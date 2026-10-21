@@ -47,8 +47,19 @@ def test_aot_graph_integer_image_full_copy(tmp_path):
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_aot_graph_image_transfer_export(tmp_path):
+def test_aot_graph_image_transfer_export(tmp_path, monkeypatch):
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+
     image = ti.hardware.image
+    lowered = []
+    original_lower = NativeOperationBinding.lower
+
+    def observe_lower(binding, *args, **kwargs):
+        if binding.definition.provider == "image":
+            lowered.append(binding)
+        return original_lower(binding, *args, **kwargs)
+
+    monkeypatch.setattr(NativeOperationBinding, "lower", observe_lower)
     region = image.VulkanImageRegion
     layout = image.VulkanBufferImageLayout
     a, b, c = [ti.Texture(ti.Format.r32f, shape) for shape in ((3, 2), (4, 3), (4, 4))]
@@ -130,6 +141,15 @@ def test_aot_graph_image_transfer_export(tmp_path):
     assert sorted((v["offset"], v["shape"][0]) for v in views) == [(2, 9), (2, 24)]
     assert not module._data_payloads  # No producer texture snapshot.
     module.add_execution_plan("public", graph, **options, resource_bindings={a: "a", b: "b", c: "c"})
+    assert [binding.definition.operation for binding in lowered] == ["copy_region", "blit"] * 2
+    for copy_binding, blit_binding in (lowered[:2], lowered[2:]):
+        assert copy_binding.binding_names == ("a", "b")
+        assert tuple(effect.subresource for effect in copy_binding.resource_effects) == (
+            ("image", 0, 0, 1, (1, 0, 0), (2, 2, 1)),
+            ("image", 0, 0, 1, (1, 1, 0), (2, 2, 1)),
+        )
+        assert blit_binding.binding_names == ("a", "c")
+        assert blit_binding.resource_effects[1].subresource == ("image", 0, 0, 1, (0, 0, 0), None)
     export_ms = (time.perf_counter() - start) * 1000
     graph.close()
     artifact = tmp_path / "image-transfer-graph.tcm"

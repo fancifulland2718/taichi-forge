@@ -74,14 +74,19 @@ class NativeResourceReference:
 
     Snapshot/asset adapters may need to publish data before they can provide a
     resource. A reference connects that result without repeating its factory.
+    An optional port effect retains the recording's logical resource name and
+    precise subresource scope even when lowering relocates the resource symbol.
     """
 
     name: str
+    effect: ResourceEffect | None = None
     arrays = ()
 
     def __post_init__(self):
         if not isinstance(self.name, str) or not self.name or "\0" in self.name:
             raise ValueError("Native resource references require a nonempty symbol without NUL")
+        if self.effect is not None and not isinstance(self.effect, ResourceEffect):
+            raise TypeError("Native resource port effects require a ResourceEffect")
 
 
 @dataclass(frozen=True)
@@ -145,7 +150,17 @@ class NativeOperationBinding:
 
     @property
     def binding_names(self):
-        return tuple(item.value for item in self._array_bindings if item.runtime_bound)
+        return tuple(item.value for item in self._array_bindings if item.runtime_bound) + tuple(
+            effect.resource for effect in self._resource_effects if effect.runtime_bound
+        )
+
+    @property
+    def _resource_effects(self):
+        return tuple(
+            resource.effect
+            for _, resource in self.resources
+            if isinstance(resource, NativeResourceReference) and resource.effect is not None
+        )
 
     @property
     def _array_bindings(self):
@@ -153,8 +168,12 @@ class NativeOperationBinding:
 
     @property
     def resource_effects(self):
-        return tuple(
-            ResourceEffect(item.value, item.access, runtime_bound=item.runtime_bound) for item in self._array_bindings
+        return (
+            tuple(
+                ResourceEffect(item.value, item.access, runtime_bound=item.runtime_bound)
+                for item in self._array_bindings
+            )
+            + self._resource_effects
         )
 
     def lower(self, context, *, resource_requirements=None):

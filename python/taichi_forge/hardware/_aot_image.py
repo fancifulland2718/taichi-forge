@@ -44,18 +44,15 @@ def preflight(recording, context):
     kind = type(recording)
     if kind in (VulkanImageCopyRecording, VulkanImageBlitRecording):
         source, destination = (images.require_transfer(name) for name in (recording.source, recording.destination))
-        a, b = _region(recording.source_region, source), _region(recording.destination_region, destination)
-        if kind is VulkanImageCopyRecording:
-            if recording._whole_image and source._creation_metadata[1] != destination._creation_metadata[1]:
-                raise TaichiRuntimeError("AOT whole-image copy requires equal shapes")
-            if recording.destination_region.extent is not None and a["extent"] != b["extent"]:
-                raise TaichiRuntimeError("AOT image copy region extents must match")
-            b["extent"] = list(a["extent"])
-        parameters = dict(source_region=a, destination_region=b)
-        operation = "copy_region" if kind is VulkanImageCopyRecording else "blit"
-        if operation == "blit":
-            parameters["filter"] = recording.filter
-        result = operation, parameters, recording.source, recording.destination, _full(destination, b)
+        definition = recording._definition.resolve(source, destination)
+        parameters = definition.parameter_dict()
+        result = (
+            definition.operation,
+            definition,
+            recording.source,
+            recording.destination,
+            _full(destination, parameters["destination_region"]),
+        )
     elif kind in (VulkanBufferToImageRecording, VulkanImageToBufferRecording):
         upload = kind is VulkanBufferToImageRecording
         name = recording.destination if upload else recording.source
@@ -82,6 +79,7 @@ def export(recording, context):
             source=images.resource(context, source),
             destination=images.resource(context, destination, full_overwrite=overwrite),
         )
+        recording._native_binding(parameters, bindings["source"], bindings["destination"]).lower(context)
     else:
         bindings = dict(
             image=images.resource(context, source, full_overwrite=overwrite),
@@ -90,5 +88,5 @@ def export(recording, context):
         # Native preparation rechecks the actual finite dense view. Merely
         # claiming this validator without reconstructing it is not sufficient.
         context.reconstructed_binding_validators.add(id(recording))
-    context.native("image", operation, parameters=parameters, bindings=bindings)
+        context.native("image", operation, parameters=parameters, bindings=bindings)
     return ()

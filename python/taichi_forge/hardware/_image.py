@@ -9,6 +9,7 @@ from taichi_forge._hardware_telemetry import (
 )
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.graph._native_definition import NativeDefinition, NativeOperationBinding, NativeResourceReference
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
     validate_exact_bindings,
@@ -98,6 +99,81 @@ class VulkanImageRegion:
             self.layer_count,
             self.offset,
             self.extent if extent is None else extent,
+        )
+
+    def parameters(self, texture):
+        return dict(
+            offset=self.offset,
+            extent=self.resolved_extent(texture),
+            mip_level=self.mip_level,
+            base_layer=self.base_layer,
+            layer_count=self.layer_count,
+        )
+
+
+def _image_reference(name, access, scope, symbol=None):
+    return NativeResourceReference(name if symbol is None else symbol, ResourceEffect(name, access, subresource=scope))
+
+
+@dataclass(frozen=True)
+class _ImageCopyDefinition:
+    source_region: VulkanImageRegion
+    destination_region: VulkanImageRegion
+    whole_image: bool = False
+
+    def copy_extent(self, source):
+        extent = self.source_region.resolved_extent(source)
+        if self.destination_region.extent is not None and self.destination_region.extent != extent:
+            raise TaichiRuntimeError("Vulkan image copy source and destination region extents must match")
+        return extent
+
+    def references(self, source, destination, symbols=(None, None)):
+        if self.whole_image:
+            source_scope = destination_scope = ("image", "whole")
+        else:
+            source_scope = self.source_region.effect_scope()
+            destination_scope = self.destination_region.effect_scope(self.source_region.extent)
+        return (
+            ("source", _image_reference(source, GraphAccess.READ, source_scope, symbols[0])),
+            ("destination", _image_reference(destination, GraphAccess.WRITE, destination_scope, symbols[1])),
+        )
+
+    def resolve(self, source, destination):
+        if self.whole_image and source._creation_metadata[1] != destination._creation_metadata[1]:
+            raise TaichiRuntimeError("AOT whole-image copy requires equal shapes")
+        a, b = self.source_region.parameters(source), self.destination_region.parameters(destination)
+        b["extent"] = self.copy_extent(source)
+        return NativeDefinition("image", "copy_region", dict(source_region=a, destination_region=b))
+
+
+@dataclass(frozen=True)
+class _ImageBlitDefinition:
+    source_region: VulkanImageRegion
+    destination_region: VulkanImageRegion
+    filter: str
+
+    def __post_init__(self):
+        if self.filter not in ("nearest", "linear"):
+            raise ValueError("Vulkan image blit filter must be 'nearest' or 'linear'")
+
+    def references(self, source, destination, symbols=(None, None)):
+        return (
+            ("source", _image_reference(source, GraphAccess.READ, self.source_region.effect_scope(), symbols[0])),
+            (
+                "destination",
+                _image_reference(destination, GraphAccess.WRITE, self.destination_region.effect_scope(), symbols[1]),
+            ),
+        )
+
+    def resolve(self, source, destination):
+        return NativeDefinition(
+            "image",
+            "blit",
+            dict(
+                source_region=self.source_region.parameters(source),
+                destination_region=self.destination_region.parameters(destination),
+                filter=self.filter,
+            ),
         )
 
 
@@ -237,31 +313,26 @@ class VulkanImageCopyRecording(_VulkanImageTransferRecording):
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "destination", destination)
         object.__setattr__(
-            self, "source_region", _region(source_region, "source_region")
-        )
-        object.__setattr__(
             self,
-            "destination_region",
-            _region(destination_region, "destination_region"),
+            "_definition",
+            _ImageCopyDefinition(
+                _region(source_region, "source_region"),
+                _region(destination_region, "destination_region"),
+                source_region is None and destination_region is None,
+            ),
         )
-        object.__setattr__(
-            self, "_whole_image", source_region is None and destination_region is None
-        )
+
+    source_region = property(lambda self: self._definition.source_region)
+    destination_region = property(lambda self: self._definition.destination_region)
+    _whole_image = property(lambda self: self._definition.whole_image)
 
     @property
     def resource_effects(self):
-        if self._whole_image:
-            source_scope = destination_scope = ("image", "whole")
-        else:
-            source_scope = self.source_region.effect_scope()
-            destination_scope = self.destination_region.effect_scope(
-                self.source_region.extent
-            )
-        return (
-            ResourceEffect(self.source, GraphAccess.READ, subresource=source_scope),
-            ResourceEffect(
-                self.destination, GraphAccess.WRITE, subresource=destination_scope
-            ),
+        return tuple(reference.effect for _, reference in self._definition.references(self.source, self.destination))
+
+    def _native_binding(self, definition, source, destination):
+        return NativeOperationBinding(
+            definition, (), self._definition.references(self.source, self.destination, (source, destination))
         )
 
     def _execute(self, bindings):
@@ -270,14 +341,7 @@ class VulkanImageCopyRecording(_VulkanImageTransferRecording):
         if self._whole_image:
             self._runtime_prog._vulkan_copy_texture(destination.tex, source.tex)
             return destination
-        extent = self.source_region.resolved_extent(source)
-        if (
-            self.destination_region.extent is not None
-            and self.destination_region.extent != extent
-        ):
-            raise TaichiRuntimeError(
-                "Vulkan image copy source and destination region extents must match"
-            )
+        extent = self._definition.copy_extent(source)
         self._runtime_prog._vulkan_copy_texture_region(
             destination.tex,
             source.tex,
@@ -502,36 +566,27 @@ class VulkanImageBlitRecording(_VulkanImageTransferRecording):
         destination_region=None,
         filter="nearest",
     ):
-        if filter not in ("nearest", "linear"):
-            raise ValueError("Vulkan image blit filter must be 'nearest' or 'linear'")
+        definition = _ImageBlitDefinition(
+            _region(source_region, "source_region"), _region(destination_region, "destination_region"), filter
+        )
         super().__init__(
             ((source, "texture"), (destination, "texture")), queue="graphics"
         )
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "destination", destination)
-        object.__setattr__(
-            self, "source_region", _region(source_region, "source_region")
-        )
-        object.__setattr__(
-            self,
-            "destination_region",
-            _region(destination_region, "destination_region"),
-        )
-        object.__setattr__(self, "filter", filter)
+        object.__setattr__(self, "_definition", definition)
+
+    source_region = property(lambda self: self._definition.source_region)
+    destination_region = property(lambda self: self._definition.destination_region)
+    filter = property(lambda self: self._definition.filter)
 
     @property
     def resource_effects(self):
-        return (
-            ResourceEffect(
-                self.source,
-                GraphAccess.READ,
-                subresource=self.source_region.effect_scope(),
-            ),
-            ResourceEffect(
-                self.destination,
-                GraphAccess.WRITE,
-                subresource=self.destination_region.effect_scope(),
-            ),
+        return tuple(reference.effect for _, reference in self._definition.references(self.source, self.destination))
+
+    def _native_binding(self, definition, source, destination):
+        return NativeOperationBinding(
+            definition, (), self._definition.references(self.source, self.destination, (source, destination))
         )
 
     def _execute(self, bindings):
