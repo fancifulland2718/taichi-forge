@@ -62,10 +62,15 @@ class NativeArrayBinding:
     port: str
     value: object
     access: object
+    subresource: object = None
 
     @property
     def runtime_bound(self):
         return isinstance(self.value, str)
+
+    @property
+    def effect(self):
+        return ResourceEffect(self.value, self.access, runtime_bound=self.runtime_bound, subresource=self.subresource)
 
 
 @dataclass(frozen=True)
@@ -168,13 +173,7 @@ class NativeOperationBinding:
 
     @property
     def resource_effects(self):
-        return (
-            tuple(
-                ResourceEffect(item.value, item.access, runtime_bound=item.runtime_bound)
-                for item in self._array_bindings
-            )
-            + self._resource_effects
-        )
+        return tuple(item.effect for item in self._array_bindings) + self._resource_effects
 
     def lower(self, context, *, resource_requirements=None):
         # The context decides how fixed arrays and resource owners are referenced;

@@ -4,16 +4,6 @@ from taichi_forge._lib import core
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
-def _region(region, owner):
-    return dict(
-        offset=list(region.offset),
-        extent=list(region.resolved_extent(owner)),
-        mip_level=region.mip_level,
-        base_layer=region.base_layer,
-        layer_count=region.layer_count,
-    )
-
-
 def _full(owner, region):
     _, shape, levels, _ = owner._creation_metadata
     return (
@@ -47,7 +37,6 @@ def preflight(recording, context):
         definition = recording._definition.resolve(source, destination)
         parameters = definition.parameter_dict()
         result = (
-            definition.operation,
             definition,
             recording.source,
             recording.destination,
@@ -57,14 +46,8 @@ def preflight(recording, context):
         upload = kind is VulkanBufferToImageRecording
         name = recording.destination if upload else recording.source
         owner = images.require_transfer(name)
-        r = _region(recording.image_region, owner)
-        parameters = dict(
-            region=r,
-            byte_offset=recording.buffer_layout.byte_offset,
-            row_length=recording.buffer_layout.row_length,
-            image_height=recording.buffer_layout.image_height,
-        )
-        result = "buffer_to_image" if upload else "image_to_buffer", parameters, name, None, upload and _full(owner, r)
+        definition = recording._definition.resolve(owner)
+        result = definition, name, None, upload and _full(owner, definition.parameter_dict()["region"])
     else:
         raise TaichiRuntimeError("AOT image transfer requires a concrete qualified recording")
     cache[id(recording)] = result
@@ -72,21 +55,20 @@ def preflight(recording, context):
 
 
 def export(recording, context):
-    operation, parameters, source, destination, overwrite = preflight(recording, context)
+    definition, source, destination, overwrite = preflight(recording, context)
     images = context.source_images
     if destination is not None:
         bindings = dict(
             source=images.resource(context, source),
             destination=images.resource(context, destination, full_overwrite=overwrite),
         )
-        recording._native_binding(parameters, bindings["source"], bindings["destination"]).lower(context)
+        recording._native_binding(definition, bindings["source"], bindings["destination"]).lower(context)
     else:
-        bindings = dict(
-            image=images.resource(context, source, full_overwrite=overwrite),
-            buffer=context.binding(recording.source if operation == "buffer_to_image" else recording.destination),
-        )
+        image = images.resource(context, source, full_overwrite=overwrite)
+        # Preserve array admission before the default adapter resolves symbols.
+        context.binding(recording.source if definition.operation == "buffer_to_image" else recording.destination)
         # Native preparation rechecks the actual finite dense view. Merely
         # claiming this validator without reconstructing it is not sufficient.
         context.reconstructed_binding_validators.add(id(recording))
-        context.native("image", operation, parameters=parameters, bindings=bindings)
+        recording._native_binding(definition, image).lower(context)
     return ()

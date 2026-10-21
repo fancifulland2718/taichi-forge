@@ -50,6 +50,8 @@ def test_buffer_image_dense_ranges_prepare_once_and_preserve_padding(
     with monkeypatch.context() as patched:
         patched.setattr(type(upload), "_prepare_packet", unexpected_prepare)
         patched.setattr(type(download), "_prepare_packet", unexpected_prepare)
+        patched.setattr(type(upload), "_native_binding", unexpected_prepare)
+        patched.setattr(type(download), "_native_binding", unexpected_prepare)
         for base in (0, 100, 200):
             values = np.arange(48, dtype=np.float32).reshape(12, 4) + base
             field.from_numpy(values)
@@ -331,7 +333,6 @@ def test_vulkan_buffer_image_region_round_trip_with_pitch_and_offset():
     )
     with pytest.raises(RuntimeError, match="row pitch"):
         excessive_pitch.execute({"source": source, "destination": texture})
-
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False, debug=True)

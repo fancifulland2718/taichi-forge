@@ -141,8 +141,17 @@ def test_aot_graph_image_transfer_export(tmp_path, monkeypatch):
     assert sorted((v["offset"], v["shape"][0]) for v in views) == [(2, 9), (2, 24)]
     assert not module._data_payloads  # No producer texture snapshot.
     module.add_execution_plan("public", graph, **options, resource_bindings={a: "a", b: "b", c: "c"})
-    assert [binding.definition.operation for binding in lowered] == ["copy_region", "blit"] * 2
-    for copy_binding, blit_binding in (lowered[:2], lowered[2:]):
+    assert [binding.definition.operation for binding in lowered] == [
+        "buffer_to_image",
+        "copy_region",
+        "blit",
+        "image_to_buffer",
+        "image_to_buffer",
+    ] * 2
+    for batch in (lowered[:5], lowered[5:]):
+        upload, copy_binding, blit_binding, download, _ = batch
+        assert upload.arrays[0].effect.subresource == ("buffer_image_layout", 4, 5, 4)
+        assert download.arrays[0].effect.subresource == ("buffer_image_layout", 4, 6, 0)
         assert copy_binding.binding_names == ("a", "b")
         assert tuple(effect.subresource for effect in copy_binding.resource_effects) == (
             ("image", 0, 0, 1, (1, 0, 0), (2, 2, 1)),

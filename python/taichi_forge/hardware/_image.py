@@ -9,7 +9,12 @@ from taichi_forge._hardware_telemetry import (
 )
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
-from taichi_forge.graph._native_definition import NativeDefinition, NativeOperationBinding, NativeResourceReference
+from taichi_forge.graph._native_definition import (
+    NativeArrayBinding,
+    NativeDefinition,
+    NativeOperationBinding,
+    NativeResourceReference,
+)
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
     validate_exact_bindings,
@@ -210,6 +215,46 @@ class VulkanBufferImageLayout:
         )
 
 
+@dataclass(frozen=True)
+class _BufferImageDefinition:
+    to_image: bool
+    buffer_layout: VulkanBufferImageLayout
+    image_region: VulkanImageRegion
+
+    def ports(self, source, destination, image_symbol=None):
+        image, buffer = (destination, source) if self.to_image else (source, destination)
+        return (
+            NativeArrayBinding(
+                "buffer",
+                buffer,
+                GraphAccess.READ if self.to_image else GraphAccess.WRITE,
+                self.buffer_layout.effect_scope(),
+            ),
+            _image_reference(
+                image,
+                GraphAccess.WRITE if self.to_image else GraphAccess.READ,
+                self.image_region.effect_scope(),
+                image_symbol,
+            ),
+        )
+
+    def effects(self, source, destination):
+        buffer, image = self.ports(source, destination)
+        return (buffer.effect, image.effect) if self.to_image else (image.effect, buffer.effect)
+
+    def resolve(self, texture):
+        return NativeDefinition(
+            "image",
+            "buffer_to_image" if self.to_image else "image_to_buffer",
+            dict(
+                region=self.image_region.parameters(texture),
+                byte_offset=self.buffer_layout.byte_offset,
+                row_length=self.buffer_layout.row_length,
+                image_height=self.buffer_layout.image_height,
+            ),
+        )
+
+
 def _region(value, name):
     if value is None:
         return VulkanImageRegion()
@@ -371,9 +416,20 @@ class _PreparedBufferImageCopy:
 class _VulkanBufferImageRecording(_VulkanImageTransferRecording):
     """Cold byte-range bindings; native leases remain the execution boundary."""
 
+    buffer_layout = property(lambda self: self._definition.buffer_layout)
+    image_region = property(lambda self: self._definition.image_region)
+
+    @property
+    def resource_effects(self):
+        return self._definition.effects(self.source, self.destination)
+
+    def _native_binding(self, definition, image):
+        buffer, reference = self._definition.ports(self.source, self.destination, image)
+        return NativeOperationBinding(definition, (buffer,), (("image", reference),))
+
     def _describe_bindings(self, bindings):
-        texture_name = self.destination if self._to_image else self.source
-        buffer_name = self.source if self._to_image else self.destination
+        texture_name = self.destination if self._definition.to_image else self.source
+        buffer_name = self.source if self._definition.to_image else self.destination
         texture = bindings[texture_name]
         if not isinstance(texture, Texture):
             raise TaichiRuntimeError(
@@ -398,7 +454,7 @@ class _VulkanBufferImageRecording(_VulkanImageTransferRecording):
         command = self._runtime_prog._prepare_vulkan_buffer_image_copy(
             texture.tex,
             description.descriptor,
-            self._to_image,
+            self._definition.to_image,
             self.buffer_layout.byte_offset,
             self.buffer_layout.row_length,
             self.buffer_layout.image_height,
@@ -467,21 +523,13 @@ class VulkanBufferToImageRecording(_VulkanBufferImageRecording):
         super().__init__(((source, "ndarray"), (destination, "texture")))
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "destination", destination)
-        object.__setattr__(self, "buffer_layout", _buffer_layout(buffer_layout))
-        object.__setattr__(self, "image_region", _region(image_region, "image_region"))
-
-    @property
-    def resource_effects(self):
-        return (
-            ResourceEffect(
-                self.source,
-                GraphAccess.READ,
-                subresource=self.buffer_layout.effect_scope(),
-            ),
-            ResourceEffect(
-                self.destination,
-                GraphAccess.WRITE,
-                subresource=self.image_region.effect_scope(),
+        object.__setattr__(
+            self,
+            "_definition",
+            _BufferImageDefinition(
+                self._to_image,
+                _buffer_layout(buffer_layout),
+                _region(image_region, "image_region"),
             ),
         )
 
@@ -521,21 +569,13 @@ class VulkanImageToBufferRecording(_VulkanBufferImageRecording):
         super().__init__(((source, "texture"), (destination, "ndarray")))
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "destination", destination)
-        object.__setattr__(self, "buffer_layout", _buffer_layout(buffer_layout))
-        object.__setattr__(self, "image_region", _region(image_region, "image_region"))
-
-    @property
-    def resource_effects(self):
-        return (
-            ResourceEffect(
-                self.source,
-                GraphAccess.READ,
-                subresource=self.image_region.effect_scope(),
-            ),
-            ResourceEffect(
-                self.destination,
-                GraphAccess.WRITE,
-                subresource=self.buffer_layout.effect_scope(),
+        object.__setattr__(
+            self,
+            "_definition",
+            _BufferImageDefinition(
+                self._to_image,
+                _buffer_layout(buffer_layout),
+                _region(image_region, "image_region"),
             ),
         )
 
