@@ -53,6 +53,13 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
   CUgraphExec executable{nullptr};
   void *stream{nullptr};
   void *arguments{nullptr};
+  void *parameter_staging{nullptr};
+  void *parameter_upload_function{nullptr};
+  std::size_t parameter_count{0};
+  struct ParameterUpload {
+    std::size_t source, destination, bytes;
+  };
+  std::vector<ParameterUpload> parameter_uploads;
   CudaGraphConditionalControl64 *controls{nullptr};
   BoundedGraphControls bounded;
   std::vector<std::unique_ptr<ParallelGraphCapture>> parallel;
@@ -229,6 +236,11 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
       controls = nullptr;
       free(arguments);
       arguments = nullptr;
+      if (parameter_staging) {
+        check(driver.mem_free_host.call(parameter_staging),
+              "free submission parameters");
+        parameter_staging = nullptr;
+      }
       free(temporaries);
       temporaries = nullptr;
       if (stream) {
@@ -391,6 +403,29 @@ void FixedGraph::enqueue_execution_part(void *stream) {
     throw std::logic_error(
         "CUDA execution part requires its live enclosing domain");
   CUDAContext::get_instance().launch_graph(state_->executable, stream);
+}
+
+void FixedGraph::snapshot_parameters(
+    const std::vector<SubmissionParameterValue> &values) {
+  if (state_->parameter_count > values.size())
+    throw std::invalid_argument("Missing submission parameter values");
+  if (state_->parameter_count)
+    std::memcpy(state_->parameter_staging, values.data(),
+                state_->parameter_count * sizeof(SubmissionParameterValue));
+}
+
+void FixedGraph::enqueue_parameter_upload(void *stream) {
+  auto &driver = CUDADriver::get_instance();
+  for (const auto &upload : state_->parameter_uploads) {
+    void *destination =
+        static_cast<char *>(state_->arguments) + upload.destination;
+    void *source =
+        static_cast<char *>(state_->parameter_staging) + upload.source;
+    std::uint64_t words = upload.bytes / sizeof(SubmissionParameterValue);
+    void *args[] = {&destination, &source, &words};
+    driver.launch_kernel(state_->parameter_upload_function, 1, 1, 1, 32, 1, 1,
+                         0, stream, args, nullptr);
+  }
 }
 
 void FixedGraph::validate_retained_provider() const {
@@ -858,6 +893,45 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
         std::memcpy(image.data() + offset + packet.arg_buffer_prefix_size,
                     packet.context.arg_buffer, packet.arg_buffer_size);
     }
+    for (const auto &patch : dispatch.parameters) {
+      constexpr auto width = sizeof(SubmissionParameterValue);
+      if (!state.independent || domain_ ||
+          patch.argument_offset > packet.arg_buffer_size ||
+          width > packet.arg_buffer_size - patch.argument_offset ||
+          patch.slot >= std::numeric_limits<std::size_t>::max() / width)
+        throw std::invalid_argument("Invalid independent submission parameter");
+      state.parameter_count = std::max(state.parameter_count, patch.slot + 1);
+      State::ParameterUpload upload{
+          patch.slot * width,
+          offset + packet.arg_buffer_prefix_size + patch.argument_offset,
+          width};
+      if (!state.parameter_uploads.empty() &&
+          state.parameter_uploads.back().source +
+                  state.parameter_uploads.back().bytes ==
+              upload.source &&
+          state.parameter_uploads.back().destination +
+                  state.parameter_uploads.back().bytes ==
+              upload.destination) {
+        state.parameter_uploads.back().bytes += width;
+      } else {
+        state.parameter_uploads.push_back(upload);
+      }
+    }
+  }
+  if (state.parameter_count) {
+    int unified = 0;
+    driver.device_get_attribute(&unified,
+                                CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING,
+                                CUDAContext::get_instance().get_device());
+    if (!unified)
+      throw std::invalid_argument(
+          "Submission parameters require CUDA unified addressing");
+    state.parameter_upload_function = driver_graph_prepare_parameter_upload();
+    // Non-write-combined cuMemHostAlloc storage has the same host/device
+    // address with UVA. GPU copies avoid a blocked peer's DMA queue head.
+    driver.mem_host_alloc(
+        &state.parameter_staging,
+        state.parameter_count * sizeof(SubmissionParameterValue), 0);
   }
   if (grid_limit) {
     std::uint32_t error = CUDA_SUCCESS;

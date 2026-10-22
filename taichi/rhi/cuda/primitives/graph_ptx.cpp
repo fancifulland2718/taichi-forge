@@ -236,6 +236,36 @@ STORE_SELECTOR:
 }
 )ptx";
 
+const char kCudaParameterUploadPtx[] = R"ptx(
+.version 6.0
+.target sm_50
+.address_size 64
+.visible .entry graph_upload_parameters(
+    .param .u64 destination, .param .u64 source, .param .u64 words)
+{
+    .reg .pred %p;
+    .reg .b32 %t;
+    .reg .b64 %rd<9>;
+    ld.param.u64 %rd0, [destination];
+    ld.param.u64 %rd1, [source];
+    ld.param.u64 %rd2, [words];
+    mov.u32 %t, %tid.x;
+    cvt.u64.u32 %rd3, %t;
+COPY:
+    setp.ge.u64 %p, %rd3, %rd2;
+    @%p bra DONE;
+    shl.b64 %rd4, %rd3, 3;
+    add.u64 %rd5, %rd1, %rd4;
+    add.u64 %rd6, %rd0, %rd4;
+    ld.volatile.global.u64 %rd7, [%rd5];
+    st.global.u64 [%rd6], %rd7;
+    add.u64 %rd3, %rd3, 32;
+    bra COPY;
+DONE:
+    ret;
+}
+)ptx";
+
 const char kCudaGraphBoundedUpdatePtx[] = R"ptx(
 .version 6.0
 .target sm_50
@@ -765,6 +795,20 @@ bool ensure_bounded_module(std::uint32_t *driver_error) {
 
 bool driver_graph_conditional_setter_compiled() {
   return true;
+}
+
+void *driver_graph_prepare_parameter_upload() {
+  static std::once_flag once;
+  static void *module = nullptr;
+  static void *function = nullptr;
+  std::call_once(once, [] {
+    auto guard = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    driver.module_load_data_ex(&module, kCudaParameterUploadPtx, 0, nullptr,
+                               nullptr);
+    driver.module_get_function(&function, module, "graph_upload_parameters");
+  });
+  return function;
 }
 
 void driver_graph_prepare_conditional_setter() {

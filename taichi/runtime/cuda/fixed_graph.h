@@ -10,6 +10,7 @@
 #include "taichi/runtime/cuda/capture_resources.h"
 #include "taichi/runtime/branch_selection.h"
 #include "taichi/runtime/cuda_control_recipe.h"
+#include "taichi/runtime/submission_parameters.h"
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
@@ -37,6 +38,7 @@ class FixedGraph {
     std::uint32_t adaptive_block_dim{0};
     bool grouped_update{false};
     const void *bounded_binding_identity{nullptr};
+    std::vector<SubmissionParameterPatch> parameters;
   };
   struct While;
   struct Branch;
@@ -123,6 +125,8 @@ class FixedGraph {
       std::shared_ptr<RuntimeCompletionResources> operands,
       std::vector<std::shared_ptr<RuntimeClient>> &parts);
   void enqueue_execution_part(void *stream);
+  void snapshot_parameters(const std::vector<SubmissionParameterValue> &values);
+  void enqueue_parameter_upload(void *stream);
   FixedGraph(const std::vector<Operation> &operations,
              std::shared_ptr<RuntimeFaultDomain> fault_domain,
              std::shared_ptr<void> operands,

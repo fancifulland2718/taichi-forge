@@ -475,6 +475,105 @@ TEST(CudaPublicExecutionAot, ExactDependenciesBusyAndReleasedInstanceLifetime) {
   EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
 }
 
+TEST(CudaExecutionOwner, SubmissionParametersStayOnTheirSelectedDomains) {
+  const auto *folder = std::getenv("TAICHI_A12_AOT_FOLDER");
+  if (!folder || !cuda::ExecutionDomain::available())
+    GTEST_SKIP() << "Requires the submission-parameter AOT fixture";
+  auto runtime = std::make_unique<capi::LlvmRuntime>(Arch::cuda);
+  auto rt = reinterpret_cast<TiRuntime>(runtime.get());
+  auto module = ti_load_aot_module(rt, folder);
+  ASSERT_NE(module, nullptr);
+  const TiCudaExecutionDomainCreateInfo options{3, 4, 0};
+  std::array<TiCudaExecutionDomain, 2> domains{};
+  std::array<TiMemory, 2> memory{};
+  std::array<TiPreparedExecution, 2> calls{};
+  const char *names[] = {"epoch", "simulation_step", "timestamp_ns"};
+  const std::string plan =
+      R"({"version":1,"operations":[{"kind":"kernel","entry":"publish","arguments":["out","epoch","simulation_step","timestamp_ns"]}]})";
+  for (int lane = 0; lane < 2; ++lane) {
+    domains[lane] = ti_create_cuda_execution_domain_ext(rt, &options);
+    ASSERT_NE(domains[lane], nullptr);
+    TiMemoryAllocateInfo allocation{};
+    allocation.size = 1000 * 3 * sizeof(uint64_t);
+    allocation.usage = TI_MEMORY_USAGE_STORAGE_BIT;
+    memory[lane] = ti_allocate_memory(rt, &allocation);
+    TiNamedArgument arguments[4]{};
+    arguments[0].name = "out";
+    arguments[0].argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+    arguments[0].argument.value.ndarray = {
+        memory[lane], {2, {1000, 3}}, {0, {}}, TI_DATA_TYPE_U64};
+    for (int i = 0; i < 3; ++i) {
+      arguments[i + 1].name = names[i];
+      arguments[i + 1].argument.type = TI_ARGUMENT_TYPE_SCALAR;
+      arguments[i + 1].argument.value.scalar.type = TI_DATA_TYPE_U64;
+      arguments[i + 1].argument.value.scalar.value.x64 = 0;
+    }
+    calls[lane] = ti_prepare_execution_plan_parameters_on_domain_ext(
+        rt, module, domains[lane], plan.size(), plan.c_str(), 4, arguments, 0,
+        nullptr, 3, names);
+    ASSERT_NE(calls[lane], nullptr);
+    ti_initialize_prepared_ext(rt, calls[lane]);
+    ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  }
+  const std::array<uint64_t, 3> expected{
+      uint64_t(1) << 63, (uint64_t(1) << 62) + 17, ~uint64_t(0)};
+  for (int lane = 0; lane < 2; ++lane) {
+    testing::CudaExternalGate gate;
+    auto domain = capi::get_execution_domain(domains[lane]);
+    auto prefix = domain->submit(
+        {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+    auto values = expected;
+    TiCompletion accepted = nullptr, rejected = nullptr, peer = nullptr;
+    ASSERT_TRUE(ti_try_submit_prepared_parameters_ext(
+        rt, calls[lane], 0, nullptr, &accepted, TI_FALSE, 3, values.data()));
+    values.fill(41);  // Accepted work must no longer read this host array.
+    const auto sequence = domain->latest_completion().sequence();
+    EXPECT_FALSE(ti_try_submit_prepared_parameters_ext(
+        rt, calls[lane], 0, nullptr, &rejected, TI_FALSE, 3, values.data()));
+    EXPECT_EQ(rejected, nullptr);
+    EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+    EXPECT_EQ(domain->latest_completion().sequence(), sequence);
+    ASSERT_TRUE(ti_try_submit_prepared_parameters_ext(
+        rt, calls[1 - lane], 0, nullptr, &peer, TI_FALSE, 3, expected.data()));
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!ti_query_completion_ext(peer) &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    EXPECT_TRUE(ti_query_completion_ext(peer));
+    EXPECT_FALSE(ti_query_completion_ext(accepted));
+    EXPECT_FALSE(gate.timed_out());
+    EXPECT_TRUE(gate.producer_pending());
+    EXPECT_FALSE(ti_try_submit_prepared_parameters_ext(
+        rt, calls[1 - lane], 1, &accepted, &rejected, TI_TRUE, 3,
+        values.data()));
+    EXPECT_EQ(rejected, nullptr);
+    EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+    gate.release();
+    ti_wait_completion_ext(accepted);
+    for (int output = 0; output < 2; ++output) {
+      auto &device = static_cast<cuda::CudaDevice &>(runtime->get());
+      auto pointer = device.get_memory_addr(
+          runtime->get_memory(memory[output]).allocation);
+      std::array<uint64_t, 3> actual{};
+      auto current = CUDAContext::get_instance().get_guard();
+      CUDADriver::get_instance().memcpy_device_to_host(actual.data(), pointer,
+                                                       sizeof(actual));
+      EXPECT_EQ(actual, expected);
+    }
+    ti_release_completion_ext(accepted);
+    ti_release_completion_ext(peer);
+  }
+  for (int lane = 0; lane < 2; ++lane) {
+    ti_destroy_prepared_ext(rt, calls[lane]);
+    ti_close_cuda_execution_domain_ext(domains[lane]);
+    ti_release_cuda_execution_domain_ext(domains[lane]);
+    ti_free_memory(rt, memory[lane]);
+  }
+  ti_destroy_aot_module(module);
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+}
+
 TEST(CudaExecutionOwner, PublicTicketWaitDoesNotLockQueryOrPeerSubmission) {
   if (!cuda::ExecutionDomain::available())
     GTEST_SKIP();

@@ -4,7 +4,7 @@
 
 The independent AOT consumer can bind a saved execution plan to a bounded CUDA
 execution domain. Each domain owns a nonblocking stream, and each prepared
-instance owns its executable, immutable arguments and compiler temporaries.
+instance owns its executable, argument storage and compiler temporaries.
 This API preserves the complete selected plan. Stream handles, priorities and
 completion tickets are runtime choices; they are never serialized into AOT.
 
@@ -29,12 +29,13 @@ the DSL or creating a device. These are native implementation declarations:
 | `cuda_jit_graph_execution_domains` | Complete live JIT Graph preparation |
 | `cuda_external_storage_execution_domains` | Managed external imports and selected acquire/release epochs |
 | `cuda_canvas_execution_domains` | Selected Canvas copy/writer/empty/repeat and bounded prepared image pools |
+| `cuda_submission_parameters_u64` | Declared u64 scalar updates per submission for JIT/AOT independent instances |
 
 Use `features.get(name, False)` for older packages. Missing declarations do not
 become support because a version or commit looks newer. Device/driver support,
 same-GPU sharing and each recipe's compiler/provider facts are checked at cold
 creation/preparation. A true build declaration does not qualify Linux windows
-or every provider. Existing bootstrap and private ABI 111 are unchanged; an
+or every provider. See [SDK component pairing](aot_sdk.en.md#component-pairing); an
 incompatible shim/native pair is rejected before C++ bindings are entered.
 
 ## Current JIT Graphs
@@ -100,6 +101,38 @@ the participating prefix has completed. For a pause while peers run, stop
 admission and wait for the domain's latest completion while retaining its bounded
 instances and image pool. Destroy them only at the cold teardown boundary.
 Canvas stream selection and source completion are a separate interface boundary.
+
+## Per-submission parameters
+
+Declare mutable scalars during cold preparation. Other bindings stay frozen:
+
+```python
+names = ("epoch", "simulation_step", "timestamp_ns")
+step = graph.prepare(arguments, execution_domain=domain, mutable_parameters=names)
+step.initialize()
+ticket = step.submit(values={"epoch": epoch, "simulation_step": step_id,
+                             "timestamp_ns": timestamp}, wait_for=previous_tickets)
+```
+
+`module.prepare_execution(..., mutable_parameters=names)` has the same AOT
+contract. This first implementation accepts replay-only `u64` kernel scalars.
+Scalars also used in initialization, arrays and other types are rejected during
+preparation. Names and count are caller-defined. Every submit requires all
+declared values in `[0, 2**64)`. Mutating the original dictionary after acceptance
+cannot change accepted work. Each instance owns preallocated pinned staging and
+device arguments. Uploads and the complete Graph use the selected stream, and
+the completion covers both.
+Uploads use a small GPU kernel reading pinned storage to avoid cross-stream
+head-of-line blocking on the DMA engine. Preparation requires CUDA unified
+addressing; replay never allocates pinned memory.
+
+One mutable argument frame permits one in-flight submission per instance;
+another returns `None`. Prepare independent instances for overlap and configure
+domain capacity as needed. Busy and unready calls enqueue no upload, consume no
+external signal and allocate no submission sequence. Replay does not prepare,
+allocate device parameter storage or synchronize globally. Independent domains
+and these updates currently support CUDA; Vulkan does not claim independent
+queue support.
 
 ## Selected Canvas display domain
 

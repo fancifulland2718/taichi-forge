@@ -856,7 +856,7 @@ class Module(_Resource):
             with ZipFile(self._source_path) as archive:
                 return ExecutionPlan.from_json(archive.read(relative))
 
-    def prepare_execution(self, plan, arguments, *, gradients=None, execution_domain=None):
+    def prepare_execution(self, plan, arguments, *, gradients=None, execution_domain=None, mutable_parameters=()):
         """Prepare a named or explicit ExecutionPlan for repeated native replay."""
         from ._plan import ExecutionPlan
 
@@ -864,7 +864,8 @@ class Module(_Resource):
             plan = self.execution_plan(plan)
         if not isinstance(plan, ExecutionPlan):
             raise TypeError("Expected an ExecutionPlan or an exported plan name")
-        return plan.prepare(self, arguments, gradients=gradients, execution_domain=execution_domain)
+        return plan.prepare(self, arguments, gradients=gradients, execution_domain=execution_domain,
+                            mutable_parameters=mutable_parameters)
 
     def prepare_workspace_pool(self, plan, capacity, *, arguments=None, arrays=None, gradients=None):
         """Share code while preparing independent resources and result leases.
@@ -1033,12 +1034,14 @@ class PreparedCall(_Resource):
     _kind = "prepared"
 
     def __init__(self, runtime, handle, owners, *, replay_owners=None, family=None, execution_domain=None,
-                 return_layout=None):
+                 return_layout=None, submission_parameters=None):
         self._owners = owners
         self._replay_owners = replay_owners
         self._family = family
         self._execution_domain = execution_domain
         self._return_layout = return_layout
+        from ._parameters import SubmissionParameters
+        self._submission_parameters = submission_parameters or SubmissionParameters()
         super().__init__(runtime, handle)
         if execution_domain is not None:
             execution_domain._clients.add(runtime)
@@ -1103,7 +1106,7 @@ class PreparedCall(_Resource):
             runtime._pending.add(self)
             runtime._api.call(runtime._api.ti_launch_prepared_ext, runtime._handle, self._handle)
 
-    def submit(self, *, wait_for=(), ready_only=False):
+    def submit(self, *, wait_for=(), ready_only=False, values=None):
         """Try one replay, returning a ticket or None if full or input unready.
 
         Initialize explicitly in the cold phase. Dependencies enqueue device
@@ -1115,6 +1118,7 @@ class PreparedCall(_Resource):
 
         if type(ready_only) is not bool:
             raise TypeError("ready_only must be bool")
+        parameters = self._submission_parameters.snapshot(values)
         predecessors = tuple(wait_for)
         if self._execution_domain is None:
             if predecessors or ready_only:
@@ -1130,12 +1134,17 @@ class PreparedCall(_Resource):
             self._check()
             handle = abi.Handle()
             function = runtime._api.ti_try_submit_prepared_ext
-            if ready_only:
+            suffix = ()
+            if self._submission_parameters.names:
+                function = runtime._api.ti_try_submit_prepared_parameters_ext
+                suffix = (ready_only, len(parameters), self._submission_parameters.bind(parameters))
+            elif ready_only:
                 runtime._api.load_cuda_ready_submit()
                 function = runtime._api.ti_try_submit_prepared_ready_ext
             accepted = runtime._api.call(
                 function,
                 runtime._handle, self._handle, len(dependencies), dependencies, C.byref(handle),
+                *suffix,
             )
         if not accepted:
             return None

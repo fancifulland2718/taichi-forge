@@ -450,6 +450,28 @@ class Api:
             setattr(self, name, function)
         self._cuda_domains_loaded = True
 
+    def load_submission_parameters(self):
+        if getattr(self, "_submission_parameters_loaded", False):
+            return
+        declarations = {
+            "ti_prepare_execution_plan_parameters_on_domain_ext": (
+                [Handle, Handle, Handle, C.c_uint64, C.c_char_p, UInt, C.POINTER(NamedArgument),
+                 UInt, C.POINTER(NamedBinding), UInt, C.POINTER(C.c_char_p)], Handle,
+            ),
+            "ti_try_submit_prepared_parameters_ext": (
+                [Handle, Handle, UInt, C.POINTER(Handle), C.POINTER(Handle), UInt, UInt,
+                 C.POINTER(C.c_uint64)], UInt,
+            ),
+        }
+        try:
+            functions = {name: getattr(self.library, name) for name in declarations}
+        except AttributeError as error:
+            raise NotImplementedError("The selected runtime has no submission parameter API") from error
+        for name, function in functions.items():
+            function.argtypes, function.restype = declarations[name]
+            setattr(self, name, function)
+        self._submission_parameters_loaded = True
+
     def call(self, function, *arguments):
         self.ti_set_last_error(0, None)
         result = function(*arguments)

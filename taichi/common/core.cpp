@@ -107,7 +107,8 @@ std::uint64_t get_forge_native_feature_bitmap() {
 #endif
 #if defined(TI_WITH_CUDA) && defined(TI_FORGE_BUILD_RUNTIME_C_API)
   result |= kForgeCudaExecutionDomains | kForgeCudaAotExecutionDomains |
-            kForgeCudaExternalStorageExecutionDomains;
+            kForgeCudaExternalStorageExecutionDomains |
+            kForgeCudaSubmissionParameters;
 #if defined(TI_WITH_LLVM)
   result |= kForgeCudaJitGraphExecutionDomains;
 #endif

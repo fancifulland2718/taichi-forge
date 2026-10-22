@@ -261,6 +261,37 @@ ti_try_submit_prepared_ready_ext(TiRuntime runtime,
                                  const TiCompletion *dependencies,
                                  TiCompletion *completion);
 
+// Cold declaration of replay-only u64 scalar parameters in positional order.
+// Each independent instance owns preallocated pinned/device argument storage.
+// A parameterized instance accepts one in-flight submission; prepare separate
+// instances for overlap. No new kernel compilation or artifact format is used.
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_execution_plan_parameters_on_domain_ext(
+    TiRuntime runtime,
+    TiAotModule module,
+    TiCudaExecutionDomain domain,
+    uint64_t description_size,
+    const char *description,
+    uint32_t arg_count,
+    const TiNamedArgument *args,
+    uint32_t binding_count,
+    const TiNamedNdArrayBinding *bindings,
+    uint32_t parameter_count,
+    const char *const *parameter_names);
+
+// Values are copied before return; all declared parameters must be supplied.
+// Busy consumes no sequence, device upload, dependency or external signal.
+// Accepted completion covers both uploads and execution on the selected stream.
+TI_DLL_EXPORT TiBool TI_API_CALL
+ti_try_submit_prepared_parameters_ext(TiRuntime runtime,
+                                      TiPreparedExecution execution,
+                                      uint32_t dependency_count,
+                                      const TiCompletion *dependencies,
+                                      TiCompletion *completion,
+                                      TiBool ready_only,
+                                      uint32_t parameter_count,
+                                      const uint64_t *parameters);
+
 // These calls do not access or lock the originating Runtime. Query, wait and
 // independent submission may proceed concurrently. Reset/fault remains visible
 // through the ticket's owner state; the caller must release each handle.

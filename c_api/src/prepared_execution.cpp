@@ -50,6 +50,7 @@ struct PreparedExecution {
   std::shared_ptr<cuda::ExecutionDomain> domain;
   std::shared_ptr<RuntimeCompletionCudaEventPool> bootstrap_events;
   RuntimeCompletion bootstrap;
+  std::vector<SubmissionParameterValue> submission_values;
   // Declared before backend recordings so owned buffers are destroyed last.
   std::shared_ptr<ExecutionResourceStorage> resources;
   std::vector<std::shared_ptr<NativeResource>> native_resources;
@@ -302,6 +303,7 @@ struct PreparedExecution {
         if (!initial_access.empty())
           initialization->bind_external_access(std::move(initial_access));
       }
+      selected.parameter_count = submission_values.size();
       native = std::make_unique<FixedExecution>(
           runtime.arch, runtime.get(), gfx_runtime, operations, &sequence,
           runtime.runtime_fault_domain(), family ? family->replay : nullptr,
@@ -598,7 +600,7 @@ class PreparedExecutionRegistry {
     if (!entry.live || !entry.domain || !entry.domain_initialized)
       throw MemoryBindingError(
           "Submit requires an initialized live CUDA execution-domain instance");
-    auto result = entry.native->submit(dependencies);
+    auto result = entry.native->submit(dependencies, entry.submission_values);
     ++entry.info.launches;
     return result;
   }
@@ -837,12 +839,15 @@ static TiPreparedExecution prepare_execution_plan_impl(
     uint32_t binding_count,
     const TiNamedNdArrayBinding *bindings,
     std::shared_ptr<capi::ExecutionBindingFamily> family,
-    TiCudaExecutionDomain selected_domain = nullptr) {
+    TiCudaExecutionDomain selected_domain = nullptr,
+    uint32_t parameter_count = 0,
+    const char *const *parameter_names = nullptr) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   TI_CAPI_ARGUMENT_NULL_RV(module);
   TI_CAPI_ARGUMENT_NULL_RV(description);
   if ((arg_count && !args) || (binding_count && !bindings) ||
+      (parameter_count && !parameter_names) ||
       description_size > std::numeric_limits<std::size_t>::max())
     throw MemoryBindingError("Invalid execution plan input descriptors");
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
@@ -886,6 +891,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
     }
   }
   const auto &plan = family ? family->plan : parsed;
+  if (parameter_count && (!domain || family))
+    throw MemoryBindingError(
+        "Submission parameters require an independent execution domain");
   if (plan.vulkan_submission && rt.arch != taichi::Arch::vulkan)
     throw MemoryBindingError("Selected Vulkan submission requires Vulkan");
   const auto &resource_description =
@@ -897,6 +905,23 @@ static TiPreparedExecution prepare_execution_plan_impl(
       throw MemoryBindingError(
           "Execution plan argument names must be unique and nonempty");
   }
+  std::unordered_map<std::string, std::size_t> parameter_slots;
+  for (uint32_t i = 0; i < parameter_count; ++i) {
+    if (!parameter_names[i] || !*parameter_names[i] ||
+        !parameter_slots.emplace(parameter_names[i], i).second)
+      throw MemoryBindingError(
+          "Submission parameter names must be unique and nonempty");
+    const std::string name(parameter_names[i]);
+    const auto argument = arguments.find(name);
+    if (argument == arguments.end() ||
+        argument->second->type != TI_ARGUMENT_TYPE_SCALAR ||
+        argument->second->value.scalar.type != TI_DATA_TYPE_U64 ||
+        !plan.replay_bindings.count(name) ||
+        plan.initialization_bindings.count(name))
+      throw MemoryBindingError(
+          "Submission parameters require replay-only u64 scalars: " + name);
+  }
+  std::unordered_set<std::string> patched_parameters;
   std::unordered_set<std::string> frozen_metadata;
   if (rebinding) {
     for (const auto &[name, value] : arguments)
@@ -938,6 +963,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
   prepared->owner = &mod;
   prepared->family = family;
   prepared->domain = domain;
+  prepared->submission_values.resize(parameter_count);
   // Reject unmanaged entry paths before private allocation/provider setup.
   // This is a cold validation; submit uses only the frozen epoch closure.
   for (const auto &[name, argument] : arguments)
@@ -1642,6 +1668,23 @@ static TiPreparedExecution prepare_execution_plan_impl(
             kernel_resources, bool(domain));
         if (!bound)
           return false;
+        std::vector<SubmissionParameterPatch> patches;
+        for (std::size_t i = 0; i < kernel->arguments.size(); ++i) {
+          const auto &name = kernel->arguments[i];
+          const auto slot = parameter_slots.find(name);
+          if (slot == parameter_slots.end())
+            continue;
+          const auto parameter = parameters.find({static_cast<int>(i)});
+          if (parameter == parameters.end() || parameter->second.is_array ||
+              parameter->second.get_dtype() != PrimitiveType::u64)
+            throw MemoryBindingError(
+                "Submission parameter compiled ABI must be scalar u64: " +
+                name);
+          patches.push_back(
+              {slot->second, bound->kernel->args_type->get_element_offset(
+                                 {static_cast<int>(i)})});
+          patched_parameters.insert(name);
+        }
         bound->context->append_dispatch_label(kernel->label);
         DevicePtr indirect_packet{kDeviceNullPtr};
         DevicePtr bounded_extent{kDeviceNullPtr};
@@ -1691,12 +1734,11 @@ static TiPreparedExecution prepare_execution_plan_impl(
         prepared->memories.insert(prepared->memories.end(),
                                   bound->memories.begin(),
                                   bound->memories.end());
-        operations.emplace_back(
-            FixedExecution::Dispatch{bound->kernel, bound->context.get(),
-                                     indirect_packet, bounded_extent,
-                                     bounded_capacity, adaptive_block_dim,
-                                     grouped_update, bounded_binding_identity,
-                                     bound->kernel_resources});
+        operations.emplace_back(FixedExecution::Dispatch{
+            bound->kernel, bound->context.get(), indirect_packet,
+            bounded_extent, bounded_capacity, adaptive_block_dim,
+            grouped_update, bounded_binding_identity, bound->kernel_resources,
+            std::move(patches)});
         prepared->plan_arguments.push_back(std::move(bound));
       } else if (const auto *copy =
                      std::get_if<aot::ExecutionPlan::Copy>(&operation)) {
@@ -1793,6 +1835,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
   preparing_initialization = false;
   if (!bind_steps(plan.operations, operations))
     return TI_NULL_HANDLE;
+  if (patched_parameters.size() != parameter_slots.size())
+    throw MemoryBindingError(
+        "Submission parameter is not used by a replay kernel");
   if (used_bindings.size() != layouts.size())
     throw MemoryBindingError(
         "Ndarray layout/gradient binding is unused by any kernel");
@@ -1941,12 +1986,35 @@ TiPreparedExecution ti_prepare_execution_plan_on_domain_ext(
                                      binding_count, bindings, {}, domain);
 }
 
+TiPreparedExecution ti_prepare_execution_plan_parameters_on_domain_ext(
+    TiRuntime runtime,
+    TiAotModule module,
+    TiCudaExecutionDomain domain,
+    uint64_t description_size,
+    const char *description,
+    uint32_t arg_count,
+    const TiNamedArgument *args,
+    uint32_t binding_count,
+    const TiNamedNdArrayBinding *bindings,
+    uint32_t parameter_count,
+    const char *const *parameter_names) {
+  if (!domain) {
+    ti_set_last_error(TI_ERROR_ARGUMENT_NULL, "domain");
+    return TI_NULL_HANDLE;
+  }
+  return prepare_execution_plan_impl(
+      runtime, module, description_size, description, arg_count, args,
+      binding_count, bindings, {}, domain, parameter_count, parameter_names);
+}
+
 static TiBool try_submit_prepared_impl(TiRuntime runtime,
                                        TiPreparedExecution execution,
                                        uint32_t dependency_count,
                                        const TiCompletion *dependencies,
                                        TiCompletion *completion,
-                                       bool ready_only) {
+                                       bool ready_only,
+                                       uint32_t parameter_count = 0,
+                                       const uint64_t *parameters = nullptr) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(completion);
   *completion = TI_NULL_HANDLE;
@@ -1960,6 +2028,15 @@ static TiBool try_submit_prepared_impl(TiRuntime runtime,
     predecessors.push_back(capi::get_completion(dependencies[i]));
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  auto &entry = rt.prepared_registry().get(execution);
+  if (entry.submission_values.size() != parameter_count ||
+      (parameter_count && !parameters))
+    throw MemoryBindingError(
+        "Submission parameter count does not match preparation");
+  // This host snapshot has no device effects and is never the DMA source.
+  // The instance copies it to its pinned storage only after admission.
+  if (parameter_count)
+    std::copy_n(parameters, parameter_count, entry.submission_values.begin());
   if (ready_only) {
     const auto &entry = rt.prepared_registry().get(execution);
     if (!entry.live || !entry.domain || !entry.domain_initialized)
@@ -2007,6 +2084,19 @@ TiBool ti_try_submit_prepared_ready_ext(TiRuntime runtime,
                                         TiCompletion *completion) {
   return try_submit_prepared_impl(runtime, execution, dependency_count,
                                   dependencies, completion, true);
+}
+
+TiBool ti_try_submit_prepared_parameters_ext(TiRuntime runtime,
+                                             TiPreparedExecution execution,
+                                             uint32_t dependency_count,
+                                             const TiCompletion *dependencies,
+                                             TiCompletion *completion,
+                                             TiBool ready_only,
+                                             uint32_t parameter_count,
+                                             const uint64_t *parameters) {
+  return try_submit_prepared_impl(
+      runtime, execution, dependency_count, dependencies, completion,
+      ready_only != TI_FALSE, parameter_count, parameters);
 }
 #endif
 

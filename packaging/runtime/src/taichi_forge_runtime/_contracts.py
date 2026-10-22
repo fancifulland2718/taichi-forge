@@ -32,6 +32,7 @@ _FEATURE_BITS = {
     "cuda_jit_graph_execution_domains": 14,
     "cuda_external_storage_execution_domains": 15,
     "cuda_canvas_execution_domains": 16,
+    "cuda_submission_parameters_u64": 17,
 }
 
 

@@ -3,7 +3,7 @@
 [English](cuda_execution_domains.en.md)
 
 独立 AOT consumer 可以将保存的完整执行计划绑定到有界 CUDA 执行域。每个域拥有
-nonblocking stream，每个准备好的实例拥有自己的 executable、不可变参数和编译临时区。
+nonblocking stream，每个准备好的实例拥有自己的 executable、参数存储和编译临时区。
 该接口保留已经选择的完整计划。stream、优先级和完成票据只属于运行时，不写入 AOT 产物。
 
 JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和当前 Program 的 dense Field。
@@ -24,10 +24,11 @@ JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和�
 | `cuda_jit_graph_execution_domains` | 完整 live JIT Graph 准备 |
 | `cuda_external_storage_execution_domains` | 托管外部导入及选域 acquire/release epoch |
 | `cuda_canvas_execution_domains` | Canvas copy/writer/empty/repeat 选域及固定预备池 |
+| `cuda_submission_parameters_u64` | JIT/AOT 独立实例逐提交更新已声明的 u64 scalar |
 
 对旧包使用 `features.get(name, False)`；不能从版本号或较新的提交推定能力。具体设备/
 驱动、同 GPU 共享及 recipe 的编译/provider 条件在冷创建和准备时检查。声明为真不代表
-Linux 窗口或所有 provider 已通过验收。沿用现有 bootstrap 与 ABI 111；不匹配的 shim/
+Linux 窗口或所有 provider 已通过验收。版本见 [SDK 配对合同](aot_sdk.zh.md#component-pairing)；不匹配的 shim/
 native 在进入 C++ 绑定前拒绝。
 
 ## 当前 JIT Graph
@@ -81,6 +82,31 @@ VkDeviceMemory 绑定位置，因此拒绝非零 buffer-relative 偏移。两者
 非紧凑/只读或无同步域的外部存储视图，以及未资格的 native route 会在冷准备时拒绝，不回退到默认 stream。
 默认 `Graph.run()`/`submit()` 合同不变。`ti.graph.execution_domain()` 的借用 runtime
 由 Program 的 Python owner 持有，避免丢弃最后一个域包装时意外触发破坏性关闭。
+
+## 逐提交参数
+
+在冷准备时声明可更新参数，其他绑定继续冻结：
+
+```python
+names = ("epoch", "simulation_step", "timestamp_ns")
+step = graph.prepare(arguments, execution_domain=domain, mutable_parameters=names)
+step.initialize()
+ticket = step.submit(values={"epoch": epoch, "simulation_step": step_id,
+                             "timestamp_ns": timestamp}, wait_for=previous_tickets)
+```
+
+`module.prepare_execution(..., mutable_parameters=names)` 提供相同的 AOT 合同。
+首版支持仅用于重放内核的 `u64` scalar；初始化阶段使用的 scalar、数组或其他类型在
+准备时拒绝。名称和数量由调用方声明，每次提交必须完整提供，值必须在 `[0, 2**64)`。
+接受提交后，修改原字典不影响该次执行。预分配的 pinned 参数和设备参数区属于实例，
+上传与完整 Graph 都进入所选域，completion 精确覆盖二者。
+上传使用读取 pinned 存储的小型 GPU kernel，避免 DMA 拷贝引擎的跨流队头阻塞。
+冷准备要求 CUDA unified addressing；重放不分配 pinned 内存。
+
+一个实例只有一份可变参数存储，在途时再次提交返回 `None`。需要重叠时，冷阶段准备
+多个独立实例；域容量由调用方配置。busy 或 ready-only 未就绪不上传、不消费外部信号、
+不分配提交序号。重放不重新 prepare、不创建设备参数存储、不进行全局同步。
+独立执行域及其参数更新目前仅支持 CUDA；Vulkan 尚不声明独立队列能力。
 
 ## Canvas 显式显示域
 

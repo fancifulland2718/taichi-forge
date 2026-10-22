@@ -626,11 +626,13 @@ class ExecutionPlan:
         # introduced, preserving every existing execution and storage choice.
         return ExecutionPlan(**document)
 
-    def prepare(self, module, arguments, *, gradients=None, execution_domain=None):
+    def prepare(self, module, arguments, *, gradients=None, execution_domain=None, mutable_parameters=()):
         """Resolve a frozen plan to the same native executor as kernel.prepare()."""
-        return self._prepare(module, arguments, gradients=gradients, execution_domain=execution_domain)
+        return self._prepare(module, arguments, gradients=gradients, execution_domain=execution_domain,
+                             mutable_parameters=mutable_parameters)
 
-    def _prepare(self, module, arguments, *, gradients=None, source=None, execution_domain=None):
+    def _prepare(self, module, arguments, *, gradients=None, source=None, execution_domain=None,
+                 mutable_parameters=()):
         from . import _c_api as abi
         from ._runtime import (
             NativeResource, NdArray, PreparedCall, _BindingFamily, _argument, _name,
@@ -638,6 +640,10 @@ class ExecutionPlan:
         )
 
         runtime = module._runtime
+        from ._parameters import SubmissionParameters
+        submission_parameters = SubmissionParameters(mutable_parameters)
+        if submission_parameters.names and execution_domain is None:
+            raise ValueError("mutable_parameters requires an independent execution domain")
         with runtime._lock:
             module._check()
             if execution_domain is not None:
@@ -689,6 +695,14 @@ class ExecutionPlan:
             if execution_domain is not None:
                 function = runtime._api.ti_prepare_execution_plan_on_domain_ext
                 prefix = (runtime._handle, module._handle, execution_domain._native_handle(), len(self._json), self._json)
+            suffix = ()
+            if submission_parameters.names:
+                runtime._api.load_submission_parameters()
+                function = runtime._api.ti_prepare_execution_plan_parameters_on_domain_ext
+                names = (abi.C.c_char_p * len(submission_parameters.names))(
+                    *(_name(name) for name in submission_parameters.names)
+                )
+                suffix = (len(names), names)
             handle = runtime._api.call(
                 function,
                 *prefix,
@@ -696,6 +710,7 @@ class ExecutionPlan:
                 native,
                 len(bindings),
                 (abi.NamedBinding * len(bindings))(*bindings),
+                *suffix,
             )
             family = source._family if source is not None else None
             if family is None and self.binding_strategy is not None:
@@ -711,4 +726,5 @@ class ExecutionPlan:
                 ),
                 family=family,
                 execution_domain=execution_domain,
+                submission_parameters=submission_parameters,
             )

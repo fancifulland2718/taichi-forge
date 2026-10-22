@@ -12,6 +12,7 @@
 #include "taichi/runtime/vulkan_control_recipe.h"
 #include "taichi/runtime/vulkan_submission_recipe.h"
 #include "taichi/runtime/ordered_storage_ring.h"
+#include "taichi/runtime/submission_parameters.h"
 
 namespace taichi::lang {
 class LaunchContextBuilder;
@@ -42,6 +43,7 @@ class FixedExecution {
   struct CudaExecutionBinding {
     std::shared_ptr<cuda::ExecutionDomain> domain;
     std::shared_ptr<RuntimeCompletionResources> operands;
+    std::size_t parameter_count{0};
   };
   struct Dispatch {
     aot::Kernel *kernel;
@@ -54,6 +56,7 @@ class FixedExecution {
     // Cold-only logical binding identity; never dereferenced or retained.
     const void *bounded_binding_identity{nullptr};
     std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
+    std::vector<SubmissionParameterPatch> parameters;
   };
   struct BufferCopy {
     DevicePtr destination;
@@ -124,7 +127,8 @@ class FixedExecution {
   FixedExecution &operator=(const FixedExecution &) = delete;
   void run();
   RuntimeCompletion submit(
-      const std::vector<RuntimeCompletion> &dependencies = {});
+      const std::vector<RuntimeCompletion> &dependencies = {},
+      const std::vector<SubmissionParameterValue> &parameters = {});
   // Cold, once-only binding before publishing this instance to submitters.
   // The whole replay owns one external epoch on its selected CUDA stream.
   // Initialization has its own separately qualified access closure.

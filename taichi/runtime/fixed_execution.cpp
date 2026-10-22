@@ -94,6 +94,9 @@ struct FixedExecution::State {
     ExternalStreamDomain external_stream;
     std::vector<CudaStep> steps;
     std::vector<std::shared_ptr<NativeOperation>> ordered;
+    std::size_t parameter_count{0};
+    std::mutex parameter_mutex;
+    RuntimeCompletion parameter_use;
     // Contains no ExecutionDomain reference. One domain registration owns the
     // entire recipe, including partial construction and provider-only recipes.
     std::vector<std::shared_ptr<RuntimeClient>> parts;
@@ -119,6 +122,7 @@ struct FixedExecution::State {
       steps.clear();
       parts.clear();
       ordered.clear();
+      parameter_use = {};
       external_access.reset();
       std::atomic_store(&operands,
                         std::shared_ptr<RuntimeCompletionResources>{});
@@ -921,6 +925,8 @@ FixedExecution::FixedExecution(
       retained->provider_bindings = state_->cuda_provider_bindings;
       state_->cuda_instance = std::make_shared<State::CudaInstance>();
       state_->cuda_instance->operands = std::move(retained);
+      state_->cuda_instance->parameter_count =
+          execution_binding->parameter_count;
       for (const auto &provider : state_->cuda_providers)
         state_->cuda_instance->parts.push_back(provider);
     }
@@ -1002,12 +1008,19 @@ FixedExecution::FixedExecution(
           if (!launcher)
             throw std::invalid_argument("Fixed CUDA entry is not registered");
           native.emplace_back(cuda::FixedGraph::Dispatch{
-              launcher, loaded->handle(), dispatch->context, {}, {},
+              launcher,
+              loaded->handle(),
+              dispatch->context,
+              {},
+              {},
               dispatch->bounded_extent == kDeviceNullPtr
                   ? nullptr
                   : cuda_pointer(dispatch->bounded_extent),
-              dispatch->bounded_capacity, dispatch->adaptive_block_dim,
-              dispatch->grouped_update, dispatch->bounded_binding_identity});
+              dispatch->bounded_capacity,
+              dispatch->adaptive_block_dim,
+              dispatch->grouped_update,
+              dispatch->bounded_binding_identity,
+              dispatch->parameters});
         } else if (const auto *external =
                        std::get_if<std::shared_ptr<NativeOperation>>(
                            &operation)) {
@@ -1297,15 +1310,23 @@ void FixedExecution::bind_external_access(
       "Prepared external access requires an independent CUDA instance");
 }
 RuntimeCompletion FixedExecution::submit(
-    const std::vector<RuntimeCompletion> &dependencies) {
+    const std::vector<RuntimeCompletion> &dependencies,
+    const std::vector<SubmissionParameterValue> &parameters) {
 #ifdef TI_WITH_CUDA
   if (state_->cuda_domain && state_->cuda_instance) {
     const auto instance = state_->cuda_instance;
+    if (parameters.size() != instance->parameter_count)
+      throw std::invalid_argument(
+          "Submission parameter count does not match preparation");
+    std::unique_lock<std::mutex> parameter_lock(instance->parameter_mutex,
+                                                std::defer_lock);
+    if (instance->parameter_count)
+      parameter_lock.lock();
     std::shared_ptr<cuda::OrderedSubmissionResources> ordered;
     if (state_->cuda_ordered_count)
       ordered = std::make_shared<cuda::OrderedSubmissionResources>(
           state_->cuda_ordered_count, std::atomic_load(&instance->operands));
-    return state_->cuda_domain->submit(
+    auto completion = state_->cuda_domain->submit(
         dependencies,
         ordered
             ? ordered
@@ -1319,6 +1340,10 @@ RuntimeCompletion FixedExecution::submit(
             selected.native_stream = stream;
             external.emplace(*instance->external_access, selected);
           }
+          for (const auto &step : instance->steps)
+            if (const auto *graph =
+                    std::get_if<std::unique_ptr<cuda::FixedGraph>>(&step))
+              (*graph)->enqueue_parameter_upload(stream);
           std::size_t index = 0;
           for (const auto &step : instance->steps) {
             if (const auto *graph =
@@ -1333,11 +1358,21 @@ RuntimeCompletion FixedExecution::submit(
         [&] {
           // All readiness checks precede provider reservations, dependency
           // waits, external semaphore consumption and sequence allocation.
+          if (instance->parameter_use.valid() &&
+              !instance->parameter_use.done())
+            throw cuda::ExecutionDomainBusy();
           if (instance->external_access && !instance->external_access->ready())
             throw cuda::ExecutionDomainBusy();
           if (ordered)
             ordered->reserve(instance->ordered);
+          for (const auto &step : instance->steps)
+            if (const auto *graph =
+                    std::get_if<std::unique_ptr<cuda::FixedGraph>>(&step))
+              (*graph)->snapshot_parameters(parameters);
         });
+    if (instance->parameter_count)
+      instance->parameter_use = completion;
+    return completion;
   }
 #endif
   throw std::invalid_argument(

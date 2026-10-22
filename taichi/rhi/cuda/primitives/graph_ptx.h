@@ -6,6 +6,10 @@
 
 namespace taichi::lang::cuda {
 
+// Cold load. The returned kernel copies mapped pinned u64 parameters on the
+// compute stream, without joining the driver's shared DMA engine queue.
+void *driver_graph_prepare_parameter_upload();
+
 struct CudaGraphConditionalControl {
   std::uintptr_t predicate{0};
   std::uint32_t iteration{0};

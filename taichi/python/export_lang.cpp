@@ -8137,6 +8137,8 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeCudaExternalStorageExecutionDomains);
     features["cuda_canvas_execution_domains"] =
         bool(bitmap & kForgeCudaCanvasExecutionDomains);
+    features["cuda_submission_parameters_u64"] =
+        bool(bitmap & kForgeCudaSubmissionParameters);
     result["features"] = std::move(features);
     result["legacy_runtime"] = false;
     return result;

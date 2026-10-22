@@ -11,7 +11,7 @@
 
 ## 组件配套与版本
 
-frontend、Python bridge 与 native runtime 的私有 ABI 必须匹配。当前修订为 **145**，
+frontend、Python bridge 与 native runtime 的私有 ABI 必须匹配。当前修订为 **146**，
 权威定义见 [`runtime_contract.h`](../../taichi/common/runtime_contract.h) 与
 [`_contract_constants.py`](../../python/taichi_forge/_contract_constants.py)。
 使用同一配套构建的组件，不承诺兼容 0.6.3–0.6.4 期间的开发中间修订。

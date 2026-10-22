@@ -162,11 +162,11 @@ class GraphExecution:
         finally:
             self._owner._active_graph_submissions -= 1
 
-    def submit(self, *, wait_for=(), ready_only=False):
+    def submit(self, *, wait_for=(), ready_only=False, values=None):
         """Return an exact completion, or None if busy, without a host wait."""
         self._begin()
         try:
-            return self._prepared.submit(wait_for=wait_for, ready_only=ready_only)
+            return self._prepared.submit(wait_for=wait_for, ready_only=ready_only, values=values)
         finally:
             self._owner._active_graph_submissions -= 1
 
@@ -185,7 +185,7 @@ class GraphExecution:
         self.close()
 
 
-def prepare_graph(graph, arguments, *, execution_domain):
+def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
     """Resolve immutable bindings once; submit reuses the native closure."""
     if not isinstance(execution_domain, CudaExecutionDomain):
         raise TypeError("execution_domain must be a CudaExecutionDomain")
@@ -299,6 +299,7 @@ def prepare_graph(graph, arguments, *, execution_domain):
                     bindings,
                     gradients=gradients,
                     execution_domain=execution_domain,
+                    mutable_parameters=mutable_parameters,
                 )
                 # Keep source wrappers until cold domain retirement as well as
                 # native code/storage leases. Dropping a call must not trigger
