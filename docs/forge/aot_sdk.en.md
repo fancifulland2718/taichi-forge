@@ -5,6 +5,25 @@
 For application artifact selection, producer/consumer cost and package ownership,
 see [AOT deployment profiles](aot_deployment_profiles.en.md).
 
+<a id="component-pairing"></a>
+
+## Component pairing and versions
+
+Frontend, Python bridge and native runtime must have matching private ABI
+revisions. The current revision is **145**, defined in
+[`runtime_contract.h`](../../taichi/common/runtime_contract.h) and
+[`_contract_constants.py`](../../python/taichi_forge/_contract_constants.py).
+Use components from the same matched build; development revisions within
+0.6.3–0.6.4 are not compatibility targets. Requirements below refer to this
+current pairing, not a historical per-feature ABI revision.
+
+Native operation schema versions, ExecutionPlan versions (currently up to 26)
+and external provider ABIs are separate contracts. Their numbers do not select
+the Forge private ABI. Package qualification records retain the revisions and
+sizes measured at the time; they are not current installation requirements.
+
+## SDK build and installation
+
 The 0.6.4 development build can install a separate C/C++ SDK. The producer uses
 Forge Python to export modules; the consumer links `TaichiForge::c_api` and does
 not import Python. CPU/CUDA still use the supplied LLVM runtime and compiler.
@@ -2319,7 +2338,7 @@ executor prepares each segment once and reads the i32 predicate each iteration;
 it does not unroll the budget or call back into producer Python. The initial
 condition executes once even at zero budget, and body-only initialization never
 escapes a possibly zero-trip loop. Explicit plans also retain the
-`continue_while_nonzero` polarity. Pair frontend/native ABI 144. Independent
+`continue_while_nonzero` polarity. Use matching frontend/native components. Independent
 execution domains, immutable CUDA binding families and host loops inside native
 GPU control remain unqualified; Vulkan portable WHILE export is not added.
 
@@ -2377,7 +2396,7 @@ definitions or repeating the trailing condition. Control scalar shapes and
 non-aliasing contracts are saved too. Small tests cover parent Sequential
 embedding, private controls, status and explicit adjoints. Nested CUDA export
 uses the selected flat physical dispatches and their condition/body boundaries.
-With matching private ABI 70 components, compact nested CUDA execution uses the
+With matching current private ABI components, compact nested CUDA execution uses the
 same nonnegative int64 budget contract as AOT and 32 bytes of private device
 control per loop. It imposes no 64-iteration, eight-inner-region or 4096-static-
 dispatch software cap. `structured_control_capabilities()["device_control"]`
@@ -2400,7 +2419,7 @@ in a body cannot escape a possibly zero-trip loop. Closing storage, modules or a
 borrowed owner retires dependent executions under the existing rules. Small
 CPU/CUDA cases cover nesting, zero trips, early exit, budget exhaustion and an
 explicitly exported suffix gradient; this does not promise differentiation of
-arbitrary dynamic loops. Matching private ABI 46 components are required.
+arbitrary dynamic loops. Matching current private ABI components are required.
 
 Version 13 adds explicit `cuda_nested_device_update` lowering (recipe version 1):
 
@@ -2523,7 +2542,7 @@ prefix/loop/suffix execution uses one queue submission. Zero outer budgets run
 only the initial condition between the prefix and suffix. Small standalone and
 borrowed checks cover two ordered inner loops, zero inner budgets, early exits,
 budget exhaustion, private and external controls, parent embedding, input updates,
-explicit adjoints and owner retirement. Use matching private ABI 53 components.
+explicit adjoints and owner retirement. Use matching current private ABI components.
 This covers the selected kernel-only depth-2 route, not arbitrary nesting or
 every Vulkan SolvePlan strategy.
 
@@ -2620,7 +2639,7 @@ kernel gradients and in-flight retirement pass Windows CPU/CUDA/Vulkan checks,
 including Vulkan synchronization validation. CUDA profiling confirms six native
 affine kernels for six JIT calls and likewise for six prepared AOT calls, rather
 than expanding a matrix into one launch per lane. Struct members and arbitrary
-strides still require their own export contracts. Use matching private ABI 115
+strides still require their own export contracts. Use matching current private ABI
 runtime/frontend components; ndarray execution defaults remain unchanged.
 
 The matching Windows runtime/frontend wheels pass normal installation and the
@@ -2799,7 +2818,7 @@ Preparation validates these layouts once, and replay does not read counts back.
 Tests cover zero/partial/full work, packet reuse between dependent segments,
 two bindings, real downstream `.grad`, explicit payload adjoints, and retirement
 in standalone/borrowed consumers. CPU exact and CUDA logical-exact launches also
-export with paired private ABI 64 components. ExecutionPlan version 7 records
+export with paired current private ABI components. ExecutionPlan version 7 records
 `"launch": {"kind": "cpu_exact", "extent": "name", "capacity": 65}` or the
 `cuda_logical_exact` kind. CPU schedules the valid range; CUDA preserves its
 saturation-capped grid-stride launch and executes only valid logical iterations.
@@ -2833,8 +2852,7 @@ prefix and join suffix. Export checks the selected groups against the native
 physical schedule and preserves private resources, layouts and disjointness
 constraints. Each preparation creates its own branch streams and events through
 the shared JIT capture core. Warm replay launches one root CUDA graph without
-creating streams, parsing the plan or consulting the producer. Use paired private
-ABI 65 components. Standalone and borrowed CUDA checks cover 2/8 branches, selected
+creating streams, parsing the plan or consulting the producer. Use paired current private ABI components. Standalone and borrowed CUDA checks cover 2/8 branches, selected
 two-chain recipes, private arrays, alias rejection, real Field gradients,
 independent frames and in-flight retirement. The lightweight consumer needs no
 producer Python source. CPU/Vulkan reject this CUDA-specific node.
@@ -2879,7 +2897,7 @@ Preparation forwards them to the common launch context. Fixed replay does not
 thereby enable individual kernel-profiler or NVTX events. Labels must be nonempty
 strings without NUL or line breaks, with no fixed length limit. Small
 CPU/CUDA/Vulkan standalone and borrowed consumer tests cover long UTF-8 labels,
-explicit reverse kernels and retirement. This requires matching private ABI 46
+explicit reverse kernels and retirement. This requires matching current private ABI
 components. Reduction/helper capacity, layout and disjointness certificates are
 preserved through the cold constraints below; unsupported binding recipes still fail preflight.
 
@@ -2897,7 +2915,7 @@ plan = ExecutionPlan(
 ```
 
 The optional `dtype` field freezes the scalar type, rejecting equal-width type
-substitutions before recording. It requires paired private ABI 55 components.
+substitutions before recording. It requires paired current private ABI components.
 Without it, kernel/provider contracts continue to determine permitted types.
 
 `array_layout` requires a packed scalar/AoS ndarray, matching rank and element
@@ -2969,7 +2987,7 @@ tensor layout, imported aliases and retirement. Graph export translates qualifie
 scalar/AoS and packed two-dimensional layout requirements, canonicalizing private
 aliases and removing duplicate constraints. Custom binding executors, storage
 plans and lifetime validators still need their own reconstruction contract.
-Use matching private ABI 46 components.
+Use matching current private ABI components.
 
 Selected CUDA typed reductions can now export direct and block-partial/finalize
 recipes, preserving the chosen kernels, fixed counts, labels, private partials
@@ -3059,7 +3077,7 @@ blocks, explicit adjoints, blocks inside compositions, independent preparations,
 numeric publications and retirement in standalone and borrowed consumers. Existing
 backend/provider recordability and affine-view restrictions still apply; this does
 not qualify arbitrary block leaves or add automatic derivatives. Automatic export
-in this section requires matching private ABI 50 components; no provider library
+in this section requires matching current private ABI components; no provider library
 is added to the consumer.
 
 Kernel-backed f32 CG/PCG SolvePlan actions can also retain their complete selected
@@ -3139,7 +3157,7 @@ modified state without reinitialization. Unused roots consume no device storage;
 closing the module still releases their reserved identities. If a directory
 source changes after loading, first initialization revalidates the selected
 snapshot. A failed module must be closed and reloaded before further use.
-This requires matching private ABI 127 components without changing artifact
+This requires matching current private ABI components without changing artifact
 formats; Vulkan retains its resource-loading path. Windows CPU/CUDA checks cover
 allocation counts, views before kernels, actual gradients, non-demoted dense
 lists, multiple modules and standalone/borrowed failure retirement. Vulkan
@@ -3243,7 +3261,7 @@ duplicate names and conflicting external bindings are errors. `plan.argument_nam
 reports the external slots, including shape sources and declared gradients.
 
 An ndarray resource can name an optional `"allocator"` resource (plan v19,
-matching private ABI 103 components). For example:
+matching current private ABI components). For example:
 
 ```python
 pool = dict(kind="native", name="pool", provider="memory", operation="pool",
@@ -3512,7 +3530,7 @@ Explicit gradient bindings may name separate views with different parent offsets
 the exported kernel must still declare its gradient ABI. CPU/CUDA/Vulkan tests
 cover actual `.grad`, nested views, tensor elements, reshape, empty views, native
 sort, alias rejection and retirement. No additional device allocation or replay
-copy is introduced by a view. Use matching private ABI 46 components. This common
+copy is introduced by a view. Use matching current private ABI components. This common
 resource support is separate from automatic export of operator-derived views.
 
 Packed dense Fields can expose the same module-owned storage to kernels and native
@@ -3662,8 +3680,8 @@ instances. An action failure skips the suffix, retains partially submitted work
 through retirement, and rejects replay of that instance. GPU conditional bodies
 cannot contain host-invoked actions. Pure ordered batches report
 `execution_kind="cuda_ordered"`; batches also containing synchronous actions
-report `cuda_mixed`. This shared contract was introduced in private ABI 61. Ordinary cuDSS
-transaction export uses it with the paired ABI 62 components described below.
+report `cuda_mixed`. Ordinary cuDSS transaction export uses this shared contract with matching
+components as described below.
 
 This composition capability still requires a registered provider-specific schema,
 resource reconstruction and numeric qualification. NVIDIA documents the
@@ -3991,8 +4009,7 @@ HOST/DEVICE pointer modes, views, invalid-binding rollback, empty inputs and
 retirement. An exported energy/reverse kernel and explicit vector adjoint check
 gradients; external operations are not automatically differentiated. The tests
 exercise the 64-bit entry points at small sizes, not multi-billion-element
-allocations or compatibility with older vendor libraries. Use matching private
-ABI 44 components. This supplies reusable operations for persistent plans;
+allocations or compatibility with older vendor libraries. Use matching current private ABI components. This supplies reusable operations for persistent plans;
 automatic export of every solver or JIT recording remains a separate contract.
 
 Native resources use the same registered envelope in `resources`, with an added
@@ -4075,7 +4092,7 @@ checks cover standalone/source-free and borrowed consumption, i32/i64 topology,
 transpose, coefficient updates, empty matrices, views, rejection and retirement.
 An exported energy kernel and its real `.grad` compose with an explicit transpose
 SpMV to check input gradients. This does not automatically differentiate an
-external call. CSR support started at ABI 44. Triangular solves and BSR use the
+external call. Triangular solves and BSR use the
 separate reconstruction contracts below; components must match the current private ABI.
 
 Root sequential mixed Graphs containing `CusparseSpmvRecording` can be exported
@@ -4347,8 +4364,7 @@ plan's frozen CSR seed, matrix type/view and configuration, without resampling t
 original matrix or serializing vendor factors or machine-local library paths.
 Each plan is sampled once per export; multi-RHS groups retain one numerical
 factorization, operations share one reconstructed plan, and identical read-only
-payloads are deduplicated within the module. This export requires paired private
-ABI 54; rebuilding analysis/factors remains cold preparation. Qualification covers
+payloads are deduplicated within the module. This export requires paired current private ABI; rebuilding analysis/factors remains cold preparation. Qualification covers
 changes to original seed/display fields, independent source-free consumption,
 explicit adjoints and selected recipe order.
 
@@ -4370,7 +4386,7 @@ after source closure, changing RHS/values, actual `kernel.grad` and explicit
 symmetric adjoints; they do not qualify every matrix class or control composition.
 
 Ordinary `CudssPlan.recording()` (`CudssSolveRecording`) also exports a frozen
-`solve` resource with paired private ABI 59. Under the native storage/submission
+`solve` resource with paired current private ABI. Under the native storage/submission
 locks, export verifies that successful factors still match the matrix identity,
 pattern and numeric version, then copies its CSR data and native configuration
 once per plan per export. Updating matrix values requires a new successful
@@ -4382,7 +4398,7 @@ consumption after closing the source plan, separate bindings, and real kernel
 gradients with an explicit symmetric solve adjoint.
 
 Ordinary `CudssPlan.record_refactor_solve()` exports through the same API with
-paired private ABI 62. Its `cudss/transaction_plan_f32` v1 resource uses the CSR
+paired current private ABI. Its `cudss/transaction_plan_f32` v1 resource uses the CSR
 seed ports and configuration above, without a `phase` parameter. The
 `cudss/refactor_solve_f32` v1 operation has empty parameters and `plan`, `values`,
 `rhs`, `output` ports. It reports `cuda_ordered`, retaining ordinary host-invoked
@@ -4951,7 +4967,7 @@ ABIs, and explicitly requested public aliases remain separate. Conflicting
 specializations or ABIs cannot overwrite a published name. CPU/CUDA avoid extra
 LLVM/PTX/cubin payloads; Vulkan retains its existing shader reuse and avoids
 redundant entry aliases. These lookups run only during producer export; consumer
-formats and dispatch paths are unchanged. Paired components use private ABI 98.
+formats and dispatch paths are unchanged. Paired components use current private ABI.
 
 Vulkan modules can export dense fields created after `Module()` and reuse kernels
 compiled before unrelated fields were created. The archive includes only layouts
@@ -5059,7 +5075,7 @@ copy or submission. Small Windows checks cover module root storage, nested
 views, actual reverse gradients, adjacent scalar arguments, binding updates and
 three-backend lifetime regressions. Legal aligned bindings of old artifacts
 remain usable; unaligned views that old shaders cannot express require re-export
-before execution. Use this version's matching private ABI 102 runtime and shim;
+before execution. Use this version's matching current private ABI runtime and shim;
 other artifacts retain their required minimum metadata version.
 Dense modules using only the new array-offset semantics do not allocate sparse
 diagnostic resources. Device descriptor-range and integer-overflow limits still
@@ -5103,7 +5119,7 @@ exact task identities conservatively allocate lists for the affected kernel's
 dependencies, which can allocate extra storage. Ordinary forward/backward
 compatibility is checked for old CPU bitcode/CUDA PTX; old CUDA fixed admission
 is unchanged. Old runtimes reject the unknown `list_v1` contract. Compilation
-defaults and serialized field layouts are unchanged; use paired ABI 98 components.
+defaults and serialized field layouts are unchanged; use components with matching current private ABI.
 
 JIT/AOT share structural sizing for independent automatic CUDA pools belonging
 to dense or packed traversal trees. Full list capacity and metadata alignment
@@ -5137,7 +5153,7 @@ small stable-topology workloads are not guaranteed to run faster. Default fixed
 replay caps listgen grids using the compiler's existing parent-list capacity
 bound and grid-stride traversal. It adds no active-count readback or generated
 artifact; explicit task plans retain their selected launch policy. Ordinary JIT
-Graph admission is unchanged. Matching components require private ABI 98.
+Graph admission is unchanged. Matching components require current private ABI.
 
 Windows CUDA bitcode/PTX/cubin checks also cover sparse
 `cuda_immutable_argument_frames` families. Multiple scalar/array binding frames

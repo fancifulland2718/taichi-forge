@@ -1,19 +1,21 @@
 # JIT 与 AOT 内部契约
 
-本文记录 Forge 0.6.4 第一轮契约收敛后的维护方式，不是新的公共插件 ABI，
+本文记录 Forge 0.6.4 共同编译与执行契约的维护方式，不是新的公共插件 ABI，
 也不表示所有 native 操作均可重建。[English](jit_aot_contracts.en.md)
 
 ## 权威来源与所有权
 
 | 事实 | 权威来源 | 消费与边界 |
 | --- | --- | --- |
-| 有效 kernel 编译选项 | `KernelCompileRequest` | 沿用已有 JIT/AOT 编译入口；完整 target/cache identity 工作另行处理。 |
+| 有效 kernel 编译选项 | `KernelCompileRequest` | JIT/AOT 的 CUDA lowering 与缓存身份消费同一已解析目标；CPU 宿主优化与 Vulkan capability 保留后端政策。 |
 | LLVM 实际调用 ABI 与资源依赖 | 编译产物中的 `KernelCallContract` | JIT 注册与 AOT metadata 投影编译事实；编译后不再从 frontend Kernel 维护另一份 ABI。 |
 | GFX 调用 ABI 与依赖 | 编译后的 GFX attributes | 保留后端物理布局差异，不建立统一物理 ABI。 |
 | 已选 Graph 执行结构 | `graph/_lowering.py` | 共用遍历、物理 operation 边界、绑定规则与控制 lowering。 |
 | 部署发布与快照 | AOT `_ExportContext` | 导出事务、结构/Field 发布、数据捕获、编译后根资源闭包确认。 |
 | 已选 JIT 代码与 live storage | JIT `_JitContext` | 借用冻结 dispatch，验证 owner 代次，不伪造 AOT Module。 |
 | Native 语义定义 | 功能模块的规范化定义与 native schema/binder | Python 创建、recording 与重建消费同一语义事实。 |
+| Kernel 注册 | `KernelExecutionHandle` | 保存 runtime 身份/代次和独立 ordinary/masked 注册；编译产物不再保存注册状态。 |
+| 源码与 compiled-host 定义输入 | `CallableDefinition` / `DefinitionTemplate` | 共用定义获取合同；每次特化仍取得自己的作用域和可变 AST。 |
 | Workspace、handle、提交与退休 | 现有 prepared/execution owner | 共享定义不等于共享可变状态。 |
 
 LLVM 契约定义见
@@ -85,8 +87,9 @@ cuSPARSE 的 SpMM、triangular 参数和 recording 端口同样来自共同定�
 CSR/BSR 可通过 `resource_bindings={matrix: "name"}` 引用消费者创建的 native 矩阵，
 此时导出不读回或打包矩阵内容。矩阵拥有自己的 values，不能同时把它映射为独立
 `source_bindings` 系数端口。共享公开 CSR 的 triangular 保留私有 analysis，并在每次
-solve 前更新；公开 triangular plan handle 尚未获得导出资格。显式公开身份由原
-resource/alias 校验管理，同配置不同 owner 不自动合并。
+solve 前更新。也可公开绑定 triangular plan，但其 matrix 必须同时公开；v2 update/solve
+描述验证 plan、matrix 和输入/输出的对应关系。显式公开身份由原 resource/alias 校验管理，
+同配置不同 owner 不自动合并。
 
 [`_primitive_definitions.py`](../../python/taichi_forge/algorithms/_primitive_definitions.py)
 提供 Scan、Reduce、Transform 的冷阶段定义。普通 native 调用从中取得 dtype、范围、
@@ -134,13 +137,15 @@ cuSPARSELt raw-A 种子与压缩 epoch 是可变状态政策，仍区别一次�
 
 多键排序复用 gather/transform 的定义；Unique/RLE 的 helper 选择由算法层提供，
 Module 与 Sequence adapter 共享其特化事实。确定性 retained scatter-reduce 仍共用原
-fused kernel/action；其固定 provider-owned 存储和拓扑尚无 AOT 重建角色，当前仍拒绝导出。
-普通 Graph 的单 dispatch 支持不能替代这个部署合同。
+fused kernel/action，并导出当前 permutation/offset 拓扑与 typed group-count 绑定。
+重建保留已选物理 dispatch；provider-owned 存储通过显式角色描述，不从 live handle 推断。
 
 求解资源将静态配置和数值状态分开：cuSOLVERDn 的创建/recording 定义共用，factor/status
 仍在同一快照边界读取；cuDSS 从 native owner 取得实际 seed，并校对冻结配置。SparseSolver
 从相同 dtype/method/ordering 构造直接 solver 和导出描述，保留 factor generation 与 CUDA LU
-的 host 边界。AmgX 仍使用直接 provider ABI 和显式 AOT 描述，尚无普通 recording 自动导出。
+的 host 边界。AmgX 保留直接 provider ABI，device binding 提供 host 控制的 Graph action，
+从冻结配置/拓扑和消费者显式 values 种子自动重建 AOT。Sequential/portable branch 及
+CUDA host WHILE 保留解初始化检查；未提供 CUDA capture 或 execution-domain 异步 host 控制。
 
 Vulkan classic/mesh pipeline 的冻结 driver 配置、资产与原 contract hash 属于共同定义，
 创建路径不依赖 AOT 私有模块。默认 adapter 连接已有 shader 资源引用；公开 pipeline 借用、

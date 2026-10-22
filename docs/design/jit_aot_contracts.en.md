@@ -1,6 +1,6 @@
 # JIT and AOT internal contracts
 
-This describes the first contract consolidation in Forge 0.6.4. It is a
+This describes the shared compilation and execution contracts in Forge 0.6.4. It is a
 maintenance guide, not a new public plugin ABI or a claim that every native
 operation can be reconstructed. [中文版](jit_aot_contracts.zh.md)
 
@@ -8,13 +8,15 @@ operation can be reconstructed. [中文版](jit_aot_contracts.zh.md)
 
 | Fact | Authority | Consumers and boundaries |
 | --- | --- | --- |
-| Effective kernel compilation options | `KernelCompileRequest` | Existing JIT and AOT compilation entries; target/cache identity work remains separate. |
+| Effective kernel compilation options | `KernelCompileRequest` | JIT and AOT share resolved CUDA target facts with lowering and cache identity; CPU host optimization and Vulkan capability policies remain backend-specific. |
 | Actual LLVM call ABI and resource dependencies | `KernelCallContract` in compiled data | JIT registration and AOT metadata project compiled facts. Source `Kernel` is not a second ABI source after compilation. |
 | GFX call ABI and dependencies | Compiled GFX attributes | Preserve backend layout differences; no universal physical ABI. |
 | Selected Graph execution structure | `graph/_lowering.py` | Traversal, physical operation boundaries, binding rules and control lowering are shared. |
 | Deployment publication and snapshots | AOT `_ExportContext` | Export transaction, structure/Field publication, data capture and post-compilation root closure. |
 | Selected JIT code and live storage | JIT `_JitContext` | Borrow frozen physical dispatches and validate live owner generations. No fabricated AOT Module. |
 | Native semantic definition | Provider's normalized definition and native schema/binder | Python creation, recording and reconstruction consume the same semantic facts. |
+| Kernel registration | `KernelExecutionHandle` | Runtime identity/generation and separate ordinary/masked registrations; compiled payloads contain no registration state. |
+| Source and compiled-host definition input | `CallableDefinition` / `DefinitionTemplate` | Shared acquisition contract; each specialization still acquires its own scope and mutable AST. |
 | Workspace, handles, submission and retirement | Existing prepared/execution owners | Shared definitions do not imply shared mutable state. |
 
 The LLVM contract lives in
@@ -106,8 +108,9 @@ CSR/BSR support `resource_bindings={matrix: "name"}` for a consumer-created
 native matrix, without reading back or packaging its contents. The matrix owns
 its values and cannot also map to a separate `source_bindings` coefficient port.
 Triangular execution sharing a public CSR keeps private analysis and refreshes
-it before every solve. Public triangular plan handles remain unqualified for
-export. Existing resource/alias checks govern explicit public identities;
+it before every solve. Public triangular plans can also be bound when their
+matrix is public: v2 update/solve descriptions validate the plan, matrix and
+input/output correspondence. Existing resource/alias checks govern explicit public identities;
 different owners with equal configurations are not implicitly merged.
 
 [`_primitive_definitions.py`](../../python/taichi_forge/algorithms/_primitive_definitions.py)
@@ -178,16 +181,20 @@ definitions do not imply shared mutable state across instances.
 Multi-key sort reuses gather/transform definitions. Unique/RLE helper selection
 belongs to the algorithms layer, with specialization facts shared by Module and
 Sequence adapters. Deterministic retained scatter-reduce shares its existing
-fused kernel/action, but still rejects AOT export: fixed provider-owned storage
-and topology lack explicit reconstruction roles. Ordinary single-dispatch Graph
-support does not establish that deployment contract.
+fused kernel/action and exports its current permutation/offset topology and
+typed group-count binding. Reconstruction retains the selected physical dispatch;
+provider-owned storage is explicitly described rather than inferred from a live handle.
 
 Solver resources separate configuration from numerical state. cuSOLVERDn shares
 creation/recording definitions while snapshotting factor/status at one boundary.
 cuDSS reads actual seeds from the native owner and verifies frozen configuration.
 SparseSolver uses the same dtype/method/ordering for direct creation and export,
 preserving factor generations and CUDA LU's host boundary. AmgX retains its direct
-provider ABI and explicit AOT descriptions; ordinary recordings are not automatically exported.
+provider ABI. Its device binding exposes a host-controlled Graph action with
+automatic AOT reconstruction from frozen configuration/topology and an explicit
+consumer values seed. Sequential/portable branch and CUDA host WHILE paths retain
+solution-initialization checks. This does not provide CUDA capture or asynchronous
+execution-domain host control.
 
 Vulkan classic/mesh pipeline definitions own frozen driver configuration, assets
 and the existing contract hash. Creation no longer depends on an AOT-private

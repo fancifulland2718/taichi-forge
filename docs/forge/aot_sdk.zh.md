@@ -7,6 +7,22 @@
 [CUDA 执行域](cuda_execution_domains.zh.md)。开发接口在运行时绑定已保存计划，
 不序列化 stream 身份，也不改变已选择的执行路线。
 
+<a id="component-pairing"></a>
+
+## 组件配套与版本
+
+frontend、Python bridge 与 native runtime 的私有 ABI 必须匹配。当前修订为 **145**，
+权威定义见 [`runtime_contract.h`](../../taichi/common/runtime_contract.h) 与
+[`_contract_constants.py`](../../python/taichi_forge/_contract_constants.py)。
+使用同一配套构建的组件，不承诺兼容 0.6.3–0.6.4 期间的开发中间修订。
+下文的组件要求均指当前配套关系，不要求安装各功能开发时的历史 ABI。
+
+Native operation schema 版本、ExecutionPlan 版本（当前最高为 26）和外部 provider ABI
+是不同合同，其数字不用于选择 Forge 私有 ABI。包体验收记录保留当时实际测量的修订与
+体积，不作为当前安装要求。
+
+## SDK 构建与安装
+
 0.6.4 开发版可以单独安装 C/C++ SDK。生产端通过 Forge Python 导出模块；
 消费端链接 `TaichiForge::c_api`，无需导入 Python。CPU/CUDA 仍使用随 SDK
 提供的 LLVM runtime 与编译器。这是一份完整 SDK，不是无编译器 runtime。
@@ -1786,7 +1802,7 @@ host 分支可以包含原生子块，GPU 原生控制体内包含 host 分支�
 Graph 循环保留选中的 body+condition 段，包括具有重建合同的 host native 操作。C++ host-control
 执行器准备一次各段、每轮读取 i32 predicate，不展开预算、不回调生产端 Python。零预算仍执行
 一次初始 condition，可能零轮的 body 中初始化的事实不能传到循环后。显式计划也保留
-`continue_while_nonzero` 极性。frontend/native 配套私有 ABI 144；独立 execution domain、
+`continue_while_nonzero` 极性。frontend/native 配套当前私有 ABI；独立 execution domain、
 immutable CUDA binding family、GPU 原生控制内的 host loop 仍未接通；未增加 Vulkan portable WHILE 导出。
 
 版本 16 增加显式 `cuda_masked` 分支 lowering（recipe 1）。它与 v15 循环共用已有
@@ -1830,7 +1846,7 @@ plan = ExecutionPlan([loop])
 前后段，不重新生成源定义或重复
 末尾条件计算。控制数组的标量形状及互不别名约束一并保存；父 Sequential 嵌入、
 私有控制资源、状态与显式伴随已有小规模验证。CUDA 嵌套导出使用已选的平坦物理
-dispatch 及条件/循环体边界。配套 private ABI 70 组件的紧凑 CUDA 嵌套路线与 AOT
+dispatch 及条件/循环体边界。配套 当前 private ABI 组件的紧凑 CUDA 嵌套路线与 AOT
 共用非负 int64 预算合同，每个循环的私有设备控制为32字节，不设置64轮、8个内层
 region或4096个静态dispatch的软件上限。`structured_control_capabilities()["device_control"]`
 通过`nested_cuda_conditional_limits`报告该路线；原`nested_native_*`数量字段描述展开式
@@ -1845,7 +1861,7 @@ CG/PCG SolvePlan 导出复用这些已选控制路线。需要 host 同步的 CU
 provider 不可放入循环；使用不透明冷状态的 provider 仍需专门的分支/循环合并合同。
 循环体的新初始化事实不能传播到零轮出口。关闭存储、模块或借用 owner 会按既有
 规则退休相关执行。CPU/CUDA 小用例验证了嵌套、零轮、提前结束、预算耗尽和显式导出的
-后段梯度；这不表示支持对任意动态循环自动微分。需匹配 private ABI 46。
+后段梯度；这不表示支持对任意动态循环自动微分。需匹配 当前 private ABI。
 
 版本 13 增加显式 `cuda_nested_device_update` lowering（recipe 版本 1）：
 
@@ -1935,7 +1951,7 @@ dispatch 列表、外层首次条件、有序内层 condition/body/end 边界及
 八个内循环上限；现有 JIT 路线资格检查仍适用。prepare 复用共用嵌套录制器，暖态
 正预算的前段/循环/后段合为一次队列提交。外层零预算只在前后段之间执行首次条件。
 独立及借用消费端的小用例覆盖两个顺序内循环、内层零预算、提前结束、预算耗尽、
-私有及外部控制、父图嵌入、输入更新、显式伴随与 owner 退休。需匹配 private ABI 53。
+私有及外部控制、父图嵌入、输入更新、显式伴随与 owner 退休。需匹配 当前 private ABI。
 这覆盖已选的纯 kernel depth-2 路线，不表示任意嵌套或全部 Vulkan SolvePlan 策略可用。
 
 Vulkan 与 JIT 复用录制核心，将前段、有序循环分块和后段合入一次队列提交。prepare
@@ -2149,7 +2165,7 @@ kernel dispatch 标签可经自动导出及 kernel operation 的可选 `"label"`
 标签属于每次操作，同一 kernel 的不同标签不会重复生成编译代码；准备时传给共用
 launch context。固定重放不会因此自动开启逐 kernel profiler 或 NVTX 事件。
 标签为非空字符串，不能含 NUL 或换行，不设固定长度上限。CPU/CUDA/Vulkan 的独立
-及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 46。
+及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 当前 private ABI。
 reduction/helper 的容量、布局和 disjoint 证明通过下面的冷约束保留；未支持的绑定
 配方仍在预检期拒绝。
 
@@ -2169,7 +2185,7 @@ plan = ExecutionPlan(
 `array_layout` 要求紧凑 scalar/AoS ndarray，rank 与 element shape 一致，各索引维
 不小于 `minimum_shape`，每条 record 的字节数相等且满足基址对齐。`element_shape`
 省略时为 `[]`；可选 `dtype` 冻结 scalar 类型，省略时仍由 kernel/provider 检查。
-显式 dtype 可拒绝同字节宽度的类型替换，需要配对 private ABI 55。允许零长度索引维。只能约束选中
+显式 dtype 可拒绝同字节宽度的类型替换，需要配对 当前 private ABI。允许零长度索引维。只能约束选中
 执行及其保留资源/梯度已使用的绑定，不会为此额外保留无关数组。`disjoint` 比较
 CPU/CUDA 地址范围或 Vulkan buffer/memory 绑定，可识别不同导入分配句柄的重叠。
 Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者须描述真实底层
@@ -2218,7 +2234,7 @@ Vulkan导入必须提供足以证明这些关系的身份；同buffer范围可�
 及 affine view 需要独立布局合同。CPU/CUDA/Vulkan 已测真实反向 kernel、零长度、
 tensor 布局、导入别名和退休。Graph 导出会翻译已资格的 scalar/AoS、紧凑二维布局
 要求，合并私有别名名称并去除重复约束。自定义绑定器、存储规划和生命周期 validator
-仍需自己的重建合同。需配套 private ABI 46。
+仍需自己的重建合同。需配套 当前 private ABI。
 
 已选中的 CUDA typed reduction 可导出 direct 和 block-partial/finalize，保留
 物理 kernel、固定 count、标签、私有 partial 和绑定要求，重复导出复用 kernel 定义。
@@ -2284,7 +2300,7 @@ Graph 私有数组及组合 scratch 上的连续视图；即使只有子视图�
 CPU/CUDA/Vulkan 已验证矩形块、显式伴随、compose 内嵌 block、独立准备、数值发布，以及
 独立/借用消费端退休。既有 backend/provider 可录制性及 affine view 限制仍适用，不表示
 任意叶算子均可作为 block，也不自动生成导数。
-本节自动导出要求配套 private ABI 50，不给消费端增加 provider 库依赖。
+本节自动导出要求配套 当前 private ABI，不给消费端增加 provider 库依赖。
 
 kernel-backed f32 CG/PCG SolvePlan action 也可以保留完整已选程序，包括初始化、
 算子/预条件器调用、控制流、私有工作区及终端写回：
@@ -2340,7 +2356,7 @@ extent 绑定采用标量 `i32[2]`（count、overflow），顺序分段 offsets 
 
 独立/借用消费测试覆盖零量、部分/全量、相邻依赖分段复用 packet、双绑定、真实后续
 `.grad`、payload 显式伴随及退休。CPU exact 与 CUDA logical-exact 也可导出，要求配对
-private ABI 64 组件。ExecutionPlan 版本 7 使用
+当前 private ABI 组件。ExecutionPlan 版本 7 使用
 `"launch": {"kind": "cpu_exact", "extent": "name", "capacity": 65}` 或
 `cuda_logical_exact`。CPU 只调度有效范围；CUDA 保留饱和上限的 grid-stride 派发，
 只执行有效逻辑迭代，不据此缩减物理 grid 或省略零工作量的 launch。
@@ -2365,7 +2381,7 @@ CUDA adaptive 物理 grid 更新也可导出，保留选中的 `per_node` 或 `g
 每个非空分支保留 kernel 顺序，外部序列保留前段和汇合后段；导出核对所选分组与原生
 物理顺序，并保留私有资源、布局和不相交约束。每次 preparation 通过 JIT 共用核心
 创建独立分支流和事件，暖态一次根 CUDA Graph launch，不创建流、不解析计划，也不
-访问生产端。需配对的 private ABI 65 组件。独立/借用 CUDA 检查覆盖 2/8 分支、
+访问生产端。需配对的 当前 private ABI 组件。独立/借用 CUDA 检查覆盖 2/8 分支、
 已选两链策略、私有数组、别名拒绝、真实 Field 梯度、独立 frame 和在途退休；轻量
 消费端不需要生产端 Python 源码。CPU/Vulkan 明确拒绝此 CUDA 专用节点。
 
@@ -2391,7 +2407,7 @@ CPU/CUDA 的 runtime-owned LLVM 模块也按实际使用初始化根存储：加
 只分配其依赖的根并恢复初值。后续入口共享已修改的状态，不会重新初始化。未使用的根
 不分配设备存储，关闭时仍释放其保留的身份。目录源在加载后被修改时，首次初始化会
 重新校验对应快照；失败的模块不可继续使用，应关闭后重新加载。
-此行为需要配对的 private ABI 127 组件，产物格式不变；Vulkan 沿用其资源加载路径。
+此行为需要配对的 当前 private ABI 组件，产物格式不变；Vulkan 沿用其资源加载路径。
 Windows CPU/CUDA 检查覆盖按需分配数量、视图先于 kernel、实际梯度、非 demoted dense
 列表、多模块及独立/借用的失败退休；Vulkan 的初值、根视图和梯度回归通过。
 
@@ -2468,7 +2484,7 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 会报错。`plan.argument_names` 列出实际外部参数，包括形状来源和声明的梯度。
 
 ndarray 资源可通过可选 `"allocator"` 字段指定分配器资源（计划 v19，Python/native
-组件须配套 private ABI 103）。例如：
+组件须配套 当前 private ABI）。例如：
 
 ```python
 pool = dict(kind="native", name="pool", provider="memory", operation="pool",
@@ -2661,7 +2677,7 @@ resources = [
 kernel、copy、fill 和合格的原生操作使用所选范围。显式梯度绑定可以指向独立视图，
 其父数组与偏移可与 primal 不同；导出的 kernel 仍须声明相应梯度 ABI。CPU/CUDA/Vulkan
 测试覆盖实际 `.grad`、嵌套视图、tensor 元素、reshape、空视图、原生 sort、别名拒绝和
-退休。视图本身不增加设备分配或重放复制。需配套 private ABI 46。此公共资源能力与
+退休。视图本身不增加设备分配或重放复制。需配套 当前 private ABI。此公共资源能力与
 operator derived view 的自动导出分别接入。
 
 CPU/CUDA/Vulkan 的连续 dense Field 可将同一份模块存储提供给 kernel 与原生执行操作：
@@ -2777,7 +2793,7 @@ stream 的原生宿主动作。前后 CUDA Graph 片段依靠 stream 次序，�
 不同 prepared 实例可识别同一完成事件。动作失败时跳过后段，保留部分提交的资源直到
 退休，并拒绝该实例再次重放。GPU 条件循环体不能包含宿主调用。仅含有序动作的混合图
 报告 `execution_kind="cuda_ordered"`；同时含同步动作则报告 `cuda_mixed`。公共合同
-于 private ABI 61 引入；普通 cuDSS 事务导出通过下文配对的 ABI 62 组件使用它。
+由普通 cuDSS 事务导出通过下文的配套组件使用。
 
 这项组合能力仍需对应 provider 的 schema、资源重建与数值资格，不能代称库全面
 支持 capture。当前 context 的等待语义见 NVIDIA
@@ -3033,7 +3049,7 @@ AXPY/SCAL 接受有限 f32 的 `alpha` 参数（默认 1），或形状为 `()` 
 设备系数变化、共享 HOST/DEVICE pointer mode、视图、非法绑定回滚、空输入和退休。
 导出的 energy/反向 kernel 与显式向量伴随核对梯度，不提供外部操作的自动微分。
 测试用小规模数据执行 64 位入口，未验证数十亿元素分配或旧 vendor 库兼容性。
-需配套 private ABI 46。本项为持久计划提供可复用操作；全部 solver 或 JIT recording
+需配套 当前 private ABI。本项为持久计划提供可复用操作；全部 solver 或 JIT recording
 自动导出仍需各自的合同。
 
 原生资源在 `resources` 中使用同一注册式外壳，另加 `name`。CUDA 的
@@ -3311,7 +3327,7 @@ Graph-owned `CudssCaptureRecording` 也可通过 `module.add_execution_plan(name
 导出普通或已选 Graph。导出读取原生计划冻结的 CSR seed、矩阵类型/视图与配置，
 不重新采样原始矩阵，也不序列化 vendor 因子或本机库路径。同一计划在每次导出中
 只采样一次；多 RHS 组保持一次数值分解，多个操作共享一份重建计划，相同只读载荷
-在模块内去重。该导出需要配对的 private ABI 54；重建时重新分析/分解属于冷准备。
+在模块内去重。该导出需要配对的 当前 private ABI；重建时重新分析/分解属于冷准备。
 已验证原始 seed/展示字段修改后仍保留原生语义、独立无源码消费、显式伴随及选中
 recipe 顺序。
 
@@ -3327,13 +3343,13 @@ capture 导出还保存 `solve_group_f32` 的布尔参数 `disjoint_bindings=tru
 变化 RHS/数值、真实 `kernel.grad` 及显式对称伴随；不等于所有矩阵类别或控制组合已验证。
 
 普通 `CudssPlan.recording()`（`CudssSolveRecording`）也可导出冻结的 `solve` 资源，
-要求配对 private ABI 59。导出在原生存储/提交锁内检查成功分解的因子仍对应当前矩阵
+要求配对 当前 private ABI。导出在原生存储/提交锁内检查成功分解的因子仍对应当前矩阵
 身份、pattern 和 numeric version，再读取 CSR 数据与原生配置；每计划每次导出只
 读取一次。更新矩阵值后必须重新成功分解才能再导出，已导出的包仍保留原值。
 未分解、过期、事务在途、仅来自显式值的因子和已关闭 owner 均会被拒绝。
 消费端在冷准备时重建因子，重放复用计划，不在主机查询矩阵。Windows CUDA 已验证
 源计划关闭后的独立/借用消费、不同绑定及真实 kernel 梯度配合显式对称求解伴随。
-普通 `CudssPlan.record_refactor_solve()` 也通过相同导出 API 接入，要求配对 private ABI 62。
+普通 `CudssPlan.record_refactor_solve()` 也通过相同导出 API 接入，要求配对 当前 private ABI。
 其 `cudss/transaction_plan_f32` v1 资源沿用上面的 CSR seed 端口和配置，不接受 `phase`。
 `cudss/refactor_solve_f32` v1 动作参数为空，端口为 `plan`、`values`、`rhs`、`output`，
 报告 `cuda_ordered`：保留普通主机调用的事务语义，与前后 kernel 按 stream 次序执行。
@@ -3762,7 +3778,7 @@ Windows CPU/CUDA/Vulkan 与 CUDA PTX 小夹具验证了嵌套混合类型、重�
 这不修改原 Graph，也不合并不同 ndarray 特化、普通/门控 ABI 或用户显式声明的公共别名。
 入口同名但指向不同特化/ABI 时会在导出前拒绝。CPU/CUDA 避免多份 LLVM/PTX/cubin
 载荷；Vulkan 沿用已有 shader 复用，并减少冗余入口别名。查找只发生在生产端导出期间，
-消费端格式和调用路径保持不变；配套组件使用私有 ABI 98。
+消费端格式和调用路径保持不变；配套组件使用当前私有 ABI。
 
 Vulkan 模块可导出在 `Module()` 之后创建的 dense field，也可复用无关 field 创建前
 已编译的 kernel。归档只包含导出 kernel 或显式 `add_field()` 引用的布局；仅使用
@@ -3838,7 +3854,7 @@ hash、实际 field 与下游 ndarray 反向梯度、双模块，以及独立/�
 固定执行会将 descriptor 基址向下对齐，再分别传入数据/梯度的字节偏移；满足元素对齐的
 子视图无需额外数据复制或提交。Windows 小型验证覆盖模块根存储、嵌套视图、实际反向
 梯度、相邻标量参数、绑定更新与三后端生命周期回归。旧产物的合法对齐绑定继续可用；
-旧 shader 无法表达的非对齐视图在执行前要求重新导出。本版本需配套的私有 ABI 102
+旧 shader 无法表达的非对齐视图在执行前要求重新导出。本版本需配套的当前私有 ABI
 runtime 与 shim；其他产物保留所需的最低 metadata 版本。仅使用新数组偏移语义的 dense
 模块不因此分配稀疏诊断资源。设备的 descriptor 范围和整数溢出约束仍然适用。
 
@@ -3868,7 +3884,7 @@ CPU bitcode/CUDA PTX 的小型测试覆盖普通/固定调用、实际 field 梯
 旧产物缺少精确任务归属时，仅对对应 kernel 的依赖树保守分配列表，可能多分配；
 旧 CPU bitcode/CUDA PTX 的普通前向/反向兼容性已检查，未扩大旧 CUDA fixed 准入。
 新 `list_v1` 会被不认识该合同的旧 runtime 拒绝。编译默认选项和持久字段布局不变，
-配套组件使用私有 ABI 98。
+配套组件使用当前私有 ABI。
 
 dense 或 packed 遍历树的 CUDA 独立自动池按完整列表容量和元数据对齐计算，不再每树预留
 一份 32 MiB runtime 基线；JIT/AOT 共用此路径。用户显式池下限仍生效，共享/固定池
@@ -3891,7 +3907,7 @@ host 回读。不同模块不共享该缓存。关闭依赖会等待在途工作
 固定重放会减少 host 提交，却仍执行设备列表检查，不能据此保证稳定拓扑的小任务更快。
 默认固定重放使用编译器已有的父列表容量上界缩小 listgen 网格，沿用 grid-stride
 遍历；不读回活跃数量、不新增编译产物，显式 task plan 保持其选择的启动策略。
-该扩展不改变普通 JIT Graph 的稀疏准入。配套组件使用私有 ABI 98。
+该扩展不改变普通 JIT Graph 的稀疏准入。配套组件使用当前私有 ABI。
 
 Windows CUDA bitcode/PTX/cubin 还验证了稀疏 `cuda_immutable_argument_frames`
 参数族：多个参数帧共用一个可执行图，切换标量/数组后保留实际 field 梯度和普通调用
