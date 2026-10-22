@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Normal Python exit now uses the resource cleanup order of explicit reset,
+  retiring Graph owners, borrowed AOT runtimes and the Program before backend
+  libraries unload. This fixes a Windows Vulkan ray borrower exit access
+  violation with validation enabled, without an application-side `ti.reset()`.
+  Pending submissions, borrowed resources and repeated cleanup are verified on
+  Windows CPU/CUDA/Vulkan.
+
 - Direct prepared AOT kernels on CPU/CUDA/Vulkan can return values. Each binding
   owns an independent result frame; `run/submit` stay asynchronous and `result()`
   explicitly waits for the latest successful submission. Older tickets do not

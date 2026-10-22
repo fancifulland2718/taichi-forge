@@ -1085,9 +1085,8 @@ def runtime_generation():
     return _runtime_generation
 
 
-def reset():
-    global pytaichi, _runtime_generation
-    old_kernels = pytaichi.kernels
+def _clear_runtime():
+    """Retire Python owners before their Program and backend libraries."""
     _dump_func_expansion_stats(pytaichi)
     window_module = sys.modules.get("taichi_forge.ui.window")
     if window_module is not None:
@@ -1104,6 +1103,12 @@ def reset():
     ):
         algorithms_module.clear_default_workspaces()
     pytaichi.clear()
+
+
+def reset():
+    global pytaichi, _runtime_generation
+    old_kernels = pytaichi.kernels
+    _clear_runtime()
     pytaichi = PyTaichi(old_kernels)
     _runtime_generation += 1
     for k in tuple(old_kernels):
@@ -1146,11 +1151,13 @@ def _dump_func_expansion_stats(runtime):
 
 
 @atexit.register
-def _atexit_dump_func_expansion_stats():
-    try:
-        _dump_func_expansion_stats(pytaichi)
-    except Exception:  # pylint: disable=broad-except
-        pass
+def _atexit_clear_runtime():
+    # Python/pybind cycles can keep the Program alive through module teardown.
+    # In particular, Vulkan validation still owns device state at DLL detach
+    # if we rely on the native Program destructor alone. Retire while Python
+    # callbacks and backend libraries are usable, in explicit reset order.
+    # Do not create a replacement runtime or reset kernels during shutdown.
+    _clear_runtime()
 
 
 @taichi_scope

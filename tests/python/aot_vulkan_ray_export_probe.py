@@ -56,10 +56,6 @@ def main(mode, artifact, output):
         costs.update(private_info=private.info)
         if mode == "standalone":
             assert "taichi_forge" not in sys.modules
-    if mode == "borrowed":
-        # Retire the JIT owner while both runtime libraries are still loaded.
-        # Interpreter DLL teardown order is a separate shutdown qualification.
-        ti.reset()
     Path(output).write_text(json.dumps(costs, indent=2))
 
 

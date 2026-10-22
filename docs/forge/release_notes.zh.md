@@ -31,6 +31,11 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Python 正常退出时复用显式 reset 的资源清理顺序，在后端库卸载前退休 Graph、
+  借用的 AOT runtime 和 Program。修复 Windows Vulkan ray 借用消费者在启用
+  validation 时退出进程发生的访问冲突；应用无需额外调用 `ti.reset()`。
+  Windows CPU/CUDA/Vulkan 的在途提交、借用资源及重复清理已验证。
+
 - CPU/CUDA/Vulkan 直接 AOT kernel 的固定准备支持返回值。每个绑定拥有独立结果帧，
   `run/submit` 保持异步，`result()` 显式等待并读取最近一次成功提交；旧 ticket 不保存
   数值快照。复用编译布局解码复合值，无返回值路径不增加结果分配或读回。
