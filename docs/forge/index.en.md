@@ -31,6 +31,7 @@ See [external providers](external_hardware_providers.en.md),
 | Run a kernel and reuse a Graph | [Quick start](quickstart.en.md) |
 | Deploy AOT without Python | [Standalone C/C++ SDK](aot_sdk.en.md) |
 | Schedule CUDA domains and associate Vulkan | [Execution domains](cuda_execution_domains.en.md), [experimental CiG initialization and limits](cuda_vulkan_cig.en.md) |
+| Wait for any JIT/AOT completion | [Completion sets, timeout and cancellation](completion_wait_sets.en.md) |
 | Choose an application AOT format and package layout | [Deployment profiles](aot_deployment_profiles.en.md) |
 | Select the basic AMD GPU backend | [ROCm/HIP setup and limits](rocm_backend.en.md) |
 | Find a public symbol or supported input | [API reference](forge_api_reference.en.md) |

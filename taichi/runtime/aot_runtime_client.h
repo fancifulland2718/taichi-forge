@@ -68,4 +68,8 @@ class AotRuntimeClient final : public RuntimeClient {
 };
 // Pin an exact public ticket without entering the borrower's submission scope.
 TI_DLL_EXPORT RuntimeCompletion borrow_aot_completion(std::uintptr_t handle);
+// Publish a shared exact prefix as a host-only AOT submission ticket. Its
+// caller releases it with ti_destroy_submission_ext after consumer snapshot.
+TI_DLL_EXPORT std::uintptr_t publish_aot_completion(
+    const RuntimeCompletion &completion);
 }  // namespace taichi::lang

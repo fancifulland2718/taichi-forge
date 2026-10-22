@@ -317,6 +317,41 @@ typedef struct TiComputeGraph_t *TiComputeGraph;
 // closing any bound memory or its module invalidates future launches.
 typedef struct TiPreparedExecution_t *TiPreparedExecution;
 typedef struct TiSubmissionTicket_t *TiSubmissionTicket;
+typedef struct TiCompletionSet_t *TiCompletionSet;
+
+typedef enum TiCompletionSourceKind {
+  TI_COMPLETION_SOURCE_SUBMISSION = 0,
+  TI_COMPLETION_SOURCE_CUDA_DOMAIN = 1,
+} TiCompletionSourceKind;
+typedef struct TiCompletionSource {
+  TiCompletionSourceKind kind;
+  void *handle;
+} TiCompletionSource;
+typedef enum TiCompletionWaitStatus {
+  TI_COMPLETION_WAIT_READY = 0,
+  TI_COMPLETION_WAIT_TIMEOUT = 1,
+  TI_COMPLETION_WAIT_CANCELLED = 2,
+  TI_COMPLETION_WAIT_FAILED = 3,
+} TiCompletionWaitStatus;
+typedef struct TiCompletionWaitResult {
+  TiCompletionWaitStatus status;
+  uint64_t index;  // Original input index; valid only for READY.
+} TiCompletionWaitResult;
+
+// Snapshot exact prefixes without querying, waiting or submitting GPU work.
+// The original ticket handles may be released after successful creation.
+// poll_interval_ns controls the waiting caller's query/sleep interval; no
+// per-ticket worker threads or backend callbacks are created.
+TI_DLL_EXPORT TiCompletionSet TI_API_CALL ti_create_completion_set_ext(
+    uint64_t count, const TiCompletionSource *sources, int64_t poll_interval_ns);
+// -1 waits indefinitely; 0 scans once. Returns the first ready input index.
+// Neither waiting nor cancellation holds a runtime submission lock.
+TI_DLL_EXPORT void TI_API_CALL ti_wait_completion_set_ext(
+    TiCompletionSet set, int64_t timeout_ns, TiCompletionWaitResult *result);
+// Terminal cancellation wakes all waiters without cancelling any device work.
+TI_DLL_EXPORT void TI_API_CALL ti_cancel_completion_set_ext(TiCompletionSet set);
+// Cancels and releases the host set; a wait already in progress remains safe.
+TI_DLL_EXPORT void TI_API_CALL ti_release_completion_set_ext(TiCompletionSet set);
 
 // Runtime-owned native resource. Distinct from raw TiImage/RHI handles.
 typedef struct TiNativeResource_t *TiNativeResource;

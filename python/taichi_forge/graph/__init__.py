@@ -1,4 +1,5 @@
 from ._graph import *
+from taichi_forge_runtime.aot._wait_set import CompletionSet, CompletionWaitResult
 
 
 def execution_domain(*, capacity=2, instance_capacity=64, priority=0, gpu_timing=False):

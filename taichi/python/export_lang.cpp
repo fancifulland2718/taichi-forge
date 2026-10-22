@@ -640,6 +640,8 @@ void export_lang(py::module &m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("_borrow_aot_completion", &lang::borrow_aot_completion,
         py::call_guard<py::gil_scoped_release>());
+  m.def("_publish_aot_completion", &lang::publish_aot_completion,
+        py::call_guard<py::gil_scoped_release>());
 #endif
   m.def("_compile_graph_segmented_reduce_values",
         [](lang::Program &program, lang::Kernel *reduction,
@@ -8203,6 +8205,7 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeCompletionWaitConcurrent);
     features["completion_blocking_wait"] =
         bool(bitmap & kForgeCompletionBlockingWait);
+    features["completion_wait_any"] = bool(bitmap & kForgeCompletionWaitAny);
     features["cuda_execution_domains"] =
         bool(bitmap & kForgeCudaExecutionDomains);
     features["cuda_aot_execution_domains"] =

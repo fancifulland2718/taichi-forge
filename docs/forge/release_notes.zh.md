@@ -137,7 +137,10 @@
   在上传前返回。域创建时可预分配计时事件，提交时稀疏采样 `Completion.gpu_timing`。
   计算区间排除前驱、参数上传与外部 acquire/release，包含 Graph/provider 内部间隙；
   未采样、pending、不支持和失败均有明确状态，不用零伪装时长。
-- 独立域当前仅 CUDA；Vulkan 独立队列、逐提交参数与域计时对齐、wait-any 留待后续。
+- 新增[完成集合等待](completion_wait_sets.zh.md)：普通 JIT/AOT 的 CPU、CUDA、Vulkan
+  票据及 CUDA 独立域票据共用可取消的 `CompletionSet`，支持超时，不占 runtime 提交锁。
+  使用可配置间隔轮询，不创建逐票据线程或额外 GPU 节点。
+- 独立域当前仅 CUDA；Vulkan 独立队列、逐提交参数与域计时对齐留待后续。
   详见[执行域合同](cuda_execution_domains.zh.md)。
 - Python/native `Window.get_scroll_delta()` 返回水平/垂直浮点增量，读后清零，不额外
   轮询事件或等待 GPU；修复 Vulkan resize/关闭时呈现队列仍引用已释放信号量的问题。

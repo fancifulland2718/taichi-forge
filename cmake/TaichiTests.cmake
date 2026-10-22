@@ -98,6 +98,7 @@ list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cuda_ordered_submission_test.cpp"
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cuda_binding_frame_replay_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/runtime_client_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/submission_completion_test.cpp")
+list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/completion_wait_set_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/optix_provider_test.cpp")
 
 if (TI_WITH_OPENGL OR TI_WITH_VULKAN)
@@ -410,6 +411,7 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   # or a test spin kernel occupying the GPU. Link private RHI implementation
   # objects rather than expanding the package ABI for test helpers.
   add_executable(taichi_cuda_execution_domain_tests
+    tests/cpp/aot/completion_wait_set_test.cpp
     tests/cpp/rhi/common/cuda_execution_domain_test.cpp
     tests/cpp/rhi/common/cuda_retained_memory_test.cpp
     tests/cpp/aot/runtime_client_test.cpp

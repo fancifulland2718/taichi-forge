@@ -27,6 +27,7 @@ _FEATURE_BITS = {
     "display_shared_image_reuse": 9,
     "completion_wait_concurrent": 10,
     "completion_blocking_wait": 11,
+    "completion_wait_any": 20,
     "cuda_execution_domains": 12,
     "cuda_aot_execution_domains": 13,
     "cuda_jit_graph_execution_domains": 14,

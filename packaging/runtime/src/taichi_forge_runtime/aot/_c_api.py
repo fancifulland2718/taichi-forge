@@ -9,6 +9,14 @@ from .. import _native
 Handle = C.c_void_p
 UInt = C.c_uint32
 
+
+class CompletionSource(C.Structure):
+    _fields_ = [("kind", UInt), ("handle", Handle)]
+
+
+class CompletionWaitResult(C.Structure):
+    _fields_ = [("status", UInt), ("index", C.c_uint64)]
+
 # Public TiCapability values, independent of the compiler's persisted enum.
 CAPABILITY_NAMES = dict(
     enumerate(
@@ -425,6 +433,24 @@ class Api:
         function.argtypes = [Handle, Handle, UInt, C.POINTER(Handle), C.POINTER(Handle)]
         function.restype = UInt
         setattr(self, name, function)
+
+    def load_completion_sets(self):
+        if getattr(self, "_completion_sets_loaded", False):
+            return
+        declarations = {
+            "ti_create_completion_set_ext": ([C.c_uint64, C.POINTER(CompletionSource), C.c_int64], Handle),
+            "ti_wait_completion_set_ext": ([Handle, C.c_int64, C.POINTER(CompletionWaitResult)], None),
+            "ti_cancel_completion_set_ext": ([Handle], None),
+            "ti_release_completion_set_ext": ([Handle], None),
+        }
+        try:
+            functions = {name: getattr(self.library, name) for name in declarations}
+        except AttributeError as error:
+            raise NotImplementedError("The selected runtime has no completion wait-any API") from error
+        for name, function in functions.items():
+            function.argtypes, function.restype = declarations[name]
+            setattr(self, name, function)
+        self._completion_sets_loaded = True
 
     def load_cuda_domains(self):
         if getattr(self, "_cuda_domains_loaded", False):

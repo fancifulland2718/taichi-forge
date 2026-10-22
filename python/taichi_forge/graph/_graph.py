@@ -18483,6 +18483,16 @@ class SubmissionTicket:
             else (int(value) for value in workspace_lanes)
         )
 
+    def _loan_wait_completion(self, api):
+        from taichi_forge_runtime import _native
+        from taichi_forge_runtime.aot._completion import SubmissionTicket as NativeTicket
+
+        if api.library._handle != _native.load_library()._handle:
+            raise ValueError("JIT completion belongs to another native runtime library")
+        if not hasattr(_ti_core, "_publish_aot_completion"):
+            raise NotImplementedError("The selected runtime has no JIT completion-set bridge")
+        return NativeTicket(api, _ti_core._publish_aot_completion(self._completion), (self,))
+
     def _observe_completion(self):
         observations = self._completion_observations
         if not observations:

@@ -779,6 +779,59 @@ TEST(CudaExecutionOwner, PublicTicketWaitDoesNotLockQueryOrPeerSubmission) {
   ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
 }
 
+TEST(CudaCompletionSet, ExactPrefixesTimeoutCancellationAndOwnerRetirement) {
+  if (!cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  auto runtime = std::make_unique<capi::LlvmRuntime>(Arch::cuda);
+  auto rt = reinterpret_cast<TiRuntime>(runtime.get());
+  const TiCudaExecutionDomainCreateInfo options{2, 2, 0};
+  auto left = ti_create_cuda_execution_domain_ext(rt, &options);
+  auto right = ti_create_cuda_execution_domain_ext(rt, &options);
+  testing::CudaExternalGate gate;
+  auto pending = capi::get_execution_domain(left)->submit(
+      {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+  capi::get_execution_domain(right)->submit({}, nullptr, [](void *) {});
+  auto first = ti_get_cuda_execution_domain_completion_ext(left);
+  auto second = ti_get_cuda_execution_domain_completion_ext(right);
+  TiCompletionSource sources[] = {{TI_COMPLETION_SOURCE_CUDA_DOMAIN, first},
+                                   {TI_COMPLETION_SOURCE_CUDA_DOMAIN, second}};
+  auto both = ti_create_completion_set_ext(2, sources, 1000000);
+  auto blocked = ti_create_completion_set_ext(1, sources, 1000000);
+  ASSERT_NE(both, nullptr);
+  ASSERT_NE(blocked, nullptr);
+  ti_release_completion_ext(first);
+  ti_release_completion_ext(second);
+  TiCompletionWaitResult result{};
+  ti_wait_completion_set_ext(both, 1000000000, &result);
+  ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  EXPECT_EQ(result.status, TI_COMPLETION_WAIT_READY);
+  EXPECT_EQ(result.index, 1);
+  EXPECT_FALSE(pending.done());
+  ti_wait_completion_set_ext(blocked, 2000000, &result);
+  EXPECT_EQ(result.status, TI_COMPLETION_WAIT_TIMEOUT);
+  auto waiting = std::async(std::launch::async, [&] {
+    TiCompletionWaitResult observed{};
+    ti_wait_completion_set_ext(blocked, -1, &observed);
+    return observed.status;
+  });
+  ti_cancel_completion_set_ext(blocked);
+  EXPECT_EQ(waiting.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_EQ(waiting.get(), TI_COMPLETION_WAIT_CANCELLED);
+  ti_release_completion_set_ext(blocked);
+  EXPECT_FALSE(gate.timed_out());
+  EXPECT_FALSE(pending.done());
+  gate.release();
+  pending.wait();
+  ti_destroy_runtime(reinterpret_cast<TiRuntime>(runtime.release()));
+  ti_release_cuda_execution_domain_ext(left);
+  ti_release_cuda_execution_domain_ext(right);
+  ti_wait_completion_set_ext(both, 0, &result);
+  EXPECT_EQ(result.status, TI_COMPLETION_WAIT_READY);
+  EXPECT_EQ(result.index, 0);
+  ti_release_completion_set_ext(both);
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+}
+
 TEST(CudaExecutionOwner,
      PublicDomainHandlesRetireWithRuntimeAndRejectBadCapacity) {
   if (!cuda::ExecutionDomain::available())

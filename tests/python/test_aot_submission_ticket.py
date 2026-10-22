@@ -70,6 +70,8 @@ def _read(array):
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_aot_submission_ticket_primal_gradients_and_retirement(tmp_path):
+    from taichi_forge_runtime.aot import CompletionSet
+
     artifact = tmp_path / "tickets.tcm"
     _archive(artifact)
     arch = str(ti.lang.impl.current_cfg().arch).split(".")[-1]
@@ -99,11 +101,12 @@ def test_aot_submission_ticket_primal_gradients_and_retirement(tmp_path):
                     held.set()
                     release.wait()
 
-            with ThreadPoolExecutor(max_workers=2) as workers:
+            with CompletionSet([tickets[-1]]) as progress, ThreadPoolExecutor(max_workers=2) as workers:
                 blocker = workers.submit(hold_submission_scope)
                 try:
                     assert held.wait(2)
-                    workers.submit(tickets[-1].wait).result(timeout=2)
+                    observed = workers.submit(progress.wait, 1).result(timeout=2)
+                    assert observed.status == "ready" and observed.index == 0
                 finally:
                     release.set()
                 blocker.result()

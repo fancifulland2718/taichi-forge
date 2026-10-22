@@ -166,8 +166,11 @@ combination. Consult the linked API contracts and capability queries for exact s
   timing events for sparse `Completion.gpu_timing` samples. The compute interval excludes predecessor
   waits, parameter uploads and external acquire/release, and includes internal Graph/provider gaps.
   Unsampled, pending, unsupported and failed states are explicit, never a fabricated zero duration.
-- Independent domains remain CUDA-only. Vulkan queue/domain parameters and timing parity, and wait-any,
-  are follow-up work. See [execution-domain contracts](cuda_execution_domains.en.md).
+- [Completion sets](completion_wait_sets.en.md) provide cancellable, timed wait-any for ordinary
+  CPU/CUDA/Vulkan JIT/AOT tickets and CUDA domain tickets without taking runtime submission locks.
+  Polling uses a configurable interval, without per-ticket threads or extra GPU nodes.
+- Independent domains remain CUDA-only. Vulkan queue/domain parameters and timing parity remain
+  follow-up work. See [execution-domain contracts](cuda_execution_domains.en.md).
 - Python/native `Window.get_scroll_delta()` returns horizontal/vertical floating increments and clears
   them on read, without extra event polling or GPU waits. Vulkan resize/close no longer frees signal
   semaphores still referenced by the presentation queue.

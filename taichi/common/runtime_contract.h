@@ -37,6 +37,7 @@ inline constexpr std::uint64_t kForgeCudaCanvasExecutionDomains = 1ull << 16;
 inline constexpr std::uint64_t kForgeCudaSubmissionParameters = 1ull << 17;
 inline constexpr std::uint64_t kForgeCudaCompletionGpuTiming = 1ull << 18;
 inline constexpr std::uint64_t kForgeCudaExecutionInstanceRetirement = 1ull << 19;
+inline constexpr std::uint64_t kForgeCompletionWaitAny = 1ull << 20;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

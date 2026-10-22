@@ -1,6 +1,11 @@
 #include "taichi_core_impl.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/runtime/submission_completion.h"
+#include "taichi/runtime/completion_wait_set.h"
+#include "taichi/runtime/aot_runtime_client.h"
+#ifdef TI_WITH_CUDA
+#include "execution_domain.h"
+#endif
 #ifdef TI_WITH_VULKAN
 #include "taichi_gfx_impl.h"
 #endif
@@ -18,7 +23,94 @@ taichi::lang::SubmissionCompletionHandles &tickets() {
   static taichi::lang::SubmissionCompletionHandles handles;
   return handles;
 }
+
+struct CompletionSets {
+  std::mutex mutex;
+  std::unordered_map<TiCompletionSet,
+                     std::shared_ptr<taichi::lang::CompletionWaitSet>> entries;
+};
+CompletionSets &completion_sets() {
+  static auto *sets = new CompletionSets;
+  return *sets;
+}
+std::shared_ptr<taichi::lang::CompletionWaitSet> get_completion_set(
+    TiCompletionSet handle, bool release = false) {
+  auto &sets = completion_sets();
+  std::lock_guard<std::mutex> lock(sets.mutex);
+  const auto found = sets.entries.find(handle);
+  if (found == sets.entries.end())
+    throw MemoryBindingError("Completion set is closed or unknown");
+  auto set = found->second;
+  if (release)
+    sets.entries.erase(found);
+  return set;
+}
 }  // namespace
+
+namespace taichi::lang {
+std::uintptr_t publish_aot_completion(const RuntimeCompletion &completion) {
+  const auto handle = Runtime::new_handle_token();
+  tickets().publish(handle, completion);
+  return handle;
+}
+}  // namespace taichi::lang
+
+TiCompletionSet ti_create_completion_set_ext(
+    uint64_t count, const TiCompletionSource *sources, int64_t poll_interval_ns) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(sources);
+  std::vector<taichi::lang::RuntimeCompletion> completions;
+  completions.reserve(count);
+  for (uint64_t index = 0; index < count; ++index) {
+    const auto &source = sources[index];
+    if (source.kind == TI_COMPLETION_SOURCE_SUBMISSION) {
+      completions.push_back(tickets().get(
+          reinterpret_cast<std::uintptr_t>(source.handle)));
+    }
+#ifdef TI_WITH_CUDA
+    else if (source.kind == TI_COMPLETION_SOURCE_CUDA_DOMAIN) {
+      completions.push_back(
+          capi::get_completion(reinterpret_cast<TiCompletion>(source.handle)));
+    }
+#endif
+    else {
+      throw MemoryBindingError("Unknown completion source kind");
+    }
+  }
+  auto set = std::make_shared<taichi::lang::CompletionWaitSet>(
+      std::move(completions), std::chrono::nanoseconds(poll_interval_ns));
+  auto handle = reinterpret_cast<TiCompletionSet>(Runtime::new_handle_token());
+  auto &sets = completion_sets();
+  std::lock_guard<std::mutex> lock(sets.mutex);
+  sets.entries.emplace(handle, set);
+  return handle;
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
+}
+
+void ti_wait_completion_set_ext(TiCompletionSet set, int64_t timeout_ns,
+                                TiCompletionWaitResult *result) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(result);
+  *result = {TI_COMPLETION_WAIT_FAILED, 0};
+  const auto observed = get_completion_set(set)->wait(
+      std::chrono::nanoseconds(timeout_ns));
+  *result = {static_cast<TiCompletionWaitStatus>(observed.status),
+             static_cast<uint64_t>(observed.index)};
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_cancel_completion_set_ext(TiCompletionSet set) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  get_completion_set(set)->cancel();
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_release_completion_set_ext(TiCompletionSet set) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  get_completion_set(set, true)->cancel();
+  TI_CAPI_TRY_CATCH_END();
+}
 
 void Runtime::borrow_completion_recorder(
     std::function<taichi::lang::RuntimeCompletion()> recorder) {
