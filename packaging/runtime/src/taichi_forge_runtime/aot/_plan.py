@@ -655,7 +655,7 @@ class ExecutionPlan:
                 layout = kernel._argument_layout
                 for index, argument in enumerate(operation["arguments"]):
                     if argument == name:
-                        if (layout is None or len(operation["arguments"]) != layout.count
+                        if (layout is None or len(operation["arguments"]) < layout.count
                                 or index not in layout.pack_indices):
                             raise ValueError("Plan argument is not consistently a logical ArgPack")
                         first = kernel, index

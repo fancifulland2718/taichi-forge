@@ -36,7 +36,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **147**, persistent execution-plan version **26**, and
+- The frontend/native private ABI is **151**, persistent execution-plan version **26**, and
   compiled-cache schema **68**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
@@ -113,6 +113,7 @@ combination. Consult the linked API contracts and capability queries for exact s
   automatically exported as CPU/CUDA/Vulkan sequential execution plans through shared lowering,
   reusing native pack storage and recording. Consumers can create public owners by argument name
   with `ExecutionPlan.argpack()` and reuse them across kernel argument positions. Frozen export
+  may share a dispatch with public packs, preserving resource and explicit gradient bindings. It
   shares equivalent storage for repeated uses of one source pack. Automatic image/AS members
   and legacy CGraph serialization remain separate follow-up work.
 - Native sort/compact, scan/reduce, transform, gather/scatter and grouped/segmented recording/AOT

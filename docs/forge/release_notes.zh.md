@@ -34,7 +34,7 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **147**，持久执行计划为 **26**，
+- frontend 与 native runtime 使用私有 ABI **151**，持久执行计划为 **26**，
   编译缓存 schema 为 **68**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
@@ -93,6 +93,7 @@
   参数位置和显式 ndarray 反向。值/ndarray 包可冷冻结到 CUDA 独立执行域，并经共同 lowering
   自动导出 CPU/CUDA/Vulkan 顺序执行计划；独立实例复用已有原生包存储和录制。
   公开消费端可用 `ExecutionPlan.argpack()` 按参数名创建 owner，跨 kernel 参数位置复用；
+  同一 dispatch 可混用公开和源冻结包，保留各自的资源与显式梯度绑定。
   固定导出合并同一源包的等价只读存储。image/AS 成员自动重建与旧 CGraph 序列化继续单独处理。
 - 扩大原生 sort/compact、scan/reduce、transform、gather/scatter、grouped/segmented
   操作在 recording/AOT 中的布局覆盖；支持范围依操作、后端、类型和策略而定。

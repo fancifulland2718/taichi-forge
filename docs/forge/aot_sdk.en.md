@@ -1957,8 +1957,9 @@ Generated kernel names are not required. The nested value/resource dictionary
 and gradient member-name paths follow `Kernel.argpack()`. One immutable owner
 may serve compatible kernel arguments at different positions and with different
 parameter names; preparation validates all uses. Multiple packs in a single
-kernel dispatch currently must all be public or all source-frozen. Separate
-dispatches may choose independently. Isolated checks cover sequential plans,
+kernel dispatch may mix public and source-frozen owners. Cold preparation expands
+public owners and connects frozen resource members using compiled argument origins;
+both retain their explicit gradient bindings. Isolated checks cover sequential plans,
 explicit adjoints and independent instances. Automatic image/AS members, legacy
 CGraph serialization and other fixed physical strategies need separate
 qualification. Normal installations have not yet been refreshed with this slice.

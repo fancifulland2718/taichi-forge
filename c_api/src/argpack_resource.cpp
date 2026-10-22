@@ -45,8 +45,18 @@ ExpandedArgPackArguments expand_argpack_arguments(
   }
   if (packs.empty())
     return result;  // Existing physical callers keep their explicit ABI.
-  if (argument_count != roots.size())
-    throw MemoryBindingError("ArgPack calls require logical root arguments");
+  // Public packs supply their own lifted members. Frozen packs supply those
+  // members after the logical roots, in compiled logical-path order. Resolve
+  // this only during preparation; the recorder still receives the physical ABI.
+  std::map<uint32_t, uint32_t> inputs = roots;
+  uint32_t next = static_cast<uint32_t>(roots.size());
+  for (const auto &[logical, physical] : resource_slots) {
+    if (!packs.count(uint32_t(logical.front())))
+      inputs.emplace(next++, physical);
+  }
+  if (argument_count != inputs.size())
+    throw MemoryBindingError(
+        "ArgPack calls require logical roots and explicit frozen resource members");
   result.arguments.resize(kernel.kernel->args_type->elements().size());
   std::vector<bool> assigned(result.arguments.size(), false);
   const auto assign = [&](uint32_t index, const TiArgument &value) {
@@ -56,9 +66,9 @@ ExpandedArgPackArguments expand_argpack_arguments(
     assigned[index] = true;
   };
   for (uint32_t index = 0; index < argument_count; ++index) {
-    const auto found = roots.find(index);
-    if (found == roots.end())
-      throw MemoryBindingError("Missing logical root argument origin");
+    const auto found = inputs.find(index);
+    if (found == inputs.end())
+      throw MemoryBindingError("Missing logical argument origin");
     assign(found->second, arguments[index]);
     if (const auto resource = resources.find(index); resource != resources.end())
       result.resources.emplace(found->second, resource->second);
@@ -98,10 +108,10 @@ ExpandedArgPackArguments expand_argpack_arguments(
     throw MemoryBindingError("ArgPack call is missing a resource member");
   for (uint32_t i = 0; i < binding_count; ++i) {
     auto binding = bindings[i];
-    const auto root = roots.find(binding.argument_index);
-    if (root == roots.end())
-      throw MemoryBindingError("Ndarray binding is not a logical root argument");
-    binding.argument_index = root->second;
+    const auto input = inputs.find(binding.argument_index);
+    if (input == inputs.end())
+      throw MemoryBindingError("Ndarray binding has no logical argument origin");
+    binding.argument_index = input->second;
     result.bindings.push_back(binding);
   }
   result.expanded = true;

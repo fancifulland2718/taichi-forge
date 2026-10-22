@@ -107,11 +107,9 @@ def kernel_pack_bindings(context, arguments, entry, jit_source):
         result = [context.kernel_binding(argument) for argument in arguments]
         context.source_arrays.validate_kernel(arguments, result)
         return result
-    if not all(frozen):
-        raise TaichiRuntimeError("One kernel dispatch must use either public or source-frozen ArgPacks")
     logical = {}
     for index, argument in enumerate(arguments):
-        if argument.tag == core.ArgKind.ARGPACK:
+        if argument.tag == core.ArgKind.ARGPACK and argument.name in context.source_resources.argpacks.owners:
             resource, lifted = context.source_resources.argpacks.bind(context, argument, entry, index, jit_source)
             logical[(index,)] = resource
             logical.update(lifted)
@@ -119,6 +117,11 @@ def kernel_pack_bindings(context, arguments, entry, jit_source):
             name = context.kernel_binding(argument)
             context.source_arrays.validate_kernel([argument], [name])
             logical[(index,)] = name
+    if not all(frozen):
+        # The common native binder expands public packs and remaps the explicit
+        # frozen resource suffix using the same compiled origins as below.
+        roots = [logical[(index,)] for index in range(len(arguments))]
+        return roots + [logical[path] for path in sorted(logical) if len(path) > 1]
     physical = {}
     for path, target in native._logical_argument_bindings(dispatch):
         if len(target) == 1:

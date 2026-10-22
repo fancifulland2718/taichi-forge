@@ -1533,7 +1533,8 @@ source_bindings={"pack": pack, "values": pack.values})` 同样自动冻结包值
 然后 `plan.prepare(loaded_module, {"pack": packet, ...})`，无需知道生成的 kernel 名称。
 `values` 是包含嵌套值和资源的字典；梯度键沿用 `Kernel.argpack()` 的成员名路径。
 同一个 owner 可用于参数位置/参数变量名不同但成员合同兼容的 kernel，prepare 验证所有用途。
-一条 kernel dispatch 中的多个包目前须全部公开或全部源冻结；不同 dispatch 可分别选择。
+同一 kernel dispatch 可以混用公开和源冻结的包。准备阶段根据编译后的参数来源展开
+公开包，并连接冻结包的资源成员；两类成员的显式梯度继续使用各自的绑定。
 本切片已隔离验证三后端顺序计划、显式反向与双实例；自动 image/AS 成员重建、旧 CGraph
 序列化及其他固定物理策略仍需各自资格验证。正常安装尚未更新到此切片。
 
