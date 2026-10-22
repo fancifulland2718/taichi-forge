@@ -274,13 +274,12 @@ def test_source_template_cache_reuses_ast_template_for_specializations():
             x[None] = 5
 
     set_x(3)
-    cache = set_x._primal._source_template_cache
-    assert len(cache) == 6
-    assert isinstance(cache[4].instantiate(), ast.Module)
-    template_id = id(cache[4])
+    cache = set_x._primal._definition.cached_template
+    assert isinstance(cache.template.instantiate(), ast.Module)
+    template_id = id(cache.template)
 
     set_x(5)
-    assert id(set_x._primal._source_template_cache[4]) == template_id
+    assert id(set_x._primal._definition.cached_template.template) == template_id
     assert len(set_x._primal.compiled_kernels) == 2
     assert x[None] == 5
 

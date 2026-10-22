@@ -4,7 +4,7 @@ import textwrap
 import numpy as np
 import pytest
 import taichi_forge as ti
-from taichi_forge.lang import kernel_impl
+from taichi_forge.lang import kernel_impl, _definition
 from taichi_forge.lang._compiled_template import bind
 from taichi_forge.tools._compiled_host import lower_module
 from tests import test_utils
@@ -68,17 +68,24 @@ def load(source=SOURCE):
     return namespace, entries
 
 
+@pytest.mark.parametrize("definition_kind", ["source", "compiled"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_compiled_host_specialization_grad_and_scope(monkeypatch):
-    module, entries = load()
-    assert {e["kind"] for e in entries} == {"kernel", "func", "pyfunc"}
-    original = kernel_impl.getsourcefile
+def test_compiled_host_specialization_grad_and_scope(monkeypatch, tmp_path, definition_kind):
+    if definition_kind == "compiled":
+        module, entries = load()
+        assert {e["kind"] for e in entries} == {"kernel", "func", "pyfunc"}
+    else:
+        source = tmp_path / "source_definition.py"
+        source.write_text(SOURCE, encoding="utf8")
+        module = {"__name__": "source_test", "__file__": str(source)}
+        exec(compile(SOURCE, str(source), "exec"), module)
+    original = _definition.getsourcefile
 
     def no_private_source(function):
         assert function.__module__ != "compiled_test", "compiled definitions must not query source"
         return original(function)
 
-    monkeypatch.setattr(kernel_impl, "getsourcefile", no_private_source)
+    monkeypatch.setattr(_definition, "getsourcefile", no_private_source)
     values = np.arange(7, dtype=np.float32) / 8
     x, y = ti.ndarray(ti.f32, 7, needs_grad=True), ti.ndarray(ti.f32, 7, needs_grad=True)
     x.from_numpy(values)
@@ -99,7 +106,7 @@ def test_compiled_host_specialization_grad_and_scope(monkeypatch):
     run(x, y)
     np.testing.assert_allclose(y.to_numpy(), 3 * values + 3)
     run2, _ = module["make"](5)
-    run.__wrapped__._taichi_compiled_template.globals_getter()["GLOBAL"] = 4
+    module["GLOBAL"] = 4
     run2(x, y)
     np.testing.assert_allclose(y.to_numpy(), 5 * values + 5)
     run(x, y)

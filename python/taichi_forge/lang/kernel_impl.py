@@ -6,7 +6,6 @@ import operator
 import os
 import re
 import sys
-import textwrap
 import threading
 import time
 import typing
@@ -19,7 +18,7 @@ import taichi_forge.lang
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl, ops, runtime_ops
 from taichi_forge.lang.any_array import AnyArray
-from taichi_forge.lang._wrap_inspect import getsourcefile, getsourcelines
+from taichi_forge.lang._definition import CallableDefinition
 from taichi_forge.lang._compile_profile import python_compile_profile_event
 from taichi_forge.lang.argpack import ArgPackType, ArgPack
 from taichi_forge.lang.ast import (
@@ -27,7 +26,6 @@ from taichi_forge.lang.ast import (
     KernelSimplicityASTChecker,
     transform_tree,
 )
-from taichi_forge.lang.ast._ast_template import ASTTemplate
 from taichi_forge.lang.ast._inline_ir import InlineSyntax, UnsupportedInlineResult, scalar_key
 from taichi_forge.lang.ast.ast_transformer_utils import ReturnStatus
 from taichi_forge.lang.enums import AutodiffMode, Layout
@@ -151,56 +149,9 @@ def _get_tree_and_ctx(
     is_real_function=False,
 ):
     profile_prefix = f"python.frontend.{self.func.__name__}"
-    compiled_template = getattr(self.func, "_taichi_compiled_template", None)
-    if compiled_template is not None:
-        with python_compile_profile_event(f"{profile_prefix}.compiled_template"):
-            cache = getattr(self, "_compiled_template_cache", None) if _SOURCE_TEMPLATE_CACHE else None
-            if cache is None:
-                parsed_tree, src = compiled_template.instantiate(self.func.__name__)
-                cache = (ASTTemplate(parsed_tree), src, {})
-                if _SOURCE_TEMPLATE_CACHE:
-                    self._compiled_template_cache = cache
-            tree_template, src, source_info_cache = cache
-            tree = tree_template.instantiate()
-            file, start_lineno = compiled_template.filename, 1
-    elif _SOURCE_TEMPLATE_CACHE:
-        with python_compile_profile_event(f"{profile_prefix}.source"):
-            cache = getattr(self, "_source_template_cache", None)
-            if cache is None:
-                file = getsourcefile(self.func)
-                src, start_lineno = getsourcelines(self.func)
-                src = [textwrap.fill(line, tabsize=4, width=9999) for line in src]
-                source = textwrap.dedent("\n".join(src))
-                cache = (file, src, start_lineno, source, None, {})
-                self._source_template_cache = cache
-            file, src, start_lineno, source, tree_template, source_info_cache = cache
-        with python_compile_profile_event(f"{profile_prefix}.ast_parse"):
-            if tree_template is None:
-                parsed_tree = ast.parse(source)
-                parsed_tree.body[0].decorator_list = []
-                tree_template = ASTTemplate(parsed_tree)
-                self._source_template_cache = (
-                    file,
-                    src,
-                    start_lineno,
-                    source,
-                    tree_template,
-                    source_info_cache,
-                )
-            tree = tree_template.instantiate()
-    else:
-        source_info_cache = None
-        with python_compile_profile_event(f"{profile_prefix}.source"):
-            file = getsourcefile(self.func)
-            src, start_lineno = getsourcelines(self.func)
-            src = [textwrap.fill(line, tabsize=4, width=9999) for line in src]
-            source = textwrap.dedent("\n".join(src))
-        with python_compile_profile_event(f"{profile_prefix}.ast_parse"):
-            tree = ast.parse(source)
-        func_body = tree.body[0]
-        func_body.decorator_list = []
+    tree, definition = self._definition.acquire(cache=_SOURCE_TEMPLATE_CACHE)
     with python_compile_profile_event(f"{profile_prefix}.global_vars"):
-        global_vars = _get_global_vars(self.func)
+        global_vars = self._definition.scope()
 
     if is_kernel or is_real_function:
         # inject template parameters into globals
@@ -216,12 +167,12 @@ def _get_tree_and_ctx(
             arg_features=arg_features,
             global_vars=global_vars,
             argument_data=args,
-            src=src,
-            start_lineno=start_lineno,
-            file=file,
+            src=definition.lines,
+            start_lineno=definition.start_lineno,
+            file=definition.filename,
             ast_builder=ast_builder,
             is_real_function=is_real_function,
-            source_info_cache=source_info_cache,
+            source_info_cache=definition.source_info_cache,
         )
     return tree, ctx
 
@@ -296,10 +247,11 @@ class Func:
 
     def __init__(self, _func, _classfunc=False, _pyfunc=False, is_real_function=False):
         self.func = _func
+        self._definition = CallableDefinition(_func, is_class=_classfunc)
         self.func_id = Func.function_counter
         Func.function_counter += 1
         self.compiled = None
-        self.classfunc = _classfunc
+        self.classfunc = self._definition.is_class
         self.pyfunc = _pyfunc
         self.is_real_function = is_real_function
         self.arguments = []
@@ -554,7 +506,7 @@ class Func:
             tree, ctx = _get_tree_and_ctx(self, is_kernel=False, args=args)
             syntax = InlineSyntax(tree)
             self._inline_ir_syntax = syntax
-        dependencies = syntax.dependency_key(_get_global_vars(self.func))
+        dependencies = syntax.dependency_key(self._definition.scope())
         if dependencies is None:
             return None
         key = (self, tuple(signature), dependencies)
@@ -699,7 +651,7 @@ class Func:
         self.taichi_functions[key.instance_id].set_function_body(func_body)
 
     def extract_arguments(self):
-        sig = _get_signature(self.func)
+        sig = self._definition.signature
         if sig.return_annotation not in (inspect.Signature.empty, None):
             self.return_type = sig.return_annotation
             if sys.version_info >= (3, 9):
@@ -1255,28 +1207,6 @@ class TaichiCallableTemplateMapper:
         return False
 
 
-def _get_signature(_func):
-    compiled_template = getattr(_func, "_taichi_compiled_template", None)
-    return compiled_template.signature if compiled_template is not None else inspect.signature(_func)
-
-
-def _get_global_vars(_func):
-    compiled_template = getattr(_func, "_taichi_compiled_template", None)
-    if compiled_template is not None:
-        return compiled_template.scope()
-    # Discussions: https://github.com/taichi-dev/taichi/issues/282
-    global_vars = _func.__globals__.copy()
-
-    freevar_names = _func.__code__.co_freevars
-    closure = _func.__closure__
-    if closure:
-        freevar_values = list(map(lambda x: x.cell_contents, closure))
-        for name, value in zip(freevar_names, freevar_values):
-            global_vars[name] = value
-
-    return global_vars
-
-
 _ORDINARY_LAUNCH_PLAN_CACHE_CAPACITY = 4
 _ORDINARY_LAUNCH_CONTEXT_POOL_CAPACITY = 4
 _TASK_LAUNCH_AUTO_DECISION_CACHE_CAPACITY = 16
@@ -1436,6 +1366,7 @@ class Kernel:
 
     def __init__(self, _func, autodiff_mode, _classkernel=False, opt_level=None):
         self.func = _func
+        self._definition = CallableDefinition(_func, is_class=_classkernel)
         self.kernel_counter = Kernel.counter
         Kernel.counter += 1
         assert autodiff_mode in (
@@ -1448,7 +1379,7 @@ class Kernel:
         self.grad = None
         self.arguments = []
         self.return_type = None
-        self.classkernel = _classkernel
+        self.classkernel = self._definition.is_class
         # P-Compile-6: per-kernel compile_tier override. None = use program
         # default (CompileConfig::compile_tier from ti.init). String value is
         # validated here so users see errors at decoration time, not first
@@ -1624,7 +1555,7 @@ class Kernel:
         self._materializing_external_grad_accesses.add(arg_indices)
 
     def extract_arguments(self):
-        sig = _get_signature(self.func)
+        sig = self._definition.signature
         if sig.return_annotation not in (inspect._empty, None):
             self.return_type = sig.return_annotation
             if sys.version_info >= (3, 9):
