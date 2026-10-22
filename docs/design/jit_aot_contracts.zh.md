@@ -15,7 +15,7 @@
 | 部署发布与快照 | AOT `_ExportContext` | 导出事务、结构/Field 发布、数据捕获、编译后根资源闭包确认。 |
 | 已选 JIT 代码与 live storage | JIT `_JitContext` | 借用冻结 dispatch，验证 owner 代次，不伪造 AOT Module。 |
 | Native 语义定义 | 功能模块的规范化定义与 native schema/binder | Python 创建、recording 与重建消费同一语义事实。 |
-| Kernel 注册 | `KernelExecutionHandle` | 保存 runtime 身份/代次和独立 ordinary/masked 注册；编译产物不再保存注册状态。 |
+| Kernel 注册 | [`KernelExecutionHandle`](../../taichi/runtime/kernel_execution_handle.h) | 保存 runtime 身份/代次和独立 ordinary/masked 注册；编译产物不再保存注册状态。 |
 | 源码与 compiled-host 定义输入 | `CallableDefinition` / `DefinitionTemplate` | 共用定义获取合同；每次特化仍取得自己的作用域和可变 AST。 |
 | Workspace、handle、提交与退休 | 现有 prepared/execution owner | 共享定义不等于共享可变状态。 |
 

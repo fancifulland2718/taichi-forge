@@ -5,7 +5,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "taichi/codegen/compiled_kernel_data.h"
+#include "taichi/runtime/kernel_execution_handle.h"
 #include "taichi/program/launch_context_builder.h"
 #include "taichi/program/sparse_runtime_statistics.h"
 

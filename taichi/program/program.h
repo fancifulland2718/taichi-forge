@@ -20,6 +20,7 @@
 
 #include <taichi/program/runtime_resource_registry.h>
 #include <taichi/program/runtime_completion.h>
+#include "taichi/runtime/kernel_execution_handle.h"
 #include "taichi/runtime/cuda/provider_completion_resource.h"
 #include "taichi/runtime/vulkan_ray_query_packet.h"
 #include "taichi/runtime/vulkan_ray_types.h"

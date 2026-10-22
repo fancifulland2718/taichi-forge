@@ -11,7 +11,7 @@
 
 #include "taichi/util/offline_cache.h"
 #include "taichi/codegen/kernel_compiler.h"
-#include "taichi/codegen/compiled_kernel_data.h"
+#include "taichi/runtime/kernel_execution_handle.h"
 #include "taichi/struct/snode_tree.h"
 
 namespace taichi::lang {

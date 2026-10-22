@@ -2,6 +2,7 @@
 
 #include "taichi/common/core.h"
 #include "taichi/codegen/compiled_kernel_data.h"
+#include "taichi/runtime/kernel_execution_handle.h"
 
 namespace taichi::lang {
 namespace {

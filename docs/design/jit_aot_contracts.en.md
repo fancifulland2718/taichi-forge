@@ -16,7 +16,7 @@ operation can be reconstructed. [中文版](jit_aot_contracts.zh.md)
 | Deployment publication and snapshots | AOT `_ExportContext` | Export transaction, structure/Field publication, data capture and post-compilation root closure. |
 | Selected JIT code and live storage | JIT `_JitContext` | Borrow frozen physical dispatches and validate live owner generations. No fabricated AOT Module. |
 | Native semantic definition | Provider's normalized definition and native schema/binder | Python creation, recording and reconstruction consume the same semantic facts. |
-| Kernel registration | `KernelExecutionHandle` | Runtime identity/generation and separate ordinary/masked registrations; compiled payloads contain no registration state. |
+| Kernel registration | [`KernelExecutionHandle`](../../taichi/runtime/kernel_execution_handle.h) | Runtime identity/generation and separate ordinary/masked registrations; compiled payloads contain no registration state. |
 | Source and compiled-host definition input | `CallableDefinition` / `DefinitionTemplate` | Shared acquisition contract; each specialization still acquires its own scope and mutable AST. |
 | Workspace, handles, submission and retirement | Existing prepared/execution owners | Shared definitions do not imply shared mutable state. |
 
