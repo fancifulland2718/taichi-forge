@@ -31,6 +31,19 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CUDA 独立执行域支持 JIT/AOT 逐提交更新显式声明的 `u64` 参数。接受时冻结数值，
+  参数上传和固定 Graph 都在选定域执行；实例忙时在上传前返回 busy。上传使用域内
+  GPU copy，避免异步 DMA 队列把相互独立的域重新串行化。两实例各 1000 组三元组、
+  高位非零值、受控外部等待及双向独立推进已在 Windows 验证。
+- 域创建时可预分配 GPU 计时事件，提交时按需采样，通过 `Completion.gpu_timing`
+  非阻塞读取结果。计算区间排除前驱等待和参数上传，包含 Graph/provider 内部间隙；
+  未采样、未完成和失败有明确状态。以上两项需配对 frontend/runtime 私有 ABI 147；
+  当前独立域仍限 CUDA，详见 [执行域合同](cuda_execution_domains.zh.md)。
+- 保留 Python/native `Window.get_scroll_delta()` 的浮点增量、读后清零合同；修复
+  Vulkan 窗口关闭/resize 时，渲染 fence 已完成但呈现队列仍引用信号量的问题。
+  Windows 消息注入、多窗口、UI 输入、resize/关闭及 validation 检查通过；
+  真人硬件滚轮和 Ubuntu 窗口交互尚未在本轮复核。
+
 - kernel 编译产物与执行注册状态分离：CPU/CUDA/Vulkan 的注册属于执行 owner，
   CUDA ordinary 与 masked 句柄分别保存，退休不再修改共享代码。Graph 借用和普通
   调用继续使用现有执行器与提交顺序；AOT 容器格式不变。配套 frontend/native
@@ -46,7 +59,7 @@
   retained guess 按实际控制路径校验。Windows CPU/CUDA/Vulkan 小型 Graph 与真实 CUDA
   AmgX 无源码/借用分支测试通过；未新增 CUDA capture 或异步 host 控制提交。精确 CUDA portable
   WHILE 可通过版本 26 执行计划导出，包括 AmgX host 操作与显式反向 kernel；
-  需配套支持该能力的 frontend/native（当前私有 ABI 145）。
+  需配套支持该能力的 frontend/native（当前私有 ABI 147）。
 
 - AmgX device binding 提供显式 host 控制的 Graph action，可从冻结配置和 CSR 拓扑自动
   导出 AOT。消费者提供初始系数，各实例重建独立 solver session；v2 solve 描述保持共享

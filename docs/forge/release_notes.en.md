@@ -34,6 +34,24 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Independent CUDA domains accept per-submission updates of explicitly declared
+  `u64` parameters in JIT and AOT. Accepted values are frozen; uploads and the
+  fixed Graph execute on the selected domain. Busy instances reject before
+  uploading. A domain-local GPU copy avoids cross-domain serialization through
+  the asynchronous DMA queue. Windows checks cover 1,000 triples per instance,
+  high bits, controlled external waits and independent progress in both directions.
+- Domains can preallocate GPU timing events and sample selected submissions.
+  `Completion.gpu_timing` reads results without blocking. The compute envelope
+  excludes predecessor waits and parameter uploads, while including internal
+  Graph/provider gaps. Unsampled, pending and failed results have explicit states.
+  Both features require paired frontend/runtime private ABI 147. Independent
+  domains remain CUDA-only; see the [domain contract](cuda_execution_domains.en.md).
+- Python/native `Window.get_scroll_delta()` retains floating-point, read-and-clear
+  semantics. Vulkan window close/resize now drains presentation waits before
+  destroying semaphores whose rendering fences have already completed. Windows
+  injected scroll messages, multiple windows, UI input, resize/close and Vulkan
+  validation pass. Physical wheel interaction and Ubuntu windows were not retested.
+
 - Compiled kernel payloads no longer hold runtime registration state.
   CPU/CUDA/Vulkan execution owners retain their registrations, with separate
   CUDA ordinary and masked handles; retirement does not mutate shared code.
@@ -56,7 +74,7 @@ lifetimes. The entries below describe the changes.
   and asynchronous host-control submission are not added. Exact portable CUDA
   WHILE now exports through execution plan version 26, including AmgX host
   operations and explicit reverse kernels. Pair frontend/native components
-  supporting this capability (current private ABI 145).
+  supporting this capability (current private ABI 147).
 
 - AmgX device bindings expose an explicit host-controlled Graph action with
   automatic AOT reconstruction from frozen configuration and CSR topology.
