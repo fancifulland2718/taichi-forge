@@ -937,6 +937,36 @@ def test_multicomponent_dynamic_lane_is_row_local_and_fuses():
     np.testing.assert_array_equal(fused_result, expected)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_three_dimensional_rows_keep_dynamic_components_local():
+    @ti.kernel
+    def produce(values: ti.types.ndarray(ti.i32, ndim=3), count: ti.i32):
+        for i in range(count):
+            values[i, i % 2, i % 3] = i * 7
+
+    @ti.kernel
+    def consume(
+        values: ti.types.ndarray(ti.i32, ndim=3),
+        output: ti.types.ndarray(ti.i32, ndim=1),
+        count: ti.i32,
+    ):
+        for i in range(count):
+            output[i] = values[i, i % 2, i % 3] + 1
+
+    values_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=3)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
+    count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    builder = ti.graph.GraphBuilder(_map_recipe="map2")
+    builder.dispatch(produce, values_arg, count_arg)
+    builder.dispatch(consume, values_arg, output_arg, count_arg)
+    graph = builder.compile()
+    assert graph.physical_plan()["physical_dispatch_count"] == 1
+    values = ti.ndarray(ti.i32, shape=(17, 2, 3))
+    output = ti.ndarray(ti.i32, shape=17)
+    graph.run({"values": values, "output": output, "count": 17})
+    np.testing.assert_array_equal(output.to_numpy(), np.arange(17, dtype=np.int32) * 7 + 1)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_dynamic_leading_and_cross_row_indices_stay_fusion_blockers():
     @ti.kernel

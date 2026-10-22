@@ -191,7 +191,8 @@ class Kernel;
 //  65 - Preserve integer reverse-power exponents and finite zero/one bases.
 //  66 - Regenerate SPIR-V with valid shared float CAS storage and scalar types.
 //  67 - Identity uses resolved kernel targets, not the CUDA producer/provider.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 67;
+//  68 - Restore row-local multidimensional Graph resource footprints.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 68;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

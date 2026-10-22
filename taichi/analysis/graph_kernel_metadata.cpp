@@ -555,12 +555,11 @@ class MetadataVisitor final : public BasicStmtVisitor {
         indices.size() < static_cast<std::size_t>(external_dimensions)) {
       return false;
     }
-    if (external_dimensions == 1) {
-      std::int64_t scalar_offset = 0;
-      if (!affine_loop_offset(indices.front(), loop_, domain_,
-                              &scalar_offset)) {
-        return false;
-      }
+    std::int64_t scalar_offset = 0;
+    if (external_dimensions >= 1 &&
+        affine_loop_offset(indices.front(), loop_, domain_, &scalar_offset)) {
+      // Array rank does not determine iteration rank: one range iteration
+      // can own a complete row, including dynamic trailing components.
       *offset = {scalar_offset};
       *flattened_inner_extent = 0;
       return true;
