@@ -33,6 +33,7 @@ def test_scroll_headless_and_closed_window():
 @test_utils.test(arch=[ti.vulkan])
 def test_scroll_windows_event_pump_and_window_isolation():
     import ctypes
+    import time
     from ctypes import wintypes
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -131,9 +132,16 @@ def test_scroll_windows_event_pump_and_window_isolation():
         assert not second.is_render_input_available()
         # Discard captured input; leaving the UI must not replay it to a camera.
         move_cursor(230, 170)
-        for _ in range(3):
+        # SetCursorPos and the GLFW/ImGui event queue need not settle within a
+        # fixed number of unpaced frames. Wait for input delivery, without a GPU
+        # synchronization or any additional read of the scroll accumulator.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
             draw_panel()
-        assert second.is_render_input_available()
+            if second.is_render_input_available():
+                break
+            time.sleep(0.005)
+        assert second.is_render_input_available(), second.get_cursor_pos()
         assert second.get_scroll_delta() == (0.0, 0.0)
         # Resize immediately after presentation. Validation must accept retiring
         # both render work and present waits, then closing the rebuilt swapchain.
