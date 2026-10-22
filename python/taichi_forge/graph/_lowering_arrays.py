@@ -161,9 +161,23 @@ class RetainedArrayBindings:
             raise TaichiRuntimeError("AOT private storage cannot alias a different reconstruction role")
         return identity
 
-    def bind_private(self, name, owner):
+    def bind_private(self, name, owner, *, binding_owner=None):
+        # Some retained dispatches publish a generation-bound native wrapper
+        # instead of the producer ndarray. A qualified adapter may connect it
+        # to that exact source, while preserving the frozen binding identity.
+        if binding_owner is None:
+            binding_owner = owner
+        if binding_owner is not owner:
+            from ._native import ProviderOwnedNdarrayBinding
+
+            if (
+                type(binding_owner) is not ProviderOwnedNdarrayBinding
+                or binding_owner.arr is not getattr(owner, "arr", None)
+                or binding_owner._runtime_prog is not getattr(owner, "_runtime_prog", None)
+            ):
+                raise TaichiRuntimeError("Retained provider binding must reference its exact source ndarray")
         context = self.context
-        if name in context.private_bindings and context.private_bindings[name] is not owner:
+        if name in context.private_bindings and context.private_bindings[name] is not binding_owner:
             raise TaichiRuntimeError("AOT retained array conflicts with a private binding")
         context._private_names[name] = self.require(owner)
-        context.private_bindings[name] = owner
+        context.private_bindings[name] = binding_owner

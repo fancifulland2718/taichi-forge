@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- `DeterministicScatterReducePlan` 的 retained Graph 可导出 AOT，保留选中的单 dispatch、
+  固定 group count 和实际 permutation/offset 数据；支持外部 ndarray 绑定及显式 Field
+  状态快照。Windows CPU/CUDA/Vulkan 的标量、向量、空拓扑、重复导出和独立消费已验证。
+
 - Python 正常退出时复用显式 reset 的资源清理顺序，在后端库卸载前退休 Graph、
   借用的 AOT runtime 和 Program。修复 Windows Vulkan ray 借用消费者在启用
   validation 时退出进程发生的访问冲突；应用无需额外调用 `ti.reset()`。

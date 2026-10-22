@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Retained Graphs from `DeterministicScatterReducePlan` can export to AOT,
+  preserving the selected single dispatch, fixed group count and actual
+  permutation/offset data. External ndarray bindings and explicit Field state
+  snapshots are supported. Scalar, vector, empty-topology, repeated export and
+  independent consumption checks pass on Windows CPU/CUDA/Vulkan.
+
 - Normal Python exit now uses the resource cleanup order of explicit reset,
   retiring Graph owners, borrowed AOT runtimes and the Program before backend
   libraries unload. This fixes a Windows Vulkan ray borrower exit access

@@ -389,6 +389,11 @@ class _DeterministicScatterReduceGraphExecutable(NativeGraphExecutable):
             output_arg.name: _fixed_graph_storage(binding.output, self),
             group_count_arg.name: binding.plan.num_groups,
         }
+        self._array_sources = {
+            values_arg.name: binding._values_view,
+            output_arg.name: binding._output_view,
+        }
+        self._topology_names = (permutation_arg.name, offsets_arg.name)
         self._action = DispatchGraphAction(
             (
                 (
@@ -426,6 +431,20 @@ class _DeterministicScatterReduceGraphExecutable(NativeGraphExecutable):
 
     def run(self):
         self._binding.run()
+
+    def _export_aot_bindings(self, context):
+        self._binding.plan._validate_current()
+        # Export the allocations used by the frozen dispatch, not the host
+        # indices from construction. They may have been updated since then.
+        # The operation only reads topology; each consumer owns its data seed.
+        for name in self._topology_names:
+            context.provider_data_binding(name, self._fixed_bindings[name])
+        for name, source in self._array_sources.items():
+            owner = self._fixed_bindings[name]
+            context.retained_arrays.bind_private(
+                name, source if type(owner) is ProviderOwnedNdarrayBinding else owner, binding_owner=owner
+            )
+        # group_count is encoded from the selected dispatch's scalar type.
 
     @property
     def resource_effects(self):
