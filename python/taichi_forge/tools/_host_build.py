@@ -143,6 +143,25 @@ def prepare_source(source, name):
     tree = transform.visit(ast.parse(lowered))
     declaration, cpp, header = emitter.emit("templates.h")
     imports = []
+    # CPython's future statement both selects a compiler feature and binds its
+    # _Feature object in the module. Cython consumes only the directive. Keep
+    # the Python binding as well (including aliases and subsequent deletion).
+    future_names = [
+        alias
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__"
+        for alias in node.names
+    ]
+    if future_names:
+        imports.append(ast.Import([ast.alias("__future__", "_forge_host_future")]))
+        for alias in future_names:
+            imports.append(
+                ast.Assign(
+                    [ast.Name(alias.asname or alias.name, ast.Store())],
+                    ast.Attribute(ast.Name("_forge_host_future", ast.Load()), alias.name, ast.Load()),
+                )
+            )
+        imports.append(ast.Delete([ast.Name("_forge_host_future", ast.Del())]))
     if transform.used:
         imports.append(ast.Import([ast.alias("cython", "_forge_host_cython")]))
     if declaration:

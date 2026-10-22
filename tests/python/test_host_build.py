@@ -56,6 +56,11 @@ def test_real_host_build_semantics_cache_and_source_boundary(tmp_path):
     (package / "ordinary.py").write_text(
         textwrap.dedent("""
         from __future__ import annotations
+        from __future__ import division as division_feature
+        future_binding = annotations
+        del annotations
+        def annotation_binding_deleted():
+            return 'annotations' not in globals()
         def choose(flag, visit):
             return (visit(1), visit(2)) if flag else (visit(3),)
         def power(value):
@@ -288,6 +293,11 @@ def test_real_host_build_semantics_cache_and_source_boundary(tmp_path):
         import closed_host_alias
         assert closed_host_alias is closed_host.ordinary
         host = closed_host.ordinary
+        import __future__
+        assert host.future_binding is __future__.annotations
+        assert host.division_feature is __future__.division
+        assert host.annotation_binding_deleted()
+        assert not any(name.startswith('_forge_host_future') for name in vars(host))
         assert host.label() == 'caf\u00e9'
         events = []
         def visit(value):
