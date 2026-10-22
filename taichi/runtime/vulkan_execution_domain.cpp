@@ -139,7 +139,8 @@ RuntimeCompletion ExecutionDomain::submit_impl(
     std::shared_ptr<const Commands> commands,
     const std::vector<RuntimeCompletion> &dependencies,
     std::shared_ptr<RuntimeCompletionResources> resources,
-    const Admission &admit) {
+    const Admission &admit,
+    const CommandSelector &select) {
   auto &state = *state_;
   // Both completion and command operand destruction run outside admission.
   collect_ready(1);
@@ -182,7 +183,12 @@ RuntimeCompletion ExecutionDomain::submit_impl(
           if (instance)
             instance->unsealed_submission = true;
           reserved = true;
-        });
+        }, select ? CommandSelector([&](std::size_t slot) {
+          // Keep selected operands alive outside the wider admission lock,
+          // including a failure before the queue accepts the commands.
+          commands = select(slot);
+          return commands;
+        }) : CommandSelector{});
   } catch (...) {
     if (reserved) {
       state.first_error = std::current_exception();
@@ -197,6 +203,17 @@ RuntimeCompletion ExecutionDomain::submit_impl(
     instance->unsealed_submission = false;
   }
   return ticket;
+}
+
+RuntimeCompletion ExecutionDomain::submit_instance_selected(
+    const std::shared_ptr<ExecutionInstance> &instance,
+    const CommandSelector &select,
+    const std::vector<RuntimeCompletion> &dependencies,
+    std::shared_ptr<RuntimeCompletionResources> resources,
+    const Admission &admit) {
+  if (!instance || !select)
+    throw std::invalid_argument("Vulkan submission requires an instance and selector");
+  return submit_impl(instance, {}, dependencies, std::move(resources), admit, select);
 }
 
 std::size_t ExecutionDomain::collect_ready(std::size_t budget) {

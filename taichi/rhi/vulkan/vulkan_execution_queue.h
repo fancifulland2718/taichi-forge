@@ -43,6 +43,8 @@ class VulkanExecutionQueue {
     std::shared_ptr<void> operands;
   };
   using Point = std::shared_ptr<VulkanTimelinePoint>;
+  using CommandSelector =
+      std::function<std::shared_ptr<const Commands>(std::size_t)>;
   class Busy : public std::runtime_error {
    public:
     Busy() : std::runtime_error("Vulkan execution queue is full") {}
@@ -71,7 +73,10 @@ class VulkanExecutionQueue {
   Point submit_precollected(
       std::shared_ptr<const Commands> commands,
       const std::vector<Point> &dependencies = {},
-      const std::function<void(std::size_t, const Point &)> &admit = {});
+      const std::function<void(std::size_t, const Point &)> &admit = {},
+      // Select a pre-recorded variant after capacity/dependency admission and
+      // before publication or device effects. This callback must not enqueue.
+      const CommandSelector &select = {});
   std::size_t collect(std::size_t budget);
   std::size_t pending() const;
   std::uint32_t queue_index() const;

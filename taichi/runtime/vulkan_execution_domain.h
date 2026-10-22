@@ -35,6 +35,7 @@ class ExecutionDomain {
     bool closed{false};
   };
   using Commands = VulkanExecutionQueue::Commands;
+  using CommandSelector = VulkanExecutionQueue::CommandSelector;
   using Busy = VulkanExecutionQueue::Busy;
   using Admission =
       std::function<void(std::size_t, const RuntimeCompletion &)>;
@@ -69,6 +70,15 @@ class ExecutionDomain {
       const std::vector<RuntimeCompletion> &dependencies = {},
       std::shared_ptr<RuntimeCompletionResources> resources = {},
       const Admission &admit = {});
+  // Select an immutable variant inside admission, after collection and exact
+  // owner/capacity checks. This serializes first-use and per-slot selection
+  // without holding an instance mutex while completed operands are released.
+  RuntimeCompletion submit_instance_selected(
+      const std::shared_ptr<ExecutionInstance> &instance,
+      const CommandSelector &select,
+      const std::vector<RuntimeCompletion> &dependencies = {},
+      std::shared_ptr<RuntimeCompletionResources> resources = {},
+      const Admission &admit = {});
   std::size_t collect_ready(std::size_t budget);
   Snapshot snapshot() const;
   RuntimeCompletion latest_completion() const;
@@ -95,7 +105,8 @@ class ExecutionDomain {
       std::shared_ptr<const Commands> commands,
       const std::vector<RuntimeCompletion> &dependencies,
       std::shared_ptr<RuntimeCompletionResources> resources,
-      const Admission &admit);
+      const Admission &admit,
+      const CommandSelector &select = {});
   struct State;
   std::unique_ptr<State> state_;
 };

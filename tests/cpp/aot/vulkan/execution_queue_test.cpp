@@ -9,6 +9,9 @@
 #include "taichi/program/runtime_fault.h"
 #include "taichi/runtime/completion_wait_set.h"
 #include "taichi/runtime/vulkan_execution_domain.h"
+#include "taichi/runtime/fixed_execution_vulkan.h"
+#include "taichi/runtime/gfx/aot_graph_data.h"
+#include "taichi/runtime/native_operation.h"
 
 #include <chrono>
 #include <set>
@@ -330,6 +333,193 @@ TEST(VulkanFixedCommands, RejectsSharedStateAndUnqualifiedCallbacksBeforeRecordi
   EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls,
             before.queue_submit_calls);
   EXPECT_FALSE(queue.latest());
+}
+
+namespace {
+struct FixedOperands final : RuntimeCompletionResources {
+  std::vector<std::shared_ptr<DeviceAllocationGuard>> allocations;
+  std::size_t retained_resource_count(std::uint32_t) const noexcept override {
+    return allocations.size();
+  }
+};
+
+struct FixedParts final : RuntimeClient {
+  std::vector<std::shared_ptr<RuntimeClient>> parts;
+  void retire() override {
+    for (const auto &part : parts)
+      part->retire();
+    parts.clear();
+  }
+};
+}  // namespace
+
+TEST(VulkanFixedExecution, PrivateReplayAndNativeSortIgnoreBlockedDefaultQueue) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 51);
+  device.set_backend_fault_reporter(owner);
+  gfx::GfxRuntime::Params params;
+  params.device = &device;
+  gfx::GfxRuntime runtime(params);
+  runtime.add_root_buffer(4);
+  runtime.add_root_buffer(4);
+  runtime.synchronize();
+  vulkan::ExecutionDomainRegistry registry(device, owner);
+  std::array<std::shared_ptr<vulkan::ExecutionDomain>, 2> domains{
+      registry.create({1, 1}), registry.create({1, 1})};
+  std::array<std::unique_ptr<FixedExecution>, 2> calls;
+  std::array<std::shared_ptr<FixedOperands>, 2> operands;
+  CallableBase callable;
+  LaunchContextBuilder context(&callable);
+  for (int i = 0; i < 2; ++i) {
+    auto resources = std::make_shared<FixedOperands>();
+    auto [out, out_status] = device.allocate_memory_unique(
+        {4, false, true, false, AllocUsage::Storage});
+    auto [keys, key_status] = device.allocate_memory_unique(
+        {32, true, true, false, AllocUsage::Storage});
+    ASSERT_EQ(out_status, RhiResult::success);
+    ASSERT_EQ(key_status, RhiResult::success);
+    resources->allocations.push_back(std::move(out));
+    resources->allocations.push_back(std::move(keys));
+    void *mapped = nullptr;
+    ASSERT_EQ(device.map(*resources->allocations[1], &mapped), RhiResult::success);
+    for (uint32_t j = 0; j < 8; ++j)
+      static_cast<uint32_t *>(mapped)[j] = 8 - j;
+    device.unmap(*resources->allocations[1]);
+    const auto handle = temporary_counter(runtime, i);
+    gfx::GfxRuntime::RegisterParams metadata;
+    metadata.snode_tree_ids = {i};
+    gfx::KernelImpl kernel(&runtime, std::move(metadata), &handle);
+    auto sort = prepare_sort_operation(Arch::vulkan, device,
+        {resources->allocations[1]->get_ptr(), kDeviceNullPtr, 8, NativeSortKeyType::u32});
+    FixedExecution::VulkanExecutionBinding binding{domains[i], resources};
+    const auto before = device.queue_submission_snapshot().queue_submit_calls;
+    calls[i] = std::make_unique<FixedExecution>(
+        Arch::vulkan, device, &runtime,
+        std::vector<FixedExecution::Operation>{
+            FixedExecution::Dispatch{&kernel, &context}, sort,
+            FixedExecution::BufferCopy{resources->allocations[0]->get_ptr(),
+                                      runtime.get_root_buffer(i)->get_ptr(), 4}},
+        nullptr, owner, nullptr, nullptr, nullptr, nullptr, nullptr, &binding);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before);
+    operands[i] = std::move(resources);
+  }
+  const auto read = [&](int index) {
+    void *mapped = nullptr;
+    EXPECT_EQ(device.map(*operands[index]->allocations[0], &mapped), RhiResult::success);
+    const auto value = *static_cast<uint32_t *>(mapped);
+    device.unmap(*operands[index]->allocations[0]);
+    EXPECT_EQ(device.map(*operands[index]->allocations[1], &mapped), RhiResult::success);
+    for (uint32_t j = 0; j < 8; ++j)
+      EXPECT_EQ(static_cast<uint32_t *>(mapped)[j], j + 1);
+    device.unmap(*operands[index]->allocations[1]);
+    return value;
+  };
+  RuntimeCompletion completed;
+  {
+    TimelineGate default_gate(device, 0);
+    TimelineGate left_gate(device, domains[0]->snapshot().queue_index);
+    const auto pending = domains[0]->submit(domains[0]->prepare_commands({}));
+    const auto before = device.queue_submission_snapshot().queue_submit_calls;
+    EXPECT_THROW(calls[0]->submit(), vulkan::ExecutionDomain::Busy);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before);
+    for (uint32_t expected : {1, 2}) {
+      const auto before_peer = device.queue_submission_snapshot().queue_submit_calls;
+      completed = calls[1]->submit();
+      CompletionWaitSet ready({completed}, std::chrono::milliseconds(1));
+      ASSERT_EQ(ready.wait(std::chrono::seconds(3)).status, CompletionWaitSet::Status::ready);
+      EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before_peer + 1);
+      EXPECT_EQ(read(1), expected);
+      EXPECT_FALSE(pending.done());
+    }
+    left_gate.release();
+    pending.wait();
+    for (uint32_t expected : {1, 2}) {
+      calls[0]->submit().wait();
+      EXPECT_EQ(read(0), expected);
+    }
+    domains[0]->close();
+    EXPECT_THROW(calls[0]->submit(), std::exception);
+    calls[1]->submit().wait();
+    EXPECT_EQ(read(1), 3u);
+    domains[1]->close();
+  }
+  registry.retire();
+  EXPECT_TRUE(completed.done());
+}
+
+TEST(VulkanFixedExecution, SharedPhaseOwnerRetiresAndRejectedPreparationReleasesBudget) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 52);
+  device.set_backend_fault_reporter(owner);
+  gfx::GfxRuntime::Params params;
+  params.device = &device;
+  gfx::GfxRuntime runtime(params);
+  runtime.add_root_buffer(4);
+  runtime.synchronize();
+  vulkan::ExecutionDomainRegistry registry(device, owner);
+  auto domain = registry.create({2, 1});
+  auto operands = std::make_shared<FixedOperands>();
+  CallableBase callable;
+  LaunchContextBuilder context(&callable);
+  const auto handle = temporary_counter(runtime, 0);
+  gfx::GfxRuntime::RegisterParams metadata;
+  metadata.snode_tree_ids = {0};
+  gfx::KernelImpl kernel(&runtime, std::move(metadata), &handle);
+  const std::vector<FixedExecution::Operation> operations{
+      FixedExecution::Dispatch{&kernel, &context}};
+  FixedExecution::VulkanExecutionBinding binding{domain, operands};
+  auto parts = std::make_shared<FixedParts>();
+  auto workspace = runtime.create_fixed_graph_workspace();
+  binding.workspace = workspace;
+  binding.retirement_parts = &parts->parts;
+  std::unique_ptr<FixedExecution> first, second;
+  auto registration = domain->prepare_owned_instance(parts, [&](const auto &instance) {
+    binding.instance = instance;
+    first = std::make_unique<FixedExecution>(Arch::vulkan, device, &runtime,
+        operations, nullptr, owner, nullptr, nullptr, nullptr, nullptr, nullptr, &binding);
+    second = std::make_unique<FixedExecution>(Arch::vulkan, device, &runtime,
+        operations, nullptr, owner, nullptr, nullptr, nullptr, nullptr, nullptr, &binding);
+  });
+  auto initialize = domain->new_command_list();
+  workspace->record_initialization(*initialize);
+  domain->submit_instance(registration,
+      domain->prepare_commands({initialize.get()}, workspace)).wait();
+  first->submit().wait();
+  auto completed = second->submit();
+  domain->retire_instance(registration);
+  EXPECT_TRUE(completed.done());
+  EXPECT_TRUE(parts->parts.empty());
+  EXPECT_THROW(first->submit(), std::exception);
+  auto source = runtime.get_root_buffer(0)->get_ptr();
+  uint32_t value = 0;
+  void *host = &value;
+  std::size_t bytes = sizeof(value);
+  ASSERT_EQ(device.readback_data(&source, &host, &bytes, 1), RhiResult::success);
+  EXPECT_EQ(value, 2u);
+  // A subsequent rejected detached recording must release the one-instance
+  // reservation. Its caller cannot accidentally publish a partial execution.
+  const auto bad_handle = temporary_counter(runtime, 0, true);
+  gfx::GfxRuntime::RegisterParams bad_metadata;
+  bad_metadata.snode_tree_ids = {0};
+  gfx::KernelImpl bad(&runtime, std::move(bad_metadata), &bad_handle);
+  binding = {domain, operands};
+  EXPECT_ANY_THROW(FixedExecution(Arch::vulkan, device, &runtime,
+      {FixedExecution::Dispatch{&bad, &context}}, nullptr, owner,
+      nullptr, nullptr, nullptr, nullptr, nullptr, &binding));
+  FixedExecution replacement(Arch::vulkan, device, &runtime, operations,
+      nullptr, owner, nullptr, nullptr, nullptr, nullptr, nullptr, &binding);
+  replacement.submit().wait();
+  registry.retire();
 }
 
 TEST(VulkanExecutionQueue, PhysicalLeasesAreExclusiveAndReusable) {

@@ -18710,6 +18710,9 @@ class FixedVulkanSort final : public NativeOperation {
           "Vulkan sort workspace does not match its operation");
     if (operation.size <= 1)
       return;
+    operands_.push_back(operation.keys);
+    if (operation.values != kDeviceNullPtr)
+      operands_.push_back(operation.values);
     const auto value_type = operation.value_scalar_bytes == 8 ? 3 : 0;
     recording_ = prepare_vulkan_sort_recording(
         nullptr, &device_, workspace_->cache, operation, value_type, false,
@@ -18728,10 +18731,16 @@ class FixedVulkanSort final : public NativeOperation {
     if (recording_.record)
       recording_.record(device, commands);
   }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
+    NativeVulkanRecordingRequirements requirements;
+    requirements.buffers = operands_;
+    return requirements;
+  }
 
  private:
   Device &device_;
   bool external_workspace_;
+  std::vector<DeviceAllocation> operands_;
   std::shared_ptr<FixedVulkanSortWorkspace> workspace_;
   VulkanSortRecording recording_;
 };

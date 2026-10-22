@@ -34,6 +34,7 @@
 #endif
 #ifdef TI_WITH_VULKAN
 #include "taichi/runtime/gfx/aot_graph_data.h"
+#include "taichi/runtime/fixed_execution_vulkan.h"
 #endif
 
 namespace taichi::lang {
@@ -143,6 +144,39 @@ struct FixedExecution::State {
   bool cuda_failed{false};
 #endif
 #ifdef TI_WITH_VULKAN
+  std::shared_ptr<vulkan::ExecutionDomain> vulkan_domain;
+  std::shared_ptr<vulkan::ExecutionInstance> vulkan_registration;
+  struct VulkanInstance final : RuntimeClient, RuntimeCompletionResources {
+    struct Payload {
+      std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> workspace;
+      std::vector<std::shared_ptr<NativeOperation>> operations;
+      std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
+      std::vector<std::shared_ptr<NativeKernelResultStorage>> results;
+      std::shared_ptr<gfx::GfxRuntime::GraphReplayExecutable::Slot> recording;
+    };
+    std::shared_ptr<RuntimeCompletionResources> operands;
+    std::shared_ptr<Payload> payload;
+    std::shared_ptr<const vulkan::ExecutionDomain::Commands> commands;
+    std::shared_ptr<const vulkan::ExecutionDomain::Commands> first_commands;
+    std::mutex mutex;
+    bool initialized{false};
+    bool retired{false};
+    void retire() override {
+      std::lock_guard<std::mutex> lock(mutex);
+      first_commands.reset();
+      commands.reset();
+      payload.reset();
+      std::atomic_store(&operands,
+                        std::shared_ptr<RuntimeCompletionResources>{});
+      retired = true;
+    }
+    std::size_t retained_resource_count(
+        std::uint32_t kind) const noexcept override {
+      const auto retained = std::atomic_load(&operands);
+      return retained ? retained->retained_resource_count(kind) : 0;
+    }
+  };
+  std::shared_ptr<VulkanInstance> vulkan_instance;
   std::vector<std::unique_ptr<gfx::GraphReplayRegistration>> vulkan_graphs;
   gfx::GfxRuntime *vulkan_runtime{nullptr};
 #endif
@@ -188,9 +222,42 @@ FixedExecution::FixedExecution(
     std::shared_ptr<void> binding_operands,
     const VulkanSubmissionRecipe *submission_recipe,
     const OrderedStorageRing *storage_ring,
-    const CudaExecutionBinding *execution_binding)
+    const CudaExecutionBinding *execution_binding,
+    const VulkanExecutionBinding *vulkan_binding)
     : state_(std::make_unique<State>()) {
   state_->fault_domain = std::move(fault_domain);
+  if (vulkan_binding) {
+    if (arch != Arch::vulkan || execution_binding || !state_->fault_domain ||
+        storage_ring || binding_replay || binding_operands || submission_recipe)
+      throw std::invalid_argument(
+          "Independent Vulkan execution requires a fixed compute recipe");
+#ifdef TI_WITH_VULKAN
+    if (!vulkan_binding->domain || !vulkan_binding->operands ||
+        !vulkan_binding->domain->belongs_to(state_->fault_domain))
+      throw std::invalid_argument(
+          "Fixed Vulkan execution requires its runtime domain and operands");
+    if (vulkan_binding->retirement_parts && !vulkan_binding->instance)
+      throw std::invalid_argument(
+          "Grouped Vulkan preparation requires its logical instance owner");
+    if (operations.empty())
+      throw std::invalid_argument("Independent Vulkan execution is empty");
+    for (const auto &operation : operations) {
+      if (std::holds_alternative<std::shared_ptr<const Branch>>(operation) ||
+          std::holds_alternative<std::shared_ptr<const While>>(operation) ||
+          std::holds_alternative<std::shared_ptr<const Parallel>>(operation))
+        throw std::invalid_argument(
+            "Independent Vulkan control recording is not implemented");
+      if (const auto *dispatch = std::get_if<Dispatch>(&operation))
+        if (!dispatch->parameters.empty())
+          throw std::invalid_argument(
+              "Independent Vulkan submission parameters are not prepared");
+    }
+    state_->vulkan_domain = vulkan_binding->domain;
+    state_->vulkan_registration = vulkan_binding->instance;
+#else
+    throw std::invalid_argument("Vulkan execution domains are unavailable");
+#endif
+  }
   if (execution_binding) {
     if (arch != Arch::cuda || !state_->fault_domain ||
         !execution_binding->domain || !execution_binding->operands ||
@@ -1169,6 +1236,56 @@ FixedExecution::FixedExecution(
       if (!gfx_runtime)
         throw std::invalid_argument(
             "Fixed Vulkan operations require a runtime");
+      if (vulkan_binding) {
+        auto instance = std::make_shared<State::VulkanInstance>();
+        state_->vulkan_instance = instance;
+        instance->operands = vulkan_binding->operands;
+        instance->payload = std::make_shared<State::VulkanInstance::Payload>();
+        auto &payload = *instance->payload;
+        payload.operations = std::move(state_->native_operations);
+        payload.resources = std::move(state_->kernel_resources);
+        payload.results = std::move(state_->kernel_results);
+        const auto prepare = [&] {
+          payload.workspace = vulkan_binding->workspace
+                                  ? vulkan_binding->workspace
+                                  : gfx_runtime->create_fixed_graph_workspace();
+          std::vector<int> roots;
+          for (const auto &operation : operations)
+            if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+              const auto &ids = static_cast<gfx::KernelImpl *>(dispatch->kernel)
+                                    ->params().snode_tree_ids;
+              roots.insert(roots.end(), ids.begin(), ids.end());
+            }
+          std::sort(roots.begin(), roots.end());
+          roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+          payload.recording = gfx_runtime->prepare_fixed_commands(
+              native, state_->vulkan_domain->new_command_list(),
+              payload.workspace, {}, std::move(roots));
+          instance->commands = state_->vulkan_domain->prepare_commands(
+              {payload.recording->cmdlist.get()}, instance->payload);
+          if (!vulkan_binding->workspace) {
+            auto initialize = state_->vulkan_domain->new_command_list();
+            payload.workspace->record_initialization(*initialize);
+            instance->first_commands = state_->vulkan_domain->prepare_commands(
+                {initialize.get(), payload.recording->cmdlist.get()},
+                instance->payload);
+          }
+          for (const auto bytes : payload.recording->args_buffer_sizes)
+            state_->bytes += bytes;
+          if (!vulkan_binding->workspace)
+            state_->workspace_bytes += payload.workspace->bytes();
+        };
+        if (vulkan_binding->retirement_parts) {
+          vulkan_binding->retirement_parts->push_back(instance);
+          prepare();
+        } else {
+          state_->vulkan_registration =
+              state_->vulkan_domain->prepare_owned_instance(
+                  instance, [&](const auto &) { prepare(); });
+        }
+        native.clear();
+        return;
+      }
       retain(gfx_runtime->prepare_fixed_graph(native, {}, {}, independent));
       native.clear();
     };
@@ -1327,6 +1444,23 @@ RuntimeCompletion FixedExecution::submit(
     const std::vector<RuntimeCompletion> &dependencies,
     const std::vector<SubmissionParameterValue> &parameters,
     bool sample_gpu) {
+#ifdef TI_WITH_VULKAN
+  if (state_->vulkan_domain && state_->vulkan_instance) {
+    if (!parameters.empty() || sample_gpu)
+      throw std::invalid_argument(
+          "Vulkan submission parameters and timing were not prepared");
+    const auto instance = state_->vulkan_instance;
+    return state_->vulkan_domain->submit_instance_selected(
+        state_->vulkan_registration,
+        [&](std::size_t) {
+          return !instance->initialized && instance->first_commands
+                     ? instance->first_commands : instance->commands;
+        }, dependencies, instance,
+        [&](std::size_t, const RuntimeCompletion &) {
+          instance->initialized = true;
+        });
+  }
+#endif
 #ifdef TI_WITH_CUDA
   if (state_->cuda_domain && state_->cuda_instance) {
     const auto instance = state_->cuda_instance;
@@ -1422,6 +1556,12 @@ void FixedExecution::retire_completed_binding(bool backend_safe) {
 }
 
 void FixedExecution::run_impl() {
+#ifdef TI_WITH_VULKAN
+  if (state_->vulkan_instance) {
+    (void)submit();
+    return;
+  }
+#endif
 #ifdef TI_WITH_CUDA
   if (state_->cuda_instance) {
     (void)submit();

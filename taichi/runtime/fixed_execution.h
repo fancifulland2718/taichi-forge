@@ -39,6 +39,7 @@ class ExecutionInstance;
 // Contexts and operation descriptors are borrowed only during preparation.
 class FixedExecution {
  public:
+  struct VulkanExecutionBinding;
   // Runtime-only ownership for independent CUDA capture/ordered recipes. Code
   // and array owners outlive every pending launch; provider objects supplied in
   // operations must have independent mutable state. Never serialized in AOT.
@@ -129,7 +130,8 @@ class FixedExecution {
                  std::shared_ptr<void> binding_operands = {},
                  const VulkanSubmissionRecipe *submission_recipe = nullptr,
                  const OrderedStorageRing *storage_ring = nullptr,
-                 const CudaExecutionBinding *execution_binding = nullptr);
+                 const CudaExecutionBinding *execution_binding = nullptr,
+                 const VulkanExecutionBinding *vulkan_binding = nullptr);
   ~FixedExecution();
   FixedExecution(const FixedExecution &) = delete;
   FixedExecution &operator=(const FixedExecution &) = delete;

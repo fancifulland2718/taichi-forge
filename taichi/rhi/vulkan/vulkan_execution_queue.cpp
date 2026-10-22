@@ -238,8 +238,9 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit(
 VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
     std::shared_ptr<const Commands> commands,
     const std::vector<Point> &dependencies,
-    const std::function<void(std::size_t, const Point &)> &admit) {
-  if (!commands || dependencies.size() > UINT32_MAX)
+    const std::function<void(std::size_t, const Point &)> &admit,
+    const CommandSelector &select) {
+  if ((!commands && !select) || dependencies.size() > UINT32_MAX)
     throw std::invalid_argument("Invalid Vulkan execution submission");
   auto &state = *state_;
   State::Slot pending;
@@ -249,7 +250,7 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
     std::rethrow_exception(state.error);
   if (!state.accepting)
     throw std::runtime_error("Vulkan execution queue is closed");
-  if (commands->device != &state.device)
+  if (commands && commands->device != &state.device)
     throw std::invalid_argument("Vulkan execution command device mismatch");
   std::vector<std::pair<VkSemaphore, std::uint64_t>> waits;
   waits.reserve(dependencies.size());
@@ -280,6 +281,11 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
   }
   if (state.count == state.slots.size())
     throw Busy();
+  const auto index = (state.head + state.count) % state.slots.size();
+  if (select)
+    commands = select(index);
+  if (!commands || commands->device != &state.device)
+    throw std::invalid_argument("Vulkan execution command device mismatch");
   const auto previous = state.tail ? state.tail->value() : 0;
   if (previous == UINT64_MAX)
     throw std::overflow_error("Vulkan timeline counter exhausted");
@@ -289,7 +295,6 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
   pending.point = point;
   std::vector<VkPipelineStageFlags> stages(semaphores.size(),
                                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-  const auto index = (state.head + state.count) % state.slots.size();
   if (admit)
     admit(index, point);
   auto &slot = state.slots[index];
