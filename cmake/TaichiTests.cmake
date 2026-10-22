@@ -253,6 +253,10 @@ target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
     taichi_core
     taichi_common
     gtest_main)
+# Like the aggregate tests, this target uses private native implementation
+# symbols. Transitive OBJECT libraries propagate usage requirements, not their
+# object files; consume the existing dependency closure in split builds too.
+ti_link_object_dependencies(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME} taichi_core)
 if (TI_WITH_OPENGL OR TI_WITH_VULKAN)
   target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
     PRIVATE gfx_runtime)
