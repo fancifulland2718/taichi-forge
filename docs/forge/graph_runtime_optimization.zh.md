@@ -128,7 +128,9 @@ Sequential 控制区域只有一个 owner，组成树；当前结构化深度上
 须选择 `lowering_mode="portable"`，通过 `Graph.run()` 执行。循环每轮检查条件，即使 kernel
 请求 masked chunk，也不会在条件已结束后继续调用 host 操作。这属于宏观 Graph 组合；
 CUDA conditional capture 的准入要求保持。provider 继续负责自身同步和生命周期合同。
-AOT 导出还要求节点具有重建合同；CUDA host 分支可导出，CUDA portable host WHILE 尚不可导出。
+AOT 导出还要求节点具有重建合同；CUDA host 分支及精确 portable host WHILE 可导出。
+host WHILE 使用执行计划版本 26，frontend/native 需匹配私有 ABI 144；保留选中的 body
+及其尾部 condition，不把投机 chunk replay 改写为精确循环。独立 runtime 每轮读取一个条件标量。
 
 | 模式 | 含义 |
 | --- | --- |

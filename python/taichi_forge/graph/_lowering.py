@@ -712,6 +712,24 @@ def _while(context, node):
     from taichi_forge.lang import impl
 
     arch = impl.current_cfg().arch
+    if arch == core.Arch.cuda and node.lowering_mode == "portable":
+        if node.chunk_limit != 1:
+            raise TaichiRuntimeError("AOT host while requires its selected exact iteration recipe")
+        # The selected body already includes its tail condition. Keep that
+        # physical segment, including provider boundaries and selected fusion.
+        _node(context, node._condition)
+        if node.max_iterations:
+            context.operations.append(
+                dict(
+                    kind="while",
+                    predicate=context.binding(node.predicate),
+                    max_iterations=node.max_iterations,
+                    condition=[],
+                    body=context.region(_node, node._chunks[1]),
+                    lowering=dict(kind="cuda_host", version=1),
+                )
+            )
+        return
     if arch == core.Arch.vulkan:
         from taichi_forge.graph._graph import _vulkan_compound_strategy_codes
 

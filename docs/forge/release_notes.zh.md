@@ -34,7 +34,9 @@
 - 宏观 Graph 的 Sequential 接受 host native action，包括显式 portable 控制中只有 host
   操作的 body；循环精确检查条件，收敛后不额外调用 host 操作。AmgX host 分支可导出重建，
   retained guess 按实际控制路径校验。Windows CPU/CUDA/Vulkan 小型 Graph 与真实 CUDA
-  AmgX 无源码/借用分支测试通过；未新增 CUDA capture、异步 host 控制提交或 AOT CUDA host WHILE。
+  AmgX 无源码/借用分支测试通过；未新增 CUDA capture 或异步 host 控制提交。精确 CUDA portable
+  WHILE 可通过版本 26 执行计划导出，包括 AmgX host 操作与显式反向 kernel；frontend/native
+  需配套私有 ABI 144。
 
 - AmgX device binding 提供显式 host 控制的 Graph action，可从冻结配置和 CSR 拓扑自动
   导出 AOT。消费者提供初始系数，各实例重建独立 solver session；v2 solve 描述保持共享

@@ -65,6 +65,22 @@ def test_amgx_graph_automatic_export(scalar, tmp_path, monkeypatch):
     def select(choice: ti.types.ndarray(ti.i32, 1), predicate: ti.types.ndarray(ti.i32, 0)):
         predicate[None] = choice[0]
 
+    @ti.kernel
+    def reset_steps(steps: ti.types.ndarray(ti.i32, 1)):
+        steps[0] = 0
+
+    @ti.kernel
+    def loop_condition(
+        steps: ti.types.ndarray(ti.i32, 1),
+        limit: ti.types.ndarray(ti.i32, 1),
+        predicate: ti.types.ndarray(ti.i32, 0),
+    ):
+        predicate[None] = int(steps[0] < limit[0])
+
+    @ti.kernel
+    def advance(steps: ti.types.ndarray(ti.i32, 1)):
+        steps[0] += 1
+
     config = solver_resource(str(scalar), compute_residual=False)["parameters"]["config"]
     config_path = tmp_path / "amgx.json"
     config_path.write_text(config, encoding="utf8")
@@ -146,6 +162,50 @@ def test_amgx_graph_automatic_export(scalar, tmp_path, monkeypatch):
                 assert branch["lowering"] == dict(kind="cuda_host", version=1)
                 assert [op["operation"] for op in branch["bodies"][0]] == ["replace_coefficients", "solve"]
                 conditional.close()
+                for budget in (0, 3):
+                    parent = ti.graph.GraphBuilder()
+                    predicate = parent.private_ndarray("loop_selected", ti.i32, ())
+                    steps_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "steps", ti.i32, ndim=1)
+                    limit_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "limit", ti.i32, ndim=1)
+                    parent.dispatch(reset_steps, steps_arg)
+                    parent.dispatch(produce, arg("seed"), arg("diagonal"), arg("values"), arg("rhs"))
+                    cond, body = parent.create_sequential(), parent.create_sequential()
+                    cond.dispatch(loop_condition, steps_arg, limit_arg, predicate)
+                    body.append_native(binding.graph_action(update_coefficients=True))
+                    body.dispatch(advance, steps_arg)
+                    parent.while_loop(
+                        cond,
+                        body,
+                        predicate=predicate,
+                        max_iterations=budget,
+                        carried_state=(steps_arg,),
+                        lowering_mode="portable",
+                    )
+                    parent.dispatch(publish, arg("solution"), arg("output"))
+                    loop = parent.compile()
+                    steps, limit = ti.ndarray(ti.i32, 1), ti.ndarray(ti.i32, 1)
+                    for count in (0, 1, 9):
+                        limit.fill(count)
+                        solution.fill(13)
+                        loop.run(dict(args, steps=steps, limit=limit))
+                        iterations = min(budget, count)
+                        assert steps[0] == iterations
+                        expected = 2 * np.array(reference(4, [2.125] * N)) + 1 if iterations else np.full(N, 27)
+                        np.testing.assert_allclose(output.to_numpy(), expected, rtol=tolerance, atol=tolerance)
+                    plan = module.add_execution_plan(
+                        f"loop{budget}",
+                        loop,
+                        source_bindings=dict(values=values, rhs=rhs, solution=solution),
+                        resource_bindings={solver: {"values": "initial"}} if budget else None,
+                    )
+                    doc = json.loads(plan.to_json())
+                    loops = [op for op in doc["operations"] if op["kind"] == "while"]
+                    assert len(loops) == int(budget > 0)
+                    if loops:
+                        assert doc["version"] == 26
+                        assert loops[0]["lowering"] == dict(kind="cuda_host", version=1)
+                        assert not loops[0]["condition"]  # Selected body already includes the tail condition.
+                    loop.close()
             # Ordinary execution retains its direct callable and current session.
             diagonal.fill(5)
             solution.fill(float("nan"))

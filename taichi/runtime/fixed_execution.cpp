@@ -402,6 +402,13 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Fixed while requires aligned predicate storage and nonempty "
               "bodies");
+        const bool host = loop->host_control;
+        if (host && (arch != Arch::cuda || inside_control || execution_binding ||
+                     loop->vulkan || loop->cuda_control))
+          throw std::invalid_argument(
+              "Host while requires ordinary CUDA execution outside native GPU "
+              "control");
+        has_host_selection |= host;
         if ((arch == Arch::vulkan) != bool(loop->vulkan))
           throw std::invalid_argument(
               "Fixed while requires a matching selected Vulkan recipe on "
@@ -463,12 +470,12 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Fixed control descriptors contain a cycle");
         auto condition = recording_state.control_branch();
-        validate(loop->condition, condition, true);
+        validate(loop->condition, condition, !host);
         // The initial condition always executes, including a zero budget. Body
         // facts cannot escape a possibly zero-trip loop.
         recording_state.initialized = condition.initialized;
         auto body = condition;
-        validate(loop->body, body, true);
+        validate(loop->body, body, !host);
         // Monotonic initialization plus stateless operations is loop-invariant;
         // do not rewalk or unroll regions to validate another iteration.
         for (const auto *resource : condition.initialized)
@@ -699,6 +706,35 @@ FixedExecution::FixedExecution(
         block.clear();
       };
       for (const auto &operation : region) {
+        const auto *loop_value =
+            std::get_if<std::shared_ptr<const While>>(&operation);
+        if (loop_value && (*loop_value)->host_control) {
+          flush();
+          const auto &loop = **loop_value;
+          struct PreparedWhile {
+            std::function<std::int32_t()> read;
+            State::HostSteps condition;
+            State::HostSteps body;
+          };
+          auto prepared = std::make_shared<PreparedWhile>();
+          prepared->read = reader(loop.predicate);
+          auto condition = facts.control_branch();
+          prepared->condition = prepare(loop.condition, condition);
+          facts.initialized = condition.initialized;
+          auto body = condition;
+          prepared->body = prepare(loop.body, body);
+          steps.push_back([prepared, budget = loop.max_iterations,
+                           nonzero = loop.continue_while_nonzero] {
+            State::run_host_steps(prepared->condition);
+            for (std::uint64_t iteration = 0;
+                 iteration < budget && ((prepared->read() != 0) == nonzero);
+                 ++iteration) {
+              State::run_host_steps(prepared->body);
+              State::run_host_steps(prepared->condition);
+            }
+          });
+          continue;
+        }
         const auto *value =
             std::get_if<std::shared_ptr<const Branch>>(&operation);
         if (!value || (*value)->mode != BranchExecutionMode::host) {

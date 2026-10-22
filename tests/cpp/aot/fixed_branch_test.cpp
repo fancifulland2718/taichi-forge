@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <functional>
@@ -184,6 +185,88 @@ TEST(FixedBranch, CudaSelectsOnDeviceWithOneRootAndIndependentBindings) {
   };
   check_branches(Arch::cuda, device, write, read);
   check_nested_branches(Arch::cuda, device, write, read);
+}
+
+TEST(FixedBranch, CudaHostWhileStopsExactlyAndPoisonsFailedReplay) {
+  if (!CUDADriver::get_instance_without_context().detected())
+    GTEST_SKIP();
+  cuda::CudaDevice device;
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto allocation = device.allocate_memory_unique({sizeof(Frame)});
+  ASSERT_EQ(allocation.second, RhiResult::success);
+  auto ptr = allocation.first->get_ptr();
+  auto *address = device.get_memory_addr(ptr);
+  int calls = 0;
+  bool fail = false;
+  class Step final : public NativeOperation {
+   public:
+    Step(Device &device, void *address, int &calls, bool &fail)
+        : device_(device), address_(address), calls_(calls), fail_(fail) {}
+    Arch arch() const override { return Arch::cuda; }
+    Device &device() const override { return device_; }
+    std::size_t workspace_bytes() const override { return 0; }
+    NativeOperationMode execution_mode() const override {
+      return NativeOperationMode::cuda_synchronous;
+    }
+    void run_cuda_synchronous() override {
+      ++calls_;
+      if (fail_)
+        throw std::runtime_error("host loop provider failed");
+      Frame frame;
+      auto &driver = CUDADriver::get_instance();
+      driver.memcpy_device_to_host(frame.data(), address_, sizeof(frame));
+      ++frame[1];
+      frame[0] = frame[1] < 2;
+      driver.memcpy_host_to_device(address_, frame.data(), sizeof(frame));
+    }
+
+   private:
+    Device &device_;
+    void *address_;
+    int &calls_;
+    bool &fail_;
+  };
+  auto step = std::make_shared<Step>(device, address, calls, fail);
+  auto loop = std::make_shared<FixedExecution::While>();
+  loop->predicate = ptr;
+  loop->host_control = true;
+  loop->condition = {FixedExecution::BufferFill{ptr, 4, 1}};
+  // Selected plans can keep the condition in their physical body. Here the
+  // body itself updates it, so the condition must run only once as a prefix.
+  auto initialize = loop->condition.front();
+  loop->condition.clear();
+  loop->body = {step};
+  auto suffix = ptr;
+  suffix.offset += 8;
+  auto &driver = CUDADriver::get_instance();
+  for (auto budget : {std::uint64_t{0}, std::uint64_t{1},
+                      std::numeric_limits<std::uint64_t>::max()}) {
+    loop->max_iterations = budget;
+    Frame frame{0, 0, 73, 74};
+    driver.memcpy_host_to_device(address, frame.data(), sizeof(frame));
+    calls = 0;
+    FixedExecution call(
+        Arch::cuda, device, nullptr,
+        {initialize, loop, FixedExecution::BufferFill{suffix, 4, 91}});
+    EXPECT_EQ(call.execution_kind(), 5);
+    call.run();
+    driver.memcpy_device_to_host(frame.data(), address, sizeof(frame));
+    EXPECT_EQ(calls, std::min<std::uint64_t>(budget, 2));
+    EXPECT_EQ(frame[1], calls);
+    EXPECT_EQ(frame[2], 91);
+  }
+  Frame frame{0, 0, 73, 74};
+  driver.memcpy_host_to_device(address, frame.data(), sizeof(frame));
+  calls = 0;
+  fail = true;
+  FixedExecution broken(
+      Arch::cuda, device, nullptr,
+      {initialize, loop, FixedExecution::BufferFill{suffix, 4, 91}});
+  EXPECT_THROW(broken.run(), std::runtime_error);
+  EXPECT_THROW(broken.run(), std::runtime_error);
+  EXPECT_EQ(calls, 1);
+  driver.memcpy_device_to_host(frame.data(), address, sizeof(frame));
+  EXPECT_EQ(frame[2], 73);
 }
 #endif
 }  // namespace

@@ -39,7 +39,9 @@ lifetimes. The entries below describe the changes.
   calls after convergence. AmgX host branches export and reconstruct with
   path-sensitive retained-guess validation. Windows CPU/CUDA/Vulkan small Graph
   checks and real CUDA AmgX source-free/borrowed branch tests pass. CUDA capture,
-  asynchronous host-control submission and AOT CUDA host WHILE are not added.
+  and asynchronous host-control submission are not added. Exact portable CUDA
+  WHILE now exports through execution plan version 26, including AmgX host
+  operations and explicit reverse kernels. Pair frontend/native ABI 144.
 
 - AmgX device bindings expose an explicit host-controlled Graph action with
   automatic AOT reconstruction from frozen configuration and CSR topology.

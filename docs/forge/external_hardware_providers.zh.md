@@ -1343,8 +1343,10 @@ condition 先写入声明的 selector，再由 host 选择分支。普通执行�
 顺序；跳过分支时既不刷新系数也不求解。Windows CUDA f32 分支导出已用无源码、借用消费者
 验证。retained guess 的冷阶段有效性在分支汇合处取交集，重新 setup 会使它失效。
 这复用现有 host-control 执行器，AmgX 边界仍有 context 同步，整个逻辑 Graph 不承诺一次
-CUDA Graph launch。通用 portable JIT WHILE 已接受 host action；CUDA AOT host-WHILE
-导出及 AmgX 独立 execution domain 仍不支持。GPU portable 控制使用 `Graph.run()`；
+CUDA Graph launch。通用 portable JIT WHILE 接受 host action；精确 CUDA portable 循环
+也可导出为版本 26 的 host WHILE 计划，在无源码消费者执行。零预算、跳过 body、提前退出及
+预算耗尽保持选中的 kernel/provider 次序。AmgX 独立 execution domain 仍不支持。
+GPU portable 控制使用 `Graph.run()`；
 结构化 `Graph.submit()` 的异步准入合同保持。
 
 系数与 RHS 已一起就绪时，可调用 `bound.update_and_solve()`，在一次资源保留的提交内先刷新绑定的 values，

@@ -257,6 +257,24 @@ def test_host_branch_requires_v12_and_preserves_selected_backend(route):
     assert json.loads(ExecutionPlan([nested]).to_json())["version"] == 12
 
 
+def test_host_while_requires_v26_and_preserves_condition_semantics():
+    loop = dict(
+        kind="while", predicate="p", max_iterations=0x7FFFFFFFFFFFFFFF,
+        condition=[], body=[dict(kind="fill32", destination="p", value=1)],
+        continue_while_nonzero=False, lowering=dict(kind="cuda_host", version=1),
+    )
+    plan = ExecutionPlan([loop])
+    document = json.loads(plan.to_json())
+    assert document["version"] == 26 and plan.argument_names == ("p",)
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    with pytest.raises(ValueError, match="version 26"):
+        ExecutionPlan.from_json(json.dumps(dict(document, version=25)))
+    for lowering in (dict(kind="cuda_host", version=2), dict(kind="cuda_host", version=True),
+                     dict(kind="cuda_host", version=1, counter="c")):
+        with pytest.raises(ValueError, match="host while"):
+            ExecutionPlan([dict(loop, lowering=lowering)])
+
+
 def test_masked_branch_requires_v16_flat_kernels_and_all_path_closure():
     kernel = dict(kind="kernel", entry="gated", arguments=["x", "y"])
     branch = dict(

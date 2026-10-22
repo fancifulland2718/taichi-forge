@@ -1782,6 +1782,13 @@ host 分支可以包含原生子块，GPU 原生控制体内包含 host 分支�
 默认策略不变；CUDA auto 自动导出、原生嵌套分支自动导出及分支 binding family
 仍未开放。未取得资格的路线在导出时明确拒绝。显式 host lowering 不能伪装为版本 11。
 
+版本 26 为 WHILE 增加 `{"kind":"cuda_host","version":1}` lowering。精确 CUDA portable
+Graph 循环保留选中的 body+condition 段，包括具有重建合同的 host native 操作。C++ host-control
+执行器准备一次各段、每轮读取 i32 predicate，不展开预算、不回调生产端 Python。零预算仍执行
+一次初始 condition，可能零轮的 body 中初始化的事实不能传到循环后。显式计划也保留
+`continue_while_nonzero` 极性。frontend/native 配套私有 ABI 144；独立 execution domain、
+immutable CUDA binding family、GPU 原生控制内的 host loop 仍未接通；未增加 Vulkan portable WHILE 导出。
+
 版本 16 增加显式 `cuda_masked` 分支 lowering（recipe 1）。它与 v15 循环共用已有
 gated kernel 载荷及根图执行器：condition 使用普通入口，所有 body 使用
 `cuda_graph_gate_v1` 入口；只接受无 launch override 的平坦 kernel 区域。

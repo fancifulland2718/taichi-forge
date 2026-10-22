@@ -1069,6 +1069,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
       if (const auto *loop =
               std::get_if<std::shared_ptr<const aot::ExecutionPlan::While>>(
                   &operation)) {
+        if ((*loop)->cuda_host && (rt.arch != taichi::Arch::cuda || domain))
+          throw MemoryBindingError(
+              "AOT host while requires CUDA without an independent execution domain");
         if ((*loop)->cuda_control && rt.arch != taichi::Arch::cuda)
           throw MemoryBindingError(
               "AOT CUDA control requires a CUDA runtime");
@@ -1537,6 +1540,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
         bound->predicate = control_pointer(loop.predicate);
         bound->max_iterations = loop.max_iterations;
         bound->continue_while_nonzero = loop.continue_while_nonzero;
+        bound->host_control = loop.cuda_host;
         if (loop.cuda_control) {
           bound->cuda_control.emplace();
           bound->cuda_control->encoding = loop.cuda_control->encoding;

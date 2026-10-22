@@ -149,6 +149,30 @@ TEST(ExecutionPlan, HostBranchesRequireV12AndKeepBackendSelection) {
   }
 }
 
+TEST(ExecutionPlan, HostWhileRequiresV26AndKeepsItsSelectedRoute) {
+  const std::string source = R"({"version":26,"operations":[
+    {"kind":"while","predicate":"p","max_iterations":9223372036854775807,
+     "continue_while_nonzero":false,"condition":[],
+     "body":[{"kind":"fill32","destination":"p","value":1}],
+     "lowering":{"kind":"cuda_host","version":1}}]})";
+  const auto plan = ExecutionPlan::parse(source);
+  const auto &loop = *std::get<std::shared_ptr<const ExecutionPlan::While>>(
+      plan.operations[0]);
+  EXPECT_TRUE(loop.cuda_host);
+  EXPECT_FALSE(loop.continue_while_nonzero);
+  EXPECT_FALSE(loop.cuda_control);
+  EXPECT_FALSE(loop.vulkan);
+  EXPECT_EQ(loop.max_iterations, std::uint64_t{9223372036854775807});
+  for (const auto &[from, to] :
+       {std::pair{"\"version\":26", "\"version\":25"},
+        {"\"version\":1", "\"version\":2"},
+        {"\"version\":1", "\"version\":1,\"counter\":\"c\""}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(from), std::string(from).size(), to);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+  }
+}
+
 TEST(ExecutionPlan, BranchKeepsEveryPathAndExplicitLowering) {
   const std::string source = R"({"version":11,"operations":[
     {"kind":"branch","selector":"selector","selection":"indexed",

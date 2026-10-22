@@ -207,6 +207,15 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
                   "Selected control requires execution plan version 4");
             const auto &lowering = found->second;
             const auto kind = name(lowering["kind"]);
+            if (kind == "cuda_host") {
+              fields(lowering, {"kind", "version"});
+              if (version < 26 || integer(lowering["version"]) != 1)
+                throw std::invalid_argument(
+                    "Host while requires execution plan version 26 and lowering version 1");
+              loop->cuda_host = true;
+              operations.emplace_back(std::move(loop));
+              continue;
+            }
             if (kind == "cuda_nested_device_update" ||
                 kind == "cuda_nested_masked" || kind == "cuda_masked") {
               parse_cuda_control(lowering, *loop, arguments, version);

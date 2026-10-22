@@ -160,6 +160,27 @@ def main(mode, artifact, adapter, vendor, dtype):
                 expected = [2 * x + 1 for x in reference(diagonal, [2.125] * N)] if selected else [27] * N
                 near(read(arrays["output"], code), expected, tolerance)
             conditional.close()
+            arrays.pop("choice")
+            arrays["steps"], arrays["limit"] = runtime.ndarray("i32", 1), runtime.ndarray("i32", 1)
+            for budget in (0, 3):
+                plan = modules[1].execution_plan(f"loop{budget}")
+                call = plan.prepare(modules[1], {name: arrays[name] for name in plan.argument_names})
+                for count in (0, 1, 9):
+                    write(arrays["limit"], [count], "i")
+                    write(arrays["solution"], [13] * N, code)
+                    write(arrays["diagonal"], [4], code)
+                    call()
+                    assert read(arrays["steps"], "i") == [min(budget, count)]
+                    expected = [2 * x + 1 for x in reference(4, [2.125] * N)] if min(budget, count) else [27] * N
+                    near(read(arrays["output"], code), expected, tolerance)
+                call.close()
+            # Neither a zero-trip loop nor a possibly skipped body establishes
+            # a retained guess for its suffix, even if its compile budget is positive.
+            document = json.loads(modules[1].execution_plan("loop3").to_json())
+            retained = deepcopy(next(op for op in document["operations"] if op["kind"] == "while")["body"][1])
+            retained["parameters"].update(initial_guess="retained", binding_id="after_loop")
+            document["operations"].insert(-1, retained)
+            raises(lambda: ExecutionPlan.from_json(json.dumps(document)).prepare(modules[1], arrays), "preceding solve")
     if mode == "standalone":
         assert "taichi_forge" not in sys.modules and "numpy" not in sys.modules
 

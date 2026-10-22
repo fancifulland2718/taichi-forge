@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 25
+_MAX_EXECUTION_PLAN_VERSION = 26
 
 
 def _resource_version(resources):
@@ -68,6 +68,8 @@ def _control_version(steps):
                 selected = 14
             if isinstance(lowering, dict) and lowering.get("kind") == "cuda_masked":
                 selected = 15
+            if isinstance(lowering, dict) and lowering.get("kind") == "cuda_host":
+                selected = 26
             version = max(version, selected if "lowering" in op else 3)
             for key in ("condition", "body"):
                 if isinstance(op.get(key), list):
@@ -251,6 +253,10 @@ class ExecutionPlan:
 
         def validate_lowering(op):
             lowering = op["lowering"]
+            if isinstance(lowering, dict) and lowering.get("kind") == "cuda_host":
+                if set(lowering) != {"kind", "version"} or type(lowering["version"]) is not int or lowering["version"] != 1:
+                    raise ValueError("Unsupported host while lowering")
+                return
             if isinstance(lowering, dict) and lowering.get("kind") in (
                 "cuda_nested_device_update",
                 "cuda_nested_masked",

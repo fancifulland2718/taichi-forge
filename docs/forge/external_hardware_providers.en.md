@@ -1712,8 +1712,10 @@ f32 host-branch export is checked with source-free and borrowed consumers. Cold
 retained-guess validity is intersected across branch paths, and setup invalidates
 it. This uses the existing host-control executor, with context synchronization at
 AmgX boundaries, rather than a single CUDA Graph launch. Generic portable JIT
-WHILE accepts host actions; CUDA AOT host-WHILE export and independent execution
-domains for AmgX remain unsupported. Portable GPU control uses `Graph.run()`;
+WHILE accepts host actions; exact portable CUDA loops also export as version 26
+host WHILE plans for source-free replay. Zero budgets, skipped bodies, early exit
+and exhausted budgets preserve the selected kernel/provider order. Independent
+execution domains for AmgX remain unsupported. Portable GPU control uses `Graph.run()`;
 the asynchronous structured `Graph.submit()` contract is unchanged.
 
 Forge owns the thin adapter, buffer/lifetime integration, and its diagnostic

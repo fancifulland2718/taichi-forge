@@ -157,7 +157,10 @@ chunking, so skipped iterations never invoke the host action. This is macro
 Graph composition, not admission to a captured CUDA conditional body.
 Providers still own their synchronization and lifetime contracts. AOT export
 additionally requires the action's reconstruction contract; CUDA host branches
-are supported, while CUDA portable host WHILE export remains unsupported.
+and exact portable CUDA host WHILE are supported. Host WHILE uses execution
+plan version 26 and matching frontend/native ABI 144. The selected body and its
+tail condition are retained; chunked speculative replay is not exported as an
+exact loop. Runtime-only consumers read one predicate scalar per iteration.
 
 | Mode | Meaning |
 | --- | --- |

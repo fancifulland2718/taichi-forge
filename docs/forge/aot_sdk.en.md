@@ -2312,6 +2312,17 @@ Defaults are unchanged. CUDA auto export, automatic export of nested native
 branches and branch binding families remain unavailable. Unqualified routes fail
 explicitly during export. Explicit host lowerings cannot be labeled version 11.
 
+Version 26 adds `{"kind":"cuda_host","version":1}` lowering for WHILE.
+Exact CUDA portable Graph loops preserve their selected body-plus-condition
+segments, including reconstructible host native operations. The C++ host-control
+executor prepares each segment once and reads the i32 predicate each iteration;
+it does not unroll the budget or call back into producer Python. The initial
+condition executes once even at zero budget, and body-only initialization never
+escapes a possibly zero-trip loop. Explicit plans also retain the
+`continue_while_nonzero` polarity. Pair frontend/native ABI 144. Independent
+execution domains, immutable CUDA binding families and host loops inside native
+GPU control remain unqualified; Vulkan portable WHILE export is not added.
+
 Version 16 adds explicit `cuda_masked` branch lowering (recipe 1), sharing the
 gated kernel payload and root graph executor used by v15 loops. The condition
 uses ordinary entries; every body uses `cuda_graph_gate_v1` entries. Regions

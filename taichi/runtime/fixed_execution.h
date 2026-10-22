@@ -99,6 +99,7 @@ class FixedExecution {
     std::vector<Operation> body;
     std::optional<Vulkan> vulkan;
     std::optional<CudaControlRecipe<DevicePtr>> cuda_control;
+    bool host_control{false};
   };
 
   // Optional cold facts chain unconditional phases of one prepared execution.
