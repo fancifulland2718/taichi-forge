@@ -381,7 +381,8 @@ class JITSessionCPU : public JITSession {
     auto symbol = es_.lookup(all_libs_, es_.intern(Name));
 #endif
     if (!symbol)
-      TI_ERROR("Function \"{}\" not found", Name);
+      TI_ERROR("Function \"{}\" not found: {}", Name,
+               llvm::toString(symbol.takeError()));
     return symbol->getAddress().toPtr<void *>();
   }
 
@@ -394,7 +395,8 @@ class JITSessionCPU : public JITSession {
     auto symbol = es_.lookup({lib}, es_.intern(Name));
 #endif
     if (!symbol)
-      TI_ERROR("Function \"{}\" not found", Name);
+      TI_ERROR("Function \"{}\" not found: {}", Name,
+               llvm::toString(symbol.takeError()));
     return symbol->getAddress().toPtr<void *>();
   }
 };

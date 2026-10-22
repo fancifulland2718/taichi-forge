@@ -1791,20 +1791,18 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
                                                    data.cuda_max_registers);
     try {
       bind_cuda_native_functions(jit_module, data.tasks);
+      // Populate ctx
+      ctx->jit_module = jit_module;
+      ctx->snode_tree_ids = compiled.snode_tree_ids();
+      ctx->parameters = std::move(parameters);
+      ctx->offloaded_tasks = std::move(data.tasks);
+      configure_launch_bindings(compiled.get_internal_data(), *ctx);
+      const bool was_inserted = contexts_.emplace(index, std::move(ctx)).second;
+      TI_ASSERT(was_inserted);
     } catch (...) {
       executor->remove_jit_module(jit_module);
       throw;
     }
-
-    // Populate ctx
-    ctx->jit_module = jit_module;
-    ctx->snode_tree_ids = compiled.snode_tree_ids();
-    ctx->parameters = std::move(parameters);
-    ctx->offloaded_tasks = std::move(data.tasks);
-    configure_launch_bindings(compiled.get_internal_data(), *ctx);
-    const bool was_inserted = contexts_.emplace(index, std::move(ctx)).second;
-    TI_ASSERT(was_inserted);
-
     compiled.set_handle(handle);
   } else {
     TI_ERROR_IF(
@@ -1873,19 +1871,18 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
                                                  data.cuda_max_registers);
   try {
     bind_cuda_native_functions(jit_module, data.tasks);
+    ctx->jit_module = jit_module;
+    ctx->snode_tree_ids = compiled.snode_tree_ids();
+    ctx->parameters = std::move(parameters);
+    ctx->offloaded_tasks = std::move(data.tasks);
+    configure_launch_bindings(compiled.get_internal_data(), *ctx);
+    const bool inserted =
+        contexts_.emplace(handle.get_launch_id(), std::move(ctx)).second;
+    TI_ASSERT(inserted);
   } catch (...) {
     executor->remove_jit_module(jit_module);
     throw;
   }
-
-  ctx->jit_module = jit_module;
-  ctx->snode_tree_ids = compiled.snode_tree_ids();
-  ctx->parameters = std::move(parameters);
-  ctx->offloaded_tasks = std::move(data.tasks);
-  configure_launch_bindings(compiled.get_internal_data(), *ctx);
-  const bool inserted =
-      contexts_.emplace(handle.get_launch_id(), std::move(ctx)).second;
-  TI_ASSERT(inserted);
   compiled.set_graph_masked_handle(handle);
   return handle;
 }

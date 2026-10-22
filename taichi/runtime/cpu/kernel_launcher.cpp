@@ -390,40 +390,44 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     auto parameters = internal_data.args;
     auto *jit_module = executor->create_jit_module(std::move(data.module));
 
-    // Construct task_funcs
-    using TaskFunc = int32 (*)(void *);
-    std::vector<TaskFunc> task_funcs;
-    std::vector<OffloadedTaskType> task_types;
-    std::vector<std::pair<std::string, std::string>> task_trace_metadata;
-    std::vector<Context::SparseTaskMetadata> sparse_task_metadata;
-    task_funcs.reserve(data.tasks.size());
-    task_types.reserve(data.tasks.size());
-    task_trace_metadata.reserve(data.tasks.size());
-    sparse_task_metadata.reserve(data.tasks.size());
-    for (auto &task : data.tasks) {
-      ctx->bounded_range |= task.one_to_one;
-      auto *func_ptr = jit_module->lookup_function(task.name);
-      TI_ASSERT_INFO(func_ptr, "Offloaded datum function {} not found",
-                     task.name);
-      task_funcs.push_back((TaskFunc)(func_ptr));
-      task_types.push_back(task.task_type);
-      task_trace_metadata.emplace_back(task.name, task.task_id);
-      sparse_task_metadata.push_back({task.sparse_list_op,
-                                      task.sparse_list_snode_id,
-                                      task.sparse_list_parent_snode_id});
+    try {
+      // Construct task_funcs
+      using TaskFunc = int32 (*)(void *);
+      std::vector<TaskFunc> task_funcs;
+      std::vector<OffloadedTaskType> task_types;
+      std::vector<std::pair<std::string, std::string>> task_trace_metadata;
+      std::vector<Context::SparseTaskMetadata> sparse_task_metadata;
+      task_funcs.reserve(data.tasks.size());
+      task_types.reserve(data.tasks.size());
+      task_trace_metadata.reserve(data.tasks.size());
+      sparse_task_metadata.reserve(data.tasks.size());
+      for (auto &task : data.tasks) {
+        ctx->bounded_range |= task.one_to_one;
+        auto *func_ptr = jit_module->lookup_function(task.name);
+        TI_ASSERT_INFO(func_ptr, "Offloaded datum function {} not found",
+                       task.name);
+        task_funcs.push_back((TaskFunc)(func_ptr));
+        task_types.push_back(task.task_type);
+        task_trace_metadata.emplace_back(task.name, task.task_id);
+        sparse_task_metadata.push_back({task.sparse_list_op,
+                                        task.sparse_list_snode_id,
+                                        task.sparse_list_parent_snode_id});
+      }
+
+      // Populate ctx
+      ctx->jit_module = jit_module;
+      ctx->snode_tree_ids = compiled.snode_tree_ids();
+      ctx->parameters = std::move(parameters);
+      ctx->task_funcs = std::move(task_funcs);
+      ctx->task_types = std::move(task_types);
+      ctx->task_trace_metadata = std::move(task_trace_metadata);
+      ctx->sparse_task_metadata = std::move(sparse_task_metadata);
+      const bool was_inserted = contexts_.emplace(index, std::move(ctx)).second;
+      TI_ASSERT(was_inserted);
+    } catch (...) {
+      executor->remove_jit_module(jit_module);
+      throw;
     }
-
-    // Populate ctx
-    ctx->jit_module = jit_module;
-    ctx->snode_tree_ids = compiled.snode_tree_ids();
-    ctx->parameters = std::move(parameters);
-    ctx->task_funcs = std::move(task_funcs);
-    ctx->task_types = std::move(task_types);
-    ctx->task_trace_metadata = std::move(task_trace_metadata);
-    ctx->sparse_task_metadata = std::move(sparse_task_metadata);
-    const bool was_inserted = contexts_.emplace(index, std::move(ctx)).second;
-    TI_ASSERT(was_inserted);
-
     compiled.set_handle(handle);
   }
   return *compiled.get_handle();

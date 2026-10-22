@@ -8,7 +8,39 @@
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #endif
 
+#ifdef TI_WITH_LLVM
+#include "taichi/runtime/cpu/kernel_launcher.h"
+#include "taichi/runtime/program_impls/llvm/llvm_program.h"
+#endif
+
 namespace taichi::lang {
+
+#ifdef TI_WITH_LLVM
+TEST(KernelRegistrationFailure, MissingSymbolDoesNotPublishContext) {
+  TestProgram test;
+  test.setup(Arch::x64);
+  auto *program = test.prog();
+  auto kernel = setup_kernel1(program);
+  const auto &compiled = dynamic_cast<const LLVM::CompiledKernelData &>(
+      program->compile_kernel(program->compile_config(),
+                              program->get_device_caps(), *kernel));
+  auto *executor =
+      dynamic_cast<LlvmProgramImpl *>(program->get_program_impl())
+          ->get_runtime_executor();
+  cpu::KernelLauncher launcher(LLVM::KernelLauncher::Config{executor});
+  auto broken_data = compiled.get_internal_data();
+  ASSERT_FALSE(broken_data.compiled_data.tasks.empty());
+  broken_data.compiled_data.tasks.front().name = "missing_registration_entry";
+  LLVM::CompiledKernelData broken(Arch::x64, std::move(broken_data));
+  EXPECT_ANY_THROW(launcher.register_llvm_kernel(broken));
+  EXPECT_FALSE(broken.get_handle());
+  EXPECT_EQ(launcher.debug_registered_kernel_count(), 0);
+  launcher.register_llvm_kernel(compiled);
+  EXPECT_TRUE(compiled.get_handle());
+  EXPECT_EQ(launcher.debug_registered_kernel_count(), 1);
+  launcher.retire_all_kernels();
+}
+#endif
 
 TEST(IRBuilder, Basic) {
   IRBuilder builder;
