@@ -3,6 +3,8 @@
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_execution_queue.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
+#include "taichi/codegen/spirv/spirv_ir_builder.h"
+#include "taichi/runtime/gfx/runtime.h"
 
 #include <chrono>
 #include <set>
@@ -155,7 +157,176 @@ bool ready_before_deadline(const vulkan::VulkanExecutionQueue::Point &point) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   return point->is_ready();
 }
+
+gfx::GfxRuntime::KernelHandle temporary_counter(gfx::GfxRuntime &runtime,
+                                               int root,
+                                               bool diagnostic = false) {
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::spirv_version, 0x10300);
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto temp = builder.buffer_argument(builder.u32_type(), 0, 0, "temporary");
+  const auto out = builder.buffer_argument(builder.u32_type(), 0, 1, "output");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+  const auto pointer = builder.struct_array_access(
+      builder.u32_type(), temp, builder.const_i32_zero_);
+  const auto value = builder.add(builder.load_variable(pointer, builder.u32_type()),
+                                  builder.uint_immediate_number(builder.u32_type(), 1));
+  builder.store_variable(pointer, value);
+  builder.store_variable(builder.struct_array_access(
+                             builder.u32_type(), out, builder.const_i32_zero_), value);
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+  builder.commit_kernel_function(function, "main", {}, {1, 1, 1});
+  gfx::GfxRuntime::RegisterParams params;
+  params.num_snode_trees = 1;
+  params.root_buffer_bindings = {root};
+  params.snode_tree_ids = {root};
+  spirv::TaskAttributes task;
+  task.name = "private_temporary_counter";
+  task.task_type = OffloadedTaskType::serial;
+  task.advisory_total_num_threads = task.advisory_num_threads_per_group = 1;
+  using Buffer = spirv::TaskAttributes::BufferType;
+  task.buffer_binds = {{diagnostic ? Buffer::HashOverflow : Buffer::GlobalTmps, 0},
+                       {{Buffer::Root, 0}, 1}};
+  params.kernel_attribs.tasks_attribs = {task};
+  params.task_spirv_source_codes = {builder.finalize()};
+  return runtime.register_taichi_kernel(std::move(params));
+}
 }  // namespace
+
+TEST(VulkanFixedCommands, PrivateTemporariesPersistWithoutDefaultQueueProgress) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  gfx::GfxRuntime::Params params;
+  params.device = &device;
+  gfx::GfxRuntime runtime(params);
+  for (int i = 0; i < 3; ++i)
+    runtime.add_root_buffer(4);
+  const auto ordinary = temporary_counter(runtime, 2);
+  CallableBase callable;
+  LaunchContextBuilder context(&callable);
+  runtime.launch_kernel(ordinary, context);
+  runtime.synchronize();
+  using Queue = vulkan::VulkanExecutionQueue;
+  Queue left(device, 2), right(device, 2);
+  std::array<Queue *, 2> queues{&left, &right};
+  std::array<std::shared_ptr<const Queue::Commands>, 2> prepared;
+  std::array<std::shared_ptr<DeviceAllocationGuard>, 2> outputs;
+  std::shared_ptr<const Queue::Commands> continuation;
+  for (int i = 0; i < 2; ++i) {
+    auto workspace = runtime.create_fixed_graph_workspace();
+    EXPECT_EQ(workspace->bytes(), 0u);
+    const auto kernel = temporary_counter(runtime, i);
+    auto [output, status] = device.allocate_memory_unique(
+        {4, false, true, false, AllocUsage::Storage});
+    ASSERT_EQ(status, RhiResult::success);
+    outputs[i] = std::move(output);
+    gfx::GfxRuntime::GraphRecordingOperation copy;
+    copy.inline_recording = true;
+    const auto root = *runtime.get_root_buffer(i);
+    copy.buffers = std::vector<DeviceAllocation>{root, *outputs[i]};
+    copy.external = [root, output = outputs[i]](Device *, CommandList *commands) {
+      commands->buffer_copy(output->get_ptr(), root.get_ptr(), 4);
+      commands->memory_barrier();
+    };
+    const std::vector<gfx::GfxRuntime::GraphRecordingOperation> operations{
+        {{kernel, &context}, {}}, copy};
+    const auto before = device.queue_submission_snapshot();
+    auto payload = runtime.prepare_fixed_commands(
+        operations, queues[i]->new_command_list(), workspace, {outputs[i]}, {i});
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls,
+              before.queue_submit_calls);
+    EXPECT_GT(workspace->bytes(), 0u);
+    prepared[i] = queues[i]->prepare({payload->cmdlist.get()}, payload);
+    if (i == 0) {
+      auto next = runtime.prepare_fixed_commands(
+          operations, queues[i]->new_command_list(), workspace, {outputs[i]}, {i});
+      continuation = queues[i]->prepare({next->cmdlist.get()}, next);
+    }
+    auto initialize = queues[i]->new_command_list();
+    workspace->record_initialization(*initialize);
+    EXPECT_ANY_THROW(workspace->record_initialization(*initialize));
+    ASSERT_TRUE(queues[i]->submit(queues[i]->prepare({initialize.get()}, workspace))->wait());
+  }
+  const auto read = [&](int index) {
+    void *mapped = nullptr;
+    if (device.map(*outputs[index], &mapped) != RhiResult::success) {
+      ADD_FAILURE() << "Cannot map readback";
+      return uint32_t(0);
+    }
+    const auto value = *static_cast<const uint32_t *>(mapped);
+    device.unmap(*outputs[index]);
+    return value;
+  };
+  {
+    TimelineGate ordinary_gate(device, 0);
+    TimelineGate left_gate(device, left.queue_index());
+    const auto pending = left.submit(prepared[0]);
+    for (uint32_t expected : {1, 2}) {
+      ASSERT_TRUE(ready_before_deadline(right.submit(prepared[1])));
+      EXPECT_EQ(read(1), expected);
+      EXPECT_FALSE(pending->is_ready());
+    }
+    left_gate.release();
+    ASSERT_TRUE(ready_before_deadline(pending));
+    EXPECT_EQ(read(0), 1u);
+    ASSERT_TRUE(ready_before_deadline(left.submit(continuation)));
+    EXPECT_EQ(read(0), 2u);
+  }
+  // Both instances leave the original runtime's mutable temporary untouched.
+  runtime.launch_kernel(ordinary, context);
+  runtime.synchronize();
+  auto source = runtime.get_root_buffer(2)->get_ptr();
+  uint32_t value = 0;
+  void *host = &value;
+  std::size_t bytes = sizeof(value);
+  ASSERT_EQ(device.readback_data(&source, &host, &bytes, 1), RhiResult::success);
+  EXPECT_EQ(value, 2u);
+  left.close();
+  right.close();
+}
+
+TEST(VulkanFixedCommands, RejectsSharedStateAndUnqualifiedCallbacksBeforeRecording) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  gfx::GfxRuntime::Params params;
+  params.device = &device;
+  gfx::GfxRuntime runtime(params);
+  runtime.add_root_buffer(4);
+  CallableBase callable;
+  LaunchContextBuilder context(&callable);
+  const auto shared = temporary_counter(runtime, 0, true);
+  const auto normal = temporary_counter(runtime, 0);
+  vulkan::VulkanExecutionQueue queue(device, 1);
+  auto workspace = runtime.create_fixed_graph_workspace();
+  bool called = false;
+  gfx::GfxRuntime::GraphRecordingOperation external;
+  external.external = [&](Device *, CommandList *) { called = true; };
+  const auto before = device.queue_submission_snapshot();
+  EXPECT_ANY_THROW(runtime.prepare_fixed_commands(
+      {external}, queue.new_command_list(), workspace, {}));
+  EXPECT_FALSE(called);
+  EXPECT_ANY_THROW(runtime.prepare_fixed_commands(
+      {{{shared, &context}, {}}}, queue.new_command_list(), workspace, {}, {0}));
+  EXPECT_EQ(workspace->bytes(), 0u);
+  auto initialization = queue.new_command_list();
+  workspace->record_initialization(*initialization);
+  EXPECT_ANY_THROW(runtime.prepare_fixed_commands(
+      {{{normal, &context}, {}}}, queue.new_command_list(), workspace, {}, {0}));
+  EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls,
+            before.queue_submit_calls);
+  EXPECT_FALSE(queue.latest());
+}
 
 TEST(VulkanExecutionQueue, PhysicalLeasesAreExclusiveAndReusable) {
   if (!vulkan::is_vulkan_api_available())

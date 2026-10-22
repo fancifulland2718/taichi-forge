@@ -572,6 +572,32 @@ class TI_DLL_EXPORT GfxRuntime {
       std::vector<int> snode_tree_ids = {},
       bool independent_graphics = false,
       std::shared_ptr<std::vector<std::pair<std::string, StreamGpuTiming>>> *timings = nullptr);
+  // Cold per-instance state shared by the instance's initialization/replay
+  // segments. Allocation is lazy; initialization is recorded once, after all
+  // segments are prepared, and must precede their first execution.
+  class FixedGraphWorkspace {
+   public:
+    void record_initialization(CommandList &commands);
+    std::size_t bytes() const;
+
+   private:
+    friend class GfxRuntime;
+    explicit FixedGraphWorkspace(Device *device) : device_(device) {}
+    Device *device_;
+    std::shared_ptr<DeviceAllocationGuard> global_tmps_;
+    bool initialization_recorded_{false};
+  };
+  std::shared_ptr<FixedGraphWorkspace> create_fixed_graph_workspace();
+  // Produce immutable buffer-only commands for a caller-owned compute queue.
+  // No default-queue submit, registration or replay closure is created. The
+  // caller owns code/runtime retirement and must retain the returned payload
+  // through every use of its primary command list.
+  std::shared_ptr<GraphReplayExecutable::Slot> prepare_fixed_commands(
+      const std::vector<GraphRecordingOperation> &operations,
+      std::unique_ptr<CommandList> commands,
+      const std::shared_ptr<FixedGraphWorkspace> &workspace,
+      std::vector<std::shared_ptr<void>> owners,
+      std::vector<int> snode_tree_ids = {});
   // Record the existing GPU-controlled strategy without executing it. Contexts
   // are cold-only; owners retain code and external storage through retirement.
   std::unique_ptr<GraphReplayRegistration> prepare_fixed_structured_graph(
@@ -779,6 +805,15 @@ class TI_DLL_EXPORT GfxRuntime {
   GraphReplayStats snapshot_graph_replay_stats(uint64_t replay_token);
   void collect_ready_graph_replays(std::size_t max_polls);
   struct FixedSparseReplayResources;
+  GraphReplayState record_fixed_graph(
+      const std::vector<GraphRecordingOperation> &operations,
+      std::vector<std::shared_ptr<void>> owners,
+      std::vector<int> snode_tree_ids,
+      bool independent_graphics,
+      bool timings,
+      std::shared_ptr<GraphReplayExecutable::Slot> detached = {},
+      std::unique_ptr<CommandList> commands = {},
+      const std::shared_ptr<FixedGraphWorkspace> &workspace = {});
   void prepare_fixed_sparse_resources(
       FixedSparseReplayResources &resources,
       std::vector<std::shared_ptr<void>> &owners);

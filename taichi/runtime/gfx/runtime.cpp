@@ -2881,7 +2881,8 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
                      int task_index,
                      ShaderResourceSet *bindings,
                      bool patch_existing,
-                     DeviceAllocation *listgen = nullptr) {
+                     DeviceAllocation *listgen = nullptr,
+                     DeviceAllocation *global_tmps = nullptr) {
   for (const auto &bind : pd.kernel->buffer_binding_plan(task_index)) {
     if (bind.binding < 0) {
       continue;
@@ -2889,11 +2890,16 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
     switch (bind.kind) {
       case CompiledTaichiKernel::BufferBindingKind::Skip:
         break;
-      case CompiledTaichiKernel::BufferBindingKind::StaticRw:
-        bindings->rw_buffer(bind.binding, bind.static_alloc
-                                              ? *bind.static_alloc
-                                              : kDeviceNullAllocation);
+      case CompiledTaichiKernel::BufferBindingKind::StaticRw: {
+        const auto *allocation =
+            global_tmps && bind.buffer.type ==
+                               spirv::TaskAttributes::BufferType::GlobalTmps
+                ? global_tmps
+                : bind.static_alloc;
+        bindings->rw_buffer(bind.binding,
+                            allocation ? *allocation : kDeviceNullAllocation);
         break;
+      }
       case CompiledTaichiKernel::BufferBindingKind::StaticLookupRw: {
         auto *allocation =
             listgen && bind.buffer.type ==
@@ -3040,6 +3046,60 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   // (registry -> runtime is also the order used by reset and late destruction).
   auto registration = register_graph_replay(1);
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  auto state = record_fixed_graph(operations, std::move(owners),
+                                  std::move(snode_tree_ids),
+                                  independent_graphics, timings != nullptr);
+  if (timings)
+    *timings = state.fixed_gpu_timings;
+  graph_replay_states_.emplace(registration->replay_key(), std::move(state));
+  return registration;
+}
+
+std::shared_ptr<GfxRuntime::FixedGraphWorkspace>
+GfxRuntime::create_fixed_graph_workspace() {
+  return std::shared_ptr<FixedGraphWorkspace>(new FixedGraphWorkspace(device_));
+}
+
+std::size_t GfxRuntime::FixedGraphWorkspace::bytes() const {
+  return global_tmps_ ? kGtmpBufferSize : 0;
+}
+
+void GfxRuntime::FixedGraphWorkspace::record_initialization(
+    CommandList &commands) {
+  TI_ERROR_IF(initialization_recorded_,
+              "Fixed Graph workspace initialization was already recorded");
+  if (global_tmps_) {
+    commands.buffer_fill(global_tmps_->get_ptr(), kGtmpBufferSize, 0);
+    commands.memory_barrier();
+  }
+  initialization_recorded_ = true;
+}
+
+std::shared_ptr<GfxRuntime::GraphReplayExecutable::Slot>
+GfxRuntime::prepare_fixed_commands(
+    const std::vector<GraphRecordingOperation> &operations,
+    std::unique_ptr<CommandList> commands,
+    const std::shared_ptr<FixedGraphWorkspace> &workspace,
+    std::vector<std::shared_ptr<void>> owners,
+    std::vector<int> snode_tree_ids) {
+  TI_ERROR_IF(!commands || !workspace || workspace->device_ != device_,
+              "Detached Graph requires owned commands and same-device workspace");
+  auto payload = std::make_shared<GraphReplayExecutable::Slot>();
+  record_fixed_graph(operations, std::move(owners), std::move(snode_tree_ids),
+                     false, false, payload, std::move(commands), workspace);
+  return payload;
+}
+
+GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
+    const std::vector<GraphRecordingOperation> &operations,
+    std::vector<std::shared_ptr<void>> owners,
+    std::vector<int> snode_tree_ids,
+    bool independent_graphics,
+    bool timings,
+    std::shared_ptr<GraphReplayExecutable::Slot> detached,
+    std::unique_ptr<CommandList> commands,
+    const std::shared_ptr<FixedGraphWorkspace> &workspace) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   TI_ERROR_IF(
       operations.empty() || profiler_ || dispatch_cache_,
       "Prepared Vulkan Graph requires nonempty uninstrumented commands");
@@ -3052,7 +3112,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   }
   auto &executable = state.executable;
   executable.bind_device(device_);
-  auto payload = std::make_shared<GraphReplayExecutable::Slot>();
+  auto payload = detached ? detached : std::make_shared<GraphReplayExecutable::Slot>();
   auto &slot = *payload;
   slot.retained_owners = std::move(owners);
   for (const int tree_id : snode_tree_ids) {
@@ -3071,6 +3131,18 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   TI_ERROR_IF(graphics_queue && !graphics_device,
               "Prepared mixed Graph requires a graphics device");
   for (const auto &operation : operations) {
+    TI_ERROR_IF(detached &&
+                    (operation.graphics_queue || !operation.images.empty() ||
+                     !operation.graphics_pipelines.empty() ||
+                     !operation.ray_resources.empty() ||
+                     (operation.external &&
+                      (!operation.inline_recording || !operation.buffers))),
+                "Detached Graph requires described buffer-only inline commands");
+    if (detached && operation.buffers) {
+      for (const auto &buffer : *operation.buffers)
+        TI_ERROR_IF(buffer.device != device_ || !buffer.alloc_id,
+                    "Detached Graph buffer belongs to another device or is closed");
+    }
     state.fixed_graphics_pipelines.insert(state.fixed_graphics_pipelines.end(),
                                           operation.graphics_pipelines.begin(),
                                           operation.graphics_pipelines.end());
@@ -3079,6 +3151,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
                                      operation.ray_resources.end());
   }
   std::vector<GraphReplayExecutable::PreparedDispatch> prepared;
+  bool uses_global_tmps = false;
   FixedSparseReplayResources sparse;
   using ImageBinding = std::pair<DeviceAllocation, ImageLayout>;
   std::vector<ImageBinding> entry_images;
@@ -3125,7 +3198,19 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
                 "Prepared Vulkan indirect dispatch requires one task and an "
                 "aligned device packet");
     for (std::size_t i = 0; i < tasks.size(); ++i) {
+      TI_ERROR_IF(detached &&
+                      (!tasks[i].texture_binds.empty() ||
+                       !tasks[i].acceleration_structure_binds.empty() ||
+                       tasks[i].may_mutate_sparse_topology),
+                  "Detached Graph requires buffer-only kernels without sparse mutation");
       for (const auto &bind : kernel->buffer_binding_plan(i)) {
+        using BufferType = spirv::TaskAttributes::BufferType;
+        uses_global_tmps |= bind.buffer.type == BufferType::GlobalTmps;
+        TI_ERROR_IF(detached &&
+                        (bind.buffer.type == BufferType::ListGen ||
+                         bind.buffer.type == BufferType::HashOverflow ||
+                         bind.buffer.type == BufferType::NodeAllocatorPool),
+                    "Detached Graph cannot borrow shared sparse runtime state");
         TI_ERROR_IF(
             bind.kind == CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray,
             "Unsupported prepared Vulkan Graph resource binding");
@@ -3134,6 +3219,21 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     sparse.include(*kernel);
     prepared.push_back(
         {kernel, dispatch.host_ctx, nullptr, nullptr, packet});
+  }
+  if (detached) {
+    TI_ERROR_IF(sparse.uses_listgen || sparse.unknown_mutation ||
+                    !sparse.mutated_trees.empty(),
+                "Detached Graph cannot borrow shared sparse runtime state");
+    if (uses_global_tmps && !workspace->global_tmps_) {
+      TI_ERROR_IF(workspace->initialization_recorded_,
+                  "Fixed Graph workspace was sealed before temporary storage preparation");
+      auto [buffer, result] = device_->allocate_memory_unique(
+          {kGtmpBufferSize, false, false, false, AllocUsage::Storage});
+      TI_ERROR_IF(result != RhiResult::success,
+                  "Fixed Graph private temporary allocation failed");
+      workspace->global_tmps_ = std::move(buffer);
+    }
+    slot.retained_owners.push_back(workspace);
   }
   prepare_fixed_sparse_resources(sparse, slot.retained_owners);
   const auto &listgen = sparse.listgen;
@@ -3213,17 +3313,16 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
       blitter->host_to_device(*pd.any_arrays, {});
     }
   }
-  std::unique_ptr<CommandList> commands;
   std::unique_ptr<CommandList> prefix_commands;
   std::unique_ptr<CommandList> graphics_commands;
-  if (!graphics_queue &&
+  if (!detached && !graphics_queue &&
       std::all_of(operations.begin(), operations.end(),
                   [](const auto &operation) {
                     return !operation.external || operation.inline_recording;
                   })) {
     commands = device_->get_compute_stream()->new_secondary_command_list();
   }
-  state.fixed_secondary = bool(commands);
+  state.fixed_secondary = !detached && bool(commands);
   if (!commands) {
     auto *stream = graphics_queue && !independent_graphics
                        ? graphics_device->get_graphics_stream()
@@ -3422,7 +3521,8 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
         }
       }
       TI_ERROR_IF(
-          !bind_graph_task(pd, i, resources.get(), false, listgen.get()),
+          !bind_graph_task(pd, i, resources.get(), false, listgen.get(),
+                           workspace ? workspace->global_tmps_.get() : nullptr),
           "Prepared Vulkan Graph descriptor preparation failed");
       if (tasks[i].task_type == OffloadedTaskType::listgen) {
         commands->buffer_fill(listgen->get_ptr(0), sizeof(uint32_t), 0);
@@ -3461,6 +3561,11 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   }
   for (auto bytes : slot.args_buffer_sizes) {
     state.fixed_argument_bytes += bytes;
+  }
+  if (detached) {
+    slot.cmdlist = std::move(commands);
+    slot.recorded = true;
+    return state;
   }
   if (independent_graphics) {
     slot.cmdlist = std::move(prefix_commands);
@@ -3548,11 +3653,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
         };
   }
   attach_fixed_sparse_resources(state, std::move(sparse));
-  if (timings) {
-    *timings = state.fixed_gpu_timings;
-  }
-  graph_replay_states_.emplace(registration->replay_key(), std::move(state));
-  return registration;
+  return state;
 }
 
 std::unique_ptr<GraphReplayRegistration>
