@@ -114,8 +114,9 @@ combination. Consult the linked API contracts and capability queries for exact s
   reusing native pack storage and recording. Consumers can create public owners by argument name
   with `ExecutionPlan.argpack()` and reuse them across kernel argument positions. Frozen export
   may share a dispatch with public packs, preserving resource and explicit gradient bindings. It
-  shares equivalent storage for repeated uses of one source pack. Automatic image/AS members
-  and legacy CGraph serialization remain separate follow-up work.
+  shares equivalent storage for repeated uses of one source pack. Image members reuse image
+  reconstruction, public bindings and alias preflight; compiler texture expressions no longer
+  enter device-value uploads. Automatic AS members and legacy CGraph serialization remain follow-ups.
 - Native sort/compact, scan/reduce, transform, gather/scatter and grouped/segmented recording/AOT
   routes support more layouts. Coverage remains specific to operation, backend, type and strategy.
   Packed Field/vector/matrix routes reuse existing cores, preserving stable order, payload bits and aliases.

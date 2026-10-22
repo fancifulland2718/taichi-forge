@@ -94,7 +94,8 @@
   自动导出 CPU/CUDA/Vulkan 顺序执行计划；独立实例复用已有原生包存储和录制。
   公开消费端可用 `ExecutionPlan.argpack()` 按参数名创建 owner，跨 kernel 参数位置复用；
   同一 dispatch 可混用公开和源冻结包，保留各自的资源与显式梯度绑定。
-  固定导出合并同一源包的等价只读存储。image/AS 成员自动重建与旧 CGraph 序列化继续单独处理。
+  固定导出合并同一源包的等价只读存储。image 成员复用图像重建、公开绑定和别名预检，
+  修复编译期纹理表达式误走设备值上传；AS 成员自动重建与旧 CGraph 序列化继续单独处理。
 - 扩大原生 sort/compact、scan/reduce、transform、gather/scatter、grouped/segmented
   操作在 recording/AOT 中的布局覆盖；支持范围依操作、后端、类型和策略而定。
   packed Field/vector/matrix 路线复用既有核心，保留稳定顺序、载荷位模式与别名规则。

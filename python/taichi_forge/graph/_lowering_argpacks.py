@@ -25,6 +25,34 @@ class SourceArgPacks:
         if self.owners.keys() - self.used:
             raise ValueError("source_bindings contains ArgPacks unused by the exported Graph")
 
+    @staticmethod
+    def members(argument, value, path=()):
+        if argument.tag == core.ArgKind.ARGPACK:
+            if (
+                not isinstance(value, ArgPack)
+                or value._ArgPack__argpack is None
+                or value._ArgPack__runtime_prog is not impl.get_runtime().prog
+                or value._ArgPack__dtype != argument.dtype()
+            ):
+                raise TaichiRuntimeError("Fixed Graph ArgPack requires a live matching value type")
+            children = dict(value.items)
+            if list(children) != [member.name for member in argument.members]:
+                raise TaichiRuntimeError("Fixed Graph ArgPack member names differ from its compiled signature")
+            yield path, argument, value
+            for index, member in enumerate(argument.members):
+                yield from SourceArgPacks.members(member, children[member.name], path + (index,))
+        else:
+            yield path, argument, value
+
+    def preflight(self, context, requirements):
+        # Include later writes before an earlier use reconstructs a shared image.
+        # The frozen Graph supplies logical contracts, never byte offsets.
+        for symbol in requirements:
+            if symbol.name in self.owners:
+                for _, argument, value in self.members(symbol, self.owners[symbol.name]):
+                    if argument.tag in (core.ArgKind.TEXTURE, core.ArgKind.RWTEXTURE, core.ArgKind.TEXTURE_COLLECTION):
+                        context.source_images.validate_retained_argument(context.arch, argument, value)
+
     def bind(self, context, symbol, entry, index, jit_source):
         owner = self.owners.get(symbol.name)
         if owner is None or jit_source is None:
@@ -37,29 +65,18 @@ class SourceArgPacks:
         native, dispatch = jit_source
         packs, resources = {}, {}
 
-        def visit(argument, value, path):
+        for path, argument, value in self.members(symbol, owner, (index,)):
             if argument.tag == core.ArgKind.ARGPACK:
-                if (
-                    not isinstance(value, ArgPack)
-                    or value._ArgPack__argpack is None
-                    or value._ArgPack__runtime_prog is not impl.get_runtime().prog
-                    or value._ArgPack__dtype != argument.dtype()
-                ):
-                    raise TaichiRuntimeError("Fixed Graph ArgPack requires a live matching value type")
-                children = dict(value.items)
-                if list(children) != [member.name for member in argument.members]:
-                    raise TaichiRuntimeError("Fixed Graph ArgPack member names differ from its compiled signature")
                 packs[path] = value._ArgPack__argpack
-                for member_index, member in enumerate(argument.members):
-                    visit(member, children[member.name], path + (member_index,))
             elif argument.tag == core.ArgKind.NDARRAY:
                 name = context.retained_arrays.require(value)
                 context.source_arrays.validate_kernel([argument], [name])
                 resources[path] = name
+            elif argument.tag in (core.ArgKind.TEXTURE, core.ArgKind.RWTEXTURE, core.ArgKind.TEXTURE_COLLECTION):
+                resources[path] = context.source_images.retained_kernel_resource(context, argument, value)
             elif argument.tag not in (core.ArgKind.SCALAR, core.ArgKind.MATRIX, core.ArgKind.STRUCT):
-                raise TaichiRuntimeError("Fixed Graph ArgPack currently requires value or ndarray members")
+                raise TaichiRuntimeError("Fixed Graph ArgPack requires supported value, ndarray or image members")
 
-        visit(symbol, owner, (index,))
         layout, payloads = native._snapshot_argpack(dispatch, index, packs)
         signature = json.loads(layout)
         signature["logical_argument"] = 0

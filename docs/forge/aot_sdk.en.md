@@ -1950,6 +1950,16 @@ storage do not enter the snapshot. Repeated uses of one source pack with equal
 layouts and values share immutable storage within one plan, across kernel
 argument positions. Independent preparations still rebuild private storage.
 
+Frozen image members reuse ordinary image contracts: sampled Texture on CUDA/Vulkan,
+plus RWTexture and TextureCollection on Vulkan. Supply consumer initialization with
+`resource_bindings={image: {"pixels": "pixels"}}`, or a public consumer owner with
+`{image: "public_image"}`. Producer image contents are never copied implicitly.
+Export preflight combines ordinary and packed read/write uses, preserving
+sample/write/sample aliases and repeated collection members. Windows checks cover
+ordinary packed sampling, reconstruction, public images and actual downstream
+ndarray adjoints. This does not make texture sampling differentiable or qualify
+independent CUDA-domain image borrowing.
+
 Omitting the pack from `source_bindings` preserves a public logical input.
 Create it with `packet = plan.argpack(loaded_module, "pack", values,
 gradients=...)`, then call `plan.prepare(loaded_module, {"pack": packet, ...})`.
@@ -1960,7 +1970,7 @@ parameter names; preparation validates all uses. Multiple packs in a single
 kernel dispatch may mix public and source-frozen owners. Cold preparation expands
 public owners and connects frozen resource members using compiled argument origins;
 both retain their explicit gradient bindings. Isolated checks cover sequential plans,
-explicit adjoints and independent instances. Automatic image/AS members, legacy
+explicit adjoints and independent instances. Automatic AS members, legacy
 CGraph serialization and other fixed physical strategies need separate
 qualification. Normal installations have not yet been refreshed with this slice.
 

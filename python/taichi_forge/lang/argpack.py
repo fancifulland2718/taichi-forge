@@ -203,6 +203,7 @@ class ArgPack:
                 or isinstance(anno, ndarray_type.NdarrayType)
                 or isinstance(anno, texture_type.TextureType)
                 or isinstance(anno, texture_type.RWTextureType)
+                or isinstance(anno, texture_type.TextureCollectionType)
                 or isinstance(anno, ndarray_type.NdarrayType)
             ):
                 old_index -= 1
@@ -233,6 +234,10 @@ class ArgPack:
             elif isinstance(needed, texture_type.TextureType) and isinstance(v, taichi_forge.lang._texture.Texture):
                 pass
             elif isinstance(needed, texture_type.RWTextureType) and isinstance(v, taichi_forge.lang._texture.Texture):
+                pass
+            elif isinstance(needed, texture_type.TextureCollectionType) and isinstance(
+                v, taichi_forge.lang._texture.TextureCollection
+            ):
                 pass
             elif isinstance(needed, ndarray_type.NdarrayType):
                 pass
@@ -275,6 +280,11 @@ class _IntermediateArgPack(ArgPack):
         annotations (Dict[str, Union[Expr, Matrix, Struct]]): keys and types for struct members.
         entries (Dict[str, Union[Expr, Matrix, Struct]]): keys and values for struct members.
     """
+
+    def __setitem__(self, key, value):
+        # Deferred resources are compiler expressions (samplers/accessors/etc.),
+        # not host values to validate and upload into a managed device pack.
+        self._ArgPack__entries[key] = value
 
     def __init__(self, annotations, dtype, *args, **kwargs):
         # converts dicts to argument packs
@@ -329,6 +339,8 @@ class ArgPackType(CompoundType):
             elif isinstance(dtype, texture_type.RWTextureType):
                 self.members[k] = dtype
             elif isinstance(dtype, texture_type.TextureType):
+                self.members[k] = dtype
+            elif isinstance(dtype, texture_type.TextureCollectionType):
                 self.members[k] = dtype
             else:
                 dtype = cook_dtype(dtype)
@@ -392,6 +404,8 @@ class ArgPackType(CompoundType):
             elif isinstance(dtype, texture_type.RWTextureType):
                 entries[k] = pack._ArgPack__entries[k]
             elif isinstance(dtype, texture_type.TextureType):
+                entries[k] = pack._ArgPack__entries[k]
+            elif isinstance(dtype, texture_type.TextureCollectionType):
                 entries[k] = pack._ArgPack__entries[k]
             elif isinstance(dtype, sparse_matrix_builder):
                 entries[k] = pack._ArgPack__entries[k]

@@ -83,6 +83,12 @@ class SourceImageBindings:
 
     def validate_argument(self, arch, arg):
         owner = self.require(arg.name)
+        self.validate_retained_argument(arch, arg, owner)
+
+    def validate_retained_argument(self, arch, arg, owner):
+        if type(owner) not in (Texture, TextureCollection):
+            raise TaichiRuntimeError("AOT image requires a Texture or TextureCollection source")
+        self._validate_owner(owner)
         if arg.tag == core.ArgKind.TEXTURE_COLLECTION:
             if (
                 arch != core.Arch.vulkan
@@ -107,7 +113,7 @@ class SourceImageBindings:
             )
             if not matches:
                 raise TaichiRuntimeError("AOT RWTexture format differs from the Graph kernel argument")
-            self.require_storage(arg.name, owner)
+            self._storage_owners.add(id(owner))
         elif arg.tag != core.ArgKind.TEXTURE or not is_float_sampled_texture_format(fmt):
             raise TaichiRuntimeError("AOT sampled Texture requires a floating sampling format")
 
@@ -208,6 +214,13 @@ class SourceImageBindings:
     def kernel_resource(self, context, arg):
         self.validate_argument(context.arch, arg)
         return self.resource(context, arg.name)
+
+    def retained_kernel_resource(self, context, arg, owner):
+        self.validate_retained_argument(context.arch, arg, owner)
+        self.used.update(name for name, source in self.owners.items() if source is owner)
+        if type(owner) is TextureCollection:
+            return self._collection_resource(context, owner)
+        return self._image_resource(context, owner)
 
     def validate_used(self):
         if self.owners.keys() - self.used:

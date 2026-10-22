@@ -10211,9 +10211,13 @@ def _discover_cuda_recording_partition_sources(source_nodes, backend):
 def _graph_resource_binding_requirements(nodes):
     """Collect frozen symbolic resource contracts, never inspect replay values."""
     requirements = {}
+    packs = []
 
     def add(args):
         for arg in args:
+            if arg.tag == getattr(ArgKind, "ARGPACK", None):
+                packs.append(arg)
+                continue
             if arg.tag in (
                 ArgKind.TEXTURE,
                 ArgKind.RWTEXTURE,
@@ -10247,7 +10251,7 @@ def _graph_resource_binding_requirements(nodes):
 
     for node in nodes:
         visit(node)
-    return tuple(requirements.values())
+    return (*requirements.values(), *packs)
 
 
 def _graph_memory_disjoint_pairs(root):
@@ -11450,6 +11454,9 @@ class _GraphSpec:
         source_nodes = tuple(nodes)
         structured_control_nodes = _prepare_structured_definition_tree(source_nodes)
         resource_requirements = _graph_resource_binding_requirements(source_nodes)
+        self._argpack_binding_requirements = tuple(
+            arg for arg in resource_requirements if arg.tag == getattr(ArgKind, "ARGPACK", None)
+        )
         self._texture_binding_requirements = tuple(
             arg
             for arg in resource_requirements

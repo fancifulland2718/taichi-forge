@@ -1528,6 +1528,13 @@ source_bindings={"pack": pack, "values": pack.values})` 同样自动冻结包值
 同一个源包的布局与值一致时，一份计划内多个 kernel/参数位置共享只读包存储；独立 prepare
 仍重建自己的私有存储。
 
+冻结包的 image 成员复用普通图像资源合同：CUDA/Vulkan 支持 sampled Texture，Vulkan
+另支持 RWTexture 和 TextureCollection。用 `resource_bindings={image: {"pixels": "pixels"}}`
+提供消费端初始数据，或用 `{image: "public_image"}` 指定消费端公开 owner。不会隐式复制生产端
+纹理内容。导出预检汇总普通参数及包成员的读写用途，保留采样→写入→采样和 collection 内的
+共享成员别名。Windows 已验证普通包采样、自动重建、公开图像和真实下游 ndarray 反向；
+该结果不表示纹理采样本身可微，也不扩展 CUDA 独立域的 image 借用资格。
+
 不在 `source_bindings` 提供包时，导出保留其公开逻辑参数。消费端用
 `packet = plan.argpack(loaded_module, "pack", values, gradients=...)` 创建不可变 owner，
 然后 `plan.prepare(loaded_module, {"pack": packet, ...})`，无需知道生成的 kernel 名称。
@@ -1535,7 +1542,7 @@ source_bindings={"pack": pack, "values": pack.values})` 同样自动冻结包值
 同一个 owner 可用于参数位置/参数变量名不同但成员合同兼容的 kernel，prepare 验证所有用途。
 同一 kernel dispatch 可以混用公开和源冻结的包。准备阶段根据编译后的参数来源展开
 公开包，并连接冻结包的资源成员；两类成员的显式梯度继续使用各自的绑定。
-本切片已隔离验证三后端顺序计划、显式反向与双实例；自动 image/AS 成员重建、旧 CGraph
+本切片已隔离验证三后端顺序计划、显式反向与双实例；自动 AS 成员重建、旧 CGraph
 序列化及其他固定物理策略仍需各自资格验证。正常安装尚未更新到此切片。
 
 生产端 `Module.add_kernel()` 可为完全声明的 ArgPack 自动构造编译占位；成员 ndarray

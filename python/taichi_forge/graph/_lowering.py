@@ -1050,6 +1050,7 @@ def lower_frozen_graph(context, graph):
     """
     spec = graph._spec
     context.source_resources.images.preflight(context.arch, spec._texture_binding_requirements)
+    context.source_resources.argpacks.preflight(context, spec._argpack_binding_requirements)
     context.control_names = set(spec.control_binding_plan.names)
     context.declare_recipe_bindings(graph)
     operation_ends = []
