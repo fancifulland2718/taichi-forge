@@ -2857,8 +2857,10 @@ VulkanDevice::~VulkanDevice() {
   // be properly deallocated before VulkanDevice destruction. This isn't
   // the most proper fix but is less intrusive compared to other
   // approaches.
+  bool backend_complete = false;
   if (backend_calls_safe()) {
     const VkResult wait_result = device_.functions().vkDeviceWaitIdle(device_);
+    backend_complete = wait_result == VK_SUCCESS;
     if (wait_result != VK_SUCCESS) {
       try {
         BackendRuntimeError error(
@@ -2870,6 +2872,8 @@ VulkanDevice::~VulkanDevice() {
       }
     }
   }
+
+  retire_execution_timelines(backend_complete);
 
   InteropDeviceReleaseCallback interop_device_release = nullptr;
   {

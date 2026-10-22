@@ -34,6 +34,7 @@ rhi_impl::RhiReturn<VkFormat> buffer_format_ti_to_vk(BufferFormat format);
 class VulkanDevice;
 class VulkanResourceBinder;
 class VulkanStream;
+class VulkanTimelineState;
 struct VulkanRayTracingPipelineParams;
 class VulkanShaderBindingTable;
 
@@ -1396,6 +1397,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   std::unique_lock<std::mutex> acquire_queue_lock(VkQueue queue);
   std::weak_ptr<vkapi::DeviceObjVkFence> &queue_tail_fence_locked(VkQueue queue);
+  void retire_execution_timelines(bool backend_complete) noexcept;
   void create_vma_allocator();
   [[nodiscard]] RhiResult new_descriptor_pool_locked(
       const VulkanResourceSet *required_resources = nullptr);
@@ -1425,6 +1427,11 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     bool leased{false};
   };
   std::mutex execution_queue_mutex_;
+  // Native retirement ownership, not domain/workspace ownership. Creation
+  // prunes entries with no queue or completion users. A strong reference also
+  // prevents the last ticket destructor racing vkDestroyDevice after a failed
+  // weak_ptr::lock(). All domain users must stop before device retirement.
+  std::vector<std::shared_ptr<VulkanTimelineState>> execution_timelines_;
   std::vector<std::unique_ptr<AdditionalComputeQueue>> additional_compute_queues_;
   std::unordered_map<VkQueue, AdditionalComputeQueue *> additional_queue_states_;
 

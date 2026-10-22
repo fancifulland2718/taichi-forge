@@ -449,6 +449,99 @@ TEST(VulkanExecutionQueue, RuntimeCompletionPreservesReusablePrefixAndOwnerCheck
   EXPECT_TRUE(ticket.done());
 }
 
+TEST(VulkanExecutionQueue, DeviceRetiresPrefixesAfterQueueOwnersAreGone) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  using Queue = vulkan::VulkanExecutionQueue;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(
+      vulkan::VulkanDeviceCreator::Params{});
+  auto &device = *creator->device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  auto fault = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 29);
+  device.set_backend_fault_reporter(fault);
+  std::vector<RuntimeCompletion> tickets;
+  std::vector<Queue::Point> points;
+  std::weak_ptr<vulkan::VulkanTimelinePoint> released;
+  // Reuse one physical queue; keep only selected old completion prefixes.
+  // The retirement registry must not keep a Point, command, or queue owner.
+  for (int i = 0; i < 24; ++i) {
+    Queue queue(device, 1);
+    auto point = queue.submit(queue.prepare({}), points);
+    ASSERT_TRUE(point->wait());
+    queue.close();
+    if (i % 3 == 0) {
+      points.push_back(point);
+      tickets.push_back(RuntimeCompletion::from_reusable_stream_dependency(
+          Arch::vulkan, 29, i + 1, point, fault));
+    } else {
+      released = point;
+    }
+  }
+  EXPECT_TRUE(released.expired());
+  std::atomic<bool> stop{false};
+  std::exception_ptr failure;
+  std::thread observer([&] {
+    try {
+      while (!stop.load(std::memory_order_acquire)) {
+        for (const auto &point : points) {
+          if (!point->is_ready() || !point->wait())
+            throw std::runtime_error("completed prefix became pending");
+        }
+        std::this_thread::yield();
+      }
+    } catch (...) {
+      failure = std::current_exception();
+    }
+  });
+  // No manual retire_timeline call and no surviving Queue owner. Queries may
+  // race teardown, but native semaphore operations must finish before exit.
+  creator.reset();
+  stop.store(true, std::memory_order_release);
+  observer.join();
+  EXPECT_FALSE(failure);
+  for (std::size_t i = 0; i < points.size(); ++i) {
+    EXPECT_TRUE(points[i]->is_ready());
+    EXPECT_TRUE(points[i]->wait());
+    EXPECT_TRUE(tickets[i].done());
+    EXPECT_NO_THROW(tickets[i].wait());
+  }
+}
+
+TEST(VulkanExecutionQueue, DeviceRetirementDoesNotInventCompletionAfterFault) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  using Queue = vulkan::VulkanExecutionQueue;
+  Queue::Point point;
+  auto fault = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 30);
+  {
+    vulkan::VulkanDeviceCreator creator({});
+    auto &device = *creator.device();
+    if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 2)
+      GTEST_SKIP();
+    device.set_backend_fault_reporter(fault);
+    {
+      Queue queue(device, 1);
+      point = queue.submit(queue.prepare({}));
+      ASSERT_TRUE(point->wait());
+      queue.close();
+    }
+    // Inject lifecycle failure only after real device work drained. Teardown
+    // cannot use a successful vkDeviceWaitIdle as its completion proof now.
+    fault->report_fatal({Arch::vulkan, VK_ERROR_DEVICE_LOST, 7,
+                        "test retirement", "retirement first failure"});
+  }
+  for (bool wait : {false, true}) {
+    try {
+      wait ? point->wait() : point->is_ready();
+      FAIL() << "failed timeline was reported complete";
+    } catch (const std::exception &error) {
+      EXPECT_NE(std::string(error.what()).find("retirement first failure"),
+                std::string::npos);
+    }
+  }
+}
+
 TEST(VulkanExecutionQueue, BusyIsAtomicAndTimelineDependenciesCanFanOut) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();
