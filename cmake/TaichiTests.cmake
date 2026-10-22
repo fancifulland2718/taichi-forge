@@ -431,6 +431,7 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
     taichi_core gtest_main ${_ti_backend_native_targets})
   if(TARGET taichi_runtime_c_api)
     target_sources(taichi_cuda_execution_domain_tests PRIVATE
+      tests/cpp/aot/completion_publication_test.cpp
       tests/cpp/aot/llvm/cuda_execution_owner_test.cpp
       tests/cpp/aot/vulkan/execution_domain_owner_test.cpp
       tests/cpp/aot/argpack_aot_binding_test.cpp)

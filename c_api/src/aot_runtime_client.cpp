@@ -10,6 +10,7 @@
 #include "native_resource_registry.h"
 #include "jit_module.h"
 #include "taichi_core_impl.h"
+#include "completion.h"
 #include "execution_domain.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/execution_domain.h"
@@ -294,11 +295,7 @@ std::shared_ptr<cuda::ExecutionDomain> AotRuntimeClient::execution_domain(
 }
 
 RuntimeCompletion borrow_aot_completion(std::uintptr_t handle) {
-#ifdef TI_WITH_CUDA
   return capi::get_completion(reinterpret_cast<TiCompletion>(handle));
-#else
-  throw std::runtime_error("CUDA completion bridge is unavailable");
-#endif
 }
 
 std::uintptr_t AotRuntimeClient::import_jit_kernels(

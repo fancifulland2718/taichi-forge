@@ -319,9 +319,54 @@ typedef struct TiPreparedExecution_t *TiPreparedExecution;
 typedef struct TiSubmissionTicket_t *TiSubmissionTicket;
 typedef struct TiCompletionSet_t *TiCompletionSet;
 
+// Exact runtime-owned device prefix; backend-neutral and never serialized.
+typedef struct TiCompletion_t *TiCompletion;
+
+typedef struct TiCompletionInfo {
+  uint64_t owner;
+  uint64_t sequence;
+  TiBool has_backend_work;
+} TiCompletionInfo;
+
+typedef enum TiCompletionGpuTimingStatus {
+  TI_COMPLETION_GPU_TIMING_NOT_SAMPLED = 0,
+  TI_COMPLETION_GPU_TIMING_PENDING = 1,
+  TI_COMPLETION_GPU_TIMING_READY = 2,
+  TI_COMPLETION_GPU_TIMING_UNSUPPORTED = 3,
+  TI_COMPLETION_GPU_TIMING_FAILED = 4
+} TiCompletionGpuTimingStatus;
+
+typedef struct TiCompletionGpuTiming {
+  TiCompletionGpuTimingStatus status;
+  uint32_t scope;  // 1: complete compute envelope.
+  uint64_t owner;
+  uint64_t sequence;
+  uint64_t duration_ns;  // Meaningful only when status is READY.
+} TiCompletionGpuTiming;
+
+// Nonblocking. The compute envelope excludes predecessor waits, external
+// acquire, parameter uploads and external release. It includes gaps and any
+// waits inside the selected Graph/provider execution, not a sum of kernels.
+// The immutable result survives event reuse and owner retirement.
+TI_DLL_EXPORT void TI_API_CALL
+ti_get_completion_gpu_timing_ext(TiCompletion completion,
+                                 TiCompletionGpuTiming *info);
+
+// These calls do not access or lock the originating Runtime. Query, wait and
+// independent submission may proceed concurrently. Reset/fault remains visible
+// through the ticket's owner state; the caller must release each handle.
+TI_DLL_EXPORT TiBool TI_API_CALL
+ti_query_completion_ext(TiCompletion completion);
+TI_DLL_EXPORT void TI_API_CALL ti_wait_completion_ext(TiCompletion completion);
+TI_DLL_EXPORT void TI_API_CALL
+ti_get_completion_info_ext(TiCompletion completion, TiCompletionInfo *info);
+TI_DLL_EXPORT void TI_API_CALL
+ti_release_completion_ext(TiCompletion completion);
+
 typedef enum TiCompletionSourceKind {
   TI_COMPLETION_SOURCE_SUBMISSION = 0,
-  TI_COMPLETION_SOURCE_CUDA_DOMAIN = 1,
+  TI_COMPLETION_SOURCE_DOMAIN = 1,
+  TI_COMPLETION_SOURCE_CUDA_DOMAIN = TI_COMPLETION_SOURCE_DOMAIN,
 } TiCompletionSourceKind;
 typedef struct TiCompletionSource {
   TiCompletionSourceKind kind;

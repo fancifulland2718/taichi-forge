@@ -6,7 +6,8 @@ function(ti_get_c_api_sources OUT_SOURCES OUT_HEADERS)
         c_api/src/argument_binding.cpp c_api/src/argpack_resource.cpp
         c_api/src/prepared_execution.cpp
         c_api/src/execution_resources.cpp c_api/src/execution_binding_family.cpp
-        c_api/src/native_resource_registry.cpp c_api/src/submission_completion.cpp)
+        c_api/src/native_resource_registry.cpp c_api/src/submission_completion.cpp
+        c_api/src/completion.cpp)
     if(TI_WITH_RUNTIME_C_API)
         list(APPEND _sources c_api/src/aot_runtime_client.cpp c_api/src/jit_module.cpp)
     endif()

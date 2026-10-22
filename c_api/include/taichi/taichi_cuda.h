@@ -99,7 +99,6 @@ TI_DLL_EXPORT void TI_API_CALL ti_get_cuda_stream(void **stream);
 // are runtime objects and must never be serialized into AOT artifacts.
 typedef struct TiCudaExecutionDomain_t *TiCudaExecutionDomain;
 typedef struct TiCudaExecutionInstance_t *TiCudaExecutionInstance;
-typedef struct TiCompletion_t *TiCompletion;
 
 typedef struct TiCudaExecutionDomainCreateInfo {
   uint32_t capacity;
@@ -121,12 +120,6 @@ typedef struct TiCudaExecutionDomainInfo {
   TiBool accepting;
   TiBool closed;
 } TiCudaExecutionDomainInfo;
-
-typedef struct TiCompletionInfo {
-  uint64_t owner;
-  uint64_t sequence;
-  TiBool has_backend_work;
-} TiCompletionInfo;
 
 // Opaque external allocation plus one binary ready/consumed semaphore pair.
 // These are runtime import facts, never AOT artifact fields. Values are native
@@ -327,41 +320,6 @@ ti_try_submit_prepared_sampled_ext(TiRuntime runtime,
                                    TiBool sample_gpu,
                                    uint32_t parameter_count,
                                    const uint64_t *parameters);
-
-typedef enum TiCompletionGpuTimingStatus {
-  TI_COMPLETION_GPU_TIMING_NOT_SAMPLED = 0,
-  TI_COMPLETION_GPU_TIMING_PENDING = 1,
-  TI_COMPLETION_GPU_TIMING_READY = 2,
-  TI_COMPLETION_GPU_TIMING_UNSUPPORTED = 3,
-  TI_COMPLETION_GPU_TIMING_FAILED = 4
-} TiCompletionGpuTimingStatus;
-
-typedef struct TiCompletionGpuTiming {
-  TiCompletionGpuTimingStatus status;
-  uint32_t scope;  // 1: complete compute envelope.
-  uint64_t owner;
-  uint64_t sequence;
-  uint64_t duration_ns;  // Meaningful only when status is READY.
-} TiCompletionGpuTiming;
-
-// Nonblocking. The compute envelope excludes predecessor waits, external
-// acquire, parameter uploads and external release. It includes gaps and any
-// waits inside the selected Graph/provider execution, not a sum of kernels.
-// The immutable result survives event reuse and owner retirement.
-TI_DLL_EXPORT void TI_API_CALL
-ti_get_completion_gpu_timing_ext(TiCompletion completion,
-                                 TiCompletionGpuTiming *info);
-
-// These calls do not access or lock the originating Runtime. Query, wait and
-// independent submission may proceed concurrently. Reset/fault remains visible
-// through the ticket's owner state; the caller must release each handle.
-TI_DLL_EXPORT TiBool TI_API_CALL
-ti_query_completion_ext(TiCompletion completion);
-TI_DLL_EXPORT void TI_API_CALL ti_wait_completion_ext(TiCompletion completion);
-TI_DLL_EXPORT void TI_API_CALL
-ti_get_completion_info_ext(TiCompletion completion, TiCompletionInfo *info);
-TI_DLL_EXPORT void TI_API_CALL
-ti_release_completion_ext(TiCompletion completion);
 
 #ifdef __cplusplus
 }  // extern "C"

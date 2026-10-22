@@ -3,9 +3,7 @@
 #include "taichi/runtime/submission_completion.h"
 #include "taichi/runtime/completion_wait_set.h"
 #include "taichi/runtime/aot_runtime_client.h"
-#ifdef TI_WITH_CUDA
-#include "execution_domain.h"
-#endif
+#include "completion.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi_gfx_impl.h"
 #endif
@@ -67,12 +65,10 @@ TiCompletionSet ti_create_completion_set_ext(
       completions.push_back(tickets().get(
           reinterpret_cast<std::uintptr_t>(source.handle)));
     }
-#ifdef TI_WITH_CUDA
-    else if (source.kind == TI_COMPLETION_SOURCE_CUDA_DOMAIN) {
+    else if (source.kind == TI_COMPLETION_SOURCE_DOMAIN) {
       completions.push_back(
           capi::get_completion(reinterpret_cast<TiCompletion>(source.handle)));
     }
-#endif
     else {
       throw MemoryBindingError("Unknown completion source kind");
     }
