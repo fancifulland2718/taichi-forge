@@ -231,9 +231,16 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit(
     std::shared_ptr<const Commands> commands,
     const std::vector<Point> &dependencies,
     const std::function<void(std::size_t, const Point &)> &admit) {
+  collect(1);
+  return submit_precollected(std::move(commands), dependencies, admit);
+}
+
+VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
+    std::shared_ptr<const Commands> commands,
+    const std::vector<Point> &dependencies,
+    const std::function<void(std::size_t, const Point &)> &admit) {
   if (!commands || dependencies.size() > UINT32_MAX)
     throw std::invalid_argument("Invalid Vulkan execution submission");
-  collect(1);
   auto &state = *state_;
   State::Slot pending;
   std::lock_guard<std::mutex> lock(state.mutex);

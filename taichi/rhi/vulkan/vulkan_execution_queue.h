@@ -66,6 +66,12 @@ class VulkanExecutionQueue {
   Point submit(std::shared_ptr<const Commands> commands,
                const std::vector<Point> &dependencies = {},
                const std::function<void(std::size_t, const Point &)> &admit = {});
+  // A runtime owner collects before taking its wider admission lock, keeping
+  // operand destruction outside both locks. This variant never collects.
+  Point submit_precollected(
+      std::shared_ptr<const Commands> commands,
+      const std::vector<Point> &dependencies = {},
+      const std::function<void(std::size_t, const Point &)> &admit = {});
   std::size_t collect(std::size_t budget);
   std::size_t pending() const;
   std::uint32_t queue_index() const;

@@ -8,6 +8,7 @@
 #include "taichi/program/runtime_completion.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/runtime/completion_wait_set.h"
+#include "taichi/runtime/vulkan_execution_domain.h"
 
 #include <chrono>
 #include <set>
@@ -608,6 +609,178 @@ TEST(VulkanExecutionQueue, BusyIsAtomicAndTimelineDependenciesCanFanOut) {
   EXPECT_EQ(static_cast<uint32_t *>(mapped)[0], 13u);
   EXPECT_EQ(static_cast<uint32_t *>(mapped)[1], 13u);
   device.unmap(*storage);
+}
+
+TEST(VulkanRuntimeDomain, AdmissionIsAtomicAndPeersKeepProgress) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 39);
+  device.set_backend_fault_reporter(owner);
+  vulkan::ExecutionDomainRegistry registry(device, owner);
+  auto left = registry.create({1, 2});
+  auto right = registry.create({1, 2});
+  auto foreign = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 39);
+  EXPECT_TRUE(left->belongs_to(owner));
+  EXPECT_FALSE(left->belongs_to(foreign));
+  auto [storage, result] = device.allocate_memory_unique(
+      {8, false, true, false, AllocUsage::Storage});
+  ASSERT_EQ(result, RhiResult::success);
+  auto left_cmd = left->new_command_list();
+  left_cmd->buffer_fill(storage->get_ptr(), 4, 37);
+  left_cmd->memory_barrier();
+  auto right_cmd = right->new_command_list();
+  right_cmd->buffer_fill(storage->get_ptr(4), 4, 91);
+  right_cmd->memory_barrier();
+  auto left_work = left->prepare_commands({left_cmd.get()});
+  auto right_work = right->prepare_commands({right_cmd.get()});
+  auto before = device.queue_submission_snapshot().queue_submit_calls;
+  EXPECT_THROW(left->submit(left_work, {}, {}, [](auto, const auto &) {
+    throw std::invalid_argument("rejected parameter snapshot");
+  }), std::invalid_argument);
+  EXPECT_EQ(left->snapshot().pending, 0u);
+  EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before);
+  EXPECT_THROW(left->submit(left_work,
+      {RuntimeCompletion::completed(Arch::vulkan, 39, 0, foreign)}),
+      std::invalid_argument);
+  {
+    TimelineGate default_gate(device, 0);
+    TimelineGate gate(device, left->snapshot().queue_index);
+    const auto pending = left->submit(left_work);
+    bool admitted = false;
+    before = device.queue_submission_snapshot().queue_submit_calls;
+    EXPECT_THROW(left->submit(left_work, {}, {}, [&](auto, const auto &) {
+      admitted = true;
+    }), vulkan::ExecutionDomain::Busy);
+    EXPECT_FALSE(admitted);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before);
+    auto peer = right->submit(right_work);
+    CompletionWaitSet progress({peer}, std::chrono::milliseconds(1));
+    EXPECT_EQ(progress.wait(std::chrono::seconds(3)).status,
+              CompletionWaitSet::Status::ready);
+    EXPECT_FALSE(pending.done());
+    auto dependent = right->submit(right_work, {pending});
+    EXPECT_FALSE(dependent.done());
+    gate.release();
+    dependent.wait();
+    EXPECT_TRUE(pending.done());
+    EXPECT_GT(dependent.sequence(), peer.sequence());
+    EXPECT_EQ(dependent.program_domain(), owner->program_domain());
+    left->close();
+    // Completion observation and domain close preserve cross-queue ordering.
+    right->submit(right_work, {pending}).wait();
+    right->submit(right_work, {pending}).wait();
+    right->close();
+  }
+  void *mapped = nullptr;
+  ASSERT_EQ(device.map(*storage, &mapped), RhiResult::success);
+  EXPECT_EQ(static_cast<std::uint32_t *>(mapped)[0], 37u);
+  EXPECT_EQ(static_cast<std::uint32_t *>(mapped)[1], 91u);
+  device.unmap(*storage);
+  registry.retire();
+  EXPECT_FALSE(registry.accepting());
+  EXPECT_THROW(registry.create({1, 1}), std::runtime_error);
+}
+
+TEST(VulkanRuntimeDomain, InstanceRetirementReusesBudgetWhilePeerIsPending) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 40);
+  device.set_backend_fault_reporter(owner);
+  vulkan::ExecutionDomainRegistry registry(device, owner);
+  auto domain = registry.create({2, 2});
+  struct Client : RuntimeClient {
+    std::function<void()> callback;
+    void retire() override { callback(); }
+  };
+  int retirements = 0;
+  auto client = std::make_shared<Client>();
+  client->callback = [&] {
+    (void)domain->snapshot();  // No admission mutex during resource callbacks.
+    ++retirements;
+  };
+  const auto prepare = [](const auto &) {};
+  auto first = domain->prepare_owned_instance(client, prepare);
+  auto second = domain->prepare_owned_instance(client, prepare);
+  auto work = domain->prepare_commands({});
+  auto completed = domain->submit_instance(first, work);
+  completed.wait();
+  EXPECT_THROW(domain->prepare_owned_instance(client, prepare), std::runtime_error);
+  EXPECT_EQ(retirements, 0);
+  {
+    TimelineGate gate(device, domain->snapshot().queue_index);
+    auto pending = domain->submit_instance(second, work);
+    EXPECT_FALSE(pending.done());
+    domain->retire_instance(first);
+    EXPECT_EQ(retirements, 1);
+    EXPECT_TRUE(domain->instance_retired(first));
+    EXPECT_FALSE(pending.done());
+    EXPECT_THROW(domain->submit_instance(first, work), std::invalid_argument);
+    auto reused = domain->prepare_owned_instance(client, prepare);
+    domain->retire_instance(reused);
+    EXPECT_EQ(retirements, 2);
+    std::shared_ptr<vulkan::ExecutionInstance> rejected;
+    EXPECT_THROW(domain->prepare_owned_instance(client, [&](const auto &instance) {
+      rejected = instance;
+      throw std::invalid_argument("partial preparation rejected");
+    }), std::invalid_argument);
+    EXPECT_EQ(retirements, 3);
+    EXPECT_TRUE(domain->instance_retired(rejected));
+    EXPECT_TRUE(domain->snapshot().accepting);
+    auto recovered = domain->prepare_owned_instance(client, prepare);
+    EXPECT_FALSE(pending.done());
+    gate.release();
+    pending.wait();
+    domain->submit_instance(recovered, work).wait();
+  }
+  domain->close();
+  EXPECT_EQ(retirements, 5);
+  EXPECT_TRUE(domain->instance_retired(second));
+  EXPECT_TRUE(completed.done());
+  const auto previous_id = domain->snapshot().identity;
+  // Releasing the native queue permits registry-slot reuse without revoking
+  // old completion identities or requiring a runtime-wide synchronize.
+  auto replacement = registry.create({1, 1});
+  EXPECT_NE(replacement->snapshot().identity, previous_id);
+  replacement->submit(replacement->prepare_commands({}), {completed}).wait();
+  registry.retire();
+  EXPECT_TRUE(replacement->snapshot().closed);
+}
+
+TEST(VulkanRuntimeDomain, RejectedAndCollectedOperandsRetireOutsideAdmission) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 41);
+  device.set_backend_fault_reporter(owner);
+  vulkan::ExecutionDomain domain(device, owner, {1, 1});
+  int released = 0;
+  const auto operand = [&] {
+    return std::shared_ptr<void>(reinterpret_cast<void *>(1), [&](void *) {
+      (void)domain.snapshot();
+      ++released;
+    });
+  };
+  EXPECT_THROW(domain.submit(domain.prepare_commands({}, operand()), {}, {},
+      [](auto, const auto &) { throw std::invalid_argument("reject"); }),
+      std::invalid_argument);
+  EXPECT_EQ(released, 1);
+  auto first = domain.submit(domain.prepare_commands({}, operand()));
+  first.wait();
+  EXPECT_EQ(released, 1);
+  domain.submit(domain.prepare_commands({})).wait();
+  EXPECT_EQ(released, 2);
+  domain.close();
 }
 
 TEST(VulkanExecutionQueue, CompletedOperandReleaseDoesNotHoldAdmissionLock) {
