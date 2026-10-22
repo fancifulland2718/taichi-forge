@@ -30,6 +30,7 @@ from taichi_forge.lang._storage_view import (
     validate_storage_owner,
 )
 from taichi_forge.lang._texture import Texture, TextureCollection
+from taichi_forge.lang.argpack import ArgPack, ArgPackType
 from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
 from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.util import to_numpy_type
@@ -5137,6 +5138,7 @@ class _GraphRunContext:
 
         signature = []
         dynamic_items = []
+        has_argpacks = False
         arch = self.compile_config().arch
         runtime_storage_backend = arch in (
             _ti_core.Arch.x64,
@@ -5151,7 +5153,13 @@ class _GraphRunContext:
             ndarray_consumer = "graph_replay"
             ndarray_mode = "replay"
         for k, v in args.items():
-            if isinstance(v, DeviceExtent):
+            if isinstance(v, ArgPack):
+                from taichi_forge.graph._argpack import runtime_pack
+
+                has_argpacks = True
+                signature.append((k, "argpack"))
+                dynamic_items.append((k, runtime_pack(v, arch)))
+            elif isinstance(v, DeviceExtent):
                 v._validate_current()
                 signature.append((k, "device_extent", v.binding.allocation_identity))
             elif isinstance(v, (Ndarray, ProviderOwnedNdarrayBinding)):
@@ -5159,7 +5167,10 @@ class _GraphRunContext:
                     raise TaichiRuntimeError(
                         "Cannot submit an Ndarray to Graph.run() after its Taichi runtime has been reset"
                     )
-                signature.append((k, "ndarray", v._runtime_allocation_identity))
+                entry = (k, "ndarray", v._runtime_allocation_identity)
+                if isinstance(v, Ndarray) and v.grad is not None:
+                    entry += ("gradient", v.grad._runtime_allocation_identity)
+                signature.append(entry)
             elif isinstance(v, (DenseNdarrayView, ScalarField, MatrixField)):
                 signature.append((k, "dense_storage", id(v)))
             elif isinstance(v, Texture):
@@ -5192,7 +5203,7 @@ class _GraphRunContext:
                 dynamic_items.append((k, v))
             else:
                 raise TaichiRuntimeError(
-                    "Only Python scalars, ti.Matrix, ti.Ndarray, DeviceExtent, "
+                    "Only Python scalars, ti.Matrix, ti.Ndarray, ArgPack, DeviceExtent, "
                     "canonical dense Field, DenseNdarrayView, Texture, "
                     "TextureCollection, "
                     "and InstanceTLAS are supported "
@@ -5235,6 +5246,8 @@ class _GraphRunContext:
                             v.arr,
                             v._runtime_storage_argument(ndarray_consumer, ndarray_mode),
                         )
+                        if has_argpacks and isinstance(v, Ndarray) and v.grad is not None:
+                            flattened[k] += (v.grad.arr,)
                     else:
                         flattened[k] = v.arr
                 elif isinstance(v, (DenseNdarrayView, ScalarField, MatrixField)):
@@ -12091,6 +12104,10 @@ class _GraphSpec:
     def _binding_value_volatile_reason(self, name, value):
         from taichi_forge.lang.device_extent import DeviceExtent
 
+        if isinstance(value, ArgPack):
+            # Ordinary packs permit member rebinding. A Graph binding version
+            # must not retain a stale flattened resource inventory.
+            return f"volatile_argpack:{name}"
         if isinstance(value, DeviceExtent):
             certified = any(
                 isinstance(lease, _DeviceExtentGraphContract)
@@ -16155,6 +16172,10 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
         )
         proven = (
             bool(record.get("available", False))
+            and not any(
+                binding.kind == str(getattr(ArgKind, "ARGPACK", None))
+                for binding in fallback.bindings
+            )
             and not bool(record.get("opaque", True))
             and iteration_domain is not None
             and all(effect is not None for effect in effects)
@@ -20613,6 +20634,13 @@ def _make_arg_acceleration_structure(kwargs: Dict[str, Any]):
     return _ti_core.Arg(ArgKind.ACCELERATION_STRUCTURE, kwargs["name"], u64, 0, [])
 
 
+def _make_arg_argpack(kwargs: Dict[str, Any]):
+    from taichi_forge.graph._argpack import symbolic_pack
+
+    _check_args(kwargs, ["tag", "name", "dtype"])
+    return symbolic_pack(kwargs["name"], kwargs["dtype"])
+
+
 def _make_arg(kwargs: Dict[str, Any]):
     assert "tag" in kwargs
     _deprecate_arg_args(kwargs)
@@ -20624,6 +20652,8 @@ def _make_arg(kwargs: Dict[str, Any]):
         ArgKind.RWTEXTURE: _make_arg_rwtexture,
     }
     tag = kwargs["tag"]
+    if tag == getattr(ArgKind, "ARGPACK", None):
+        return _make_arg_argpack(kwargs)
     if tag == getattr(ArgKind, "TEXTURE_COLLECTION", None):
         return _make_arg_texture_collection(kwargs)
     if tag == getattr(ArgKind, "ACCELERATION_STRUCTURE", None):

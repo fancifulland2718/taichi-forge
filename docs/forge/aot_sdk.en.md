@@ -1921,6 +1921,19 @@ cannot carry resource handles or ArgPacks and does not extend ordinary CGraph
 input types. Value parameters are constants in an explicitly
 exported adjoint; ndarray gradients keep their existing bindings and ownership.
 
+Producer-side ordinary `Graph.run()` accepts
+`ti.graph.Arg(ti.graph.ArgKind.ARGPACK, "pack", pack_type)` on CPU/CUDA/Vulkan,
+with a Python ArgPack supplied at execution. Member ndarray dtype/rank must be
+concrete. Compiled argument origins map nested packs and lifted resources, so
+the same symbol can occupy different kernel argument positions. Values and
+member bindings may change between executions; `Graph.bind()` does not cache
+a mutable pack's old member references as an immutable snapshot. Explicit
+`kernel.grad` dispatches use managed ndarray gradient owners; value members
+remain constants. A missing gradient owner fails before that dispatch submits.
+This route uses ordinary launch resource leases. Native fixed recording,
+independent domains and automatic AOT pack export remain separate follow-up
+work; the explicit AOT pack interfaces below remain available.
+
 The producer's `Module.add_kernel()` synthesizes compilation exemplars for fully
 declared ArgPacks. When a member ndarray has an unspecified dtype or rank, supply
 its pack through `template_args={"pack_argument": exemplar, ...}`, together with

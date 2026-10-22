@@ -346,7 +346,7 @@ std::shared_ptr<GraphBindingFrame> GraphBindingExecutor::prepare(
       data.contexts.push_back(
           std::make_unique<LaunchContextBuilder>(dispatch.ti_kernel));
       auto &launch = *data.contexts.back();
-      state.graph.init_runtime_context(dispatch.symbolic_args, args, launch);
+      state.graph.init_runtime_context(dispatch, args, launch);
       state.program->resolve_ndarray_launch_context_under_guard(launch);
       state.program->resolve_runtime_storage_launch_context_under_guard(launch);
       state.program->resolve_texture_launch_context_under_guard(launch);

@@ -1507,6 +1507,15 @@ launch/prepare 在返回前复制载荷。此形式不能携带资源句柄或 A
 CGraph 的输入类型。显式导出的伴随中，按值参数作为常量使用；
 ndarray 梯度仍沿用既有绑定与所有权。
 
+生产端普通 `Graph.run()` 在 CPU/CUDA/Vulkan 上接受
+`ti.graph.Arg(ti.graph.ArgKind.ARGPACK, "pack", pack_type)`，运行时传入对应的
+Python ArgPack。成员 ndarray 的 dtype/ndim 必须明确；嵌套成员及提升到根部的资源
+通过编译器的参数来源映射绑定，同一符号可以位于不同 kernel 参数位置。两次执行之间
+可以修改包值或重绑定成员，`Graph.bind()` 不会把可变包的旧成员引用当作永久快照。
+此路径也支持显式 `kernel.grad` dispatch 的 managed ndarray 梯度；按值成员仍为常量。
+缺失的梯度 owner 会在该 dispatch 提交前报错。当前通过普通 launcher 保留资源租约，
+尚不包含原生固定录制、独立执行域及自动 AOT 包导出；下述显式 AOT 参数包接口继续可用。
+
 生产端 `Module.add_kernel()` 可为完全声明的 ArgPack 自动构造编译占位；成员 ndarray
 的 dtype/ndim 未指定时，通过 `template_args={"pack参数名": 实际参数包, ...}` 提供
 specialization，其他必需模板参数仍须给出。`add_kernel_template().instantiate()`

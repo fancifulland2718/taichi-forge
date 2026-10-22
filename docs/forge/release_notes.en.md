@@ -107,8 +107,10 @@ combination. Consult the linked API contracts and capability queries for exact s
   belong to bindings; `result()` explicitly waits, old tickets do not retain value snapshots, and
   Graph/ExecutionPlan dispatch returns can still be discarded.
 - ArgPack supports direct kernels and declared execution-plan binding/reconstruction, including
-  nested values, resource members and gradient source mappings. Symbolic Graph ArgPack automatic
-  export and mutable JIT ArgPack Graph binding remain incomplete.
+  nested values, resource members and gradient source mappings. Ordinary JIT `Graph.run()` now
+  accepts `ArgKind.ARGPACK`, member rebinding, different kernel argument positions and explicit
+  ndarray adjoints. Native fixed recording, independent domains and symbolic Graph automatic
+  export remain incomplete.
 - Native sort/compact, scan/reduce, transform, gather/scatter and grouped/segmented recording/AOT
   routes support more layouts. Coverage remains specific to operation, backend, type and strategy.
   Packed Field/vector/matrix routes reuse existing cores, preserving stable order, payload bits and aliases.

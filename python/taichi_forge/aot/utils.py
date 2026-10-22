@@ -101,23 +101,41 @@ def produce_injected_args_from_template(kernel, template_args):
     return injected_args
 
 
-def _produce_injected_argpack(annotation, name):
+def _produce_injected_argpack(annotation, name, symbolic_arg=None):
+    symbols = None
+    if symbolic_arg is not None:
+        actual = describe_symbolic_arg(symbolic_arg)
+        if actual.kind != "argpack" or tuple(annotation.members) != tuple(
+            member for member, _ in actual.members
+        ):
+            raise TaichiCompilationError(f"Graph ArgPack {name} member layout does not match its annotation")
+        symbols = dict((member.name, member) for member in symbolic_arg.members)
     entries = {}
     for member, dtype in annotation.members.items():
         path = f"{name}.{member}"
-        if isinstance(dtype, NdarrayType):
+        if isinstance(dtype, NdarrayType) and symbols is None:
             descriptor = describe_annotation(dtype)
             if descriptor.ndim is None or not descriptor.element.is_complete:
                 raise TaichiCompilationError(
                     f"AOT ArgPack member {path} needs a concrete ndarray dtype and ndim; "
                     "provide the containing argument pack in template_args to specialize it"
                 )
+        symbol = symbols[member] if symbols is not None else None
+        if isinstance(dtype, (MatrixType, StructType)) and symbol is not None:
+            expected = describe_annotation(dtype)
+            actual = describe_symbolic_arg(symbol)
+            if expected.kind != actual.kind or not expected.element.matches(actual.element):
+                raise TaichiCompilationError(f"Graph ArgPack member {path} type does not match its annotation")
         if isinstance(dtype, MatrixType):
             entries[member] = dtype(0)
         elif isinstance(dtype, StructType):
             entries[member] = dtype()
         else:
-            entries[member] = _produce_injected_arg(KernelArgument(dtype, path))
+            entries[member] = _produce_injected_arg(
+                KernelArgument(dtype, path), symbol, symbols is not None
+            )
+            if symbols is not None and isinstance(dtype, NdarrayType):
+                entries[member]._graph_runtime_affine_exemplar = True
     # Compilation needs member types, not the exemplar's runtime addresses or
     # values. Use the existing managed pack once, avoiding ArgPackType.cast's
     # second normalization allocation for these already typed placeholders.
@@ -127,9 +145,7 @@ def _produce_injected_argpack(annotation, name):
 def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
     anno = arg.annotation
     if isinstance(anno, ArgPackType):
-        if has_symbolic_arg:
-            raise TaichiCompilationError("Symbolic Graph arguments do not support ArgPack")
-        return _produce_injected_argpack(anno, arg.name)
+        return _produce_injected_argpack(anno, arg.name, symbolic_arg if has_symbolic_arg else None)
     if isinstance(anno, AccelerationStructureType):
         if has_symbolic_arg and (
             symbolic_arg is None
@@ -144,6 +160,12 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
     if isinstance(anno, NdarrayType):
         if has_symbolic_arg:
             symbolic_descriptor = describe_symbolic_arg(symbolic_arg)
+            if (
+                symbolic_descriptor.needs_grad is not None
+                and anno.needs_grad is not None
+                and bool(anno.needs_grad) != symbolic_descriptor.needs_grad
+            ):
+                raise TaichiCompilationError(f"Graph argument {arg.name} gradient contract does not match")
             dtype = python_compound_type(symbolic_descriptor.element)
             ndim = symbolic_descriptor.ndim
         else:

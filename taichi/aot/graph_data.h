@@ -29,6 +29,7 @@ T taichi_union_cast_with_different_sizes(G g);
 namespace taichi::lang {
 class AotModuleBuilder;
 class Ndarray;
+class ArgPack;
 class Texture;
 class TextureCollection;
 class Matrix;
@@ -53,7 +54,9 @@ enum class ArgKind {
   kRWTexture,
   kUnknown,
   kAccelerationStructure,
-  kTextureCollection
+  kTextureCollection,
+  kArgPack,
+  kStruct
 };
 
 /**
@@ -69,6 +72,11 @@ struct Arg {
   // Kept outside legacy Arg serialization. Versioned AOT graph artifacts store
   // structure types once per named binding and restore them on load.
   const StructType *struct_dtype{nullptr};
+  const ArgPackType *pack_dtype{nullptr};
+  // Logical members, including resources lifted out of the packed storage.
+  // Physical parameter paths belong to each compiled dispatch, not this symbol.
+  std::vector<Arg> members;
+  std::optional<bool> needs_grad;
   size_t field_dim;
   std::vector<int> element_shape;
 
@@ -85,6 +93,15 @@ struct Arg {
         field_dim(0),
         element_shape({}),
         num_channels(0) {
+  }
+
+  explicit Arg(const std::string &name, const DataType &dtype, std::vector<Arg> members)
+      : Arg() {
+    TI_ERROR_IF(!dtype->is<ArgPackType>(), "Graph ArgPack requires an ArgPack type");
+    tag = ArgKind::kArgPack;
+    this->name = name;
+    pack_dtype = dtype->as<ArgPackType>();
+    this->members = std::move(members);
   }
 
   explicit Arg(ArgKind tag,
@@ -119,7 +136,8 @@ struct Arg {
     }
     DataType scalar_dtype = dtype;
     if (dtype->is<StructType>()) {
-      TI_ERROR_IF(tag != ArgKind::kNdarray || !element_shape.empty(),
+      TI_ERROR_IF((tag != ArgKind::kNdarray && tag != ArgKind::kStruct) ||
+                      !element_shape.empty(),
                   "Graph structure types require a scalar-shaped ndarray element");
       struct_dtype = dtype->as<StructType>();
       dtype_id = PrimitiveTypeID::unknown;
@@ -151,6 +169,7 @@ struct Arg {
   }
 
   DataType dtype() const {
+    if (pack_dtype) return DataType(pack_dtype);
     if (struct_dtype) return DataType(struct_dtype);
     return PrimitiveType::get(dtype_id);
   }
@@ -170,10 +189,11 @@ struct Arg {
   bool operator==(const Arg &other) const {
     return tag == other.tag && name == other.name &&
            field_dim == other.field_dim && dtype_id == other.dtype_id &&
-           struct_dtype == other.struct_dtype &&
+           struct_dtype == other.struct_dtype && pack_dtype == other.pack_dtype &&
            element_shape == other.element_shape &&
            num_channels == other.num_channels &&
-           texture_format == other.texture_format;
+           texture_format == other.texture_format && members == other.members &&
+           needs_grad == other.needs_grad;
   }
 
   bool operator!=(const Arg &other) const {
@@ -192,7 +212,16 @@ struct TI_DLL_EXPORT IValue {
   uint64 val;
   ArgKind tag;
   const storage::RuntimeStorageArgument *runtime_storage{nullptr};
+  const Ndarray *gradient{nullptr};
   Program *resource_owner{nullptr};
+  std::shared_ptr<const std::vector<IValue>> members;
+
+  static IValue argpack(const ArgPack &pack, std::vector<IValue> members) {
+    IValue value(reinterpret_cast<intptr_t>(&pack), ArgKind::kArgPack);
+    value.members =
+        std::make_shared<const std::vector<IValue>>(std::move(members));
+    return value;
+  }
 
   static IValue acceleration_structure(Program &owner, std::uint64_t handle) {
     IValue value(handle, ArgKind::kAccelerationStructure);
@@ -342,12 +371,20 @@ class CudaGraphCaptureCommand {
 
 struct CompiledGraphKernelInvocation;
 
+struct GraphArgumentBinding {
+  std::vector<int> logical;
+  std::vector<int> physical;
+};
+
 struct CompiledDispatch {
   std::string kernel_name;
   // JIT-only invocation metadata. AOT payloads remain source-compatible and
   // simply load this as empty.
   std::string dispatch_label;
   std::vector<Arg> symbolic_args;
+  // Nonempty only for a signature containing packs. Resolved once from the
+  // compiled callable's ArgumentOrigins, shared by all replay backends.
+  std::vector<GraphArgumentBinding> argument_bindings;
   Kernel *compiled_kernel{nullptr};
   taichi::lang::Kernel *ti_kernel{nullptr};
   // JIT-only immutable build artifact and callable ABI. Shared by dispatch
@@ -983,7 +1020,7 @@ struct TI_DLL_EXPORT CompiledGraph {
 
   // Internal helper shared by graph replay backends.
   static void init_runtime_context(
-      const std::vector<Arg> &paramter_list,
+      const CompiledDispatch &dispatch,
       const std::unordered_map<std::string, IValue> &args,
       LaunchContextBuilder &ctx);
 };

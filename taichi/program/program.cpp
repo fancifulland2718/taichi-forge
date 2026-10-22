@@ -4063,7 +4063,7 @@ void Program::launch_kernel(const KernelExecutionHandle &execution,
     return;
   }
 
-  if (active_runtime_resource_graph_program == this) {
+  if (active_runtime_resource_graph_program == this && ctx.argpack_ptrs.empty()) {
     const bool attribute = ordinary_launch_attribution_.enabled;
     const std::uint64_t total_started =
         attribute ? ordinary_launch_now_ns() : 0;
@@ -4207,7 +4207,7 @@ void Program::launch_kernel_impl(const CompiledKernelData &compiled_kernel_data,
     return;
   }
 
-  if (active_runtime_resource_graph_program == this) {
+  if (active_runtime_resource_graph_program == this && ctx.argpack_ptrs.empty()) {
     TI_ASSERT(ctx.argpack_ptrs.empty());
     resolve_ndarray_launch_context_under_guard(ctx);
     resolve_runtime_storage_launch_context_under_guard(ctx);

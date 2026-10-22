@@ -49,8 +49,11 @@ class AotModuleImpl : public aot::Module {
     TI_ERROR_IF(graphs_.count(name) == 0, "Cannot find graph {}", name);
     std::vector<aot::CompiledDispatch> dispatches;
     for (auto &dispatch : graphs_[name].dispatches) {
-      dispatches.push_back({dispatch.kernel_name, {}, dispatch.symbolic_args,
-                            get_kernel(dispatch.kernel_name)});
+      aot::CompiledDispatch loaded;
+      loaded.kernel_name = dispatch.kernel_name;
+      loaded.symbolic_args = dispatch.symbolic_args;
+      loaded.compiled_kernel = get_kernel(dispatch.kernel_name);
+      dispatches.push_back(std::move(loaded));
     }
     aot::CompiledGraph graph{dispatches};
     return std::make_unique<aot::CompiledGraph>(std::move(graph));

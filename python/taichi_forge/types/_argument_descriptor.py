@@ -207,12 +207,22 @@ def describe_annotation(annotation):
 
 def describe_symbolic_arg(symbolic_arg):
     tag = symbolic_arg.tag
+    if tag == getattr(_ti_core.ArgKind, "ARGPACK", None):
+        return ArgumentTypeDescriptor(
+            "argpack", members=tuple(
+                (member.name, describe_symbolic_arg(member))
+                for member in symbolic_arg.members
+            )
+        )
+    if tag == getattr(_ti_core.ArgKind, "STRUCT", None):
+        return ArgumentTypeDescriptor("struct", describe_element_type(symbolic_arg.dtype()))
     if tag == _ti_core.ArgKind.NDARRAY:
         element_type = symbolic_arg.element_dtype()
         return ArgumentTypeDescriptor(
             "ndarray",
             describe_element_type(element_type),
             symbolic_arg.field_dim,
+            getattr(symbolic_arg, "needs_grad", None),
         )
     if tag == _ti_core.ArgKind.MATRIX:
         return ArgumentTypeDescriptor(

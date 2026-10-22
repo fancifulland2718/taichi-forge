@@ -195,6 +195,8 @@ std::unordered_map<std::string, Kernel *> AotModuleBuilder::add_graph(
     const aot::CompiledGraph &graph) {
   compile_options_frozen_ = true;
   for (const auto &[arg_name, arg] : graph.args) {
+    TI_ERROR_IF(arg.tag == aot::ArgKind::kArgPack,
+                "AOT CGraph does not persist ArgPack resources; use an execution plan");
     TI_ERROR_IF(
         arg.tag == aot::ArgKind::kAccelerationStructure,
         "AOT Graph {} contains JIT-only acceleration-structure argument {}",

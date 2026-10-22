@@ -488,8 +488,11 @@ std::unique_ptr<aot::CompiledGraph> LlvmAotModule::get_graph(
 
   std::vector<aot::CompiledDispatch> dispatches;
   for (auto &dispatch : it->second.dispatches) {
-    dispatches.push_back({dispatch.kernel_name, {}, dispatch.symbolic_args,
-                          get_kernel(dispatch.kernel_name)});
+    aot::CompiledDispatch loaded;
+    loaded.kernel_name = dispatch.kernel_name;
+    loaded.symbolic_args = dispatch.symbolic_args;
+    loaded.compiled_kernel = get_kernel(dispatch.kernel_name);
+    dispatches.push_back(std::move(loaded));
   }
 
   aot::CompiledGraph graph = aot::CompiledGraph({dispatches});

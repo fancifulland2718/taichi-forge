@@ -1251,7 +1251,8 @@ std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_maps(
   map_sources.reserve(sources.size());
   for (std::size_t index = 0; index < sources.size(); ++index) {
     if (sources[index] == nullptr || compiled_sources[index] == nullptr ||
-        !sources[index]->dispatch_label().empty()) {
+        !sources[index]->dispatch_label().empty() ||
+        !compiled_sources[index]->argument_bindings.empty()) {
       return std::nullopt;
     }
     map_sources.push_back(

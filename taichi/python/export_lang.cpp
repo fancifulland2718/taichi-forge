@@ -5914,9 +5914,13 @@ void export_lang(py::module &m) {
       .value("RWTEXTURE", aot::ArgKind::kRWTexture)
       .value("ACCELERATION_STRUCTURE", aot::ArgKind::kAccelerationStructure)
       .value("TEXTURE_COLLECTION", aot::ArgKind::kTextureCollection)
+      .value("ARGPACK", aot::ArgKind::kArgPack)
+      .value("STRUCT", aot::ArgKind::kStruct)
       .export_values();
 
   py::class_<aot::Arg>(m, "Arg")
+      .def(py::init<const std::string &, const DataType &, std::vector<aot::Arg>>(),
+           py::arg("name"), py::arg("dtype"), py::arg("members"))
       .def(py::init<aot::ArgKind, std::string, DataType &, size_t,
                     std::vector<int>, BufferFormat>(),
            py::arg("tag"), py::arg("name"), py::arg("channel_format"),
@@ -5930,6 +5934,14 @@ void export_lang(py::module &m) {
            py::arg("tag"), py::arg("name"), py::arg("channel_format"),
            py::arg("num_channels"), py::arg("shape"))
       .def_readonly("tag", &aot::Arg::tag)
+      .def_readonly("members", &aot::Arg::members)
+      .def_readonly("needs_grad", &aot::Arg::needs_grad)
+      .def("_with_needs_grad", [](aot::Arg arg, bool needs_grad) {
+        TI_ERROR_IF(arg.tag != aot::ArgKind::kNdarray,
+                    "Only ndarray Graph arguments carry a gradient contract");
+        arg.needs_grad = needs_grad;
+        return arg;
+      })
       .def_readonly("name", &aot::Arg::name)
       .def_readonly("element_shape", &aot::Arg::element_shape)
       .def_readonly("texture_shape", &aot::Arg::element_shape)
@@ -6174,14 +6186,12 @@ void export_lang(py::module &m) {
   auto with_graph_arguments = [](const aot::CompiledGraph *self,
                                  const py::dict &pyargs, auto &&action) {
         std::unordered_map<std::string, aot::IValue> args;
-        auto insert_scalar_arg = [&args](std::string arg_name,
-                                         DataType expected_dtype,
-                                         py::object pyarg) {
+        auto scalar_arg = [](DataType expected_dtype, py::object pyarg) -> aot::IValue {
           auto type_id = expected_dtype->as<PrimitiveType>()->type;
           switch (type_id) {
 #define PER_C_TYPE(type, ctype)                                           \
   case PrimitiveTypeID::type:                                             \
-    args.insert({arg_name, aot::IValue::create(py::cast<ctype>(pyarg))}); \
+    return aot::IValue::create(py::cast<ctype>(pyarg)); \
     break;
 #include "taichi/inc/data_type_with_c_type.inc.h"
 #undef PER_C_TYPE
@@ -6208,14 +6218,40 @@ void export_lang(py::module &m) {
                   ? static_cast<uint32_t>(buffer_info.shape[1])
                   : 0};
         };
-        for (const auto &[arg_name, arg] : self->args) {
+        auto convert = [&](auto &&self, const aot::Arg &arg,
+                           py::object pyarg) -> aot::IValue {
+          const auto &arg_name = arg.name;
           auto tag = arg.tag;
-          TI_ASSERT(pyargs.contains(arg_name.c_str()));
-          auto pyarg = pyargs[arg_name.c_str()];
+          if (tag == aot::ArgKind::kArgPack) {
+            auto binding = pyarg.cast<py::tuple>();
+            TI_ERROR_IF(binding.size() != 3 ||
+                            binding[1].cast<DataType>() != arg.dtype(),
+                        "Graph ArgPack {} value type does not match", arg_name);
+            auto &pack = binding[0].cast<ArgPack &>();
+            auto children = binding[2].cast<py::dict>();
+            std::vector<aot::IValue> members;
+            members.reserve(arg.members.size());
+            std::size_t resources = 0;
+            for (const auto &member : arg.members) {
+              if (member.tag == aot::ArgKind::kScalar ||
+                  member.tag == aot::ArgKind::kMatrix ||
+                  member.tag == aot::ArgKind::kStruct) {
+                members.push_back(aot::IValue::create(0));
+              } else {
+                TI_ERROR_IF(!children.contains(member.name.c_str()),
+                            "Graph ArgPack {} is missing member {}", arg_name, member.name);
+                members.push_back(self(self, member, children[member.name.c_str()]));
+                ++resources;
+              }
+            }
+            TI_ERROR_IF(children.size() != resources,
+                        "Graph ArgPack {} has unexpected resource members", arg_name);
+            return aot::IValue::argpack(pack, std::move(members));
+          }
           if (tag == aot::ArgKind::kNdarray) {
             if (py::isinstance<py::tuple>(pyarg)) {
               auto runtime_pair = pyarg.template cast<py::tuple>();
-              TI_ERROR_IF(runtime_pair.size() != 2,
+              TI_ERROR_IF(runtime_pair.size() != 2 && runtime_pair.size() != 3,
                           "Graph ndarray runtime storage tuple must contain "
                           "the owner and argument");
               auto &runtime_argument =
@@ -6223,18 +6259,21 @@ void export_lang(py::module &m) {
                       .template cast<storage::RuntimeStorageArgument &>();
               if (py::isinstance<Ndarray>(runtime_pair[0])) {
                 auto &val = runtime_pair[0].template cast<Ndarray &>();
-                args.insert(
-                    {arg_name, aot::IValue::create(val, runtime_argument)});
+                auto value = aot::IValue::create(val, runtime_argument);
+                if (runtime_pair.size() == 3 && !runtime_pair[2].is_none())
+                  value.gradient = &runtime_pair[2].template cast<Ndarray &>();
+                return value;
               } else {
+                TI_ERROR_IF(runtime_pair.size() != 2,
+                            "Graph view gradients require an explicit qualified binding");
                 // The first tuple item is a Python keepalive for a dense
                 // Field/view. Its immutable descriptor is the complete C++
                 // runtime value; no owning Ndarray is fabricated.
-                args.insert(
-                    {arg_name, aot::IValue::create(runtime_argument)});
+                return aot::IValue::create(runtime_argument);
               }
             } else {
               auto &val = pyarg.template cast<Ndarray &>();
-              args.insert({arg_name, aot::IValue::create(val)});
+              return aot::IValue::create(val);
             }
           } else if (tag == aot::ArgKind::kAccelerationStructure) {
             auto binding = pyarg.template cast<py::tuple>();
@@ -6243,18 +6282,17 @@ void export_lang(py::module &m) {
                 "Graph acceleration structure requires its Program and handle");
             auto &owner = binding[0].template cast<Program &>();
             auto handle = binding[1].template cast<std::uint64_t>();
-            args.insert(
-                {arg_name, aot::IValue::acceleration_structure(owner, handle)});
+            return aot::IValue::acceleration_structure(owner, handle);
           } else if (tag == aot::ArgKind::kTextureCollection) {
             auto &val = pyarg.template cast<TextureCollection &>();
-            args.insert({arg_name, aot::IValue::create(val)});
+            return aot::IValue::create(val);
           } else if (tag == aot::ArgKind::kTexture ||
                      tag == aot::ArgKind::kRWTexture) {
             auto &val = pyarg.template cast<Texture &>();
-            args.insert({arg_name, aot::IValue::create(val)});
+            return aot::IValue::create(val);
           } else if (tag == aot::ArgKind::kScalar) {
             auto expected_dtype = arg.dtype();
-            insert_scalar_arg(arg_name, expected_dtype, pyarg);
+            return scalar_arg(expected_dtype, pyarg);
           } else if (tag == aot::ArgKind::kMatrix) {
             auto type_id = arg.dtype()->template as<PrimitiveType>()->type;
             switch (type_id) {
@@ -6283,7 +6321,7 @@ void export_lang(py::module &m) {
                     length, arg.dtype(),
                     reinterpret_cast<intptr_t>(matrix_buffers.back().get()),
                     dimensions[0], dimensions[1], dimensions[2]));
-                args.insert({arg_name, aot::IValue::create(matrices.back())});
+                return aot::IValue::create(matrices.back());
                 break;
               }
 #define PER_C_TYPE(type, ctype)                                           \
@@ -6309,7 +6347,7 @@ void export_lang(py::module &m) {
         Matrix(length, arg.dtype(),                                       \
                reinterpret_cast<intptr_t>(matrix_buffers.back().get()),   \
                dimensions[0], dimensions[1], dimensions[2]));            \
-    args.insert({arg_name, aot::IValue::create(matrices.back())});        \
+    return aot::IValue::create(matrices.back());        \
     break;                                                                \
   }
 #include "taichi/inc/data_type_with_c_type.inc.h"
@@ -6321,6 +6359,10 @@ void export_lang(py::module &m) {
           } else {
             TI_NOT_IMPLEMENTED;
           }
+        };
+        for (const auto &[arg_name, arg] : self->args) {
+          TI_ERROR_IF(!pyargs.contains(arg_name.c_str()), "Missing Graph argument {}", arg_name);
+          args.emplace(arg_name, convert(convert, arg, pyargs[arg_name.c_str()]));
         }
         // Argument conversion above touches Python objects and must keep the
         // GIL. Once it is complete, graph execution is entirely native. In

@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Launch contexts can retain fixed device result storage.
-inline constexpr int kForgeNativeAbiRevision = 147;
+inline constexpr int kForgeNativeAbiRevision = 148;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

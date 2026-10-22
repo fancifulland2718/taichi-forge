@@ -430,8 +430,11 @@ class AotModuleImpl : public aot::Module {
         throw aot::ArtifactLoadError("Graph references missing kernel: " +
                                      dispatch.kernel_name);
       }
-      dispatches.push_back(
-          {dispatch.kernel_name, {}, dispatch.symbolic_args, kernel});
+      aot::CompiledDispatch loaded;
+      loaded.kernel_name = dispatch.kernel_name;
+      loaded.symbolic_args = dispatch.symbolic_args;
+      loaded.compiled_kernel = kernel;
+      dispatches.push_back(std::move(loaded));
     }
     aot::CompiledGraph graph{dispatches};
     return std::make_unique<aot::CompiledGraph>(std::move(graph));

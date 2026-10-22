@@ -811,7 +811,7 @@ TiPreparedExecution ti_prepare_compute_graph_ext(
           "Prepared AOT graph requires ordinary loaded dispatches");
     auto context =
         std::make_unique<LaunchContextBuilder>(dispatch.compiled_kernel);
-    aot::CompiledGraph::init_runtime_context(dispatch.symbolic_args,
+    aot::CompiledGraph::init_runtime_context(dispatch,
                                              bound.arguments, *context);
     for (int i = 0; i < dispatch.symbolic_args.size(); ++i) {
       const auto &name = dispatch.symbolic_args[i].name;

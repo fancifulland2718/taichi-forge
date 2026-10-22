@@ -318,7 +318,9 @@ Program::create_vulkan_graph_recording(
         owners.push_back(std::move(kernel));
         auto context =
             std::make_unique<LaunchContextBuilder>(dispatch.ti_kernel);
-        graph.init_runtime_context(dispatch.symbolic_args, args, *context);
+        graph.init_runtime_context(dispatch, args, *context);
+        TI_ERROR_IF(!context->argpack_ptrs.empty(),
+                    "Vulkan fixed recording requires an immutable ArgPack snapshot");
         resolve_ndarray_launch_context_under_guard(*context);
         resolve_runtime_storage_launch_context_under_guard(*context);
         resolve_texture_launch_context_under_guard(*context);

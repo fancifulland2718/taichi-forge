@@ -1,8 +1,10 @@
 #include "taichi/aot/graph_data.h"
+#include "taichi/aot/argument_origins.h"
 #include "taichi/aot/jit_graph_binding.h"
 #include "taichi/program/program.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/program/ndarray.h"
+#include "taichi/program/argpack.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/program/texture.h"
 #include "taichi/program/kernel.h"
@@ -95,6 +97,42 @@ void CompiledDispatch::bind_jit_kernel(
   TI_ASSERT(ti_kernel != nullptr && handle != nullptr);
   jit_invocation = std::make_shared<CompiledGraphKernelInvocation>(
       *ti_kernel, std::move(handle));
+  argument_bindings.clear();
+  if (std::none_of(symbolic_args.begin(), symbolic_args.end(),
+                   [](const Arg &arg) { return arg.tag == ArgKind::kArgPack; }))
+    return;
+  const auto &callable = jit_invocation->callable;
+  TI_ERROR_IF(!callable.argument_origins,
+              "Graph ArgPack requires compiled argument origins");
+  validate_argument_origins(callable, *callable.argument_origins);
+  for (const auto &origin : canonical_argument_origins(*callable.argument_origins)) {
+    TI_ERROR_IF(origin.logical.front() >= symbolic_args.size(),
+                "Graph ArgPack signature differs from the compiled kernel");
+    const Arg *symbol = &symbolic_args[origin.logical.front()];
+    for (std::size_t depth = 1; depth < origin.logical.size(); ++depth) {
+      const auto index = origin.logical[depth];
+      TI_ERROR_IF(symbol->tag != ArgKind::kArgPack || index >= symbol->members.size(),
+                  "Graph ArgPack member layout differs from the compiled kernel");
+      symbol = &symbol->members[index];
+    }
+    TI_ERROR_IF(origin.logical.size() > 1 && symbol->name != origin.name,
+                "Graph ArgPack member name differs from the compiled kernel");
+    const bool matches =
+        (origin.kind == "argpack" && symbol->tag == ArgKind::kArgPack) ||
+        (origin.kind == "value" &&
+         (symbol->tag == ArgKind::kScalar || symbol->tag == ArgKind::kMatrix ||
+          symbol->tag == ArgKind::kStruct)) ||
+        (origin.kind == "ndarray" && symbol->tag == ArgKind::kNdarray) ||
+        (origin.kind == "texture" && symbol->tag == ArgKind::kTexture) ||
+        (origin.kind == "rw_texture" && symbol->tag == ArgKind::kRWTexture) ||
+        (origin.kind == "texture_collection" && symbol->tag == ArgKind::kTextureCollection) ||
+        (origin.kind == "acceleration_structure" && symbol->tag == ArgKind::kAccelerationStructure);
+    TI_ERROR_IF(!matches, "Graph ArgPack member kind differs from the compiled kernel");
+    // Inline values already reside in their pack. Only roots, nested packs and
+    // lifted resources require launch-context bindings.
+    if (origin.logical.size() == 1 || origin.kind != "value")
+      argument_bindings.push_back({origin.logical, origin.physical});
+  }
 }
 
 const std::shared_ptr<KernelExecutionHandle> &
@@ -213,10 +251,11 @@ struct GraphRuntimeResourceViews {
   InlineUniqueViewList<storage::RuntimeStorageArgument> runtime_storage;
   InlineUniqueViewList<Texture> textures;
   bool has_acceleration_structures{false};
+  bool has_argpacks{false};
 
   bool empty() const noexcept {
     return ndarrays.empty() && runtime_storage.empty() && textures.empty() &&
-           !has_acceleration_structures;
+           !has_acceleration_structures && !has_argpacks;
   }
 };
 
@@ -224,20 +263,33 @@ GraphRuntimeResourceViews graph_runtime_resource_views(
     const std::unordered_map<std::string, IValue> &args,
     Program *expected_program) {
   GraphRuntimeResourceViews views;
-  for (const auto &[name, value] : args) {
-    (void)name;
+  auto visit = [&](auto &&self, const IValue &value) -> void {
+    if (value.tag == ArgKind::kArgPack) {
+      const auto *pack = reinterpret_cast<const ArgPack *>(value.val);
+      TI_ERROR_IF(pack == nullptr || !value.members ||
+                      pack->owning_program() != expected_program,
+                  "Graph ArgPack must belong to the Graph's Program");
+      views.has_argpacks = true;
+      for (const auto &member : *value.members) self(self, member);
+      return;
+    }
     if (value.tag == ArgKind::kAccelerationStructure) {
       TI_ERROR_IF(
           value.resource_owner == nullptr || value.val == 0 ||
               value.resource_owner != expected_program,
           "Graph acceleration structures must belong to the Graph's Program");
       views.has_acceleration_structures = true;
-      continue;
+      return;
     }
     if (value.tag == ArgKind::kNdarray) {
+      if (value.gradient) {
+        TI_ERROR_IF(value.gradient->owning_program() != expected_program,
+                    "Graph ndarray gradient must belong to the Graph's Program");
+        views.ndarrays.add(value.gradient);
+      }
       if (value.runtime_storage != nullptr) {
         views.runtime_storage.add(value.runtime_storage);
-        continue;
+        return;
       }
       auto *view = reinterpret_cast<const Ndarray *>(value.val);
       TI_ERROR_IF(view == nullptr, "Graph received a null Ndarray runtime arg");
@@ -245,13 +297,13 @@ GraphRuntimeResourceViews graph_runtime_resource_views(
       if (owner == nullptr) {
         // AOT DeviceAllocation-backed views preserve their existing external
         // ownership contract and never enter a Program registry.
-        continue;
+        return;
       }
       TI_ERROR_IF(expected_program != nullptr && owner != expected_program,
                   "Graph Ndarray runtime arguments must belong to the Graph's "
                   "Program");
       views.ndarrays.add(view);
-      continue;
+      return;
     }
     if (value.tag != ArgKind::kTexture) {
       if (value.tag == ArgKind::kTextureCollection) {
@@ -265,19 +317,20 @@ GraphRuntimeResourceViews graph_runtime_resource_views(
           views.textures.add(member.texture);
         }
       }
-      continue;
+      return;
     }
     auto *view = reinterpret_cast<const Texture *>(value.val);
     TI_ERROR_IF(view == nullptr, "Graph received a null Texture runtime arg");
     Program *owner = view->owning_program();
     if (owner == nullptr) {
-      continue;
+      return;
     }
     TI_ERROR_IF(expected_program != nullptr && owner != expected_program,
                 "Graph Texture runtime arguments must belong to the Graph's "
                 "Program");
     views.textures.add(view);
-  }
+  };
+  for (const auto &[name, value] : args) visit(visit, value);
   return views;
 }
 
@@ -296,7 +349,8 @@ bool graph_has_runtime_resource_declarations(
     return entry.second.tag == ArgKind::kNdarray ||
            entry.second.tag == ArgKind::kTexture ||
            entry.second.tag == ArgKind::kTextureCollection ||
-           entry.second.tag == ArgKind::kAccelerationStructure;
+           entry.second.tag == ArgKind::kAccelerationStructure ||
+           entry.second.tag == ArgKind::kArgPack;
   });
 }
 
@@ -491,7 +545,8 @@ const CompiledKernelData *get_or_compile_cached_kernel(
     bool cache_compiled_kernel_data) {
   if (cached.kernel_key.empty()) {
     // Validate once on a cache miss, never in the warm replay path.
-    validate_jit_graph_gradients(*dispatch.jit_callable());
+    if (dispatch.argument_bindings.empty())
+      validate_jit_graph_gradients(*dispatch.jit_callable());
   }
   auto *prog = dispatch.ti_kernel->program;
   auto execution_handle = dispatch.jit_execution_handle();
@@ -625,7 +680,8 @@ CompiledGraphDispatchRuntimePlan build_cpu_runtime_arg_plan(
   auto *args_type = dispatch.jit_callable()->args_type;
   for (int i = 0; i < dispatch.symbolic_args.size(); ++i) {
     const auto &symbolic_arg = dispatch.symbolic_args[i];
-    if (symbolic_arg.struct_dtype != nullptr) {
+    if (symbolic_arg.struct_dtype != nullptr ||
+        symbolic_arg.tag == ArgKind::kArgPack) {
       plan.cpu_fast_path = false;
       plan.args.clear();
       return plan;
@@ -808,6 +864,8 @@ bool try_launch_cached_llvm_kernel(Program *prog,
                                    LaunchContextBuilder &launch_ctx,
                                    const CompiledGraphDispatchRuntimePlan *plan,
                                    bool bounded_extent_uses_runtime_storage) {
+  // Program's launcher owns generation validation and in-flight pack leases.
+  if (!launch_ctx.argpack_ptrs.empty()) return false;
   auto *launcher =
       dynamic_cast<LLVM::KernelLauncher *>(&prog->get_kernel_launcher());
   auto *llvm_compiled =
@@ -2244,7 +2302,7 @@ bool patch_cuda_graph_arguments(
 
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
-    graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    graph.init_runtime_context(dispatch, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
     prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
@@ -2615,7 +2673,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
 
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
-    graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    graph.init_runtime_context(dispatch, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
     prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
@@ -3008,7 +3066,7 @@ bool try_run_cuda_masked_control_graph(
         llvm_ckd, cache.kernels[i].execution_handle->registration());
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
-    graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    graph.init_runtime_context(dispatch, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
     prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
@@ -3336,7 +3394,7 @@ bool try_run_cuda_conditional_nested_control_graph(
           cache.kernels[i].execution_handle->registration());
       auto context = dispatch.make_launch_context();
       context.append_dispatch_label(dispatch.dispatch_label);
-      graph.init_runtime_context(dispatch.symbolic_args, args, context);
+      graph.init_runtime_context(dispatch, args, context);
       program.resolve_ndarray_launch_context_under_guard(context);
       program.resolve_runtime_storage_launch_context_under_guard(context);
       program.resolve_texture_launch_context_under_guard(context);
@@ -3750,7 +3808,7 @@ bool try_run_cuda_device_update_nested_control_graph(
         llvm_ckd, cache.kernels[i].execution_handle->registration());
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
-    graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    graph.init_runtime_context(dispatch, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
     prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
@@ -4179,7 +4237,7 @@ bool try_run_cuda_masked_nested_control_graph(
                   llvm_ckd, cache.kernels[i].execution_handle->registration());
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
-    graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    graph.init_runtime_context(dispatch, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
     prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
@@ -4521,7 +4579,7 @@ bool try_run_cuda_bounded_graph(
         llvm_ckd, cache.kernels[i].execution_handle->registration());
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
-    graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    graph.init_runtime_context(dispatch, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
     prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
@@ -4878,7 +4936,7 @@ bool try_run_cuda_conditional_graph(
         llvm_ckd, cache.kernels[i].execution_handle->registration());
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
-    graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    graph.init_runtime_context(dispatch, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
     prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
@@ -5278,7 +5336,7 @@ bool prepare_vulkan_graph_launch(
             dispatch.make_launch_context()));
     prepared.launch_contexts.back()->append_dispatch_label(
         dispatch.dispatch_label);
-    graph.init_runtime_context(dispatch.symbolic_args, args,
+    graph.init_runtime_context(dispatch, args,
                                *prepared.launch_contexts.back());
     prog->resolve_ndarray_launch_context_under_guard(
         *prepared.launch_contexts.back());
@@ -5347,6 +5405,11 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
                               *nested_control = nullptr,
                           gfx::GfxRuntime::GraphNestedStructuredResult
                               *nested_result = nullptr) {
+  // Managed packs currently use Program's ordinary launcher, which acquires
+  // their generation-qualified leases. Fixed replay needs its own snapshot.
+  if (std::any_of(args.begin(), args.end(), [](const auto &entry) {
+        return entry.second.tag == ArgKind::kArgPack;
+      })) return false;
   if (compile_config.debug) {
     auto &stats = cache.vulkan_inline_stats;
     stats.backend = CompiledGraphBackend::vulkan;
@@ -5846,7 +5909,7 @@ void CompiledGraph::run(
     launch_ctx.discard_return_values();
     set_cuda_bounded_range_binding(dispatch, launch_ctx);
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
-    init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    init_runtime_context(dispatch, args, launch_ctx);
     for (int i = 0; i < dispatch.symbolic_args.size(); ++i) {
       const auto &name = dispatch.symbolic_args[i].name;
       auto grad = gradients.find(name);
@@ -5964,7 +6027,7 @@ void CompiledGraph::jit_run(
     TI_ASSERT(dispatch.ti_kernel);
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
-    init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    init_runtime_context(dispatch, args, launch_ctx);
     // Launch the artifact selected while building the Graph. The helper also
     // handles internal dispatches assembled without a bound invocation.
     auto *prog = dispatch.ti_kernel->program;
@@ -6008,8 +6071,11 @@ void CompiledGraph::jit_run_cached(
   // Statistics are now side-effect free, and opt-in ticket telemetry is the
   // only measured path, so the production launch is compiled without clocks.
   constexpr bool attribute = false;
-  const bool stable_replay = cache.stable_replay_optimization_enabled.load(
-      std::memory_order_relaxed);
+  const bool has_argpacks = std::any_of(args.begin(), args.end(), [](const auto &entry) {
+    return entry.second.tag == ArgKind::kArgPack;
+  });
+  const bool stable_replay = !has_argpacks &&
+      cache.stable_replay_optimization_enabled.load(std::memory_order_relaxed);
   const auto replay_begin =
       attribute ? ReplayClock::now() : ReplayClock::time_point{};
   auto finish_attribution = [&]() {
@@ -6271,7 +6337,7 @@ void CompiledGraph::jit_run_cached(
       bounded_extent_uses_runtime_storage = init_runtime_context_from_plan(
           cache.runtime_arg_plans[i], args, prog, launch_ctx);
     } else {
-      init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+      init_runtime_context(dispatch, args, launch_ctx);
     }
     auto &cached = cache.kernels[i];
     const CompiledKernelData *compiled_kernel_data =
@@ -7413,24 +7479,65 @@ bool CompiledGraph::jit_run_conditional_cuda_masked_cached(
 
 // static
 void CompiledGraph::init_runtime_context(
-    const std::vector<Arg> &paramter_list,
+    const CompiledDispatch &dispatch,
     const std::unordered_map<std::string, IValue> &args,
     LaunchContextBuilder &ctx) {
   TI_COMPILE_PROFILER("compiled_graph_init_runtime_context");
-  for (int i = 0; i < paramter_list.size(); ++i) {
-    auto &symbolic_arg = paramter_list[i];
-    const std::vector<int> arg_id{i};
-    auto found = args.find(symbolic_arg.name);
+  const auto &parameters = dispatch.symbolic_args;
+  const auto &bindings = dispatch.argument_bindings;
+  const auto count = bindings.empty() ? parameters.size() : bindings.size();
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto root = bindings.empty() ? i : bindings[i].logical.front();
+    const Arg *symbol = &parameters[root];
+    auto found = args.find(symbol->name);
     TI_ERROR_IF(found == args.end(), "Missing runtime value for {}",
-                symbolic_arg.name);
-    const aot::IValue &ival = found->second;
-    if (symbolic_arg.tag == aot::ArgKind::kNdarray) {
+                symbol->name);
+    const IValue *value = &found->second;
+    if (!bindings.empty()) {
+      for (std::size_t depth = 1; depth < bindings[i].logical.size(); ++depth) {
+        const auto member = bindings[i].logical[depth];
+        TI_ERROR_IF(value->tag != ArgKind::kArgPack || !value->members ||
+                        member >= value->members->size(),
+                    "Graph ArgPack runtime member layout does not match");
+        symbol = &symbol->members[member];
+        value = &value->members->at(member);
+      }
+    }
+    const auto &symbolic_arg = *symbol;
+    const auto &ival = *value;
+    const std::vector<int> arg_id =
+        bindings.empty() ? std::vector<int>{static_cast<int>(i)} : bindings[i].physical;
+    if (symbolic_arg.tag == ArgKind::kArgPack) {
+      TI_ERROR_IF(bindings.empty() || ival.tag != ArgKind::kArgPack || !ival.val ||
+                      !ival.members || ival.members->size() != symbolic_arg.members.size(),
+                  "Graph ArgPack requires a matching compiled binding plan");
+      ctx.set_arg_argpack(arg_id, *reinterpret_cast<const ArgPack *>(ival.val));
+    } else if (symbolic_arg.tag == aot::ArgKind::kNdarray) {
       TI_ASSERT(ival.tag == aot::ArgKind::kNdarray);
+      const bool needs_grad = !bindings.empty() &&
+          dispatch.jit_callable()->nested_parameters.at(arg_id).needs_grad;
+      auto bind_array = [&](const Ndarray &array) {
+        if (needs_grad) {
+          TI_ERROR_IF(!ival.gradient || ival.gradient->dtype != array.dtype ||
+                          ival.gradient->shape != array.shape,
+                      "Graph ArgPack ndarray {} requires a matching gradient owner",
+                      symbolic_arg.name);
+          ctx.set_arg_ndarray_with_grad(arg_id, array, *ival.gradient);
+        } else {
+          ctx.set_arg_ndarray(arg_id, array);
+        }
+      };
       if (ival.runtime_storage != nullptr) {
         validate_graph_runtime_storage_argument(
             *ival.runtime_storage, symbolic_arg.name, symbolic_arg.dtype_id,
             symbolic_arg.field_dim, symbolic_arg.element_shape);
-        ctx.set_arg_runtime_storage(arg_id, *ival.runtime_storage);
+        if (needs_grad) {
+          TI_ERROR_IF(!ival.val,
+                      "Graph ArgPack gradients require managed ndarray owners");
+          bind_array(*reinterpret_cast<const Ndarray *>(ival.val));
+        } else {
+          ctx.set_arg_runtime_storage(arg_id, *ival.runtime_storage);
+        }
         continue;
       }
       Ndarray *arr = reinterpret_cast<Ndarray *>(ival.val);
@@ -7462,7 +7569,7 @@ void CompiledGraph::init_runtime_context(
                   "dtype={} but got an ndarray with dtype={}",
                   symbolic_arg.name, symbolic_arg_primitive_dtype.to_string(),
                   arr_primitive_dtype.to_string());
-      ctx.set_arg_ndarray(arg_id, *arr);
+      bind_array(*arr);
     } else if (symbolic_arg.tag == aot::ArgKind::kScalar) {
       TI_ASSERT(ival.tag == aot::ArgKind::kScalar);
       // Matrix args are flattened so they're same as scalars.
@@ -7560,7 +7667,7 @@ void CompiledGraph::init_runtime_context(
       TI_ERROR_IF(mat->length() * data_type_size(mat->dtype()) > 128,
                   "Matrix size={} is out of bound",
                   mat->length() * data_type_size(mat->dtype()));
-      ctx.set_arg_matrix(i, *mat);
+      ctx.set_arg_matrix(arg_id.front(), *mat);
     } else {
       TI_ERROR("Error in compiled graph: unknown tag {}", int(ival.tag));
     }
