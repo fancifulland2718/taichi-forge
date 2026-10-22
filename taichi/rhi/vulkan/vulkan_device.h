@@ -1391,6 +1391,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
  private:
   friend class VulkanResourceSet;
   friend class VulkanStream;
+  friend class VulkanExecutionQueue;
   friend VulkanSurface;
 
   std::unique_lock<std::mutex> acquire_queue_lock(VkQueue queue);
@@ -1421,7 +1422,9 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     std::mutex mutex;
     VulkanQueueLockTelemetry telemetry;
     std::weak_ptr<vkapi::DeviceObjVkFence> tail_fence;
+    bool leased{false};
   };
+  std::mutex execution_queue_mutex_;
   std::vector<std::unique_ptr<AdditionalComputeQueue>> additional_compute_queues_;
   std::unordered_map<VkQueue, AdditionalComputeQueue *> additional_queue_states_;
 

@@ -9,6 +9,7 @@ target_sources(${VULKAN_RHI}
     vulkan_api.cpp
     vulkan_device.cpp
     vulkan_device_creator.cpp
+    vulkan_execution_queue.cpp
     vulkan_loader.cpp
     vulkan_memory_allocator.cpp
     vulkan_pipeline_diagnostics.cpp
