@@ -615,6 +615,13 @@ class Module:
         copying data or storing addresses; consumers supply their own arrays.
         These arrays remain public even with ``snapshot_state=True``.
         Reuse a kernel's symbolic name when it accesses the same storage.
+        A symbolic ArgPack may also appear in ``source_bindings``. Its actual
+        device values are frozen into private pack resources; ndarray members
+        use named source arrays or the explicit ``snapshot_state`` policy.
+        Nested Python value objects are not treated as device snapshots.
+        The pack name leaves the public plan inputs, while named member arrays
+        remain public. This automatic path currently accepts value/ndarray
+        members and retains the existing backend recording admission rules.
         An f32 CUDA CSR/BSR SparseMatrix names its compressed numeric values,
         not the ndarray originally copied into the matrix. Its topology stays
         frozen and consumers supply a one-dimensional f32 array in that order.

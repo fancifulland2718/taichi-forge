@@ -1930,9 +1930,27 @@ member bindings may change between executions; `Graph.bind()` does not cache
 a mutable pack's old member references as an immutable snapshot. Explicit
 `kernel.grad` dispatches use managed ndarray gradient owners; value members
 remain constants. A missing gradient owner fails before that dispatch submits.
-This route uses ordinary launch resource leases. Native fixed recording,
-independent domains and automatic AOT pack export remain separate follow-up
-work; the explicit AOT pack interfaces below remain available.
+Mutable ordinary execution retains resources through the Program launcher.
+
+Fixed value/ndarray packs also work with CUDA
+`Graph.prepare(..., execution_domain=...)`. Preparation freezes actual device
+values and member references into private pack storage for each instance.
+Changing or releasing the producer pack does not alter that instance. Array
+contents keep their existing loan contract and require explicit concurrent
+dependencies. Call `initialize()` before submitting; replay does not upload pack
+values. Prepare another instance to change frozen values or member references.
+
+On CPU/CUDA/Vulkan, `Module.add_execution_plan("step", graph,
+source_bindings={"pack": pack, "values": pack.values})` automatically freezes
+pack values while named member arrays remain public inputs. Unnamed arrays need
+explicit `snapshot_state=True`. The original pack input is removed from the
+plan. Only compiled pure-value windows are stored, with no pointer or padding
+bytes; in-place edits to nested Python objects that have not reached device
+storage do not enter the snapshot. Isolated checks cover sequential plans,
+explicit adjoints and independent instances. Automatic image/AS members,
+consumer-supplied public pack owners, legacy CGraph serialization and other
+fixed physical strategies need separate qualification. Normal installations
+have not yet been refreshed with this slice.
 
 The producer's `Module.add_kernel()` synthesizes compilation exemplars for fully
 declared ArgPacks. When a member ndarray has an unspecified dtype or rank, supply
@@ -1993,8 +2011,8 @@ support immutable pack values with lifted array members. Recording adds uniform
 read dependencies once, coalescing duplicate allocations; replay uploads no pack
 values. Checks cover zero/early/budget exits, independent instances, rebuilt
 values, explicit suffix adjoints and in-flight retirement. Vulkan control retains
-its buffer-only resource scope. Automatic symbolic Graph pack export and mutable
-JIT pack Graph bindings remain pending.
+its buffer-only resource scope. These explicit-plan results do not expand the
+qualification of automatic export or mutable ordinary Graph execution above.
 
 Matching Windows runtime/frontend wheels pass installed CPU/CUDA/Vulkan checks
 for standalone and borrowed execution, persistent-pack forward/explicit reverse

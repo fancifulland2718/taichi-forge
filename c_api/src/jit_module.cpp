@@ -54,6 +54,10 @@ class JitKernel final : public llvm_aot::KernelImpl {
                                  kernel.execution->compiled())
                                  .get_internal_data()),
         dispatch_(kernel.dispatch) {
+    const auto &callable = *dispatch_.jit_callable();
+    argument_origins = callable.argument_origins;
+    value_parameter_types = callable.value_parameter_types;
+    argpack_types = callable.argpack_types;
     // Invocation metadata is frozen; never dereference a frontend shell
     // after the cold adoption transaction.
     dispatch_.ti_kernel = nullptr;

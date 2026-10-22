@@ -399,10 +399,17 @@ class GraphLoweringContext:
             launch_abi != "cuda_graph_gate_v1" or self.arch != core.Arch.cuda or launch is not None
         ):
             raise TaichiRuntimeError("AOT gated code requires a plain selected CUDA dispatch")
-        bindings = [self.kernel_binding(arg) for arg in args]
+        has_packs = any(arg.tag == core.ArgKind.ARGPACK for arg in args)
+        name = self._kernel_entry(kernel, launch_abi, jit_source)
+        if has_packs:
+            from ._lowering_argpacks import kernel_pack_bindings
+
+            bindings = kernel_pack_bindings(self, args, name, jit_source)
+        else:
+            bindings = [self.kernel_binding(arg) for arg in args]
         if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY) for arg in args):
             self._buffer_only_kernels = False
-        if self.source_arrays is not None:
+        if self.source_arrays is not None and not has_packs:
             self.source_arrays.validate_kernel(args, bindings)
         if any(
             arg.tag
@@ -413,11 +420,11 @@ class GraphLoweringContext:
                 core.ArgKind.RWTEXTURE,
                 core.ArgKind.TEXTURE_COLLECTION,
                 core.ArgKind.ACCELERATION_STRUCTURE,
+                core.ArgKind.ARGPACK,
             )
             for arg in args
         ):
             raise TaichiRuntimeError("AOT execution Graph requires scalar, ndarray or qualified image/AS bindings")
-        name = self._kernel_entry(kernel, launch_abi, jit_source)
         self._used_kernel_entries.add(name)
         operation = dict(kind="kernel", entry=name, arguments=bindings)
         if label:

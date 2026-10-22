@@ -8,6 +8,8 @@ from taichi_forge.lang._texture import Texture, TextureCollection
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 from taichi_forge.graph._lowering_image_sources import SourceImageBindings
+from taichi_forge.graph._lowering_argpacks import SourceArgPacks
+from taichi_forge.lang.argpack import ArgPack
 
 
 class SourceAccelerationStructures:
@@ -56,16 +58,18 @@ class SourceResourceBindings:
                 SourceImageBindings,
             ),
             ((InstanceTLAS,), (core.ArgKind.ACCELERATION_STRUCTURE,), SourceAccelerationStructures),
+            ((ArgPack,), (core.ArgKind.ARGPACK,), SourceArgPacks),
         )
         grouped = [{} for _ in handlers]
         routes = {owner_type: grouped[i] for i, (types, _, _) in enumerate(handlers) for owner_type in types}
         self.arrays = {}
         for name, owner in bindings.items():
-            routes.get(type(owner), self.arrays)[name] = owner
+            routes.get(ArgPack if isinstance(owner, ArgPack) else type(owner), self.arrays)[name] = owner
         self._groups = tuple(factory(group, fixed_bindings) for group, (_, _, factory) in zip(grouped, handlers))
         self._handlers = {tag: handler for handler, (_, tags, _) in zip(self._groups, handlers) for tag in tags}
         self.images = self._handlers[core.ArgKind.TEXTURE]
         self.acceleration_structures = self._handlers[core.ArgKind.ACCELERATION_STRUCTURE]
+        self.argpacks = self._handlers[core.ArgKind.ARGPACK]
         self.owners = {name: owner for handler in self._groups for name, owner in handler.owners.items()}
 
     @property

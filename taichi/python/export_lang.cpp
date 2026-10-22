@@ -6885,6 +6885,40 @@ void export_lang(py::module &m) {
   };
 
   py::class_<aot::CompiledGraph>(m, "CompiledGraph")
+      .def("_logical_argument_bindings", [](const aot::CompiledGraph &graph,
+                                            std::size_t index) {
+        const auto &dispatch = graph.dispatches.at(index);
+        py::list result;
+        for (const auto &binding : dispatch.argument_bindings)
+          result.append(py::make_tuple(binding.logical, binding.physical));
+        return result;
+      })
+      .def("_snapshot_argpack", [](const aot::CompiledGraph &graph,
+                                   std::size_t index, int argument,
+                                   const std::map<std::vector<int>, const ArgPack *> &packs) {
+        const auto &dispatch = graph.dispatches.at(index);
+        const auto &execution = dispatch.jit_execution_handle();
+        TI_ERROR_IF(!dispatch.ti_kernel || !execution || !execution->active() || argument < 0,
+                    "ArgPack snapshot requires live selected Graph code");
+        auto *program = dispatch.ti_kernel->program;
+        auto guard = program->acquire_snode_tree_lifecycle_read_guard();
+        const auto arch = program->compile_config().arch;
+        TI_ERROR_IF(!arch_is_cpu(arch) && arch != Arch::cuda && arch != Arch::vulkan,
+                    "ArgPack snapshot requires CPU, CUDA or Vulkan");
+        const auto data_layout = program->get_kernel_argument_data_layout();
+        const aot::ArgPackLayout layout(
+            *dispatch.jit_callable(), {argument},
+            arch == Arch::vulkan ? aot::ValueStorage::Gfx : aot::ValueStorage::Host,
+            [program, data_layout](const StructType *type) {
+              return program->get_struct_type_with_data_layout(type, data_layout);
+            });
+        auto values = program->snapshot_argpack_values(layout, packs);
+        py::list payloads;
+        for (const auto &[path, bytes] : values)
+          payloads.append(py::make_tuple(
+              path, py::bytes(reinterpret_cast<const char *>(bytes.data()), bytes.size())));
+        return py::make_tuple(layout.to_json(), payloads);
+      })
       .def_property_readonly(
           "_physical_jit_parallel_execution_sources",
           [physical_graph_sources](const py::object &owner) {

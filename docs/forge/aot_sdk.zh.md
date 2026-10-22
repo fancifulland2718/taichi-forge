@@ -1513,8 +1513,20 @@ Python ArgPack。成员 ndarray 的 dtype/ndim 必须明确；嵌套成员及提
 通过编译器的参数来源映射绑定，同一符号可以位于不同 kernel 参数位置。两次执行之间
 可以修改包值或重绑定成员，`Graph.bind()` 不会把可变包的旧成员引用当作永久快照。
 此路径也支持显式 `kernel.grad` dispatch 的 managed ndarray 梯度；按值成员仍为常量。
-缺失的梯度 owner 会在该 dispatch 提交前报错。当前通过普通 launcher 保留资源租约，
-尚不包含原生固定录制、独立执行域及自动 AOT 包导出；下述显式 AOT 参数包接口继续可用。
+缺失的梯度 owner 会在该 dispatch 提交前报错。可变普通执行通过 Program launcher 保留资源租约。
+
+固定值/ndarray 参数包可以进入 CUDA `Graph.prepare(..., execution_domain=...)`：
+prepare 冻结实际设备值和成员引用，每个实例拥有私有参数包存储；随后修改或释放源包
+不影响该实例。数组内容仍沿既有借用合同共享，必须显式安排并发依赖。调用
+`initialize()` 后再提交，重放不重新上传包值。需要新包值或成员引用时重新 prepare。
+
+CPU/CUDA/Vulkan 的 `Module.add_execution_plan("step", graph,
+source_bindings={"pack": pack, "values": pack.values})` 同样自动冻结包值，数组成员
+经现有 source binding 保持公开；未命名的数组仅在 `snapshot_state=True` 时捕获。
+产物移除原 `pack` 输入，保留命名成员数组输入；只保存编译布局下的纯值，不保存指针或
+填充字节。嵌套 Python 对象原地修改而尚未写入设备的值不会混入快照。
+本切片已隔离验证三后端顺序计划、显式反向与双实例；自动 image/AS 成员重建、消费端公开
+包 owner、旧 CGraph 序列化及其他固定物理策略仍需各自资格验证。正常安装尚未更新到此切片。
 
 生产端 `Module.add_kernel()` 可为完全声明的 ArgPack 自动构造编译占位；成员 ndarray
 的 dtype/ndim 未指定时，通过 `template_args={"pack参数名": 实际参数包, ...}` 提供
@@ -1558,8 +1570,8 @@ family 按既有私有状态合同共享存储。显式计划的 CPU/CUDA 条件
 Vulkan 已选 compact/chained/conditional 和二层嵌套录制，支持只读包值与提升后的
 数组成员；录制一次 uniform 读取依赖，按 allocation 合并重复引用，重放无需上传。
 这些路线通过零轮/提前结束/预算耗尽、双实例、参数值重建、后段显式反向与在途退休
-检查。Vulkan 条件区域仍沿用 buffer-only 资源范围；symbolic Graph 参数包自动导出
-和可变 JIT 参数包的 Graph 绑定尚未接通。
+检查。Vulkan 条件区域仍沿用 buffer-only 资源范围；这些显式计划测试不扩大上述自动导出
+与可变普通 Graph 的资格范围。
 
 配套 Windows runtime/frontend wheel 已通过 CPU/CUDA/Vulkan 的正常安装验证，
 覆盖独立与借用执行、持久参数包的前向/显式反向、状态隔离和退休；仅安装 runtime 的

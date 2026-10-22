@@ -109,8 +109,10 @@ combination. Consult the linked API contracts and capability queries for exact s
 - ArgPack supports direct kernels and declared execution-plan binding/reconstruction, including
   nested values, resource members and gradient source mappings. Ordinary JIT `Graph.run()` now
   accepts `ArgKind.ARGPACK`, member rebinding, different kernel argument positions and explicit
-  ndarray adjoints. Native fixed recording, independent domains and symbolic Graph automatic
-  export remain incomplete.
+  ndarray adjoints. Value/ndarray packs can be frozen into independent CUDA domains and
+  automatically exported as CPU/CUDA/Vulkan sequential execution plans through shared lowering,
+  reusing native pack storage and recording. Automatic image/AS members, public consumer pack
+  owners and legacy CGraph serialization remain separate follow-up work.
 - Native sort/compact, scan/reduce, transform, gather/scatter and grouped/segmented recording/AOT
   routes support more layouts. Coverage remains specific to operation, backend, type and strategy.
   Packed Field/vector/matrix routes reuse existing cores, preserving stable order, payload bits and aliases.

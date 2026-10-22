@@ -58,6 +58,10 @@ namespace cuda {
 class ExecutionDomainRegistry;
 }
 
+namespace aot {
+class ArgPackLayout;
+}
+
 struct HostMemoryPoolStats;
 
 namespace cuda::detail {
@@ -1126,6 +1130,12 @@ class TI_DLL_EXPORT Program {
   void delete_ndarray(Ndarray *ndarray);
 
   void delete_argpack(ArgPack *argpack);
+
+  // Cold snapshot of compiled pure-value windows. Never publishes pointer or
+  // padding bytes; the caller retains the logical member/resource contract.
+  std::map<std::vector<int>, std::vector<std::uint8_t>> snapshot_argpack_values(
+      const aot::ArgPackLayout &layout,
+      const std::map<std::vector<int>, const ArgPack *> &packs);
 
   void delete_texture(Texture *texture);
 

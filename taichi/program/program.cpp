@@ -5,6 +5,7 @@
 #include "taichi/ir/statements.h"
 #include "taichi/program/extension.h"
 #include "taichi/program/kernel_compile_request.h"
+#include "taichi/aot/argpack_layout.h"
 #include "taichi/runtime/runtime_client.h"
 #include "taichi/codegen/cpu/codegen_cpu.h"
 #include "taichi/struct/struct.h"
@@ -9025,6 +9026,108 @@ void Program::copy_ndarray_to_host(Ndarray *src,
   const RhiResult res = device->readback_data(&src_ptr, &dst_ptr, &size, 1);
   TI_ERROR_IF(res != RhiResult::success,
               "copy_ndarray_to_host failed: {}", res);
+}
+
+std::map<std::vector<int>, std::vector<std::uint8_t>>
+Program::snapshot_argpack_values(
+    const aot::ArgPackLayout &layout,
+    const std::map<std::vector<int>, const ArgPack *> &packs) {
+  auto lifecycle = acquire_snode_tree_lifecycle_read_guard();
+  auto submission = acquire_runtime_resource_submission_guard();
+  const auto &storages = layout.storages();
+  TI_ERROR_IF(packs.size() != storages.size(),
+              "ArgPack snapshot requires its exact nested pack inventory");
+  std::vector<ArgPackResourceLease> leases;
+  std::vector<DevicePtr> sources;
+  std::vector<std::vector<std::uint8_t>> buffers;
+  std::vector<void *> destinations;
+  std::vector<std::size_t> sizes;
+  {
+    std::lock_guard<std::mutex> lock(argpack_lifecycle_mutex_);
+    TI_ERROR_IF(!argpack_resources_open_, "Cannot snapshot a retired Program");
+    for (const auto &storage : storages) {
+      const auto found = packs.find(storage.origin.logical);
+      TI_ERROR_IF(found == packs.end(), "ArgPack snapshot is missing a nested pack");
+      const auto registered = argpack_views_.find(found->second);
+      TI_ERROR_IF(registered == argpack_views_.end(),
+                  "ArgPack snapshot references a stale or foreign owner");
+      leases.push_back(registered->second.lease.clone());
+      TI_ERROR_IF(!leases.back(), "ArgPack snapshot could not retain its owner");
+      const auto *pack = leases.back().get();
+      const auto *type = pack->dtype->as<ArgPackType>();
+      if (storage.type->elements().empty()) {
+        // Python owns an i32 placeholder for resource-only packs. The compiled
+        // ABI has no values there, so neither that word nor its padding is read.
+        buffers.emplace_back();
+        continue;
+      }
+      const auto actual_bytes = get_argpack_type_with_data_layout(
+          type, get_kernel_argument_data_layout()).second;
+      TI_ERROR_IF(type->elements().size() != storage.type->elements().size() ||
+                      actual_bytes != storage.bytes,
+                  "ArgPack snapshot layout differs from the selected code");
+      // Kernel storage uses compiler-generated member names, while the managed
+      // pack retains user names. Compare the actual pure-value windows through
+      // the shared layout reflector; child pointer slots are never exported.
+      for (const auto &value : storage.values) {
+        const auto slot = std::size_t(value.origin.physical.back());
+        const auto &member = type->elements().at(slot);
+        const auto end = slot + 1 < type->elements().size()
+                             ? type->elements()[slot + 1].offset : actual_bytes;
+        TI_ERROR_IF(member.offset != value.offset || end < member.offset,
+                    "ArgPack snapshot value offset differs from the selected code");
+        const aot::ValueLayout actual(value.layout.type, member.type,
+                                       end - member.offset, layout.value_storage());
+        TI_ERROR_IF(actual.members.size() != value.layout.members.size(),
+                    "ArgPack snapshot value shape differs from the selected code");
+        for (std::size_t leaf = 0; leaf < actual.members.size(); ++leaf) {
+          const auto &left = actual.members[leaf];
+          const auto &right = value.layout.members[leaf];
+          TI_ERROR_IF(left.offset != right.offset || left.size != right.size ||
+                          left.scalar_type != right.scalar_type ||
+                          left.scalar_size != right.scalar_size ||
+                          left.component_offsets != right.component_offsets,
+                      "ArgPack snapshot value layout differs from the selected code");
+        }
+      }
+      buffers.emplace_back(storage.bytes);
+      if (storage.bytes) {
+        sources.push_back(pack->get_device_allocation().get_ptr());
+        destinations.push_back(buffers.back().data());
+        sizes.push_back(storage.bytes);
+      }
+    }
+  }
+  synchronize();
+  auto *device = program_impl_->get_compute_device();
+  for (std::size_t begin = 0; begin < sizes.size();) {
+    const auto count = std::min<std::size_t>(sizes.size() - begin,
+                                            std::numeric_limits<int>::max());
+    TI_ERROR_IF(device->readback_data(sources.data() + begin,
+                                      destinations.data() + begin,
+                                      sizes.data() + begin, static_cast<int>(count)) !=
+                    RhiResult::success,
+                "Unable to snapshot ArgPack values");
+    begin += count;
+  }
+  std::map<std::vector<int>, std::vector<std::uint8_t>> result;
+  for (std::size_t i = 0; i < storages.size(); ++i) {
+    for (const auto &value : storages[i].values) {
+      auto &output = result[value.origin.logical];
+      output.resize(value.layout.buffer_size, 0);
+      for (const auto &leaf : value.layout.members) {
+        if (leaf.component_offsets.empty()) {
+          std::memcpy(output.data() + leaf.offset,
+                      buffers[i].data() + value.offset + leaf.offset, leaf.size);
+        } else {
+          for (const auto offset : leaf.component_offsets)
+            std::memcpy(output.data() + offset,
+                        buffers[i].data() + value.offset + offset, leaf.scalar_size);
+        }
+      }
+    }
+  }
+  return result;
 }
 
 void Program::copy_ndarrays_to_host(const Ndarray *const *srcs,

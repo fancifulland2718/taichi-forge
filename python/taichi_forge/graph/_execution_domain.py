@@ -11,6 +11,7 @@ from taichi_forge.graph._lowering_resource_bindings import ResourceInputBindings
 from taichi_forge.graph._lowering_resource_sources import SourceResourceBindings
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray, StructNdarray
+from taichi_forge.lang.argpack import ArgPack
 from taichi_forge.lang._storage_view import DenseNdarrayView, ndarray_view
 from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.matrix import MatrixField
@@ -47,14 +48,14 @@ class _JitRetainedArrays(RetainedArrayBindings):
         return self.context.data_resource()
 
     def require(self, owner):
-        if not isinstance(owner, (DenseNdarrayView, ScalarField, MatrixField)):
+        if not isinstance(owner, (Ndarray, DenseNdarrayView, ScalarField, MatrixField)):
             return super().require(owner)
         context = self.context
         identity = id(owner)
         previous = context.live_names.get(identity)
         if previous is not None:
             return previous
-        view = owner if isinstance(owner, DenseNdarrayView) else ndarray_view(owner)
+        view = owner if isinstance(owner, (Ndarray, DenseNdarrayView)) else ndarray_view(owner)
         name = context._name("live")
         context.live_arrays[name] = view
         context.live_names[identity] = name
@@ -62,26 +63,35 @@ class _JitRetainedArrays(RetainedArrayBindings):
 
 
 class _JitContext(GraphLoweringContext):
-    def __init__(self, graph):
+    def __init__(self, graph, arguments):
         spec = graph._spec
         super().__init__(
             core.Arch.cuda,
             set(spec.runtime_arg_names) | set(spec.fixed_runtime_args),
             source_arrays=SourceArrayBindings(None, spec.fixed_runtime_args),
-            source_resources=SourceResourceBindings(None, spec.fixed_runtime_args),
+            source_resources=SourceResourceBindings(
+                {name: value for name, value in arguments.items() if isinstance(value, ArgPack)}, spec.fixed_runtime_args
+            ),
             resource_inputs=ResourceInputBindings(None, spec.fixed_runtime_args),
         )
         self.imports = []
         self.scalar_types = {}
         self.live_arrays = {}
-        self.live_names = {}
+        self.live_names = {id(value): name for name, value in arguments.items() if isinstance(value, (Ndarray, DenseNdarrayView))}
+        self.live_blobs = {}
         self.retained_arrays = _JitRetainedArrays(self)
 
     def data_resource(self, *args, **kwargs):
         raise TaichiRuntimeError("JIT preparation requires a live storage loan for retained Field views/provider data")
 
-    host_blob_resource = data_resource
     provider_data_binding = data_resource
+
+    def host_blob_resource(self, data):
+        if type(data) is not bytes:
+            raise TypeError("JIT host blobs must be immutable bytes")
+        name = self._name("blob")
+        self.live_blobs[name] = data
+        return name
 
     def _kernel_entry(self, kernel, launch_abi, jit_source):
         if jit_source is None:
@@ -207,7 +217,7 @@ def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
             )
         arguments, version = graph._snapshot_binding_source(arguments)
         spec._validate_runtime_arg_names(arguments, "Graph.prepare")
-        context = _JitContext(graph)
+        context = _JitContext(graph, arguments)
         lower_frozen_graph(context, graph)
         plan = ExecutionPlan(
             context.operations,
@@ -220,7 +230,8 @@ def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
         )
         if (
             set(plan.argument_names)
-            != set(spec.runtime_arg_names) | context.live_arrays.keys()
+            != (set(spec.runtime_arg_names) - context.source_resources.argpacks.used)
+            | context.live_arrays.keys() | context.live_blobs.keys()
         ):
             raise TaichiRuntimeError(
                 "JIT preparation changed the complete Graph binding contract"
@@ -231,7 +242,10 @@ def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
             )
         # Reject unsupported inputs before importing code or storage. Original
         # fixed workspace is never silently shared between independent calls.
-        arguments = dict(arguments, **context.live_arrays)
+        arguments = dict(
+            ((name, value) for name, value in arguments.items() if name not in context.source_resources.argpacks.used),
+            **context.live_arrays,
+        )
         for name, value in arguments.items():
             if name in context.scalar_types:
                 if type(value) not in (bool, int, float):
@@ -293,6 +307,9 @@ def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
                     bindings[name] = borrow(value)
                     if value.grad is not None:
                         gradients[name] = borrow(value.grad)
+            for name, payload in context.live_blobs.items():
+                blob = runtime.host_blob(payload)
+                imported[("host_blob", name)] = bindings[name] = blob
             with runtime._lock:
                 prepared = module.prepare_execution(
                     plan,
