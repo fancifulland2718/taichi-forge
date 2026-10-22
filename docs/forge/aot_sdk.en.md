@@ -1978,6 +1978,12 @@ both retain their explicit gradient bindings. Isolated checks cover sequential p
 explicit adjoints and independent instances. Automatic AS members, legacy
 CGraph serialization and other fixed physical strategies need separate
 qualification. Normal installations have not yet been refreshed with this slice.
+Automatic control checks additionally cover CPU/CUDA/Vulkan WHILE with zero rounds,
+early exit, exhausted budgets and explicit suffix adjoints; GPU cases require native
+WHILE. Branch checks cover CPU, CUDA native conditional nodes and Vulkan's existing
+host-control route, switching selections with public and frozen packs and checking
+actual gradients. A CUDA-domain WHILE with initialization uses one logical instance
+reservation. Nested/fork-join/recording combinations still need their own qualification.
 
 The producer's `Module.add_kernel()` synthesizes compilation exemplars for fully
 declared ArgPacks. When a member ndarray has an unspecified dtype or rank, supply

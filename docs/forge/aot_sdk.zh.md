@@ -1548,6 +1548,10 @@ source_bindings={"pack": pack, "values": pack.values})` 同样自动冻结包值
 公开包，并连接冻结包的资源成员；两类成员的显式梯度继续使用各自的绑定。
 本切片已隔离验证三后端顺序计划、显式反向与双实例；自动 AS 成员重建、旧 CGraph
 序列化及其他固定物理策略仍需各自资格验证。正常安装尚未更新到此切片。
+自动控制另已验证 CPU/CUDA/Vulkan WHILE 的零轮、提前结束、预算耗尽和后续显式伴随，
+GPU 用例要求原生 WHILE。分支覆盖 CPU、CUDA 原生条件节点和 Vulkan 现有 host 控制路线，
+公开包与源冻结包均在选择切换后核对真实梯度。CUDA 独立域已验证带初始化的 WHILE 使用
+一个逻辑实例名额；尚不据此宣称全部嵌套/fork-join/recording 组合已取得资格。
 
 生产端 `Module.add_kernel()` 可为完全声明的 ArgPack 自动构造编译占位；成员 ndarray
 的 dtype/ndim 未指定时，通过 `template_args={"pack参数名": 实际参数包, ...}` 提供

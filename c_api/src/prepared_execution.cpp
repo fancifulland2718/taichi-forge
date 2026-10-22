@@ -32,6 +32,30 @@
 namespace capi {
 using namespace taichi::lang;
 
+// One public preparation owns both initialization and replay recordings. Its
+// domain reservation counts the logical instance, independent of phase count.
+struct PreparedDomainInstance final : RuntimeClient {
+  std::vector<std::shared_ptr<RuntimeClient>> parts;
+  std::mutex mutex;
+  std::exception_ptr retirement_error;
+  void retire() override {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (retirement_error)
+      std::rethrow_exception(retirement_error);
+    for (const auto &part : parts) {
+      try {
+        part->retire();
+      } catch (...) {
+        if (!retirement_error)
+          retirement_error = std::current_exception();
+      }
+    }
+    if (retirement_error)
+      std::rethrow_exception(retirement_error);
+    parts.clear();
+  }
+};
+
 struct PreparedExecution {
   AotModule *owner{nullptr};
   std::shared_ptr<ExecutionBindingFamily> family;
@@ -48,6 +72,7 @@ struct PreparedExecution {
   bool released{false};
   bool domain_initialized{false};
   std::shared_ptr<cuda::ExecutionDomain> domain;
+  std::shared_ptr<PreparedDomainInstance> domain_instance;
   std::shared_ptr<RuntimeCompletionCudaEventPool> bootstrap_events;
   RuntimeCompletion bootstrap;
   std::vector<SubmissionParameterValue> submission_values;
@@ -265,6 +290,8 @@ struct PreparedExecution {
         retained->arrays = resources;
         retained->objects = native_resources;
         selected.operands = std::move(retained);
+        domain_instance = std::make_shared<PreparedDomainInstance>();
+        selected.retirement_parts = &domain_instance->parts;
       }
       const auto *execution_binding = domain ? &selected : nullptr;
       NativeRecordingState sequence =
@@ -283,38 +310,46 @@ struct PreparedExecution {
           if (replay_resources.count(object.get()))
             operands->objects.push_back(object);
       }
-      if (family && !family->prepared) {
-        if (!initializers.empty()) {
-          auto initial_operands = std::make_shared<FrameOperands>(*operands);
-          initial_operands->objects = native_resources;
-          family->initialization_operands = std::move(initial_operands);
-          family->initialization = std::make_unique<FixedExecution>(
+      const auto prepare_recordings = [&] {
+        if (family && !family->prepared) {
+          if (!initializers.empty()) {
+            auto initial_operands = std::make_shared<FrameOperands>(*operands);
+            initial_operands->objects = native_resources;
+            family->initialization_operands = std::move(initial_operands);
+            family->initialization = std::make_unique<FixedExecution>(
+                runtime.arch, runtime.get(), gfx_runtime, initializers, &sequence,
+                runtime.runtime_fault_domain());
+          } else {
+            family->initialized = true;
+          }
+          family->initial_facts = sequence;
+        } else if (!family && !initializers.empty()) {
+          initialization = std::make_unique<FixedExecution>(
               runtime.arch, runtime.get(), gfx_runtime, initializers, &sequence,
-              runtime.runtime_fault_domain());
-        } else {
-          family->initialized = true;
+              runtime.runtime_fault_domain(), nullptr, nullptr, nullptr, nullptr,
+              execution_binding);
+          if (!initial_access.empty())
+            initialization->bind_external_access(std::move(initial_access));
         }
-        family->initial_facts = sequence;
-      } else if (!family && !initializers.empty()) {
-        initialization = std::make_unique<FixedExecution>(
-            runtime.arch, runtime.get(), gfx_runtime, initializers, &sequence,
-            runtime.runtime_fault_domain(), nullptr, nullptr, nullptr, nullptr,
+        selected.parameter_count = submission_values.size();
+        native = std::make_unique<FixedExecution>(
+            runtime.arch, runtime.get(), gfx_runtime, operations, &sequence,
+            runtime.runtime_fault_domain(), family ? family->replay : nullptr,
+            family ? operands : nullptr, submission_recipe, storage_ring,
             execution_binding);
-        if (!initial_access.empty())
-          initialization->bind_external_access(std::move(initial_access));
-      }
-      selected.parameter_count = submission_values.size();
-      native = std::make_unique<FixedExecution>(
-          runtime.arch, runtime.get(), gfx_runtime, operations, &sequence,
-          runtime.runtime_fault_domain(), family ? family->replay : nullptr,
-          family ? operands : nullptr, submission_recipe, storage_ring,
-          execution_binding);
-      if (!replay_access.empty())
-        native->bind_external_access(std::move(replay_access));
-      if (family) {
-        family->prepared = true;
-        family->arrays->sealed = true;
-      }
+        if (!replay_access.empty())
+          native->bind_external_access(std::move(replay_access));
+        if (family) {
+          family->prepared = true;
+          family->arrays->sealed = true;
+        }
+      };
+#ifdef TI_WITH_CUDA
+      if (domain)
+        domain->prepare_instance(domain_instance, prepare_recordings);
+      else
+#endif
+        prepare_recordings();
     } catch (const std::invalid_argument &error) {
       throw MemoryBindingError(error.what());
     }

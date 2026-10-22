@@ -36,7 +36,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **151**, persistent execution-plan version **26**, and
+- The frontend/native private ABI is **152**, persistent execution-plan version **26**, and
   compiled-cache schema **68**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
@@ -81,6 +81,9 @@ combination. Consult the linked API contracts and capability queries for exact s
 - CPU/CUDA/Vulkan registration belongs to execution owners while compiled code can be shared.
   In-flight leases, independent instances, reset/close and process exit retire resources in dependency
   order, fixing borrowed-runtime and Vulkan process-exit access violations.
+- CUDA domains count complete prepared instances: initialization and replay share one capacity
+  reservation. The same owner cleans up partial recordings, so `instance_capacity=1` accepts
+  a complete graph with initialization.
 - Eligible CUDA prefix/conditional-WHILE/suffix regions are assembled in one root graph, including
   initial condition evaluation and counters. Other regions retain their existing route. Macro Graphs
   also accept host native actions: AmgX supports explicit host control and export/reconstruction,

@@ -322,9 +322,10 @@ Runtime domain registration grows during cold creation and reuses closed-domain
 slots; it has no fixed domain-count limit. Creating streams and their storage
 can still fail when backend or host resources are exhausted.
 
-`capacity` bounds pending submissions; `instance_capacity` bounds resident
-recordings. A plan with an explicit initializer can retain both an initializer
-and replay recording. Releasing a prepared handle keeps its code, arrays and
+`capacity` bounds pending submissions; `instance_capacity` bounds resident logical
+prepared instances. Initialization and replay share one instance reservation while
+retaining their own recordings. A partially built instance retires its established
+parts through the same owner. Releasing a prepared handle keeps its code, arrays and
 reverse dependency edges until domain retirement. Explicit module, memory or
 native-resource destruction closes dependent domains before freeing their
 storage. Runtime close/reset retires its domains. A failed retirement retains

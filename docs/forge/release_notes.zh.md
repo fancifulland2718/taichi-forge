@@ -34,7 +34,7 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **151**，持久执行计划为 **26**，
+- frontend 与 native runtime 使用私有 ABI **152**，持久执行计划为 **26**，
   编译缓存 schema 为 **68**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
@@ -68,6 +68,8 @@
   JIT code loan 借用已编译代码，AOT adapter 处理部署闭包。普通调用的执行与提交路径保持。
 - CPU/CUDA/Vulkan 的执行注册状态归执行 owner，编译代码可共享；在途租约、独立实例、
   reset/close 和进程退出按资源依赖退休，修复借用 runtime 及 Vulkan 退出访问异常。
+- CUDA 独立域按完整 prepared 实例计数，初始化和 replay 共享一个容量名额；部分构造
+  的录制由同一 owner 清理，避免一份带初始化的图被 `instance_capacity=1` 拒绝。
 - CUDA 合格的“前段 → 条件 WHILE → 后段”在同一根图组装，包括首次条件计算与计数器；
   不合格区域保留原路径。宏观 Graph 也可包含 host native action；AmgX 使用显式 host
   控制，支持导出重建，但不因此获得 CUDA capture 或异步 host 控制提交能力。

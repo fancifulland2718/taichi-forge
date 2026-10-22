@@ -19,6 +19,7 @@ class LaunchContextBuilder;
 class NativeOperation;
 class NativeKernelResourceBinding;
 class RuntimeFaultDomain;
+class RuntimeClient;
 class ExternalSynchronizationDomain;
 struct NativeRecordingState;
 namespace aot {
@@ -44,6 +45,10 @@ class FixedExecution {
     std::shared_ptr<cuda::ExecutionDomain> domain;
     std::shared_ptr<RuntimeCompletionResources> operands;
     std::size_t parameter_count{0};
+    // A complete owner may already hold one domain preparation reservation for
+    // initialization and replay. Append every partial instance before building
+    // it; that owner must retain and retire this closure on failure and close.
+    std::vector<std::shared_ptr<RuntimeClient>> *retirement_parts{nullptr};
   };
   struct Dispatch {
     aot::Kernel *kernel;

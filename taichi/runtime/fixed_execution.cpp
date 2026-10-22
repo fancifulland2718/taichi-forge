@@ -1072,13 +1072,20 @@ FixedExecution::FixedExecution(
       return native;
     };
     if (execution_binding) {
-      state_->cuda_domain->prepare_instance(state_->cuda_instance, [&] {
+      const auto prepare_instance = [&] {
         for (const auto &operation : state_->native_operations)
           operation->prepare_cuda_execution_domain(
               state_->fault_domain, state_->cuda_instance->parts);
         auto native = prepare(operations);
         flush(native);
-      });
+      };
+      if (execution_binding->retirement_parts) {
+        execution_binding->retirement_parts->push_back(state_->cuda_instance);
+        prepare_instance();
+      } else {
+        state_->cuda_domain->prepare_instance(state_->cuda_instance,
+                                               prepare_instance);
+      }
       state_->kind = ordered_operations ? 4 : 1;
       state_->cuda_ordered_count = ordered_operations;
       if (sequence_state)
