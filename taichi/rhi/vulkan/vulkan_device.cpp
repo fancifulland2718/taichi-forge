@@ -2824,6 +2824,16 @@ void VulkanDevice::init_vulkan_structs(Params &params) {
   compute_queue_family_index_ = params.compute_queue_family_index;
   graphics_queue_ = params.graphics_queue;
   graphics_queue_family_index_ = params.graphics_queue_family_index;
+  vk_caps_.timeline_semaphore = params.timeline_semaphore;
+  for (auto queue : params.additional_compute_queues) {
+    if (!queue || queue == compute_queue_ || queue == graphics_queue_ ||
+        additional_queue_states_.count(queue))
+      throw std::invalid_argument("Additional Vulkan compute queues must be distinct");
+    auto state = std::make_unique<AdditionalComputeQueue>();
+    state->queue = queue;
+    additional_queue_states_.emplace(queue, state.get());
+    additional_compute_queues_.push_back(std::move(state));
+  }
 
   create_vma_allocator();
   {
@@ -3426,6 +3436,22 @@ void VulkanDevice::memcpy_internal(DevicePtr dst,
   stream->submit_synced(cmd.get());
 }
 
+uint32_t VulkanDevice::created_compute_queue_count() const noexcept {
+  return static_cast<uint32_t>(additional_compute_queues_.size()) + 1;
+}
+
+VkQueue VulkanDevice::compute_queue_at(uint32_t index) const {
+  if (index >= created_compute_queue_count())
+    throw std::out_of_range("Vulkan compute queue was not created by this owner");
+  return index == 0 ? compute_queue_ : additional_compute_queues_[index - 1]->queue;
+}
+
+std::unique_ptr<VulkanStream> VulkanDevice::create_compute_stream(uint32_t index) {
+  throw_if_backend_submission_disallowed("create Vulkan compute stream");
+  return std::make_unique<VulkanStream>(*this, compute_queue_at(index),
+                                         compute_queue_family_index_);
+}
+
 Stream *VulkanDevice::get_compute_stream() {
   const auto streams = compute_streams_;
   const auto thread_id = std::this_thread::get_id();
@@ -3667,6 +3693,9 @@ std::unique_lock<std::mutex> VulkanDevice::acquire_queue_lock(VkQueue queue) {
   if (queue == compute_queue_) {
     return compute_queue_lock_telemetry_.acquire(compute_queue_mutex_);
   }
+  if (const auto found = additional_queue_states_.find(queue);
+      found != additional_queue_states_.end())
+    return found->second->telemetry.acquire(found->second->mutex);
   TI_ASSERT(queue == graphics_queue_);
   return graphics_queue_lock_telemetry_.acquire(graphics_queue_mutex_);
 }
@@ -3677,6 +3706,9 @@ std::weak_ptr<vkapi::DeviceObjVkFence> &VulkanDevice::queue_tail_fence_locked(
   if (queue == compute_queue_) {
     return compute_queue_tail_fence_;
   }
+  if (const auto found = additional_queue_states_.find(queue);
+      found != additional_queue_states_.end())
+    return found->second->tail_fence;
   TI_ASSERT(queue == graphics_queue_);
   return graphics_queue_tail_fence_;
 }

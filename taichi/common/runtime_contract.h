@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Fixed CUDA recordings share a logical instance and cold retirement stream.
-inline constexpr int kForgeNativeAbiRevision = 154;
+// Vulkan owners retain explicitly created same-family compute queues.
+inline constexpr int kForgeNativeAbiRevision = 155;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

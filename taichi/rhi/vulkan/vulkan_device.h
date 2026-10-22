@@ -949,6 +949,9 @@ struct VulkanCooperativeMatrixProperty {
 };
 
 struct VulkanCapabilities {
+  // Enabled device feature, not a shader/codegen requirement. Imported
+  // devices must explicitly declare it; physical support alone is insufficient.
+  bool timeline_semaphore{false};
   uint32_t vk_api_version{0};
   // C-2.4.c: VkPhysicalDeviceLimits::maxPerStageDescriptorStorageBuffers,
   // 0 = not yet probed.
@@ -1067,6 +1070,10 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     VkPhysicalDevice physical_device{VK_NULL_HANDLE};
     VkDevice device{VK_NULL_HANDLE};
     VkQueue compute_queue{VK_NULL_HANDLE};
+    // Explicit same-family queues created by the owner. Imported devices do
+    // not discover or borrow queues that their caller did not supply.
+    std::vector<VkQueue> additional_compute_queues;
+    bool timeline_semaphore{false};
     uint32_t compute_queue_family_index{0};
     VkQueue graphics_queue{VK_NULL_HANDLE};
     uint32_t graphics_queue_family_index{0};
@@ -1131,6 +1138,12 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   void memcpy_internal(DevicePtr dst, DevicePtr src, uint64_t size) override;
 
   Stream *get_compute_stream() override;
+  uint32_t created_compute_queue_count() const noexcept;
+  VkQueue compute_queue_at(uint32_t index) const;
+  // Cold factory, not a domain reservation. The caller owns retirement and
+  // must drain this stream before releasing it; ordinary thread-local streams
+  // and default-queue ordering are unchanged.
+  std::unique_ptr<VulkanStream> create_compute_stream(uint32_t queue_index);
   Stream *get_graphics_stream() override;
 
   void wait_idle() override;
@@ -1403,6 +1416,14 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   std::mutex compute_queue_mutex_;
   VulkanQueueLockTelemetry compute_queue_lock_telemetry_;
   std::weak_ptr<vkapi::DeviceObjVkFence> compute_queue_tail_fence_;
+  struct AdditionalComputeQueue {
+    VkQueue queue{VK_NULL_HANDLE};
+    std::mutex mutex;
+    VulkanQueueLockTelemetry telemetry;
+    std::weak_ptr<vkapi::DeviceObjVkFence> tail_fence;
+  };
+  std::vector<std::unique_ptr<AdditionalComputeQueue>> additional_compute_queues_;
+  std::unordered_map<VkQueue, AdditionalComputeQueue *> additional_queue_states_;
 
   VkQueue graphics_queue_{VK_NULL_HANDLE};
   uint32_t graphics_queue_family_index_{0};

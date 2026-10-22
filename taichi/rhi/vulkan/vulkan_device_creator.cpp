@@ -410,6 +410,8 @@ VulkanDeviceCreator::VulkanDeviceCreator(
     params.physical_device = physical_device_;
     params.device = device_;
     params.compute_queue = compute_queue_;
+    params.additional_compute_queues = std::move(additional_compute_queues_);
+    params.timeline_semaphore = ti_device_->vk_caps().timeline_semaphore;
     params.compute_queue_family_index =
         queue_family_indices_.compute_family.value();
     params.graphics_queue = graphics_queue_;
@@ -664,13 +666,24 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     unique_families.insert(queue_family_indices_.graphics_family.value());
   }
 
-  float queue_priority = 1.0f;
+  // Queues can only be requested at device creation. Keep queue zero for the
+  // ordinary runtime and expose the same-family hardware capacity to cold
+  // execution-domain preparation, without a fixed software queue limit.
+  uint32_t family_count = 0;
+  vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &family_count,
+                                          nullptr);
+  std::vector<VkQueueFamilyProperties> families(family_count);
+  vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &family_count,
+                                          families.data());
+  const auto compute_family = queue_family_indices_.compute_family.value();
+  const auto compute_count = families.at(compute_family).queueCount;
+  std::vector<float> queue_priorities(compute_count, 1.0f);
   for (uint32_t queue_family : unique_families) {
     VkDeviceQueueCreateInfo queueCreateInfo{};
     queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     queueCreateInfo.queueFamilyIndex = queue_family;
-    queueCreateInfo.queueCount = 1;
-    queueCreateInfo.pQueuePriorities = &queue_priority;
+    queueCreateInfo.queueCount = queue_family == compute_family ? compute_count : 1;
+    queueCreateInfo.pQueuePriorities = queue_priorities.data();
     queue_create_infos.push_back(queueCreateInfo);
   }
 
@@ -1149,6 +1162,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       const auto supported = core12_features;
       core12_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
       core12_features.drawIndirectCount = supported.drawIndirectCount;
+      // Optional cold execution-domain support. Ordinary submissions retain
+      // their binary-semaphore path; do not require this feature on old devices.
+      core12_features.timelineSemaphore = supported.timelineSemaphore;
+      ti_device_->vk_caps().timeline_semaphore = supported.timelineSemaphore;
       ti_device_->vk_caps().draw_indirect_count = supported.drawIndirectCount;
       // These aggregate bits are implied by explicitly enabled extension names.
       // Preserve that intent without copying every supported core feature.
@@ -1675,6 +1692,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   if (queue_family_indices_.compute_family.has_value()) {
     get_device_queue(device_, queue_family_indices_.compute_family.value(), 0,
                      &compute_queue_);
+    additional_compute_queues_.resize(compute_count - 1);
+    for (uint32_t index = 1; index < compute_count; ++index)
+      get_device_queue(device_, compute_family, index,
+                       &additional_compute_queues_[index - 1]);
   }
   if (queue_family_indices_.graphics_family.has_value()) {
     get_device_queue(device_, queue_family_indices_.graphics_family.value(), 0,
