@@ -659,7 +659,34 @@ TEST(CudaExecutionOwner, SubmissionParametersStayOnTheirSelectedDomains) {
     ti_release_completion_ext(peer);
   }
   for (int lane = 0; lane < 2; ++lane) {
-    ti_destroy_prepared_ext(rt, calls[lane]);
+    // Parameter staging is pinned host memory and has its own release path.
+    // Retiring it must not turn an unrelated pending prefix into a host wait.
+    testing::CudaExternalGate gate;
+    auto pending = capi::get_execution_domain(domains[1 - lane])->submit(
+        {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+    auto lease = ti_get_prepared_cuda_instance_ext(rt, calls[lane]);
+    ASSERT_NE(lease, nullptr);
+    auto retirement = std::async(std::launch::async, [&] {
+      ti_retire_cuda_execution_instance_ext(lease);
+      auto error = ti_get_last_error(nullptr, nullptr);
+      if (error == TI_ERROR_SUCCESS) {
+        ti_finish_prepared_cuda_instance_retirement_ext(rt, calls[lane]);
+        error = ti_get_last_error(nullptr, nullptr);
+      }
+      return error;
+    });
+    const bool independent =
+        retirement.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    EXPECT_TRUE(independent);
+    if (independent)
+      EXPECT_FALSE(pending.done());
+    EXPECT_FALSE(gate.timed_out());
+    gate.release();
+    EXPECT_EQ(retirement.get(), TI_ERROR_SUCCESS);
+    pending.wait();
+    ti_release_cuda_execution_instance_ext(lease);
+  }
+  for (int lane = 0; lane < 2; ++lane) {
     ti_close_cuda_execution_domain_ext(domains[lane]);
     ti_release_cuda_execution_domain_ext(domains[lane]);
     ti_free_memory(rt, memory[lane]);

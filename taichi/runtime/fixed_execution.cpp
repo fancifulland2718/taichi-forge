@@ -958,7 +958,8 @@ FixedExecution::FixedExecution(
       auto graph = execution_binding ? cuda::FixedGraph::prepare_execution_part(
                                            native, state_->fault_domain,
                                            state_->cuda_instance->operands,
-                                           state_->cuda_instance->parts)
+                                           state_->cuda_instance->parts,
+                                           *state_->cuda_domain)
                                      : std::make_unique<cuda::FixedGraph>(
                                            native, state_->fault_domain);
       account(*graph);

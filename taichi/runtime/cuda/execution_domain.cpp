@@ -24,6 +24,99 @@ void check_result(Function &function,
                               function.get_error_message(result));
 }
 
+class ParameterStoragePool
+    : public std::enable_shared_from_this<ParameterStoragePool> {
+ public:
+  explicit ParameterStoragePool(std::shared_ptr<RuntimeFaultDomain> owner)
+      : owner_(std::move(owner)) {
+  }
+  ~ParameterStoragePool() {
+    try {
+      close();
+    } catch (...) {
+      // Failed retirement retains pinned mappings, never frees active readers.
+    }
+  }
+  std::shared_ptr<void> acquire(std::size_t bytes) {
+    if (!bytes)
+      throw std::invalid_argument("Parameter staging requires nonzero storage");
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (closed_)
+      throw std::runtime_error("Parameter staging pool is closed");
+    Block *selected = nullptr;
+    for (const auto &block : blocks_) {
+      if (block->used)
+        continue;
+      if (!selected || (block->bytes >= bytes &&
+                        (selected->bytes < bytes || block->bytes < selected->bytes)))
+        selected = block.get();
+    }
+    if (!selected) {
+      blocks_.push_back(std::make_unique<Block>());
+      selected = blocks_.back().get();
+    }
+    if (selected->bytes < bytes) {
+      // Growth is a cold prepare operation. Replacing an idle undersized
+      // mapping keeps storage proportional to peak concurrent reservations,
+      // without a fixed size/count limit or an unbounded size-class cache.
+      owner_->throw_if_new_submission_disallowed("prepare parameter storage");
+      auto context = CUDAContext::get_instance().get_guard();
+      auto &driver = CUDADriver::get_instance();
+      if (selected->data) {
+        check_result(driver.mem_free_host,
+                     driver.mem_free_host.call(selected->data),
+                     "grow submission parameter storage");
+        selected->data = nullptr;
+        selected->bytes = 0;
+      }
+      check_result(driver.mem_host_alloc,
+                   driver.mem_host_alloc.call(&selected->data, bytes, 0),
+                   "allocate submission parameter storage");
+      selected->bytes = bytes;
+    }
+    selected->used = true;
+    lock.unlock();
+    // shared_ptr construction calls this deleter even on control-block OOM.
+    return {selected->data, [pool = shared_from_this(), selected](void *) {
+              std::lock_guard<std::mutex> guard(pool->mutex_);
+              selected->used = false;
+            }};
+  }
+  void close() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_ || blocks_.empty()) {
+      closed_ = true;
+      return;
+    }
+    for (const auto &block : blocks_)
+      if (block->used)
+        throw std::runtime_error("Parameter staging still has active readers");
+    if (!owner_->backend_calls_safe())
+      throw std::runtime_error("Cannot unpin parameter storage after backend failure");
+    auto context = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    for (const auto &block : blocks_) {
+      if (block->data) {
+        check_result(driver.mem_free_host, driver.mem_free_host.call(block->data),
+                     "release domain parameter storage");
+        block->data = nullptr;
+      }
+    }
+    blocks_.clear();
+    closed_ = true;
+  }
+
+ private:
+  struct Block {
+    void *data{nullptr};
+    std::size_t bytes{0};
+    bool used{false};
+  };
+  std::shared_ptr<RuntimeFaultDomain> owner_;
+  std::mutex mutex_;
+  std::vector<std::unique_ptr<Block>> blocks_;
+  bool closed_{false};
+};
 }  // namespace
 
 // Mutable fields except the published retirement proof use the admission mutex.
@@ -59,6 +152,7 @@ struct ExecutionDomain::State {
   const std::uint64_t identity;
   const Options options;
   std::shared_ptr<RuntimeCompletionCudaEventPool> events;
+  std::shared_ptr<ParameterStoragePool> parameter_storage;
   std::vector<Pending> pending;
   std::vector<StreamGpuTiming> timings;
   std::vector<std::shared_ptr<ExecutionInstance>> instances;
@@ -87,6 +181,7 @@ struct ExecutionDomain::State {
         events(
             std::make_shared<RuntimeCompletionCudaEventPool>(this->owner,
                                                              options.capacity)),
+        parameter_storage(std::make_shared<ParameterStoragePool>(this->owner)),
         pending(options.capacity) {
     if (owner_id == 0 || identity == 0)
       throw std::invalid_argument(
@@ -539,6 +634,11 @@ bool ExecutionDomain::instance_retired(
   return instance->retired.load(std::memory_order_acquire);
 }
 
+std::shared_ptr<void> ExecutionDomain::acquire_parameter_storage(
+    std::size_t bytes) {
+  return state_->parameter_storage->acquire(bytes);
+}
+
 void ExecutionDomain::stop_accepting() {
   std::lock_guard<std::mutex> lock(state_->mutex);
   state_->accepting = false;
@@ -621,8 +721,14 @@ void ExecutionDomain::close() {
         retirement_error = instance->error;
     }
   }
-  if (!retirement_error)
-    instances.clear();
+  if (!retirement_error) {
+    try {
+      state.parameter_storage->close();
+      instances.clear();
+    } catch (...) {
+      retirement_error = std::current_exception();
+    }
+  }
   {
     std::lock_guard<std::mutex> lock(state.mutex);
     if (retirement_error) {

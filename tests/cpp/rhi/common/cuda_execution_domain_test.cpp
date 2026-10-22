@@ -627,6 +627,52 @@ struct DomainInstance final : RuntimeClient {
   }
 };
 
+TEST_F(CudaExecutionDependency, ParameterStorageReusesRetiredMappingBeforePeerCompletes) {
+  cuda::ExecutionDomain domain(fault, {1, 0, 1});
+  cuda::ExecutionDomain peer(fault, {1, 0, 1});
+  auto client = std::make_shared<DomainInstance>();
+  std::shared_ptr<void> staging;
+  auto instance = domain.prepare_owned_instance(client, [&](const auto &) {
+    staging = domain.acquire_parameter_storage(24);
+  });
+  auto *address = staging.get();
+  client->on_retire = [&] { staging.reset(); };
+  testing::CudaExternalGate gate;
+  auto pending = peer.submit({}, nullptr, [&](void *stream) {
+    gate.enqueue_wait(stream);
+  });
+  auto retirement = std::async(std::launch::async, [&] {
+    domain.retire_instance(instance);
+    instance = domain.prepare_owned_instance(client, [&](const auto &) {
+      staging = domain.acquire_parameter_storage(16);
+    });
+  });
+  const bool independent =
+      retirement.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  EXPECT_TRUE(independent);
+  if (independent)
+    EXPECT_FALSE(pending.done());
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  retirement.get();
+  EXPECT_EQ(staging.get(), address);
+  domain.retire_instance(instance);
+  // A cold resize replaces an idle block instead of retaining every size.
+  instance = domain.prepare_owned_instance(client, [&](const auto &) {
+    staging = domain.acquire_parameter_storage(96);
+  });
+  address = staging.get();
+  domain.retire_instance(instance);
+  instance = domain.prepare_owned_instance(client, [&](const auto &) {
+    staging = domain.acquire_parameter_storage(24);
+  });
+  EXPECT_EQ(staging.get(), address);
+  domain.close();
+  EXPECT_FALSE(staging);
+  EXPECT_THROW(domain.acquire_parameter_storage(8), std::runtime_error);
+  pending.wait();
+}
+
 TEST_F(CudaExecutionDependency, InstanceRetirementWaitsOnlyItsOwnPrefixAndReusesBudget) {
   cuda::ExecutionDomain domain(fault, {3, 0, 1});
   auto client = std::make_shared<DomainInstance>();

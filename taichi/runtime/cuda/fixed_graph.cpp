@@ -55,6 +55,7 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
   void *stream{nullptr};
   void *arguments{nullptr};
   void *parameter_staging{nullptr};
+  std::shared_ptr<void> parameter_storage;
   void *parameter_upload_function{nullptr};
   std::size_t parameter_count{0};
   struct ParameterUpload {
@@ -239,8 +240,7 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
       free(arguments);
       arguments = nullptr;
       if (parameter_staging) {
-        check(driver.mem_free_host.call(parameter_staging),
-              "free submission parameters");
+        parameter_storage.reset();
         parameter_staging = nullptr;
       }
       free(temporaries);
@@ -295,7 +295,8 @@ FixedGraph::FixedGraph(
     bool binding_frame,
     std::shared_ptr<ExecutionDomain> domain,
     std::shared_ptr<RuntimeCompletionResources> instance_operands,
-    std::vector<std::shared_ptr<RuntimeClient>> *parts)
+    std::vector<std::shared_ptr<RuntimeClient>> *parts,
+    ExecutionDomain *allocation_domain)
     : state_(std::make_shared<State>()), domain_(std::move(domain)) {
   if (domain_ || parts) {
     if (!fault_domain || (domain_ && !domain_->belongs_to(fault_domain)) ||
@@ -359,12 +360,12 @@ FixedGraph::FixedGraph(
       instance_ = domain_->prepare_owned_instance(
           state_, [&](const auto &) {
             state_->preparation_started = true;
-            initialize(operations);
+            initialize(operations, domain_.get());
           });
     else if (parts) {
       parts->push_back(state_);
       state_->preparation_started = true;
-      initialize(operations);
+      initialize(operations, allocation_domain);
     } else
       initialize(operations);
   } catch (const BackendRuntimeError &error) {
@@ -397,10 +398,11 @@ std::unique_ptr<FixedGraph> FixedGraph::prepare_execution_part(
     const std::vector<Operation> &operations,
     std::shared_ptr<RuntimeFaultDomain> owner,
     std::shared_ptr<RuntimeCompletionResources> operands,
-    std::vector<std::shared_ptr<RuntimeClient>> &parts) {
+    std::vector<std::shared_ptr<RuntimeClient>> &parts,
+    ExecutionDomain &allocation_domain) {
   return std::unique_ptr<FixedGraph>(
       new FixedGraph(operations, std::move(owner), {}, false, {},
-                     std::move(operands), &parts));
+                     std::move(operands), &parts, &allocation_domain));
 }
 
 void FixedGraph::enqueue_execution_part(void *stream) {
@@ -492,7 +494,8 @@ void *FixedGraph::binding_source() const {
   return state_->graph;
 }
 
-void FixedGraph::initialize(const std::vector<Operation> &operations) {
+void FixedGraph::initialize(const std::vector<Operation> &operations,
+                            ExecutionDomain *allocation_domain) {
   TI_ERROR_IF(operations.empty() || !available(),
               "Fixed CUDA Graph requires operations and driver graph support");
   auto &cuda = CUDAContext::get_instance();
@@ -934,9 +937,11 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     state.parameter_upload_function = driver_graph_prepare_parameter_upload();
     // Non-write-combined cuMemHostAlloc storage has the same host/device
     // address with UVA. GPU copies avoid a blocked peer's DMA queue head.
-    driver.mem_host_alloc(
-        &state.parameter_staging,
-        state.parameter_count * sizeof(SubmissionParameterValue), 0);
+    if (!allocation_domain)
+      throw std::invalid_argument("Submission parameters require a domain owner");
+    state.parameter_storage = allocation_domain->acquire_parameter_storage(
+        state.parameter_count * sizeof(SubmissionParameterValue));
+    state.parameter_staging = state.parameter_storage.get();
   }
   if (grid_limit) {
     std::uint32_t error = CUDA_SUCCESS;

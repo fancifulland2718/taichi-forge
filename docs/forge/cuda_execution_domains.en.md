@@ -338,6 +338,12 @@ tickets remain usable. Waiting does not hold the runtime submission lock.
 Driver/provider destruction can still synchronize, so close belongs at a cold
 boundary with external producers able to signal pending waits.
 
+Submission-parameter staging returns to a domain-owned pinned pool after its
+last device read completes. Later preparations reuse idle mappings; an idle
+mapping that is too small is replaced during cold preparation. The pool retains
+its peak concurrent storage until domain close, avoiding context-wide unpinning
+on each instance retirement. This does not change parameter upload or replay.
+
 `step.release()` and garbage collection release only the host handle, keeping
 code, arrays and reverse dependency edges until domain retirement. This path
 does not reclaim the resident instance reservation. Explicit module, memory or

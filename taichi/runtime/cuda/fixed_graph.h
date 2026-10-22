@@ -128,7 +128,8 @@ class FixedGraph {
       const std::vector<Operation> &operations,
       std::shared_ptr<RuntimeFaultDomain> owner,
       std::shared_ptr<RuntimeCompletionResources> operands,
-      std::vector<std::shared_ptr<RuntimeClient>> &parts);
+      std::vector<std::shared_ptr<RuntimeClient>> &parts,
+      ExecutionDomain &allocation_domain);
   void enqueue_execution_part(void *stream);
   void snapshot_parameters(const std::vector<SubmissionParameterValue> &values);
   void enqueue_parameter_upload(void *stream);
@@ -138,8 +139,10 @@ class FixedGraph {
              bool binding_frame,
              std::shared_ptr<ExecutionDomain> domain = {},
              std::shared_ptr<RuntimeCompletionResources> instance_operands = {},
-             std::vector<std::shared_ptr<RuntimeClient>> *parts = nullptr);
-  void initialize(const std::vector<Operation> &operations);
+             std::vector<std::shared_ptr<RuntimeClient>> *parts = nullptr,
+             ExecutionDomain *allocation_domain = nullptr);
+  void initialize(const std::vector<Operation> &operations,
+                  ExecutionDomain *allocation_domain = nullptr);
   struct State;
   std::shared_ptr<State> state_;
   std::shared_ptr<ExecutionDomain> domain_;

@@ -116,6 +116,12 @@ class ExecutionDomain {
   void retire_instance(const std::shared_ptr<ExecutionInstance> &instance);
   bool instance_retired(const std::shared_ptr<ExecutionInstance> &instance) const;
 
+  // Cold preparation only. Retired staging returns to this domain's pool;
+  // unpinning is deferred to cold domain close because it may drain peers.
+  // The lease must outlive every device read. Idle blocks are reused or grown,
+  // so repeated prepare/retire does not accumulate one allocation per instance.
+  std::shared_ptr<void> acquire_parameter_storage(std::size_t bytes);
+
   // Cold, idempotent destructive teardown. The explicit drain waits only for
   // this stream without admission/global CUDA locks, but driver or vendor
   // destruction may synchronize the context. To pause while peers are active,
