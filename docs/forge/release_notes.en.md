@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Macro Graph sequences accept host native actions, including host-only bodies
+  in explicit portable control. Host loops remain exact, without speculative
+  calls after convergence. AmgX host branches export and reconstruct with
+  path-sensitive retained-guess validation. Windows CPU/CUDA/Vulkan small Graph
+  checks and real CUDA AmgX source-free/borrowed branch tests pass. CUDA capture,
+  asynchronous host-control submission and AOT CUDA host WHILE are not added.
+
 - AmgX device bindings expose an explicit host-controlled Graph action with
   automatic AOT reconstruction from frozen configuration and CSR topology.
   Consumers provide initial coefficients; each instance starts a new solver

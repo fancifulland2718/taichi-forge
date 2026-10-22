@@ -1331,6 +1331,22 @@ binding 按原始 zero/upload 政策开始，再按需保留 solver 最近的解
 单独配置 AmgX adapter 和 vendor 库，两者不进入 TCM。Windows CUDA f32/f64、系数刷新、
 无源码/借用消费者、独立实例和单步 PCG 的 binding 状态语义已验证。
 
+AmgX action 也可以进入宏观 Graph 的 portable 控制区域：
+
+```python
+body = builder.create_sequential()
+body.append_native(bound.graph_action(update_coefficients=True))
+builder.if_then_else(condition, body, predicate=selected, lowering_mode="portable")
+```
+
+condition 先写入声明的 selector，再由 host 选择分支。普通执行及 AOT 重建保留前后 kernel
+顺序；跳过分支时既不刷新系数也不求解。Windows CUDA f32 分支导出已用无源码、借用消费者
+验证。retained guess 的冷阶段有效性在分支汇合处取交集，重新 setup 会使它失效。
+这复用现有 host-control 执行器，AmgX 边界仍有 context 同步，整个逻辑 Graph 不承诺一次
+CUDA Graph launch。通用 portable JIT WHILE 已接受 host action；CUDA AOT host-WHILE
+导出及 AmgX 独立 execution domain 仍不支持。GPU portable 控制使用 `Graph.run()`；
+结构化 `Graph.submit()` 的异步准入合同保持。
+
 系数与 RHS 已一起就绪时，可调用 `bound.update_and_solve()`，在一次资源保留的提交内先刷新绑定的 values，
 再求解，省掉中间一次 Forge producer 等待；它不省略 vendor setup 或收敛判断。绑定时需提供 `values=...`，
 两步之间不能插入其他 Forge 操作，调用者也不能并发修改这些 buffer。原有分开调用的接口保留；等待更少不保证

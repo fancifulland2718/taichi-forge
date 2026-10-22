@@ -36,10 +36,6 @@ void validate_array(Device &device,
       array.bytes != count * width)
     throw std::invalid_argument("AmgX requires matching compact scalar arrays");
 }
-struct AmgxRecordingFacts {
-  bool has_solution{false};
-};
-
 // Ordinary device bindings initialize their guess independently, even when
 // several bindings share one solver. Version 1 retains solver-wide semantics.
 struct BoundAmgxSolveOperation : AmgxSolveOperation {
@@ -148,6 +144,7 @@ class CudaSolver final : public AmgxSolverResource {
              std::shared_ptr<NativeProviderRuntime> runtime)
       : AmgxSolverResource(std::move(desc)),
         device_(device),
+        solution_fact_(device),
         runtime_(std::move(runtime)),
         api_(runtime_->execution_api<TiForgeAmgxExecutionApi>()) {
     if (!api_.create_solver || !api_.replace_coefficients || !api_.solve ||
@@ -176,6 +173,9 @@ class CudaSolver final : public AmgxSolverResource {
   bool supports_retained_guess() const {
     return runtime_->provider_info().features &
            TI_FORGE_RUNTIME_PROVIDER_FEATURE_AMGX_RETAINED_GUESS;
+  }
+  const NativeResource *solution_fact() const {
+    return &solution_fact_;
   }
   std::shared_ptr<bool> binding_state(const std::string &name,
                                     const AmgxSolveOperation &op) {
@@ -260,6 +260,19 @@ class CudaSolver final : public AmgxSolverResource {
                "AmgX solver cleanup failed (result {}).", int(result));
   }
   Device &device_;
+  // Cold validity of the vendor solution is a separate initialized resource
+  // fact. The common control-flow join intersects it across branches; setup
+  // invalidates it, and a skipped solve cannot establish it for a later user.
+  class SolutionFact final : public NativeResource {
+   public:
+    explicit SolutionFact(Device &device) : device_(device) {}
+    Arch arch() const override { return Arch::cuda; }
+    Device &device() const override { return device_; }
+    std::size_t workspace_bytes() const override { return 0; }
+
+   private:
+    Device &device_;
+  } solution_fact_;
   std::shared_ptr<NativeProviderRuntime> runtime_;
   TiForgeAmgxExecutionApi api_;
   TiForgeAmgxSolver handle_{nullptr};
@@ -314,8 +327,7 @@ class CudaSetup final : public CudaAction {
   }
   void validate_recording(NativeRecordingState &state) const override {
     state.initialized.insert(solver_.get());
-    state.provider_state<AmgxRecordingFacts>(solver_.get()).has_solution =
-        false;
+    state.initialized.erase(solver_->solution_fact());
   }
   void run_cuda_synchronous() override {
     auto &driver = CUDADriver::get_instance();
@@ -379,11 +391,10 @@ class CudaSolve final : public CudaAction {
   }
   void validate_recording(NativeRecordingState &state) const override {
     CudaAction::validate_recording(state);
-    auto &facts = state.provider_state<AmgxRecordingFacts>(solver_.get());
-    if (guess_ == 2 && !facts.has_solution)
+    if (guess_ == 2 && !state.initialized.count(solver_->solution_fact()))
       throw std::invalid_argument(
           "AmgX retained guess requires a preceding solve in this sequence");
-    facts.has_solution = true;
+    state.initialized.insert(solver_->solution_fact());
   }
   void run_cuda_synchronous() override {
     const auto guess = initialized_ && retain_ && *initialized_ ? 2 : guess_;

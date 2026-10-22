@@ -2,6 +2,7 @@
 
 import sys
 import json
+from copy import deepcopy
 from pathlib import Path
 
 from taichi_forge_runtime.aot import Runtime
@@ -110,6 +111,55 @@ def main(mode, artifact, adapter, vendor, dtype):
         )
         if dtype == "f64":
             check_binding_states(runtime, modules[1], artifact)
+        else:
+            arrays = frames[1][0]
+            arrays["choice"] = runtime.ndarray("i32", 1)
+            write(arrays["initial"], coefficients(4), code)
+            conditional = modules[1].prepare_execution("conditional", arrays)
+            # A solve in only one branch cannot establish a retained guess at
+            # the join. Both branches can; setup after the join invalidates it.
+            from taichi_forge_runtime.aot import ExecutionPlan
+
+            document = json.loads(modules[1].execution_plan("conditional").to_json())
+            captured = deepcopy(document)
+            captured["operations"][1]["lowering"]["kind"] = "cuda_conditional"
+            raises(
+                lambda: ExecutionPlan.from_json(json.dumps(captured)).prepare(modules[1], arrays),
+                "GPU control cannot contain host-invoked",
+            )
+            retained = deepcopy(document["operations"][1]["bodies"][0][-1])
+            retained["parameters"].update(initial_guess="retained", binding_id="retained_suffix")
+            document["operations"].insert(2, retained)
+            raises(
+                lambda: ExecutionPlan.from_json(json.dumps(document)).prepare(modules[1], arrays),
+                "preceding solve",
+            )
+            branch = document["operations"][1]
+            branch["has_default"] = True
+            branch["bodies"].append(deepcopy(branch["bodies"][0]))
+            joined = ExecutionPlan.from_json(json.dumps(document)).prepare(modules[1], arrays)
+            for selected in (0, 1):
+                write(arrays["choice"], [selected], "i")
+                write(arrays["seed"], [1] * N, code)
+                write(arrays["solution"], [0] * N, code)
+                write(arrays["diagonal"], [4], code)
+                joined()
+                near(read(arrays["output"], code), [2 * x + 1 for x in reference(4, [2.125] * N)], tolerance)
+            joined.close()
+            document["operations"].insert(2, deepcopy(document["initialization"][0]))
+            raises(
+                lambda: ExecutionPlan.from_json(json.dumps(document)).prepare(modules[1], arrays),
+                "preceding solve",
+            )
+            for selected, diagonal in ((0, 4), (1, 4), (0, 6), (1, 6)):
+                write(arrays["choice"], [selected], "i")
+                write(arrays["seed"], [1] * N, code)
+                write(arrays["solution"], [13] * N, code)
+                write(arrays["diagonal"], [diagonal], code)
+                conditional()
+                expected = [2 * x + 1 for x in reference(diagonal, [2.125] * N)] if selected else [27] * N
+                near(read(arrays["output"], code), expected, tolerance)
+            conditional.close()
     if mode == "standalone":
         assert "taichi_forge" not in sys.modules and "numpy" not in sys.modules
 

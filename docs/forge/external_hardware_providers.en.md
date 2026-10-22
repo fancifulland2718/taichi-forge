@@ -1697,6 +1697,25 @@ adapter and vendor library separately; neither library is embedded in the TCM.
 Windows CUDA f32/f64, changed coefficients, source-free and borrowed consumers,
 independent instances, and one-step PCG binding-state behavior are validated.
 
+AmgX actions also fit a macro Graph's portable control region:
+
+```python
+body = builder.create_sequential()
+body.append_native(bound.graph_action(update_coefficients=True))
+builder.if_then_else(condition, body, predicate=selected, lowering_mode="portable")
+```
+
+The condition writes the declared selector before the host chooses a branch.
+Ordinary execution and AOT reconstruction preserve the surrounding kernel order;
+skipping the branch skips both coefficient replacement and solving. Windows CUDA
+f32 host-branch export is checked with source-free and borrowed consumers. Cold
+retained-guess validity is intersected across branch paths, and setup invalidates
+it. This uses the existing host-control executor, with context synchronization at
+AmgX boundaries, rather than a single CUDA Graph launch. Generic portable JIT
+WHILE accepts host actions; CUDA AOT host-WHILE export and independent execution
+domains for AmgX remain unsupported. Portable GPU control uses `Graph.run()`;
+the asynchronous structured `Graph.submit()` contract is unchanged.
+
 Forge owns the thin adapter, buffer/lifetime integration, and its diagnostic
 call policy, not an AmgX fork.
 AMG coefficient setup can still allocate temporary storage and synchronize

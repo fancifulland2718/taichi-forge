@@ -61,6 +61,10 @@ def test_amgx_graph_automatic_export(scalar, tmp_path, monkeypatch):
         for i in range(N):
             output[i] = 2 * solution[i] + 1
 
+    @ti.kernel
+    def select(choice: ti.types.ndarray(ti.i32, 1), predicate: ti.types.ndarray(ti.i32, 0)):
+        predicate[None] = choice[0]
+
     config = solver_resource(str(scalar), compute_residual=False)["parameters"]["config"]
     config_path = tmp_path / "amgx.json"
     config_path.write_text(config, encoding="utf8")
@@ -112,6 +116,36 @@ def test_amgx_graph_automatic_export(scalar, tmp_path, monkeypatch):
                     "kernel",
                 ]
                 assert [op["operation"] for op in doc["initialization"]] == ["setup_csr"]
+            if scalar == ti.f32:
+                # The semantic Graph owns a host branch containing a host-only
+                # native sequence; the branch is not a CUDA capture body.
+                parent = ti.graph.GraphBuilder()
+                predicate = parent.private_ndarray("selected", ti.i32, ())
+                choice_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "choice", ti.i32, ndim=1)
+                parent.dispatch(produce, arg("seed"), arg("diagonal"), arg("values"), arg("rhs"))
+                cond, body = parent.create_sequential(), parent.create_sequential()
+                cond.dispatch(select, choice_arg, predicate)
+                body.append_native(binding.graph_action(update_coefficients=True))
+                parent.if_then_else(cond, body, predicate=predicate, lowering_mode="portable")
+                parent.dispatch(publish, arg("solution"), arg("output"))
+                conditional = parent.compile()
+                choice = ti.ndarray(ti.i32, 1)
+                for selected in (0, 1, 0):
+                    choice.fill(selected)
+                    solution.fill(13)
+                    conditional.run(dict(args, choice=choice))
+                    expected = 2 * np.array(reference(4, [2.125] * N)) + 1 if selected else np.full(N, 27)
+                    np.testing.assert_allclose(output.to_numpy(), expected, rtol=tolerance, atol=tolerance)
+                plan = module.add_execution_plan(
+                    "conditional",
+                    conditional,
+                    source_bindings=dict(values=values, rhs=rhs, solution=solution),
+                    resource_bindings={solver: {"values": "initial"}},
+                )
+                branch = json.loads(plan.to_json())["operations"][1]
+                assert branch["lowering"] == dict(kind="cuda_host", version=1)
+                assert [op["operation"] for op in branch["bodies"][0]] == ["replace_coefficients", "solve"]
+                conditional.close()
             # Ordinary execution retains its direct callable and current session.
             diagonal.fill(5)
             solution.fill(float("nan"))
