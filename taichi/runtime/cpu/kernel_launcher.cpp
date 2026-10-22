@@ -374,11 +374,13 @@ void KernelLauncher::launch_prepared(std::vector<PreparedLaunch> &launches) {
 }
 
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
-    const LLVM::CompiledKernelData &compiled) {
+    const LLVM::CompiledKernelData &compiled,
+    const KernelRegistrationState &registration) {
   TI_ASSERT(arch_is_cpu(compiled.arch()));
   std::unique_lock<std::shared_mutex> lock(registration_mutex());
 
-  if (!compiled.get_handle()) {
+  bind_registration(registration);
+  if (!registration.get_handle()) {
     auto handle = make_handle();
     auto index = handle.get_launch_id();
 
@@ -428,9 +430,9 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
       executor->remove_jit_module(jit_module);
       throw;
     }
-    compiled.set_handle(handle);
+    registration.set_handle(handle);
   }
-  return *compiled.get_handle();
+  return *registration.get_handle();
 }
 
 void KernelLauncher::retire_all_kernels() {
@@ -443,6 +445,7 @@ void KernelLauncher::retire_all_kernels() {
     executor->remove_jit_module(module);
   }
   sparse_listgen_telemetry_.clear();
+  advance_registration_generation();
 }
 
 void KernelLauncher::retire_snode_tree(int tree_id) {

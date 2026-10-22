@@ -414,17 +414,18 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
                   *compiled.get_internal_data().compiled_data.module) != launch_abi,
               "AOT LLVM code does not match its kernel launch ABI: {}", name);
   KernelLaunchHandle handle;
+  KernelRegistrationState registration;
   if (gated) {
 #if defined(TI_WITH_CUDA)
     auto *launcher = dynamic_cast<cuda::KernelLauncher *>(kernel_launcher_.get());
     TI_ASSERT(launcher != nullptr);
     handle = launcher->register_llvm_kernel(
-        compiled, cuda::KernelLaunchABI::graph_gate_v1);
+        compiled, registration, cuda::KernelLaunchABI::graph_gate_v1);
 #else
     TI_ERROR("CUDA gate artifacts require a build with CUDA support");
 #endif
   } else {
-    handle = kernel_launcher_->register_llvm_kernel(compiled);
+    handle = kernel_launcher_->register_llvm_kernel(compiled, registration);
   }
   // The launcher owns the executable. The callable retains its parameter/return
   // ABI, not an additional LLVM module for the entire AOT module lifetime.

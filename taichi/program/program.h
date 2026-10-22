@@ -480,19 +480,22 @@ class TI_DLL_EXPORT Program {
 
    private:
     friend class Program;
-    RegisteredKernelExecutionPlan(Program *owner,
-                                  const CompiledKernelData *compiled,
-                                  KernelLaunchHandle handle,
-                                  std::vector<SNodeTreeDependency> dependencies,
-                                  std::uint64_t validated_snode_tree_epoch)
+    RegisteredKernelExecutionPlan(
+        Program *owner,
+        std::shared_ptr<KernelExecutionHandle> execution,
+        KernelLaunchHandle handle,
+        std::vector<SNodeTreeDependency> dependencies,
+        std::uint64_t validated_snode_tree_epoch)
         : owner_(owner),
-          compiled_(compiled),
+          execution_(std::move(execution)),
+          compiled_(&execution_->compiled()),
           handle_(handle),
           dependencies_(std::move(dependencies)),
           validated_snode_tree_epoch_(validated_snode_tree_epoch) {
     }
 
     Program *owner_{nullptr};
+    std::shared_ptr<KernelExecutionHandle> execution_;
     const CompiledKernelData *compiled_{nullptr};
     KernelLaunchHandle handle_;
     std::vector<SNodeTreeDependency> dependencies_;
@@ -518,16 +521,18 @@ class TI_DLL_EXPORT Program {
     friend class RegisteredKernelExecutionPlan;
     RegisteredKernelExecutionPlanLaunchScope(
         Program *program,
-        const CompiledKernelData *compiled,
+        std::shared_ptr<KernelExecutionHandle> execution,
         KernelLaunchHandle handle,
         std::optional<SNodeTreeLifecycleReadGuard> lifecycle_guard)
         : program_(program),
-          compiled_(compiled),
+          execution_(std::move(execution)),
+          compiled_(&execution_->compiled()),
           handle_(handle),
           lifecycle_guard_(std::move(lifecycle_guard)) {
     }
 
     Program *program_{nullptr};
+    std::shared_ptr<KernelExecutionHandle> execution_;
     const CompiledKernelData *compiled_{nullptr};
     KernelLaunchHandle handle_;
     std::optional<SNodeTreeLifecycleReadGuard> lifecycle_guard_;
@@ -808,7 +813,7 @@ class TI_DLL_EXPORT Program {
   // Only set when compile_config.compile_dag_scheduler is true.
   static bool in_compile_kernels_worker();
 
-  void launch_kernel(const CompiledKernelData &compiled_kernel_data,
+  void launch_kernel(const KernelExecutionHandle &execution,
                      LaunchContextBuilder &ctx);
 
   void launch_registered_kernel(
@@ -4456,7 +4461,8 @@ class TI_DLL_EXPORT Program {
                                              std::size_t count);
   void launch_kernel_impl(const CompiledKernelData &compiled_kernel_data,
                           LaunchContextBuilder &ctx,
-                          const KernelLaunchHandle *registered_handle);
+                          const KernelLaunchHandle *registered_handle,
+                          const KernelRegistrationState *registration);
   void pin_ndarray_launch_leases(NdarrayLaunchLeases &leases);
   void release_completed_ndarray_leases();
   void close_ndarray_resources();

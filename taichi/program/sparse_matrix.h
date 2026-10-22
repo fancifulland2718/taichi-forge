@@ -30,6 +30,7 @@ class CudaSparseSpmvPlan;
 class VulkanSparseAssemblyPlan;
 class Kernel;
 class CompiledKernelData;
+class KernelExecutionHandle;
 class LaunchContextBuilder;
 class OperatorBinding;
 class OperatorPinnedAction;
@@ -436,7 +437,7 @@ class CompiledKernelLinearOperator final : public SparseMatrix {
 
   Program *program_{nullptr};
   Kernel *kernel_{nullptr};
-  const CompiledKernelData *compiled_kernel_{nullptr};
+  std::shared_ptr<KernelExecutionHandle> compiled_kernel_{nullptr};
   std::shared_ptr<TopologyState> topology_state_;
   std::shared_ptr<ResourceGeneration> current_resource_generation_;
   std::unique_ptr<OperatorResourceGenerationPublisher>

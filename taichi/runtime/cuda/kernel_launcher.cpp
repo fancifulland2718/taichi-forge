@@ -1762,12 +1762,15 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
 }
 
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
-    const LLVM::CompiledKernelData &compiled) {
-  return register_llvm_kernel(compiled, KernelLaunchABI::ordinary);
+    const LLVM::CompiledKernelData &compiled,
+    const KernelRegistrationState &registration) {
+  return register_llvm_kernel(compiled, registration,
+                              KernelLaunchABI::ordinary);
 }
 
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     const LLVM::CompiledKernelData &compiled,
+    const KernelRegistrationState &registration,
     KernelLaunchABI launch_abi) {
   TI_ASSERT(compiled.arch() == Arch::cuda);
   TI_ERROR_IF(launch_abi != KernelLaunchABI::ordinary &&
@@ -1775,7 +1778,8 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
               "Unsupported CUDA kernel launch ABI");
   std::unique_lock<std::shared_mutex> lock(registration_mutex());
 
-  if (!compiled.get_handle()) {
+  bind_registration(registration);
+  if (!registration.get_handle()) {
     auto handle = make_handle();
     auto index = handle.get_launch_id();
 
@@ -1803,14 +1807,14 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
       executor->remove_jit_module(jit_module);
       throw;
     }
-    compiled.set_handle(handle);
+    registration.set_handle(handle);
   } else {
     TI_ERROR_IF(
-        contexts_.at(compiled.get_handle()->get_launch_id())->launch_abi !=
+        contexts_.at(registration.get_handle()->get_launch_id())->launch_abi !=
             launch_abi,
         "CUDA kernel registration cannot change its launch ABI");
   }
-  return *compiled.get_handle();
+  return *registration.get_handle();
 }
 
 KernelLauncher::Handle KernelLauncher::register_cuda_artifact_kernel(
@@ -1851,11 +1855,13 @@ KernelLauncher::Handle KernelLauncher::register_cuda_artifact_kernel(
 }
 
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
-    const LLVM::CompiledKernelData &compiled) {
+    const LLVM::CompiledKernelData &compiled,
+    const KernelRegistrationState &registration) {
   TI_ASSERT(compiled.arch() == Arch::cuda);
   std::unique_lock<std::shared_mutex> lock(registration_mutex());
-  if (compiled.get_graph_masked_handle()) {
-    return *compiled.get_graph_masked_handle();
+  bind_registration(registration);
+  if (registration.get_graph_masked_handle()) {
+    return *registration.get_graph_masked_handle();
   }
 
   auto handle = make_handle();
@@ -1883,7 +1889,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
     executor->remove_jit_module(jit_module);
     throw;
   }
-  compiled.set_graph_masked_handle(handle);
+  registration.set_graph_masked_handle(handle);
   return handle;
 }
 
@@ -1899,6 +1905,7 @@ void KernelLauncher::retire_all_kernels() {
   std::lock_guard<std::mutex> sparse_lock(sparse_list_mutex_);
   sparse_list_states_.clear();
   sparse_listgen_telemetry_.clear();
+  advance_registration_generation();
 }
 
 void KernelLauncher::retire_snode_tree(int tree_id) {
@@ -1945,13 +1952,14 @@ std::size_t KernelLauncher::debug_registered_kernel_count() {
 
 std::vector<KernelLauncher::ArtifactQualification>
 KernelLauncher::qualify_llvm_kernel_artifacts(
-    const LLVM::CompiledKernelData &compiled) {
+    const LLVM::CompiledKernelData &compiled,
+    const KernelRegistrationState &registration) {
   TI_ASSERT(compiled.arch() == Arch::cuda);
   auto &telemetry = artifact_qualification_telemetry();
   telemetry.qualification_calls.fetch_add(1, std::memory_order_relaxed);
 
-  const bool was_registered = compiled.get_handle().has_value();
-  const Handle handle = register_llvm_kernel(compiled);
+  const bool was_registered = registration.get_handle().has_value();
+  const Handle handle = register_llvm_kernel(compiled, registration);
   if (!was_registered) {
     telemetry.registration_materializations.fetch_add(
         1, std::memory_order_relaxed);

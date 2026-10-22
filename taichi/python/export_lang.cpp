@@ -442,11 +442,13 @@ py::dict spirv_task_metadata_to_python(
 #endif
 
 py::dict compiled_kernel_gpu_semantics_to_python(
-    const lang::CompiledKernelData &compiled,
+    const lang::KernelExecutionHandle &execution,
     AutodiffMode autodiff_mode,
     const lang::Kernel *kernel,
     const lang::aot::CompiledDispatch *graph_dispatch = nullptr,
     std::size_t graph_dispatch_index = 0) {
+  const auto &compiled = execution.compiled();
+  const auto &registration = execution.registration();
   const auto backend = compiled.arch();
   py::dict result;
   result["backend"] = arch_name(backend);
@@ -457,9 +459,9 @@ py::dict compiled_kernel_gpu_semantics_to_python(
   result["autodiff_role"] = autodiff_mode_name(autodiff_mode);
   result["graph_metadata"] =
       graph_kernel_metadata_to_python(compiled.graph_metadata());
-  result["regular_handle_registered"] = compiled.get_handle().has_value();
+  result["regular_handle_registered"] = registration.get_handle().has_value();
   result["graph_masked_handle_registered"] =
-      compiled.get_graph_masked_handle().has_value();
+      registration.get_graph_masked_handle().has_value();
   if (graph_dispatch != nullptr) {
     result["graph_dispatch_index"] = graph_dispatch_index;
     result["graph_kernel_name"] = graph_dispatch->kernel_name;
@@ -1687,8 +1689,10 @@ void export_lang(py::module &m) {
         auto guard = program.acquire_snode_tree_lifecycle_read_guard();
         const auto request = resolve_kernel_compile_request(
             program.compile_config(), program.get_device_caps(), kernel->get_compile_tier_override());
-        const auto &compiled = program.compile_kernel(
+        auto execution = program.compile_kernel_execution_handle(
             program.compile_config(), program.get_device_caps(), *kernel);
+        const auto &compiled = execution->compiled();
+        const auto &registration = execution->registration();
         const auto *spirv = dynamic_cast<const lang::spirv::CompiledKernelData *>(&compiled);
         TI_ERROR_IF(!spirv, "Vulkan kernel did not produce SPIR-V");
         py::list shaders;
@@ -1699,7 +1703,7 @@ void export_lang(py::module &m) {
         result["metadata_json"] = liong::json::print(liong::json::serialize(spirv->get_internal_data().metadata));
         result["kernel_identity"] = compiled.kernel_identity();
         result["resolved_config"] = py::cast(request.config(), py::return_value_policy::copy);
-        result["pipeline_registered"] = compiled.get_handle().has_value();
+        result["pipeline_registered"] = registration.get_handle().has_value();
 #else
         TI_NOT_IMPLEMENTED
 #endif
@@ -1730,11 +1734,10 @@ void export_lang(py::module &m) {
                          arch_name(backend));
              auto tree_guard =
                  program.acquire_snode_tree_lifecycle_read_guard();
-             const auto &compiled = program.compile_kernel(
-                 program.compile_config(), program.get_device_caps(),
-                 *kernel);
+             auto execution = program.compile_kernel_execution_handle(
+                 program.compile_config(), program.get_device_caps(), *kernel);
              return compiled_kernel_gpu_semantics_to_python(
-                 compiled, kernel->autodiff_mode, kernel);
+                 *execution, kernel->autodiff_mode, kernel);
            })
       .def("_kernel_gpu_artifact_qualification",
            [](Program &program, Kernel *kernel) {
@@ -1747,12 +1750,14 @@ void export_lang(py::module &m) {
                          arch_name(backend));
              auto tree_guard =
                  program.acquire_snode_tree_lifecycle_read_guard();
-             const auto &compiled = program.compile_kernel(
-                 program.compile_config(), program.get_device_caps(),
-                 *kernel);
+             auto execution = program.compile_kernel_execution_handle(
+                 program.compile_config(), program.get_device_caps(), *kernel);
+             const auto &compiled = execution->compiled();
+             const auto &registration = execution->registration();
              py::dict result;
              result["backend"] = arch_name(backend);
-             result["registered_before"] = compiled.get_handle().has_value();
+             result["registered_before"] =
+                 registration.get_handle().has_value();
              py::list tasks;
 #if defined(TI_WITH_CUDA)
              if (backend == Arch::cuda) {
@@ -1766,8 +1771,8 @@ void export_lang(py::module &m) {
                TI_ERROR_IF(launcher == nullptr,
                            "CUDA artifact qualification requires the CUDA "
                            "kernel launcher");
-               for (const auto &item :
-                    launcher->qualify_llvm_kernel_artifacts(*llvm_compiled)) {
+               for (const auto &item : launcher->qualify_llvm_kernel_artifacts(
+                        *llvm_compiled, registration)) {
                  py::dict encoded;
                  encoded["entry_point"] = item.entry_point;
                  encoded["function_identity"] =
@@ -1824,7 +1829,7 @@ void export_lang(py::module &m) {
                result["materialized"] = false;
              }
 #endif
-             result["registered_after"] = compiled.get_handle().has_value();
+             result["registered_after"] = registration.get_handle().has_value();
              result["tasks"] = std::move(tasks);
              return result;
            })
@@ -1864,17 +1869,20 @@ void export_lang(py::module &m) {
              {
                auto tree_guard =
                    program.acquire_snode_tree_lifecycle_read_guard();
-               const auto &compiled = program.compile_kernel(
+               auto execution = program.compile_kernel_execution_handle(
                    program.compile_config(), program.get_device_caps(),
                    *kernel);
+               const auto &compiled = execution->compiled();
+               const auto &registration = execution->registration();
                tree_ids = compiled.snode_tree_ids();
                tasks = compiled.task_manifest();
                kernel_identity = compiled.kernel_identity();
                backend = compiled.arch();
                relocation = compiled.snode_relocation_descriptor();
-               regular_handle_registered = compiled.get_handle().has_value();
+               regular_handle_registered =
+                   registration.get_handle().has_value();
                graph_masked_handle_registered =
-                   compiled.get_graph_masked_handle().has_value();
+                   registration.get_graph_masked_handle().has_value();
              }
 
              // The compiler/runtime descriptor is the product contract. This
@@ -2023,11 +2031,16 @@ void export_lang(py::module &m) {
                    "GPU executable-plan semantics are unavailable for "
                    "AOT-only Graph dispatch {} ({})",
                    dispatch_index, dispatch.kernel_name);
-               const auto &compiled = program.compile_kernel(
-                   program.compile_config(), program.get_device_caps(),
-                   *dispatch.ti_kernel);
+               auto execution = dispatch.jit_execution_handle();
+               if (!execution) {
+                 execution = program.compile_kernel_execution_handle(
+                     program.compile_config(), program.get_device_caps(),
+                     *dispatch.ti_kernel);
+               }
+               TI_ERROR_IF(!execution->active(),
+                           "Graph build artifact has retired");
                segments.append(compiled_kernel_gpu_semantics_to_python(
-                   compiled, dispatch.ti_kernel->autodiff_mode,
+                   *execution, dispatch.ti_kernel->autodiff_mode,
                    dispatch.ti_kernel, &dispatch, dispatch_index));
              }
              result["segments"] = std::move(segments);

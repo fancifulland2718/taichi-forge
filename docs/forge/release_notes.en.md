@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Compiled kernel payloads no longer hold runtime registration state.
+  CPU/CUDA/Vulkan execution owners retain their registrations, with separate
+  CUDA ordinary and masked handles; retirement does not mutate shared code.
+  Graph loans and ordinary calls keep their existing executors and submission
+  order. AOT container formats are unchanged. Update frontend/native together
+  for private ABI 145.
+
 - CUDA kernel requests now freeze the effective target before compilation.
   AOT keeps its declared deployment target, including linked sparse helpers;
   fixed-target LLVM cache identity no longer reads the producer's CUDA device
@@ -48,7 +55,8 @@ lifetimes. The entries below describe the changes.
   checks and real CUDA AmgX source-free/borrowed branch tests pass. CUDA capture,
   and asynchronous host-control submission are not added. Exact portable CUDA
   WHILE now exports through execution plan version 26, including AmgX host
-  operations and explicit reverse kernels. Pair frontend/native ABI 144.
+  operations and explicit reverse kernels. Pair frontend/native components
+  supporting this capability (current private ABI 145).
 
 - AmgX device bindings expose an explicit host-controlled Graph action with
   automatic AOT reconstruction from frozen configuration and CSR topology.

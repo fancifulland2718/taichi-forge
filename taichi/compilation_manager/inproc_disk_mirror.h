@@ -10,10 +10,9 @@
 // directly from memory and skip the disk I/O entirely.
 //
 // Semantics are identical to loading from disk: deserialization itself is
-// still performed per Program, producing a fresh CompiledKernelData whose
-// `kernel_launch_handle_` is null. This is intentional — the launch
-// handle is per-runtime (see runtime/{cpu,cuda,gfx}/kernel_launcher.cpp)
-// and must not be shared across Programs.
+// still performed per Program, producing code and its call contract. Runtime
+// registrations live separately in KernelExecutionHandle and are never part
+// of these serialized bytes (see runtime/{cpu,cuda,gfx}/kernel_launcher.cpp).
 //
 // Thread-safe. Bounded by a byte cap read once from the environment
 // variable `TI_INPROC_DISK_MIRROR_MB` (default 256 MB; set to 0 to

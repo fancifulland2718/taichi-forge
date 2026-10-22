@@ -120,7 +120,8 @@ class LoadedEntryLauncher : public LLVM::KernelLauncher {
   LoadedEntryLauncher() : LLVM::KernelLauncher(Config{}) {
   }
 
-  Handle register_llvm_kernel(const LLVM::CompiledKernelData &) override {
+  Handle register_llvm_kernel(const LLVM::CompiledKernelData &,
+                              const KernelRegistrationState &) override {
     ++registrations;
     return make_handle();
   }

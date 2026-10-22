@@ -194,27 +194,6 @@ class CompiledKernelData {
     return Err::kNoError;
   }
 
-  void set_handle(const KernelLaunchHandle &handle) const {
-    kernel_launch_handle_ = handle;
-  }
-
-  const std::optional<KernelLaunchHandle> &get_handle() const {
-    return kernel_launch_handle_;
-  }
-
-  void set_graph_masked_handle(const KernelLaunchHandle &handle) const {
-    graph_masked_launch_handle_ = handle;
-  }
-
-  const std::optional<KernelLaunchHandle> &get_graph_masked_handle() const {
-    return graph_masked_launch_handle_;
-  }
-
-  void clear_registered_handles() const noexcept {
-    kernel_launch_handle_.reset();
-    graph_masked_launch_handle_.reset();
-  }
-
   static std::unique_ptr<CompiledKernelData> load(std::istream &is, Err *p_err);
 
   static std::string get_err_msg(Err err);
@@ -238,15 +217,54 @@ class CompiledKernelData {
 
   static std::unique_ptr<CompiledKernelData> create(Arch arch, Err &err);
 
-  mutable std::optional<KernelLaunchHandle> kernel_launch_handle_;
-  // Internal CUDA Graph masking uses a separately compiled entry-gated
-  // variant. Its handle belongs to the same compiled-kernel lifetime and must
-  // not be cached by a reusable raw object address.
-  mutable std::optional<KernelLaunchHandle> graph_masked_launch_handle_;
   std::string kernel_identity_;
   std::string logical_kernel_identity_;
   std::string optimization_spec_identity_;
   SNodeRelocationDescriptor snode_relocation_descriptor_;
+};
+
+// Runtime registration belongs to an execution owner, never to code bytes.
+// Callers use the launcher's existing registration/lifecycle gate. No global
+// payload-address lookup or extra synchronization is required on replay.
+class KernelRegistrationState {
+ public:
+  KernelRegistrationState() = default;
+  KernelRegistrationState(const KernelRegistrationState &) = delete;
+  KernelRegistrationState &operator=(const KernelRegistrationState &) = delete;
+
+  void bind_runtime(std::uint64_t owner, std::uint64_t generation) const {
+    TI_ERROR_IF(retired_, "Kernel execution registration has retired");
+    TI_ERROR_IF(owner_ != 0 && (owner_ != owner || generation_ != generation),
+                "Kernel execution registration belongs to another runtime "
+                "or a retired registration generation");
+    owner_ = owner;
+    generation_ = generation;
+  }
+
+  void set_handle(KernelLaunchHandle handle) const {
+    ordinary_ = handle;
+  }
+  const std::optional<KernelLaunchHandle> &get_handle() const {
+    return ordinary_;
+  }
+  void set_graph_masked_handle(KernelLaunchHandle handle) const {
+    masked_ = handle;
+  }
+  const std::optional<KernelLaunchHandle> &get_graph_masked_handle() const {
+    return masked_;
+  }
+  void retire() noexcept {
+    retired_ = true;
+    ordinary_.reset();
+    masked_.reset();
+  }
+
+ private:
+  mutable std::uint64_t owner_{0};
+  mutable std::uint64_t generation_{0};
+  mutable std::optional<KernelLaunchHandle> ordinary_;
+  mutable std::optional<KernelLaunchHandle> masked_;
+  bool retired_{false};
 };
 
 // Stable ownership boundary between a frontend Kernel definition, compiled
@@ -261,7 +279,7 @@ class KernelExecutionHandle {
   };
 
   KernelExecutionHandle(std::uint64_t identity,
-                        std::shared_ptr<CompiledKernelData> payload)
+                        std::shared_ptr<const CompiledKernelData> payload)
       : identity_(identity), payload_(std::move(payload)) {
   }
 
@@ -281,16 +299,21 @@ class KernelExecutionHandle {
     return payload_;
   }
 
+  const KernelRegistrationState &registration() const noexcept {
+    return registration_;
+  }
+
   void retire() noexcept {
     if (state_.exchange(State::retired, std::memory_order_acq_rel) ==
         State::active) {
-      payload_->clear_registered_handles();
+      registration_.retire();
     }
   }
 
  private:
   std::uint64_t identity_{0};
-  std::shared_ptr<CompiledKernelData> payload_;
+  std::shared_ptr<const CompiledKernelData> payload_;
+  KernelRegistrationState registration_;
   std::atomic<State> state_{State::active};
 };
 

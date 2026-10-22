@@ -20,6 +20,7 @@ class KernelLauncher : public lang::KernelLauncher {
   explicit KernelLauncher(Config config);
 
   void launch_kernel(const lang::CompiledKernelData &compiled_kernel_data,
+                     const KernelRegistrationState &registration,
                      LaunchContextBuilder &ctx) override;
 
   void launch_registered_kernel(
@@ -32,7 +33,8 @@ class KernelLauncher : public lang::KernelLauncher {
 
   virtual void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) = 0;
   virtual Handle register_llvm_kernel(
-      const LLVM::CompiledKernelData &compiled) = 0;
+      const LLVM::CompiledKernelData &compiled,
+      const KernelRegistrationState &registration) = 0;
 
   // AOT launchers own all their registrations. The caller must first wait for
   // submitted work; ordinary Program launchers retain their existing lifetime.

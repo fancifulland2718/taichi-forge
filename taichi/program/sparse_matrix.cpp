@@ -116,15 +116,14 @@ struct CompiledKernelLinearOperator::TopologyState {
 };
 
 struct CompiledKernelLinearOperator::ResourceGeneration {
-  ResourceGeneration(
-      Program *program,
-      const CompiledKernelData *compiled_kernel,
-      Kernel *kernel,
-      int size,
-      std::shared_ptr<TopologyState> topology,
-      Ndarray *numeric_data,
-      std::size_t input_arg_index,
-      std::size_t output_arg_index)
+  ResourceGeneration(Program *program,
+                     std::shared_ptr<KernelExecutionHandle> compiled_kernel,
+                     Kernel *kernel,
+                     int size,
+                     std::shared_ptr<TopologyState> topology,
+                     Ndarray *numeric_data,
+                     std::size_t input_arg_index,
+                     std::size_t output_arg_index)
       : program(program),
         program_lifetime(program ? program->weak_resource_lifetime_token()
                                  : std::weak_ptr<ProgramLifetimeToken>{}),
@@ -186,7 +185,7 @@ struct CompiledKernelLinearOperator::ResourceGeneration {
 
   Program *program{nullptr};
   std::weak_ptr<ProgramLifetimeToken> program_lifetime;
-  const CompiledKernelData *compiled_kernel{nullptr};
+  std::shared_ptr<KernelExecutionHandle> compiled_kernel{nullptr};
   std::shared_ptr<TopologyState> topology;
   Ndarray *numeric_data{nullptr};
   OperatorResourceStamp stamp;
@@ -457,9 +456,9 @@ CompiledKernelLinearOperator::CompiledKernelLinearOperator(
                 "input, f32[1D] output) with no return values.");
   }
 
-  const auto &compiled = program->compile_kernel(
+  const auto &compiled = program->compile_kernel_execution_handle(
       program->compile_config(), program->get_device_caps(), kernel);
-  TI_ERROR_IF(!compiled.snode_tree_ids().empty(),
+  TI_ERROR_IF(!compiled->compiled().snode_tree_ids().empty(),
               "Compiled-kernel linear operators must not depend on any "
               "SNodeTree; use explicit topology/numeric ndarray arguments.");
 
@@ -491,7 +490,7 @@ CompiledKernelLinearOperator::CompiledKernelLinearOperator(
   ProgramNdarrayOwner numeric_owner(program, owned_numeric_data);
   program_ = program;
   kernel_ = &kernel;
-  compiled_kernel_ = &compiled;
+  compiled_kernel_ = compiled;
   topology_state_ =
       std::make_shared<TopologyState>(program, topology_owner.get());
   topology_owner.release();

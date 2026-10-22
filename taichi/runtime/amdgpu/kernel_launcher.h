@@ -22,7 +22,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
-      const LLVM::CompiledKernelData &compiled) override;
+      const LLVM::CompiledKernelData &compiled,
+      const KernelRegistrationState &registration) override;
 
  private:
   bool on_amdgpu_device(void *ptr);

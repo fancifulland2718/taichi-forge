@@ -54,7 +54,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
-      const LLVM::CompiledKernelData &compiled) override;
+      const LLVM::CompiledKernelData &compiled,
+      const KernelRegistrationState &registration) override;
   void retire_snode_tree(int tree_id) override;
   void retire_all_kernels() override;
   std::size_t debug_registered_kernel_count() override;

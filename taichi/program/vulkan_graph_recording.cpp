@@ -313,7 +313,8 @@ Program::create_vulkan_graph_recording(
                     "Prepared Vulkan Graph cannot lower this dispatch");
         auto kernel = compile_kernel_execution_handle(
             compile_config(), get_device_caps(), *dispatch.ti_kernel);
-        auto handle = launcher->get_or_register_kernel(kernel->compiled());
+        auto handle = launcher->get_or_register_kernel(kernel->compiled(),
+                                                       kernel->registration());
         owners.push_back(std::move(kernel));
         auto context =
             std::make_unique<LaunchContextBuilder>(dispatch.ti_kernel);

@@ -154,11 +154,13 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
 }
 
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
-    const LLVM::CompiledKernelData &compiled) {
+    const LLVM::CompiledKernelData &compiled,
+    const KernelRegistrationState &registration) {
   TI_ASSERT(compiled.arch() == Arch::amdgpu);
   std::unique_lock<std::shared_mutex> lock(registration_mutex());
 
-  if (!compiled.get_handle()) {
+  bind_registration(registration);
+  if (!registration.get_handle()) {
     auto handle = make_handle();
     auto index = handle.get_launch_id();
     contexts_.resize(index + 1);
@@ -176,9 +178,9 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     ctx->offloaded_tasks = std::move(data.tasks);
     contexts_[index] = std::move(ctx);
 
-    compiled.set_handle(handle);
+    registration.set_handle(handle);
   }
-  return *compiled.get_handle();
+  return *registration.get_handle();
 }
 
 }  // namespace amdgpu

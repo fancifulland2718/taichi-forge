@@ -9,6 +9,7 @@ KernelLauncher::KernelLauncher(Config config) : config_(std::move(config)) {
 
 void KernelLauncher::launch_kernel(
     const lang::CompiledKernelData &compiled_kernel_data,
+    const KernelRegistrationState &registration,
     LaunchContextBuilder &ctx) {
   TI_AUTO_PROF;
   TI_ASSERT(arch_uses_llvm(compiled_kernel_data.arch()));
@@ -17,7 +18,7 @@ void KernelLauncher::launch_kernel(
   KernelLauncher::Handle handle;
   {
     TI_PROFILER("register_llvm_kernel");
-    handle = register_llvm_kernel(llvm_ckd);
+    handle = register_llvm_kernel(llvm_ckd, registration);
   }
   {
     TI_PROFILER("launch_llvm_kernel");

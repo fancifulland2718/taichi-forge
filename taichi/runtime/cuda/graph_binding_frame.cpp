@@ -222,7 +222,8 @@ GraphBindingExecutor::GraphBindingExecutor(const aot::CompiledGraph &graph,
         config, state->program->get_device_caps(), *dispatch.ti_kernel);
     const auto &compiled =
         dynamic_cast<const LLVM::CompiledKernelData &>(kernel->compiled());
-    state->handles.push_back(state->launcher->register_llvm_kernel(compiled));
+    state->handles.push_back(state->launcher->register_llvm_kernel(
+        compiled, kernel->registration()));
     state->kernels.push_back(std::move(kernel));
   }
   auto context = CUDAContext::get_instance().get_guard();

@@ -816,7 +816,8 @@ bool try_launch_cached_llvm_kernel(Program *prog,
     return false;
   }
   if (cached.llvm_launch_id < 0) {
-    auto handle = launcher->register_llvm_kernel(*llvm_compiled);
+    auto handle = launcher->register_llvm_kernel(
+        *llvm_compiled, cached.execution_handle->registration());
     cached.llvm_launch_id = handle.get_launch_id();
   }
   KernelLaunchHandle handle;
@@ -2609,7 +2610,8 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
                                      /*cache_compiled_kernel_data=*/true);
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
-    auto handle = launcher->register_llvm_kernel(llvm_ckd);
+    auto handle = launcher->register_llvm_kernel(
+        llvm_ckd, cache.kernels[i].execution_handle->registration());
 
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
@@ -3002,7 +3004,8 @@ bool try_run_cuda_masked_control_graph(
                                      /*cache_compiled_kernel_data=*/true);
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
-    auto handle = launcher->register_llvm_kernel_graph_gated(llvm_ckd);
+    auto handle = launcher->register_llvm_kernel_graph_gated(
+        llvm_ckd, cache.kernels[i].execution_handle->registration());
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
@@ -3329,7 +3332,8 @@ bool try_run_cuda_conditional_nested_control_graph(
       auto *data = get_or_compile_cached_kernel(
           dispatch, compile_config, cache.kernels[i], true);
       auto handle = launcher->register_llvm_kernel(
-          dynamic_cast<const LLVM::CompiledKernelData &>(*data));
+          dynamic_cast<const LLVM::CompiledKernelData &>(*data),
+          cache.kernels[i].execution_handle->registration());
       auto context = dispatch.make_launch_context();
       context.append_dispatch_label(dispatch.dispatch_label);
       graph.init_runtime_context(dispatch.symbolic_args, args, context);
@@ -3742,7 +3746,8 @@ bool try_run_cuda_device_update_nested_control_graph(
                                      /*cache_compiled_kernel_data=*/true);
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
-    auto handle = launcher->register_llvm_kernel(llvm_ckd);
+    auto handle = launcher->register_llvm_kernel(
+        llvm_ckd, cache.kernels[i].execution_handle->registration());
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
@@ -4166,9 +4171,12 @@ bool try_run_cuda_masked_nested_control_graph(
       }
       return nullptr;
     }();
-    auto handle = initial_outer_condition
-                      ? launcher->register_llvm_kernel(llvm_ckd)
-                      : launcher->register_llvm_kernel_graph_gated(llvm_ckd);
+    auto handle =
+        initial_outer_condition
+            ? launcher->register_llvm_kernel(
+                  llvm_ckd, cache.kernels[i].execution_handle->registration())
+            : launcher->register_llvm_kernel_graph_gated(
+                  llvm_ckd, cache.kernels[i].execution_handle->registration());
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
@@ -4509,7 +4517,8 @@ bool try_run_cuda_bounded_graph(
                                      /*cache_compiled_kernel_data=*/true);
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
-    auto handle = launcher->register_llvm_kernel(llvm_ckd);
+    auto handle = launcher->register_llvm_kernel(
+        llvm_ckd, cache.kernels[i].execution_handle->registration());
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
@@ -4865,7 +4874,8 @@ bool try_run_cuda_conditional_graph(
                                      /*cache_compiled_kernel_data=*/true);
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
-    auto handle = launcher->register_llvm_kernel(llvm_ckd);
+    auto handle = launcher->register_llvm_kernel(
+        llvm_ckd, cache.kernels[i].execution_handle->registration());
     auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
@@ -5260,7 +5270,9 @@ bool prepare_vulkan_graph_launch(
     const CompiledKernelData *compiled_kernel_data =
         get_or_compile_cached_kernel(dispatch, compile_config, cache.kernels[i],
                                      /*cache_compiled_kernel_data=*/false);
-    auto handle = launcher->get_or_register_kernel(*compiled_kernel_data);
+    auto handle = launcher->get_or_register_kernel(
+        *compiled_kernel_data,
+        cache.kernels[i].execution_handle->registration());
     prepared.launch_contexts.push_back(
         std::make_unique<LaunchContextBuilder>(
             dispatch.make_launch_context()));
@@ -5957,9 +5969,8 @@ void CompiledGraph::jit_run(
     // handles internal dispatches assembled without a bound invocation.
     auto *prog = dispatch.ti_kernel->program;
     CompiledGraphJITCachedKernel cached;
-    const auto *compiled_kernel_data = get_or_compile_cached_kernel(
-        dispatch, compile_config, cached, true);
-    prog->launch_kernel(*compiled_kernel_data, launch_ctx);
+    get_or_compile_cached_kernel(dispatch, compile_config, cached, true);
+    prog->launch_kernel(*cached.execution_handle, launch_ctx);
   }
   if (resource_guard) {
     resource_guard->finish_external_access_epoch();
@@ -6277,7 +6288,7 @@ void CompiledGraph::jit_run_cached(
 #endif
     TI_ERROR_IF(dispatch.cpu_bounded_dispatch.has_value(),
                 "CPU exact bounded dispatch requires the LLVM fast launcher");
-    prog->launch_kernel(*compiled_kernel_data, launch_ctx);
+    prog->launch_kernel(*cached.execution_handle, launch_ctx);
   }
   if (resource_guard) {
     resource_guard->finish_external_access_epoch();

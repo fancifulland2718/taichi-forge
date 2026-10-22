@@ -31,6 +31,11 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- kernel 编译产物与执行注册状态分离：CPU/CUDA/Vulkan 的注册属于执行 owner，
+  CUDA ordinary 与 masked 句柄分别保存，退休不再修改共享代码。Graph 借用和普通
+  调用继续使用现有执行器与提交顺序；AOT 容器格式不变。配套 frontend/native
+  私有 ABI 升至145，请一起更新组件。
+
 - CUDA kernel 请求在编译前冻结有效目标；AOT 连同链接的稀疏 helper 使用声明的部署
   目标。固定目标的 LLVM 缓存身份不再读取生产机器的 CUDA 设备或 driver provider；
   bitcode 保留 lowering 要求，并校验后续 PTX 目标。独立 runtime 模块继续面向消费设备。
@@ -40,8 +45,8 @@
   操作的 body；循环精确检查条件，收敛后不额外调用 host 操作。AmgX host 分支可导出重建，
   retained guess 按实际控制路径校验。Windows CPU/CUDA/Vulkan 小型 Graph 与真实 CUDA
   AmgX 无源码/借用分支测试通过；未新增 CUDA capture 或异步 host 控制提交。精确 CUDA portable
-  WHILE 可通过版本 26 执行计划导出，包括 AmgX host 操作与显式反向 kernel；frontend/native
-  需配套私有 ABI 144。
+  WHILE 可通过版本 26 执行计划导出，包括 AmgX host 操作与显式反向 kernel；
+  需配套支持该能力的 frontend/native（当前私有 ABI 145）。
 
 - AmgX device binding 提供显式 host 控制的 Graph action，可从冻结配置和 CSR 拓扑自动
   导出 AOT。消费者提供初始系数，各实例重建独立 solver session；v2 solve 描述保持共享

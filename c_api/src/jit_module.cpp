@@ -184,8 +184,10 @@ std::uintptr_t import_jit_module(
     auto &entry = selected.at(name);
     const auto &compiled = static_cast<const LLVM::CompiledKernelData &>(
         entry.execution->compiled());
-    entry.launch = gated ? launcher->register_llvm_kernel_graph_gated(compiled)
-                         : launcher->register_llvm_kernel(compiled);
+    entry.launch = gated ? launcher->register_llvm_kernel_graph_gated(
+                               compiled, entry.execution->registration())
+                         : launcher->register_llvm_kernel(
+                               compiled, entry.execution->registration());
   }
   auto retirement = std::make_shared<JitCodeRetirement>(runtime);
   auto module = std::make_unique<JitModule>(program, *launcher,

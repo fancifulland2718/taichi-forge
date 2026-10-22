@@ -3790,15 +3790,15 @@ struct CompiledKernelActionTopology {
 
 class CompiledKernelActionLaunch {
  public:
-  CompiledKernelActionLaunch(Program *program,
-                             Kernel *kernel,
-                             const CompiledKernelData *compiled_kernel,
-                             int active_size,
-                             std::shared_ptr<CompiledKernelActionTopology>
-                                 topology,
-                             Ndarray *numeric_data,
-                             std::size_t input_arg_index,
-                             std::size_t output_arg_index)
+  CompiledKernelActionLaunch(
+      Program *program,
+      Kernel *kernel,
+      std::shared_ptr<KernelExecutionHandle> compiled_kernel,
+      int active_size,
+      std::shared_ptr<CompiledKernelActionTopology> topology,
+      Ndarray *numeric_data,
+      std::size_t input_arg_index,
+      std::size_t output_arg_index)
       : program_(program),
         compiled_kernel_(compiled_kernel),
         topology_(std::move(topology)),
@@ -3847,7 +3847,7 @@ class CompiledKernelActionLaunch {
   }
 
   Program *program_{nullptr};
-  const CompiledKernelData *compiled_kernel_{nullptr};
+  std::shared_ptr<KernelExecutionHandle> compiled_kernel_{nullptr};
   std::shared_ptr<CompiledKernelActionTopology> topology_;
   Ndarray *numeric_data_{nullptr};
   std::size_t input_arg_index_{0};
@@ -3860,9 +3860,9 @@ struct CompiledKernelActionGeneration {
   CompiledKernelActionGeneration(
       Program *program,
       Kernel *forward_kernel,
-      const CompiledKernelData *forward_compiled,
+      std::shared_ptr<KernelExecutionHandle> forward_compiled,
       Kernel *adjoint_kernel,
-      const CompiledKernelData *adjoint_compiled,
+      std::shared_ptr<KernelExecutionHandle> adjoint_compiled,
       const OperatorDescriptor &descriptor,
       std::shared_ptr<CompiledKernelActionTopology> topology,
       Ndarray *numeric_data,
@@ -4099,8 +4099,9 @@ class CompiledKernelActionProvider {
   }
 
  private:
-  const CompiledKernelData *validate_and_compile(Kernel &kernel,
-                                                  const char *role) {
+  std::shared_ptr<KernelExecutionHandle> validate_and_compile(
+      Kernel &kernel,
+      const char *role) {
     TI_ERROR_IF(kernel.program != program_ ||
                     kernel.arch != program_->compile_config().arch,
                 "Compiled-kernel action {} kernel must belong to the same "
@@ -4128,12 +4129,12 @@ class CompiledKernelActionProvider {
                 "topology, optional numeric, f32[1D] input, f32[1D] output "
                 "with no return values.",
                 role);
-    const auto &compiled = program_->compile_kernel(
+    const auto &compiled = program_->compile_kernel_execution_handle(
         program_->compile_config(), program_->get_device_caps(), kernel);
-    TI_ERROR_IF(!compiled.snode_tree_ids().empty(),
+    TI_ERROR_IF(!compiled->compiled().snode_tree_ids().empty(),
                 "Compiled-kernel actions must not depend on an SNodeTree; "
                 "use explicit topology/numeric ndarray arguments.");
-    return &compiled;
+    return compiled;
   }
 
   OperatorCapabilities make_capabilities() const {
@@ -4181,8 +4182,8 @@ class CompiledKernelActionProvider {
   Program *program_{nullptr};
   Kernel *forward_kernel_{nullptr};
   Kernel *adjoint_kernel_{nullptr};
-  const CompiledKernelData *forward_compiled_{nullptr};
-  const CompiledKernelData *adjoint_compiled_{nullptr};
+  std::shared_ptr<KernelExecutionHandle> forward_compiled_{nullptr};
+  std::shared_ptr<KernelExecutionHandle> adjoint_compiled_{nullptr};
   OperatorDescriptor descriptor_;
   std::shared_ptr<CompiledKernelActionTopology> topology_;
   std::shared_ptr<CompiledKernelActionGeneration> current_generation_;

@@ -130,6 +130,36 @@ TEST(CompiledKernelDataTest, Correct) {
   }
 }
 
+TEST(CompiledKernelDataTest, ExecutionOwnersShareCodeButNotRegistration) {
+  auto payload = std::make_shared<FakeCompiledKernelData>(
+      std::vector<std::string>{"entry"}, "code bytes");
+  KernelExecutionHandle first(1, payload), second(2, payload);
+  EXPECT_EQ(first.payload_lease().get(), second.payload_lease().get());
+  std::ostringstream before;
+  ASSERT_EQ(payload->dump(before), CompiledKernelData::Err::kNoError);
+  KernelLaunchHandle ordinary, masked;
+  ordinary.set_launch_id(4);
+  masked.set_launch_id(9);
+  first.registration().bind_runtime(11, 1);
+  first.registration().set_handle(ordinary);
+  first.registration().set_graph_masked_handle(masked);
+  second.registration().bind_runtime(22, 1);
+  second.registration().set_handle(masked);
+  EXPECT_ANY_THROW(first.registration().bind_runtime(22, 1));
+  EXPECT_ANY_THROW(first.registration().bind_runtime(11, 2));
+  first.retire();
+  EXPECT_FALSE(first.active());
+  EXPECT_FALSE(first.registration().get_handle());
+  EXPECT_FALSE(first.registration().get_graph_masked_handle());
+  EXPECT_ANY_THROW(first.registration().bind_runtime(11, 1));
+  EXPECT_TRUE(second.active());
+  ASSERT_TRUE(second.registration().get_handle());
+  EXPECT_EQ(second.registration().get_handle()->get_launch_id(), 9);
+  std::ostringstream after;
+  ASSERT_EQ(payload->dump(after), CompiledKernelData::Err::kNoError);
+  EXPECT_EQ(before.str(), after.str());
+}
+
 TEST(CompiledKernelDataTest, Error) {
   using Err = CompiledKernelData::Err;
   using FErr = CompiledKernelDataFile::Err;

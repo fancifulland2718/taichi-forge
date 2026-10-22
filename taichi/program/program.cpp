@@ -3974,8 +3974,11 @@ void Program::compile_kernels(
   }
 }
 
-void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
+void Program::launch_kernel(const KernelExecutionHandle &execution,
                             LaunchContextBuilder &ctx) {
+  TI_ERROR_IF(!execution.active(), "Kernel execution has retired");
+  const auto &compiled_kernel_data = execution.compiled();
+  const auto *registration = &execution.registration();
   ensure_runtime_submission_allowed("kernel launch");
   if (ctx.argpack_ptrs.empty() && ctx.ndarray_ptrs.empty() &&
       ctx.texture_ptrs.empty() && ctx.dense_storage_ptrs.empty()) {
@@ -3991,7 +3994,7 @@ void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
     auto launch_backend = [&] {
       const std::uint64_t started = attribute ? ordinary_launch_now_ns() : 0;
       program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
-                                                          ctx);
+                                                         *registration, ctx);
       if (attribute) {
         ordinary_launch_attribution_.backend_submit_ns.fetch_add(
             ordinary_launch_now_ns() - started, std::memory_order_relaxed);
@@ -4082,7 +4085,7 @@ void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
     const std::uint64_t backend_started =
         attribute ? ordinary_launch_now_ns() : 0;
     program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
-                                                        ctx);
+                                                       *registration, ctx);
     if (attribute) {
       ordinary_launch_attribution_.backend_submit_ns.fetch_add(
           ordinary_launch_now_ns() - backend_started,
@@ -4102,7 +4105,7 @@ void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
     }
     return;
   }
-  launch_kernel_impl(compiled_kernel_data, ctx, nullptr);
+  launch_kernel_impl(compiled_kernel_data, ctx, nullptr, registration);
 }
 
 void Program::launch_registered_kernel(
@@ -4110,13 +4113,13 @@ void Program::launch_registered_kernel(
     KernelLaunchHandle handle,
     LaunchContextBuilder &ctx) {
   ensure_runtime_submission_allowed("registered kernel launch");
-  launch_kernel_impl(compiled_kernel_data, ctx, &handle);
+  launch_kernel_impl(compiled_kernel_data, ctx, &handle, nullptr);
 }
 
-void Program::launch_kernel_impl(
-    const CompiledKernelData &compiled_kernel_data,
-    LaunchContextBuilder &ctx,
-    const KernelLaunchHandle *registered_handle) {
+void Program::launch_kernel_impl(const CompiledKernelData &compiled_kernel_data,
+                                 LaunchContextBuilder &ctx,
+                                 const KernelLaunchHandle *registered_handle,
+                                 const KernelRegistrationState *registration) {
   const bool attribute = ordinary_launch_attribution_.enabled;
   const std::uint64_t total_started =
       attribute ? ordinary_launch_now_ns() : 0;
@@ -4184,7 +4187,7 @@ void Program::launch_kernel_impl(
           compiled_kernel_data, *registered_handle, ctx);
     } else {
       program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
-                                                          ctx);
+                                                         *registration, ctx);
     }
     if (attribute) {
       ordinary_launch_attribution_.backend_submit_ns.fetch_add(
@@ -4217,7 +4220,7 @@ void Program::launch_kernel_impl(
           compiled_kernel_data, *registered_handle, ctx);
     } else {
       program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
-                                                          ctx);
+                                                         *registration, ctx);
     }
     if (attribute) {
       ordinary_launch_attribution_.backend_submit_ns.fetch_add(
@@ -4296,7 +4299,7 @@ void Program::launch_kernel_impl(
             compiled_kernel_data, *registered_handle, ctx);
       } else {
         program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
-                                                            ctx);
+                                                           *registration, ctx);
       }
       if (attribute) {
         ordinary_launch_attribution_.backend_submit_ns.fetch_add(
@@ -4418,7 +4421,7 @@ void Program::launch_kernel_impl(
           compiled_kernel_data, *registered_handle, ctx);
     } else {
       program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
-                                                          ctx);
+                                                         *registration, ctx);
     }
     if (attribute) {
       ordinary_launch_attribution_.backend_submit_ns.fetch_add(
@@ -4470,6 +4473,7 @@ void Program::RegisteredKernelExecutionPlan::launch(
   TI_ERROR_IF(&program != owner_,
               "Registered kernel execution plan belongs to another Program");
   TI_ASSERT(compiled_ != nullptr);
+  TI_ERROR_IF(!execution_->active(), "Kernel execution plan has retired");
   if (program.ordinary_launch_attribution_.enabled) {
     program.ordinary_launch_attribution_.registered_execution_plan_launches
         .fetch_add(1, std::memory_order_relaxed);
@@ -4514,9 +4518,10 @@ Program::RegisteredKernelExecutionPlan::begin_launch(Program &program) const {
               1, std::memory_order_relaxed);
     }
   }
+  TI_ERROR_IF(!execution_->active(), "Kernel execution plan has retired");
   return std::unique_ptr<RegisteredKernelExecutionPlanLaunchScope>(
       new RegisteredKernelExecutionPlanLaunchScope(
-          &program, compiled_, handle_, std::move(lifecycle_guard)));
+          &program, execution_, handle_, std::move(lifecycle_guard)));
 }
 
 void Program::RegisteredKernelExecutionPlanLaunchScope::launch(
@@ -4525,6 +4530,7 @@ void Program::RegisteredKernelExecutionPlanLaunchScope::launch(
               "Registered kernel execution plan launch scope was already used");
   TI_ASSERT(program_ != nullptr);
   TI_ASSERT(compiled_ != nullptr);
+  TI_ERROR_IF(!execution_->active(), "Kernel execution plan has retired");
   launched_ = true;
   if (program_->ordinary_launch_attribution_.enabled) {
     program_->ordinary_launch_attribution_.registered_execution_plan_launches
@@ -4540,8 +4546,10 @@ Program::register_kernel_execution_plan(
     const Kernel &kernel_def,
     bool allow_snode_tree_dependencies) {
   auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
-  const auto &compiled = compile_kernel(compile_config, caps, kernel_def);
-  if (!compiled.get_handle() ||
+  auto execution =
+      compile_kernel_execution_handle(compile_config, caps, kernel_def);
+  const auto &compiled = execution->compiled();
+  if (!execution->registration().get_handle() ||
       (compiled.has_snode_tree_dependencies() &&
        !allow_snode_tree_dependencies)) {
     return nullptr;
@@ -4554,10 +4562,9 @@ Program::register_kernel_execution_plan(
   const std::uint64_t validated_snode_tree_epoch =
       dependencies.empty() ? 0 : lifecycle_guard.epoch();
   return std::unique_ptr<RegisteredKernelExecutionPlan>(
-      new RegisteredKernelExecutionPlan(this, &compiled,
-                                        *compiled.get_handle(),
-                                        std::move(dependencies),
-                                        validated_snode_tree_epoch));
+      new RegisteredKernelExecutionPlan(
+          this, execution, *execution->registration().get_handle(),
+          std::move(dependencies), validated_snode_tree_epoch));
 }
 
 void Program::compile_and_launch_kernel(
@@ -4589,7 +4596,9 @@ void Program::compile_and_launch_kernel(
   }
   const std::uint64_t compile_started =
       attribute ? ordinary_launch_now_ns() : 0;
-  const auto &compiled = compile_kernel(compile_config, caps, kernel_def);
+  auto execution =
+      compile_kernel_execution_handle(compile_config, caps, kernel_def);
+  const auto &compiled = execution->compiled();
   if (attribute) {
     ordinary_launch_attribution_.compile_lookup_ns.fetch_add(
         ordinary_launch_now_ns() - compile_started,
@@ -4599,7 +4608,7 @@ void Program::compile_and_launch_kernel(
       !compiled.has_snode_tree_dependencies()) {
     lifecycle_guard.reset();
   }
-  launch_kernel(compiled, ctx);
+  launch_kernel(*execution, ctx);
   if (attribute) {
     ordinary_launch_attribution_.compile_and_launch_total_ns.fetch_add(
         ordinary_launch_now_ns() - total_started,

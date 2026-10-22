@@ -185,10 +185,12 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
-      const LLVM::CompiledKernelData &compiled) override;
+      const LLVM::CompiledKernelData &compiled,
+      const KernelRegistrationState &registration) override;
   // Register already-generated code with its persisted call contract. This
   // overload does not insert gates or otherwise regenerate a code variant.
   Handle register_llvm_kernel(const LLVM::CompiledKernelData &compiled,
+                              const KernelRegistrationState &registration,
                               KernelLaunchABI launch_abi);
   Handle register_cuda_artifact_kernel(
       const LLVM::CompiledKernelData::InternalData &metadata,
@@ -202,12 +204,14 @@ class KernelLauncher : public LLVM::KernelLauncher {
   // remain untouched, so only internal masked CUDA Graph replay pays the
   // branch cost.
   Handle register_llvm_kernel_graph_gated(
-      const LLVM::CompiledKernelData &compiled);
+      const LLVM::CompiledKernelData &compiled,
+      const KernelRegistrationState &registration);
   void retire_snode_tree(int tree_id) override;
   void retire_all_kernels() override;
   std::size_t debug_registered_kernel_count() override;
   std::vector<ArtifactQualification> qualify_llvm_kernel_artifacts(
-      const LLVM::CompiledKernelData &compiled);
+      const LLVM::CompiledKernelData &compiled,
+      const KernelRegistrationState &registration);
   void debug_reset_sparse_listgen_statistics() override;
   SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(
       const std::vector<int> &snode_ids, int tree_id = -1) override;
