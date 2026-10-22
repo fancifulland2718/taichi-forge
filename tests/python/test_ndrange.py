@@ -5,6 +5,34 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@pytest.mark.parametrize("grouped", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], advanced_optimization=False, offline_cache=False)
+def test_ndrange_coordinate_decoding_preserves_reverse_gradient(grouped):
+    shape = (3, 4, 5)
+    x = ti.field(ti.f32, shape=shape, needs_grad=True)
+    y = ti.field(ti.f32, shape=shape, needs_grad=True)
+
+    @ti.kernel
+    def square(begin: ti.i32, end: ti.i32):
+        if ti.static(grouped):
+            for I in ti.grouped(ti.ndrange((begin, end), (1, 4), (2, 5))):
+                y[I] = x[I] * x[I]
+        else:
+            for i, j, k in ti.ndrange((begin, end), (1, 4), (2, 5)):
+                y[i, j, k] = x[i, j, k] * x[i, j, k]
+
+    values = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    x.from_numpy(values)
+    y.grad.fill(1)
+    square(1, 3)
+    square.grad(1, 3)
+    expected = np.zeros(shape, dtype=np.float32)
+    expected[1:3, 1:4, 2:5] = values[1:3, 1:4, 2:5] ** 2
+    np.testing.assert_array_equal(y.to_numpy(), expected)
+    expected[1:3, 1:4, 2:5] = 2 * values[1:3, 1:4, 2:5]
+    np.testing.assert_array_equal(x.grad.to_numpy(), expected)
+
+
 @test_utils.test()
 def test_1d():
     x = ti.field(ti.f32, shape=(16))

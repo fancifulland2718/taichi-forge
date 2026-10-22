@@ -208,12 +208,13 @@ def test_graph_memory_2d_stencil_materializes_true_tiles_and_replays_exactly():
     manifests = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
     }
-    assert len(manifests) == 4
     staged_manifests = {
         recipe_id: manifest["memory_recipe_manifest"]
         for recipe_id, manifest in manifests.items()
-        if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_2d"
+        if manifest.get("memory_recipe_manifest", {}).get("strategy") == "shared_staged_2d"
     }
+    # Other recipe families may add direct-execution alternatives.
+    assert len(staged_manifests) == 3
     assert {
         tuple(manifest["offload_plan"]["tasks"][0]["memory_tile_shape"])
         for manifest in staged_manifests.values()
@@ -593,9 +594,8 @@ def test_graph_memory_2d_rejects_noncanonical_wraparound_coordinates():
     graph = builder.compile()
     search = compileiq_recipe_search(graph)
 
-    assert len(search.recipe_ids) == 1
     assert graph._spec._graph_memory_sources[0].candidate_failure
-    assert "memory_recipe_id" not in search.recipe_manifest(search.recipe_ids[0])
+    assert all("memory_recipe_id" not in search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

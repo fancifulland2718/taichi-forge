@@ -1423,7 +1423,9 @@ class ASTTransformer(Builder):
                     ),
                 )
                 if i + 1 < len(targets):
-                    I._assign(I - target_tmp * ndrange_var.acc_dimensions[i + 1])
+                    # Keep coordinate decoding in SSA form even without CFG
+                    # optimization; Graph analysis must see the loop index.
+                    I = I - target_tmp * ndrange_var.acc_dimensions[i + 1]
             build_stmts(ctx, node.body)
             ctx.ast_builder.end_frontend_range_for()
         return None
@@ -1457,7 +1459,8 @@ class ASTTransformer(Builder):
                     target_tmp = I
                 impl.subscript(ctx.ast_builder, target_var, i)._assign(target_tmp + ndrange_var.bounds[i][0])
                 if i + 1 < len(ndrange_var.dimensions):
-                    I._assign(I - target_tmp * ndrange_var.acc_dimensions[i + 1])
+                    # Each dimension consumes the previous remainder once.
+                    I = I - target_tmp * ndrange_var.acc_dimensions[i + 1]
             build_stmts(ctx, node.body)
             ctx.ast_builder.end_frontend_range_for()
         return None
