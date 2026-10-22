@@ -3,7 +3,7 @@
 #include <memory>
 
 #include "taichi/program/kernel.h"
-#include "taichi/program/compile_config.h"
+#include "taichi/program/kernel_compile_request.h"
 #include "taichi/codegen/compiled_kernel_data.h"
 
 namespace taichi::lang {
@@ -14,13 +14,12 @@ class KernelCompiler {
   using CKDPtr = std::unique_ptr<CompiledKernelData>;
 
   // AST -> CHI IR
-  virtual IRNodePtr compile(const CompileConfig &compile_config,
+  virtual IRNodePtr compile(const KernelCompileRequest &request,
                             const Kernel &kernel_def,
                             GraphKernelMetadata *graph_metadata) const = 0;
 
   // CHI IR -> CompiledKernelData
-  virtual CKDPtr compile(const CompileConfig &compile_config,
-                         const DeviceCapabilityConfig &device_caps,
+  virtual CKDPtr compile(const KernelCompileRequest &request,
                          const Kernel &kernel_def,
                          IRNode &chi_ir) const = 0;
 

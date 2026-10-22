@@ -12,7 +12,7 @@
 #include "taichi/program/program.h"
 #include "taichi/util/lang_util.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
-#include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/analysis/offline_cache_util.h"
 #include "taichi/analysis/gather_snode_tree_dependencies.h"
@@ -69,10 +69,7 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
       : TaskCodeGenLLVM(id, config, tlctx, kernel, ir, nullptr,
                         &root_binding_tree_ids),
         target_compute_capability_(
-            device_caps.contains(DeviceCapability::cuda_compute_capability)
-                ? static_cast<int>(device_caps.get(
-                      DeviceCapability::cuda_compute_capability))
-                : CUDAContext::get_instance().get_compute_capability()) {
+            static_cast<int>(device_caps.get(DeviceCapability::cuda_compute_capability))) {
   }
 
   llvm::Value *create_print(std::string tag,

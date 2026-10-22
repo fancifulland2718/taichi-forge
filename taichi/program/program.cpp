@@ -3723,7 +3723,7 @@ const CompiledKernelData &Program::compile_kernel(
     return handle->compiled();
   }
   const auto &ckd =
-      mgr.load_or_compile(request.config(), request.device_caps(), kernel_def);
+      mgr.load_or_compile(request, kernel_def);
   kernel_def.set_snode_tree_dependencies(ckd.snode_tree_ids());
   total_compilation_time_ += Time::get_time() - start_t;
   return ckd;
@@ -3753,7 +3753,7 @@ Program::compile_kernel_execution_handle(
     return handle;
   }
   auto handle = mgr.load_or_compile_execution_handle(
-      request.config(), request.device_caps(), kernel_def);
+      request, kernel_def);
   kernel_def.set_snode_tree_dependencies(handle->compiled().snode_tree_ids());
   total_compilation_time_ += Time::get_time() - start_t;
   return handle;
@@ -3934,7 +3934,7 @@ void Program::compile_kernels(
       const auto request = resolve_kernel_compile_request(
           compile_config, caps, k->get_compile_tier_override());
       const auto &compiled =
-          mgr.load_or_compile(request.config(), request.device_caps(), *k);
+          mgr.load_or_compile(request, *k);
       k->set_snode_tree_dependencies(compiled.snode_tree_ids());
     }
     total_compilation_time_ += Time::get_time() - start_t;
@@ -3954,7 +3954,7 @@ void Program::compile_kernels(
           const auto request = resolve_kernel_compile_request(
               compile_config, caps, k->get_compile_tier_override());
           const auto &compiled = mgr.load_or_compile(
-              request.config(), request.device_caps(), *k);
+              request, *k);
           k->set_snode_tree_dependencies(compiled.snode_tree_ids());
         } catch (...) {
           std::lock_guard<std::mutex> g(err_mu);

@@ -6,7 +6,7 @@ from tests import test_utils
 
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("retire_definition", [False, True])
-@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, compile_tier="balanced", advanced_optimization=True)
 def test_cold_graph_keeps_build_request_and_callable(cached, retire_definition):
     source = ti.field(ti.i32)
     source_builder = ti.FieldsBuilder()

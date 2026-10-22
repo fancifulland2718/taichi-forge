@@ -160,9 +160,10 @@ void KernelCompilationManager::ensure_metadata_loaded_locked(Arch arch) {
 }
 
 const CompiledKernelData &KernelCompilationManager::load_or_compile(
-    const CompileConfig &compile_config,
-    const DeviceCapabilityConfig &caps,
+    const KernelCompileRequest &request,
     const Kernel &kernel_def) {
+  const auto &compile_config = request.config();
+  const auto &caps = request.device_caps();
   auto cache_mode = get_cache_mode(compile_config, kernel_def);
   const auto kernel_key = make_kernel_key(compile_config, caps, kernel_def);
 
@@ -223,7 +224,7 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
     if (!compiled) {
       record_if_enabled(executable_lifecycle_telemetry_.enabled,
                         executable_lifecycle_telemetry_.compiler_invocations);
-      compiled = compile_kernel(compile_config, caps, kernel_def);
+      compiled = compile_kernel(request, kernel_def);
     }
     // Logical identity is needed only when this thread installs a cache miss.
     // Keep its serialization and SHA-256 work off the memory-cache hit path,
@@ -259,10 +260,9 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
 
 std::shared_ptr<KernelExecutionHandle>
 KernelCompilationManager::load_or_compile_execution_handle(
-    const CompileConfig &compile_config,
-    const DeviceCapabilityConfig &caps,
+    const KernelCompileRequest &request,
     const Kernel &kernel_def) {
-  const auto &compiled = load_or_compile(compile_config, caps, kernel_def);
+  const auto &compiled = load_or_compile(request, kernel_def);
   const auto &kernel_key = compiled.kernel_identity();
   std::lock_guard<std::mutex> lock(cache_mutex_);
   if (auto found = caching_kernels_.find(kernel_key);
@@ -760,19 +760,18 @@ std::string KernelCompilationManager::make_filename(
 }
 
 std::unique_ptr<CompiledKernelData> KernelCompilationManager::compile_kernel(
-    const CompileConfig &compile_config,
-    const DeviceCapabilityConfig &caps,
+    const KernelCompileRequest &request,
     const Kernel &kernel_def) const {
   TI_COMPILE_PROFILER("cpp.compile.kernel");
   auto &compiler = *config_.kernel_compiler;
   GraphKernelMetadata graph_metadata;
   auto ir = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.ir_pipeline");
-    return compiler.compile(compile_config, kernel_def, &graph_metadata);
+    return compiler.compile(request, kernel_def, &graph_metadata);
   }();
   auto ckd = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.backend_codegen");
-    return compiler.compile(compile_config, caps, kernel_def, *ir);
+    return compiler.compile(request, kernel_def, *ir);
   }();
   ckd->set_graph_metadata(std::move(graph_metadata));
   {

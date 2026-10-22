@@ -153,7 +153,7 @@ TEST(Dx11ProgramTest, MaterializeRuntimeTest) {
   ker->finalize_rets();
   ker->finalize_params();
   program->get_kernel_compilation_manager().load_or_compile(
-      *program->config, program->get_device_caps(), *ker.get());
+      resolve_kernel_compile_request(*program->config, program->get_device_caps()), *ker.get());
 }
 
 }  // namespace directx11

@@ -10,7 +10,6 @@
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
 #include "taichi/program/kernel_compile_request.h"
-#include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/runtime/llvm/runtime_context_abi.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
@@ -33,37 +32,7 @@ LlvmAotModuleBuilder::LlvmAotModuleBuilder(
       caps_(caps),
       explicit_cuda_target_(
           caps.contains(DeviceCapability::cuda_compute_capability)) {
-  if (compile_config_.arch != Arch::cuda) {
-    return;
-  }
-
-  // AOT targets a deployable device family rather than the producer's device.
-  // Ampere is the default; callers may select an exact target through caps.
-  constexpr int kDefaultCudaAotComputeCapability = 80;
-  constexpr int kMinimumCudaAotComputeCapability = 60;
-  int target = caps_.contains(DeviceCapability::cuda_compute_capability)
-                   ? static_cast<int>(caps_.get(
-                         DeviceCapability::cuda_compute_capability))
-                   : kDefaultCudaAotComputeCapability;
-  const auto resolution =
-      cuda::detail::resolve_compute_capability_target(target);
-  TI_ERROR_IF(
-      target < kMinimumCudaAotComputeCapability ||
-          resolution.codegen_compute_capability != target,
-      "Unsupported CUDA AOT target compute capability {}. Choose an exact "
-      "LLVM-supported target at or above 60.",
-      target);
-
-  if (caps_.contains(DeviceCapability::cuda_ptx_version)) {
-    TI_ERROR_IF(
-        caps_.get(DeviceCapability::cuda_ptx_version) !=
-            static_cast<uint32_t>(resolution.ptx_version),
-        "CUDA AOT target {} requires PTX {}, but caps requested PTX {}.",
-        target, resolution.ptx_version,
-        caps_.get(DeviceCapability::cuda_ptx_version));
-  }
-  caps_.set(DeviceCapability::cuda_compute_capability, target);
-  caps_.set(DeviceCapability::cuda_ptx_version, resolution.ptx_version);
+  caps_ = resolve_kernel_target(compile_config_.arch, caps, CompilePurpose::aot).capabilities;
 }
 
 void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
@@ -375,7 +344,7 @@ LLVM::CompiledKernelData::InternalData LlvmAotModuleBuilder::compile_kernel(
       config, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot,
       compile_options_);
   const auto &ckd = compilation_manager_.load_or_compile(
-      request.config(), request.device_caps(), *kernel);
+      request, *kernel);
   TI_ASSERT(arch_uses_llvm(ckd.arch()));
   return dynamic_cast<const LLVM::CompiledKernelData &>(ckd)
       .get_internal_data();

@@ -10,6 +10,20 @@ namespace taichi::lang {
 
 enum class CompilePurpose { jit, aot };
 enum class CompileTierSource { base_config, kernel_override, export_override };
+enum class CompileTargetSource { capability_snapshot, current_device, aot_default, explicit_target };
+
+// The capability projection is also used by backend lowering. CUDA resolution
+// happens once at the entry boundary, never in a worker's task code generator.
+struct ResolvedKernelTarget {
+  DeviceCapabilityConfig capabilities;
+  CompileTargetSource source{CompileTargetSource::capability_snapshot};
+};
+
+ResolvedKernelTarget resolve_kernel_target(
+    Arch arch,
+    const DeviceCapabilityConfig &caps,
+    CompilePurpose purpose,
+    std::optional<int> current_cuda_compute_capability = std::nullopt);
 
 struct KernelCompileOptions {
   std::optional<std::string> compile_tier;
@@ -40,7 +54,10 @@ class KernelCompileRequest {
     return config_;
   }
   const DeviceCapabilityConfig &device_caps() const {
-    return caps_;
+    return target_.capabilities;
+  }
+  const ResolvedKernelTarget &target() const {
+    return target_;
   }
   const CompileRequestProvenance &provenance() const {
     return provenance_;
@@ -48,11 +65,11 @@ class KernelCompileRequest {
 
  private:
   KernelCompileRequest(CompileConfig config,
-                       DeviceCapabilityConfig caps,
+                       ResolvedKernelTarget target,
                        CompileRequestProvenance provenance);
 
   CompileConfig config_;
-  DeviceCapabilityConfig caps_;
+  ResolvedKernelTarget target_;
   CompileRequestProvenance provenance_;
 
   friend KernelCompileRequest resolve_kernel_compile_request(

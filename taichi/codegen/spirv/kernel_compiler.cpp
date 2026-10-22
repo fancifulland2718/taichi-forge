@@ -15,9 +15,10 @@ KernelCompiler::KernelCompiler(Config config) : config_(std::move(config)) {
 }
 
 KernelCompiler::IRNodePtr KernelCompiler::compile(
-    const CompileConfig &compile_config,
+    const KernelCompileRequest &request,
     const Kernel &kernel_def,
     GraphKernelMetadata *graph_metadata) const {
+  const auto &compile_config = request.config();
   auto ir = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.spirv.clone_ir");
     return irpass::analysis::clone(kernel_def.ir.get());
@@ -65,10 +66,11 @@ KernelCompiler::IRNodePtr KernelCompiler::compile(
 }
 
 KernelCompiler::CKDPtr KernelCompiler::compile(
-    const CompileConfig &compile_config,
-    const DeviceCapabilityConfig &device_caps,
+    const KernelCompileRequest &request,
     const Kernel &kernel_def,
     IRNode &chi_ir) const {
+  const auto &compile_config = request.config();
+  const auto &device_caps = request.device_caps();
   TI_TRACE("VK codegen for Taichi kernel={}", kernel_def.name);
   KernelCodegen::Params params;
   params.ti_kernel_name = kernel_def.name;

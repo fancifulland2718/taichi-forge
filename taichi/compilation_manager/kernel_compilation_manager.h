@@ -88,13 +88,11 @@ class KernelCompilationManager final {
   explicit KernelCompilationManager(Config init_params);
 
   // Load from memory || Load from disk || (Compile && Cache in memory)
-  const CompiledKernelData &load_or_compile(const CompileConfig &compile_config,
-                                            const DeviceCapabilityConfig &caps,
+  const CompiledKernelData &load_or_compile(const KernelCompileRequest &request,
                                             const Kernel &kernel_def);
 
   std::shared_ptr<KernelExecutionHandle> load_or_compile_execution_handle(
-      const CompileConfig &compile_config,
-      const DeviceCapabilityConfig &caps,
+      const KernelCompileRequest &request,
       const Kernel &kernel_def);
 
   // Return an already materialized in-memory kernel for a known specialization
@@ -164,8 +162,7 @@ class KernelCompilationManager final {
   std::string make_filename(const std::string &kernel_key) const;
 
   std::unique_ptr<CompiledKernelData> compile_kernel(
-      const CompileConfig &compile_config,
-      const DeviceCapabilityConfig &caps,
+      const KernelCompileRequest &request,
       const Kernel &kernel_def) const;
 
   std::string make_kernel_key(const CompileConfig &compile_config,

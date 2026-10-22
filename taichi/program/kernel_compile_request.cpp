@@ -1,14 +1,67 @@
 #include "taichi/program/kernel_compile_request.h"
 
 #include <utility>
+#include <limits>
+#include "taichi/rhi/cuda/cuda_capability.h"
+#if defined(TI_WITH_CUDA)
+#include "taichi/rhi/cuda/cuda_context.h"
+#endif
 
 namespace taichi::lang {
 
+ResolvedKernelTarget resolve_kernel_target(
+    Arch arch,
+    const DeviceCapabilityConfig &caps,
+    CompilePurpose purpose,
+    std::optional<int> current_cuda_compute_capability) {
+  ResolvedKernelTarget result{caps};
+  if (arch != Arch::cuda)
+    return result;
+  const bool explicit_target = caps.contains(DeviceCapability::cuda_compute_capability);
+  int requested;
+  if (explicit_target) {
+    const auto value = caps.get(DeviceCapability::cuda_compute_capability);
+    TI_ERROR_IF(value > std::numeric_limits<int>::max(), "Invalid CUDA compute capability {}", value);
+    requested = static_cast<int>(value);
+    result.source = CompileTargetSource::explicit_target;
+  } else if (purpose == CompilePurpose::aot) {
+    requested = 80;
+    result.source = CompileTargetSource::aot_default;
+  } else {
+    if (!current_cuda_compute_capability) {
+#if defined(TI_WITH_CUDA)
+      current_cuda_compute_capability = CUDAContext::get_instance().get_compute_capability();
+#else
+      TI_ERROR("CUDA JIT target resolution requires CUDA support");
+#endif
+    }
+    requested = *current_cuda_compute_capability;
+    result.source = CompileTargetSource::current_device;
+  }
+  const auto resolution = cuda::detail::resolve_compute_capability_target(requested);
+  TI_ERROR_IF(requested < 20 ||
+                  ((explicit_target || purpose == CompilePurpose::aot) &&
+                   resolution.codegen_compute_capability != requested) ||
+                  (purpose == CompilePurpose::aot && requested < 60),
+              "Unsupported CUDA {} target compute capability {}",
+              purpose == CompilePurpose::aot ? "AOT" : "JIT", requested);
+  if (caps.contains(DeviceCapability::cuda_ptx_version))
+    TI_ERROR_IF(caps.get(DeviceCapability::cuda_ptx_version) !=
+                    static_cast<std::uint32_t>(resolution.ptx_version),
+                "CUDA target {} requires PTX {}, but caps requested PTX {}",
+                requested, resolution.ptx_version,
+                caps.get(DeviceCapability::cuda_ptx_version));
+  result.capabilities.set(DeviceCapability::cuda_compute_capability,
+                           resolution.codegen_compute_capability);
+  result.capabilities.set(DeviceCapability::cuda_ptx_version, resolution.ptx_version);
+  return result;
+}
+
 KernelCompileRequest::KernelCompileRequest(CompileConfig config,
-                                           DeviceCapabilityConfig caps,
+                                           ResolvedKernelTarget target,
                                            CompileRequestProvenance provenance)
     : config_(std::move(config)),
-      caps_(std::move(caps)),
+      target_(std::move(target)),
       provenance_(provenance) {
 }
 
@@ -76,7 +129,8 @@ KernelCompileRequest resolve_kernel_compile_request(
                              CompileOptionSource::derived);
   }
   provenance.option_sources = config.option_sources;
-  return KernelCompileRequest(std::move(config), caps, provenance);
+  auto target = resolve_kernel_target(config.arch, caps, purpose);
+  return KernelCompileRequest(std::move(config), std::move(target), provenance);
 }
 
 }  // namespace taichi::lang

@@ -30,6 +30,34 @@ TEST(KernelCompileRequest, OwnsConfigAndTargetWithoutChangingTheCaller) {
       request.device_caps().get(DeviceCapability::cuda_compute_capability), 86);
 }
 
+TEST(KernelCompileRequest, ResolvesCudaTargetsWithoutBorrowingProducerCapabilities) {
+  for (int producer : {86, 120, 122}) {
+    const auto deployment = resolve_kernel_target(Arch::cuda, {}, CompilePurpose::aot, producer);
+    EXPECT_EQ(deployment.source, CompileTargetSource::aot_default);
+    EXPECT_EQ(deployment.capabilities.get(DeviceCapability::cuda_compute_capability), 80);
+    EXPECT_EQ(deployment.capabilities.get(DeviceCapability::cuda_ptx_version), 70);
+    const auto current = resolve_kernel_target(Arch::cuda, {}, CompilePurpose::jit, producer);
+    EXPECT_EQ(current.source, CompileTargetSource::current_device);
+    EXPECT_EQ(current.capabilities.get(DeviceCapability::cuda_compute_capability), producer == 86 ? 86 : 120);
+  }
+  DeviceCapabilityConfig explicit_caps;
+  explicit_caps.set(DeviceCapability::cuda_compute_capability, 60);
+  const auto target = resolve_kernel_target(Arch::cuda, explicit_caps, CompilePurpose::aot, 120);
+  EXPECT_EQ(target.source, CompileTargetSource::explicit_target);
+  EXPECT_EQ(target.capabilities.get(DeviceCapability::cuda_ptx_version), 60);
+  EXPECT_FALSE(explicit_caps.contains(DeviceCapability::cuda_ptx_version));
+  explicit_caps.set(DeviceCapability::cuda_ptx_version, 50);
+  EXPECT_ANY_THROW(resolve_kernel_target(Arch::cuda, explicit_caps, CompilePurpose::aot, 120));
+  explicit_caps.set(DeviceCapability::cuda_compute_capability, 122);
+  EXPECT_ANY_THROW(resolve_kernel_target(Arch::cuda, explicit_caps, CompilePurpose::aot, 120));
+  // Non-CUDA snapshots do not acquire CUDA requirements or device state.
+  for (auto arch : {Arch::x64, Arch::vulkan}) {
+    const auto other = resolve_kernel_target(arch, {}, CompilePurpose::jit, 122);
+    EXPECT_TRUE(other.capabilities.devcaps.empty());
+    EXPECT_EQ(other.source, CompileTargetSource::capability_snapshot);
+  }
+}
+
 TEST(KernelCompileRequest, PreservesLegacyFullTierNormalization) {
   CompileConfig base;
   base.compile_tier = "balanced";

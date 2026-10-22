@@ -216,7 +216,7 @@ void AotModuleBuilderImpl::add_compiled_kernel(const std::string &identifier,
       config_, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot,
       compile_options_);
   const auto &ckd = compilation_manager_.load_or_compile(
-      request.config(), request.device_caps(), *kernel);
+      request, *kernel);
   const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);
 
   const auto &compiled = spirv_ckd.get_internal_data();
