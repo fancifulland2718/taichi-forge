@@ -6188,7 +6188,7 @@ def _sequence_structured_nodes(sequence):
 
 
 class _CompiledSequentialRegionNode:
-    """Ordered host-level sequence used when a region contains control nodes.
+    """Ordered host-level sequence containing control or host native nodes.
 
     Plain action runs remain coalesced into CGraph segments. Structured
     children stay explicit, so an empty action prefix/suffix never creates a
@@ -6374,11 +6374,11 @@ class _CompiledSequentialRegionNode:
 
     @property
     def debug_graph_stats(self):
-        return tuple(node.debug_graph_stats for node in self.nodes)
+        return tuple(getattr(node, "debug_graph_stats", ()) for node in self.nodes)
 
     @property
     def snapshot_graph_stats(self):
-        return tuple(node.snapshot_graph_stats for node in self.nodes)
+        return tuple(getattr(node, "snapshot_graph_stats", ()) for node in self.nodes)
 
     @property
     def debug_info(self):
@@ -6412,7 +6412,7 @@ def _compile_sequential_runtime_node(
             raise TaichiRuntimeError(
                 "Structured Graph region kinds must match its Sequential values"
             )
-    if not any(sequence._structured_depth for sequence in sequences):
+    if not any(sequence._structured_depth or sequence._has_host_native for sequence in sequences):
         return _compile_plain_sequential_runtime_node(
             sequences,
             repetitions=repetitions,
@@ -6444,7 +6444,7 @@ def _compile_sequential_runtime_node(
             pending = []
             for item, ir_node in zip(sequence._items, sequence._ir_nodes):
                 ir_nodes.append(ir_node)
-                if item[0] != "structured":
+                if item[0] not in ("structured", "host_native"):
                     pending.append((item, ir_node))
                     continue
                 flush_plain(sequence, pending, sequence_region_kind)
@@ -6493,6 +6493,15 @@ def _graph_control_names(values, role):
 
 def _prepare_structured_definition(kind, name, lowering_mode, definition_regions):
     sequences = tuple(sequence for _, sequence in definition_regions if sequence)
+    if (
+        any(sequence._has_host_native for sequence in sequences)
+        and impl.current_cfg().arch not in (_ti_core.Arch.x64, _ti_core.Arch.arm64)
+        and lowering_mode != "portable"
+    ):
+        raise TaichiRuntimeError(
+            f"Graph {kind} {name!r} contains host native actions; "
+            "select lowering_mode='portable' for host control"
+        )
     child_depth = max(
         (sequence._structured_depth for sequence in sequences),
         default=0,
@@ -6737,11 +6746,11 @@ class _CompiledWhileGraphNode:
         name,
         _control_recipe=None,
     ):
-        if not isinstance(condition, Sequential) or condition._dispatch_count == 0:
+        if not isinstance(condition, Sequential) or not condition._items:
             raise TaichiRuntimeError(
                 "Graph while condition must be a non-empty Sequential"
             )
-        if not isinstance(body, Sequential) or body._dispatch_count == 0:
+        if not isinstance(body, Sequential) or not body._items:
             raise TaichiRuntimeError("Graph while body must be a non-empty Sequential")
         if isinstance(max_iterations, bool) or not isinstance(
             max_iterations, (int, np.integer)
@@ -6823,7 +6832,9 @@ class _CompiledWhileGraphNode:
         self._definition_chunk_size = chunk_size
         self.chunk_limit = (
             1
-            if self._has_nested_control
+            # Host actions cannot be speculatively replayed after convergence.
+            # Observe every outer iteration, regardless of a masked kernel hint.
+            if self._has_nested_control or condition._has_host_native or body._has_host_native
             else min(
                 self.max_iterations or 1,
                 _structured_chunk_limit(arch, chunk_size, self.masked_execution),
@@ -8294,16 +8305,16 @@ class _CompiledIfGraphNode:
         name,
         _control_recipe=None,
     ):
-        if not isinstance(condition, Sequential) or condition._dispatch_count == 0:
+        if not isinstance(condition, Sequential) or not condition._items:
             raise TaichiRuntimeError(
                 "Graph if condition must be a non-empty Sequential"
             )
-        if not isinstance(then_region, Sequential) or then_region._dispatch_count == 0:
+        if not isinstance(then_region, Sequential) or not then_region._items:
             raise TaichiRuntimeError(
                 "Graph if then_region must be a non-empty Sequential"
             )
         if else_region is not None and (
-            not isinstance(else_region, Sequential) or else_region._dispatch_count == 0
+            not isinstance(else_region, Sequential) or not else_region._items
         ):
             raise TaichiRuntimeError(
                 "Graph if else_region must be a non-empty Sequential"
@@ -8705,13 +8716,13 @@ class _CompiledSwitchGraphNode:
         name,
         _control_recipe=None,
     ):
-        if not isinstance(condition, Sequential) or condition._dispatch_count == 0:
+        if not isinstance(condition, Sequential) or not condition._items:
             raise TaichiRuntimeError(
                 "Graph switch condition must be a non-empty Sequential"
             )
         branches = tuple(branches)
         if not branches or any(
-            not isinstance(branch, Sequential) or branch._dispatch_count == 0
+            not isinstance(branch, Sequential) or not branch._items
             for branch in branches
         ):
             raise TaichiRuntimeError(
@@ -8719,7 +8730,7 @@ class _CompiledSwitchGraphNode:
             )
         if default_region is not None and (
             not isinstance(default_region, Sequential)
-            or default_region._dispatch_count == 0
+            or not default_region._items
         ):
             raise TaichiRuntimeError(
                 "Graph switch default_region must be a non-empty Sequential"
@@ -16282,6 +16293,10 @@ class Sequential:
         self._has_indirect_dispatch = False
         self._structured_depth = 0
 
+    @property
+    def _has_host_native(self):
+        return any(manifest.execution_kind == "opaque_host" for manifest in self._native_action_manifests)
+
     def _bind_declared_private_args(self, args):
         for symbolic, requirement in _declared_private_arguments(
             self._declared_private_bindings, args
@@ -16482,6 +16497,11 @@ class Sequential:
         return self
 
     def append_native(self, node, *, prewarm=False):
+        """Append a native action, retaining host calls as explicit boundaries.
+
+        GPU control regions containing host calls require ``lowering_mode="portable"``.
+        The provider retains responsibility for its submission/completion contract.
+        """
         executable = compile_native_graph_node(node)
         if prewarm:
             executable.prewarm()
@@ -16492,10 +16512,14 @@ class Sequential:
         compiled = _CompiledNativeGraphNode(executable)
         action = compiled.recordable_action
         if action is None:
-            raise TaichiRuntimeError(
-                "Structured Graph Sequential.append_native requires a "
-                "recordable provider action"
-            )
+            self._items.append(("host_native", compiled))
+            self._ir_nodes.append(compiled.ir_node)
+            self._runtime_arg_names.update(compiled.runtime_arg_names)
+            self._recording_runtime_arg_names.update(compiled.recording_runtime_arg_names)
+            self._lifetime_leases.extend(compiled.lifetime_leases)
+            self._source_native_count += compiled.source_native_count
+            self._native_action_manifests.extend(compiled.native_action_manifests)
+            return self
         backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
         if not action.supports_backend(backend):
             raise TaichiRuntimeError(

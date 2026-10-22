@@ -123,6 +123,13 @@ Sequential 控制区域只有一个 owner，组成树；当前结构化深度上
 不要在多个位置复用可变控制节点或形成环。
 只有 provider 明确允许时，recordable native action 才能进入 body。
 
+`Sequential.append_native()` 也接受 host native action，包括只有 host 操作的 body；
+这些节点在编译后的 kernel 段之间保留显式 host 边界。CUDA/Vulkan 的外层 IF/SWITCH/WHILE
+须选择 `lowering_mode="portable"`，通过 `Graph.run()` 执行。循环每轮检查条件，即使 kernel
+请求 masked chunk，也不会在条件已结束后继续调用 host 操作。这属于宏观 Graph 组合；
+CUDA conditional capture 的准入要求保持。provider 继续负责自身同步和生命周期合同。
+AOT 导出还要求节点具有重建合同；CUDA host 分支可导出，CUDA portable host WHILE 尚不可导出。
+
 | 模式 | 含义 |
 | --- | --- |
 | `portable` | 强制 portable control |

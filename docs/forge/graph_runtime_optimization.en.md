@@ -148,6 +148,17 @@ depth limit is two. Do not reuse a mutable control node at multiple call sites
 or form cycles. Recordable native actions can enter a body only where their
 provider explicitly supports it.
 
+Host native actions can also be appended with `Sequential.append_native()`.
+They remain explicit host boundaries between compiled kernel segments, including
+host-only bodies. On CUDA/Vulkan, enclosing IF/SWITCH/WHILE regions must select
+`lowering_mode="portable"` and execute through `Graph.run()`. These loops check
+the predicate after every iteration, including when kernels request masked
+chunking, so skipped iterations never invoke the host action. This is macro
+Graph composition, not admission to a captured CUDA conditional body.
+Providers still own their synchronization and lifetime contracts. AOT export
+additionally requires the action's reconstruction contract; CUDA host branches
+are supported, while CUDA portable host WHILE export remains unsupported.
+
 | Mode | Meaning |
 | --- | --- |
 | `portable` | Force the portable control route |
