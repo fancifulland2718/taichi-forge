@@ -134,7 +134,8 @@ def main(arch, module_path, order):
     raises(ValueError, lambda: tensor.read_into(bytes(tensor.nbytes)))
     raises(ValueError, lambda: tensor.write(memoryview(bytearray(48))[::2]))
     raises(ValueError, lambda: forward.bind(x, y, gradients={3: dx}))
-    raises(aot.AotError, lambda: module.kernel("adjust")(0.5, 2))
+    # Argument count is checked by the shared Python ABI binder before C API entry.
+    raises(ValueError, lambda: module.kernel("adjust")(0.5, 2))
     raises(aot.AotError, lambda: module.kernel("adjust")(aot.Scalar("f64", 0.5), 2, tensor))
     raises(aot.AotError, lambda: module.kernel("adjust")(0.5, 2, runtime.ndarray("i32", 3, element_shape=(2,))))
     raises(aot.AotError, lambda: module.kernel("adjust")(0.5, 2, runtime.ndarray("f32", 6)))
