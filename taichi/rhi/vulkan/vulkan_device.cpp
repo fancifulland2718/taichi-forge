@@ -5185,6 +5185,32 @@ void VulkanSurface::destroy_swap_chain() {
   if (swapchain_ == VK_NULL_HANDLE) {
     return;
   }
+  // Rendering fences do not cover vkQueuePresentKHR's semaphore waits.
+  // Retire those waits on the present queue before releasing the swapchain's
+  // retained semaphores. This is a cold resize/close boundary, not a frame
+  // submission wait. Without swapchain-maintenance present fences, queue idle
+  // is the conventional WSI teardown fallback.
+  const bool has_present_waits = std::any_of(
+      present_waits_by_image_.begin(), present_waits_by_image_.end(),
+      [](const auto &waits) { return !waits.empty(); });
+  if (has_present_waits && device_->backend_calls_safe()) {
+    VkResult result;
+    {
+      auto queue_lock = device_->acquire_queue_lock(device_->graphics_queue());
+      ScopedBackendWaitTelemetry wait_scope(device_->backend_wait_telemetry());
+      result = device_->vk_device().functions().vkQueueWaitIdle(
+          device_->graphics_queue());
+    }
+    if (result != VK_SUCCESS) {
+      try {
+        device_->report_backend_error(BackendRuntimeError(
+            Arch::vulkan, static_cast<std::int64_t>(result), "vkQueueWaitIdle",
+            "Vulkan present queue wait failed during swapchain retirement"));
+      } catch (...) {
+        // Keep destruction non-throwing and preserve the first backend error.
+      }
+    }
+  }
   for (auto &alloc : swapchain_images_) {
     std::get<1>(device_->get_vk_image(alloc)) = nullptr;
     device_->destroy_image(alloc);

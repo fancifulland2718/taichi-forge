@@ -47,6 +47,10 @@ def test_scroll_windows_event_pump_and_window_isolation():
     user32.SetCursorPos.argtypes = (ctypes.c_int, ctypes.c_int)
     user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
     user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.SetWindowPos.argtypes = (
+        wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, wintypes.UINT,
+    )
     old_position = wintypes.POINT()
     assert user32.GetCursorPos(ctypes.byref(old_position))
     old_foreground = user32.GetForegroundWindow()
@@ -131,6 +135,12 @@ def test_scroll_windows_event_pump_and_window_isolation():
             draw_panel()
         assert second.is_render_input_available()
         assert second.get_scroll_delta() == (0.0, 0.0)
+        # Resize immediately after presentation. Validation must accept retiring
+        # both render work and present waits, then closing the rebuilt swapchain.
+        assert user32.SetWindowPos(second_handle, None, 0, 0, 300, 230, 0x0016)
+        second.poll_events()
+        for _ in range(3):
+            draw_panel()
     finally:
         if first is not None:
             first.destroy()
