@@ -67,6 +67,37 @@ module.archive("geophys.tcm")
 
 ## 分别验证成本与行为
 
+### 新场景与执行实例的复用边界
+
+把场景输入和静态特化分开：同一容量、布局、类型和算法配置内，应用可以导出
+输入上传入口，更新初值、系数和 active counts，然后重放已有 solve 计划。复用
+`ExecutionPlan` 只复用描述；`prepare_execution()` 仍为该实例建立私有计划资源。
+Field 根属于加载的 `Module`，同一模块中准备两份计划不会复制其 Field 状态。
+需要独立 Field 场景时，分别加载模块；计划描述可复用，资源 owner 必须独立。
+
+```python
+first = runtime.load_module("engine.tcm")
+plan = first.execution_plan("solve")  # 冷阶段读取一次
+second = runtime.load_module("engine.tcm")
+solve_a = first.prepare_execution(plan, arguments_a)
+solve_b = second.prepare_execution(plan, arguments_b)
+# 应用通过各模块导出的上传入口设置数据，然后重复调用 solve_a / solve_b。
+```
+
+容量、类型、静态材料或 preconditioner 改变时，由 SDK 验证是否仍符合该部署
+入口；不能只因参数名字相同就复用旧计划或旧地址。超出布局应在上传前拒绝，并
+选择另一份合资格产物或进入已有 JIT 特化路径。输入上传入口及其完整性校验由
+应用定义，Forge 不从初始快照推断任意场景导入协议。
+
+Windows CUDA 的补充资格使用已安装的 compiled-host SAP 接口：同容量两个/一个
+接触、不同初值与系数复用同一 Graph，未重新编译 kernel；改变 preconditioner
+建立新的特化，容量不匹配的 image 在上传前拒绝。runtime-only 消费者禁止导入
+DSL、NumPy 和 GeoPhys 私有模块，使用同一 TCM 的两份独立模块、显式上传入口
+及同一计划描述，验证状态隔离、数据更新和关闭一个模块后另一个继续执行。
+这项是前向 SAP 资格，不新增 SAP 自动微分、跨实例代码注册共享或其他平台声明。
+
+### 测量项目
+
 比较格式时保持场景、数值设置、目标和 Graph 结构一致，分开测量：
 
 1. Graph 构建、导出、归档生成。原生格式将部分工作移到归档阶段，这些仍是

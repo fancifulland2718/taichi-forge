@@ -80,6 +80,45 @@ Keep package ownership explicit:
 
 ## Qualify cost and behavior separately
 
+### Reuse boundaries for new scenes and execution instances
+
+Separate scene inputs from static specialization. Within a fixed capacity,
+layout, type and algorithm configuration, applications can export upload entries
+for initial values, coefficients and active counts, then replay the existing
+solve plan. Reusing an `ExecutionPlan` shares its description; preparation still
+creates instance-private plan resources. Field roots belong to the loaded
+`Module`: preparing twice does not duplicate its Field state. Load separate
+modules for independent Field scenes, retaining independent resource owners.
+
+```python
+first = runtime.load_module("engine.tcm")
+plan = first.execution_plan("solve")  # Read once during cold setup.
+second = runtime.load_module("engine.tcm")
+solve_a = first.prepare_execution(plan, arguments_a)
+solve_b = second.prepare_execution(plan, arguments_b)
+# Set inputs through each module's exported upload entries, then replay.
+```
+
+For changed capacities, types, static materials or preconditioners, the SDK must
+validate the deployment entry's contract. Matching argument names do not permit
+reusing old addresses or an incompatible plan. Reject layout mismatches before
+upload, then select another qualified artifact or the existing JIT specialization
+path. The application defines upload entries and input completeness validation;
+Forge does not infer a general scene importer from an initial-state snapshot.
+
+Additional Windows CUDA qualification uses the installed compiled-host SAP
+interface. Two-contact and one-contact inputs with changed coefficients and
+initial values reuse one fixed-capacity Graph without kernel recompilation.
+A changed preconditioner creates a new specialization; an incompatible image
+capacity is rejected before upload. A runtime-only consumer forbids DSL, NumPy
+and private GeoPhys imports. It uses two modules from the same TCM, explicit
+upload entries and one plan description to verify isolated state, data updates
+and continued execution after closing the other module. This is forward SAP
+qualification, not SAP autodiff, shared cross-instance code registrations or
+qualification of other platforms.
+
+### Measurement stages
+
 Keep the scene, numerical settings, target and Graph structure fixed when
 comparing formats. Measure these stages separately:
 
