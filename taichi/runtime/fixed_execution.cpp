@@ -1311,7 +1311,8 @@ void FixedExecution::bind_external_access(
 }
 RuntimeCompletion FixedExecution::submit(
     const std::vector<RuntimeCompletion> &dependencies,
-    const std::vector<SubmissionParameterValue> &parameters) {
+    const std::vector<SubmissionParameterValue> &parameters,
+    bool sample_gpu) {
 #ifdef TI_WITH_CUDA
   if (state_->cuda_domain && state_->cuda_instance) {
     const auto instance = state_->cuda_instance;
@@ -1326,24 +1327,13 @@ RuntimeCompletion FixedExecution::submit(
     if (state_->cuda_ordered_count)
       ordered = std::make_shared<cuda::OrderedSubmissionResources>(
           state_->cuda_ordered_count, std::atomic_load(&instance->operands));
+    std::optional<PreparedExternalAccess::Epoch> external;
     auto completion = state_->cuda_domain->submit(
         dependencies,
         ordered
             ? ordered
             : std::static_pointer_cast<RuntimeCompletionResources>(instance),
         [&](void *stream) {
-          std::optional<PreparedExternalAccess::Epoch> external;
-          if (instance->external_access) {
-            // Admission and exact dependency validation already succeeded.
-            // Busy/rejected calls never consume an external binary semaphore.
-            auto selected = instance->external_stream;
-            selected.native_stream = stream;
-            external.emplace(*instance->external_access, selected);
-          }
-          for (const auto &step : instance->steps)
-            if (const auto *graph =
-                    std::get_if<std::unique_ptr<cuda::FixedGraph>>(&step))
-              (*graph)->enqueue_parameter_upload(stream);
           std::size_t index = 0;
           for (const auto &step : instance->steps) {
             if (const auto *graph =
@@ -1352,8 +1342,6 @@ RuntimeCompletion FixedExecution::submit(
             else
               ordered->run(index++, stream);
           }
-          if (external)
-            external->release();
         },
         [&] {
           // All readiness checks precede provider reservations, dependency
@@ -1369,7 +1357,25 @@ RuntimeCompletion FixedExecution::submit(
             if (const auto *graph =
                     std::get_if<std::unique_ptr<cuda::FixedGraph>>(&step))
               (*graph)->snapshot_parameters(parameters);
-        });
+        },
+        [&](void *stream) {
+          if (instance->external_access) {
+            // Admission and exact dependency validation already succeeded.
+            // Busy/rejected calls never consume an external binary semaphore.
+            auto selected = instance->external_stream;
+            selected.native_stream = stream;
+            external.emplace(*instance->external_access, selected);
+          }
+          for (const auto &step : instance->steps)
+            if (const auto *graph =
+                    std::get_if<std::unique_ptr<cuda::FixedGraph>>(&step))
+              (*graph)->enqueue_parameter_upload(stream);
+        },
+        [&](void *) {
+          if (external)
+            external->release();
+        },
+        sample_gpu);
     if (instance->parameter_count)
       instance->parameter_use = completion;
     return completion;

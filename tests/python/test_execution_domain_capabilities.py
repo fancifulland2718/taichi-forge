@@ -37,6 +37,7 @@ def test_domain_manifest_matches_runtime_only_without_initializing_a_device():
         cuda_api and jit["features"]["vulkan"] and jit["features"]["ggui"]
     )
     assert native["features"]["cuda_submission_parameters_u64"] == cuda_api
+    assert native["features"]["cuda_completion_gpu_timing"] == cuda_api
     assert ti.lang.impl.get_runtime().prog is None
     with pytest.raises(TypeError):
         native["features"][NAMES[0]] = False
@@ -87,6 +88,7 @@ def test_old_native_bits_do_not_infer_domains_from_version_or_abi(monkeypatch, b
     manifest = _contracts.runtime_contract_manifest()
     assert manifest["native_abi_revision"] == 87
     assert not manifest["features"]["cuda_submission_parameters_u64"]
+    assert not manifest["features"]["cuda_completion_gpu_timing"]
     assert all(
         manifest["features"][name] == bool(bitmap & (1 << (12 + i)))
         for i, name in enumerate(NAMES)

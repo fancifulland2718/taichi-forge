@@ -30,6 +30,7 @@ the DSL or creating a device. These are native implementation declarations:
 | `cuda_external_storage_execution_domains` | Managed external imports and selected acquire/release epochs |
 | `cuda_canvas_execution_domains` | Selected Canvas copy/writer/empty/repeat and bounded prepared image pools |
 | `cuda_submission_parameters_u64` | Declared u64 scalar updates per submission for JIT/AOT independent instances |
+| `cuda_completion_gpu_timing` | Preallocated per-submission sampling and nonblocking completion GPU timing |
 
 Use `features.get(name, False)` for older packages. Missing declarations do not
 become support because a version or commit looks newer. Device/driver support,
@@ -133,6 +134,32 @@ external signal and allocate no submission sequence. Replay does not prepare,
 allocate device parameter storage or synchronize globally. Independent domains
 and these updates currently support CUDA; Vulkan does not claim independent
 queue support.
+
+## Completion GPU timing
+
+Timing is off by default. Create the domain with `gpu_timing=True` to allocate
+one timestamp pair per queue slot, then select submissions with `sample_gpu=True`:
+
+```python
+domain = ti.graph.execution_domain(capacity=2, gpu_timing=True)
+step = graph.prepare(arguments, execution_domain=domain, mutable_parameters=names)
+step.initialize()
+ticket = step.submit(values=metadata, sample_gpu=sample_this_step)
+if ticket is not None:
+    measurement = ticket.gpu_timing
+```
+
+The result contains `status`, `scope`, `owner`, `sequence` and `duration_ns`.
+Only `ready` has a duration; `not_sampled`, `pending`, `unsupported` and `failed`
+return `None`. Reading performs a nonblocking poll without a submission lock.
+The result belongs to that exact ticket and survives event reuse and domain close.
+
+`compute_envelope` spans the complete execution, excluding predecessor waits,
+external acquire, parameter uploads and external release. It includes gaps and
+waits inside the selected Graph/providers, so it is not a sum of kernel times.
+Sampling does not split the Graph or change its domain. AOT uses the same API.
+This currently covers independent CUDA domains; existing ordinary Vulkan Graph
+timing retains its own contract.
 
 ## Selected Canvas display domain
 

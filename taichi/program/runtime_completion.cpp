@@ -241,7 +241,6 @@ class StreamSemaphoreCompletion final : public CompletionPrimitive {
 class CudaStreamGpuTimingObject final : public StreamGpuTimingObject {
  public:
   CudaStreamGpuTimingObject(
-      void *stream,
       std::weak_ptr<RuntimeFaultDomain> fault_domain)
       : fault_domain_(std::move(fault_domain)) {
     auto context_guard = CUDAContext::get_instance().get_guard();
@@ -261,9 +260,15 @@ class CudaStreamGpuTimingObject final : public StreamGpuTimingObject {
           Arch::cuda, result, "event_create",
           driver.event_create.get_error_message(result));
     }
-    result = driver.event_record.call(start_event_, stream);
+  }
+
+  void record_begin(void *stream) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    ended_.store(false, std::memory_order_release);
+    stream_id_ = reinterpret_cast<std::uintptr_t>(stream);
+    const auto result = driver.event_record.call(start_event_, stream);
     if (result != CUDA_SUCCESS) {
-      destroy_events(driver);
       throw BackendRuntimeError(
           Arch::cuda, result, "event_record",
           driver.event_record.get_error_message(result));
@@ -306,8 +311,7 @@ class CudaStreamGpuTimingObject final : public StreamGpuTimingObject {
   StreamGpuTimingSnapshot snapshot() const override {
     StreamGpuTimingSnapshot result;
     result.measurement_path_changed = true;
-    // Taichi CUDA launches currently use the context's default stream.
-    result.stream_id = 0;
+    result.stream_id = stream_id_;
     if (!ended_.load(std::memory_order_acquire)) {
       result.status = "not_ended";
       return result;
@@ -359,6 +363,7 @@ class CudaStreamGpuTimingObject final : public StreamGpuTimingObject {
   void *end_event_{nullptr};
   std::weak_ptr<RuntimeFaultDomain> fault_domain_;
   std::atomic<bool> ended_{false};
+  std::uint64_t stream_id_{0};
 };
 
 class CudaEventCompletion final : public CompletionPrimitive {
@@ -1039,7 +1044,9 @@ StreamGpuTiming RuntimeCompletion::begin_cuda_gpu_timing(
     std::shared_ptr<RuntimeFaultDomain> fault_domain) {
 #ifdef TI_WITH_CUDA
   try {
-    return std::make_shared<CudaStreamGpuTimingObject>(stream, fault_domain);
+    auto timing = std::make_shared<CudaStreamGpuTimingObject>(fault_domain);
+    timing->record_begin(stream);
+    return timing;
   } catch (const BackendRuntimeError &error) {
     if (fault_domain) {
       fault_domain->report_backend_error(error, 0);
@@ -1050,6 +1057,35 @@ StreamGpuTiming RuntimeCompletion::begin_cuda_gpu_timing(
   (void)stream;
   (void)fault_domain;
   return nullptr;
+#endif
+}
+
+StreamGpuTiming RuntimeCompletion::prepare_cuda_gpu_timing(
+    std::shared_ptr<RuntimeFaultDomain> fault_domain) {
+#ifdef TI_WITH_CUDA
+  try {
+    return std::make_shared<CudaStreamGpuTimingObject>(fault_domain);
+  } catch (const BackendRuntimeError &error) {
+    if (fault_domain)
+      fault_domain->report_backend_error(error, 0);
+    throw;
+  }
+#else
+  (void)fault_domain;
+  return nullptr;
+#endif
+}
+
+void RuntimeCompletion::restart_cuda_gpu_timing(const StreamGpuTiming &timing,
+                                                void *stream) {
+#ifdef TI_WITH_CUDA
+  auto cuda_timing =
+      std::dynamic_pointer_cast<CudaStreamGpuTimingObject>(timing);
+  TI_ERROR_IF(!cuda_timing, "CUDA timing restart requires a CUDA event pair");
+  cuda_timing->record_begin(stream);
+#else
+  (void)timing;
+  (void)stream;
 #endif
 }
 

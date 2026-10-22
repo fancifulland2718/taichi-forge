@@ -595,12 +595,14 @@ class PreparedExecutionRegistry {
     entry.run();
   }
   RuntimeCompletion submit(TiPreparedExecution handle,
-                           const std::vector<RuntimeCompletion> &dependencies) {
+                           const std::vector<RuntimeCompletion> &dependencies,
+                           bool sample_gpu = false) {
     auto &entry = get(handle);
     if (!entry.live || !entry.domain || !entry.domain_initialized)
       throw MemoryBindingError(
           "Submit requires an initialized live CUDA execution-domain instance");
-    auto result = entry.native->submit(dependencies, entry.submission_values);
+    auto result =
+        entry.native->submit(dependencies, entry.submission_values, sample_gpu);
     ++entry.info.launches;
     return result;
   }
@@ -2014,7 +2016,8 @@ static TiBool try_submit_prepared_impl(TiRuntime runtime,
                                        TiCompletion *completion,
                                        bool ready_only,
                                        uint32_t parameter_count = 0,
-                                       const uint64_t *parameters = nullptr) {
+                                       const uint64_t *parameters = nullptr,
+                                       bool sample_gpu = false) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(completion);
   *completion = TI_NULL_HANDLE;
@@ -2059,7 +2062,7 @@ static TiBool try_submit_prepared_impl(TiRuntime runtime,
   capi::CompletionPublication publication;
   try {
     *completion = publication.commit(
-        rt.prepared_registry().submit(execution, predecessors));
+        rt.prepared_registry().submit(execution, predecessors, sample_gpu));
   } catch (const taichi::lang::cuda::ExecutionDomainBusy &) {
     return TI_FALSE;
   }
@@ -2098,6 +2101,21 @@ TiBool ti_try_submit_prepared_parameters_ext(TiRuntime runtime,
       runtime, execution, dependency_count, dependencies, completion,
       ready_only != TI_FALSE, parameter_count, parameters);
 }
+TiBool ti_try_submit_prepared_sampled_ext(TiRuntime runtime,
+                                          TiPreparedExecution execution,
+                                          uint32_t dependency_count,
+                                          const TiCompletion *dependencies,
+                                          TiCompletion *completion,
+                                          TiBool ready_only,
+                                          TiBool sample_gpu,
+                                          uint32_t parameter_count,
+                                          const uint64_t *parameters) {
+  return try_submit_prepared_impl(runtime, execution, dependency_count,
+                                  dependencies, completion,
+                                  ready_only != TI_FALSE, parameter_count,
+                                  parameters, sample_gpu != TI_FALSE);
+}
+
 #endif
 
 TiPreparedExecution ti_prepare_execution_binding_ext(

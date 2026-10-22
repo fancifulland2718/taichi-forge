@@ -175,9 +175,10 @@ TiMemory ti_import_cuda_external_memory_with_ready_gate_ext(
   return import_cuda_external_memory_impl(runtime, import_info, ready_gate);
 }
 
-TiCudaExecutionDomain ti_create_cuda_execution_domain_ext(
+static TiCudaExecutionDomain create_cuda_execution_domain_impl(
     TiRuntime runtime,
-    const TiCudaExecutionDomainCreateInfo *create_info) {
+    const TiCudaExecutionDomainCreateInfo *create_info,
+    bool gpu_timing) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   TI_CAPI_ARGUMENT_NULL_RV(create_info);
@@ -196,7 +197,7 @@ TiCudaExecutionDomain ti_create_cuda_execution_domain_ext(
   try {
     auto domain = rt.cuda_execution_domains()->create(
         {create_info->capacity, create_info->priority,
-         create_info->instance_capacity});
+         create_info->instance_capacity, gpu_timing});
     std::lock_guard<std::mutex> lock(registry.mutex);
     registry.domains.at(handle) = std::move(domain);
   } catch (...) {
@@ -207,6 +208,18 @@ TiCudaExecutionDomain ti_create_cuda_execution_domain_ext(
   return handle;
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
+}
+
+TiCudaExecutionDomain ti_create_cuda_execution_domain_ext(
+    TiRuntime runtime,
+    const TiCudaExecutionDomainCreateInfo *create_info) {
+  return create_cuda_execution_domain_impl(runtime, create_info, false);
+}
+
+TiCudaExecutionDomain ti_create_timed_cuda_execution_domain_ext(
+    TiRuntime runtime,
+    const TiCudaExecutionDomainCreateInfo *create_info) {
+  return create_cuda_execution_domain_impl(runtime, create_info, true);
 }
 
 void ti_get_cuda_execution_domain_info_ext(TiCudaExecutionDomain domain,
@@ -303,6 +316,37 @@ void ti_get_completion_info_ext(TiCompletion completion,
 void ti_release_completion_ext(TiCompletion completion) {
   TI_CAPI_TRY_CATCH_BEGIN();
   (void)capi::take_completion(completion);
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_get_completion_gpu_timing_ext(TiCompletion completion,
+                                      TiCompletionGpuTiming *info) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(info);
+  *info = {};
+  const auto ticket = capi::get_completion(completion);
+  info->owner = ticket.program_domain();
+  info->sequence = ticket.sequence();
+  info->scope = 1;  // Complete compute envelope, see the public contract.
+  try {
+    ticket.done();  // Nonblocking poll; freezes events before their reuse.
+  } catch (...) {
+    info->status = TI_COMPLETION_GPU_TIMING_FAILED;
+    return;
+  }
+  const auto timing = ticket.gpu_timing_snapshot();
+  if (timing.available) {
+    info->status = TI_COMPLETION_GPU_TIMING_READY;
+    info->duration_ns = timing.duration_ns;
+  } else if (timing.status == "pending" || timing.status == "not_ready") {
+    info->status = TI_COMPLETION_GPU_TIMING_PENDING;
+  } else if (timing.status == "unavailable") {
+    info->status = TI_COMPLETION_GPU_TIMING_NOT_SAMPLED;
+  } else if (timing.status == "unsupported") {
+    info->status = TI_COMPLETION_GPU_TIMING_UNSUPPORTED;
+  } else {
+    info->status = TI_COMPLETION_GPU_TIMING_FAILED;
+  }
   TI_CAPI_TRY_CATCH_END();
 }
 #endif

@@ -128,7 +128,8 @@ class FixedExecution {
   void run();
   RuntimeCompletion submit(
       const std::vector<RuntimeCompletion> &dependencies = {},
-      const std::vector<SubmissionParameterValue> &parameters = {});
+      const std::vector<SubmissionParameterValue> &parameters = {},
+      bool sample_gpu = false);
   // Cold, once-only binding before publishing this instance to submitters.
   // The whole replay owns one external epoch on its selected CUDA stream.
   // Initialization has its own separately qualified access closure.

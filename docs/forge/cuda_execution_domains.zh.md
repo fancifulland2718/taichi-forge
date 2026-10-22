@@ -25,6 +25,7 @@ JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和�
 | `cuda_external_storage_execution_domains` | 托管外部导入及选域 acquire/release epoch |
 | `cuda_canvas_execution_domains` | Canvas copy/writer/empty/repeat 选域及固定预备池 |
 | `cuda_submission_parameters_u64` | JIT/AOT 独立实例逐提交更新已声明的 u64 scalar |
+| `cuda_completion_gpu_timing` | 预分配、逐提交采样及 completion 的非阻塞 GPU 计时读取 |
 
 对旧包使用 `features.get(name, False)`；不能从版本号或较新的提交推定能力。具体设备/
 驱动、同 GPU 共享及 recipe 的编译/provider 条件在冷创建和准备时检查。声明为真不代表
@@ -107,6 +108,30 @@ ticket = step.submit(values={"epoch": epoch, "simulation_step": step_id,
 多个独立实例；域容量由调用方配置。busy 或 ready-only 未就绪不上传、不消费外部信号、
 不分配提交序号。重放不重新 prepare、不创建设备参数存储、不进行全局同步。
 独立执行域及其参数更新目前仅支持 CUDA；Vulkan 尚不声明独立队列能力。
+
+## Completion GPU 计时
+
+计时默认关闭。创建域时指定 `gpu_timing=True`，为每个队列槽位预分配一对事件；
+提交时使用 `sample_gpu=True` 选择需要观测的提交：
+
+```python
+domain = ti.graph.execution_domain(capacity=2, gpu_timing=True)
+step = graph.prepare(arguments, execution_domain=domain, mutable_parameters=names)
+step.initialize()
+ticket = step.submit(values=metadata, sample_gpu=sample_this_step)
+if ticket is not None:
+    measurement = ticket.gpu_timing
+```
+
+`measurement` 包含 `status`、`scope`、`owner`、`sequence` 和 `duration_ns`。
+状态为 `ready` 时才有时长；`not_sampled`、`pending`、`unsupported` 或 `failed`
+的时长均为 `None`。读取仅进行非阻塞查询，不等待 GPU、不持有提交锁。
+结果与具体票据关联，事件复用或域关闭后仍保持不变。
+
+范围 `compute_envelope` 是完整执行区间，排除前驱依赖等待、外部 acquire、参数上传和
+外部 release；包括 Graph 内部间隙以及 provider/Graph 内部声明的等待，因此不是逐
+kernel 耗时之和。不会拆开原 Graph，也不切换到默认域。AOT 使用相同接口。
+当前只声明 CUDA 独立域计时；普通 Vulkan Graph 已有的计时路线保持原合同。
 
 ## Canvas 显式显示域
 

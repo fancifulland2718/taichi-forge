@@ -20,7 +20,7 @@ from taichi_forge_runtime.aot._domain import CudaExecutionDomain
 from taichi_forge_runtime.aot._runtime import Module
 
 
-def execution_domain(*, capacity=2, instance_capacity=64, priority=0):
+def execution_domain(*, capacity=2, instance_capacity=64, priority=0, gpu_timing=False):
     """Create a bounded persistent CUDA queue on the current JIT Program.
 
     Prepare immutable instances with ``graph.prepare(..., execution_domain=...)``.
@@ -38,7 +38,7 @@ def execution_domain(*, capacity=2, instance_capacity=64, priority=0):
             runtime = borrow_runtime()
             owner._graph_execution_runtime = runtime
         return runtime.execution_domain(
-            capacity=capacity, instance_capacity=instance_capacity, priority=priority
+            capacity=capacity, instance_capacity=instance_capacity, priority=priority, gpu_timing=gpu_timing
         )
 
 
@@ -162,11 +162,11 @@ class GraphExecution:
         finally:
             self._owner._active_graph_submissions -= 1
 
-    def submit(self, *, wait_for=(), ready_only=False, values=None):
+    def submit(self, *, wait_for=(), ready_only=False, values=None, sample_gpu=False):
         """Return an exact completion, or None if busy, without a host wait."""
         self._begin()
         try:
-            return self._prepared.submit(wait_for=wait_for, ready_only=ready_only, values=values)
+            return self._prepared.submit(wait_for=wait_for, ready_only=ready_only, values=values, sample_gpu=sample_gpu)
         finally:
             self._owner._active_graph_submissions -= 1
 

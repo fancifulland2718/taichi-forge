@@ -205,11 +205,11 @@ class Runtime:
                 for entry in entries[: count.value]
             }
 
-    def execution_domain(self, *, capacity=2, instance_capacity=64, priority=0):
+    def execution_domain(self, *, capacity=2, instance_capacity=64, priority=0, gpu_timing=False):
         """Create a bounded independent CUDA queue with explicit priority."""
         from ._domain import create_domain
 
-        return create_domain(self, capacity, instance_capacity, priority)
+        return create_domain(self, capacity, instance_capacity, priority, gpu_timing)
 
     def native_operation_capabilities(self, kind, *, version=1):
         """Registered composition modes for this backend and operation version.
@@ -1106,7 +1106,7 @@ class PreparedCall(_Resource):
             runtime._pending.add(self)
             runtime._api.call(runtime._api.ti_launch_prepared_ext, runtime._handle, self._handle)
 
-    def submit(self, *, wait_for=(), ready_only=False, values=None):
+    def submit(self, *, wait_for=(), ready_only=False, values=None, sample_gpu=False):
         """Try one replay, returning a ticket or None if full or input unready.
 
         Initialize explicitly in the cold phase. Dependencies enqueue device
@@ -1118,11 +1118,13 @@ class PreparedCall(_Resource):
 
         if type(ready_only) is not bool:
             raise TypeError("ready_only must be bool")
+        if type(sample_gpu) is not bool:
+            raise TypeError("sample_gpu must be bool")
         parameters = self._submission_parameters.snapshot(values)
         predecessors = tuple(wait_for)
         if self._execution_domain is None:
-            if predecessors or ready_only:
-                raise ValueError("wait_for/ready_only requires an execution-domain binding")
+            if predecessors or ready_only or sample_gpu:
+                raise ValueError("wait_for/ready_only/sample_gpu requires an execution-domain binding")
             return self._submit_ordinary()
         runtime = self._runtime
         if any(not isinstance(ticket, Completion) for ticket in predecessors):
@@ -1135,7 +1137,11 @@ class PreparedCall(_Resource):
             handle = abi.Handle()
             function = runtime._api.ti_try_submit_prepared_ext
             suffix = ()
-            if self._submission_parameters.names:
+            if sample_gpu:
+                runtime._api.load_completion_timing()
+                function = runtime._api.ti_try_submit_prepared_sampled_ext
+                suffix = (ready_only, True, len(parameters), self._submission_parameters.bind(parameters))
+            elif self._submission_parameters.names:
                 function = runtime._api.ti_try_submit_prepared_parameters_ext
                 suffix = (ready_only, len(parameters), self._submission_parameters.bind(parameters))
             elif ready_only:

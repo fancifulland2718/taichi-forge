@@ -8139,6 +8139,8 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeCudaCanvasExecutionDomains);
     features["cuda_submission_parameters_u64"] =
         bool(bitmap & kForgeCudaSubmissionParameters);
+    features["cuda_completion_gpu_timing"] =
+        bool(bitmap & kForgeCudaCompletionGpuTiming);
     result["features"] = std::move(features);
     result["legacy_runtime"] = false;
     return result;

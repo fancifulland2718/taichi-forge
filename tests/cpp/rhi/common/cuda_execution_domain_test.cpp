@@ -379,6 +379,85 @@ TEST_F(CudaExecutionDependency, InvalidDomainInputsHaveNoEnqueueSideEffects) {
   EXPECT_TRUE(valid.done());
 }
 
+TEST_F(CudaExecutionDependency,
+       SampledTimingExcludesPreludeAndFreezesBeforeReuse) {
+  cuda::ExecutionDomain domain(fault, {2, 0, 4, true});
+  testing::CudaExternalGate gate;
+  auto pending = domain.submit(
+      {}, nullptr,
+      [&](void *stream) {
+        CUDADriver::get_instance().memsetd32_async(at(0), 19, 1, stream);
+      },
+      {}, [&](void *stream) { gate.enqueue_wait(stream); }, {}, true);
+  EXPECT_FALSE(pending.done());
+  EXPECT_EQ(pending.gpu_timing_snapshot().status, "pending");
+  // This deliberate external wait is outside the instrumented envelope.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_FALSE(pending.done());
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  pending.wait();
+  const auto snapshot = pending.gpu_timing_snapshot();
+  ASSERT_TRUE(snapshot.available);
+  EXPECT_LT(snapshot.duration_ns, 50000000u);
+  EXPECT_EQ(snapshot.stream_id, domain.snapshot().stream);
+  auto &driver = CUDADriver::get_instance();
+  // A warm sampled submit must reuse both completion and timestamp events.
+  {
+    auto saved_create = driver.event_create;
+    auto restore = std::shared_ptr<void>(nullptr, [&](void *) {
+      driver.event_create = std::move(saved_create);
+    });
+    driver.event_create.set(
+        reinterpret_cast<void *>(+[](void **, uint32) -> uint32 { return 2; }));
+    for (int i = 0; i < 8; ++i) {
+      auto current = domain.submit(
+          {}, nullptr,
+          [&](void *stream) { driver.memsetd32_async(at(1), 23, 1, stream); },
+          {}, {}, {}, i % 2 == 0);
+      current.wait();
+      EXPECT_EQ(current.gpu_timing_snapshot().available, i % 2 == 0);
+    }
+  }
+  domain.close();
+  EXPECT_EQ(pending.gpu_timing_snapshot().duration_ns, snapshot.duration_ns);
+}
+
+TEST_F(CudaExecutionDependency, TimingFinalizerRunsBeforeFailedPrefixRetires) {
+  for (bool fail_in_prelude : {false, true}) {
+    cuda::ExecutionDomain domain(fault, {1, 0, 4, true});
+    int finalized = 0;
+    const auto fail = [] {
+      throw std::runtime_error("test operation failure");
+    };
+    EXPECT_THROW(domain.submit(
+                     {}, nullptr,
+                     [&](void *) {
+                       if (!fail_in_prelude)
+                         fail();
+                     },
+                     {},
+                     [&](void *) {
+                       if (fail_in_prelude)
+                         fail();
+                     },
+                     [&](void *stream) {
+                       ++finalized;
+                       CUDADriver::get_instance().memsetd32_async(at(0), 97, 1,
+                                                                  stream);
+                     },
+                     true),
+                 std::runtime_error);
+    EXPECT_EQ(finalized, 1);
+    domain.close();
+    std::uint32_t result = 0;
+    auto current = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().memcpy_device_to_host(&result, at(0),
+                                                     sizeof(result));
+    EXPECT_EQ(result, 97);
+  }
+}
+
 TEST_F(CudaExecutionDependency, WarmAdmissionProgressesBeforeExternalRelease) {
   cuda::ExecutionDomain output(fault, {1, 0});
   cuda::ExecutionDomain physics(fault, {16, -1});

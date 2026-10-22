@@ -271,6 +271,11 @@ class CompletionInfo(C.Structure):
     _fields_ = [("owner", C.c_uint64), ("sequence", C.c_uint64), ("has_backend_work", UInt)]
 
 
+class CompletionGpuTiming(C.Structure):
+    _fields_ = [("status", UInt), ("scope", UInt), ("owner", C.c_uint64),
+                ("sequence", C.c_uint64), ("duration_ns", C.c_uint64)]
+
+
 class AotError(RuntimeError):
     """An error reported by the native AOT C API."""
 
@@ -471,6 +476,25 @@ class Api:
             function.argtypes, function.restype = declarations[name]
             setattr(self, name, function)
         self._submission_parameters_loaded = True
+
+    def load_completion_timing(self):
+        if getattr(self, "_completion_timing_loaded", False):
+            return
+        declarations = {
+            "ti_create_timed_cuda_execution_domain_ext": ([Handle, C.POINTER(CudaExecutionDomainCreateInfo)], Handle),
+            "ti_get_completion_gpu_timing_ext": ([Handle, C.POINTER(CompletionGpuTiming)], None),
+            "ti_try_submit_prepared_sampled_ext": (
+                [Handle, Handle, UInt, C.POINTER(Handle), C.POINTER(Handle), UInt, UInt,
+                 UInt, C.POINTER(C.c_uint64)], UInt),
+        }
+        try:
+            functions = {name: getattr(self.library, name) for name in declarations}
+        except AttributeError as error:
+            raise NotImplementedError("The selected runtime has no completion GPU timing API") from error
+        for name, function in functions.items():
+            function.argtypes, function.restype = declarations[name]
+            setattr(self, name, function)
+        self._completion_timing_loaded = True
 
     def call(self, function, *arguments):
         self.ti_set_last_error(0, None)

@@ -126,6 +126,12 @@ class TI_DLL_EXPORT RuntimeCompletion {
   static StreamGpuTiming begin_cuda_gpu_timing(
       void *stream,
       std::shared_ptr<RuntimeFaultDomain> fault_domain = nullptr);
+  // Cold event-pair allocation. Restart only after the previous enclosing
+  // completion froze its snapshot; the queue owner enforces that lifetime.
+  static StreamGpuTiming prepare_cuda_gpu_timing(
+      std::shared_ptr<RuntimeFaultDomain> fault_domain);
+  static void restart_cuda_gpu_timing(const StreamGpuTiming &timing,
+                                      void *stream);
   static void end_cuda_gpu_timing(
       const StreamGpuTiming &timing,
       void *stream,

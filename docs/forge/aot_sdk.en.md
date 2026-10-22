@@ -10,7 +10,7 @@ see [AOT deployment profiles](aot_deployment_profiles.en.md).
 ## Component pairing and versions
 
 Frontend, Python bridge and native runtime must have matching private ABI
-revisions. The current revision is **146**, defined in
+revisions. The current revision is **147**, defined in
 [`runtime_contract.h`](../../taichi/common/runtime_contract.h) and
 [`_contract_constants.py`](../../python/taichi_forge/_contract_constants.py).
 Use components from the same matched build; development revisions within

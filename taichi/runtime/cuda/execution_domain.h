@@ -26,6 +26,7 @@ class ExecutionDomain {
     std::size_t capacity{2};
     int priority{0};
     std::size_t instance_capacity{64};
+    bool gpu_timing{false};
   };
   struct Snapshot {
     std::uint64_t identity{0};
@@ -65,7 +66,10 @@ class ExecutionDomain {
       const std::vector<RuntimeCompletion> &dependencies,
       std::shared_ptr<RuntimeCompletionResources> resources,
       const std::function<void(void *)> &enqueue,
-      const std::function<void()> &admit = {});
+      const std::function<void()> &admit = {},
+      const std::function<void(void *)> &before_timing = {},
+      const std::function<void(void *)> &after_timing = {},
+      bool sample_gpu = false);
 
   // Completion/resource callbacks execute without holding the admission lock.
   std::size_t collect_ready(std::size_t budget);

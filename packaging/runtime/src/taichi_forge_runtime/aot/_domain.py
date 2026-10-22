@@ -41,6 +41,17 @@ class Completion:
     def done(self):
         return bool(self._api.call(self._api.ti_query_completion_ext, self._native_handle()))
 
+    @property
+    def gpu_timing(self):
+        """Nonblocking compute-envelope timing; unavailable durations are None."""
+        self._api.load_completion_timing()
+        value = abi.CompletionGpuTiming()
+        self._api.call(self._api.ti_get_completion_gpu_timing_ext, self._native_handle(), C.byref(value))
+        statuses = ("not_sampled", "pending", "ready", "unsupported", "failed")
+        return dict(status=statuses[value.status], scope="compute_envelope",
+                    owner=value.owner, sequence=value.sequence,
+                    duration_ns=value.duration_ns if value.status == 2 else None)
+
     def wait(self):
         # ctypes releases the GIL; native lookup pins the ticket then releases
         # its mutex before waiting. A concurrent close may win that lookup and
@@ -144,7 +155,9 @@ class CudaExecutionDomain:
             pass
 
 
-def create_domain(runtime, capacity, instance_capacity, priority):
+def create_domain(runtime, capacity, instance_capacity, priority, gpu_timing=False):
+    if type(gpu_timing) is not bool:
+        raise TypeError("gpu_timing must be bool")
     capacity = _unsigned(capacity, "capacity", positive=True)
     instance_capacity = _unsigned(instance_capacity, "instance_capacity", positive=True)
     priority = operator.index(priority)
@@ -156,7 +169,11 @@ def create_domain(runtime, capacity, instance_capacity, priority):
             raise NotImplementedError("Execution domains require a CUDA runtime")
         runtime._api.load_cuda_domains()
         options = abi.CudaExecutionDomainCreateInfo(capacity, instance_capacity, priority)
-        handle = runtime._api.call(runtime._api.ti_create_cuda_execution_domain_ext, runtime._handle, C.byref(options))
+        function = runtime._api.ti_create_cuda_execution_domain_ext
+        if gpu_timing:
+            runtime._api.load_completion_timing()
+            function = runtime._api.ti_create_timed_cuda_execution_domain_ext
+        handle = runtime._api.call(function, runtime._handle, C.byref(options))
         try:
             return CudaExecutionDomain(runtime, handle)
         except BaseException:

@@ -40,6 +40,7 @@ struct ExecutionDomain::State {
   const Options options;
   std::shared_ptr<RuntimeCompletionCudaEventPool> events;
   std::vector<Pending> pending;
+  std::vector<StreamGpuTiming> timings;
   std::vector<std::shared_ptr<RuntimeClient>> instances;
   std::size_t preparing_instances{0};
   std::size_t head{0};
@@ -72,9 +73,9 @@ struct ExecutionDomain::State {
     instances.reserve(options.instance_capacity);
   }
 
-  void publish(Pending &slot) {
+  void publish(Pending &slot, StreamGpuTiming timing = nullptr) {
     slot.completion = RuntimeCompletion::from_cuda_stream(
-        owner_id, slot.sequence, stream, owner, events);
+        owner_id, slot.sequence, stream, owner, events, std::move(timing));
     if (slot.resources) {
       slot.completion.attach_resources(slot.resources);
       slot.resources.reset();
@@ -151,6 +152,12 @@ ExecutionDomain::ExecutionDomain(std::shared_ptr<RuntimeFaultDomain> owner,
     }
     for (auto *event : prepared_events)
       state.events->release(event, true);
+    if (options.gpu_timing) {
+      state.timings.reserve(options.capacity);
+      for (std::size_t i = 0; i < options.capacity; ++i)
+        state.timings.push_back(
+            RuntimeCompletion::prepare_cuda_gpu_timing(state.owner));
+    }
   } catch (...) {
     state.report(std::current_exception(), 0);
     if (state.stream && state.owner->backend_calls_safe())
@@ -175,12 +182,18 @@ RuntimeCompletion ExecutionDomain::submit(
     const std::vector<RuntimeCompletion> &dependencies,
     std::shared_ptr<RuntimeCompletionResources> resources,
     const std::function<void(void *)> &enqueue,
-    const std::function<void()> &admit) {
+    const std::function<void()> &admit,
+    const std::function<void(void *)> &before_timing,
+    const std::function<void(void *)> &after_timing,
+    bool sample_gpu) {
   if (!enqueue)
     throw std::invalid_argument(
         "CUDA submission requires an enqueue operation");
   CUDAContext::check_runtime_health();
   auto &state = *state_;
+  if (sample_gpu && !state.options.gpu_timing)
+    throw std::invalid_argument(
+        "GPU timing must be enabled when creating the execution domain");
   // At most one FIFO prefix entry is polled per hot admission. Since every
   // entry here is on the same stream, a pending head cannot hide a ready tail.
   collect_ready(1);
@@ -203,19 +216,40 @@ RuntimeCompletion ExecutionDomain::submit(
     admit();
   auto context = CUDAContext::get_instance().get_guard();
   const auto sequence = state.owner->allocate_submission_sequence();
-  auto &slot = state.pending[(state.head + state.count) % state.pending.size()];
+  const auto index = (state.head + state.count) % state.pending.size();
+  auto &slot = state.pending[index];
+  const auto timing = sample_gpu ? state.timings[index] : StreamGpuTiming{};
   slot.sequence = sequence;
   slot.resources = std::move(resources);
   state.last_sequence = sequence;
   ++state.count;  // Ownership is published before any possible device effect.
+  bool finalized = false;
   try {
     for (const auto &dependency : dependencies)
       dependency.enqueue_cuda_wait(state.stream, state.owner_id, state.owner);
+    if (before_timing)
+      before_timing(state.stream);
+    if (timing)
+      RuntimeCompletion::restart_cuda_gpu_timing(timing, state.stream);
     enqueue(state.stream);
-    state.publish(slot);
+    if (timing)
+      RuntimeCompletion::end_cuda_gpu_timing(timing, state.stream, state.owner);
+    finalized = true;
+    if (after_timing)
+      after_timing(state.stream);
+    state.publish(slot, timing);
     return slot.completion;
   } catch (...) {
     auto error = std::current_exception();
+    // External release must precede sealing the failed prefix as well. This
+    // keeps cleanup from enqueuing work after the completion's event.
+    if (!finalized && after_timing) {
+      try {
+        after_timing(state.stream);
+      } catch (...) {
+        state.report(std::current_exception(), sequence);
+      }
+    }
     state.report(error, sequence);
     // Seal the partial prefix without synchronizing it. Failure of this
     // recovery retains the preallocated slot and its leases until cold close.
@@ -427,6 +461,7 @@ void ExecutionDomain::close() {
   for (auto &slot : retired)
     slot.completion.mark_completed();
   retired.clear();
+  state.timings.clear();
   state.events->clear();
   std::exception_ptr retirement_error;
   for (const auto &instance : instances) {

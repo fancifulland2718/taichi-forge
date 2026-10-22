@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Launch contexts can retain fixed device result storage.
-inline constexpr int kForgeNativeAbiRevision = 146;
+inline constexpr int kForgeNativeAbiRevision = 147;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
@@ -35,6 +35,7 @@ inline constexpr std::uint64_t kForgeCudaExternalStorageExecutionDomains =
     1ull << 15;
 inline constexpr std::uint64_t kForgeCudaCanvasExecutionDomains = 1ull << 16;
 inline constexpr std::uint64_t kForgeCudaSubmissionParameters = 1ull << 17;
+inline constexpr std::uint64_t kForgeCudaCompletionGpuTiming = 1ull << 18;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;
