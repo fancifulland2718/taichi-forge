@@ -518,9 +518,10 @@ std::unique_ptr<llvm::Module> TaichiLLVMContext::module_from_file(
       link_module_with_cuda_libdevice(module);
 
 #ifdef TI_WITH_CUDA
-      int cap = CUDAContext::get_instance().get_compute_capability();
-      if (cap >= 60)
-        link_module_with_custom_cuda_library(module);
+      // Make helper definitions available independently of the producer GPU.
+      // Kernel lowering selects their uses against its frozen target; linking
+      // and DCE retain only needed helpers in the eventual module.
+      link_module_with_custom_cuda_library(module);
 #endif
 
       // To prevent potential symbol name conflicts, we use "cuda_vprintf"

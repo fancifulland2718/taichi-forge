@@ -1,6 +1,6 @@
 // Shared projection of code-shaping configuration values. Keep serialization
 // and fast in-memory context comparison on this single field list. The caller
-// defines CACHE_FIELD, CACHE_TYPE, CACHE_SORTED, CACHE_VALUE, CACHE_CUDA_TARGET.
+// defines CACHE_FIELD, CACHE_TYPE, CACHE_SORTED, CACHE_VALUE.
 // No include guard: intentionally instantiated for both operations.
   CACHE_FIELD(arch);
   CACHE_FIELD(debug);
@@ -158,5 +158,4 @@
       CACHE_VALUE(std::string("cuda-listgen-latched-v1"));
     }
     CACHE_FIELD(bitmasked_clear_data_on_deactivate);
-    CACHE_CUDA_TARGET();
   }

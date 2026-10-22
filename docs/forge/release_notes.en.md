@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CUDA kernel requests now freeze the effective target before compilation.
+  AOT keeps its declared deployment target, including linked sparse helpers;
+  fixed-target LLVM cache identity no longer reads the producer's CUDA device
+  or driver provider. Bitcode retains lowering requirements and validates the
+  later PTX target; runtime modules still target the consuming device.
+  Offline cache schema 67 starts a new cache shard. Defaults are unchanged.
+
 - Macro Graph sequences accept host native actions, including host-only bodies
   in explicit portable control. Host loops remain exact, without speculative
   calls after convergence. AmgX host branches export and reconstruct with

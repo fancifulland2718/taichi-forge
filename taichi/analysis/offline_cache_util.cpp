@@ -7,9 +7,6 @@
 #include "taichi/program/compile_config.h"
 #include "taichi/program/kernel.h"
 #include "taichi/rhi/device_capability.h"
-#if defined(TI_WITH_CUDA)
-#include "taichi/rhi/cuda/cuda_context.h"
-#endif
 #include "taichi/system/profiler.h"
 
 #include "picosha2.h"
@@ -21,21 +18,6 @@
 #include <vector>
 
 namespace taichi::lang {
-
-std::optional<std::pair<std::uint8_t, int>> get_offline_cache_implicit_target(
-    Arch arch) {
-#if defined(TI_WITH_CUDA)
-  if (arch == Arch::cuda) {
-    // The provider and actual LLVM target are implicit inputs in addition to
-    // explicit capabilities. Retain both in cached-context validation.
-    return std::make_pair(
-        static_cast<std::uint8_t>(
-            CUDADriver::get_instance_without_context().get_provider()),
-        CUDAContext::get_instance().get_codegen_compute_capability());
-  }
-#endif
-  return std::nullopt;
-}
 
 namespace {
 template <typename T>
@@ -57,9 +39,7 @@ bool same_offline_cache_compile_config(const CompileConfig &config,
 #define CACHE_TYPE(name) CACHE_FIELD(name)
 #define CACHE_SORTED(name) CACHE_FIELD(name)
 #define CACHE_VALUE(value)
-#define CACHE_CUDA_TARGET()
 #include "taichi/analysis/compile_config_key_fields.inc.h"
-#undef CACHE_CUDA_TARGET
 #undef CACHE_VALUE
 #undef CACHE_SORTED
 #undef CACHE_TYPE
@@ -98,16 +78,7 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
     serializer(sorted);                      \
   }
 #define CACHE_VALUE(value) serializer(value)
-#define CACHE_CUDA_TARGET()                                             \
-  {                                                                     \
-    const auto target = get_offline_cache_implicit_target(config.arch); \
-    if (target.has_value()) {                                           \
-      serializer(target->first);                                        \
-      serializer(target->second);                                       \
-    }                                                                   \
-  }
 #include "taichi/analysis/compile_config_key_fields.inc.h"
-#undef CACHE_CUDA_TARGET
 #undef CACHE_VALUE
 #undef CACHE_SORTED
 #undef CACHE_TYPE

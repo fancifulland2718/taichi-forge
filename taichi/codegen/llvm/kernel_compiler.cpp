@@ -7,6 +7,7 @@
 #include "taichi/codegen/llvm/kernel_compiler.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/llvm_module_options.h"
+#include "taichi/runtime/llvm/cuda_lowering_target.h"
 #include "taichi/runtime/llvm/runtime_context_abi.h"
 
 namespace taichi::lang {
@@ -61,6 +62,9 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
     TI_COMPILE_PROFILER("cpp.compile.llvm.emit_module");
     return codegen->compile_kernel_to_module(data.used_snode_tree_ids);
   }();
+  if (compile_config.arch == Arch::cuda)
+    CUDALoweringTarget::from_caps(request.device_caps())
+        .write(*data.compiled_data.module);
   LLVMModuleOptions::from_config(compile_config)
       .write(*data.compiled_data.module);
   declare_runtime_context_abi(*data.compiled_data.module);

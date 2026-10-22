@@ -33,7 +33,6 @@ struct Kernel::CacheKeyContext {
   std::vector<Ret> returns;
   AutodiffMode autodiff;
   std::string optimization;
-  std::optional<std::pair<std::uint8_t, int>> implicit_target;
 
   CacheKeyContext(const CompileConfig &config,
                   const DeviceCapabilityConfig &caps,
@@ -43,8 +42,7 @@ struct Kernel::CacheKeyContext {
         parameters(kernel.parameter_list),
         returns(kernel.rets),
         autodiff(kernel.autodiff_mode),
-        optimization(kernel.optimization_spec_cache_key()),
-        implicit_target(get_offline_cache_implicit_target(config.arch)) {
+        optimization(kernel.optimization_spec_cache_key()) {
   }
 
   bool matches(const CompileConfig &requested,
@@ -52,7 +50,6 @@ struct Kernel::CacheKeyContext {
                const Kernel &kernel) const {
     return same_offline_cache_compile_config(config, requested) &&
            caps.devcaps == target.devcaps &&
-           implicit_target == get_offline_cache_implicit_target(requested.arch) &&
            parameters == kernel.parameter_list &&
            returns.size() == kernel.rets.size() &&
            std::equal(returns.begin(), returns.end(), kernel.rets.begin(),

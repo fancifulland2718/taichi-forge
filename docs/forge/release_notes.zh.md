@@ -31,6 +31,11 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CUDA kernel 请求在编译前冻结有效目标；AOT 连同链接的稀疏 helper 使用声明的部署
+  目标。固定目标的 LLVM 缓存身份不再读取生产机器的 CUDA 设备或 driver provider；
+  bitcode 保留 lowering 要求，并校验后续 PTX 目标。独立 runtime 模块继续面向消费设备。
+  离线缓存 schema 67 使用新的缓存分片，默认策略不变。
+
 - 宏观 Graph 的 Sequential 接受 host native action，包括显式 portable 控制中只有 host
   操作的 body；循环精确检查条件，收敛后不额外调用 host 操作。AmgX host 分支可导出重建，
   retained guess 按实际控制路径校验。Windows CPU/CUDA/Vulkan 小型 Graph 与真实 CUDA

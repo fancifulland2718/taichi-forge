@@ -190,15 +190,14 @@ class Kernel;
 //  64 - Emit AD stack access directly and initialize only the new adjoint.
 //  65 - Preserve integer reverse-power exponents and finite zero/one bases.
 //  66 - Regenerate SPIR-V with valid shared float CAS storage and scalar types.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 66;
+//  67 - Identity uses resolved kernel targets, not the CUDA producer/provider.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 67;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still
-// canonicalizes it. Implicit provider/target state is compared separately.
+// canonicalizes it. Resolved target capabilities are compared separately.
 bool same_offline_cache_compile_config(const CompileConfig &config,
                                        const CompileConfig &other);
-std::optional<std::pair<std::uint8_t, int>> get_offline_cache_implicit_target(
-    Arch arch);
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

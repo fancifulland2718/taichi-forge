@@ -55,3 +55,30 @@ def test_aot_resolves_kernel_tier_before_codegen_and_cache_lookup(tmp_path, kern
         config.full_simplify_global_iter_cap = original_cap
         runtime.set_kernel_executable_lifecycle_telemetry_enabled(False)
     assert calculate(7) == 22
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_aot_sparse_helpers_use_declared_cuda_target(tmp_path):
+    values = ti.field(ti.i32)
+    ti.root.pointer(ti.i, 2).dense(ti.i, 4).place(values)
+
+    @ti.kernel
+    def activate():
+        for i in range(8):
+            values[i] = i + 1
+
+    # Sparse locking uses acquire atomics; LLVM NVPTX requires sm_70 for those
+    # orderings. Pre-Volta helper specialization is covered in the native test.
+    module = ti.aot.Module(artifact_format="ptx", caps=[ti.DeviceCapability.cuda_compute_capability(70)])
+    module.add_field("values", values)
+    module.add_kernel(activate)
+    module.save(str(tmp_path / "first"))
+    # A sparse kernel, its helper requirements, and repeated exports all keep
+    # the declared deployment target even on a newer producer device.
+    (ptx,) = tuple((tmp_path / "first").glob("activate*.ptx"))
+    text = ptx.read_text(encoding="utf8")
+    assert ".target sm_70" in text
+    module.save(str(tmp_path / "second"))
+    assert ".target sm_70" in next((tmp_path / "second").glob("activate*.ptx")).read_text(encoding="utf8")
+    activate()
+    assert values[7] == 8

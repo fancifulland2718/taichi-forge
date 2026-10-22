@@ -8,6 +8,10 @@
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/platform/cuda/detect_cuda.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
+#include "taichi/runtime/llvm/cuda_lowering_target.h"
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 namespace taichi::lang {
 namespace {
@@ -54,6 +58,40 @@ TEST(CUDAArtifactTarget, ExplicitTargetsDoNotConsultTheCurrentDevice) {
     EXPECT_EQ(artifact.kind, CUDAArtifactKind::ptx);
     EXPECT_EQ(artifact.payload.back(), '\0');
   }
+}
+
+TEST(CUDAArtifactTarget, KernelLoweringTargetSurvivesBitcodeAndSpecializesOnlyItsCopy) {
+  llvm::LLVMContext context;
+  auto producer = make_cuda_artifact_fixture(context);
+  auto *type = llvm::FunctionType::get(llvm::Type::getInt32Ty(context), {}, false);
+  auto *helper = llvm::Function::Create(type, llvm::GlobalValue::InternalLinkage,
+                                        "cuda_compute_capability", *producer);
+  llvm::IRBuilder<> builder(llvm::BasicBlock::Create(context, "entry", helper));
+  builder.CreateRet(builder.getInt32(120));
+  auto module = llvm::CloneModule(*producer);
+  CUDALoweringTarget{60, 60}.write(*module);
+  auto value = [](llvm::Module &source) {
+    auto *ret = llvm::cast<llvm::ReturnInst>(source.getFunction("cuda_compute_capability")->front().getTerminator());
+    return llvm::cast<llvm::ConstantInt>(ret->getReturnValue())->getSExtValue();
+  };
+  EXPECT_EQ(value(*producer), 120);
+  EXPECT_EQ(value(*module), 60);
+  EXPECT_FALSE(CUDALoweringTarget::read(*producer));
+  llvm::SmallVector<char, 0> bytes;
+  llvm::raw_svector_ostream stream(bytes);
+  llvm::WriteBitcodeToFile(*module, stream);
+  llvm::LLVMContext decoded_context;
+  auto decoded = llvm::parseBitcodeFile(llvm::MemoryBufferRef(llvm::StringRef(bytes.data(), bytes.size()), "target"), decoded_context);
+  ASSERT_TRUE(bool(decoded));
+  const auto target = CUDALoweringTarget::read(**decoded);
+  ASSERT_TRUE(target);
+  EXPECT_EQ(target->compute_capability, 60);
+  EXPECT_EQ(value(**decoded), 60);
+  EXPECT_ANY_THROW(target->require_finalization_target("sm_50", "+ptx60"));
+  EXPECT_ANY_THROW(target->require_finalization_target("sm_60", "+ptx50"));
+  CompileConfig config;
+  auto artifact = compile_cuda_kernel_artifact(*decoded, config, {"sm_80", "+ptx70"}, 0, JITModuleRole::user_kernel);
+  EXPECT_EQ(artifact.target_identity, "sm_80|+ptx70");
 }
 
 TEST(CUDAArtifactTarget, RejectsUnknownTargetsAndFeatures) {

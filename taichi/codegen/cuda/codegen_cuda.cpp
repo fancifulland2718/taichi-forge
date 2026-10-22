@@ -643,9 +643,8 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     auto dest_type = atomic_stmt->dest->ret_type.ptr_removed();
     auto val_type = atomic_stmt->val->ret_type;
 
-    // Half2 atomic_add is supported starting from sm_60. CUDA AOT passes an
-    // explicit target capability; ordinary JIT falls back to the current
-    // device capability.
+    // Half2 atomic_add is supported starting from sm_60. Both entry adapters
+    // have already resolved their target before task code generation.
 
     std::string cuda_library_path = get_custom_cuda_library_path();
     if (is_half2(dest_type) && is_half2(val_type) &&

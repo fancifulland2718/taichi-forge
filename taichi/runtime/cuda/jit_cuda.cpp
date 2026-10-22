@@ -12,6 +12,7 @@
 
 #include "llvm/IR/Metadata.h"
 #include "llvm/MC/MCSubtargetInfo.h"
+#include "taichi/runtime/llvm/cuda_lowering_target.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -291,6 +292,8 @@ CUDAKernelArtifact compile_cuda_kernel_artifact(
     const CUDACodegenTarget &target,
     int max_reg,
     JITModuleRole role) {
+  if (const auto lowered = CUDALoweringTarget::read(*module))
+    lowered->require_finalization_target(target.mcpu, target.mattrs);
   CUDAKernelArtifact artifact;
   artifact.kind = CUDAArtifactKind::ptx;
   artifact.role = role;

@@ -2,6 +2,7 @@
 
 #include "taichi/analysis/offline_cache_util.h"
 #include "taichi/program/compile_config.h"
+#include "taichi/program/kernel_compile_request.h"
 #include "taichi/program/program.h"
 #include "taichi/rhi/device_capability.h"
 
@@ -48,6 +49,28 @@ TEST(OfflineCache, FingerprintsIrChangingCompileConfigInputs) {
   });
   expect_distinct_key(spirv,
                       [](CompileConfig &config) { config.max_block_dim /= 2; });
+}
+
+TEST(OfflineCache, FrozenCudaTargetsHaveNoImplicitProducerOrProviderInput) {
+  CompileConfig config;
+  config.arch = Arch::cuda;
+  auto identity = [&](const DeviceCapabilityConfig &caps, int producer) {
+    const auto resolved = resolve_kernel_target(Arch::cuda, caps, CompilePurpose::aot, producer);
+    return get_hashed_offline_cache_key_context(config, resolved.capabilities, nullptr);
+  };
+  // This test also runs with CUDA disabled: even key construction must be
+  // independent of the producer's live CUDAContext and driver provider.
+  const auto default_key = identity({}, 86);
+  EXPECT_EQ(default_key, identity({}, 122));
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::cuda_compute_capability, 80);
+  EXPECT_EQ(default_key, identity(caps, 120));
+  caps.set(DeviceCapability::cuda_compute_capability, 86);
+  EXPECT_NE(default_key, identity(caps, 120));
+  config.llvm_aot_relocatable_roots = true;
+  const auto relocatable = identity(caps, 120);
+  config.llvm_aot_relocatable_roots = false;
+  EXPECT_NE(relocatable, identity(caps, 120));
 }
 
 TEST(OfflineCache, FunctionDependenciesFollowCallIds) {
