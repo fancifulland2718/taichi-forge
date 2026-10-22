@@ -162,6 +162,13 @@ void KernelCompilationManager::ensure_metadata_loaded_locked(Arch arch) {
 const CompiledKernelData &KernelCompilationManager::load_or_compile(
     const KernelCompileRequest &request,
     const Kernel &kernel_def) {
+  return load_or_compile_execution_handle(request, kernel_def)->compiled();
+}
+
+std::shared_ptr<KernelExecutionHandle>
+KernelCompilationManager::load_or_compile_execution_handle(
+    const KernelCompileRequest &request,
+    const Kernel &kernel_def) {
   const auto &compile_config = request.config();
   const auto &caps = request.device_caps();
   auto cache_mode = get_cache_mode(compile_config, kernel_def);
@@ -178,9 +185,9 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
   // Wait-loop: another worker may already be compiling this exact key. If
   // so, we block on cache_cv_ and re-probe the cache on wake-up.
   while (true) {
-    if (const auto *cached = try_load_cached_kernel_locked(
+    if (auto *cached = try_load_cached_kernel_locked(
             kernel_def, kernel_key, compile_config.arch, cache_mode)) {
-      return *cached;
+      return ensure_execution_handle_locked(*cached);
     }
     if (in_progress_keys_.count(kernel_key) == 0) {
       break;  // We are responsible for compiling this key.
@@ -250,33 +257,12 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
       updated_data_.push_back(&it->second);
     }
   }
-  const auto &result = install_compiled_kernel_locked(
+  auto &result = install_compiled_kernel_locked(
       kernel_key, logical_kernel_key, kernel_def.optimization_spec_identity(),
       cache_mode, std::move(compiled));
   in_progress_keys_.erase(kernel_key);
   cache_cv_.notify_all();
-  return result;
-}
-
-std::shared_ptr<KernelExecutionHandle>
-KernelCompilationManager::load_or_compile_execution_handle(
-    const KernelCompileRequest &request,
-    const Kernel &kernel_def) {
-  const auto &compiled = load_or_compile(request, kernel_def);
-  const auto &kernel_key = compiled.kernel_identity();
-  std::lock_guard<std::mutex> lock(cache_mutex_);
-  if (auto found = caching_kernels_.find(kernel_key);
-      found != caching_kernels_.end()) {
-    return ensure_execution_handle_locked(found->second);
-  }
-  if (auto found = cached_data_.kernels.find(kernel_key);
-      found != cached_data_.kernels.end() &&
-      found->second.compiled_kernel_data != nullptr) {
-    return ensure_execution_handle_locked(found->second);
-  }
-  TI_ERROR("Compiled kernel {} lost its cache owner before handle creation",
-           kernel_key);
-  return nullptr;
+  return ensure_execution_handle_locked(result);
 }
 
 const CompiledKernelData *KernelCompilationManager::find_cached_kernel(
@@ -294,7 +280,9 @@ const CompiledKernelData *KernelCompilationManager::find_cached_kernel(
   if (cache_mode == CacheData::MemAndDiskCache) {
     ensure_metadata_loaded_locked(arch);
   }
-  return try_load_cached_kernel_locked(kernel_def, kernel_key, arch, cache_mode);
+  const auto *entry =
+      try_load_cached_kernel_locked(kernel_def, kernel_key, arch, cache_mode);
+  return entry ? entry->compiled_kernel_data.get() : nullptr;
 }
 
 std::shared_ptr<KernelExecutionHandle>
@@ -713,7 +701,7 @@ KernelCompilationManager::executable_lifecycle_statistics(bool reset) {
       if (handle.use_count() > owner_floor) {
         // The snapshot is always one owner. Active handles normally have a
         // second cache owner; retired handles do not. Any owner above that
-        // state-specific floor is a Graph/AOT/in-flight lease.
+        // state-specific floor is an ordinary/Graph/AOT/in-flight lease.
         ++result.pinned_handles;
       }
       ++iter;
@@ -801,21 +789,22 @@ std::string KernelCompilationManager::make_kernel_semantic_key(
       compile_config, caps, (Kernel *)&kernel_def);
 }
 
-const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel_locked(
+KernelCompilationManager::KernelCacheData *
+KernelCompilationManager::try_load_cached_kernel_locked(
     const Kernel &kernel_def,
     const std::string &kernel_key,
     Arch arch,
     CacheData::CacheMode cache_mode) {
   // Precondition: cache_mutex_ held by caller.
   {  // Find in memory-cache (caching_kernels_)
-    const auto &kernels = caching_kernels_;
+    auto &kernels = caching_kernels_;
     auto iter = kernels.find(kernel_key);
     if (iter != kernels.end()) {
       record_if_enabled(executable_lifecycle_telemetry_.enabled,
                         executable_lifecycle_telemetry_.memory_cache_hits);
       TI_DEBUG("Create kernel '{}' from in-memory cache (key='{}')",
                kernel_def.get_name(), kernel_key);
-      return iter->second.compiled_kernel_data.get();
+      return &iter->second;
     }
   }
   // Find in disk-cache (cached_data_)
@@ -829,7 +818,7 @@ const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel_locke
                           executable_lifecycle_telemetry_.loaded_cache_hits);
         TI_DEBUG("Create kernel '{}' from cache (key='{}')",
                  kernel_def.get_name(), kernel_key);
-        return k.compiled_kernel_data.get();
+        return &k;
       }
       // P-Compile-2-B4: do NOT call `load_ckd` while holding
       // `cache_mutex_`. Disk I/O is moved out into `load_or_compile`'s
@@ -859,7 +848,7 @@ KernelCompilationManager::ensure_execution_handle_locked(
   return kernel.execution_handle;
 }
 
-const CompiledKernelData &
+KernelCompilationManager::KernelCacheData &
 KernelCompilationManager::install_compiled_kernel_locked(
     const std::string &kernel_key,
     const std::string &logical_kernel_key,
@@ -884,10 +873,9 @@ KernelCompilationManager::install_compiled_kernel_locked(
   k.size = 0;  // Populate `size` within the KernelCompilationManager::dump()
   k.cache_mode = cache_mode;
   auto &kernel_data = (caching_kernels_[kernel_key] = std::move(k));
-  ensure_execution_handle_locked(kernel_data);
   record_if_enabled(executable_lifecycle_telemetry_.enabled,
                     executable_lifecycle_telemetry_.templates_installed);
-  return *kernel_data.compiled_kernel_data;
+  return kernel_data;
 }
 
 std::unique_ptr<CompiledKernelData> KernelCompilationManager::load_ckd(

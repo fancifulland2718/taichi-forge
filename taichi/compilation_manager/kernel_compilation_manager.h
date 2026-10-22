@@ -174,7 +174,7 @@ class KernelCompilationManager final {
       const DeviceCapabilityConfig &caps,
       const Kernel &kernel_def) const;
 
-  const CompiledKernelData *try_load_cached_kernel_locked(
+  KernelCacheData *try_load_cached_kernel_locked(
       const Kernel &kernel_def,
       const std::string &kernel_key,
       Arch arch,
@@ -183,7 +183,7 @@ class KernelCompilationManager final {
   // Inserts a freshly compiled kernel into the in-memory cache and returns
   // a stable reference to it. Caller must hold `cache_mutex_` and must have
   // previously registered `kernel_key` in `in_progress_keys_`.
-  const CompiledKernelData &install_compiled_kernel_locked(
+  KernelCacheData &install_compiled_kernel_locked(
       const std::string &kernel_key,
       const std::string &logical_kernel_key,
       const std::string &optimization_spec_identity,
