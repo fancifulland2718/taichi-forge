@@ -135,6 +135,10 @@ def test_automatic_argpack_while_export_and_adjoint(tmp_path):
                         aot.ExecutionPlan.from_json(json.dumps(invalid)).prepare(
                             loaded, bindings, execution_domain=failed
                         )
+                    assert failed.info["accepting"] and not failed.info["closed"]
+                    recovered = plan.prepare(loaded, bindings, execution_domain=failed)
+                    recovered.initialize()
+                    recovered.close()
                 assert read(arrays["values"]) == [3]
                 assert read(arrays["loss"]) == read(arrays["dx"]) == [0]
             owner = plan.prepare(loaded, bindings, gradients=dict(loss=arrays["dloss"]) if name == "public" else None)

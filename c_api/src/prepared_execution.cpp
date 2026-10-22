@@ -38,6 +38,10 @@ struct PreparedDomainInstance final : RuntimeClient {
   std::vector<std::shared_ptr<RuntimeClient>> parts;
   std::mutex mutex;
   std::exception_ptr retirement_error;
+  bool safely_released() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return parts.empty() && !retirement_error;
+  }
   void retire() override {
     std::lock_guard<std::mutex> lock(mutex);
     if (retirement_error)
@@ -71,6 +75,7 @@ struct PreparedExecution {
   // edges after public handle release. Domain capacity bounds resident entries.
   bool released{false};
   bool domain_initialized{false};
+  bool domain_instance_admitted{false};
   std::shared_ptr<cuda::ExecutionDomain> domain;
   std::shared_ptr<PreparedDomainInstance> domain_instance;
   std::shared_ptr<RuntimeCompletionCudaEventPool> bootstrap_events;
@@ -345,9 +350,10 @@ struct PreparedExecution {
         }
       };
 #ifdef TI_WITH_CUDA
-      if (domain)
+      if (domain) {
         domain->prepare_instance(domain_instance, prepare_recordings);
-      else
+        domain_instance_admitted = true;
+      } else
 #endif
         prepare_recordings();
     } catch (const std::invalid_argument &error) {
@@ -645,9 +651,13 @@ class PreparedExecutionRegistry {
     auto &entry = get(handle);
     entry.live = false;
     entry.released = true;
-    // All reverse edges were published before any independent recording.
-    // A failed drain leaves that finite closure pinned for cold retirement.
-    entry.close_domain();
+    // A rejected reservation executes no preparation. A failed preparation
+    // retires its complete group before returning. Neither case needs to
+    // drain or invalidate successful peers. After admission (e.g. bootstrap
+    // failure), or when cleanup failed, keep the existing cold close proof.
+    if (entry.domain_instance_admitted ||
+        (entry.domain_instance && !entry.domain_instance->safely_released()))
+      entry.close_domain();
     remove_dependencies(handle, entry);
     entries_.erase(handle);
   }

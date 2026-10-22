@@ -7,6 +7,48 @@ from tests import test_utils
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_prepare_capacity_rejection_preserves_resident_instance(tmp_path):
+    import array
+
+    @ti.kernel
+    def increment(out: ti.types.ndarray(ti.i32, 1)):
+        for i in out:
+            out[i] += 1
+
+    artifact = ti.aot.Module()
+    artifact.add_kernel(increment)
+    artifact.add_execution_plan("step", ExecutionPlan([
+        dict(kind="kernel", entry="increment", arguments=["out"]),
+    ]))
+    artifact.save(tmp_path / "module")
+    with Runtime("cuda") as runtime:
+        module = runtime.load_module(tmp_path / "module")
+        output = runtime.ndarray("i32", 2)
+        output.write(bytes(8))
+        with runtime.execution_domain(capacity=2, instance_capacity=1) as domain:
+            resident = module.prepare_execution("step", dict(out=output), execution_domain=domain)
+            resident.initialize()
+            first = resident.submit()
+            prefix = first.info
+            for _ in range(2):
+                with pytest.raises(RuntimeError, match="instance capacity"):
+                    module.prepare_execution("step", dict(out=output), execution_domain=domain)
+                assert domain.info["accepting"] and not domain.info["closed"]
+            first.wait()
+            assert first.done()
+            assert (first.info["owner"], first.info["sequence"]) == (prefix["owner"], prefix["sequence"])
+            second = resident.submit()
+            second.wait()
+            values = array.array("i")
+            values.frombytes(output.read())
+            assert list(values) == [2, 2]
+            resident.close()
+        assert first.done() and second.done()
+        first.close()
+        second.close()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_public_domain_owner_and_ticket_lifetime():
     with Runtime("cuda") as runtime:
         first = runtime.execution_domain(capacity=2, instance_capacity=4, priority=-1)

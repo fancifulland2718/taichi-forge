@@ -325,7 +325,10 @@ can still fail when backend or host resources are exhausted.
 `capacity` bounds pending submissions; `instance_capacity` bounds resident logical
 prepared instances. Initialization and replay share one instance reservation while
 retaining their own recordings. A partially built instance retires its established
-parts through the same owner. Releasing a prepared handle keeps its code, arrays and
+parts through the same owner. A capacity rejection, or failed construction with
+proven cleanup before admission, removes only that failed instance; the domain and
+resident peers stay usable. Failures after admission or without safe cleanup still
+use cold domain retirement. Releasing a prepared handle keeps its code, arrays and
 reverse dependency edges until domain retirement. Explicit module, memory or
 native-resource destruction closes dependent domains before freeing their
 storage. Runtime close/reset retires its domains. A failed retirement retains
