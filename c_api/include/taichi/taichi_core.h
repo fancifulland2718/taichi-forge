@@ -1264,6 +1264,13 @@ TI_DLL_EXPORT void TI_API_CALL ti_get_kernel_argpack_info_ext(
     TiRuntime runtime, TiKernel kernel, uint32_t logical_argument,
     TiKernelArgPackInfo *info);
 
+// Resolve a named Graph pack to an existing compiled contract. The returned
+// kernel belongs to the module; use the ordinary ArgPack factory below. Every
+// Graph dispatch validates the supplied pack before any work is submitted.
+TI_DLL_EXPORT TiKernel TI_API_CALL ti_get_compute_graph_argpack_kernel_ext(
+    TiRuntime runtime, TiComputeGraph graph, const char *name,
+    uint32_t *logical_argument);
+
 // Supply exactly the value/resource leaves, excluding nested-pack nodes.
 // Values use TI_ARGUMENT_TYPE_VALUE_EXT with the queried compiled payload size;
 // resources use NDARRAY or NATIVE_RESOURCE_EXT. Layout and gradient descriptors

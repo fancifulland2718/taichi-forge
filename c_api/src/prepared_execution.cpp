@@ -835,9 +835,20 @@ TiPreparedExecution ti_prepare_compute_graph_ext(
   auto prepared = std::make_unique<capi::PreparedExecution>();
   prepared->owner = arguments->owner;
   prepared->memories = arguments->memories;
+  prepared->external_resources = arguments->native_resources;
   prepared->graph_arguments = std::move(arguments);
   const auto &bound = *prepared->graph_arguments;
   using namespace taichi::lang;
+  if (!bound.dispatch_arguments.empty()) {
+    std::vector<FixedExecution::Operation> operations;
+    for (const auto &arguments : bound.dispatch_arguments) {
+      FixedExecution::Dispatch dispatch{arguments->kernel, arguments->context.get()};
+      dispatch.resources = arguments->kernel_resources;
+      operations.emplace_back(std::move(dispatch));
+    }
+    prepared->prepare_operations(rt, std::move(operations));
+    return rt.prepared_registry().publish(std::move(prepared));
+  }
   std::vector<std::pair<aot::Kernel *, LaunchContextBuilder *>> dispatches;
   for (const auto &dispatch : bound.graph->dispatches) {
     if (!dispatch.compiled_kernel || dispatch.cuda_bounded_dispatch ||

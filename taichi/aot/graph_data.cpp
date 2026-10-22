@@ -97,14 +97,25 @@ void CompiledDispatch::bind_jit_kernel(
   TI_ASSERT(ti_kernel != nullptr && handle != nullptr);
   jit_invocation = std::make_shared<CompiledGraphKernelInvocation>(
       *ti_kernel, std::move(handle));
+  bind_argument_origins(jit_invocation->callable);
+}
+
+void CompiledDispatch::bind_argument_origins(const CallableBase &callable) {
   argument_bindings.clear();
   if (std::none_of(symbolic_args.begin(), symbolic_args.end(),
                    [](const Arg &arg) { return arg.tag == ArgKind::kArgPack; }))
     return;
-  const auto &callable = jit_invocation->callable;
   TI_ERROR_IF(!callable.argument_origins,
               "Graph ArgPack requires compiled argument origins");
   validate_argument_origins(callable, *callable.argument_origins);
+  const auto count_symbols = [](auto &&self, const std::vector<Arg> &symbols) -> std::size_t {
+    std::size_t count = symbols.size();
+    for (const auto &symbol : symbols)
+      count += self(self, symbol.members);
+    return count;
+  };
+  TI_ERROR_IF(count_symbols(count_symbols, symbolic_args) != callable.argument_origins->size(),
+              "Graph ArgPack signature does not cover compiled argument origins");
   for (const auto &origin : canonical_argument_origins(*callable.argument_origins)) {
     TI_ERROR_IF(origin.logical.front() >= symbolic_args.size(),
                 "Graph ArgPack signature differs from the compiled kernel");

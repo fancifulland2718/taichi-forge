@@ -324,6 +324,7 @@ class Api:
             "ti_get_kernel_return_info_ext": ([Handle, Handle, C.POINTER(KernelReturnInfo)], None),
             "ti_get_kernel_argument_info_ext": ([Handle, Handle, C.POINTER(KernelArgumentInfo)], None),
             "ti_get_kernel_argpack_info_ext": ([Handle, Handle, UInt, C.POINTER(KernelArgPackInfo)], None),
+            "ti_get_compute_graph_argpack_kernel_ext": ([Handle, Handle, C.c_char_p, C.POINTER(UInt)], Handle),
             "ti_create_kernel_argpack_ext": ([Handle, Handle, UInt, UInt, C.POINTER(ArgPackMember)], Handle),
             "ti_launch_kernel_with_result_ext": (
                 [Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Binding), C.c_uint64, C.c_void_p], None,

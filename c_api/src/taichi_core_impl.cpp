@@ -1170,8 +1170,15 @@ void ti_launch_compute_graph_with_bindings_ext(
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
   auto bound = capi::bind_graph_arguments(rt, compute_graph, arg_count, args,
                                           binding_count, bindings);
-  if (bound)
-    bound->graph->run(bound->arguments, bound->gradients);
+  if (bound) {
+    if (bound->dispatch_arguments.empty())
+      bound->graph->run(bound->arguments, bound->gradients);
+    else
+      for (const auto &dispatch : bound->dispatch_arguments) {
+        dispatch->context->discard_return_values();
+        dispatch->kernel->launch(*dispatch->context);
+      }
+  }
   TI_CAPI_TRY_CATCH_END();
 }
 

@@ -102,6 +102,7 @@ def test_argpack_acceleration_structure_export_and_downstream_adjoint(tmp_path):
         resource_bindings={scene: "scene"},
     )
     module.add_execution_plan("pack", graph, gradients=gradients)
+    module.add_graph("cgraph", graph)
     artifact = tmp_path / "scene.tcm"
     module.archive(str(artifact))
     graph.close()
@@ -133,17 +134,25 @@ def test_argpack_acceleration_structure_export_and_downstream_adjoint(tmp_path):
         arrays = {
             name: runtime.ndarray("f32", size) for name, size in (("out", 6), ("dout", 6), ("loss", 1), ("dloss", 1))
         }
-        for name in ("private", "scene", "pack"):
-            plan = loaded.execution_plan(name)
+        for name in ("private", "scene", "pack", "cgraph"):
+            plan = loaded.graph(name) if name == "cgraph" else loaded.execution_plan(name)
             resources = (
                 dict(vertices=v, indices=i, transforms=transforms) if name == "private" else dict(scene=scene_owner)
             )
             if name == "pack":
                 resources = dict(pack=plan.argpack(loaded, "pack", dict(child=dict(scene=scene_owner), scale=2)))
+            elif name == "cgraph":
+                resources = dict(pack=plan.argpack("pack", dict(child=dict(scene=scene_owner), scale=2)))
             for ray_offset in (0, 3, 0):
                 for key, values in dict(out=[-99] * 6, dout=[0] * 6, loss=[0], dloss=[1]).items():
                     arrays[key].write(array.array("f", values).tobytes())
-                owner = plan.prepare(loaded, dict(arrays, **resources, offset=aot.Scalar("f32", ray_offset)))
+                if name == "cgraph":
+                    owner = plan.prepare(
+                        dict(out=arrays["out"], loss=arrays["loss"], **resources, offset=aot.Scalar("f32", ray_offset)),
+                        gradients=dict(out=arrays["dout"], loss=arrays["dloss"]),
+                    )
+                else:
+                    owner = plan.prepare(loaded, dict(arrays, **resources, offset=aot.Scalar("f32", ray_offset)))
                 owner.run()
                 runtime.wait()
                 assert read(arrays["out"]) == ([1, 2, 0, 37, 0.25, 0.5] if ray_offset == 0 else [0, -1, -1, -1, 0, 0])
@@ -152,4 +161,7 @@ def test_argpack_acceleration_structure_export_and_downstream_adjoint(tmp_path):
                 owner.close()
         scene_owner.close()
         with pytest.raises(RuntimeError, match="closed|retired|owned|valid"):
-            plan.prepare(loaded, dict(arrays, **resources, offset=aot.Scalar("f32", 0)))
+            plan.prepare(
+                dict(out=arrays["out"], loss=arrays["loss"], **resources, offset=aot.Scalar("f32", 0)),
+                gradients=dict(out=arrays["dout"], loss=arrays["dloss"]),
+            )

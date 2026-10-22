@@ -391,6 +391,7 @@ struct CompiledDispatch {
   // copies; neither frontend IR nor process-local handles enter AOT payloads.
   std::shared_ptr<CompiledGraphKernelInvocation> jit_invocation;
   void bind_jit_kernel(std::shared_ptr<KernelExecutionHandle> handle);
+  void bind_argument_origins(const CallableBase &callable);
   const std::shared_ptr<KernelExecutionHandle> &jit_execution_handle() const;
   bool jit_belongs_to_program(const Program &program) const;
   CallableBase *jit_callable() const;

@@ -121,6 +121,7 @@ def test_frozen_pack_sampled_image_and_downstream_adjoint(tmp_path):
         resource_bindings={image: "image"},
         gradients=dict(output="dout", loss="dloss"),
     )
+    module.add_graph("cgraph", graph)
     artifact = tmp_path / "image.tcm"
     module.archive(str(artifact))
     with ti.aot.borrow_runtime() as runtime:
@@ -133,14 +134,26 @@ def test_frozen_pack_sampled_image_and_downstream_adjoint(tmp_path):
             parameters=dict(shape=[2, 1], format="r32f", filter="nearest"),
             bindings=dict(pixels=pixels),
         )
-        for name, resources in (("step", dict(pixels=pixels)), ("public_image", dict(image=imported))):
+        entry = loaded.graph("cgraph")
+        packet = entry.argpack("pack", dict(scale=2, child=dict(image=imported)))
+        for name, resources in (
+            ("step", dict(pixels=pixels)),
+            ("public_image", dict(image=imported)),
+            ("cgraph", dict(pack=packet)),
+        ):
             arrays = {
                 key: runtime.ndarray("f32", count)
                 for key, count in (("output", 2), ("dout", 2), ("loss", 1), ("dloss", 1))
             }
             for key, data in dict(output=[-1, -1], dout=[0, 0], loss=[0], dloss=[1]).items():
                 arrays[key].write(array.array("f", data).tobytes())
-            owner = loaded.prepare_execution(name, dict(arrays, **resources))
+            if name == "cgraph":
+                owner = entry.prepare(
+                    dict(output=arrays["output"], loss=arrays["loss"], **resources),
+                    gradients=dict(output=arrays["dout"], loss=arrays["dloss"]),
+                )
+            else:
+                owner = loaded.prepare_execution(name, dict(arrays, **resources))
             assert read(arrays["output"]) == [-1, -1]
             owner.run()
             runtime.wait()

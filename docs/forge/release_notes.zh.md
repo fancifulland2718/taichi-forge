@@ -34,7 +34,7 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **152**，持久执行计划为 **26**，
+- frontend 与 native runtime 使用私有 ABI **153**，持久执行计划为 **26**，
   编译缓存 schema 为 **68**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
@@ -98,7 +98,8 @@
   同一 dispatch 可混用公开和源冻结包，保留各自的资源与显式梯度绑定。
   固定导出合并同一源包的等价只读存储。image 成员复用图像重建、公开绑定和别名预检，
   修复编译期纹理表达式误走设备值上传。Vulkan AS 成员复用既有 TLAS 重建/公开绑定；
-  不支持该资源的后端和模板入口会诊断嵌套成员路径。旧 CGraph 序列化继续单独处理。
+  不支持该资源的后端和模板入口会诊断嵌套成员路径。普通 CGraph 新增 v3 逻辑成员编码和
+  按名称创建包的消费端接口，run/prepare 复用 kernel binder，执行前校验整个序列。
 - 扩大原生 sort/compact、scan/reduce、transform、gather/scatter、grouped/segmented
   操作在 recording/AOT 中的布局覆盖；支持范围依操作、后端、类型和策略而定。
   packed Field/vector/matrix 路线复用既有核心，保留稳定顺序、载荷位模式与别名规则。

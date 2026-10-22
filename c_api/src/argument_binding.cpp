@@ -838,6 +838,75 @@ std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
       return nullptr;
     }
   }
+  if (std::any_of(graph.args.begin(), graph.args.end(), [](const auto &entry) {
+        return entry.second.tag == taichi::lang::aot::ArgKind::kArgPack;
+      })) {
+    if (named_args.size() != graph.args.size())
+      throw MemoryBindingError("Argument names do not match the exported Graph ABI");
+    for (const auto &[name, symbol] : graph.args)
+      if (!named_args.count(name))
+        throw MemoryBindingError("Missing Graph argument: " + name);
+    if (binding_count)
+      TI_CAPI_ARGUMENT_NULL_RV(bindings);
+    std::unordered_map<std::string, const TiNamedNdArrayBinding *> named_bindings;
+    for (uint32_t i = 0; i < binding_count; ++i) {
+      TI_CAPI_ARGUMENT_NULL_RV(bindings[i].name);
+      const auto symbol = graph.args.find(bindings[i].name);
+      if (symbol == graph.args.end() ||
+          symbol->second.tag != taichi::lang::aot::ArgKind::kNdarray ||
+          !named_bindings.emplace(bindings[i].name, &bindings[i]).second)
+        throw MemoryBindingError("Unknown or duplicate Graph ndarray binding");
+    }
+    auto result = std::make_unique<BoundGraphArguments>();
+    result->owner = graph_binding.owner;
+    result->graph = &graph;
+    std::unordered_set<std::string> used_gradients;
+    for (const auto &dispatch : graph.dispatches) {
+      if (!dispatch.compiled_kernel)
+        throw MemoryBindingError("AOT Graph contains an unresolved kernel");
+      std::vector<TiArgument> values;
+      std::vector<TiNdArrayBinding> descriptors;
+      for (uint32_t i = 0; i < dispatch.symbolic_args.size(); ++i) {
+        const auto &symbol = dispatch.symbolic_args[i];
+        values.push_back(*named_args.at(symbol.name));
+        const auto found = named_bindings.find(symbol.name);
+        if (found == named_bindings.end())
+          continue;
+        const auto &source = *found->second;
+        auto *gradient = source.gradient;
+        if (gradient) {
+          auto physical = std::vector<int>{int(i)};
+          for (const auto &binding : dispatch.argument_bindings)
+            if (binding.logical == physical) {
+              physical = binding.physical;
+              break;
+            }
+          const auto parameter = dispatch.compiled_kernel->nested_parameters.find(physical);
+          if (parameter != dispatch.compiled_kernel->nested_parameters.end() &&
+              parameter->second.needs_grad)
+            used_gradients.insert(symbol.name);
+          else
+            gradient = nullptr;
+        }
+        if (source.layout || source.layout_version || gradient)
+          descriptors.push_back({i, source.layout_version, source.layout, gradient});
+      }
+      auto bound = bind_kernel_arguments(
+          runtime2, graph_binding.owner->get_kernel_handle(dispatch.kernel_name),
+          static_cast<uint32_t>(values.size()), values.data(),
+          static_cast<uint32_t>(descriptors.size()), descriptors.data());
+      if (!bound)
+        return nullptr;
+      result->memories.insert(result->memories.end(), bound->memories.begin(), bound->memories.end());
+      result->native_resources.insert(result->native_resources.end(),
+                                       bound->native_resources.begin(), bound->native_resources.end());
+      result->dispatch_arguments.push_back(std::move(bound));
+    }
+    for (const auto &[name, binding] : named_bindings)
+      if (binding->gradient && !used_gradients.count(name))
+        throw MemoryBindingError("Graph gradient target was not exported with needs_grad");
+    return result;
+  }
   if (binding_count)
     TI_CAPI_ARGUMENT_NULL_RV(bindings);
   if (binding_count > arg_count) {

@@ -75,6 +75,10 @@ struct BoundGraphArguments {
   AotModule *owner{nullptr};
   taichi::lang::aot::CompiledGraph *graph{nullptr};
   std::vector<TiMemory> memories;
+  std::vector<TiNativeResource> native_resources;
+  // Pack graphs reuse the kernel binder's physical contexts and owners. The
+  // whole sequence is validated before launching or recording its first task.
+  std::vector<std::unique_ptr<BoundKernelArguments>> dispatch_arguments;
   std::vector<taichi::lang::Ndarray> arrays;
   std::vector<taichi::lang::Ndarray> gradient_arrays;
   std::vector<std::unique_ptr<taichi::lang::Texture>> textures;

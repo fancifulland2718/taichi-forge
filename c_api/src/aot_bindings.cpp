@@ -354,15 +354,22 @@ TiComputeGraph AotModule::get_graph_handle(const std::string &name) {
   if (!graph)
     return TI_NULL_HANDLE;
   Runtime::GraphBinding binding{this, graph, {}};
-  for (const auto &dispatch : graph->dispatches) {
+  for (auto &dispatch : graph->dispatches) {
     if (!dispatch.compiled_kernel) {
       throw taichi::lang::aot::ArtifactLoadError("Unresolved Graph kernel");
     }
+    dispatch.bind_argument_origins(*dispatch.compiled_kernel);
     for (uint32_t i = 0; i < dispatch.symbolic_args.size(); ++i) {
       const auto &arg = dispatch.symbolic_args[i];
       if (arg.tag != taichi::lang::aot::ArgKind::kNdarray)
         continue;
-      const auto payload = ndarray_payload(*dispatch.compiled_kernel, {int(i)});
+      auto physical = std::vector<int>{int(i)};
+      for (const auto &entry : dispatch.argument_bindings)
+        if (entry.logical == std::vector<int>{int(i)}) {
+          physical = entry.physical;
+          break;
+        }
+      const auto payload = ndarray_payload(*dispatch.compiled_kernel, physical);
       if (arg.struct_dtype || payload->is<taichi::lang::StructType>()) {
         if (!arg.struct_dtype ||
             payload != taichi::lang::DataType(arg.struct_dtype)) {
@@ -370,7 +377,7 @@ TiComputeGraph AotModule::get_graph_handle(const std::string &name) {
               "Graph layout differs from kernel ABI");
         }
         const auto parameter =
-            dispatch.compiled_kernel->nested_parameters.find({int(i)});
+            dispatch.compiled_kernel->nested_parameters.find(physical);
         if (parameter == dispatch.compiled_kernel->nested_parameters.end() ||
             parameter->second.needs_grad ||
             parameter->second.total_dim != arg.field_dim ||
@@ -436,6 +443,33 @@ void ti_get_kernel_argpack_info_ext(TiRuntime runtime,
   }
   *info = {cached.json.c_str()};
   TI_CAPI_TRY_CATCH_END();
+}
+
+TiKernel ti_get_compute_graph_argpack_kernel_ext(
+    TiRuntime runtime, TiComputeGraph graph, const char *name,
+    uint32_t *logical_argument) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(name);
+  TI_CAPI_ARGUMENT_NULL_RV(logical_argument);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  const auto &binding = rt.get_graph(graph);
+  const auto symbol = binding.graph->args.find(name);
+  if (symbol == binding.graph->args.end() ||
+      symbol->second.tag != taichi::lang::aot::ArgKind::kArgPack)
+    throw MemoryBindingError("Graph argument is not a logical ArgPack");
+  for (const auto &dispatch : binding.graph->dispatches)
+    for (uint32_t i = 0; i < dispatch.symbolic_args.size(); ++i)
+      if (dispatch.symbolic_args[i].name == name) {
+        const auto kernel = binding.owner->get_kernel_handle(dispatch.kernel_name);
+        rt.get_kernel_argpack_layout(kernel, i);
+        *logical_argument = i;
+        return kernel;
+      }
+  throw MemoryBindingError("Graph argument has no kernel use");
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
 }
 
 TiNdArrayLayout ti_get_kernel_ndarray_layout_ext(TiRuntime runtime,

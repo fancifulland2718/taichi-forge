@@ -1553,12 +1553,20 @@ kernel、Graph 及自动执行计划导出复用同一参数来源。冻结包�
 重心坐标、下游 ndarray 显式梯度及场景关闭后的失效。该查询本身不新增自动微分；
 CPU/CUDA 与 kernel template 家族继续在编译前拒绝嵌套 AS，诊断包含完整成员路径。
 
-本切片已隔离验证三后端顺序计划、显式反向与双实例；旧 CGraph
-序列化及其他固定物理策略仍需各自资格验证。正常安装尚未更新到此切片。
+本切片已隔离验证三后端顺序计划、显式反向与双实例。正常安装尚未更新到此切片。
 自动控制另已验证 CPU/CUDA/Vulkan WHILE 的零轮、提前结束、预算耗尽和后续显式伴随，
 GPU 用例要求原生 WHILE。分支覆盖 CPU、CUDA 原生条件节点和 Vulkan 现有 host 控制路线，
 公开包与源冻结包均在选择切换后核对真实梯度。CUDA 独立域已验证带初始化的 WHILE 使用
 一个逻辑实例名额；尚不据此宣称全部嵌套/fork-join/recording 组合已取得资格。
+
+`Module.add_graph()` 也可保存含 ArgPack 的普通 CGraph，使用 `graphs.v3.json`
+保存逻辑成员；物理布局、资源提升和调用校验继续来自编译 kernel。消费端可调用
+`packet = loaded.graph("step").argpack("pack", values, gradients=...)`，然后将其作为
+同名参数传给 `run()` 或 `prepare()`。同一包可用于不同 dispatch 的不同根参数位置。
+所有 dispatch 在第一次执行前完成绑定校验，后段缺少梯度不会留下已经执行的前段。
+包是只读资源 owner；更新值或资源绑定需新建包，数组内容可原位修改。关闭包会使依赖它的
+prepared 对象失效；其他实例仍持有各自状态。普通二进制 CGraph 和结构数组 v2 格式
+继续使用原有编码及读取路径。此处不把 native/control 节点写入普通 CGraph。
 
 生产端 `Module.add_kernel()` 可为完全声明的 ArgPack 自动构造编译占位；成员 ndarray
 的 dtype/ndim 未指定时，通过 `template_args={"pack参数名": 实际参数包, ...}` 提供

@@ -1975,15 +1975,27 @@ parameter names; preparation validates all uses. Multiple packs in a single
 kernel dispatch may mix public and source-frozen owners. Cold preparation expands
 public owners and connects frozen resource members using compiled argument origins;
 both retain their explicit gradient bindings. Isolated checks cover sequential plans,
-explicit adjoints and independent instances. Legacy
-CGraph serialization and other fixed physical strategies need separate
-qualification. Normal installations have not yet been refreshed with this slice.
+explicit adjoints and independent instances. Normal installations have not yet been
+refreshed with this slice.
 Automatic control checks additionally cover CPU/CUDA/Vulkan WHILE with zero rounds,
 early exit, exhausted budgets and explicit suffix adjoints; GPU cases require native
 WHILE. Branch checks cover CPU, CUDA native conditional nodes and Vulkan's existing
 host-control route, switching selections with public and frozen packs and checking
 actual gradients. A CUDA-domain WHILE with initialization uses one logical instance
 reservation. Nested/fork-join/recording combinations still need their own qualification.
+
+`Module.add_graph()` also persists ordinary CGraphs containing ArgPacks, using
+`graphs.v3.json` for logical members. Compiled kernels remain authoritative for
+physical layouts, resource lifting and call validation. Create a consumer owner with
+`packet = loaded.graph("step").argpack("pack", values, gradients=...)`, then pass it
+by name to `run()` or `prepare()`. A pack can occupy different root positions in
+different dispatches. All dispatch bindings are checked before any work executes;
+a missing gradient in a later dispatch cannot leave an executed prefix. Packs are
+immutable resource owners: create a new pack to change values or resource bindings,
+while array contents may change in place. Closing a pack invalidates its dependent
+prepared objects; other instances retain their own state. Ordinary binary CGraphs
+and structure-array v2 artifacts keep their existing encodings and readers. This
+does not serialize native/control nodes into ordinary CGraphs.
 
 Vulkan `ti.types.acceleration_structure()` pack members bind InstanceTLAS through
 the same argument origins in ordinary kernels, Graphs and automatic plan export.

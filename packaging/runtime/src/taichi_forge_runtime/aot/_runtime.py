@@ -1358,6 +1358,20 @@ class Kernel:
 
 
 class Graph(Kernel):
+    def argpack(self, argument, values, *, gradients=None):
+        """Create a named Graph pack using its compiled kernel contract.
+
+        Values and member gradients follow Kernel.argpack(). All uses are
+        validated by bind/prepare, including dispatches at other root positions.
+        """
+        runtime = self._module._runtime
+        with runtime._lock:
+            self._module._check()
+            index = abi.UInt()
+            handle = runtime._api.call(runtime._api.ti_get_compute_graph_argpack_kernel_ext,
+                                       runtime._handle, self._handle, _name(argument), C.byref(index))
+            return Kernel(self._module, handle).argpack(index.value, values, gradients=gradients)
+
     def bind(self, arguments, *, gradients=None):
         runtime = self._module._runtime
         with runtime._lock:
