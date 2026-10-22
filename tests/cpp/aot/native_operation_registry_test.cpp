@@ -1596,6 +1596,33 @@ TEST(NativeOperationRegistry,
   }
 }
 
+TEST(NativeOperationRegistry, PublicTriangularActionsRequireCompleteContract) {
+  const auto &registry = native_operation_registry();
+  auto d = NativeOperationDescription::parse(liong::json::parse_complete(R"(
+    {"kind":"native","provider":"cusparse","operation":"triangular_solve_f32","version":2,
+     "parameters":{"rhs_count":1,"mutable_values":true},
+     "bindings":{"plan":"p","matrix":"a","input":"x","output":"y"}})"));
+  for (const auto *operation : {"triangular_solve_f32", "triangular_update_f32"}) {
+    d.operation = operation;
+    const auto decoded = registry.decode(d);
+    EXPECT_EQ(decoded.version(), 2);
+    EXPECT_EQ(registry.find(decoded.kind(), 2, Arch::x64), nullptr);
+    EXPECT_EQ(registry.find(decoded.kind(), 2, Arch::vulkan), nullptr);
+    for (const auto *port : {"plan", "matrix", "input", "output"}) {
+      auto missing = d;
+      missing.bindings.erase(port);
+      EXPECT_THROW(registry.decode(missing), std::invalid_argument);
+    }
+    for (const auto *bad : {R"({"rhs_count":true})", R"({"rhs_count":0})",
+                            R"({"rhs_count":1,"transpose":1})",
+                            R"({"rhs_count":1,"fill_mode":"auto"})"}) {
+      auto malformed = d;
+      malformed.parameters = liong::json::parse_complete(bad);
+      EXPECT_THROW(registry.decode(malformed), std::invalid_argument);
+    }
+  }
+}
+
 TEST(NativeOperationRegistry, SelectedFftPlansDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto description =

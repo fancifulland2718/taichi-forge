@@ -57,9 +57,8 @@ def test_public_sparse_matrix_with_private_triangular_analysis(tmp_path):
             source_bindings=dict(coefficients=left),
         )
     assert not failed._execution_plans and not failed._data_payloads
-    # A public triangular handle does not yet carry an exported expected-plan
-    # contract; keep this unsupported route explicit instead of dropping it.
-    with pytest.raises(ValueError, match="unused"):
+    # A shared plan must expose the matrix identity checked by its operation.
+    with pytest.raises(ValueError, match="matrix as a public resource"):
         failed.add_execution_plan("plan", graph, resource_bindings={solve: "solve"})
     block_arrays = []
     for dtype, data in ((ti.i32, [0, 1]), (ti.i32, [0]), (ti.f32, [2, 0, 1, 4])):

@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- cuSPARSE triangular recording export supports public shared plans with an
+  explicit public matrix binding. Version 2 update/solve descriptions check
+  plan parameters, matrix identity and dense-port storage during preparation,
+  then reuse existing refresh/solve paths. Public plans use `mutable_values=True`
+  and require a runtime supporting these v2 descriptions; private ABI and module
+  format are unchanged. SpSV/SpSM, invalid bindings and retirement pass on Windows CUDA.
+
 - Retained Graphs from `DeterministicScatterReducePlan` can export to AOT,
   preserving the selected single dispatch, fixed group count and actual
   permutation/offset data. External ndarray bindings and explicit Field state

@@ -31,6 +31,11 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- cuSPARSE triangular recording 的 AOT 导出支持公开共享 plan，同时显式绑定其矩阵。
+  v2 update/solve 描述在 prepare 时校验 plan 参数、矩阵身份与输入输出存储，随后复用
+  既有数值刷新与求解路径。公开 plan 使用 `mutable_values=True`；需支持该 v2 描述的
+  runtime，私有 ABI 和模块格式不变。Windows CUDA 的 SpSV/SpSM、错误绑定及退休已验证。
+
 - `DeterministicScatterReducePlan` 的 retained Graph 可导出 AOT，保留选中的单 dispatch、
   固定 group count 和实际 permutation/offset 数据；支持外部 ndarray 绑定及显式 Field
   状态快照。Windows CPU/CUDA/Vulkan 的标量、向量、空拓扑、重复导出和独立消费已验证。

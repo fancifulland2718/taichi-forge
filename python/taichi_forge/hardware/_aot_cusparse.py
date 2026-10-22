@@ -84,6 +84,9 @@ def export_spmm(recording, context):
 
 def export_triangular(recording, context):
     recording.validate_graph_lifetime()
+    public_plan = context.public_resource(recording)
+    if public_plan is not None and context.public_resource(recording.matrix) is None:
+        raise ValueError("A public triangular plan requires its matrix as a public resource")
     # Public matrices keep consumer-owned values which may change between
     # submissions. Their private triangular analysis must refresh each replay.
     mutable_values = (
@@ -91,6 +94,16 @@ def export_triangular(recording, context):
         or context.public_resource(recording.matrix) is not None
     )
     matrix = snapshot_csr(context, recording.matrix)
+    if public_plan is not None:
+        context.resource_links(recording, {"matrix": recording.matrix})
+        parameters = recording._definition.resource(mutable_values=True).parameter_dict()
+        for operation in ("triangular_update_f32", "triangular_solve_f32"):
+            NativeOperationBinding(
+                NativeDefinition("cusparse", operation, parameters, version=2),
+                recording._native_arrays,
+                (("plan", NativeResourceReference(public_plan)), ("matrix", NativeResourceReference(matrix))),
+            ).lower(context)
+        return ()
     plan = NativeResourceBinding(
         recording,
         recording._definition.resource(mutable_values=mutable_values),

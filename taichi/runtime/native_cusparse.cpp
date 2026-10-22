@@ -153,6 +153,66 @@ void validate_triangular_action(Device &device,
         "CSR triangular update requires mutable_values");
 }
 
+// A public plan must prove its frozen semantics and concrete port association.
+// Version 1 remains the internal plan-only action; version 2 carries the
+// consumer's independently bound requirements. No runtime handle layout changes.
+template <bool Update>
+struct QualifiedTriangularOperation : CsrTriangularF32Operation<Update> {
+  static constexpr std::uint32_t version = 2;
+  CsrTriangularF32Description expected;
+};
+
+CsrTriangularF32Description triangular_parameters(
+    const liong::json::JsonValue &parameters) {
+  operation_json::fields(
+      parameters, {"rhs_count", "fill_mode", "unit_diagonal", "transpose",
+                   "mutable_values"});
+  CsrTriangularF32Description op;
+  const auto rhs = operation_json::integer(parameters["rhs_count"]);
+  if (rhs == 0 || rhs > std::uint64_t(std::numeric_limits<std::int64_t>::max()))
+    throw std::invalid_argument("CSR triangular requires positive rhs_count");
+  op.rhs_count = static_cast<std::int64_t>(rhs);
+  if (const auto found = parameters.obj.inner.find("fill_mode");
+      found != parameters.obj.inner.end()) {
+    const auto name = operation_json::name(found->second);
+    if (name != "lower" && name != "upper")
+      throw std::invalid_argument("CSR triangular fill_mode must be lower or upper");
+    op.upper = name == "upper";
+  }
+  op.unit_diagonal = operation_json::optional_bool(parameters, "unit_diagonal");
+  op.transpose = operation_json::optional_bool(parameters, "transpose");
+  op.mutable_values = operation_json::optional_bool(parameters, "mutable_values");
+  return op;
+}
+
+void bind_triangular_ports(CsrTriangularF32Description &result,
+                           const NativeOperationBindings &bindings) {
+  result.matrix = bindings.at("matrix").resource<CsrF32Resource>();
+  result.input = bindings.at("input").array();
+  result.output = bindings.at("output").array();
+}
+
+template <bool Update>
+void validate_qualified_triangular(Device &device,
+                                   const QualifiedTriangularOperation<Update> &op) {
+  validate_triangular_action<Update>(device, op);
+  validate_triangular(device, op.expected);
+  const auto &actual = op.plan->description();
+  const auto &expected = op.expected;
+  if (actual.matrix != expected.matrix || actual.rhs_count != expected.rhs_count ||
+      actual.upper != expected.upper || actual.unit_diagonal != expected.unit_diagonal ||
+      actual.transpose != expected.transpose || actual.mutable_values != expected.mutable_values)
+    throw std::invalid_argument("CSR triangular public plan contract mismatch");
+  auto same_port = [&](const NativeArrayBinding &a, const NativeArrayBinding &b) {
+    return a.scalar_type == b.scalar_type && a.shape == b.shape &&
+           a.element_shape == b.element_shape &&
+           resolve_native_storage_range(Arch::cuda, a.pointer, a.bytes)
+               .proven_same_range(resolve_native_storage_range(Arch::cuda, b.pointer, b.bytes));
+  };
+  if (!same_port(actual.input, expected.input) || !same_port(actual.output, expected.output))
+    throw std::invalid_argument("CSR triangular public plan input/output binding mismatch");
+}
+
 #ifdef TI_WITH_CUDA
 NativeOperationAvailability probe_cusparse() {
   if (!CUDADriver::get_instance_without_context().nvidia_extensions_available())
@@ -473,6 +533,34 @@ void register_triangular_action(NativeOperationRegistry &registry) {
       [] { return probe_triangular(Update); });
 #endif
 }
+
+template <bool Update>
+void register_qualified_triangular_action(NativeOperationRegistry &registry) {
+  using Op = QualifiedTriangularOperation<Update>;
+  registry.define<Op>(validate_qualified_triangular<Update>);
+  registry.register_schema<Op>(
+      "cusparse", Update ? "triangular_update_f32" : "triangular_solve_f32",
+      {"plan", "matrix", "input", "output"},
+      [](const liong::json::JsonValue &parameters) -> NativeOperationRegistry::Binder<Op> {
+        auto expected = triangular_parameters(parameters);
+        return [expected](const NativeOperationBindings &bindings) {
+          Op op;
+          op.plan = bindings.at("plan").resource<CsrTriangularF32Resource>();
+          op.expected = expected;
+          bind_triangular_ports(op.expected, bindings);
+          return op;
+        };
+      });
+#ifdef TI_WITH_CUDA
+  registry.register_factory<Op>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      [](Arch, Device &, const Op &description) {
+        return std::make_shared<CudaTriangularAction<Update>>(
+            std::dynamic_pointer_cast<CudaTriangularPlan>(description.plan));
+      },
+      [] { return probe_triangular(Update); });
+#endif
+}
 }  // namespace
 
 void register_cusparse_operations(NativeOperationRegistry &registry) {
@@ -482,38 +570,17 @@ void register_cusparse_operations(NativeOperationRegistry &registry) {
       "cusparse", "triangular_plan_f32", {"matrix", "input", "output"},
       [](const liong::json::JsonValue &parameters)
           -> NativeOperationRegistry::Binder<CsrTriangularF32Description> {
-        operation_json::fields(
-            parameters, {"rhs_count", "fill_mode", "unit_diagonal", "transpose",
-                         "mutable_values"});
-        CsrTriangularF32Description op;
-        op.rhs_count = static_cast<std::int64_t>(
-            operation_json::integer(parameters["rhs_count"]));
-        if (op.rhs_count <= 0)
-          throw std::invalid_argument(
-              "CSR triangular requires positive rhs_count");
-        if (const auto found = parameters.obj.inner.find("fill_mode");
-            found != parameters.obj.inner.end()) {
-          const auto name = operation_json::name(found->second);
-          if (name != "lower" && name != "upper")
-            throw std::invalid_argument(
-                "CSR triangular fill_mode must be lower or upper");
-          op.upper = name == "upper";
-        }
-        op.unit_diagonal =
-            operation_json::optional_bool(parameters, "unit_diagonal");
-        op.transpose = operation_json::optional_bool(parameters, "transpose");
-        op.mutable_values =
-            operation_json::optional_bool(parameters, "mutable_values");
+        const auto op = triangular_parameters(parameters);
         return [op](const NativeOperationBindings &bindings) {
           auto result = op;
-          result.matrix = bindings.at("matrix").resource<CsrF32Resource>();
-          result.input = bindings.at("input").array();
-          result.output = bindings.at("output").array();
+          bind_triangular_ports(result, bindings);
           return result;
         };
       });
   register_triangular_action<false>(registry);
   register_triangular_action<true>(registry);
+  register_qualified_triangular_action<false>(registry);
+  register_qualified_triangular_action<true>(registry);
 #ifdef TI_WITH_CUDA
   registry.register_factory<CsrTriangularF32Description>(
       Arch::cuda, NativeOperationMode::cuda_capture,
