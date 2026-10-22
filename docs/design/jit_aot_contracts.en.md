@@ -10,6 +10,7 @@ operation can be reconstructed. [中文版](jit_aot_contracts.zh.md)
 | --- | --- | --- |
 | Effective kernel compilation options | `KernelCompileRequest` | JIT and AOT share resolved CUDA target facts with lowering and cache identity; CPU host optimization and Vulkan capability policies remain backend-specific. |
 | Actual LLVM call ABI and resource dependencies | `KernelCallContract` in compiled data | JIT registration and AOT metadata project compiled facts. Source `Kernel` is not a second ABI source after compilation. |
+| LLVM SNode layout and tree identity | `LLVM::SNodeTreeLayout` | JIT materialization, AOT reconstruction and retirement consume the same data; the deployment container only serializes it. |
 | GFX call ABI and dependencies | Compiled GFX attributes | Preserve backend layout differences; no universal physical ABI. |
 | Selected Graph execution structure | `graph/_lowering.py` | Traversal, physical operation boundaries, binding rules and control lowering are shared. |
 | Deployment publication and snapshots | AOT `_ExportContext` | Export transaction, structure/Field publication, data capture and post-compilation root closure. |
@@ -25,6 +26,11 @@ LLVM task/module ownership and serializers remain backend-specific. AOT root
 relocation still clones producer code before mutation; its launch ABI is
 projected from transformed code. Source-analysis Graph metadata and deployed
 root-tree identifiers have different meanings and must not be remapped together.
+
+[`snode_tree_layout.h`](../../taichi/runtime/llvm/snode_tree_layout.h) describes
+node types, dimensions, capacity hints and tree/node identities without owning
+LLVM modules or allocated roots. AOT adapters still perform module-local ID
+relocation; the runtime validates the owning tree generation before retirement.
 
 The common [`GraphLoweringContext`](../../python/taichi_forge/graph/_lowering.py)
 is producer-side cold construction state. It has no Module publication or

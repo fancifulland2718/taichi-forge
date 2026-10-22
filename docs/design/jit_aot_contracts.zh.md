@@ -9,6 +9,7 @@
 | --- | --- | --- |
 | 有效 kernel 编译选项 | `KernelCompileRequest` | JIT/AOT 的 CUDA lowering 与缓存身份消费同一已解析目标；CPU 宿主优化与 Vulkan capability 保留后端政策。 |
 | LLVM 实际调用 ABI 与资源依赖 | 编译产物中的 `KernelCallContract` | JIT 注册与 AOT metadata 投影编译事实；编译后不再从 frontend Kernel 维护另一份 ABI。 |
+| LLVM SNode 布局与树身份 | `LLVM::SNodeTreeLayout` | JIT 物化、AOT 重建和退休消费同一数据；部署容器只负责持久化。 |
 | GFX 调用 ABI 与依赖 | 编译后的 GFX attributes | 保留后端物理布局差异，不建立统一物理 ABI。 |
 | 已选 Graph 执行结构 | `graph/_lowering.py` | 共用遍历、物理 operation 边界、绑定规则与控制 lowering。 |
 | 部署发布与快照 | AOT `_ExportContext` | 导出事务、结构/Field 发布、数据捕获、编译后根资源闭包确认。 |
@@ -23,6 +24,10 @@ LLVM 契约定义见
 task/module 所有权及 serializer 继续由后端负责。AOT 根重定位仍先克隆 producer 代码，
 launch ABI 从变换后的代码投影。源分析 Graph metadata 与部署根 tree ID 的含义不同，
 不能一起重映射。
+
+[`snode_tree_layout.h`](../../taichi/runtime/llvm/snode_tree_layout.h) 描述节点类型、
+维度、容量提示和树/节点身份，不拥有 LLVM module 或根分配。AOT adapter 仍负责模块内
+ID 重定位；runtime 在退休前检查所属树的 generation。
 
 共同 [`GraphLoweringContext`](../../python/taichi_forge/graph/_lowering.py)
 只持有生产端冷阶段构造状态，不含 Module 发布或快照事务。

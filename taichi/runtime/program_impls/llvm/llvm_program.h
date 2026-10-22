@@ -57,7 +57,7 @@ class LlvmProgramImpl : public ProgramImpl {
                    int root_id,
                    const StructCompiler &struct_compiler);
 
-  LlvmOfflineCache::FieldCacheData get_cached_field(int snode_tree_id) const {
+  LLVM::SNodeTreeLayout get_cached_field(int snode_tree_id) const {
     TI_ASSERT(cache_data_->fields.find(snode_tree_id) !=
               cache_data_->fields.end());
     return cache_data_->fields.at(snode_tree_id);
@@ -167,7 +167,7 @@ class LlvmProgramImpl : public ProgramImpl {
    * Initializes the SNodes for LLVM based backends.
    */
   void initialize_llvm_runtime_snodes(
-      const LlvmOfflineCache::FieldCacheData &field_cache_data,
+      const LLVM::SNodeTreeLayout &field_cache_data,
       uint64 *result_buffer) {
     runtime_exec_->initialize_llvm_runtime_snodes(field_cache_data,
                                                   result_buffer);

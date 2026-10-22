@@ -83,9 +83,8 @@ inline std::unordered_set<int> aot_element_list_tree_ids(
   return result;
 }
 
-inline void validate_relocatable_aot_field(
-    const LlvmOfflineCache::FieldCacheData &field,
-    bool sparse) {
+inline void validate_relocatable_aot_field(const LLVM::SNodeTreeLayout &field,
+                                           bool sparse) {
   TI_ERROR_IF(field.tree_generation == 0 || field.snode_metas.empty() ||
                   field.snode_metas.size() >
                       std::size_t(std::numeric_limits<int>::max()),

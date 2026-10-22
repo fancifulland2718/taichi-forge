@@ -2,7 +2,6 @@
 
 #include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/runtime/llvm/list_manager_constants.h"
-#include "taichi/runtime/llvm/llvm_offline_cache.h"
 #include "taichi/runtime/llvm/snode_runtime_state.h"
 #include "taichi/runtime/llvm/sparse_tree_statistics.h"
 
@@ -689,7 +688,7 @@ bool LlvmRuntimeExecutor::has_snode_tree_runtime_state(int tree_id) const {
 }
 
 void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
-    const LlvmOfflineCache::FieldCacheData &field_cache_data,
+    const LLVM::SNodeTreeLayout &field_cache_data,
     uint64 *result_buffer,
     std::optional<bool> element_lists) {
   auto *const runtime_jit = get_runtime_jit_module();
@@ -1824,7 +1823,7 @@ void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler,
 }
 
 void LlvmRuntimeExecutor::destroy_snode_tree_runtime(
-    const LlvmOfflineCache::FieldCacheData &field) {
+    const LLVM::SNodeTreeLayout &field) {
   const auto state = active_snode_tree_runtime_states_.find(field.tree_id);
   TI_ERROR_IF(state == active_snode_tree_runtime_states_.end() ||
                   state->second.generation != field.tree_generation,
@@ -1869,17 +1868,18 @@ void LlvmRuntimeExecutor::destroy_snode_tree_runtime(
 }
 
 void LlvmRuntimeExecutor::destroy_snode_tree(SNodeTree *snode_tree) {
-  LlvmOfflineCache::FieldCacheData field;
+  LLVM::SNodeTreeLayout field;
   field.tree_id = snode_tree->id();
   field.tree_generation = snode_tree->generation();
   std::function<void(const SNode *)> collect = [&](const SNode *node) {
-    LlvmOfflineCache::FieldCacheData::SNodeCacheData entry;
+    LLVM::SNodeTreeLayout::Node entry;
     entry.runtime_local_id = node->runtime_local_id;
     entry.type = node->type;
     entry.cell_size_bytes = node->cell_size_bytes;
     entry.chunk_size = node->chunk_size;
     field.snode_metas.push_back(entry);
-    for (const auto &child : node->ch) collect(child.get());
+    for (const auto &child : node->ch)
+      collect(child.get());
   };
   if (arch_is_cpu(config_.arch)) collect(snode_tree->root());
   destroy_snode_tree_runtime(field);

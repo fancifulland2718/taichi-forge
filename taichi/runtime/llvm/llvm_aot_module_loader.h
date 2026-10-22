@@ -3,6 +3,7 @@
 #include "taichi/aot/module_loader.h"
 #include "taichi/runtime/llvm/kernel_launcher.h"
 #include "taichi/runtime/llvm/llvm_aot_metadata.h"
+#include "taichi/runtime/llvm/llvm_offline_cache.h"
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
 
 namespace taichi::lang {
@@ -60,7 +61,7 @@ class LlvmAotModule final : public aot::Module {
     return initialized_snode_tree_ids.count(snode_tree_id);
   }
 
-  void initialize_snode_tree(const LlvmOfflineCache::FieldCacheData &field,
+  void initialize_snode_tree(const LLVM::SNodeTreeLayout &field,
                              uint64 *result_buffer);
 
   std::unique_ptr<aot::CompiledGraph> get_graph(

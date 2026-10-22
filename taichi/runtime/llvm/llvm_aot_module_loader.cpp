@@ -146,7 +146,7 @@ LlvmAotModule::LlvmAotModule(
   // tree. Legacy artifacts retain their original ID collision contract.
   for (std::size_t i = 0; i < snode_tree_ids_.size(); ++i) {
     const int id = snode_tree_ids_[i];
-    LlvmOfflineCache::FieldCacheData field;
+    LLVM::SNodeTreeLayout field;
     TI_ERROR_IF(
         !cache_reader_->get_field_cache(field, id) || field.tree_id != id,
         "Invalid LLVM AOT field metadata for tree {}", id);
@@ -217,7 +217,7 @@ LlvmAotModule::~LlvmAotModule() {
     for (const auto &[logical, physical] : tree_bindings_) {
       if (!is_snode_tree_initialized(physical))
         continue;
-      LlvmOfflineCache::FieldCacheData field;
+      LLVM::SNodeTreeLayout field;
       TI_ASSERT(cache_reader_->get_field_cache(field, logical));
       field.tree_id = physical;
       executor_->destroy_snode_tree_runtime(field);
@@ -470,7 +470,7 @@ std::unique_ptr<aot::Field> LlvmAotModule::make_new_field(
   TI_ASSERT(*end == '\0');
 
   // Load FieldCache
-  LlvmOfflineCache::FieldCacheData loaded;
+  LLVM::SNodeTreeLayout loaded;
   auto ok = cache_reader_->get_field_cache(loaded, snode_tree_id);
   TI_ERROR_IF(!ok, "Failed to load field with id={}", snode_tree_id);
   loaded.tree_id = tree_bindings_.at(snode_tree_id);
@@ -497,9 +497,8 @@ std::unique_ptr<aot::CompiledGraph> LlvmAotModule::get_graph(
   return std::make_unique<aot::CompiledGraph>(std::move(graph));
 }
 
-void LlvmAotModule::initialize_snode_tree(
-    const LlvmOfflineCache::FieldCacheData &field,
-    uint64 *result_buffer) {
+void LlvmAotModule::initialize_snode_tree(const LLVM::SNodeTreeLayout &field,
+                                          uint64 *result_buffer) {
   TI_ERROR_IF(is_corrupted(), "Cannot initialize an invalid LLVM AOT module.");
   if (is_snode_tree_initialized(field.tree_id))
     return;

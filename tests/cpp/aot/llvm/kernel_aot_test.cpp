@@ -202,7 +202,7 @@ TEST(LlvmAotMetadataTest, SparseRelocationDoesNotImplyRootSnapshots) {
 }
 
 TEST(LlvmAotMetadataTest, SparseParentClosureIsValidatedBeforeAllocation) {
-  LlvmOfflineCache::FieldCacheData field;
+  LLVM::SNodeTreeLayout field;
   field.root_id = 42;
   field.root_runtime_local_id = 2;
   field.snode_metas.resize(3);
@@ -262,7 +262,7 @@ TEST(LlvmAotMetadataTest, ListOwnersFollowTasksInsteadOfAllKernelDependencies) {
 }
 
 TEST(LlvmAotMetadataTest, HashCapacityRetainsTheCompilerIndexContract) {
-  LlvmOfflineCache::FieldCacheData field;
+  LLVM::SNodeTreeLayout field;
   field.snode_metas.resize(3);
   for (int i = 0; i < 3; ++i) {
     auto &node = field.snode_metas[i];

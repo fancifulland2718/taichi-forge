@@ -8,6 +8,7 @@
 #include "taichi/common/core.h"
 #include "taichi/common/serialization.h"
 #include "taichi/common/virtual_dir.h"
+#include "taichi/runtime/llvm/snode_tree_layout.h"
 #include "taichi/program/kernel.h"
 #include "taichi/util/offline_cache.h"
 #include "taichi/codegen/llvm/llvm_compiled_data.h"
@@ -68,89 +69,16 @@ struct LlvmOfflineCache {
               args_size);
   };
 
-  struct FieldCacheData {
-    struct SNodeCacheData {
-      int id{0};
-      int parent_id{-1};
-      int runtime_local_id{-1};
-      SNodeType type = SNodeType::undefined;
-      size_t cell_size_bytes{0};
-      size_t chunk_size{0};
-      // P-Sparse-Mem-2-A Phase 0.5 (2026-05): per-SNode user-provided
-      // capacity hint (mirrors SNode::vk_max_active_hint, -1 = unset) and
-      // the cached `num_cells_per_container` lower bound. Consumed by the
-      // CUDA sparse pool sizing path in initialize_llvm_runtime_snodes to
-      // avoid worst-case `(1 + headroom) * chunk_bytes` over-allocation.
-      // Vulkan reads the live SNode field directly; here we serialize so
-      // the LLVM offline cache reload path keeps Phase 0.5 sizing.
-      int64_t vk_max_active_hint{-1};
-      int64_t hash_expected_active_hint{-1};
-      int64_t num_cells_per_container{1};
-      int64_t total_num_cells_from_root{1};
-
-      TI_IO_DEF(id,
-                parent_id,
-                runtime_local_id,
-                type,
-                cell_size_bytes,
-                chunk_size,
-                vk_max_active_hint,
-                hash_expected_active_hint,
-                num_cells_per_container,
-                total_num_cells_from_root);
-    };
-
-    int tree_id{0};
-    std::uint64_t tree_generation{1};
-    int root_id{0};
-    int root_runtime_local_id{0};
-    size_t root_size{0};
-    std::vector<SNodeCacheData> snode_metas;
-
-    TI_IO_DEF(tree_id,
-              tree_generation,
-              root_id,
-              root_runtime_local_id,
-              root_size,
-              snode_metas);
-
-    // TODO(zhanlue): refactor llvm::Modules
-    //
-    // struct_module will eventually get cloned into each kernel_module,
-    // so there's no need to serialize it here.
-    //
-    // We have three different types of llvm::Module
-    // 1. runtime_module: contains runtime functions.
-    // 2. struct_module: contains compiled SNodeTree in llvm::Type.
-    // 3. kernel_modules: contains compiled kernel codes.
-    //
-    // The way those modules work rely on a recursive clone mechanism:
-    //   runtime_module = load("runtime.bc")
-    //   struct_module = clone(runtime_module) + compiled-SNodeTree
-    //   kernel_module = clone(struct_module) + compiled-Kernel
-    //
-    // As a result, every kernel_module contains a copy of struct_module +
-    // runtime_module.
-    //
-    // This recursive clone mechanism is super fragile,
-    // which potentially causes inconsistency between modules if not handled
-    // properly.
-    //
-    // Let's turn to use llvm::link to bind the modules,
-    // and make runtime_module, struct_module, kernel_module independent of each
-    // other
-  };
-
   using KernelMetadata = KernelCacheData;  // Required by CacheCleaner
 
   Version version{};
   std::size_t size{0};  // byte
 
-  // TODO(zhanlue): we need a better identifier for each FieldCacheData
+  // TODO(zhanlue): we need a better identifier for each LLVM::SNodeTreeLayout
   // (SNodeTree) Given that snode_tree_id is not continuous, it is ridiculous to
   // ask the users to remember each of the snode_tree_ids
   // ** Find a way to name each SNodeTree **
-  std::unordered_map<int, FieldCacheData> fields;  // key = snode_tree_id
+  std::unordered_map<int, LLVM::SNodeTreeLayout> fields;  // key = snode_tree_id
 
   std::unordered_map<std::string, KernelCacheData>
       kernels;  // key = kernel_name
@@ -178,8 +106,7 @@ class LlvmOfflineCacheFileReader {
   bool take_kernel_metadata(LlvmOfflineCache::KernelCacheData &res,
                             const std::string &key);
 
-  bool get_field_cache(LlvmOfflineCache::FieldCacheData &res,
-                       int snode_tree_id);
+  bool get_field_cache(LLVM::SNodeTreeLayout &res, int snode_tree_id);
 
   size_t get_num_snode_trees();
   std::vector<int> get_snode_tree_ids() const;

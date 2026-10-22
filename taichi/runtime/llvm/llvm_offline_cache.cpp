@@ -180,9 +180,8 @@ std::vector<int> LlvmOfflineCacheFileReader::get_snode_tree_ids() const {
   return ids;
 }
 
-bool LlvmOfflineCacheFileReader::get_field_cache(
-    LlvmOfflineCache::FieldCacheData &res,
-    int snode_tree_id) {
+bool LlvmOfflineCacheFileReader::get_field_cache(LLVM::SNodeTreeLayout &res,
+                                                 int snode_tree_id) {
   auto itr = data_.fields.find(snode_tree_id);
   if (itr == data_.fields.end()) {
     TI_DEBUG("Cannot find field with snode_tree_id={}", snode_tree_id);

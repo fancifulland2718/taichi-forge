@@ -8,7 +8,7 @@
 #ifdef TI_WITH_LLVM
 
 #include "taichi/rhi/llvm/llvm_device.h"
-#include "taichi/runtime/llvm/llvm_offline_cache.h"
+#include "taichi/runtime/llvm/snode_tree_layout.h"
 #include "taichi/runtime/llvm/snode_tree_buffer_manager.h"
 #include "taichi/runtime/snode_tree_id_registry.h"
 #include "taichi/runtime/llvm/llvm_context.h"
@@ -73,14 +73,13 @@ class LlvmRuntimeExecutor {
   void release_aot_snode_tree_ids(const std::vector<int> &ids);
 
   void initialize_llvm_runtime_snodes(
-      const LlvmOfflineCache::FieldCacheData &field_cache_data,
+      const LLVM::SNodeTreeLayout &field_cache_data,
       uint64 *result_buffer,
       std::optional<bool> element_lists = std::nullopt);
 
   // Retire tree-local runtime allocations after its launches have completed.
   // Shared by JIT and AOT; compiler-side struct modules remain caller-owned.
-  void destroy_snode_tree_runtime(
-      const LlvmOfflineCache::FieldCacheData &field);
+  void destroy_snode_tree_runtime(const LLVM::SNodeTreeLayout &field);
 
   // Ndarray and ArgPack Allocation
   DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,

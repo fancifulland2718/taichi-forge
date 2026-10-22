@@ -55,20 +55,18 @@ class KernelImpl : public aot::Kernel {
 
 class FieldImpl : public aot::Field {
  public:
-  explicit FieldImpl(const LlvmOfflineCache::FieldCacheData &field)
-      : field_(field) {
+  explicit FieldImpl(const LLVM::SNodeTreeLayout &field) : field_(field) {
   }
 
-  explicit FieldImpl(LlvmOfflineCache::FieldCacheData &&field)
-      : field_(std::move(field)) {
+  explicit FieldImpl(LLVM::SNodeTreeLayout &&field) : field_(std::move(field)) {
   }
 
-  LlvmOfflineCache::FieldCacheData get_snode_tree_cache() const {
+  LLVM::SNodeTreeLayout get_snode_tree_cache() const {
     return field_;
   }
 
  private:
-  LlvmOfflineCache::FieldCacheData field_;
+  LLVM::SNodeTreeLayout field_;
 };
 
 }  // namespace llvm_aot

@@ -105,7 +105,7 @@ void LlvmProgramImpl::cache_field(int snode_tree_id,
     return;
   }
 
-  LlvmOfflineCache::FieldCacheData ret;
+  LLVM::SNodeTreeLayout ret;
   ret.tree_id = snode_tree_id;
   ret.tree_generation = tree_generation;
   ret.root_id = root_id;
@@ -118,7 +118,7 @@ void LlvmProgramImpl::cache_field(int snode_tree_id,
   TI_ASSERT(root != snodes.end());
   ret.root_runtime_local_id = (*root)->runtime_local_id;
   for (size_t i = 0; i < snodes.size(); i++) {
-    LlvmOfflineCache::FieldCacheData::SNodeCacheData snode_cache_data;
+    LLVM::SNodeTreeLayout::Node snode_cache_data;
     snode_cache_data.id = snodes[i]->id;
     snode_cache_data.parent_id =
         snodes[i]->parent == nullptr ? -1 : snodes[i]->parent->id;
