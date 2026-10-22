@@ -627,6 +627,146 @@ struct DomainInstance final : RuntimeClient {
   }
 };
 
+TEST_F(CudaExecutionDependency, InstanceRetirementWaitsOnlyItsOwnPrefixAndReusesBudget) {
+  cuda::ExecutionDomain domain(fault, {3, 0, 1});
+  auto client = std::make_shared<DomainInstance>();
+  auto instance = domain.prepare_owned_instance(client, [](const auto &) {});
+  auto first = domain.submit_instance(instance, {}, nullptr, [&](void *stream) {
+    CUDADriver::get_instance().memsetd32_async(at(0), 17, 1, stream);
+  });
+  testing::CudaExternalGate gate;
+  auto later = domain.submit({}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+  client->on_retire = [&] {
+    EXPECT_TRUE(first.done());
+    EXPECT_FALSE(later.done());
+    EXPECT_TRUE(domain.snapshot().accepting);
+  };
+  auto closing = std::async(std::launch::async, [&] { domain.retire_instance(instance); });
+  const bool independent = closing.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  EXPECT_TRUE(independent);
+  EXPECT_FALSE(gate.timed_out());
+  if (!independent)
+    gate.release();  // Keep a failed assertion from deadlocking teardown.
+  closing.get();
+  EXPECT_EQ(client->retire_calls.load(), 1);
+  domain.retire_instance(instance);
+  int enqueued = 0;
+  EXPECT_THROW(domain.submit_instance(instance, {}, nullptr, [&](void *) { ++enqueued; }),
+               std::invalid_argument);
+  EXPECT_EQ(enqueued, 0);
+  for (int i = 0; i < 3; ++i) {
+    auto replacement_client = std::make_shared<DomainInstance>();
+    auto replacement = domain.prepare_owned_instance(replacement_client, [](const auto &) {});
+    domain.retire_instance(replacement);
+    EXPECT_EQ(replacement_client->retire_calls.load(), 1);
+  }
+  if (independent) {
+    EXPECT_FALSE(later.done());
+    gate.release();
+  }
+  later.wait();
+  domain.close();
+  EXPECT_TRUE(first.done());
+  first.wait();
+  EXPECT_EQ(client->retire_calls.load(), 1);
+}
+
+TEST_F(CudaExecutionDependency, InstanceRetirementKeepsPendingWorkAndOtherDomainProgress) {
+  cuda::ExecutionDomain domain(fault, {2, 0, 1});
+  cuda::ExecutionDomain peer(fault, {1, 0, 1});
+  auto client = std::make_shared<DomainInstance>();
+  auto instance = domain.prepare_owned_instance(client, [](const auto &) {});
+  testing::CudaExternalGate gate;
+  auto pending = domain.submit_instance(instance, {}, nullptr, [&](void *stream) {
+    gate.enqueue_wait(stream);
+    CUDADriver::get_instance().memsetd32_async(at(0), 23, 1, stream);
+  });
+  EXPECT_THROW(peer.submit_instance(instance, {}, nullptr, [](void *) {}), std::invalid_argument);
+  EXPECT_THROW(peer.retire_instance(instance), std::invalid_argument);
+  auto closing = std::async(std::launch::async, [&] { domain.retire_instance(instance); });
+  EXPECT_EQ(closing.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+  EXPECT_EQ(client->retire_calls.load(), 0);
+  auto independent = peer.submit({}, nullptr, [&](void *stream) {
+    CUDADriver::get_instance().memsetd32_async(at(1), 29, 1, stream);
+  });
+  EXPECT_TRUE(poll_until(independent));
+  EXPECT_FALSE(pending.done());
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  closing.get();
+  EXPECT_TRUE(pending.done());
+  EXPECT_EQ(client->retire_calls.load(), 1);
+}
+
+TEST_F(CudaExecutionDependency, IndividualRetirementAndDomainCloseDoNotDoubleRetire) {
+  cuda::ExecutionDomain domain(fault, {1, 0, 1});
+  auto client = std::make_shared<DomainInstance>();
+  auto instance = domain.prepare_owned_instance(client, [](const auto &) {});
+  std::promise<void> entered, release;
+  auto released = release.get_future().share();
+  client->on_retire = [&] {
+    entered.set_value();
+    released.wait();
+  };
+  auto individual = std::async(std::launch::async, [&] { domain.retire_instance(instance); });
+  entered.get_future().wait();
+  EXPECT_THROW(domain.prepare_owned_instance(std::make_shared<DomainInstance>(), [](const auto &) {}),
+               std::runtime_error);
+  auto closing = std::async(std::launch::async, [&] { domain.close(); });
+  EXPECT_EQ(closing.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+  release.set_value();
+  individual.get();
+  closing.get();
+  domain.retire_instance(instance);
+  EXPECT_TRUE(domain.snapshot().closed);
+  EXPECT_EQ(client->retire_calls.load(), 1);
+}
+
+TEST_F(CudaExecutionDependency, FailedIndividualRetirementPreservesPeersAndQuarantinesItsBudget) {
+  cuda::ExecutionDomain domain(fault, {1, 0, 2});
+  auto broken_client = std::make_shared<DomainInstance>();
+  broken_client->on_retire = [] { throw std::runtime_error("retirement failed"); };
+  auto broken = domain.prepare_owned_instance(broken_client, [](const auto &) {});
+  auto healthy_client = std::make_shared<DomainInstance>();
+  auto healthy = domain.prepare_owned_instance(healthy_client, [](const auto &) {});
+  EXPECT_THROW(domain.retire_instance(broken), std::runtime_error);
+  EXPECT_THROW(domain.retire_instance(broken), std::runtime_error);
+  EXPECT_EQ(broken_client->retire_calls.load(), 1);
+  EXPECT_THROW(domain.prepare_owned_instance(std::make_shared<DomainInstance>(), [](const auto &) {}),
+               std::runtime_error);
+  EXPECT_TRUE(poll_until(domain.submit_instance(healthy, {}, nullptr, [](void *) {})));
+  domain.retire_instance(healthy);
+  auto replacement_client = std::make_shared<DomainInstance>();
+  auto replacement = domain.prepare_owned_instance(replacement_client, [](const auto &) {});
+  EXPECT_TRUE(poll_until(domain.submit_instance(replacement, {}, nullptr, [](void *) {})));
+  EXPECT_THROW(domain.close(), std::runtime_error);
+  EXPECT_EQ(healthy_client->retire_calls.load(), 1);
+  EXPECT_EQ(replacement_client->retire_calls.load(), 1);
+  EXPECT_EQ(broken_client->retire_calls.load(), 1);
+}
+
+TEST_F(CudaExecutionDependency, FatalIndividualRetirementFaultsRuntime) {
+  cuda::ExecutionDomain domain(fault, {1, 0, 1});
+  auto client = std::make_shared<DomainInstance>();
+  // Inject the provider report, without deliberately faulting the actual GPU.
+  client->on_retire = [] {
+    throw BackendRuntimeError(Arch::cuda, CUDA_ERROR_ILLEGAL_ADDRESS,
+                              "retire test provider", "injected device fault");
+  };
+  auto instance = domain.prepare_owned_instance(client, [](const auto &) {});
+  auto ticket = domain.submit_instance(instance, {}, nullptr, [](void *) {});
+  ticket.wait();
+  EXPECT_THROW(domain.retire_instance(instance), BackendRuntimeError);
+  const auto observed = fault->snapshot();
+  ASSERT_TRUE(observed.first_fault.has_value());
+  EXPECT_EQ(observed.first_fault->submission_sequence, ticket.sequence());
+  EXPECT_EQ(observed.state, RuntimeLifecycleState::kFaulted);
+  EXPECT_ANY_THROW(domain.submit({}, nullptr, [](void *) {}));
+  EXPECT_THROW(domain.retire_instance(instance), BackendRuntimeError);
+  EXPECT_EQ(client->retire_calls.load(), 1);
+  // The finite failed owner is quarantined; no backend frees run after fault.
+}
+
 TEST_F(CudaExecutionDependency, RegistryDrainsPeersBeforeProviderDestruction) {
   cuda::ExecutionDomainRegistry registry(fault, 2);
   auto ready_domain = registry.create({1, 0});

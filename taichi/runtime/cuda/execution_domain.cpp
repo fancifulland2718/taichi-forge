@@ -1,5 +1,6 @@
 #include "taichi/runtime/cuda/execution_domain.h"
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <exception>
@@ -24,6 +25,24 @@ void check_result(Function &function,
 }
 }  // namespace
 
+// All mutable fields are protected by the owning domain's admission mutex.
+// Public tickets retain their own completion state after this owner retires.
+class ExecutionInstance {
+ public:
+  const std::uint64_t domain;
+  std::shared_ptr<RuntimeClient> client;
+  RuntimeCompletion latest;
+  std::exception_ptr error;
+  bool accepting{false};
+  bool retiring{false};
+  bool retired{false};
+  bool unsealed_submission{false};
+
+  ExecutionInstance(std::uint64_t domain, std::shared_ptr<RuntimeClient> client)
+      : domain(domain), client(std::move(client)) {
+  }
+};
+
 struct ExecutionDomain::State {
   struct Pending {
     std::uint64_t sequence{0};
@@ -41,8 +60,9 @@ struct ExecutionDomain::State {
   std::shared_ptr<RuntimeCompletionCudaEventPool> events;
   std::vector<Pending> pending;
   std::vector<StreamGpuTiming> timings;
-  std::vector<std::shared_ptr<RuntimeClient>> instances;
+  std::vector<std::shared_ptr<ExecutionInstance>> instances;
   std::size_t preparing_instances{0};
+  std::size_t retiring_instances{0};
   std::size_t head{0};
   std::size_t count{0};
   std::uint64_t last_sequence{0};
@@ -186,6 +206,34 @@ RuntimeCompletion ExecutionDomain::submit(
     const std::function<void(void *)> &before_timing,
     const std::function<void(void *)> &after_timing,
     bool sample_gpu) {
+  return submit_impl({}, dependencies, std::move(resources), enqueue, admit,
+                      before_timing, after_timing, sample_gpu);
+}
+
+RuntimeCompletion ExecutionDomain::submit_instance(
+    const std::shared_ptr<ExecutionInstance> &instance,
+    const std::vector<RuntimeCompletion> &dependencies,
+    std::shared_ptr<RuntimeCompletionResources> resources,
+    const std::function<void(void *)> &enqueue,
+    const std::function<void()> &admit,
+    const std::function<void(void *)> &before_timing,
+    const std::function<void(void *)> &after_timing,
+    bool sample_gpu) {
+  if (!instance)
+    throw std::invalid_argument("CUDA instance submission requires an owner");
+  return submit_impl(instance, dependencies, std::move(resources), enqueue,
+                      admit, before_timing, after_timing, sample_gpu);
+}
+
+RuntimeCompletion ExecutionDomain::submit_impl(
+    const std::shared_ptr<ExecutionInstance> &instance,
+    const std::vector<RuntimeCompletion> &dependencies,
+    std::shared_ptr<RuntimeCompletionResources> resources,
+    const std::function<void(void *)> &enqueue,
+    const std::function<void()> &admit,
+    const std::function<void(void *)> &before_timing,
+    const std::function<void(void *)> &after_timing,
+    bool sample_gpu) {
   if (!enqueue)
     throw std::invalid_argument(
         "CUDA submission requires an enqueue operation");
@@ -204,6 +252,8 @@ RuntimeCompletion ExecutionDomain::submit(
     std::rethrow_exception(state.first_error);
   if (!state.accepting || state.closing || state.closed)
     throw std::runtime_error("CUDA execution domain is closing or closed");
+  if (instance && (instance->domain != state.identity || !instance->accepting))
+    throw std::invalid_argument("CUDA instance belongs to another domain or has retired");
   for (const auto &dependency : dependencies)
     dependency.validate_cuda_dependency(state.owner_id, state.owner);
   if (state.count == state.pending.size())
@@ -223,6 +273,8 @@ RuntimeCompletion ExecutionDomain::submit(
   slot.resources = std::move(resources);
   state.last_sequence = sequence;
   ++state.count;  // Ownership is published before any possible device effect.
+  if (instance)
+    instance->unsealed_submission = true;
   bool finalized = false;
   try {
     for (const auto &dependency : dependencies)
@@ -238,6 +290,10 @@ RuntimeCompletion ExecutionDomain::submit(
     if (after_timing)
       after_timing(state.stream);
     state.publish(slot, timing);
+    if (instance) {
+      instance->latest = slot.completion;
+      instance->unsealed_submission = false;
+    }
     return slot.completion;
   } catch (...) {
     auto error = std::current_exception();
@@ -259,6 +315,10 @@ RuntimeCompletion ExecutionDomain::submit(
       } catch (...) {
         state.report(std::current_exception(), sequence);
       }
+    }
+    if (instance && slot.completion.valid()) {
+      instance->latest = slot.completion;
+      instance->unsealed_submission = false;
     }
     std::rethrow_exception(error);
   }
@@ -357,10 +417,19 @@ RuntimeCompletion ExecutionDomain::retirement_completion() const {
 void ExecutionDomain::prepare_instance(
     const std::shared_ptr<RuntimeClient> &instance,
     const std::function<void()> &prepare) {
-  if (!instance || !prepare)
+  if (!prepare)
+    throw std::invalid_argument("CUDA execution instance requires preparation");
+  (void)prepare_owned_instance(instance, [&](const auto &) { prepare(); });
+}
+
+std::shared_ptr<ExecutionInstance> ExecutionDomain::prepare_owned_instance(
+    const std::shared_ptr<RuntimeClient> &client,
+    const std::function<void(const std::shared_ptr<ExecutionInstance> &)> &prepare) {
+  if (!client || !prepare)
     throw std::invalid_argument(
         "CUDA execution instance requires an owner and preparation");
   auto &state = *state_;
+  auto instance = std::make_shared<ExecutionInstance>(state.identity, client);
   {
     std::lock_guard<std::mutex> lock(state.mutex);
     state.owner->throw_if_new_submission_disallowed(
@@ -375,11 +444,11 @@ void ExecutionDomain::prepare_instance(
   }
   std::exception_ptr error, retirement_error;
   try {
-    prepare();
+    prepare(instance);
   } catch (...) {
     error = std::current_exception();
     try {
-      instance->retire();
+      client->retire();
     } catch (...) {
       retirement_error = std::current_exception();
     }
@@ -390,9 +459,72 @@ void ExecutionDomain::prepare_instance(
     // instance until cold close can retry or quarantine its finite storage.
     if (!error || retirement_error)
       state.instances.push_back(instance);
+    instance->accepting = !error;
+    instance->error = retirement_error;
+    instance->retired = error && !retirement_error;
     --state.preparing_instances;
     if (retirement_error)
       state.report(retirement_error, state.last_sequence);
+    state.changed.notify_all();
+  }
+  if (error)
+    std::rethrow_exception(error);
+  return instance;
+}
+
+void ExecutionDomain::retire_instance(
+    const std::shared_ptr<ExecutionInstance> &instance) {
+  auto &state = *state_;
+  RuntimeCompletion prefix;
+  std::shared_ptr<RuntimeClient> client;
+  {
+    std::unique_lock<std::mutex> lock(state.mutex);
+    if (!instance || instance->domain != state.identity)
+      throw std::invalid_argument("CUDA instance belongs to another domain");
+    state.changed.wait(lock, [&] { return !state.closing && !instance->retiring; });
+    if (instance->error)
+      std::rethrow_exception(instance->error);
+    if (instance->retired)
+      return;
+    if (!instance->accepting || instance->unsealed_submission)
+      throw std::runtime_error("CUDA instance has no proven retirement prefix");
+    instance->accepting = false;
+    instance->retiring = true;
+    ++state.retiring_instances;  // Still occupies its existing budget slot.
+    prefix = instance->latest;
+    client = instance->client;
+  }
+  std::exception_ptr error;
+  try {
+    if (prefix.valid())
+      prefix.wait();
+    client->retire();
+  } catch (...) {
+    error = std::current_exception();
+  }
+  // A host teardown error quarantines only this instance. A genuine device
+  // fault still belongs to the shared runtime and must reject peer submissions.
+  if (error) {
+    try {
+      std::rethrow_exception(error);
+    } catch (const BackendRuntimeError &backend) {
+      state.owner->report_backend_error(backend, prefix.sequence());
+    } catch (...) {
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    instance->error = error;
+    instance->retiring = false;
+    --state.retiring_instances;
+    if (!error) {
+      instance->retired = true;
+      instance->client.reset();  // The local owner is released outside the lock.
+      instance->latest = {};
+      const auto found = std::find(state.instances.begin(), state.instances.end(), instance);
+      TI_ASSERT(found != state.instances.end());
+      state.instances.erase(found);
+    }
     state.changed.notify_all();
   }
   if (error)
@@ -421,7 +553,9 @@ void ExecutionDomain::close() {
     state.accepting = false;
     state.closing = true;
     state.closing_thread = std::this_thread::get_id();
-    state.changed.wait(lock, [&] { return state.preparing_instances == 0; });
+    state.changed.wait(lock, [&] {
+      return state.preparing_instances == 0 && state.retiring_instances == 0;
+    });
   }
   std::exception_ptr error;
   try {
@@ -441,7 +575,7 @@ void ExecutionDomain::close() {
     error = std::current_exception();
   }
   std::vector<State::Pending> retired;
-  std::vector<std::shared_ptr<RuntimeClient>> instances;
+  std::vector<std::shared_ptr<ExecutionInstance>> instances;
   {
     std::lock_guard<std::mutex> lock(state.mutex);
     if (!error) {
@@ -466,10 +600,17 @@ void ExecutionDomain::close() {
   std::exception_ptr retirement_error;
   for (const auto &instance : instances) {
     try {
-      instance->retire();
+      if (instance->error)
+        std::rethrow_exception(instance->error);
+      instance->client->retire();
+      instance->retired = true;
+      instance->accepting = false;
+      instance->client.reset();
+      instance->latest = {};
     } catch (...) {
+      instance->error = std::current_exception();
       if (!retirement_error)
-        retirement_error = std::current_exception();
+        retirement_error = instance->error;
     }
   }
   if (!retirement_error)

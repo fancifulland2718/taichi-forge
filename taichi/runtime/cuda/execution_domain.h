@@ -11,6 +11,8 @@
 
 namespace taichi::lang::cuda {
 
+class ExecutionInstance;
+
 class ExecutionDomainBusy : public std::runtime_error {
  public:
   ExecutionDomainBusy() : std::runtime_error("CUDA execution domain is full") {
@@ -89,6 +91,30 @@ class ExecutionDomain {
   void prepare_instance(const std::shared_ptr<RuntimeClient> &instance,
                         const std::function<void()> &prepare);
 
+  // Cold owner registration with an explicit submission identity. The handle
+  // is usable only after prepare returns. Submission records its exact last
+  // prefix under the same admission lock that excludes retirement.
+  std::shared_ptr<ExecutionInstance> prepare_owned_instance(
+      const std::shared_ptr<RuntimeClient> &owner,
+      const std::function<void(const std::shared_ptr<ExecutionInstance> &)> &prepare);
+  RuntimeCompletion submit_instance(
+      const std::shared_ptr<ExecutionInstance> &instance,
+      const std::vector<RuntimeCompletion> &dependencies,
+      std::shared_ptr<RuntimeCompletionResources> resources,
+      const std::function<void(void *)> &enqueue,
+      const std::function<void()> &admit = {},
+      const std::function<void(void *)> &before_timing = {},
+      const std::function<void(void *)> &after_timing = {},
+      bool sample_gpu = false);
+  // Stop this instance, wait only its last accepted prefix, then retire its
+  // client outside the admission lock. Successful teardown releases its budget
+  // even while peers remain pending. Client teardown must not reenter close or
+  // retirement; it can inspect/submit unrelated instances. A failed teardown
+  // retains its owner and budget, and remains observable on repeated calls.
+  // The client's backend/vendor frees may still synchronize other queues;
+  // callers must separately qualify those resource-specific teardown paths.
+  void retire_instance(const std::shared_ptr<ExecutionInstance> &instance);
+
   // Cold, idempotent destructive teardown. The explicit drain waits only for
   // this stream without admission/global CUDA locks, but driver or vendor
   // destruction may synchronize the context. To pause while peers are active,
@@ -99,6 +125,15 @@ class ExecutionDomain {
  private:
   friend class ExecutionDomainRegistry;
   RuntimeCompletion retirement_completion() const;
+  RuntimeCompletion submit_impl(
+      const std::shared_ptr<ExecutionInstance> &instance,
+      const std::vector<RuntimeCompletion> &dependencies,
+      std::shared_ptr<RuntimeCompletionResources> resources,
+      const std::function<void(void *)> &enqueue,
+      const std::function<void()> &admit,
+      const std::function<void(void *)> &before_timing,
+      const std::function<void(void *)> &after_timing,
+      bool sample_gpu);
   struct State;
   std::unique_ptr<State> state_;
 };
