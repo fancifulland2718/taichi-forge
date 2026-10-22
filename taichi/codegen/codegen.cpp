@@ -8,7 +8,6 @@
 #include "taichi/codegen/cpu/codegen_cpu.h"
 #include "taichi/codegen/llvm/cuda_root_binding.h"
 #include "taichi/analysis/gather_snode_tree_dependencies.h"
-#include "taichi/runtime/llvm/llvm_offline_cache.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #endif
 #if defined(TI_WITH_CUDA)

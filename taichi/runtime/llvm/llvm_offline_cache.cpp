@@ -35,66 +35,7 @@ static std::string get_llvm_cache_metadata_json_file_path(
   return taichi::join_path(dir, std::string(kMetadataFilename) + ".json");
 }
 
-static std::vector<std::string> get_possible_llvm_cache_filename_by_key(
-    const std::string &key) {
-  return {
-      key + "." + offline_cache::kLlvmCacheFilenameLLExt,
-      key + "." + offline_cache::kLlvmCacheFilenameBCExt,
-  };
-}
-
 }  // namespace
-
-namespace offline_cache {
-
-template <>
-struct CacheCleanerUtils<LlvmOfflineCache> {
-  using MetadataType = LlvmOfflineCache;
-  using KernelMetaData = typename MetadataType::KernelMetadata;
-
-  // To save metadata as file
-  static bool save_metadata(const CacheCleanerConfig &config,
-                            const MetadataType &data) {
-    write_to_binary_file(
-        data, taichi::join_path(config.path, config.metadata_filename));
-    return true;
-  }
-
-  static bool save_debugging_metadata(const CacheCleanerConfig &config,
-                                      const MetadataType &data) {
-    TextSerializer ts;
-    ts.serialize_to_json("cache", data);
-    ts.write_to_file(
-        taichi::join_path(config.path, config.debugging_metadata_filename));
-    return true;
-  }
-
-  // To get cache files name
-  static std::vector<std::string> get_cache_files(
-      const CacheCleanerConfig &config,
-      const KernelMetaData &kernel_meta) {
-    std::vector<std::string> result;
-    for (const auto &f :
-         get_possible_llvm_cache_filename_by_key(kernel_meta.kernel_key)) {
-      result.push_back(f);
-    }
-    return result;
-  }
-
-  // To remove other files except cache files and offline cache metadta files
-  static void remove_other_files(const CacheCleanerConfig &config) {
-    // Do nothing
-  }
-
-  // To check if a file is cache file
-  static bool is_valid_cache_file(const CacheCleanerConfig &config,
-                                  const std::string &name) {
-    std::string ext = filename_extension(name);
-    return ext == kLlvmCacheFilenameLLExt || ext == kLlvmCacheFilenameBCExt;
-  }
-};
-
-}  // namespace offline_cache
 
 // static
 std::unique_ptr<LlvmOfflineCacheFileReader> LlvmOfflineCacheFileReader::make(
@@ -496,22 +437,6 @@ void LlvmOfflineCacheFileWriter::mangle_offloaded_task_name(
       offload.name = mangled_name;
     }
   }
-}
-
-void LlvmOfflineCacheFileWriter::clean_cache(const std::string &path,
-                                             CleanCachePolicy policy,
-                                             int max_bytes,
-                                             double cleaning_factor) {
-  using CacheCleaner = offline_cache::CacheCleaner<LlvmOfflineCache>;
-  offline_cache::CacheCleanerConfig config;
-  config.path = path;
-  config.policy = policy;
-  config.cleaning_factor = cleaning_factor;
-  config.max_size = max_bytes;
-  config.metadata_filename = std::string(kMetadataFilename) + ".tcb";
-  config.debugging_metadata_filename = std::string(kMetadataFilename) + ".json";
-  config.metadata_lock_name = kMetadataFileLockName;
-  CacheCleaner::run(config);
 }
 
 LlvmOfflineCache::KernelCacheData LlvmOfflineCache::KernelCacheData::clone()

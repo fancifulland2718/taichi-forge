@@ -3,7 +3,8 @@
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/module_loader.h"
 #include "taichi/runtime/llvm/kernel_launcher.h"
-#include "taichi/runtime/llvm/llvm_offline_cache.h"
+#include "taichi/codegen/llvm/kernel_call_contract.h"
+#include "taichi/runtime/llvm/snode_tree_layout.h"
 
 namespace taichi::lang {
 namespace llvm_aot {

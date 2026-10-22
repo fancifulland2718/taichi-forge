@@ -1,6 +1,10 @@
 #pragma once
 
+#include <ctime>
+#include <functional>
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #ifdef TI_WITH_LLVM
@@ -10,15 +14,15 @@
 #include "taichi/common/virtual_dir.h"
 #include "taichi/runtime/llvm/snode_tree_layout.h"
 #include "taichi/program/kernel.h"
-#include "taichi/util/offline_cache.h"
 #include "taichi/codegen/llvm/llvm_compiled_data.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 
 namespace taichi::lang {
 
-// NOTE: The LlvmOfflineCache, LlvmOfflineCacheFileReader and
-// LlvmOfflineCacheFileWriter are only used by LLVM AOT now.
-// TODO(PGZXB): Rename these structs/classes.
+// LLVM AOT deployment metadata and its reader/writer. The historical cache
+// names remain, but JIT disk caching is owned by KernelCompilationManager.
+// Program keeps tree-layout metadata in this container for AOT projection;
+// the shared SNodeTreeLayout itself is independent of the container.
 
 struct LlvmOfflineCache {
   using Version = uint16[3];  // {MAJOR, MINOR, PATCH}
@@ -34,10 +38,11 @@ struct LlvmOfflineCache {
     std::string kernel_key;
     LLVMCompiledKernel compiled_data;
 
-    // For cache cleaning
+    // Existing wire fields used by artifact size accounting and metadata
+    // merges.
     std::size_t size{0};          // byte
-    std::time_t created_at{0};    // millsec
-    std::time_t last_used_at{0};  // millsec
+    std::time_t created_at{0};    // seconds since epoch
+    std::time_t last_used_at{0};  // seconds since epoch
 
     KernelCacheData() = default;
     explicit KernelCacheData(LLVM::CompiledKernelData::InternalData data)
@@ -68,8 +73,6 @@ struct LlvmOfflineCache {
               args_type,
               args_size);
   };
-
-  using KernelMetadata = KernelCacheData;  // Required by CacheCleaner
 
   Version version{};
   std::size_t size{0};  // byte
@@ -141,8 +144,6 @@ class LlvmOfflineCacheFileReader {
 
 class LlvmOfflineCacheFileWriter {
  public:
-  using CleanCachePolicy = offline_cache::CleanCachePolicy;
-
   void set_data(LlvmOfflineCache &&data) {
     this->mangled_ = false;
     this->data_ = std::move(data);
@@ -169,11 +170,6 @@ class LlvmOfflineCacheFileWriter {
   void set_no_mangle() {
     mangled_ = true;
   }
-
-  static void clean_cache(const std::string &path,
-                          CleanCachePolicy policy,
-                          int max_bytes,
-                          double cleaning_factor);
 
  private:
   void merge_with(LlvmOfflineCache &&data);

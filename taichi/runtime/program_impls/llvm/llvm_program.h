@@ -274,44 +274,11 @@ class LlvmProgramImpl : public ProgramImpl {
     return get_llvm_context()->get_struct_type_with_data_layout(old_ty, layout);
   }
 
-  // TODO(zhanlue): Rearrange llvm::Context's ownership
-  //
-  // In LLVM backend, most of the compiled information are stored in
-  // llvm::Module:
-  // 1. Runtime functions are compiled into runtime_module,
-  // 2. Fields are compiled into struct_module,
-  // 3. Each kernel is compiled into individual kernel_module
-  //
-  // However, all the llvm::Modules are owned by llvm::Context, which belongs to
-  // TaichiLLVMContext. Upon destruction, there's an implicit requirement that
-  // TaichiLLVMContext has to stay alive until all the llvm::Modules are
-  // destructed, otherwise there will be risks of dangling references.
-  //
-  // To guarantee the life cycle of llvm::Module stay aligned with
-  // llvm::Context, we better make llvm::Context a more global-scoped variable,
-  // instead of owned by TaichiLLVMContext.
-  //
-  // Objects owning llvm::Module so far (from direct to indirect):
-  // 1. LlvmOfflineCache::CachedKernelData(direct owner)
-  // 2. LlvmOfflineCache
-  //   3.1 LlvmProgramImpl
-  //   3.2 LlvmAotModuleBuilder
-  //   3.3 llvm_aot::KernelImpl (for use in CGraph)
-  //
-  // Objects owning llvm::Context (from direct to indirect)
-  // 1. TaichiLLVMContext
-  // 2. LlvmProgramImpl
-  //
-  // Make sure the above mentioned objects are destructed in order.
+  // Release Program's tree-layout metadata before the executor and its LLVM
+  // contexts. Compiled payloads and backend registrations have separate owners;
+  // their retirement is coordinated by Program finalization.
   ~LlvmProgramImpl() override {
-    // Explicitly enforce "LlvmOfflineCache::CachedKernelData::owned_module"
-    // destructs before
-    // "LlvmRuntimeExecutor::TaichiLLVMContext::ThreadSafeContext"
-
-    // 1. Destructs cache_data_
     cache_data_.reset();
-
-    // 2. Destructs runtime_exec_
     runtime_exec_.reset();
   }
   ParallelExecutor compilation_workers;  // parallel compilation

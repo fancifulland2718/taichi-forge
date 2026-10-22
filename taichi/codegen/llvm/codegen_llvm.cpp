@@ -10,7 +10,6 @@
 #include "taichi/ir/snode_hash_utils.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
-#include "taichi/runtime/llvm/llvm_offline_cache.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/program/extension.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"

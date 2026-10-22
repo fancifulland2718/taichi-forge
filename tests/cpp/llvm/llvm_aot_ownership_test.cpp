@@ -2,6 +2,7 @@
 
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/llvm/aot_graph_data.h"
+#include "taichi/runtime/llvm/llvm_offline_cache.h"
 
 namespace taichi::lang {
 namespace {
