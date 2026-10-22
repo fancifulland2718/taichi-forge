@@ -15724,6 +15724,13 @@ class _GraphOffloadFusionRecipeSource:
             manifests = _kernel_task_manifests(baseline_kernel_cpp)
         except (RuntimeError, TaichiRuntimeError):
             return None
+        # Every fusion candidate needs consecutive range-for tasks. Do not
+        # retain bound methods or template owners for an impossible domain.
+        if not any(
+            first.task_type == second.task_type == "range_for"
+            for first, second in zip(manifests, manifests[1:])
+        ):
+            return None
         return cls(kernel_fn, args, label, baseline_kernel_cpp, manifests, template_args)
 
     def _prepare_definition(self):

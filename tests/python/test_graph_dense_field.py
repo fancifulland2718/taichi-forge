@@ -763,6 +763,8 @@ def test_dense_field_graph_template_owner_uses_two_dense_trees(container):
     gc.collect()
     assert owner_ref() is None
     graph.run({"bias": 0})
+    expected += np.arange(24, dtype=np.int32) * 2
+    np.testing.assert_array_equal(target.to_numpy(), expected)
 
     assert source_tree is not target_tree
 
