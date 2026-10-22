@@ -98,8 +98,13 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   data.args_size = kernel_def.args_size;
   data.ret_type = kernel_def.ret_type;
   data.ret_size = kernel_def.ret_size;
-  auto result =
-      std::make_unique<LLVM::CompiledKernelData>(compile_config.arch, data);
+  auto result = [&]() {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.freeze_payload");
+    // This is the final owner of a newly emitted module. Copying InternalData
+    // clones the whole LLVM module, then immediately discards the original.
+    return std::make_unique<LLVM::CompiledKernelData>(compile_config.arch,
+                                                    std::move(data));
+  }();
   result->initialize_generation_bound_snode_relocation_descriptor(
       true, dependencies.structures);
   return result;
