@@ -52,6 +52,8 @@ class SourceArgPacks:
                 for _, argument, value in self.members(symbol, self.owners[symbol.name]):
                     if argument.tag in (core.ArgKind.TEXTURE, core.ArgKind.RWTEXTURE, core.ArgKind.TEXTURE_COLLECTION):
                         context.source_images.validate_retained_argument(context.arch, argument, value)
+                    elif argument.tag == core.ArgKind.ACCELERATION_STRUCTURE:
+                        context.source_resources.acceleration_structures.validate_retained_argument(context.arch, value)
 
     def bind(self, context, symbol, entry, index, jit_source):
         owner = self.owners.get(symbol.name)
@@ -74,8 +76,12 @@ class SourceArgPacks:
                 resources[path] = name
             elif argument.tag in (core.ArgKind.TEXTURE, core.ArgKind.RWTEXTURE, core.ArgKind.TEXTURE_COLLECTION):
                 resources[path] = context.source_images.retained_kernel_resource(context, argument, value)
+            elif argument.tag == core.ArgKind.ACCELERATION_STRUCTURE:
+                resources[path] = context.source_resources.acceleration_structures.retained_kernel_resource(
+                    context, value
+                )
             elif argument.tag not in (core.ArgKind.SCALAR, core.ArgKind.MATRIX, core.ArgKind.STRUCT):
-                raise TaichiRuntimeError("Fixed Graph ArgPack requires supported value, ndarray or image members")
+                raise TaichiRuntimeError("Fixed Graph ArgPack contains an unsupported resource member")
 
         layout, payloads = native._snapshot_argpack(dispatch, index, packs)
         signature = json.loads(layout)

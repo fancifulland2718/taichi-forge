@@ -30,16 +30,23 @@ from taichi_forge.types.ray_type import AccelerationStructureType
 template_types = (NdarrayType, TextureType, template)
 
 
+def _resource_argument_paths(kernel, resource_type):
+    def visit(annotation, name):
+        if isinstance(annotation, resource_type):
+            yield name
+        elif isinstance(annotation, ArgPackType):
+            for member, dtype in annotation.members.items():
+                yield from visit(dtype, f"{name}.{member}")
+
+    return [name for argument in kernel.arguments for name in visit(argument.annotation, argument.name)]
+
+
 def reject_acceleration_structure_arguments(kernel, integration):
     """Fail closed for integrations without managed AS parameter bindings."""
 
     from taichi_forge.types.ray_type import AccelerationStructureType
 
-    names = [
-        arg.name
-        for arg in kernel.arguments
-        if isinstance(arg.annotation, AccelerationStructureType)
-    ]
+    names = _resource_argument_paths(kernel, AccelerationStructureType)
     if names:
         raise TaichiCompilationError(
             "Vulkan acceleration-structure kernel arguments are unsupported by "
@@ -52,11 +59,7 @@ def reject_acceleration_structure_arguments(kernel, integration):
 def reject_texture_collection_arguments(kernel, integration):
     """Reject integrations without a qualified collection resource binding."""
 
-    names = [
-        arg.name
-        for arg in kernel.arguments
-        if isinstance(arg.annotation, TextureCollectionType)
-    ]
+    names = _resource_argument_paths(kernel, TextureCollectionType)
     if names:
         raise TaichiCompilationError(
             "TextureCollection kernel arguments are JIT-only in this integration; "

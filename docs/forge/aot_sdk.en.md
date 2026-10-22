@@ -1975,7 +1975,7 @@ parameter names; preparation validates all uses. Multiple packs in a single
 kernel dispatch may mix public and source-frozen owners. Cold preparation expands
 public owners and connects frozen resource members using compiled argument origins;
 both retain their explicit gradient bindings. Isolated checks cover sequential plans,
-explicit adjoints and independent instances. Automatic AS members, legacy
+explicit adjoints and independent instances. Legacy
 CGraph serialization and other fixed physical strategies need separate
 qualification. Normal installations have not yet been refreshed with this slice.
 Automatic control checks additionally cover CPU/CUDA/Vulkan WHILE with zero rounds,
@@ -1984,6 +1984,15 @@ WHILE. Branch checks cover CPU, CUDA native conditional nodes and Vulkan's exist
 host-control route, switching selections with public and frozen packs and checking
 actual gradients. A CUDA-domain WHILE with initialization uses one logical instance
 reservation. Nested/fork-join/recording combinations still need their own qualification.
+
+Vulkan `ti.types.acceleration_structure()` pack members bind InstanceTLAS through
+the same argument origins in ordinary kernels, Graphs and automatic plan export.
+Use existing `resource_bindings` for BLAS geometry/TLAS transforms or a public scene
+owner; public packs may also hold consumer-native scenes. Windows checks cover
+consumption after producer reset, hit/miss transitions, primitive/custom IDs,
+barycentrics, downstream ndarray adjoints and invalidation after scene close.
+The query itself gains no automatic differentiation. CPU/CUDA and kernel-template
+families reject nested AS before compilation, identifying the complete member path.
 
 The producer's `Module.add_kernel()` synthesizes compilation exemplars for fully
 declared ArgPacks. When a member ndarray has an unspecified dtype or rank, supply

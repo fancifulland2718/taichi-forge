@@ -2308,9 +2308,8 @@ class Kernel:
                         f"Argument {provided} must be a Vulkan InstanceTLAS"
                     )
                 if in_argpack:
-                    raise TaichiRuntimeTypeError(
-                        "Acceleration structures are not supported inside ArgPack"
-                    )
+                    set_later_list.append((set_arg_acceleration_structure, (v,)))
+                    return 0
                 set_arg_acceleration_structure(indices, v)
                 return 1
             if isinstance(needed, ndarray_type.NdarrayType):

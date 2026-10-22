@@ -19,6 +19,7 @@ from taichi_forge.types import (
 )
 from taichi_forge.types.compound_types import CompoundType
 from taichi_forge.types.utils import is_signed
+from taichi_forge.types.ray_type import AccelerationStructureType, _AccelerationStructureResource
 
 
 class ArgPack:
@@ -204,6 +205,7 @@ class ArgPack:
                 or isinstance(anno, texture_type.TextureType)
                 or isinstance(anno, texture_type.RWTextureType)
                 or isinstance(anno, texture_type.TextureCollectionType)
+                or isinstance(anno, AccelerationStructureType)
                 or isinstance(anno, ndarray_type.NdarrayType)
             ):
                 old_index -= 1
@@ -238,6 +240,12 @@ class ArgPack:
             elif isinstance(needed, texture_type.TextureCollectionType) and isinstance(
                 v, taichi_forge.lang._texture.TextureCollection
             ):
+                pass
+            elif isinstance(needed, AccelerationStructureType) and (
+                v is None or isinstance(v, _AccelerationStructureResource)
+            ):
+                # None is the resource-free compilation exemplar, never a
+                # launchable AS. Ordinary/Graph binders validate live owners.
                 pass
             elif isinstance(needed, ndarray_type.NdarrayType):
                 pass
@@ -342,6 +350,8 @@ class ArgPackType(CompoundType):
                 self.members[k] = dtype
             elif isinstance(dtype, texture_type.TextureCollectionType):
                 self.members[k] = dtype
+            elif isinstance(dtype, AccelerationStructureType):
+                self.members[k] = dtype
             else:
                 dtype = cook_dtype(dtype)
                 self.members[k] = dtype
@@ -406,6 +416,8 @@ class ArgPackType(CompoundType):
             elif isinstance(dtype, texture_type.TextureType):
                 entries[k] = pack._ArgPack__entries[k]
             elif isinstance(dtype, texture_type.TextureCollectionType):
+                entries[k] = pack._ArgPack__entries[k]
+            elif isinstance(dtype, AccelerationStructureType):
                 entries[k] = pack._ArgPack__entries[k]
             elif isinstance(dtype, sparse_matrix_builder):
                 entries[k] = pack._ArgPack__entries[k]

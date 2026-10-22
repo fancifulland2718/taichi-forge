@@ -1546,7 +1546,14 @@ source_bindings={"pack": pack, "values": pack.values})` 同样自动冻结包值
 同一个 owner 可用于参数位置/参数变量名不同但成员合同兼容的 kernel，prepare 验证所有用途。
 同一 kernel dispatch 可以混用公开和源冻结的包。准备阶段根据编译后的参数来源展开
 公开包，并连接冻结包的资源成员；两类成员的显式梯度继续使用各自的绑定。
-本切片已隔离验证三后端顺序计划、显式反向与双实例；自动 AS 成员重建、旧 CGraph
+Vulkan ArgPack 的 `ti.types.acceleration_structure()` 成员可绑定 InstanceTLAS，普通
+kernel、Graph 及自动执行计划导出复用同一参数来源。冻结包的场景通过既有
+`resource_bindings` 提供 BLAS 几何/TLAS transforms，或绑定公开场景 owner；公开包也可
+携带消费端原生场景。Windows 验证源 reset 后消费、命中/miss 切换、primitive/custom ID、
+重心坐标、下游 ndarray 显式梯度及场景关闭后的失效。该查询本身不新增自动微分；
+CPU/CUDA 与 kernel template 家族继续在编译前拒绝嵌套 AS，诊断包含完整成员路径。
+
+本切片已隔离验证三后端顺序计划、显式反向与双实例；旧 CGraph
 序列化及其他固定物理策略仍需各自资格验证。正常安装尚未更新到此切片。
 自动控制另已验证 CPU/CUDA/Vulkan WHILE 的零轮、提前结束、预算耗尽和后续显式伴随，
 GPU 用例要求原生 WHILE。分支覆盖 CPU、CUDA 原生条件节点和 Vulkan 现有 host 控制路线，

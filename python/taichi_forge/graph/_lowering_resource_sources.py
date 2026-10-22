@@ -26,14 +26,23 @@ class SourceAccelerationStructures:
             owner._validate_lifetime()
 
     def resource(self, context, name):
-        from taichi_forge.hardware._aot_vulkan_ray import _scene
-
         owner = self.owners.get(name)
-        if context.arch != core.Arch.vulkan or owner is None:
-            raise TaichiRuntimeError("AOT Vulkan AS argument needs its InstanceTLAS in source_bindings")
-        resource = _scene(context, owner)
+        resource = self.retained_kernel_resource(context, owner)
         self.used.add(name)
         return resource
+
+    @staticmethod
+    def validate_retained_argument(arch, owner):
+        if arch != core.Arch.vulkan or type(owner) is not InstanceTLAS:
+            raise TaichiRuntimeError("AOT Vulkan AS argument requires a qualified InstanceTLAS source")
+        owner._validate_lifetime()
+
+    def retained_kernel_resource(self, context, owner):
+        from taichi_forge.hardware._aot_vulkan_ray import _scene
+
+        self.validate_retained_argument(context.arch, owner)
+        self.used.update(name for name, source in self.owners.items() if source is owner)
+        return _scene(context, owner)
 
     def kernel_resource(self, context, arg):
         return self.resource(context, arg.name)
