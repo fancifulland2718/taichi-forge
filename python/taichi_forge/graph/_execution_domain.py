@@ -11,6 +11,7 @@ from taichi_forge.graph._lowering_resource_bindings import ResourceInputBindings
 from taichi_forge.graph._lowering_resource_sources import SourceResourceBindings
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray, StructNdarray
+from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.argpack import ArgPack
 from taichi_forge.lang._storage_view import DenseNdarrayView, ndarray_view
 from taichi_forge.lang.field import ScalarField
@@ -70,7 +71,8 @@ class _JitContext(GraphLoweringContext):
             set(spec.runtime_arg_names) | set(spec.fixed_runtime_args),
             source_arrays=SourceArrayBindings(None, spec.fixed_runtime_args),
             source_resources=SourceResourceBindings(
-                {name: value for name, value in arguments.items() if isinstance(value, ArgPack)}, spec.fixed_runtime_args
+                {name: value for name, value in arguments.items() if isinstance(value, ArgPack) or type(value) is Texture},
+                spec.fixed_runtime_args,
             ),
             resource_inputs=ResourceInputBindings(None, spec.fixed_runtime_args),
         )
@@ -79,6 +81,7 @@ class _JitContext(GraphLoweringContext):
         self.live_arrays = {}
         self.live_names = {id(value): name for name, value in arguments.items() if isinstance(value, (Ndarray, DenseNdarrayView))}
         self.live_blobs = {}
+        self.live_images = {}
         self.retained_arrays = _JitRetainedArrays(self)
 
     def data_resource(self, *args, **kwargs):
@@ -91,6 +94,17 @@ class _JitContext(GraphLoweringContext):
             raise TypeError("JIT host blobs must be immutable bytes")
         name = self._name("blob")
         self.live_blobs[name] = data
+        return name
+
+    def public_resource(self, owner):
+        if type(owner) is not Texture:
+            return super().public_resource(owner)
+        previous = self._public_resource_owners.get(id(owner))
+        if previous is not None:
+            return previous[1]
+        name = self._name("image")
+        self._public_resource_owners[id(owner)] = (owner, name)
+        self.live_images[name] = owner
         return name
 
     def _kernel_entry(self, kernel, launch_abi, jit_source):
@@ -230,8 +244,8 @@ def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
         )
         if (
             set(plan.argument_names)
-            != (set(spec.runtime_arg_names) - context.source_resources.argpacks.used)
-            | context.live_arrays.keys() | context.live_blobs.keys()
+            != (set(spec.runtime_arg_names) - context.source_resources.used)
+            | context.live_arrays.keys() | context.live_blobs.keys() | context.live_images.keys()
         ):
             raise TaichiRuntimeError(
                 "JIT preparation changed the complete Graph binding contract"
@@ -243,7 +257,7 @@ def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
         # Reject unsupported inputs before importing code or storage. Original
         # fixed workspace is never silently shared between independent calls.
         arguments = dict(
-            ((name, value) for name, value in arguments.items() if name not in context.source_resources.argpacks.used),
+            ((name, value) for name, value in arguments.items() if name not in context.source_resources.used),
             **context.live_arrays,
         )
         for name, value in arguments.items():
@@ -310,6 +324,9 @@ def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
             for name, payload in context.live_blobs.items():
                 blob = runtime.host_blob(payload)
                 imported[("host_blob", name)] = bindings[name] = blob
+            for name, image in context.live_images.items():
+                borrowed = runtime.import_texture(image)
+                imported[("image", name)] = bindings[name] = borrowed
             with runtime._lock:
                 prepared = module.prepare_execution(
                     plan,
@@ -321,7 +338,7 @@ def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
                 # Keep source wrappers until cold domain retirement as well as
                 # native code/storage leases. Dropping a call must not trigger
                 # source Graph capture destruction or resource frees in submit.
-                owners = (*prepared._owners, graph, tuple(arguments.values()), version)
+                owners = (*prepared._owners, graph, tuple(arguments.values()), tuple(context.live_images.values()), version)
                 prepared._owners = owners
                 runtime._domain_owners[execution_domain._native_handle()][
                     prepared._handle

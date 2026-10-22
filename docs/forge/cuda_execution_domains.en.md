@@ -71,6 +71,13 @@ context and concurrent AD entry. Closing the source Graph leaves prepared
 instances usable. Field-tree destruction or Program reset retires dependent
 instances before releasing code or storage.
 
+Fixed sequential Graphs also accept nested ArgPacks. Preparation freezes actual
+device values into private pack storage; ndarray members retain their existing loan
+contract. Sampled Texture arguments and packed members borrow each source image once,
+without copying pixels. Initialize images first and explicitly order pixel updates
+against sampling. Checks cover producer Graph/pack release and independent close in
+two domains; other pack-bearing control recipes require separate qualification.
+
 Explicit and retained dense views keep their finite offsets and element shapes.
 They do not copy roots or force application Fields into new ndarrays. The
 borrowed AOT runtime exposes `runtime.import_dense_view(view)` for the same

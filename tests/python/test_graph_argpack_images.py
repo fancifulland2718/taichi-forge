@@ -1,6 +1,7 @@
 """Pack images reuse the ordinary image reconstruction and alias contracts."""
 
 import array
+import gc
 import json
 
 import pytest
@@ -12,6 +13,54 @@ def read(value):
     values = array.array("f")
     values.frombytes(value.read())
     return list(values)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_pack_image_domain_borrows_alias_and_keeps_peer_live():
+    packet = ti.types.argpack(image=ti.types.texture(2), scale=ti.f32)
+    textures = [ti.Texture(ti.Format.r32f, (2, 1)) for _ in range(2)]
+    source = ti.ndarray(ti.f32, (2, 1))
+    for texture, value in zip(textures, (3, 7)):
+        source.fill(value)
+        texture.from_ndarray(source)
+    pack = packet(image=textures[0], scale=2)
+
+    @ti.kernel
+    def sample(p: packet, image: ti.types.texture(2), output: ti.types.ndarray(ti.f32, 1)):
+        for i in output:
+            xy = ti.Vector([i, 0])
+            output[i] = p.scale * p.image.fetch(xy, 0).x + image.fetch(xy, 0).x
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        sample,
+        ti.graph.Arg(ti.graph.ArgKind.ARGPACK, "pack", packet),
+        ti.graph.Arg(ti.graph.ArgKind.TEXTURE, "alias", ndim=2),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1),
+    )
+    graph = builder.compile()
+    left, right = ti.ndarray(ti.f32, 2), ti.ndarray(ti.f32, 2)
+    with (
+        ti.graph.execution_domain(instance_capacity=1) as first,
+        ti.graph.execution_domain(instance_capacity=1) as second,
+    ):
+        a = graph.prepare(dict(pack=pack, alias=textures[0], output=left), execution_domain=first)
+        a.initialize()
+        pack.image, pack.scale = textures[1], 4
+        b = graph.prepare(dict(pack=pack, alias=textures[1], output=right), execution_domain=second)
+        b.initialize()
+        graph.close()
+        del graph, pack, textures, texture
+        gc.collect()
+        a.submit().wait()
+        b.submit().wait()
+        assert left.to_numpy().tolist() == [9, 9]
+        assert right.to_numpy().tolist() == [35, 35]
+        a.close()
+        first.close()
+        b.submit().wait()
+        assert right.to_numpy().tolist() == [35, 35]
+        b.close()
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)

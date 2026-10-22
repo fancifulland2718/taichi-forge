@@ -1932,13 +1932,17 @@ a mutable pack's old member references as an immutable snapshot. Explicit
 remain constants. A missing gradient owner fails before that dispatch submits.
 Mutable ordinary execution retains resources through the Program launcher.
 
-Fixed value/ndarray packs also work with CUDA
+Fixed value/ndarray/sampled Texture packs also work with CUDA
 `Graph.prepare(..., execution_domain=...)`. Preparation freezes actual device
 values and member references into private pack storage for each instance.
 Changing or releasing the producer pack does not alter that instance. Array
 contents keep their existing loan contract and require explicit concurrent
 dependencies. Call `initialize()` before submitting; replay does not upload pack
 values. Prepare another instance to change frozen values or member references.
+Ordinary Texture arguments and packed members share native image loans, deduplicated
+by source owner without copying pixels. Initialize textures under the existing JIT
+contract and order pixel updates against sampling explicitly. Closing one instance/domain
+leaves an independent borrower usable; Program reset still retires every borrower.
 
 On CPU/CUDA/Vulkan, `Module.add_execution_plan("step", graph,
 source_bindings={"pack": pack, "values": pack.values})` automatically freezes
@@ -1957,8 +1961,9 @@ plus RWTexture and TextureCollection on Vulkan. Supply consumer initialization w
 Export preflight combines ordinary and packed read/write uses, preserving
 sample/write/sample aliases and repeated collection members. Windows checks cover
 ordinary packed sampling, reconstruction, public images and actual downstream
-ndarray adjoints. This does not make texture sampling differentiable or qualify
-independent CUDA-domain image borrowing.
+ndarray adjoints. Texture sampling itself is not differentiable. Separate CUDA
+domain checks cover sampled-image borrowing, ordinary/packed aliases, private pack
+values and independent close. Vulkan independent domains remain separate work.
 
 Omitting the pack from `source_bindings` preserves a public logical input.
 Create it with `packet = plan.argpack(loaded_module, "pack", values,

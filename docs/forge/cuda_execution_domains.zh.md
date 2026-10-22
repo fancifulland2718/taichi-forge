@@ -57,6 +57,11 @@ domain.close()  # 冷阶段，排空并退休资源
 自动 Tape/FwdMode，初始化/提交会排斥该上下文及其并发进入过程。源 Graph 的 `close()`
 不会关闭已准备实例，Field 树销毁或 Program reset 则先退休相关实例再释放代码/存储。
 
+固定顺序 Graph 也支持嵌套 ArgPack：prepare 冻结设备上的纯值，各实例拥有私有包存储，
+ndarray 成员沿已有合同借用。sampled Texture 可作为普通参数或包成员借用，同一源图像
+只导入一次；不会复制像素。源图像应先初始化，更新像素与采样之间仍需显式依赖。
+已验证源 Graph/包释放及双域独立关闭；其他包含包的控制 recipe 需分别取得资格。
+
 显式参数及 Graph 保留的 dense view 均保留切片偏移和元素形状，不复制字段根，也不要求
 应用将 Field 改成新 ndarray。借用 AOT runtime 的 `runtime.import_dense_view(view)`
 在 CPU、CUDA、Vulkan 使用同一存储合同。字段树销毁先排空相关执行，再撤销借用及其

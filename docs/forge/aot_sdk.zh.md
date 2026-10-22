@@ -1515,10 +1515,13 @@ Python ArgPack。成员 ndarray 的 dtype/ndim 必须明确；嵌套成员及提
 此路径也支持显式 `kernel.grad` dispatch 的 managed ndarray 梯度；按值成员仍为常量。
 缺失的梯度 owner 会在该 dispatch 提交前报错。可变普通执行通过 Program launcher 保留资源租约。
 
-固定值/ndarray 参数包可以进入 CUDA `Graph.prepare(..., execution_domain=...)`：
+固定值/ndarray/sampled Texture 参数包可以进入 CUDA `Graph.prepare(..., execution_domain=...)`：
 prepare 冻结实际设备值和成员引用，每个实例拥有私有参数包存储；随后修改或释放源包
 不影响该实例。数组内容仍沿既有借用合同共享，必须显式安排并发依赖。调用
 `initialize()` 后再提交，重放不重新上传包值。需要新包值或成员引用时重新 prepare。
+普通 Texture 参数及包成员复用相同的原生图像借用，按源 owner 去重，不复制像素。
+纹理必须先按原 JIT 合同初始化；像素内容共享，需要明确安排更新与采样之间的依赖。
+关闭一份实例/域不影响独立借用的另一份；Program reset 仍退休所有借用者。
 
 CPU/CUDA/Vulkan 的 `Module.add_execution_plan("step", graph,
 source_bindings={"pack": pack, "values": pack.values})` 同样自动冻结包值，数组成员
@@ -1533,7 +1536,8 @@ source_bindings={"pack": pack, "values": pack.values})` 同样自动冻结包值
 提供消费端初始数据，或用 `{image: "public_image"}` 指定消费端公开 owner。不会隐式复制生产端
 纹理内容。导出预检汇总普通参数及包成员的读写用途，保留采样→写入→采样和 collection 内的
 共享成员别名。Windows 已验证普通包采样、自动重建、公开图像和真实下游 ndarray 反向；
-该结果不表示纹理采样本身可微，也不扩展 CUDA 独立域的 image 借用资格。
+该结果不表示纹理采样本身可微。CUDA 独立域另已验证 sampled Texture 借用、普通参数与
+包成员别名、双域私有包值及独立关闭；Vulkan 的独立域仍需单独实现。
 
 不在 `source_bindings` 提供包时，导出保留其公开逻辑参数。消费端用
 `packet = plan.argpack(loaded_module, "pack", values, gradients=...)` 创建不可变 owner，
