@@ -2312,6 +2312,13 @@ TEST(NativeOperationRegistry, AmgxDescriptionsValidateWithoutLoadingCode) {
   auto solve = NativeOperationDescription::parse(liong::json::parse_complete(
       R"({"kind":"native","provider":"amgx","operation":"solve","version":1,"bindings":{"solver":"s","rhs":"b","solution":"x","status":"status"},"parameters":{"initial_guess":"upload","retain_initial_guess":true}})"));
   EXPECT_NO_THROW(registry.decode(solve));
+  auto bound_solve = solve;
+  bound_solve.version = 2;
+  EXPECT_THROW(registry.decode(bound_solve), std::exception);
+  bound_solve.parameters.obj.inner["binding_id"] = liong::json::JsonValue("binding");
+  EXPECT_NO_THROW(registry.decode(bound_solve));
+  bound_solve.parameters.obj.inner["binding_id"] = liong::json::JsonValue("");
+  EXPECT_THROW(registry.decode(bound_solve), std::invalid_argument);
   for (const auto *patch :
        {R"({"initial_guess":"automatic"})", R"({"initial_guess":2})",
         R"({"retain_initial_guess":1})"}) {

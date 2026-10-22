@@ -4,7 +4,6 @@ import ctypes
 from contextlib import nullcontext
 from functools import partial
 import os
-from pathlib import Path
 from types import MappingProxyType
 import threading
 import weakref
@@ -20,6 +19,7 @@ from taichi_forge.hardware._bundled_runtime_provider import (
 )
 from taichi_forge.hardware._native_adapter import runtime_generation_matches, validate_runtime_generation
 from taichi_forge.hardware._external_cuda_submission import external_cuda_submission
+from taichi_forge.hardware._amgx_definition import solver_definition, solve_definition
 from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
@@ -286,8 +286,8 @@ class AmgxSolver:
                 "This Forge AmgX adapter cannot omit the residual pass; update the Forge adapter, "
                 "or keep compute_residual=True. No vendor library modification is required."
             )
-        rows = _contiguous(row_offsets, np.int32, "row_offsets")
-        columns = _contiguous(column_indices, np.int32, "column_indices")
+        rows = _contiguous(row_offsets, np.int32, "row_offsets").copy()
+        columns = _contiguous(column_indices, np.int32, "column_indices").copy()
         if rows.size < 2:
             raise ValueError("AmgX row_offsets must contain at least two entries")
         row_count = int(rows.size - 1)
@@ -308,20 +308,25 @@ class AmgxSolver:
             raise ValueError("AmgX CSR arrays have inconsistent sizes")
         if isinstance(config_file, np.bool_) or not isinstance(config_file, bool):
             raise TypeError("config_file must be a bool")
-        if config_file:
-            config_value = os.fspath(Path(config).expanduser().resolve())
-        elif not isinstance(config, str):
+        if not config_file and not isinstance(config, str):
             raise TypeError("AmgX config must be a string unless config_file=True")
-        else:
-            config_value = config
-        config_bytes = os.fsencode(config_value)
-        desc = _SolverDesc(
-            ctypes.sizeof(_SolverDesc),
-            1 if dtype == np.float32 else 2,
-            int(config_file),
-            0 if compute_residual else _SKIP_RESIDUAL_NORM,
+        definition = solver_definition(
             row_count,
             nonzeros,
+            "f32" if dtype == np.float32 else "f64",
+            config,
+            config_file=config_file,
+            compute_residual=compute_residual,
+        )
+        parameters = definition.parameters
+        config_bytes = parameters["config"].encode("utf-8")
+        desc = _SolverDesc(
+            ctypes.sizeof(_SolverDesc),
+            1 if parameters["dtype"] == "f32" else 2,
+            0,
+            0 if parameters["compute_residual"] else _SKIP_RESIDUAL_NORM,
+            parameters["rows"],
+            parameters["nonzeros"],
             rows.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
             columns.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
             values_pointer,
@@ -345,6 +350,8 @@ class AmgxSolver:
         if not handle.value:
             raise TaichiRuntimeError("AmgX returned a null solver resource")
         self.provider = provider
+        self._definition = definition
+        self._topology = (rows.tobytes(), columns.tobytes())
         self._handle = handle
         self._lock = threading.RLock()
         self._runtime_prog = provider._runtime_prog
@@ -541,7 +548,15 @@ class AmgxDeviceBinding:
                 if values is None
                 else _device_buffer(values, solver.dtype, solver.nonzeros, "values", solver._runtime_prog)
             )
-            desc = _SolveDesc(ctypes.sizeof(_SolveDesc), int(zero_initial_guess), rhs_ptr, solution_ptr)
+            self._definition = solve_definition(zero_initial_guess, retain_initial_guess)
+            self._arrays = (rhs, solution, values)
+            self._closed = False
+            desc = _SolveDesc(
+                ctypes.sizeof(_SolveDesc),
+                int(self._definition.parameters["initial_guess"] == "zero"),
+                rhs_ptr,
+                solution_ptr,
+            )
             self._solver = solver
             self._solve_action = partial(
                 solver._solve_device, desc, solution, (rhs, solution), solver.provider._execution_api.solve
@@ -598,11 +613,28 @@ class AmgxDeviceBinding:
         with self._solver.provider._lock, self._solver._lock:
             return self._update_solve_action()
 
+    def graph_action(self, *, update_coefficients=False):
+        """Freeze a host-controlled solve for Graph composition and AOT export.
+
+        AOT creates an independent solver session. Supply its initial values via
+        ``resource_bindings={solver: {"values": "initial"}}`` and expose retained
+        arrays via ``source_bindings``. The current vendor-owned solution is not
+        snapshotted; the first solve uses this binding's original guess policy.
+        This preserves the existing producer wait and is not CUDA capture.
+        """
+        from ._amgx_graph import AmgxGraphNode
+
+        if self._closed:
+            raise TaichiRuntimeError("AmgX device binding has been closed")
+        return AmgxGraphNode(self, update_coefficients)
+
     def close(self):
         with self._solver.provider._lock, self._solver._lock:
+            self._closed = True
             self._solve_action = _closed_device_binding
             self._replace_action = _closed_device_binding
             self._update_solve_action = _closed_device_binding
+            self._arrays = (None, None, None)
 
 
 __all__ = (

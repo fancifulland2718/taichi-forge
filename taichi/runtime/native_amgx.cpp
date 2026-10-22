@@ -1,6 +1,8 @@
 #include "taichi/runtime/native_amgx.h"
 
 #include <limits>
+#include <tuple>
+#include <unordered_map>
 #include "taichi/common/operation_json.h"
 #include "taichi/runtime/native_operation_registry.h"
 #ifdef TI_WITH_CUDA
@@ -37,6 +39,72 @@ void validate_array(Device &device,
 struct AmgxRecordingFacts {
   bool has_solution{false};
 };
+
+// Ordinary device bindings initialize their guess independently, even when
+// several bindings share one solver. Version 1 retains solver-wide semantics.
+struct BoundAmgxSolveOperation : AmgxSolveOperation {
+  static constexpr uint32_t version = 2;
+  std::string binding_id;
+};
+
+template <typename Operation>
+void register_solve_schema(NativeOperationRegistry &registry) {
+  registry.define<Operation>([](Device &device, const Operation &op) {
+    validate_owner(device, op.solver);
+    const auto &desc = op.solver->description();
+    validate_array(device, op.rhs, desc.dtype, desc.rows);
+    validate_array(device, op.solution, desc.dtype, desc.rows);
+    if (op.initial_guess > 2)
+      throw std::invalid_argument("Unknown AmgX initial guess policy");
+    if (op.status)
+      validate_array(device, *op.status, PrimitiveType::i32, 1);
+    if (op.iterations)
+      validate_array(device, *op.iterations, PrimitiveType::i32, 1);
+    if (op.residual)
+      validate_array(device, *op.residual, PrimitiveType::f64, 1);
+  });
+  registry.register_schema<Operation>(
+      "amgx", "solve", {"solver", "rhs", "solution"},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<Operation> {
+        using namespace operation_json;
+        Operation result;
+        if constexpr (Operation::version == 2) {
+          fields(parameters,
+                 {"initial_guess", "retain_initial_guess", "binding_id"});
+          result.binding_id = name(parameters.obj.inner.at("binding_id"));
+        } else {
+          fields(parameters, {"initial_guess", "retain_initial_guess"});
+        }
+        if (const auto found = parameters.obj.inner.find("initial_guess");
+            found != parameters.obj.inner.end()) {
+          const auto value = name(found->second);
+          if (value != "upload" && value != "zero" && value != "retained")
+            throw std::invalid_argument("Unknown AmgX initial guess policy");
+          result.initial_guess = value == "upload" ? 0 : value == "zero" ? 1 : 2;
+        }
+        result.retain_initial_guess =
+            optional_bool(parameters, "retain_initial_guess");
+        return [description = result](const NativeOperationBindings &bindings) {
+          auto result = description;
+          result.solver = bindings.at("solver").resource<AmgxSolverResource>();
+          result.rhs = bindings.at("rhs").array();
+          result.solution = bindings.at("solution").array();
+          auto optional =
+              [&](const char *port) -> std::optional<NativeArrayBinding> {
+            const auto found = bindings.find(port);
+            return found == bindings.end()
+                       ? std::nullopt
+                       : std::optional(found->second.array());
+          };
+          result.status = optional("status");
+          result.iterations = optional("iterations");
+          result.residual = optional("residual");
+          return result;
+        };
+      },
+      {}, {"status", "iterations", "residual"});
+}
 
 #ifdef TI_WITH_CUDA
 const NativeProviderDefinition definition{
@@ -109,6 +177,20 @@ class CudaSolver final : public AmgxSolverResource {
     return runtime_->provider_info().features &
            TI_FORGE_RUNTIME_PROVIDER_FEATURE_AMGX_RETAINED_GUESS;
   }
+  std::shared_ptr<bool> binding_state(const std::string &name,
+                                    const AmgxSolveOperation &op) {
+    const BindingIdentity identity{
+        address(device_, op.rhs), address(device_, op.solution), op.initial_guess,
+        op.retain_initial_guess};
+    auto [found, inserted] = binding_states_.try_emplace(name);
+    if (inserted) {
+      found->second = {identity, std::make_shared<bool>(false)};
+    } else if (found->second.identity != identity) {
+      throw std::invalid_argument(
+          "AmgX binding identity has inconsistent ports or guess policy");
+    }
+    return found->second.initialized;
+  }
   void setup(const int32_t *rows, const int32_t *columns, const void *values) {
     TiForgeAmgxSolverDesc desc{};
     desc.struct_size = sizeof(desc);
@@ -137,6 +219,8 @@ class CudaSolver final : public AmgxSolverResource {
     destroy(handle_);
     handle_ = replacement;
     has_solution_ = false;
+    for (const auto &[name, state] : binding_states_)
+      *state.initialized = false;
   }
   void replace(const void *values) {
     require_setup();
@@ -180,6 +264,12 @@ class CudaSolver final : public AmgxSolverResource {
   TiForgeAmgxExecutionApi api_;
   TiForgeAmgxSolver handle_{nullptr};
   bool has_solution_{false};
+  using BindingIdentity = std::tuple<void *, void *, uint32_t, bool>;
+  struct BindingState {
+    BindingIdentity identity;
+    std::shared_ptr<bool> initialized;
+  };
+  std::unordered_map<std::string, BindingState> binding_states_;
 };
 
 class CudaAction : public NativeOperation {
@@ -257,12 +347,15 @@ class CudaReplace final : public CudaAction {
 
 class CudaSolve final : public CudaAction {
  public:
-  CudaSolve(std::shared_ptr<CudaSolver> solver, const AmgxSolveOperation &op)
+  CudaSolve(std::shared_ptr<CudaSolver> solver,
+            const AmgxSolveOperation &op,
+            std::shared_ptr<bool> initialized = {})
       : CudaAction(std::move(solver)),
         rhs_(address(device(), op.rhs)),
         solution_(address(device(), op.solution)),
         guess_(op.initial_guess),
-        retain_(op.retain_initial_guess) {
+        retain_(op.retain_initial_guess),
+        initialized_(std::move(initialized)) {
     if ((guess_ == 2 || retain_) && !solver_->supports_retained_guess())
       throw std::invalid_argument(
           "AmgX adapter cannot retain an initial guess");
@@ -293,7 +386,10 @@ class CudaSolve final : public CudaAction {
     facts.has_solution = true;
   }
   void run_cuda_synchronous() override {
-    auto info = solver_->solve(rhs_, solution_, guess_, retain_);
+    const auto guess = initialized_ && retain_ && *initialized_ ? 2 : guess_;
+    auto info = solver_->solve(rhs_, solution_, guess, !initialized_ && retain_);
+    if (initialized_)
+      *initialized_ = true;
     auto &driver = CUDADriver::get_instance();
     if (output_[0])
       driver.memcpy_host_to_device(output_[0], &info.solve_status,
@@ -310,6 +406,7 @@ class CudaSolve final : public CudaAction {
   void *rhs_, *solution_;
   uint32_t guess_;
   bool retain_;
+  std::shared_ptr<bool> initialized_;
   std::array<void *, 3> output_{};
 };
 #endif
@@ -388,57 +485,8 @@ void register_amgx_operations(NativeOperationRegistry &registry) {
               bindings.at("values").array()};
         };
       });
-  registry.define<AmgxSolveOperation>(
-      [](Device &device, const AmgxSolveOperation &op) {
-        validate_owner(device, op.solver);
-        const auto &desc = op.solver->description();
-        validate_array(device, op.rhs, desc.dtype, desc.rows);
-        validate_array(device, op.solution, desc.dtype, desc.rows);
-        if (op.initial_guess > 2)
-          throw std::invalid_argument("Unknown AmgX initial guess policy");
-        if (op.status)
-          validate_array(device, *op.status, PrimitiveType::i32, 1);
-        if (op.iterations)
-          validate_array(device, *op.iterations, PrimitiveType::i32, 1);
-        if (op.residual)
-          validate_array(device, *op.residual, PrimitiveType::f64, 1);
-      });
-  registry.register_schema<AmgxSolveOperation>(
-      "amgx", "solve", {"solver", "rhs", "solution"},
-      [](const liong::json::JsonValue &parameters)
-          -> NativeOperationRegistry::Binder<AmgxSolveOperation> {
-        using namespace operation_json;
-        fields(parameters, {"initial_guess", "retain_initial_guess"});
-        uint32_t guess = 1;
-        if (const auto found = parameters.obj.inner.find("initial_guess");
-            found != parameters.obj.inner.end()) {
-          const auto value = name(found->second);
-          if (value != "upload" && value != "zero" && value != "retained")
-            throw std::invalid_argument("Unknown AmgX initial guess policy");
-          guess = value == "upload" ? 0 : value == "zero" ? 1 : 2;
-        }
-        const bool retain = optional_bool(parameters, "retain_initial_guess");
-        return [guess, retain](const NativeOperationBindings &bindings) {
-          AmgxSolveOperation result;
-          result.solver = bindings.at("solver").resource<AmgxSolverResource>();
-          result.rhs = bindings.at("rhs").array();
-          result.solution = bindings.at("solution").array();
-          result.initial_guess = guess;
-          result.retain_initial_guess = retain;
-          auto optional =
-              [&](const char *port) -> std::optional<NativeArrayBinding> {
-            const auto found = bindings.find(port);
-            return found == bindings.end()
-                       ? std::nullopt
-                       : std::optional(found->second.array());
-          };
-          result.status = optional("status");
-          result.iterations = optional("iterations");
-          result.residual = optional("residual");
-          return result;
-        };
-      },
-      {}, {"status", "iterations", "residual"});
+  register_solve_schema<AmgxSolveOperation>(registry);
+  register_solve_schema<BoundAmgxSolveOperation>(registry);
 #ifdef TI_WITH_CUDA
   registry.register_context_factory<AmgxSolverDescription>(
       Arch::cuda, NativeOperationMode::cuda_synchronous,
@@ -477,6 +525,17 @@ void register_amgx_operations(NativeOperationRegistry &registry) {
         if (!solver)
           throw std::invalid_argument("AmgX requires a native CUDA solver");
         return std::make_shared<CudaSolve>(std::move(solver), op);
+      },
+      probe);
+  registry.register_context_factory<BoundAmgxSolveOperation>(
+      Arch::cuda, NativeOperationMode::cuda_synchronous,
+      [](NativePreparationContext &, const BoundAmgxSolveOperation &op) {
+        auto solver = std::dynamic_pointer_cast<CudaSolver>(op.solver);
+        if (!solver)
+          throw std::invalid_argument("AmgX requires a native CUDA solver");
+        auto initialized = solver->binding_state(op.binding_id, op);
+        return std::make_shared<CudaSolve>(std::move(solver), op,
+                                           std::move(initialized));
       },
       probe);
 #endif

@@ -31,6 +31,12 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AmgX device binding 提供显式 host 控制的 Graph action，可从冻结配置和 CSR 拓扑自动
+  导出 AOT。消费者提供初始系数，各实例重建独立 solver session；v2 solve 描述保持共享
+  solver 上各 binding 的初始解状态。Windows CUDA f32/f64、无源码/借用消费、系数更新、
+  独立退休及原有显式 adjoint 回归通过。此路径不支持 CUDA capture；依赖仍由外部安装，
+  不改变私有 ABI 或模块格式。
+
 - cuSPARSE triangular recording 的 AOT 导出支持公开共享 plan，同时显式绑定其矩阵。
   v2 update/solve 描述在 prepare 时校验 plan 参数、矩阵身份与输入输出存储，随后复用
   既有数值刷新与求解路径。公开 plan 使用 `mutable_values=True`；需支持该 v2 描述的

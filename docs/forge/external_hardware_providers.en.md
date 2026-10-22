@@ -32,7 +32,7 @@ initialization and workload-specific checks still determine whether it can run.
 | Vulkan driver/ICD | Backend driver dependency | OS/GPU driver installation | `ti.init(arch=ti.vulkan)` plus capability queries | Kernel and documented native Vulkan APIs |
 | cuSPARSELt 0.8.x-0.9.x | Registered bundled-adapter ABI | Forge adapter; user optional package | `ti.hardware.tensor.CusparseLtProvider` / `ti.linalg.record_sparse_matmul` | Retained FP16 2:4 capture and complete shared-A matmul recipes; no kernel intrinsic or automatic rewrite |
 | cuTENSOR 2.0.x-2.7.x | Registered bundled-adapter ABI | Forge adapter; user optional package | `ti.hardware.tensor.CutensorProvider` / `ti.linalg.record_contraction` | Retained root Graph capture and complete contraction dataflows; no kernel intrinsic or implicit auto rewrite |
-| AmgX stable C API | Registered bundled-adapter ABI | Forge adapter; user source build | `ti.hardware.probe(...)` or `ti.hardware.linalg.AmgxProvider` | Host CSR topology, host/device values and vectors; no Graph/kernel/auto route |
+| AmgX stable C API | Registered bundled-adapter ABI | Forge adapter; user source build | `ti.hardware.probe(...)` or `ti.hardware.linalg.AmgxProvider` | Host CSR topology, host/device values and vectors; explicit host-controlled Graph/AOT action |
 | NCCL | Outside Forge's current single-GPU scope | User system package | No public Forge probe or execution API | External multi-GPU communication only |
 
 Registered external providers appear in `ti.hardware.providers()`. Their probe audits a
@@ -73,7 +73,7 @@ entry is declared for that operation; it does not prohibit application providers
 | cuBLASLt matmul region | `ti.linalg.record_matmul(...)`, then `operation.prepare()` | CUDA compact scalar-f32, fixed shape and optional strided batch. Explicit `ti.hardware.linalg.MatmulRecipeProvider()` composes frozen algorithm/workspace choices, real operand packing, and separate/fused ReLU. Use the public operation/provider APIs above. |
 | cuTENSOR contraction region | `ti.linalg.record_contraction(...)`, then `operation.prepare()` | Explicit `ti.hardware.tensor.ContractionRecipeProvider()` composes real input permutations and vendor/separate epilogues; includes retained workspace and immutable binding frames. |
 | cuSPARSELt shared-A region | `ti.linalg.record_sparse_matmul(...)`, then `operation.prepare()` | Explicit `ti.hardware.tensor.SparseMatmulRecipeProvider()` searches frozen algorithm/resource/epilogue dataflows; current A is compressed once per invocation, not cached across replays. |
-| AmgX | Explicit provider plans described below | No complete-recipe provider or general Graph recording route is currently exposed. |
+| AmgX | Explicit provider plans and `binding.graph_action()` described below | Host-controlled Graph composition and AOT reconstruction; no CUDA capture or automatic recipe selection. |
 
 Prepare mathematical operations before freezing the Graph. SpMM, FFT, matmul and contraction require
 explicit finite-input / f32 tolerance contracts; Forge does not scan values on
@@ -1658,12 +1658,44 @@ This is **device-buffer interoperability, not an asynchronous or zero-copy
 solver**. The stable AmgX API copies into/from vendor-owned storage. Forge
 retains the existing producer synchronization before a vendor call; AmgX's
 solver control and residual query remain host-controlled. Device output uses
-the existing external-submission lifetime tracking. It is not Graph-recordable
+the existing external-submission lifetime tracking. It is not CUDA-capturable
 or CompileIQ-searchable. CSR topology stays on the host; no device topology
 readback is hidden inside binding. No vendor speedup or peak-VRAM reduction is
 implied by accepting device buffers: measure the actual configured AmgX build
 and application workload. Vendor hierarchy, vector copies and internal
 workspace still contribute to VRAM.
+
+`binding.graph_action(update_coefficients=False)` explicitly composes this host
+operation with kernels using `GraphBuilder.append_native(..., admission="explicit")`.
+Set `update_coefficients=True` to refresh the binding's values before solving.
+Ordinary Graph execution calls the existing binding directly and preserves its
+producer synchronization. The Graph discards the Python solve report; use the
+explicit native AOT solve description when device diagnostic outputs are needed.
+
+```python
+builder.append_native(bound.graph_action(update_coefficients=True), admission="explicit")
+graph = builder.compile()
+module.add_execution_plan(
+    "solve", graph,
+    source_bindings={"values": values_gpu, "rhs": rhs_gpu, "solution": solution_gpu},
+    resource_bindings={solver: {"values": "initial_values"}},
+)
+```
+
+Each AOT instance creates a fresh solver session. Configuration text (including
+files read once at ordinary solver creation) and copied CSR topology come from
+the same frozen definition used by the producer. Supply explicit consumer
+`initial_values`; export does not guess the vendor's current coefficients or
+snapshot its retained solution. Setup runs once during initialization. Each
+device binding starts with its original zero/upload policy, then optionally
+retains the solver's last solution. Repeated uses of one binding share that
+state; distinct bindings initialize independently even on one solver. The v2
+`amgx/solve` description resolves these identities during preparation, without
+warm registry lookups. It requires a runtime supporting that operation version;
+the private ABI and module format are unchanged. Configure the consumer's AmgX
+adapter and vendor library separately; neither library is embedded in the TCM.
+Windows CUDA f32/f64, changed coefficients, source-free and borrowed consumers,
+independent instances, and one-step PCG binding-state behavior are validated.
 
 Forge owns the thin adapter, buffer/lifetime integration, and its diagnostic
 call policy, not an AmgX fork.

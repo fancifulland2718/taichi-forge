@@ -28,7 +28,7 @@ retained-provider API，而 discovery probe 始终不执行算法。
 | Vulkan driver/ICD | 后端驱动依赖 | OS/GPU driver 安装 | `ti.init(arch=ti.vulkan)` 加 capability query | kernel 与已公开 native Vulkan API |
 | cuSPARSELt 0.8.x-0.9.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.tensor.CusparseLtProvider` / `ti.linalg.record_sparse_matmul` | retained FP16 2:4 capture 与完整 shared-A matmul recipe；无 kernel intrinsic 或自动 rewrite |
 | cuTENSOR 2.0.x-2.7.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.tensor.CutensorProvider` / `ti.linalg.record_contraction` | retained root Graph capture 与完整 contraction 数据流；无 kernel intrinsic 或隐式 auto rewrite |
-| AmgX stable C API | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户源码构建 | `ti.hardware.probe(...)` 或 `ti.hardware.linalg.AmgxProvider` | host CSR 拓扑，host/device 数值与向量；无 Graph/kernel/auto 路线 |
+| AmgX stable C API | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户源码构建 | `ti.hardware.probe(...)` 或 `ti.hardware.linalg.AmgxProvider` | host CSR 拓扑，host/device 数值与向量；显式 host 控制的 Graph/AOT 操作 |
 | NCCL | 不属于 Forge 当前单 GPU 范围 | 用户安装系统包 | 没有公开 Forge probe 或执行 API | 仅外部 multi-GPU communication |
 
 已注册外部 provider 会出现在 `ti.hardware.providers()` 中。它们的 probe 检查有界版本族和
@@ -64,7 +64,7 @@ cuTENSOR、AmgX 或 NCCL 绝不会触发 compiler rewrite。
 | cuBLASLt matmul region | `ti.linalg.record_matmul(...)`，随后 `operation.prepare()` | CUDA 紧凑 scalar-f32、固定形状及可选 strided batch。显式 `ti.hardware.linalg.MatmulRecipeProvider()` 组合冻结算法/workspace、真实输入打包、独立/融合 ReLU；通过上述公共 operation/provider API 接入。 |
 | cuTENSOR contraction region | `ti.linalg.record_contraction(...)`，然后 `operation.prepare()` | 显式 `ti.hardware.tensor.ContractionRecipeProvider()` 组合真实输入重排与 vendor/separate epilogue，持有 workspace 并支持 immutable binding frames。 |
 | cuSPARSELt shared-A region | `ti.linalg.record_sparse_matmul(...)`，然后 `operation.prepare()` | 显式 `ti.hardware.tensor.SparseMatmulRecipeProvider()` 搜索冻结的算法/资源/epilogue 数据流；当前 A 每 invocation 压缩一次，不做跨 replay 值缓存。 |
-| AmgX | 下文的显式 provider plan | 当前没有公开 complete-recipe provider 或通用 Graph recording 路线。 |
+| AmgX | 下文的显式 provider plan 和 `binding.graph_action()` | host 控制的 Graph 组合及 AOT 重建；无 CUDA capture 或自动 recipe 选择。 |
 
 先准备数学 operation，再 freeze Graph。SpMM/FFT/matmul/contraction 要求显式的 finite-input / f32 tolerance 合同，
 Forge 不在每次 replay 扫描数值。默认 FFT 正向、逆向均不归一化，连续应用两者会将输入乘以 `H * W`。
@@ -1302,9 +1302,34 @@ owner 保留到最后一个活跃 solver lease 结束（包括不同 provider �
 
 这是 **device-buffer 互操作，不是异步或 zero-copy solver**。稳定 AmgX API 仍向/从 vendor 自有存储
 复制；Forge 保留 vendor 调用前既有的 producer 同步，AmgX 的求解控制和 residual 查询仍由 host 控制。
-device 输出复用既有 external-submission 生命周期追踪，不成为 Graph recording 或 CompileIQ 搜索项。
+device 输出复用既有 external-submission 生命周期追踪，不成为 CUDA capture 或 CompileIQ 搜索项。
 CSR 拓扑仍在 host，bind 不暗中将 device 拓扑读回。接受 device 数组不等于已有加速或峰值显存下降证据，
 需对实际 AmgX build、配置和应用 workload 测量；vendor hierarchy、向量副本和内部 workspace 仍占显存。
+
+`binding.graph_action(update_coefficients=False)` 可通过
+`GraphBuilder.append_native(..., admission="explicit")` 将这个 host 操作与 kernel 组合。
+设置 `update_coefficients=True` 会先从绑定的 values 刷新系数。普通 Graph 直接调用既有
+binding，保留 producer 同步。Graph 丢弃 Python solve report；需要设备诊断输出时仍使用
+显式 native AOT solve 描述。
+
+```python
+builder.append_native(bound.graph_action(update_coefficients=True), admission="explicit")
+graph = builder.compile()
+module.add_execution_plan(
+    "solve", graph,
+    source_bindings={"values": values_gpu, "rhs": rhs_gpu, "solution": solution_gpu},
+    resource_bindings={solver: {"values": "initial_values"}},
+)
+```
+
+每个 AOT 实例创建新的 solver session。配置文本（配置文件在普通创建时读取一次）和复制
+的 CSR 拓扑来自生产者实际使用的冻结定义。消费者须显式提供 `initial_values`；导出不猜测
+vendor 的当前系数，也不快照其 retained solution。初始化阶段执行一次 setup。每个 device
+binding 按原始 zero/upload 政策开始，再按需保留 solver 最近的解；同一 binding 重复出现共享
+该状态，不同 binding 即使共享 solver 也各自初始化。v2 `amgx/solve` 在 prepare 时解析这些
+身份，暖态不查注册表；需要支持此版本操作的 runtime，私有 ABI 和模块格式不变。消费者
+单独配置 AmgX adapter 和 vendor 库，两者不进入 TCM。Windows CUDA f32/f64、系数刷新、
+无源码/借用消费者、独立实例和单步 PCG 的 binding 状态语义已验证。
 
 系数与 RHS 已一起就绪时，可调用 `bound.update_and_solve()`，在一次资源保留的提交内先刷新绑定的 values，
 再求解，省掉中间一次 Forge producer 等待；它不省略 vendor setup 或收敛判断。绑定时需提供 `values=...`，

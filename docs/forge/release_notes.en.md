@@ -34,6 +34,14 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AmgX device bindings expose an explicit host-controlled Graph action with
+  automatic AOT reconstruction from frozen configuration and CSR topology.
+  Consumers provide initial coefficients; each instance starts a new solver
+  session. Version 2 solve descriptions preserve per-binding initial-guess state
+  on shared solvers. Windows CUDA f32/f64, source-free/borrowed consumers, updates,
+  independent retirement and explicit-adjoint regression pass. This is not CUDA
+  capture; vendor dependencies remain external, with no ABI/module-format change.
+
 - cuSPARSE triangular recording export supports public shared plans with an
   explicit public matrix binding. Version 2 update/solve descriptions check
   plan parameters, matrix identity and dense-port storage during preparation,
