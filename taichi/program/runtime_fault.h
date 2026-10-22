@@ -67,6 +67,9 @@ class TI_DLL_EXPORT RuntimeFaultDomain final : public BackendFaultReporter {
   Arch backend() const noexcept {
     return backend_;
   }
+  std::uint64_t program_domain() const noexcept {
+    return program_domain_;
+  }
 
   // One identity space for the default queue, independent execution domains
   // and borrowed AOT clients. Allocation does not imply device completion or

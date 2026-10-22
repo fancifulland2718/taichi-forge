@@ -5,6 +5,9 @@
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/codegen/spirv/spirv_ir_builder.h"
 #include "taichi/runtime/gfx/runtime.h"
+#include "taichi/program/runtime_completion.h"
+#include "taichi/program/runtime_fault.h"
+#include "taichi/runtime/completion_wait_set.h"
 
 #include <chrono>
 #include <set>
@@ -356,6 +359,96 @@ TEST(VulkanExecutionQueue, PhysicalLeasesAreExclusiveAndReusable) {
   EXPECT_TRUE(point->wait());
 }
 
+TEST(VulkanExecutionQueue, RuntimeCompletionPreservesReusablePrefixAndOwnerChecks) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  RuntimeCompletion ticket;
+  std::shared_ptr<ReusableStreamDependency> retired_origin;
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 19);
+  auto other = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 19);
+  {
+    vulkan::VulkanDeviceCreator creator({});
+    auto &device = *creator.device();
+    if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 3)
+      GTEST_SKIP();
+    using Queue = vulkan::VulkanExecutionQueue;
+    Queue producer(device, 1), consumer(device, 2);
+    auto commands = producer.prepare({});
+    const auto before = device.queue_submission_snapshot();
+    EXPECT_THROW(producer.submit(commands, {}, [&](std::size_t, const auto &point) {
+      auto reservation = RuntimeCompletion::from_reusable_stream_dependency(
+          Arch::vulkan, 19, 1, point, owner);
+      throw std::bad_alloc();
+    }), std::bad_alloc);
+    EXPECT_FALSE(producer.latest());
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before.queue_submit_calls);
+
+    TimelineGate gate(device, producer.queue_index());
+    const auto point = producer.submit(commands, {}, [&](std::size_t, const auto &prefix) {
+      ticket = RuntimeCompletion::from_reusable_stream_dependency(
+          Arch::vulkan, 19, 1, prefix, owner);
+    });
+    auto retained = ticket.reusable_stream_dependency(Arch::vulkan, 19, owner);
+    EXPECT_EQ(retained.get(), point.get());
+    EXPECT_THROW(ticket.reusable_stream_dependency(Arch::vulkan, 19, other),
+                  std::invalid_argument);
+    EXPECT_THROW(ticket.reusable_stream_dependency(Arch::vulkan, 20, owner),
+                  std::invalid_argument);
+    EXPECT_THROW(ticket.reusable_stream_dependency(Arch::cuda, 19, owner),
+                  std::invalid_argument);
+    bool admitted = false;
+    EXPECT_THROW(producer.submit(commands, {}, [&](std::size_t, const auto &) {
+      admitted = true;
+    }), Queue::Busy);
+    EXPECT_FALSE(admitted);
+    CompletionWaitSet progress({ticket}, std::chrono::milliseconds(1));
+    EXPECT_EQ(progress.wait(std::chrono::nanoseconds(0)).status,
+              CompletionWaitSet::Status::timeout);
+    gate.release();
+    EXPECT_EQ(progress.wait(std::chrono::seconds(3)).status,
+              CompletionWaitSet::Status::ready);
+    EXPECT_TRUE(ticket.done());
+    EXPECT_FALSE(ticket.has_backend_work());
+    producer.close();
+    // Host observation and producer close do not erase the device dependency.
+    auto dependency = std::dynamic_pointer_cast<vulkan::VulkanTimelinePoint>(
+        ticket.reusable_stream_dependency(Arch::vulkan, 19, owner));
+    ASSERT_EQ(dependency.get(), point.get());
+    auto consumer_commands = consumer.prepare({});
+    const auto first = consumer.submit(consumer_commands, {dependency});
+    const auto second = consumer.submit(consumer_commands, {dependency});
+    ASSERT_TRUE(first->wait());
+    ASSERT_TRUE(second->wait());
+
+    auto ordinary = RuntimeCompletion::from_stream_semaphore(
+        Arch::vulkan, 19, 2, point, owner);
+    ordinary.wait();
+    EXPECT_THROW(ordinary.reusable_stream_dependency(Arch::vulkan, 19, owner),
+                  std::invalid_argument);
+    EXPECT_FALSE(RuntimeCompletion::completed(Arch::vulkan, 19, 0, owner)
+                     .reusable_stream_dependency(Arch::vulkan, 19, owner));
+    auto failed = RuntimeCompletion::from_reusable_stream_dependency(
+        Arch::vulkan, 19, 3, point, owner);
+    failed.invalidate("test failed submission");
+    failed.mark_completed();
+    EXPECT_THROW(failed.reusable_stream_dependency(Arch::vulkan, 19, owner),
+                  std::runtime_error);
+    consumer.close();
+    producer.retire_timeline();
+    consumer.retire_timeline();
+    retired_origin = ticket.reusable_stream_dependency(Arch::vulkan, 19, owner);
+  }
+  // Retired dependency/query state has no live device access.
+  EXPECT_TRUE(retired_origin->is_ready());
+  EXPECT_TRUE(retired_origin->wait());
+  EXPECT_TRUE(ticket.done());
+  EXPECT_NO_THROW(ticket.wait());
+  owner->begin_finalizing();
+  owner->mark_finalized();
+  EXPECT_ANY_THROW(ticket.reusable_stream_dependency(Arch::vulkan, 19, owner));
+  EXPECT_TRUE(ticket.done());
+}
+
 TEST(VulkanExecutionQueue, BusyIsAtomicAndTimelineDependenciesCanFanOut) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();
@@ -385,7 +478,7 @@ TEST(VulkanExecutionQueue, BusyIsAtomicAndTimelineDependenciesCanFanOut) {
   ASSERT_FALSE(pending->is_ready());
   bool admitted = false;
   EXPECT_THROW(producer.submit(produced_commands, {},
-                               [&](std::size_t) { admitted = true; }), Queue::Busy);
+                               [&](std::size_t, const auto &) { admitted = true; }), Queue::Busy);
   EXPECT_FALSE(admitted);
   EXPECT_EQ(producer.latest(), pending);
   const auto independent = consumer.submit(peer_commands);
@@ -393,7 +486,7 @@ TEST(VulkanExecutionQueue, BusyIsAtomicAndTimelineDependenciesCanFanOut) {
   EXPECT_FALSE(pending->is_ready());
   EXPECT_EQ(consumer.collect(2), 1u);
   EXPECT_THROW(consumer.submit(peer_commands, {nullptr},
-                               [&](std::size_t) { admitted = true; }),
+                               [&](std::size_t, const auto &) { admitted = true; }),
                std::invalid_argument);
   EXPECT_FALSE(admitted);
   TimelineGate peer_gate(device, consumer.queue_index());
@@ -452,7 +545,7 @@ TEST(VulkanExecutionQueue, CompletedOperandReleaseDoesNotHoldAdmissionLock) {
         EXPECT_EQ(queue.pending(), 0u);
         retired = true;
       }));
-  EXPECT_THROW(queue.submit(std::move(rejected), {}, [](std::size_t) {
+  EXPECT_THROW(queue.submit(std::move(rejected), {}, [](std::size_t, const auto &) {
                  throw std::invalid_argument("invalid parameter snapshot");
                }), std::invalid_argument);
   EXPECT_TRUE(retired);

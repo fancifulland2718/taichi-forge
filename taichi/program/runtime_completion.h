@@ -14,6 +14,7 @@
 namespace taichi::lang {
 
 class RuntimeFaultDomain;
+class ReusableStreamDependency;
 
 struct RuntimeCompletionCudaEventPoolSnapshot {
   std::uint64_t created{0};
@@ -102,6 +103,21 @@ class TI_DLL_EXPORT RuntimeCompletion {
       std::shared_ptr<RuntimeFaultDomain> fault_domain = nullptr,
       StreamGpuTiming gpu_timing = nullptr,
       std::vector<RuntimeGpuRegionTiming> gpu_region_timings = {});
+  static RuntimeCompletion from_reusable_stream_dependency(
+      Arch backend,
+      std::uint64_t program_domain,
+      std::uint64_t sequence,
+      std::shared_ptr<ReusableStreamDependency> dependency,
+      std::shared_ptr<RuntimeFaultDomain> fault_domain,
+      StreamGpuTiming gpu_timing = nullptr);
+  // Keep the exact device dependency after done()/wait() release operands.
+  // Only a never-submitted synchronous token returns null. A completed binary
+  // semaphore is not a reusable dependency and is rejected. Caller owns the
+  // destination's lifecycle guard through validation and enqueue.
+  std::shared_ptr<ReusableStreamDependency> reusable_stream_dependency(
+      Arch backend,
+      std::uint64_t owner,
+      const std::shared_ptr<RuntimeFaultDomain> &fault_domain) const;
   static RuntimeCompletion from_cuda_stream(std::uint64_t program_domain,
                                             std::uint64_t sequence,
                                             void *stream,

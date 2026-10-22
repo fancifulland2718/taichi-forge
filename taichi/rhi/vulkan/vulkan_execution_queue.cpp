@@ -190,7 +190,7 @@ VulkanExecutionQueue::prepare(const std::vector<CommandList *> &commands,
 VulkanExecutionQueue::Point VulkanExecutionQueue::submit(
     std::shared_ptr<const Commands> commands,
     const std::vector<Point> &dependencies,
-    const std::function<void(std::size_t)> &admit) {
+    const std::function<void(std::size_t, const Point &)> &admit) {
   if (!commands || dependencies.size() > UINT32_MAX)
     throw std::invalid_argument("Invalid Vulkan execution submission");
   collect(1);
@@ -244,7 +244,7 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit(
                                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
   const auto index = (state.head + state.count) % state.slots.size();
   if (admit)
-    admit(index);
+    admit(index, point);
   auto &slot = state.slots[index];
   slot = std::move(pending);
   state.tail = point;

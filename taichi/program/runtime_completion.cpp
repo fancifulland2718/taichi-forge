@@ -14,6 +14,7 @@
 #include "taichi/common/logging.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/rhi/backend_error.h"
+#include "taichi/rhi/reusable_stream_dependency.h"
 
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -516,6 +517,8 @@ std::string exception_message(const std::exception_ptr &error) {
 struct RuntimeCompletion::State {
   void *cuda_origin_stream{nullptr};
   bool has_cuda_origin{false};
+  bool synchronous_completion{true};
+  std::shared_ptr<ReusableStreamDependency> reusable_dependency;
   State() : status(CompletionStatus::completed) {
   }
 
@@ -524,7 +527,8 @@ struct RuntimeCompletion::State {
         std::uint64_t sequence,
         StreamGpuTiming gpu_timing = nullptr,
         std::vector<RuntimeGpuRegionTiming> gpu_region_timings = {})
-      : status(CompletionStatus::pending),
+      : synchronous_completion(false),
+        status(CompletionStatus::pending),
         fault_domain(std::move(fault_domain)),
         sequence(sequence),
         primitive(std::move(primitive)),
@@ -984,6 +988,43 @@ RuntimeCompletion RuntimeCompletion::from_stream_semaphore(
                                        std::move(gpu_region_timings));
   return RuntimeCompletion(backend, program_domain, sequence,
                            std::move(state), std::move(fault_domain));
+}
+
+RuntimeCompletion RuntimeCompletion::from_reusable_stream_dependency(
+    Arch backend,
+    std::uint64_t program_domain,
+    std::uint64_t sequence,
+    std::shared_ptr<ReusableStreamDependency> dependency,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain,
+    StreamGpuTiming gpu_timing) {
+  if (!dependency || !fault_domain || fault_domain->backend() != backend ||
+      fault_domain->program_domain() != program_domain)
+    throw std::invalid_argument("Reusable dependency requires its exact runtime owner");
+  auto result = from_stream_semaphore(backend, program_domain, sequence,
+                                      dependency, std::move(fault_domain),
+                                      std::move(gpu_timing));
+  result.state_->reusable_dependency = std::move(dependency);
+  return result;
+}
+
+std::shared_ptr<ReusableStreamDependency>
+RuntimeCompletion::reusable_stream_dependency(
+    Arch backend,
+    std::uint64_t owner,
+    const std::shared_ptr<RuntimeFaultDomain> &fault_domain) const {
+  if (!valid() || backend_ != backend || program_domain_ != owner ||
+      !fault_domain || fault_domain_ != fault_domain ||
+      fault_domain->backend() != backend)
+    throw std::invalid_argument("Device dependency requires the same live runtime owner");
+  fault_domain->throw_if_new_submission_disallowed("validate reusable dependency");
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  if (state_->first_error)
+    state_->rethrow_first_error_locked();
+  if (state_->synchronous_completion)
+    return {};
+  if (!state_->reusable_dependency)
+    throw std::invalid_argument("Completion has no reusable device dependency");
+  return state_->reusable_dependency;
 }
 
 RuntimeCompletion RuntimeCompletion::from_cuda_stream(

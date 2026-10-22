@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "taichi/rhi/vulkan/vulkan_device.h"
+#include "taichi/rhi/reusable_stream_dependency.h"
 
 namespace taichi::lang::vulkan {
 
@@ -13,7 +14,7 @@ class VulkanTimelineState;
 // A reusable device dependency, unlike a consumable binary semaphore. The
 // owning runtime must retire all queue users before retiring the timeline.
 // Completion wrappers may then retain the frozen host result after device exit.
-class VulkanTimelinePoint final : public StreamSemaphoreObject {
+class VulkanTimelinePoint final : public ReusableStreamDependency {
  public:
   bool is_ready() const override;
   bool wait() const override;
@@ -59,10 +60,12 @@ class VulkanExecutionQueue {
       const std::vector<CommandList *> &commands,
       std::shared_ptr<void> operands = {});
   // All validation and admission precede this host-only callback. It may copy
-  // into the selected preallocated slot, but cannot submit/wait/reenter.
+  // into the selected preallocated slot and reserve a completion wrapper for
+  // the unpublished point, but cannot submit/wait/reenter/publish the point.
+  // Every fallible host allocation must finish here, before device enqueue.
   Point submit(std::shared_ptr<const Commands> commands,
                const std::vector<Point> &dependencies = {},
-               const std::function<void(std::size_t)> &admit = {});
+               const std::function<void(std::size_t, const Point &)> &admit = {});
   std::size_t collect(std::size_t budget);
   std::size_t pending() const;
   std::uint32_t queue_index() const;
