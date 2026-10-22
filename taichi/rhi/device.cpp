@@ -13,40 +13,25 @@
 #endif  // TI_WITH_VULKAN
 
 namespace taichi::lang {
-namespace {
-
-// Program enforces one live instance process-wide. Keeping the reporter in a
-// process slot avoids changing the ABI/layout of every Device implementation,
-// including objects used across JIT and plugin boundaries. Allocate the slot
-// permanently so static destruction cannot race backend teardown.
-std::shared_ptr<BackendFaultReporter> &process_backend_fault_reporter() {
-  static auto *slot = new std::shared_ptr<BackendFaultReporter>();
-  return *slot;
-}
-
-}  // namespace
 
 void Device::set_backend_fault_reporter(
     std::shared_ptr<BackendFaultReporter> reporter) noexcept {
-  std::atomic_store_explicit(&process_backend_fault_reporter(),
+  std::atomic_store_explicit(&backend_fault_reporter_,
                              std::move(reporter), std::memory_order_release);
 }
 
 void Device::clear_backend_fault_reporter(
     const std::shared_ptr<BackendFaultReporter> &reporter) noexcept {
-  auto &slot = process_backend_fault_reporter();
-  auto current =
-      std::atomic_load_explicit(&slot, std::memory_order_acquire);
-  if (current == reporter) {
-    std::atomic_store_explicit(&slot,
-                               std::shared_ptr<BackendFaultReporter>{},
-                               std::memory_order_release);
-  }
+  auto expected = reporter;
+  std::atomic_compare_exchange_strong_explicit(
+      &backend_fault_reporter_, &expected,
+      std::shared_ptr<BackendFaultReporter>{},
+      std::memory_order_acq_rel, std::memory_order_acquire);
 }
 
 std::shared_ptr<BackendFaultReporter> Device::backend_fault_reporter() const
     noexcept {
-  return std::atomic_load_explicit(&process_backend_fault_reporter(),
+  return std::atomic_load_explicit(&backend_fault_reporter_,
                                    std::memory_order_acquire);
 }
 

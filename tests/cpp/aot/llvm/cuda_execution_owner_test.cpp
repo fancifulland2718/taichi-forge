@@ -73,6 +73,8 @@ TEST(CudaExecutionOwner, RecoverableInitializationRetiresModulesAndAllowsRetry) 
     EXPECT_GT(probe.unloads, 0);  // Failed executor was destroyed, not leaked.
   }
   capi::LlvmRuntime recovered(Arch::cuda);
+  EXPECT_EQ(recovered.get().backend_fault_reporter(),
+            recovered.runtime_fault_domain());
   EXPECT_NO_THROW(static_cast<::Runtime &>(recovered).wait());
 }
 

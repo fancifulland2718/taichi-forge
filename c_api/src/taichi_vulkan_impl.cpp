@@ -2,6 +2,7 @@
 #include "taichi_vulkan_impl.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/common/utils.h"
+#include "taichi/program/runtime_fault.h"
 
 #ifdef ANDROID
 #define VK_KHR_android_surface 1
@@ -67,14 +68,33 @@ VulkanRuntimeImported::Workaround::Workaround(
   vk_device.init_vulkan_structs(
       const_cast<taichi::lang::vulkan::VulkanDevice::Params &>(params));
 }
+struct VulkanRuntimeImported::Storage {
+  Workaround inner;
+  taichi::lang::gfx::GfxRuntime runtime;
+  Storage(uint32_t api_version,
+          const taichi::lang::vulkan::VulkanDevice::Params &params)
+      : inner(api_version, params),
+        runtime(make_aot_vulkan_runtime_params(&inner.vk_device)) {}
+};
+
 VulkanRuntimeImported::VulkanRuntimeImported(
     uint32_t api_version,
     const taichi::lang::vulkan::VulkanDevice::Params &params)
-    : inner_(api_version, params),
-      gfx_runtime_(make_aot_vulkan_runtime_params(&inner_.vk_device)) {
+    : storage_(std::make_unique<Storage>(api_version, params)) {
+  get().set_backend_fault_reporter(runtime_fault_domain());
+}
+
+VulkanRuntimeImported::~VulkanRuntimeImported() {
+  try {
+    retire_execution_domains();
+  } catch (...) {
+    // Keep the device adapter and commands together if a drain failed. The
+    // external device's own lifetime remains the importer's responsibility.
+    (void)storage_.release();
+  }
 }
 taichi::lang::Device &VulkanRuntimeImported::get() {
-  return static_cast<taichi::lang::Device &>(inner_.vk_device);
+  return storage_->inner.vk_device;
 }
 
 taichi::lang::vulkan::VulkanDeviceCreator::Params
@@ -108,22 +128,41 @@ make_vulkan_runtime_creator_params() {
   return params;
 }
 taichi::lang::gfx::GfxRuntime &VulkanRuntimeImported::get_gfx_runtime() {
-  return gfx_runtime_;
+  return storage_->runtime;
 }
+
+struct VulkanRuntimeOwned::Storage {
+  taichi::lang::vulkan::VulkanDeviceCreator creator;
+  taichi::lang::gfx::GfxRuntime runtime;
+  explicit Storage(const taichi::lang::vulkan::VulkanDeviceCreator::Params &params)
+      : creator(params),
+        runtime(make_aot_vulkan_runtime_params(creator.device())) {}
+};
 
 VulkanRuntimeOwned::VulkanRuntimeOwned()
     : VulkanRuntimeOwned(make_vulkan_runtime_creator_params()) {
 }
 VulkanRuntimeOwned::VulkanRuntimeOwned(
     const taichi::lang::vulkan::VulkanDeviceCreator::Params &params)
-    : vk_device_creator_(params),
-      gfx_runtime_(make_aot_vulkan_runtime_params(vk_device_creator_.device())) {
+    : storage_(std::make_unique<Storage>(params)) {
+  get().set_backend_fault_reporter(runtime_fault_domain());
+}
+
+VulkanRuntimeOwned::~VulkanRuntimeOwned() {
+  try {
+    // Also protect direct native destruction, before member teardown destroys
+    // GfxRuntime and VkDevice. The public destroy path has already done this.
+    retire_execution_domains();
+  } catch (...) {
+    // An unproven prefix must not lose its device/code/storage closure.
+    (void)storage_.release();
+  }
 }
 taichi::lang::Device &VulkanRuntimeOwned::get() {
-  return *static_cast<taichi::lang::Device *>(vk_device_creator_.device());
+  return *storage_->creator.device();
 }
 taichi::lang::gfx::GfxRuntime &VulkanRuntimeOwned::get_gfx_runtime() {
-  return gfx_runtime_;
+  return storage_->runtime;
 }
 
 TiImage VulkanRuntime::allocate_image(const taichi::lang::ImageParams &params) {

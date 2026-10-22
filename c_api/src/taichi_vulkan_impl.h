@@ -28,25 +28,28 @@ class VulkanRuntimeImported : public VulkanRuntime {
     taichi::lang::vulkan::VulkanDevice vk_device;
     Workaround(uint32_t api_version,
                const taichi::lang::vulkan::VulkanDevice::Params &params);
-  } inner_;
-  taichi::lang::gfx::GfxRuntime gfx_runtime_;
+  };
+  struct Storage;
+  std::unique_ptr<Storage> storage_;
 
  public:
   VulkanRuntimeImported(
       uint32_t api_version,
       const taichi::lang::vulkan::VulkanDevice::Params &params);
+  ~VulkanRuntimeImported() override;
 
   virtual taichi::lang::Device &get() override final;
   virtual taichi::lang::gfx::GfxRuntime &get_gfx_runtime() override final;
 };
 class VulkanRuntimeOwned : public VulkanRuntime {
-  taichi::lang::vulkan::VulkanDeviceCreator vk_device_creator_;
-  taichi::lang::gfx::GfxRuntime gfx_runtime_;
+  struct Storage;
+  std::unique_ptr<Storage> storage_;
 
  public:
   VulkanRuntimeOwned();
   VulkanRuntimeOwned(
       const taichi::lang::vulkan::VulkanDeviceCreator::Params &params);
+  ~VulkanRuntimeOwned() override;
 
   virtual taichi::lang::Device &get() override final;
   virtual taichi::lang::gfx::GfxRuntime &get_gfx_runtime() override final;

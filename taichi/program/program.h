@@ -57,6 +57,9 @@ namespace taichi::lang {
 namespace cuda {
 class ExecutionDomainRegistry;
 }
+namespace vulkan {
+class ExecutionDomainRegistry;
+}
 
 namespace aot {
 class ArgPackLayout;
@@ -622,6 +625,7 @@ class TI_DLL_EXPORT Program {
   // Cold native adapter shared by JIT and borrowed AOT execution. The owner
   // retires all domains before releasing code/storage and the backend.
   std::shared_ptr<cuda::ExecutionDomainRegistry> cuda_execution_domains();
+  std::shared_ptr<vulkan::ExecutionDomainRegistry> vulkan_execution_domains();
   RuntimeStatisticsSnapshot runtime_statistics_snapshot();
   HostMemoryPoolStats get_host_memory_pool_stats() const;
   PrimitiveWorkspaceSnapshot primitive_workspace_snapshot() const noexcept {
@@ -4576,6 +4580,7 @@ class TI_DLL_EXPORT Program {
   const std::uint64_t runtime_completion_domain_;
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain_;
   std::shared_ptr<cuda::ExecutionDomainRegistry> cuda_execution_domains_;
+  std::shared_ptr<vulkan::ExecutionDomainRegistry> vulkan_execution_domains_;
   RuntimeTraceRecorder runtime_trace_;
   std::shared_ptr<RuntimeCompletionCudaEventPool>
       runtime_completion_cuda_event_pool_;

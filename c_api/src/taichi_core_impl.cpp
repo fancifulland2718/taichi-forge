@@ -16,6 +16,7 @@
 #include "taichi/program/runtime_fault.h"
 #include "taichi/common/virtual_dir.h"
 #include "taichi/common/utils.h"
+#include "taichi/runtime/vulkan_execution_domain.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/execution_domain.h"
 #endif
@@ -123,20 +124,29 @@ Runtime::~Runtime() {
 
 void Runtime::borrow_runtime_fault_domain(
     std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain,
-    std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry> domains) {
+    std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry> domains,
+    std::shared_ptr<taichi::lang::vulkan::ExecutionDomainRegistry> vulkan_domains) {
   std::lock_guard<std::recursive_mutex> lock(submission_mutex());
   if (!domain || domain->backend() != arch || prepared_ || native_resources_ ||
       !modules_.empty() || !memories_.empty() || borrowed_fault_domain_ ||
-      cuda_execution_domains_ || execution_domains_retiring_ ||
-      (arch == taichi::Arch::cuda && !domains))
+      cuda_execution_domains_ || vulkan_execution_domains_ ||
+      execution_domains_retiring_ ||
+      (arch == taichi::Arch::cuda && !domains) ||
+      (arch == taichi::Arch::vulkan && !vulkan_domains))
     throw std::logic_error("Runtime fault domain must be bound before use");
 #ifdef TI_WITH_CUDA
   if (domains && !domains->belongs_to(domain))
     throw std::invalid_argument(
         "CUDA execution domains belong to another runtime");
 #endif
+#ifdef TI_WITH_VULKAN
+  if (vulkan_domains && !vulkan_domains->belongs_to(domain))
+    throw std::invalid_argument(
+        "Vulkan execution domains belong to another runtime");
+#endif
   runtime_fault_domain_ = std::move(domain);
   cuda_execution_domains_ = std::move(domains);
+  vulkan_execution_domains_ = std::move(vulkan_domains);
   borrowed_fault_domain_ = true;
 }
 
@@ -168,6 +178,15 @@ void Runtime::synchronize_execution_domains() {
   if (domains)
     domains->synchronize();
 #endif
+#ifdef TI_WITH_VULKAN
+  std::shared_ptr<taichi::lang::vulkan::ExecutionDomainRegistry> vulkan_domains;
+  {
+    std::lock_guard<std::recursive_mutex> lock(submission_mutex());
+    vulkan_domains = vulkan_execution_domains_;
+  }
+  if (vulkan_domains)
+    vulkan_domains->synchronize();
+#endif
 }
 
 void Runtime::retire_execution_domains() {
@@ -182,6 +201,36 @@ void Runtime::retire_execution_domains() {
   }
   if (domains)
     domains->retire();
+#endif
+#ifdef TI_WITH_VULKAN
+  std::shared_ptr<taichi::lang::vulkan::ExecutionDomainRegistry> vulkan_domains;
+  {
+    std::lock_guard<std::recursive_mutex> lock(submission_mutex());
+    if (borrowed_fault_domain_)
+      return;
+    execution_domains_retiring_ = true;
+    vulkan_domains = vulkan_execution_domains_;
+  }
+  if (vulkan_domains)
+    vulkan_domains->retire();
+#endif
+}
+
+std::shared_ptr<taichi::lang::vulkan::ExecutionDomainRegistry>
+Runtime::vulkan_execution_domains() {
+#ifdef TI_WITH_VULKAN
+  std::lock_guard<std::recursive_mutex> lock(submission_mutex());
+  runtime_fault_domain_->throw_if_new_submission_disallowed(
+      "access Vulkan execution domains");
+  if (arch != taichi::Arch::vulkan || execution_domains_retiring_)
+    throw std::runtime_error("Vulkan execution-domain owner is unavailable");
+  if (!vulkan_execution_domains_)
+    vulkan_execution_domains_ =
+        std::make_shared<taichi::lang::vulkan::ExecutionDomainRegistry>(
+            as_vk()->get_vk(), runtime_fault_domain_);
+  return vulkan_execution_domains_;
+#else
+  throw std::runtime_error("Vulkan support is not compiled in");
 #endif
 }
 

@@ -982,13 +982,16 @@ using UPipelineCache = std::unique_ptr<PipelineCache>;
 
 class RHI_DLL_EXPORT Device {
   DeviceCapabilityConfig caps_{};
+  // AOT runtimes may coexist with each other and with a JIT Program. Backend
+  // health belongs to the device owner, never to a process-wide current owner.
+  std::shared_ptr<BackendFaultReporter> backend_fault_reporter_;
 
  public:
   virtual ~Device() {};
 
   void set_backend_fault_reporter(
       std::shared_ptr<BackendFaultReporter> reporter) noexcept;
-  static void clear_backend_fault_reporter(
+  void clear_backend_fault_reporter(
       const std::shared_ptr<BackendFaultReporter> &reporter) noexcept;
   std::shared_ptr<BackendFaultReporter> backend_fault_reporter() const
       noexcept;

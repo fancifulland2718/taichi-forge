@@ -432,6 +432,7 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   if(TARGET taichi_runtime_c_api)
     target_sources(taichi_cuda_execution_domain_tests PRIVATE
       tests/cpp/aot/llvm/cuda_execution_owner_test.cpp
+      tests/cpp/aot/vulkan/execution_domain_owner_test.cpp
       tests/cpp/aot/argpack_aot_binding_test.cpp)
     target_compile_definitions(taichi_cuda_execution_domain_tests PRIVATE TI_TEST_RUNTIME_C_API)
     target_link_libraries(taichi_cuda_execution_domain_tests PRIVATE taichi_runtime_c_api)

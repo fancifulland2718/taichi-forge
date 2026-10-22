@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Vulkan compute queue owners reserve physical queues and reusable timelines.
-inline constexpr int kForgeNativeAbiRevision = 157;
+inline constexpr int kForgeNativeAbiRevision = 158;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

@@ -66,6 +66,9 @@ LlvmRuntime::LlvmRuntime(taichi::Arch arch) : Runtime(arch) {
     }
     throw;
   }
+  // This constructor owns the device. Borrowed runtimes keep the Program's
+  // reporter and must not replace it with the temporary adapter's owner.
+  get().set_backend_fault_reporter(runtime_fault_domain());
 }
 
 LlvmRuntime::LlvmRuntime(taichi::lang::LlvmRuntimeExecutor &executor,

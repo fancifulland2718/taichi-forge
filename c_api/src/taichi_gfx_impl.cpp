@@ -59,5 +59,6 @@ void GfxRuntime::flush() {
 void GfxRuntime::wait() {
   // (penguinliong) It's currently waiting for the entire runtime to stop.
   // Should be simply waiting for its fence to finish.
+  synchronize_execution_domains();
   get_gfx_runtime().synchronize();
 }

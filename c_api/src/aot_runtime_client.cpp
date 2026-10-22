@@ -148,7 +148,8 @@ struct AotRuntimeClient::State {
       throw std::logic_error("AOT borrower did not share its Program device");
     this->runtime->borrow_runtime_fault_domain(
         program.runtime_fault_domain(),
-        arch == Arch::cuda ? program.cuda_execution_domains() : nullptr);
+        arch == Arch::cuda ? program.cuda_execution_domains() : nullptr,
+        arch == Arch::vulkan ? program.vulkan_execution_domains() : nullptr);
     this->runtime->borrow_completion_recorder([owner = &program] {
       // The client's existing resource-submission guard protects this pointer.
       // Record through Program so its success/failure verdict retires these

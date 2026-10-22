@@ -94,11 +94,12 @@ TEST(VulkanPipelineDiagnostics,
     VolkDeviceTable &table;
     PFN_vkCreateComputePipelines original;
     std::shared_ptr<BackendFaultReporter> reporter;
+    Device *device;
     ~Restore() {
       table.vkCreateComputePipelines = original;
-      Device::clear_backend_fault_reporter(reporter);
+      device->clear_backend_fault_reporter(reporter);
     }
-  } restore{table, table.vkCreateComputePipelines, reporter};
+  } restore{table, table.vkCreateComputePipelines, reporter, device};
   table.vkCreateComputePipelines = fail_pipeline;
   pipeline_calls = 0;
 

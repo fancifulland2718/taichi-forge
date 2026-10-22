@@ -64,6 +64,7 @@
 
 #ifdef TI_WITH_VULKAN
 #include "taichi/program/vulkan_command_replay.h"
+#include "taichi/runtime/vulkan_execution_domain.h"
 #include "taichi/runtime/program_impls/vulkan/vulkan_program.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #endif
@@ -6845,7 +6846,8 @@ void Program::attach_runtime_fault_reporter() {
 }
 
 void Program::detach_runtime_fault_reporter() noexcept {
-  Device::clear_backend_fault_reporter(runtime_fault_domain_);
+  // Device-local reporters retire with their backend. Only the shared CUDA
+  // driver slot needs an explicit identity-checked detach after finalization.
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
     CUDADriver::get_instance_without_context().clear_fault_reporter(
@@ -7542,6 +7544,16 @@ void Program::synchronize() {
   if (domains)
     domains->synchronize();
 #endif
+#ifdef TI_WITH_VULKAN
+  std::shared_ptr<vulkan::ExecutionDomainRegistry> vulkan_domains;
+  {
+    std::lock_guard<std::recursive_mutex> lock(
+        runtime_resource_submission_mutex_);
+    vulkan_domains = vulkan_execution_domains_;
+  }
+  if (vulkan_domains)
+    vulkan_domains->synchronize();
+#endif
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   const bool tracking_was_enabled =
@@ -7719,6 +7731,30 @@ Program::cuda_execution_domains() {
 #endif
 }
 
+std::shared_ptr<vulkan::ExecutionDomainRegistry>
+Program::vulkan_execution_domains() {
+#ifdef TI_WITH_VULKAN
+  std::lock_guard<std::recursive_mutex> guard(
+      runtime_resource_submission_mutex_);
+  runtime_fault_domain_->throw_if_new_submission_disallowed(
+      "access Vulkan execution domains");
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Execution domains require a Vulkan runtime");
+  if (!vulkan_execution_domains_) {
+    auto *device = dynamic_cast<vulkan::VulkanDevice *>(get_compute_device());
+    if (!device)
+      throw std::runtime_error("The Vulkan device is not materialized");
+    auto domains = std::make_shared<vulkan::ExecutionDomainRegistry>(
+        *device, runtime_fault_domain_);
+    retain_runtime_client(domains);
+    vulkan_execution_domains_ = std::move(domains);
+  }
+  return vulkan_execution_domains_;
+#else
+  throw std::runtime_error("Vulkan support is not compiled in");
+#endif
+}
+
 void Program::attach_runtime_client(
     const std::shared_ptr<RuntimeClient> &client) {
   auto guard = acquire_runtime_resource_submission_guard();
@@ -7852,6 +7888,18 @@ void Program::finalize() {
       std::lock_guard<std::recursive_mutex> lock(
           runtime_resource_submission_mutex_);
       domains = cuda_execution_domains_;
+    }
+    if (domains)
+      domains->retire();
+  });
+#endif
+#ifdef TI_WITH_VULKAN
+  best_effort("retire Vulkan execution domains", [&] {
+    std::shared_ptr<vulkan::ExecutionDomainRegistry> domains;
+    {
+      std::lock_guard<std::recursive_mutex> lock(
+          runtime_resource_submission_mutex_);
+      domains = vulkan_execution_domains_;
     }
     if (domains)
       domains->retire();
