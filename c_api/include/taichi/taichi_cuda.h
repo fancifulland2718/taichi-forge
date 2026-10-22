@@ -98,6 +98,7 @@ TI_DLL_EXPORT void TI_API_CALL ti_get_cuda_stream(void **stream);
 // Runtime-owned nonblocking streams. Domain identity and completion handles
 // are runtime objects and must never be serialized into AOT artifacts.
 typedef struct TiCudaExecutionDomain_t *TiCudaExecutionDomain;
+typedef struct TiCudaExecutionInstance_t *TiCudaExecutionInstance;
 typedef struct TiCompletion_t *TiCompletion;
 
 typedef struct TiCudaExecutionDomainCreateInfo {
@@ -220,6 +221,25 @@ ti_close_cuda_execution_domain_ext(TiCudaExecutionDomain domain);
 // or runtime retirement; release never cancels submitted work.
 TI_DLL_EXPORT void TI_API_CALL
 ti_release_cuda_execution_domain_ext(TiCudaExecutionDomain domain);
+// Obtain a cold retirement handle while the runtime/prepared owner is live.
+// The handle contains no Runtime pointer and remains safe after owner teardown.
+TI_DLL_EXPORT TiCudaExecutionInstance TI_API_CALL
+ti_get_prepared_cuda_instance_ext(TiRuntime runtime,
+                                  TiPreparedExecution execution);
+// Stop this logical instance, wait its last accepted prefix outside runtime
+// locks, then retire native recordings. Actual vendor teardown may synchronize.
+// Afterwards finish retirement to release its dependency/storage edges.
+TI_DLL_EXPORT void TI_API_CALL
+ti_retire_cuda_execution_instance_ext(TiCudaExecutionInstance instance);
+// Host-only handle release; does not retire or cancel the underlying instance.
+TI_DLL_EXPORT void TI_API_CALL
+ti_release_cuda_execution_instance_ext(TiCudaExecutionInstance instance);
+// Requires successful instance retirement; frees the prepared owner's cold
+// resources and removes its handle. ti_destroy_prepared_ext keeps the existing
+// host-only release policy for independent instances, including GC paths.
+TI_DLL_EXPORT void TI_API_CALL
+ti_finish_prepared_cuda_instance_retirement_ext(TiRuntime runtime,
+                                               TiPreparedExecution execution);
 TI_DLL_EXPORT uint32_t TI_API_CALL
 ti_collect_cuda_execution_domain_ext(TiCudaExecutionDomain domain,
                                      uint32_t budget);

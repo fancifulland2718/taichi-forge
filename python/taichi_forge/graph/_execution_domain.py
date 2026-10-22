@@ -19,7 +19,7 @@ from taichi_forge.lang.matrix import MatrixField
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 from taichi_forge_runtime.aot._domain import CudaExecutionDomain
-from taichi_forge_runtime.aot._runtime import Module
+from taichi_forge_runtime.aot._runtime import Module, NativeResource, NdArray as AotNdArray
 
 
 def execution_domain(*, capacity=2, instance_capacity=64, priority=0, gpu_timing=False):
@@ -153,8 +153,9 @@ class _JitContext(GraphLoweringContext):
 class GraphExecution:
     """An immutable complete Graph instance bound to one CUDA execution domain.
 
-    The native closure survives source Graph.close(). Closing this host handle
-    leaves its bounded resources retained until domain close or Program reset.
+    The native closure survives source Graph.close(). Explicit close waits for
+    this instance's final submission and reclaims its resident capacity. Release
+    or garbage collection keeps resources until domain close or Program reset.
     Explicit adjoint kernels are supported; automatic Tape/FwdMode is not.
     """
 
@@ -199,7 +200,12 @@ class GraphExecution:
         return self._prepared.info
 
     def close(self):
+        """Retire this instance at a cold boundary, preserving old completions."""
         self._prepared.close()
+
+    def release(self):
+        """Drop the host handle without waiting; retain the domain's resources."""
+        self._prepared.release()
 
     def __enter__(self):
         self._prepared._check()
@@ -340,6 +346,12 @@ def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
                 # source Graph capture destruction or resource frees in submit.
                 owners = (*prepared._owners, graph, tuple(arguments.values()), tuple(context.live_images.values()), version)
                 prepared._owners = owners
+                prepared._instance_imports = (
+                    module,
+                    *(item._memory if isinstance(item, AotNdArray) else item
+                      for item in imported.values()
+                      if isinstance(item, (AotNdArray, NativeResource))),
+                )
                 runtime._domain_owners[execution_domain._native_handle()][
                     prepared._handle
                 ] = owners

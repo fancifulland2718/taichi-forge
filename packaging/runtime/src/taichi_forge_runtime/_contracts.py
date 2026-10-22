@@ -34,6 +34,7 @@ _FEATURE_BITS = {
     "cuda_canvas_execution_domains": 16,
     "cuda_submission_parameters_u64": 17,
     "cuda_completion_gpu_timing": 18,
+    "cuda_execution_instance_retirement": 19,
 }
 
 

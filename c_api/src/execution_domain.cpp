@@ -16,11 +16,17 @@ namespace {
 using taichi::lang::RuntimeCompletion;
 using taichi::lang::cuda::ExecutionDomain;
 
+struct InstanceHandle {
+  std::shared_ptr<ExecutionDomain> domain;
+  std::shared_ptr<taichi::lang::cuda::ExecutionInstance> instance;
+};
+
 struct Handles {
   std::mutex mutex;
   std::unordered_map<TiCudaExecutionDomain, std::shared_ptr<ExecutionDomain>>
       domains;
   std::unordered_map<TiCompletion, RuntimeCompletion> completions;
+  std::unordered_map<TiCudaExecutionInstance, InstanceHandle> instances;
 };
 
 Handles &handles() {
@@ -41,6 +47,18 @@ RuntimeCompletion take_completion(TiCompletion handle) {
   return result;
 }
 }  // namespace
+
+TiCudaExecutionInstance publish_execution_instance(
+    std::shared_ptr<ExecutionDomain> domain,
+    std::shared_ptr<taichi::lang::cuda::ExecutionInstance> instance) {
+  if (!domain || !instance)
+    throw MemoryBindingError("Prepared execution has no CUDA instance");
+  auto &registry = handles();
+  auto handle = reinterpret_cast<TiCudaExecutionInstance>(Runtime::new_handle_token());
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  registry.instances.emplace(handle, InstanceHandle{std::move(domain), std::move(instance)});
+  return handle;
+}
 
 std::shared_ptr<ExecutionDomain> get_execution_domain(
     TiCudaExecutionDomain handle) {
@@ -267,6 +285,36 @@ void ti_release_cuda_execution_domain_ext(TiCudaExecutionDomain domain) {
           "CUDA execution-domain handle is closed or unknown");
     released = std::move(it->second);
     registry.domains.erase(it);
+  }
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_retire_cuda_execution_instance_ext(TiCudaExecutionInstance instance) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  capi::InstanceHandle retained;
+  auto &registry = capi::handles();
+  {
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    const auto it = registry.instances.find(instance);
+    if (it == registry.instances.end())
+      throw MemoryBindingError("CUDA instance handle is closed or unknown");
+    retained = it->second;
+  }
+  retained.domain->retire_instance(retained.instance);
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_release_cuda_execution_instance_ext(TiCudaExecutionInstance instance) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  capi::InstanceHandle released;
+  auto &registry = capi::handles();
+  {
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    const auto it = registry.instances.find(instance);
+    if (it == registry.instances.end())
+      throw MemoryBindingError("CUDA instance handle is closed or unknown");
+    released = std::move(it->second);
+    registry.instances.erase(it);
   }
   TI_CAPI_TRY_CATCH_END();
 }

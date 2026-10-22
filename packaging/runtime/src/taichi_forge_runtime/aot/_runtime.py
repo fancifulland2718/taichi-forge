@@ -1039,13 +1039,25 @@ class PreparedCall(_Resource):
         self._replay_owners = replay_owners
         self._family = family
         self._execution_domain = execution_domain
+        self._closing = False
+        self._close_lock = threading.RLock()
+        self._domain_owner_key = None
+        # Imports created exclusively by a JIT adapter for this instance.
+        # User-owned AOT modules/arrays must never be included here.
+        self._instance_imports = ()
         self._return_layout = return_layout
         from ._parameters import SubmissionParameters
         self._submission_parameters = submission_parameters or SubmissionParameters()
         super().__init__(runtime, handle)
         if execution_domain is not None:
             execution_domain._clients.add(runtime)
-            runtime._domain_owners.setdefault(execution_domain._native_handle(), {})[handle] = owners
+            self._domain_owner_key = execution_domain._native_handle()
+            runtime._domain_owners.setdefault(self._domain_owner_key, {})[handle] = owners
+
+    def _check(self):
+        super()._check()
+        if self._closing:
+            raise RuntimeError("Prepared execution is retiring")
 
     def prepare_binding(self, arguments, *, gradients=None):
         """Prepare a sibling sharing the selected CUDA plan's state and executable.
@@ -1081,15 +1093,78 @@ class PreparedCall(_Resource):
             super().close()
         else:
             runtime = self._runtime
-            with runtime._lock:
-                if runtime._borrower is not None and runtime._borrower.closed:
-                    runtime.close()
-                if self._handle is not None and (self._kind, self._handle) in runtime._resources:
-                    runtime._destroy_resource(self._kind, self._handle)
-                self._handle = None
+            with self._close_lock:
+                with runtime._lock:
+                    if runtime._borrower is not None and runtime._borrower.closed:
+                        runtime.close()
+                    handle = self._handle
+                    live = handle is not None and (self._kind, handle) in runtime._resources
+                    retirement = None
+                    if live:
+                        retirement = runtime._api.call(
+                            runtime._api.ti_get_prepared_cuda_instance_ext, runtime._handle, handle
+                        )
+                        self._closing = True
+                if retirement is not None:
+                    # The native token pins only domain/instance state. Waiting
+                    # must not hold Runtime or borrowed Program submission locks.
+                    try:
+                        runtime._api.call(runtime._api.ti_retire_cuda_execution_instance_ext, retirement)
+                    finally:
+                        runtime._api.call(runtime._api.ti_release_cuda_execution_instance_ext, retirement)
+                with runtime._lock:
+                    if runtime._borrower is not None and runtime._borrower.closed:
+                        runtime.close()
+                    if live and (self._kind, handle) in runtime._resources:
+                        runtime._api.call(
+                            runtime._api.ti_finish_prepared_cuda_instance_retirement_ext, runtime._handle, handle
+                        )
+                        runtime._resources.remove((self._kind, handle))
+                    # Native retirement and edge removal already prove these
+                    # private import handles idle. Ordinary _Resource.close()
+                    # would unnecessarily drain every domain again.
+                    for resource in self._instance_imports:
+                        runtime._destroy_resource(resource._kind, resource._handle)
+                        resource._handle = None
+                    self._instance_imports = ()
+                    owners = runtime._domain_owners.get(self._domain_owner_key)
+                    if owners is not None:
+                        owners.pop(handle, None)
+                        if not owners:
+                            runtime._domain_owners.pop(self._domain_owner_key, None)
+                    self._handle = None
         self._owners = ()
         self._replay_owners = None
         self._family = None
+
+    def release(self):
+        """Drop an independent host handle; retain its budget until domain close.
+
+        This path performs no device wait and is used by garbage collection.
+        Use close() at a cold boundary to retire and reclaim one instance.
+        """
+        if self._execution_domain is None:
+            raise ValueError("Host-only release requires an execution-domain instance")
+        runtime = self._runtime
+        with self._close_lock, runtime._lock:
+            if runtime._borrower is not None and runtime._borrower.closed:
+                runtime.close()
+            if self._handle is not None and (self._kind, self._handle) in runtime._resources:
+                runtime._destroy_resource(self._kind, self._handle)
+            self._handle = None
+            self._instance_imports = ()
+        self._owners = ()
+        self._replay_owners = None
+        self._family = None
+
+    def __del__(self):
+        try:
+            if self._execution_domain is None:
+                self.close()
+            else:
+                self.release()
+        except Exception:
+            pass
 
     def run(self):
         if self._execution_domain is not None:

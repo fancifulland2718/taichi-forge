@@ -114,6 +114,7 @@ class ExecutionDomain {
   // The client's backend/vendor frees may still synchronize other queues;
   // callers must separately qualify those resource-specific teardown paths.
   void retire_instance(const std::shared_ptr<ExecutionInstance> &instance);
+  bool instance_retired(const std::shared_ptr<ExecutionInstance> &instance) const;
 
   // Cold, idempotent destructive teardown. The explicit drain waits only for
   // this stream without admission/global CUDA locks, but driver or vendor

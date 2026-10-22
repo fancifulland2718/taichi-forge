@@ -26,6 +26,7 @@ JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和�
 | `cuda_canvas_execution_domains` | Canvas copy/writer/empty/repeat 选域及固定预备池 |
 | `cuda_submission_parameters_u64` | JIT/AOT 独立实例逐提交更新已声明的 u64 scalar |
 | `cuda_completion_gpu_timing` | 预分配、逐提交采样及 completion 的非阻塞 GPU 计时读取 |
+| `cuda_execution_instance_retirement` | 显式退休单个实例、复用驻留预算，并保留已有票据 |
 
 对旧包使用 `features.get(name, False)`；不能从版本号或较新的提交推定能力。具体设备/
 驱动、同 GPU 共享及 recipe 的编译/provider 条件在冷创建和准备时检查。声明为真不代表
@@ -42,7 +43,7 @@ ticket = step.submit(wait_for=previous_tickets)
 if ticket is not None:
     # 消费结果或退休资源时再等待，不在每次仿真与绘图交接时等待。
     ticket.wait()
-step.close()    # 仅释放主机实例句柄
+step.close()    # 冷阶段，退休该实例并回收驻留预算
 domain.close()  # 冷阶段，排空并退休资源
 ```
 
@@ -219,7 +220,7 @@ with Runtime("cuda") as runtime:
         # 此处可以继续其他主机工作；等待是调用方的显式选择。
         ticket.wait()
         ticket.close()
-    step.close()      # 仅释放主机句柄，不等待
+    step.close()      # 冷阶段，退休该实例并回收驻留预算
     domain.close()    # 冷阶段破坏性退休
 ```
 
@@ -256,8 +257,15 @@ runtime 在冷阶段按需增长域注册存储，并复用已关闭域的位置
 初始化和 replay 共同消耗一个实例名额，仍各自保留所需 recording；部分构造失败沿同一
 owner 退休已建立的部分。实例预算拒绝，或未接纳实例的部分构造已安全清理时，只撤销
 失败实例，不关闭域，也不使已有实例失效；已接纳后的准备失败或无法证明清理安全时，
-仍采用域级冷退休。释放 prepared 句柄后，代码、数组及反向
-依赖边仍保留到域退休。显式销毁模块、内存或 native resource 时，先关闭受影响的域，再
+仍采用域级冷退休。
+
+`step.close()` 只停止该实例，等待它最后一次已接纳提交，退休 recording 并移除存储及
+依赖边，随后可复用驻留实例名额。已有 completion 票据仍有效；等待不持有 runtime
+提交锁。驱动/provider 析构仍可能产生同步，因此 close 属于冷边界，外部生产者必须
+仍能发出已经提交的等待所需的信号。
+
+`step.release()` 和垃圾回收只释放主机句柄，代码、数组及反向依赖边保留到域退休，
+也不回收驻留实例名额。显式销毁模块、内存或 native resource 时，先关闭受影响的域，再
 释放存储。runtime close/reset 退休所属域；无法证明安全退休时保留有界资源闭包并报告
 失败，不能提前释放在途对象。
 

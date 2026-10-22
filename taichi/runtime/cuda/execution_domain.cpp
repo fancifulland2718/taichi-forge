@@ -23,9 +23,10 @@ void check_result(Function &function,
     throw BackendRuntimeError(Arch::cuda, result, operation,
                               function.get_error_message(result));
 }
+
 }  // namespace
 
-// All mutable fields are protected by the owning domain's admission mutex.
+// Mutable fields except the published retirement proof use the admission mutex.
 // Public tickets retain their own completion state after this owner retires.
 class ExecutionInstance {
  public:
@@ -35,7 +36,7 @@ class ExecutionInstance {
   std::exception_ptr error;
   bool accepting{false};
   bool retiring{false};
-  bool retired{false};
+  std::atomic<bool> retired{false};
   bool unsealed_submission{false};
 
   ExecutionInstance(std::uint64_t domain, std::shared_ptr<RuntimeClient> client)
@@ -518,17 +519,24 @@ void ExecutionDomain::retire_instance(
     instance->retiring = false;
     --state.retiring_instances;
     if (!error) {
-      instance->retired = true;
       instance->client.reset();  // The local owner is released outside the lock.
       instance->latest = {};
       const auto found = std::find(state.instances.begin(), state.instances.end(), instance);
       TI_ASSERT(found != state.instances.end());
       state.instances.erase(found);
+      instance->retired.store(true, std::memory_order_release);
     }
     state.changed.notify_all();
   }
   if (error)
     std::rethrow_exception(error);
+}
+
+bool ExecutionDomain::instance_retired(
+    const std::shared_ptr<ExecutionInstance> &instance) const {
+  if (!instance || instance->domain != state_->identity)
+    throw std::invalid_argument("CUDA instance belongs to another domain");
+  return instance->retired.load(std::memory_order_acquire);
 }
 
 void ExecutionDomain::stop_accepting() {
@@ -603,10 +611,10 @@ void ExecutionDomain::close() {
       if (instance->error)
         std::rethrow_exception(instance->error);
       instance->client->retire();
-      instance->retired = true;
       instance->accepting = false;
       instance->client.reset();
       instance->latest = {};
+      instance->retired.store(true, std::memory_order_release);
     } catch (...) {
       instance->error = std::current_exception();
       if (!retirement_error)

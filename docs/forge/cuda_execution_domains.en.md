@@ -31,6 +31,7 @@ the DSL or creating a device. These are native implementation declarations:
 | `cuda_canvas_execution_domains` | Selected Canvas copy/writer/empty/repeat and bounded prepared image pools |
 | `cuda_submission_parameters_u64` | Declared u64 scalar updates per submission for JIT/AOT independent instances |
 | `cuda_completion_gpu_timing` | Preallocated per-submission sampling and nonblocking completion GPU timing |
+| `cuda_execution_instance_retirement` | Explicit instance retirement and resident-budget reuse, preserving existing tickets |
 
 Use `features.get(name, False)` for older packages. Missing declarations do not
 become support because a version or commit looks newer. Device/driver support,
@@ -50,7 +51,7 @@ if ticket is not None:
     # Wait when consuming results or retiring resources, rather than at every
     # simulation/render handoff.
     ticket.wait()
-step.close()    # release the host instance handle
+step.close()    # cold: retire this instance and reclaim its resident budget
 domain.close()  # cold: drain and retire resources
 ```
 
@@ -277,7 +278,7 @@ with Runtime("cuda") as runtime:
         # Other host work can run here. Waiting is an explicit caller decision.
         ticket.wait()
         ticket.close()
-    step.close()      # release the host handle without waiting
+    step.close()      # cold: retire this instance and reclaim its resident budget
     domain.close()    # cold destructive retirement
 ```
 
@@ -328,8 +329,18 @@ retaining their own recordings. A partially built instance retires its establish
 parts through the same owner. A capacity rejection, or failed construction with
 proven cleanup before admission, removes only that failed instance; the domain and
 resident peers stay usable. Failures after admission or without safe cleanup still
-use cold domain retirement. Releasing a prepared handle keeps its code, arrays and
-reverse dependency edges until domain retirement. Explicit module, memory or
+use cold domain retirement.
+
+`step.close()` stops only this instance, waits for its last accepted submission,
+retires its recordings and removes its storage/dependency edges. It returns the
+resident instance reservation for another preparation; existing completion
+tickets remain usable. Waiting does not hold the runtime submission lock.
+Driver/provider destruction can still synchronize, so close belongs at a cold
+boundary with external producers able to signal pending waits.
+
+`step.release()` and garbage collection release only the host handle, keeping
+code, arrays and reverse dependency edges until domain retirement. This path
+does not reclaim the resident instance reservation. Explicit module, memory or
 native-resource destruction closes dependent domains before freeing their
 storage. Runtime close/reset retires its domains. A failed retirement retains
 the unsafe closure and reports the failure instead of freeing in-flight state.

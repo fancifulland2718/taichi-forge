@@ -56,7 +56,8 @@ def test_graph_execution_domain_live_fields_and_frozen_bindings():
     second.submit().wait()
     np.testing.assert_array_equal(out.to_numpy(), np.full(8, 50))
     tree.destroy()
-    assert first_domain.info["closed"] and second_domain.info["closed"]
+    # The explicitly retired first instance no longer carries Field edges.
+    assert first_domain.info["accepting"] and second_domain.info["closed"]
     with pytest.raises(RuntimeError, match="closed|retired|live"):
         second.submit()
     second.close()

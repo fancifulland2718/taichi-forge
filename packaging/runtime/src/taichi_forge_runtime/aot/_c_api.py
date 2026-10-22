@@ -435,6 +435,10 @@ class Api:
             "ti_stop_cuda_execution_domain_ext": ([Handle], None),
             "ti_close_cuda_execution_domain_ext": ([Handle], None),
             "ti_release_cuda_execution_domain_ext": ([Handle], None),
+            "ti_get_prepared_cuda_instance_ext": ([Handle, Handle], Handle),
+            "ti_retire_cuda_execution_instance_ext": ([Handle], None),
+            "ti_release_cuda_execution_instance_ext": ([Handle], None),
+            "ti_finish_prepared_cuda_instance_retirement_ext": ([Handle, Handle], None),
             "ti_collect_cuda_execution_domain_ext": ([Handle, UInt], UInt),
             "ti_get_cuda_execution_domain_completion_ext": ([Handle], Handle),
             "ti_prepare_execution_plan_on_domain_ext": (

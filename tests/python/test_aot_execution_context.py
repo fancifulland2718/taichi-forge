@@ -112,14 +112,14 @@ def test_individual_instance_retirement_before_pending_peer(tmp_path):
         pytest.skip("Requires the native CUDA execution-domain test executable")
     directory = export_execution_context_module(tmp_path, "bc", False, "fast")
     result = subprocess.run(
-        [str(executable), "--gtest_filter=CudaExecutionInstanceRetirement.*"],
+        [str(executable), "--gtest_filter=CudaExecutionInstanceRetirement.*:CudaPublicInstanceRetirement.*"],
         env=dict(os.environ, TAICHI_F3_CONTEXT_AOT_FOLDER=str(directory)),
         capture_output=True, text=True, timeout=30,
     )
     (tmp_path / "native-retirement.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode == 0 and "[  SKIPPED ]" in result.stdout:
         pytest.skip("Native instance retirement requires stream-ordered allocation support")
-    assert result.returncode == 0 and "[  PASSED  ] 1 test." in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 0 and "[  PASSED  ] 2 tests." in result.stdout, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,8 @@
 #if defined(TI_WITH_CUDA) && defined(TI_WITH_VULKAN) && \
     defined(TI_TEST_RUNTIME_C_API)
 #include <future>
+#include <fstream>
+#include <sstream>
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -279,6 +281,98 @@ TEST(CudaExecutionOwner, ExternalStorageLoanPreservesCompleteAotEpoch) {
   shared.reset();
   observed.reset();
   program.finalize();
+}
+
+TEST(CudaPublicInstanceRetirement, PrivateStorageAndOwnerIndependentLease) {
+  const auto *folder = std::getenv("TAICHI_F3_CONTEXT_AOT_FOLDER");
+  if (!folder || !cuda::ExecutionDomain::available())
+    GTEST_SKIP() << "Requires the saved execution-context AOT fixture";
+  if (!CUDAContext::get_instance().supports_mem_pool())
+    GTEST_SKIP() << "Requires stream-ordered allocation release";
+  auto runtime = std::make_unique<capi::LlvmRuntime>(Arch::cuda);
+  auto rt = reinterpret_cast<TiRuntime>(runtime.get());
+  auto module = ti_load_aot_module(rt, folder);
+  ASSERT_NE(module, nullptr);
+  std::ifstream file(std::string(folder) + "/executions/public_stage.json");
+  ASSERT_TRUE(file.good());
+  std::ostringstream contents;
+  contents << file.rdbuf();
+  const auto plan = contents.str();
+  TiMemoryAllocateInfo allocation{};
+  allocation.size = 64 * sizeof(float);
+  allocation.usage = TI_MEMORY_USAGE_STORAGE_BIT;
+  auto memory = ti_allocate_memory(rt, &allocation);
+  ASSERT_NE(memory, nullptr);
+  TiNamedArgument arguments[2]{};
+  arguments[0].name = "out";
+  arguments[0].argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+  arguments[0].argument.value.ndarray = {
+      memory, {1, {64}}, {0, {}}, TI_DATA_TYPE_F32};
+  arguments[1].name = "seed";
+  arguments[1].argument.type = TI_ARGUMENT_TYPE_F32;
+  arguments[1].argument.value.f32 = 2.0f;
+  const TiCudaExecutionDomainCreateInfo options{2, 1, 0};
+  auto domain = ti_create_cuda_execution_domain_ext(rt, &options);
+  auto peer = ti_create_cuda_execution_domain_ext(rt, &options);
+  const auto prepare = [&] {
+    auto result = ti_prepare_execution_plan_on_domain_ext(
+        rt, module, domain, plan.size(), plan.c_str(), 2, arguments, 0, nullptr);
+    if (!result)
+      throw std::runtime_error("Unable to prepare retirement fixture");
+    ti_initialize_prepared_ext(rt, result);
+    return result;
+  };
+  auto call = prepare();
+  TiCompletion ticket = nullptr;
+  ASSERT_TRUE(ti_try_submit_prepared_ext(rt, call, 0, nullptr, &ticket));
+  ti_wait_completion_ext(ticket);
+  ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  auto lease = ti_get_prepared_cuda_instance_ext(rt, call);
+  ASSERT_NE(lease, nullptr);
+  testing::CudaExternalGate gate;
+  auto pending = capi::get_execution_domain(peer)->submit(
+      {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+  auto retirement = std::async(std::launch::async, [&] {
+    ti_retire_cuda_execution_instance_ext(lease);
+    auto error = ti_get_last_error(nullptr, nullptr);
+    if (error == TI_ERROR_SUCCESS) {
+      ti_finish_prepared_cuda_instance_retirement_ext(rt, call);
+      error = ti_get_last_error(nullptr, nullptr);
+    }
+    return error;
+  });
+  const bool independent =
+      retirement.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  EXPECT_TRUE(independent);
+  if (independent)
+    EXPECT_FALSE(pending.done());
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  EXPECT_EQ(retirement.get(), TI_ERROR_SUCCESS);
+  pending.wait();
+  EXPECT_TRUE(ti_query_completion_ext(ticket));
+  ti_release_completion_ext(ticket);
+  ti_release_cuda_execution_instance_ext(lease);
+  for (int i = 0; i < 3; ++i) {
+    call = prepare();
+    lease = ti_get_prepared_cuda_instance_ext(rt, call);
+    ASSERT_NE(lease, nullptr);
+    ti_retire_cuda_execution_instance_ext(lease);
+    ti_finish_prepared_cuda_instance_retirement_ext(rt, call);
+    ti_release_cuda_execution_instance_ext(lease);
+    ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  }
+  call = prepare();
+  lease = ti_get_prepared_cuda_instance_ext(rt, call);
+  ASSERT_NE(lease, nullptr);
+  ti_destroy_runtime(reinterpret_cast<TiRuntime>(runtime.release()));
+  ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  // An outstanding host retirement lease must never touch the dead Runtime.
+  ti_retire_cuda_execution_instance_ext(lease);
+  ti_release_cuda_execution_instance_ext(lease);
+  ti_release_cuda_execution_domain_ext(domain);
+  ti_release_cuda_execution_domain_ext(peer);
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
 }
 
 TEST(CudaPublicExecutionAot, ExactDependenciesBusyAndReleasedInstanceLifetime) {

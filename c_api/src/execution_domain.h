@@ -7,12 +7,16 @@
 #ifdef TI_WITH_CUDA
 namespace taichi::lang::cuda {
 class ExecutionDomain;
+class ExecutionInstance;
 }
 namespace capi {
 
 std::shared_ptr<taichi::lang::cuda::ExecutionDomain> get_execution_domain(
     TiCudaExecutionDomain handle);
 taichi::lang::RuntimeCompletion get_completion(TiCompletion handle);
+TiCudaExecutionInstance publish_execution_instance(
+    std::shared_ptr<taichi::lang::cuda::ExecutionDomain> domain,
+    std::shared_ptr<taichi::lang::cuda::ExecutionInstance> instance);
 
 // Reserve all public ticket bookkeeping before a submit can affect the device.
 // Failed admission destroys the unpublished reservation. commit only assigns

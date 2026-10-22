@@ -568,6 +568,17 @@ class PreparedExecutionRegistry {
     remove_dependencies(handle, entry);
     entries_.erase(handle);
   }
+  void finish_instance_retirement(TiPreparedExecution handle) {
+#ifdef TI_WITH_CUDA
+    auto &entry = get(handle);
+    if (!entry.domain || !entry.domain->instance_retired(entry.domain_registration))
+      throw MemoryBindingError("CUDA instance retirement is not complete");
+    remove_dependencies(handle, entry);
+    entries_.erase(handle);
+#else
+    throw MemoryBindingError("CUDA execution instances unavailable");
+#endif
+  }
   void initialize(TiPreparedExecution handle) {
     auto &entry = get(handle);
     const bool needed = entry.needs_initialization();
@@ -2482,6 +2493,23 @@ uint64_t ti_get_prepared_execution_workspace_bytes_ext(
   return 0;
 }
 
+TiCudaExecutionInstance ti_get_prepared_cuda_instance_ext(
+    TiRuntime runtime, TiPreparedExecution execution) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(execution);
+#ifdef TI_WITH_CUDA
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  auto &entry = rt.prepared_registry().get(execution);
+  return capi::publish_execution_instance(entry.domain, entry.domain_registration);
+#else
+  ti_set_last_error(TI_ERROR_NOT_SUPPORTED, "CUDA execution instances unavailable");
+#endif
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
+}
+
 void ti_destroy_prepared_ext(TiRuntime runtime, TiPreparedExecution execution) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
@@ -2489,6 +2517,17 @@ void ti_destroy_prepared_ext(TiRuntime runtime, TiPreparedExecution execution) {
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
   rt.prepared_registry().destroy(execution);
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_finish_prepared_cuda_instance_retirement_ext(
+    TiRuntime runtime, TiPreparedExecution execution) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(execution);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  rt.prepared_registry().finish_instance_retirement(execution);
   TI_CAPI_TRY_CATCH_END();
 }
 

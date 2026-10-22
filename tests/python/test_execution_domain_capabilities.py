@@ -38,6 +38,7 @@ def test_domain_manifest_matches_runtime_only_without_initializing_a_device():
     )
     assert native["features"]["cuda_submission_parameters_u64"] == cuda_api
     assert native["features"]["cuda_completion_gpu_timing"] == cuda_api
+    assert native["features"]["cuda_execution_instance_retirement"] == cuda_api
     assert ti.lang.impl.get_runtime().prog is None
     with pytest.raises(TypeError):
         native["features"][NAMES[0]] = False
