@@ -504,14 +504,13 @@ struct ExecutionDomainRegistry::State {
 
 ExecutionDomainRegistry::ExecutionDomainRegistry(
     std::shared_ptr<RuntimeFaultDomain> owner,
-    std::size_t capacity)
+    std::size_t initial_capacity)
     : state_(std::make_unique<State>()) {
-  if (!owner || owner->backend() != Arch::cuda || capacity == 0)
-    throw std::invalid_argument(
-        "CUDA domain registry requires a CUDA owner and capacity");
+  if (!owner || owner->backend() != Arch::cuda)
+    throw std::invalid_argument("CUDA domain registry requires a CUDA owner");
   owner->throw_if_new_submission_disallowed("create CUDA domain registry");
   state_->owner = std::move(owner);
-  state_->domains.resize(capacity);
+  state_->domains.reserve(initial_capacity);
 }
 
 ExecutionDomainRegistry::~ExecutionDomainRegistry() {
@@ -537,7 +536,18 @@ std::shared_ptr<ExecutionDomain> ExecutionDomainRegistry::create(
       return domain;
     }
   }
-  throw std::runtime_error("CUDA runtime execution-domain capacity exhausted");
+  // Reserve the ownership slot before creating any backend state. Allocation
+  // failure must not leave a live stream outside the registry. Registration is
+  // cold; domain submission and its bounded event storage remain unchanged.
+  state.domains.emplace_back();
+  try {
+    auto domain = std::make_shared<ExecutionDomain>(state.owner, options);
+    state.domains.back() = domain;
+    return domain;
+  } catch (...) {
+    state.domains.pop_back();
+    throw;
+  }
 }
 
 bool ExecutionDomainRegistry::belongs_to(

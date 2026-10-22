@@ -104,12 +104,13 @@ class ExecutionDomain {
 };
 
 // One registry per runtime generation, shared with its borrowed AOT views.
-// Retained slots bound both live domains and historical closed-domain storage.
-// Registration and retirement are cold; submit never acquires this mutex.
+// Registration grows on the cold path and reuses closed-domain slots. This
+// storage is not an admission budget: each domain controls its own in-flight
+// capacity. Submit never acquires the registry mutex.
 class ExecutionDomainRegistry final : public RuntimeClient {
  public:
   explicit ExecutionDomainRegistry(std::shared_ptr<RuntimeFaultDomain> owner,
-                                   std::size_t capacity = 64);
+                                   std::size_t initial_capacity = 0);
   ~ExecutionDomainRegistry() override;
   std::shared_ptr<ExecutionDomain> create(ExecutionDomain::Options options);
   bool belongs_to(const std::shared_ptr<RuntimeFaultDomain> &owner) const;

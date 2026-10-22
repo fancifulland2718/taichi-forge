@@ -244,6 +244,9 @@ ring 和 host selection 不会被悄悄改写为其他物理路线；native oper
 应用数据 hazard 由调用方负责。域不会自动推断数组视图或 dense field 是否 alias；所有
 重叠读写和写写都需要显式依赖，包括 snapshot 覆写和槽复用。
 
+runtime 在冷阶段按需增长域注册存储，并复用已关闭域的位置，没有固定的域数量上限。
+后端或主机资源不足时，创建 stream 及其存储仍可能失败。
+
 `capacity` 限制在途提交，`instance_capacity` 限制驻留 recording。带显式初始化的计划
 可能同时保留初始化和 replay 两个 recording。释放 prepared 句柄后，代码、数组及反向
 依赖边仍保留到域退休。显式销毁模块、内存或 native resource 时，先关闭受影响的域，再

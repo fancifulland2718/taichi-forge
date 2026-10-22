@@ -528,7 +528,7 @@ TEST_F(CudaExecutionDependency,
       std::make_shared<RuntimeFaultDomain>(Arch::cuda, 71)));
   auto output = registry.create({1, 0});
   auto physics = registry.create({1, 0});
-  EXPECT_ANY_THROW(registry.create({1, 0}));
+  auto extra = registry.create({1, 0});
   testing::CudaExternalGate gate;
   std::atomic<int> released{0};
   auto blocked =
@@ -560,6 +560,7 @@ TEST_F(CudaExecutionDependency,
   second_retirement.get();
   EXPECT_TRUE(output->snapshot().closed);
   EXPECT_TRUE(physics->snapshot().closed);
+  EXPECT_TRUE(extra->snapshot().closed);
   EXPECT_TRUE(blocked.done());
   EXPECT_EQ(released.load(), 1);
 }
@@ -569,7 +570,6 @@ TEST_F(CudaExecutionDependency, RegistryReusesOnlyClosedDomainSlots) {
   auto previous = registry.create({1, 0});
   const auto original_identity = previous->snapshot().identity;
   for (int i = 0; i < 32; ++i) {
-    EXPECT_ANY_THROW(registry.create({1, 0}));
     previous->close();
     std::weak_ptr<cuda::ExecutionDomain> retired = previous;
     previous = registry.create({1, 0});
@@ -583,6 +583,38 @@ TEST_F(CudaExecutionDependency, RegistryReusesOnlyClosedDomainSlots) {
   EXPECT_FALSE(retained.expired());
   registry.retire();
   EXPECT_TRUE(retained.lock()->snapshot().closed);
+}
+
+TEST_F(CudaExecutionDependency, RegistryGrowthPreservesDomainsAndCompletions) {
+  cuda::ExecutionDomainRegistry registry(fault);
+  std::vector<std::shared_ptr<cuda::ExecutionDomain>> domains;
+  std::vector<RuntimeCompletion> completions;
+  // Cross the former default registry limit with minimal one-event domains.
+  // No large kernel or simulation is needed to exercise this cold ownership.
+  for (int i = 0; i < 65; ++i) {
+    auto domain = registry.create({1, 0, 1});
+    completions.push_back(domain->submit({}, nullptr, [](void *) {}));
+    domains.push_back(std::move(domain));
+  }
+  registry.synchronize();
+  for (const auto &completion : completions)
+    EXPECT_TRUE(completion.done());
+  const auto first_identity = domains.front()->snapshot().identity;
+  domains.front()->close();
+  auto replacement = registry.create({1, 0, 1});
+  EXPECT_NE(replacement->snapshot().identity, first_identity);
+  EXPECT_TRUE(completions.front().done());
+  // Failed creation neither publishes an owner nor poisons later growth.
+  EXPECT_THROW(registry.create({0, 0}), std::invalid_argument);
+  auto after_failure = registry.create({1, 0, 1});
+  registry.retire();
+  for (const auto &domain : domains)
+    EXPECT_TRUE(domain->snapshot().closed);
+  EXPECT_TRUE(replacement->snapshot().closed);
+  EXPECT_TRUE(after_failure->snapshot().closed);
+  EXPECT_THROW(registry.create({1, 0}), std::runtime_error);
+  for (const auto &completion : completions)
+    EXPECT_TRUE(completion.done());
 }
 
 struct DomainInstance final : RuntimeClient {
@@ -727,8 +759,16 @@ TEST_F(CudaExecutionDependency, FailedInstanceRetirementIsSticky) {
   EXPECT_EQ(instance->retire_calls.load(), 1);
   EXPECT_FALSE(domain.snapshot().accepting);
   EXPECT_FALSE(domain.snapshot().closed);
-  EXPECT_ANY_THROW(registry.create({1, 0, 1}));
+  auto peer = registry.create({1, 0, 1});
+  EXPECT_NE(peer->snapshot().identity, domain.snapshot().identity);
   EXPECT_ANY_THROW(domain.submit({}, nullptr, [](void *) {}));
+  std::weak_ptr<cuda::ExecutionDomain> retained = retained_domain;
+  retained_domain.reset();
+  EXPECT_FALSE(retained.expired());
+  EXPECT_THROW(registry.retire(), std::runtime_error);
+  EXPECT_TRUE(peer->snapshot().closed);
+  EXPECT_FALSE(retained.lock()->snapshot().closed);
+  EXPECT_EQ(instance->retire_calls.load(), 1);
   // Cold destruction quarantines this bounded instance instead of freeing
   // storage after a failed retirement. The exception must remain observable.
 }

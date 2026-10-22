@@ -311,6 +311,10 @@ The caller owns application data hazards. Domains do not infer that two array
 views or dense fields alias. Explicit dependencies must order every overlapping
 write/read or write/write, including snapshot overwrite and slot reuse.
 
+Runtime domain registration grows during cold creation and reuses closed-domain
+slots; it has no fixed domain-count limit. Creating streams and their storage
+can still fail when backend or host resources are exhausted.
+
 `capacity` bounds pending submissions; `instance_capacity` bounds resident
 recordings. A plan with an explicit initializer can retain both an initializer
 and replay recording. Releasing a prepared handle keeps its code, arrays and
