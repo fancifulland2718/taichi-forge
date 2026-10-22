@@ -2,6 +2,7 @@
 
 import array
 import gc
+import json
 
 import numpy as np
 import pytest
@@ -24,9 +25,9 @@ def _fixture():
             out[i] = p.record.weights[0] * p.child.values[i] + ti.cast(p.child.offset - ti.u64(1 << 40), ti.f32)
 
     @ti.kernel
-    def finish(out: ti.types.ndarray(ti.f32, 1), p: pack_type):
+    def finish(out: ti.types.ndarray(ti.f32, 1), config: pack_type):
         for i in out:
-            out[i] += p.record.weights[1]
+            out[i] += config.record.weights[1]
 
     symbol = ti.graph.Arg(ti.graph.ArgKind.ARGPACK, "pack", pack_type)
     out_symbol = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.f32, ndim=1)
@@ -65,6 +66,8 @@ def test_argpack_automatic_export_preserves_device_values(tmp_path):
         loaded = runtime.load_module(artifact)
         plan = loaded.execution_plan("step")
         assert set(plan.argument_names) == {"values", "out"}
+        resources = json.loads(plan.to_json())["resources"]
+        assert sum(resource.get("operation") == "argpack" for resource in resources) == 1
         x, first, second = (runtime.ndarray("f32", 2) for _ in range(3))
         x.write(array.array("f", [3, 7]).tobytes())
         one = plan.prepare(loaded, dict(values=x, out=first))
@@ -135,6 +138,7 @@ def test_argpack_export_explicit_adjoint_and_resource_only_pack(tmp_path):
     graph = builder.compile()
     module = ti.aot.Module()
     module.add_execution_plan("step", graph, source_bindings=dict(pack=pack, x=x), gradients=dict(x="dx", loss="dloss"))
+    module.add_execution_plan("public", graph)
     artifact = tmp_path / "adjoint.tcm"
     module.archive(str(artifact))
     with ti.aot.borrow_runtime() as runtime:
@@ -148,3 +152,61 @@ def test_argpack_export_explicit_adjoint_and_resource_only_pack(tmp_path):
         assert _read(bindings["loss"]) == [9]
         assert _read(bindings["dx"]) == [6]
         prepared.close()
+        public = loaded.execution_plan("public")
+        packet = public.argpack(
+            loaded, "pack", dict(child=dict(values=bindings["x"])), gradients={("child", "values"): bindings["dx"]}
+        )
+        for name in ("dx", "loss"):
+            bindings[name].write(array.array("f", [0]).tobytes())
+        owner = public.prepare(loaded, dict(pack=packet, loss=bindings["loss"]), gradients=dict(loss=bindings["dloss"]))
+        owner.run()
+        runtime.wait()
+        assert _read(bindings["loss"]) == [9]
+        assert _read(bindings["dx"]) == [6]
+        owner.close()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_public_graph_pack_rebinds_root_positions(tmp_path):
+    graph, _, _, _, _ = _fixture()
+    backend = str(ti.lang.impl.current_cfg().arch).split(".")[-1]
+    backend = "cpu" if backend == "x64" else backend
+    module = ti.aot.Module(caps=["spirv_has_int64"] if backend == "vulkan" else None)
+    module.add_execution_plan("step", graph)
+    wrong_record = ti.types.struct(weights=ti.types.matrix(1, 2, ti.f32))
+    child = ti.types.argpack(offset=ti.u64, values=ti.types.ndarray(ti.f32, 1))
+    wrong_pack = ti.types.argpack(record=wrong_record, child=child)
+
+    @ti.kernel
+    def wrong(p: wrong_pack, out: ti.types.ndarray(ti.f32, 1)):
+        out[0] = p.record.weights[0, 0]
+
+    module.add_kernel(wrong)
+    artifact = tmp_path / "public.tcm"
+    module.archive(str(artifact))
+    graph.close()
+    ti.reset()
+    with aot.Runtime(backend) as runtime:
+        loaded = runtime.load_module(artifact)
+        plan = loaded.execution_plan("step")
+        assert set(plan.argument_names) == {"pack", "out"}
+        x, first, second = (runtime.ndarray("f32", 2) for _ in range(3))
+        x.write(array.array("f", [3, 7]).tobytes())
+        owners = []
+        for weights, offset, output in (([2, 5], 1, first), ([10, 20], 3, second)):
+            packet = plan.argpack(
+                loaded, "pack", dict(record=dict(weights=weights), child=dict(offset=(1 << 40) + offset, values=x))
+            )
+            owners.append(plan.prepare(loaded, dict(pack=packet, out=output)))
+        owners[0].run()
+        owners[0].close()
+        owners[1].run()
+        runtime.wait()
+        assert _read(first) == [12, 20]
+        assert _read(second) == [53, 93]
+        owners[1].close()
+        with pytest.raises(RuntimeError, match="ArgPack.*match"):
+            loaded.kernel("wrong").prepare(packet, second)
+        assert _read(second) == [53, 93]
+        with pytest.raises(ValueError, match="logical ArgPack"):
+            plan.argpack(loaded, "out", {})

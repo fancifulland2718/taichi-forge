@@ -32,6 +32,7 @@ class NativeArgPackKernelBinding final : public NativeKernelResourceBinding {
   const std::vector<int> argument_;
   const CallableBase *kernel_;
   const LaunchContextBuilder *context_;
+  std::vector<std::vector<int>> paths_;
   std::vector<DeviceAllocation> allocations_;
 };
 

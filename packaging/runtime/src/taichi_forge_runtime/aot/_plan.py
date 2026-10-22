@@ -626,6 +626,44 @@ class ExecutionPlan:
         # introduced, preserving every existing execution and storage choice.
         return ExecutionPlan(**document)
 
+    def argpack(self, module, name, values, *, gradients=None):
+        """Create a public immutable pack without exposing generated kernel names.
+
+        Values and resource members follow Kernel.argpack(). Preparation checks
+        compatibility at every use, including other argument positions. This is
+        a cold factory; submission performs no descriptor decoding or lookup.
+        """
+        if name not in self.argument_names:
+            raise ValueError("ArgPack factory requires a public plan argument")
+        document = json.loads(self._json)
+        pending = list(document["operations"]) + document.get("initialization", [])
+        first = None
+        while pending:
+            operation = pending.pop()
+            kind = operation["kind"]
+            if kind == "while":
+                pending.extend(operation["condition"] + operation["body"])
+            elif kind == "branch":
+                pending.extend(operation["condition"])
+                for region in operation["bodies"]:
+                    pending.extend(region)
+            elif kind == "cuda_parallel":
+                for region in operation["branches"]:
+                    pending.extend(region)
+            elif kind == "kernel" and name in operation["arguments"]:
+                kernel = module.kernel(operation["entry"])
+                layout = kernel._argument_layout
+                for index, argument in enumerate(operation["arguments"]):
+                    if argument == name:
+                        if (layout is None or len(operation["arguments"]) != layout.count
+                                or index not in layout.pack_indices):
+                            raise ValueError("Plan argument is not consistently a logical ArgPack")
+                        first = kernel, index
+        if first is None:
+            raise ValueError("Plan argument has no ArgPack kernel use")
+        kernel, index = first
+        return kernel.argpack(index, values, gradients=gradients)
+
     def prepare(self, module, arguments, *, gradients=None, execution_domain=None, mutable_parameters=()):
         """Resolve a frozen plan to the same native executor as kernel.prepare()."""
         return self._prepare(module, arguments, gradients=gradients, execution_domain=execution_domain,

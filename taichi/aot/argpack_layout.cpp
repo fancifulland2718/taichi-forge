@@ -27,6 +27,29 @@ const StructType *pack_storage(const CallableBase &kernel,
                          ->as<StructType>();
   return DataType(outer->elements()[0].type).ptr_removed()->as<StructType>();
 }
+
+bool same_storage_type(const Type *left, const Type *right) {
+  if (left == right) return true;
+  if (const auto *structure = left->cast<StructType>()) {
+    const auto *other = right->cast<StructType>();
+    if (!other || structure->get_layout() != other->get_layout() ||
+        structure->elements().size() != other->elements().size()) return false;
+    for (std::size_t i = 0; i < structure->elements().size(); ++i) {
+      const auto &a = structure->elements()[i];
+      const auto &b = other->elements()[i];
+      // Compiler-generated arg_N_M names change with the root position.
+      if (a.offset != b.offset || !same_storage_type(a.type, b.type)) return false;
+    }
+    return true;
+  }
+  if (const auto *pointer = left->cast<PointerType>()) {
+    const auto *other = right->cast<PointerType>();
+    return other && pointer->get_addr_space() == other->get_addr_space() &&
+           pointer->is_bit_pointer() == other->is_bit_pointer() &&
+           same_storage_type(pointer->get_pointee_type(), other->get_pointee_type());
+  }
+  return false;
+}
 }  // namespace
 
 ArgPackLayout::ArgPackLayout(const CallableBase &kernel,
@@ -122,12 +145,23 @@ ArgPackLayout::ArgPackLayout(const CallableBase &kernel,
 
 bool ArgPackLayout::matches(const CallableBase &kernel,
                             const std::vector<int> &physical_root) const {
-  if (!kernel.argument_origins || storages_.empty() ||
-      storages_.front().origin.physical != physical_root)
+  if (!kernel.argument_origins || storages_.empty() || physical_root.size() != 1 ||
+      storages_.front().origin.physical.size() != 1 ||
+      storages_.front().origin.logical.size() != 1)
     return false;
+  const auto origins = canonical_argument_origins(*kernel.argument_origins);
+  const auto root = std::find_if(origins.begin(), origins.end(), [&](const auto &origin) {
+    return origin.kind == "argpack" && origin.logical.size() == 1 &&
+           origin.physical == physical_root;
+  });
+  if (root == origins.end()) return false;
+  const auto relocate = [&](std::vector<int> path) {
+    path.front() = physical_root.front();
+    return path;
+  };
   ArgumentOrigins selected;
-  for (const auto &origin : canonical_argument_origins(*kernel.argument_origins))
-    if (below(origin.logical, storages_.front().origin.logical))
+  for (const auto &origin : origins)
+    if (below(origin.logical, root->logical))
       selected.push_back(origin);
   if (selected.size() != origins_.size())
     return false;
@@ -138,19 +172,24 @@ bool ArgPackLayout::matches(const CallableBase &kernel,
     // pack allocation. Other root parameters may move those resource slots
     // without changing this immutable storage. Their dtype/shape and gradient
     // contract are checked by the ordinary argument binder at the new slots.
-    if (target.logical != source.logical || target.name != source.name ||
+    auto logical = source.logical;
+    logical.front() = root->logical.front();
+    if (target.logical != logical ||
+        (source.logical.size() > 1 && target.name != source.name) ||
         target.kind != source.kind ||
         ((source.kind == "argpack" || source.kind == "value") &&
-         target.physical != source.physical))
+         target.physical != relocate(source.physical)))
       return false;
   }
   for (const auto &storage : storages_) {
-    if (pack_storage(kernel, storage.origin.physical) != storage.source_type)
+    if (!same_storage_type(pack_storage(kernel, relocate(storage.origin.physical)),
+                            storage.source_type))
       return false;
     for (const auto &value : storage.values) {
-      auto logical = compiled_value_parameter_type(kernel, value.origin.physical);
+      const auto physical = relocate(value.origin.physical);
+      auto logical = compiled_value_parameter_type(kernel, physical);
       if (kernel.value_parameter_types) {
-        const auto found = kernel.value_parameter_types->find(value.origin.physical);
+        const auto found = kernel.value_parameter_types->find(physical);
         if (found != kernel.value_parameter_types->end())
           logical = found->second;
       }

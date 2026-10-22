@@ -1,5 +1,7 @@
 """Cold ArgPack values and lifted resources for the existing execution plan ABI."""
 
+import json
+
 from taichi_forge._lib import core
 from taichi_forge.lang import impl
 from taichi_forge.lang.argpack import ArgPack
@@ -11,6 +13,7 @@ class SourceArgPacks:
         self.owners = {name: value for name, value in fixed_bindings.items() if isinstance(value, ArgPack)}
         self.used = set()
         self._resources = {}
+        self._storages = {}
         for name, owner in bindings.items():
             if not isinstance(name, str) or not name or "\0" in name:
                 raise ValueError("Source binding names must be nonempty strings without NUL")
@@ -57,7 +60,24 @@ class SourceArgPacks:
                 raise TaichiRuntimeError("Fixed Graph ArgPack currently requires value or ndarray members")
 
         visit(symbol, owner, (index,))
-        _, payloads = native._snapshot_argpack(dispatch, index, packs)
+        layout, payloads = native._snapshot_argpack(dispatch, index, packs)
+        signature = json.loads(layout)
+        signature["logical_argument"] = 0
+        for member in signature["members"]:
+            origin = member["origin"]
+            origin["logical"][0] = origin["physical"][0] = 0
+            if len(origin["logical"]) == 1:
+                origin["name"] = ""
+        storage_key = (
+            id(owner),
+            json.dumps(signature, sort_keys=True),
+            tuple((tuple(path[1:]), payload) for path, payload in payloads),
+        )
+        previous = self._storages.get(storage_key)
+        if previous is not None:
+            result = previous, resources
+            self._resources[key] = result
+            return result
         paths, bindings = [], {}
         for value_index, (path, payload) in enumerate(payloads):
             paths.append(list(path[1:]))
@@ -70,6 +90,7 @@ class SourceArgPacks:
             bindings=bindings,
         )
         result = resource, resources
+        self._storages[storage_key] = resource
         self._resources[key] = result
         return result
 
@@ -78,6 +99,16 @@ def kernel_pack_bindings(context, arguments, entry, jit_source):
     if jit_source is None:
         raise TaichiRuntimeError("Fixed Graph ArgPack requires selected physical dispatch metadata")
     native, dispatch = jit_source
+    packs = [argument for argument in arguments if argument.tag == core.ArgKind.ARGPACK]
+    frozen = [argument.name in context.source_resources.argpacks.owners for argument in packs]
+    if not any(frozen):
+        # Public consumer owners carry both the values and lifted resources.
+        # The existing C API expands them from logical roots during preparation.
+        result = [context.kernel_binding(argument) for argument in arguments]
+        context.source_arrays.validate_kernel(arguments, result)
+        return result
+    if not all(frozen):
+        raise TaichiRuntimeError("One kernel dispatch must use either public or source-frozen ArgPacks")
     logical = {}
     for index, argument in enumerate(arguments):
         if argument.tag == core.ArgKind.ARGPACK:

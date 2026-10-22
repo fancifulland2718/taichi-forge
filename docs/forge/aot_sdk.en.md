@@ -1946,11 +1946,22 @@ pack values while named member arrays remain public inputs. Unnamed arrays need
 explicit `snapshot_state=True`. The original pack input is removed from the
 plan. Only compiled pure-value windows are stored, with no pointer or padding
 bytes; in-place edits to nested Python objects that have not reached device
-storage do not enter the snapshot. Isolated checks cover sequential plans,
-explicit adjoints and independent instances. Automatic image/AS members,
-consumer-supplied public pack owners, legacy CGraph serialization and other
-fixed physical strategies need separate qualification. Normal installations
-have not yet been refreshed with this slice.
+storage do not enter the snapshot. Repeated uses of one source pack with equal
+layouts and values share immutable storage within one plan, across kernel
+argument positions. Independent preparations still rebuild private storage.
+
+Omitting the pack from `source_bindings` preserves a public logical input.
+Create it with `packet = plan.argpack(loaded_module, "pack", values,
+gradients=...)`, then call `plan.prepare(loaded_module, {"pack": packet, ...})`.
+Generated kernel names are not required. The nested value/resource dictionary
+and gradient member-name paths follow `Kernel.argpack()`. One immutable owner
+may serve compatible kernel arguments at different positions and with different
+parameter names; preparation validates all uses. Multiple packs in a single
+kernel dispatch currently must all be public or all source-frozen. Separate
+dispatches may choose independently. Isolated checks cover sequential plans,
+explicit adjoints and independent instances. Automatic image/AS members, legacy
+CGraph serialization and other fixed physical strategies need separate
+qualification. Normal installations have not yet been refreshed with this slice.
 
 The producer's `Module.add_kernel()` synthesizes compilation exemplars for fully
 declared ArgPacks. When a member ndarray has an unspecified dtype or rank, supply

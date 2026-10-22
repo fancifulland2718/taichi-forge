@@ -622,6 +622,10 @@ class Module:
         The pack name leaves the public plan inputs, while named member arrays
         remain public. This automatic path currently accepts value/ndarray
         members and retains the existing backend recording admission rules.
+        Omitting a pack from ``source_bindings`` keeps its public logical input;
+        consumers can create its immutable owner with ``plan.argpack(module,
+        name, values)``. Packs within one kernel dispatch must all be public or
+        all source-frozen. Independent dispatches may choose separately.
         An f32 CUDA CSR/BSR SparseMatrix names its compressed numeric values,
         not the ndarray originally copied into the matrix. Its topology stays
         frozen and consumers supply a one-dimensional f32 array in that order.

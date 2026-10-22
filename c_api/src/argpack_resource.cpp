@@ -68,9 +68,12 @@ ExpandedArgPackArguments expand_argpack_arguments(
                                          {int(roots.at(index))}))
       throw MemoryBindingError("ArgPack does not match this kernel argument");
     std::map<uint32_t, uint32_t> relocated;
-    for (const auto &origin : pack->storage->layout().resources())
+    for (const auto &origin : pack->storage->layout().resources()) {
+      auto logical = origin.logical;
+      logical.front() = int(index);
       relocated.emplace(uint32_t(origin.physical.at(0)),
-                         resource_slots.at(origin.logical));
+                         resource_slots.at(logical));
+    }
     for (const auto &member : pack->members) {
       const auto physical = relocated.at(member.physical);
       assign(physical, member.argument);

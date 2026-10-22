@@ -1525,8 +1525,17 @@ source_bindings={"pack": pack, "values": pack.values})` 同样自动冻结包值
 经现有 source binding 保持公开；未命名的数组仅在 `snapshot_state=True` 时捕获。
 产物移除原 `pack` 输入，保留命名成员数组输入；只保存编译布局下的纯值，不保存指针或
 填充字节。嵌套 Python 对象原地修改而尚未写入设备的值不会混入快照。
-本切片已隔离验证三后端顺序计划、显式反向与双实例；自动 image/AS 成员重建、消费端公开
-包 owner、旧 CGraph 序列化及其他固定物理策略仍需各自资格验证。正常安装尚未更新到此切片。
+同一个源包的布局与值一致时，一份计划内多个 kernel/参数位置共享只读包存储；独立 prepare
+仍重建自己的私有存储。
+
+不在 `source_bindings` 提供包时，导出保留其公开逻辑参数。消费端用
+`packet = plan.argpack(loaded_module, "pack", values, gradients=...)` 创建不可变 owner，
+然后 `plan.prepare(loaded_module, {"pack": packet, ...})`，无需知道生成的 kernel 名称。
+`values` 是包含嵌套值和资源的字典；梯度键沿用 `Kernel.argpack()` 的成员名路径。
+同一个 owner 可用于参数位置/参数变量名不同但成员合同兼容的 kernel，prepare 验证所有用途。
+一条 kernel dispatch 中的多个包目前须全部公开或全部源冻结；不同 dispatch 可分别选择。
+本切片已隔离验证三后端顺序计划、显式反向与双实例；自动 image/AS 成员重建、旧 CGraph
+序列化及其他固定物理策略仍需各自资格验证。正常安装尚未更新到此切片。
 
 生产端 `Module.add_kernel()` 可为完全声明的 ArgPack 自动构造编译占位；成员 ndarray
 的 dtype/ndim 未指定时，通过 `template_args={"pack参数名": 实际参数包, ...}` 提供

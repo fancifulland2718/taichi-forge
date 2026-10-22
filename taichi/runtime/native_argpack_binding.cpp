@@ -20,16 +20,18 @@ NativeArgPackKernelBinding::NativeArgPackKernelBinding(
   allocations_.reserve(packs.size());
   // Qualify the entire subtree before writing any launch packet state.
   for (std::size_t i = 0; i < packs.size(); ++i) {
-    const auto &physical = packs[i].origin.physical;
+    auto physical = packs[i].origin.physical;
+    physical.front() = argument_.front();
     const auto parameter = kernel.nested_parameters.find(physical);
     if (parameter == kernel.nested_parameters.end() ||
         !parameter->second.is_argpack || context.argpack_ptrs.count(physical) ||
         context.device_allocation_type.count(physical))
       throw std::invalid_argument("ArgPack subtree is already bound or invalid");
     allocations_.push_back(storage_->allocation(i));
+    paths_.push_back(std::move(physical));
   }
   for (std::size_t i = 0; i < packs.size(); ++i)
-    context.set_arg_argpack_impl(packs[i].origin.physical, &allocations_[i],
+    context.set_arg_argpack_impl(paths_[i], &allocations_[i],
                                  storage_->address(i));
 }
 
@@ -44,7 +46,7 @@ void NativeArgPackKernelBinding::validate(
     throw std::invalid_argument("ArgPack binding owner changed after qualification");
   const auto &packs = storage_->layout().storages();
   for (std::size_t i = 0; i < packs.size(); ++i) {
-    const auto &physical = packs[i].origin.physical;
+    const auto &physical = paths_[i];
     const auto pointer = context.array_ptrs.find(physical);
     const auto kind = context.device_allocation_type.find(physical);
     if (pointer == context.array_ptrs.end() || pointer->second != &allocations_[i] ||
