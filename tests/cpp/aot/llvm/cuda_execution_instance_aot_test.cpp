@@ -7,6 +7,7 @@
 #include <cmath>
 #include <mutex>
 #include <cstdlib>
+#include <future>
 #include <limits>
 #include "tests/cpp/rhi/common/cuda_external_gate.h"
 #include "taichi/program/runtime_fault.h"
@@ -302,6 +303,51 @@ TEST(CudaExecutionContextAot,
   EXPECT_FALSE(retained.expired());  // No driver frees in ticket retirement.
   registry.retire();
   EXPECT_TRUE(retained.expired());
+}
+
+TEST(CudaExecutionInstanceRetirement, PrivateBuffersRetireBeforePendingPeer) {
+  const auto *folder = std::getenv("TAICHI_F3_CONTEXT_AOT_FOLDER");
+  if (!folder || !cuda::ExecutionDomain::available())
+    GTEST_SKIP() << "Requires the saved execution-context AOT fixture";
+  if (!CUDAContext::get_instance().supports_mem_pool())
+    GTEST_SKIP() << "Requires stream-ordered legacy allocation release";
+  auto operands = std::make_shared<InstanceOperands>(folder);
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 819);
+  cuda::ExecutionDomainRegistry registry(owner, 2);
+  auto output = registry.create({2, 0, 1});
+  auto physics = registry.create({1, 0, 1});
+  LaunchContextBuilder args(&operands->kernel());
+  auto first = cuda::FixedGraph::prepare_execution_instance(
+      {operands->dispatch(args, 0), operands->read(0)}, owner, output, operands);
+  auto done = first->submit();
+  done.wait();
+  operands->check(0);
+  testing::CudaExternalGate gate;
+  auto blocked = physics->submit(
+      {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+  auto retirement = std::async(std::launch::async,
+                               [&] { first->retire_execution_instance(); });
+  const bool independent =
+      retirement.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  EXPECT_TRUE(independent);
+  if (independent)
+    EXPECT_FALSE(blocked.done());
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  retirement.get();
+  blocked.wait();
+  EXPECT_TRUE(first->instance_snapshot().retired);
+  EXPECT_TRUE(done.done());
+  EXPECT_THROW(first->submit(), std::invalid_argument);
+  first->retire_execution_instance();
+  // Cumulative creation exceeds the explicitly selected resident budget.
+  for (int i = 0; i < 3; ++i) {
+    auto next = cuda::FixedGraph::prepare_execution_instance(
+        {operands->dispatch(args, 0), operands->read(0)}, owner, output, operands);
+    next->submit().wait();
+    operands->check(0);
+    next->retire_execution_instance();
+  }
 }
 
 TEST(CudaExecutionContextAot, FixedParallelBranchesHaveIndependentTemporaries) {

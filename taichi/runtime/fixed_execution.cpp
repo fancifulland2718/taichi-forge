@@ -79,6 +79,7 @@ struct FixedExecution::State {
 #endif
 #ifdef TI_WITH_CUDA
   std::shared_ptr<cuda::ExecutionDomain> cuda_domain;
+  std::shared_ptr<cuda::ExecutionInstance> cuda_registration;
   // Declared before recordings so legacy destruction drains before releasing
   // the resource's domain claim. Independent instances retain another copy.
   std::vector<std::shared_ptr<void>> cuda_provider_bindings;
@@ -201,6 +202,10 @@ FixedExecution::FixedExecution(
       throw std::invalid_argument(
           "Fixed execution domain belongs to another runtime owner");
     state_->cuda_domain = execution_binding->domain;
+    state_->cuda_registration = execution_binding->instance;
+    if (execution_binding->retirement_parts && !state_->cuda_registration)
+      throw std::invalid_argument(
+          "Grouped CUDA preparation requires its logical instance owner");
 #else
     throw std::invalid_argument("CUDA execution domains are unavailable");
 #endif
@@ -1083,8 +1088,9 @@ FixedExecution::FixedExecution(
         execution_binding->retirement_parts->push_back(state_->cuda_instance);
         prepare_instance();
       } else {
-        state_->cuda_domain->prepare_instance(state_->cuda_instance,
-                                               prepare_instance);
+        state_->cuda_registration =
+            state_->cuda_domain->prepare_owned_instance(
+                state_->cuda_instance, [&](const auto &) { prepare_instance(); });
       }
       state_->kind = ordered_operations ? 4 : 1;
       state_->cuda_ordered_count = ordered_operations;
@@ -1335,8 +1341,8 @@ RuntimeCompletion FixedExecution::submit(
       ordered = std::make_shared<cuda::OrderedSubmissionResources>(
           state_->cuda_ordered_count, std::atomic_load(&instance->operands));
     std::optional<PreparedExternalAccess::Epoch> external;
-    auto completion = state_->cuda_domain->submit(
-        dependencies,
+    auto completion = state_->cuda_domain->submit_instance(
+        state_->cuda_registration, dependencies,
         ordered
             ? ordered
             : std::static_pointer_cast<RuntimeCompletionResources>(instance),

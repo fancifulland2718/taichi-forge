@@ -84,7 +84,7 @@ class NestedPredicateGraphControls {
   // handles and child-control addresses are not portable artifacts.
   // Fixed execution can discard cold tables; JIT retains them for telemetry.
   std::uint32_t upload(bool retain_host_tables = true);
-  void release(bool backend_safe);
+  void release(bool backend_safe, void *cleanup_stream = nullptr);
   std::uint64_t device_bytes() const;
 
   // Cold binding data and opt-in telemetry, never interpreted during replay.

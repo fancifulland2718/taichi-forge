@@ -20,6 +20,7 @@ class FixedExecution;
 namespace taichi::lang::cuda {
 class KernelLauncher;
 class ExecutionDomain;
+class ExecutionInstance;
 
 // Backend-owned fixed execution, independent of the Python/JIT Program. Source
 // contexts are consumed only during construction. Registered code and bound
@@ -86,6 +87,10 @@ class FixedGraph {
       std::shared_ptr<RuntimeCompletionResources> operands);
   RuntimeCompletion submit(
       const std::vector<RuntimeCompletion> &dependencies = {});
+  // Cold, explicit retirement. Waits this instance's last replay, then releases
+  // its native resources and domain budget. Driver/provider frees can impose
+  // additional synchronization; wrapper destruction keeps its existing policy.
+  void retire_execution_instance();
   struct InstanceSnapshot {
     std::uint64_t identity;
     std::uintptr_t temporary_storage;
@@ -138,5 +143,6 @@ class FixedGraph {
   struct State;
   std::shared_ptr<State> state_;
   std::shared_ptr<ExecutionDomain> domain_;
+  std::shared_ptr<ExecutionInstance> instance_;
 };
 }  // namespace taichi::lang::cuda

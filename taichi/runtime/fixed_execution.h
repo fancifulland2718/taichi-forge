@@ -31,6 +31,7 @@ class GfxRuntime;
 namespace cuda {
 class BindingFrameReplay;
 class ExecutionDomain;
+class ExecutionInstance;
 }
 
 // Cold bindings shared by loaded AOT entries and native runtime adapters. The
@@ -49,6 +50,8 @@ class FixedExecution {
     // initialization and replay. Append every partial instance before building
     // it; that owner must retain and retire this closure on failure and close.
     std::vector<std::shared_ptr<RuntimeClient>> *retirement_parts{nullptr};
+    // Both initialization and replay record use against this logical owner.
+    std::shared_ptr<cuda::ExecutionInstance> instance;
   };
   struct Dispatch {
     aot::Kernel *kernel;

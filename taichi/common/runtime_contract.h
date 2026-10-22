@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Launch contexts can retain fixed device result storage.
-inline constexpr int kForgeNativeAbiRevision = 153;
+// Fixed CUDA recordings share a logical instance and cold retirement stream.
+inline constexpr int kForgeNativeAbiRevision = 154;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

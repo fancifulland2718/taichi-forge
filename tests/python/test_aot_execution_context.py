@@ -102,6 +102,26 @@ def export_execution_context_module(tmp_path, artifact_format, explicit_target, 
     return directory
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_individual_instance_retirement_before_pending_peer(tmp_path):
+    executable = Path(os.environ.get(
+        "TI_TEST_CPP_EXECUTABLE",
+        str(Path(__file__).resolve().parents[2] / "build" / "taichi_cuda_execution_domain_tests.exe"),
+    ))
+    if not executable.is_file():
+        pytest.skip("Requires the native CUDA execution-domain test executable")
+    directory = export_execution_context_module(tmp_path, "bc", False, "fast")
+    result = subprocess.run(
+        [str(executable), "--gtest_filter=CudaExecutionInstanceRetirement.*"],
+        env=dict(os.environ, TAICHI_F3_CONTEXT_AOT_FOLDER=str(directory)),
+        capture_output=True, text=True, timeout=30,
+    )
+    (tmp_path / "native-retirement.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+    if result.returncode == 0 and "[  SKIPPED ]" in result.stdout:
+        pytest.skip("Native instance retirement requires stream-ordered allocation support")
+    assert result.returncode == 0 and "[  PASSED  ] 1 test." in result.stdout, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize(
     "artifact_format,explicit_target", (("bc", False), ("ptx", False), ("ptx", True), ("cubin", True))
 )

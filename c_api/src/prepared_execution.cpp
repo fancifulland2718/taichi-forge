@@ -77,6 +77,7 @@ struct PreparedExecution {
   bool domain_initialized{false};
   bool domain_instance_admitted{false};
   std::shared_ptr<cuda::ExecutionDomain> domain;
+  std::shared_ptr<cuda::ExecutionInstance> domain_registration;
   std::shared_ptr<PreparedDomainInstance> domain_instance;
   std::shared_ptr<RuntimeCompletionCudaEventPool> bootstrap_events;
   RuntimeCompletion bootstrap;
@@ -351,7 +352,11 @@ struct PreparedExecution {
       };
 #ifdef TI_WITH_CUDA
       if (domain) {
-        domain->prepare_instance(domain_instance, prepare_recordings);
+        domain_registration = domain->prepare_owned_instance(
+            domain_instance, [&](const auto &instance) {
+              selected.instance = instance;
+              prepare_recordings();
+            });
         domain_instance_admitted = true;
       } else
 #endif

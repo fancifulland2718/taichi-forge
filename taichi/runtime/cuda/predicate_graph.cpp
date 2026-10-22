@@ -1,4 +1,5 @@
 #include "taichi/runtime/cuda/predicate_graph.h"
+#include "taichi/runtime/cuda/retired_allocation.h"
 
 #include <limits>
 #include <stdexcept>
@@ -279,12 +280,13 @@ std::uint32_t NestedPredicateGraphControls::upload(bool retain_host_tables) {
   return error;
 }
 
-void NestedPredicateGraphControls::release(bool backend_safe) {
+void NestedPredicateGraphControls::release(bool backend_safe,
+                                            void *cleanup_stream) {
   if (backend_safe && device_controls)
-    CUDADriver::get_instance().mem_free(device_controls);
+    free_retired_allocation(device_controls, cleanup_stream);
   device_controls = nullptr;
   if (backend_safe && device_nodes)
-    CUDADriver::get_instance().mem_free(device_nodes);
+    free_retired_allocation(device_nodes, cleanup_stream);
   device_nodes = nullptr;
   host_controls.clear();
   host_nodes.clear();

@@ -1,4 +1,5 @@
 #include "taichi/runtime/cuda/fixed_graph.h"
+#include "taichi/runtime/cuda/retired_allocation.h"
 #include "taichi/program/runtime_fault.h"
 
 #include <algorithm>
@@ -27,10 +28,10 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
     bool masked{false};
     std::uint32_t *gates{nullptr};
     std::size_t gate_bytes{0};
-    void release(bool backend_safe) {
-      controls.release(backend_safe);
+    void release(bool backend_safe, void *cleanup_stream = nullptr) {
+      controls.release(backend_safe, cleanup_stream);
       if (backend_safe && gates)
-        CUDADriver::get_instance().mem_free(gates);
+        free_retired_allocation(gates, cleanup_stream);
       gates = nullptr;
     }
   };
@@ -74,9 +75,9 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
   std::vector<std::uint8_t> host_arguments;
   bool capturing{false};
   std::atomic<bool> submitted{false};
-  void release_selected(bool backend_safe) {
+  void release_selected(bool backend_safe, void *cleanup_stream = nullptr) {
     for (const auto &region : selected_controls)
-      region->release(backend_safe);
+      region->release(backend_safe, cleanup_stream);
   }
   std::size_t retained_resource_count(
       std::uint32_t kind) const noexcept override {
@@ -202,7 +203,8 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
               Arch::cuda, result, operation,
               "CUDA execution instance retirement failed");
       };
-      // Domain close has drained replay. Construction failure may still have
+      // The logical instance's last prefix (or domain close) drained replay.
+      // Construction failure may still have
       // work on the private preparation stream; never wait under a global
       // submission lock or release operands before this prefix is proven.
       if (capturing) {
@@ -224,13 +226,13 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
       for (const auto &resource : capture_resources)
         resource->release(true);
       capture_resources.clear();
-      bounded.release(true);
-      release_selected(true);
+      bounded.release(true, stream);
+      release_selected(true, stream);
       for (const auto &region : parallel)
         region->release(true);
       const auto free = [&](void *pointer) {
         if (pointer)
-          check(driver.mem_free.call(pointer), "free instance storage");
+          free_retired_allocation(pointer, stream);
       };
       free(controls);
       controls = nullptr;
@@ -244,6 +246,8 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
       free(temporaries);
       temporaries = nullptr;
       if (stream) {
+        check(driver.stream_synchronize.call_concurrent(stream),
+              "wait instance storage release");
         check(driver.stream_destroy.call(stream), "destroy preparation stream");
         stream = nullptr;
       }
@@ -352,10 +356,11 @@ FixedGraph::FixedGraph(
   }
   try {
     if (domain_)
-      domain_->prepare_instance(state_, [&] {
-        state_->preparation_started = true;
-        initialize(operations);
-      });
+      instance_ = domain_->prepare_owned_instance(
+          state_, [&](const auto &) {
+            state_->preparation_started = true;
+            initialize(operations);
+          });
     else if (parts) {
       parts->push_back(state_);
       state_->preparation_started = true;
@@ -1238,8 +1243,12 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     driver.graph_destroy(state.graph);
     state.graph = nullptr;
   }
-  driver.stream_destroy(state.stream);
-  state.stream = nullptr;
+  // Keep this instance's nonblocking preparation stream for cold storage
+  // retirement. Replay still uses only the selected execution domain.
+  if (!state.independent) {
+    driver.stream_destroy(state.stream);
+    state.stream = nullptr;
+  }
 }
 
 FixedGraph::~FixedGraph() = default;
@@ -1248,9 +1257,17 @@ RuntimeCompletion FixedGraph::submit(
   if (!domain_)
     throw std::invalid_argument(
         "Fixed CUDA graph was not prepared for an execution domain");
-  return domain_->submit(dependencies, state_, [state = state_](void *stream) {
-    CUDAContext::get_instance().launch_graph(state->executable, stream);
-  });
+  return domain_->submit_instance(
+      instance_, dependencies, state_, [state = state_](void *stream) {
+        CUDAContext::get_instance().launch_graph(state->executable, stream);
+      });
+}
+
+void FixedGraph::retire_execution_instance() {
+  if (!domain_)
+    throw std::invalid_argument(
+        "Fixed CUDA graph was not prepared for an execution domain");
+  domain_->retire_instance(instance_);
 }
 
 FixedGraph::InstanceSnapshot FixedGraph::instance_snapshot() const {

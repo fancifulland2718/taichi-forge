@@ -1,4 +1,5 @@
 #include "taichi/runtime/cuda/bounded_graph.h"
+#include "taichi/runtime/cuda/retired_allocation.h"
 
 #include <algorithm>
 #include <limits>
@@ -188,19 +189,19 @@ std::uint32_t BoundedGraphControls::upload() const {
   return CUDA_SUCCESS;
 }
 
-void BoundedGraphControls::release(bool backend_safe) {
+void BoundedGraphControls::release(bool backend_safe, void *cleanup_stream) {
   for (auto &control : controls) {
     if (backend_safe && control.device_control)
-      CUDADriver::get_instance().mem_free(control.device_control);
+      free_retired_allocation(control.device_control, cleanup_stream);
     control.device_control = nullptr;
   }
   controls.clear();
   for (auto &group : groups) {
     if (backend_safe && group.device_control)
-      CUDADriver::get_instance().mem_free(group.device_control);
+      free_retired_allocation(group.device_control, cleanup_stream);
     group.device_control = nullptr;
     if (backend_safe && group.device_nodes)
-      CUDADriver::get_instance().mem_free(group.device_nodes);
+      free_retired_allocation(group.device_nodes, cleanup_stream);
     group.device_nodes = nullptr;
   }
   groups.clear();

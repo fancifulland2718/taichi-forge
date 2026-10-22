@@ -53,7 +53,7 @@ class BoundedGraphControls {
   // Call after graph instantiation/upload; device node handles are not
   // portable.
   std::uint32_t upload() const;
-  void release(bool backend_safe);
+  void release(bool backend_safe, void *cleanup_stream = nullptr);
   std::uint64_t device_bytes() const;
 
   // Available to the graph owner for its binding patches and opt-in telemetry.
