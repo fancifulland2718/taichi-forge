@@ -1557,7 +1557,11 @@ CPU/CUDA 与 kernel template 家族继续在编译前拒绝嵌套 AS，诊断包
 自动控制另已验证 CPU/CUDA/Vulkan WHILE 的零轮、提前结束、预算耗尽和后续显式伴随，
 GPU 用例要求原生 WHILE。分支覆盖 CPU、CUDA 原生条件节点和 Vulkan 现有 host 控制路线，
 公开包与源冻结包均在选择切换后核对真实梯度。CUDA 独立域已验证带初始化的 WHILE 使用
-一个逻辑实例名额；尚不据此宣称全部嵌套/fork-join/recording 组合已取得资格。
+一个逻辑实例名额。另以两层循环验证 CPU、CUDA 条件节点和 Vulkan nested lowering 的
+公开/冻结包，覆盖零轮、提前退出、预算耗尽和后续真实伴随；原生 transform recording
+与包成员复用同一数组的前向/下游梯度也已验证。CUDA 显式选择的双分支 fork/join 保留
+独立输入/梯度和汇合后输出；这不代表自动推断任意包成员 alias 的并行调度已取得资格，
+也不代表 native transform 本身新增自动微分。
 
 `Module.add_graph()` 也可保存含 ArgPack 的普通 CGraph，使用 `graphs.v3.json`
 保存逻辑成员；物理布局、资源提升和调用校验继续来自编译 kernel。消费端可调用

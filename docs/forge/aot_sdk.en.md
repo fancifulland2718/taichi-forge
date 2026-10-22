@@ -1982,7 +1982,13 @@ early exit, exhausted budgets and explicit suffix adjoints; GPU cases require na
 WHILE. Branch checks cover CPU, CUDA native conditional nodes and Vulkan's existing
 host-control route, switching selections with public and frozen packs and checking
 actual gradients. A CUDA-domain WHILE with initialization uses one logical instance
-reservation. Nested/fork-join/recording combinations still need their own qualification.
+reservation. Two-level loops additionally cover public/frozen packs on CPU, CUDA
+conditional nodes and Vulkan nested lowering, including zero rounds, early exit,
+budget exhaustion and actual suffix adjoints. Native transform recordings share
+array storage with pack members through forward execution and downstream gradients.
+An explicitly selected CUDA two-branch fork/join preserves independent inputs,
+gradients and joined output. This does not qualify automatic parallel hazard
+inference for arbitrary aliased pack members or differentiate native transform itself.
 
 `Module.add_graph()` also persists ordinary CGraphs containing ArgPacks, using
 `graphs.v3.json` for logical members. Compiled kernels remain authoritative for
