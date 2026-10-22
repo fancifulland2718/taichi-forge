@@ -17,21 +17,28 @@ linker. HIP libraries are loaded optionally, never bundled or mandatory native
 imports. CPU/CUDA/Vulkan use does not require ROCm.
 
 The `taichi_forge_runtime.aot` module loads and executes exported kernels and
-ordinary CGraphs without the Python DSL, NumPy or a CPython shim. Its Python
-implementation uses only the standard library and the public C API in the same
-native core used by JIT. Importing the module does not load native libraries or
+ordinary CGraphs and exported execution plans without the Python DSL, NumPy or
+a CPython shim. Its Python implementation uses only the standard library and
+the public C API in the same native core used by JIT. Importing the module does
+not load native libraries or
 probe devices; `aot.Runtime("cpu" | "cuda" | "vulkan")` selects the backend.
 Existing wheels without this entrypoint need a matching newer runtime build.
 `entry.prepare(...)` provides explicit fixed native execution: a CPU batch,
 CUDA Graph or Vulkan fixed commands. Prepare once and replay with unchanged
 bindings; array contents can change. Preparation executes no user kernels.
 
+Exported plans can reconstruct supported native recordings, provider resources
+and structure bindings. Runtime APIs also expose supported external-memory
+imports. Availability depends on the selected backend, operation schema,
+provider and resource contract; an installed provider does not expose every
+function in its vendor library. Independent CUDA execution domains additionally
+support declared per-submission scalar updates and optional GPU timing.
+
 This is not a compiler-free runtime: CPU/CUDA bitcode still needs bundled LLVM,
-and GPU drivers may compile device code during loading. Mixed native recordings,
-providers, structure bindings and external-memory imports are not exposed by
-this Python consumer yet. See `docs/forge/aot_sdk.en.md` in the source repository
-for deployment contracts and `examples/aot_sdk/consume.py` for a source-free
-forward/explicit-gradient example.
+and GPU drivers may compile device code during loading. See
+`docs/forge/aot_sdk.en.md` and `docs/forge/cuda_execution_domains.en.md` in the
+source repository for deployment and submission contracts, and
+`examples/aot_sdk/consume.py` for a source-free forward/explicit-gradient example.
 
 The JIT `taichi_forge` API remains in the separate frontend distribution. Mixed
 installations select one native binary and bitcode resource directory per
