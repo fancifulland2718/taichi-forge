@@ -685,15 +685,17 @@ class ExecutionPlan:
         with runtime._lock:
             module._check()
             if execution_domain is not None:
-                from ._domain import CudaExecutionDomain
+                from ._domain import ExecutionDomain
 
-                if not isinstance(execution_domain, CudaExecutionDomain):
-                    raise TypeError("execution_domain must be a CudaExecutionDomain")
+                if not isinstance(execution_domain, ExecutionDomain):
+                    raise TypeError("execution_domain must be an ExecutionDomain")
                 if execution_domain._api.library._handle != runtime._api.library._handle:
                     raise ValueError("Execution domain belongs to another native runtime library")
                 if source is not None or self.binding_strategy is not None:
                     raise ValueError("Independent execution domains require independent bindings")
-                runtime._api.load_cuda_domains()
+                if execution_domain.backend != runtime.arch:
+                    raise ValueError("Execution domain backend differs from the runtime")
+                runtime._api.load_execution_domains(runtime.arch)
             owners = [module]
             replay_owners = [module]
             persistent_owners = [module]
@@ -731,12 +733,17 @@ class ExecutionPlan:
                 else (runtime._api.ti_prepare_execution_binding_ext, (runtime._handle, source._handle))
             )
             if execution_domain is not None:
-                function = runtime._api.ti_prepare_execution_plan_on_domain_ext
+                function = (runtime._api.ti_prepare_execution_plan_on_domain_ext
+                            if execution_domain.backend == "cuda" else
+                            runtime._api.ti_prepare_execution_plan_on_vulkan_domain_ext)
                 prefix = (runtime._handle, module._handle, execution_domain._native_handle(), len(self._json), self._json)
             suffix = ()
+            vulkan_domain = execution_domain is not None and execution_domain.backend == "vulkan"
             if submission_parameters.names:
                 runtime._api.load_submission_parameters()
-                function = runtime._api.ti_prepare_execution_plan_parameters_on_domain_ext
+            if submission_parameters.names or vulkan_domain:
+                function = (runtime._api.ti_prepare_execution_plan_on_vulkan_domain_ext if vulkan_domain
+                            else runtime._api.ti_prepare_execution_plan_parameters_on_domain_ext)
                 names = (abi.C.c_char_p * len(submission_parameters.names))(
                     *(_name(name) for name in submission_parameters.names)
                 )

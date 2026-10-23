@@ -206,7 +206,12 @@ class Runtime:
             }
 
     def execution_domain(self, *, capacity=2, instance_capacity=64, priority=0, gpu_timing=False):
-        """Create a bounded independent CUDA queue with explicit priority."""
+        """Create an independent CUDA stream or additional Vulkan compute queue.
+
+        Capacity bounds in-flight storage; instance_capacity budgets resident
+        preparations. Vulkan requires enabled timelines and an unused physical
+        queue; its priority is fixed at device creation and must be zero here.
+        """
         from ._domain import create_domain
 
         return create_domain(self, capacity, instance_capacity, priority, gpu_timing)
@@ -1102,22 +1107,22 @@ class PreparedCall(_Resource):
                     retirement = None
                     if live:
                         retirement = runtime._api.call(
-                            runtime._api.ti_get_prepared_cuda_instance_ext, runtime._handle, handle
+                            self._execution_domain._functions["instance"], runtime._handle, handle
                         )
                         self._closing = True
                 if retirement is not None:
                     # The native token pins only domain/instance state. Waiting
                     # must not hold Runtime or borrowed Program submission locks.
                     try:
-                        runtime._api.call(runtime._api.ti_retire_cuda_execution_instance_ext, retirement)
+                        runtime._api.call(self._execution_domain._functions["retire_instance"], retirement)
                     finally:
-                        runtime._api.call(runtime._api.ti_release_cuda_execution_instance_ext, retirement)
+                        runtime._api.call(self._execution_domain._functions["release_instance"], retirement)
                 with runtime._lock:
                     if runtime._borrower is not None and runtime._borrower.closed:
                         runtime.close()
                     if live and (self._kind, handle) in runtime._resources:
                         runtime._api.call(
-                            runtime._api.ti_finish_prepared_cuda_instance_retirement_ext, runtime._handle, handle
+                            runtime._api.ti_finish_prepared_instance_retirement_ext, runtime._handle, handle
                         )
                         runtime._resources.remove((self._kind, handle))
                     # Native retirement and edge removal already prove these
@@ -1170,7 +1175,7 @@ class PreparedCall(_Resource):
         if self._execution_domain is not None:
             completion = self.submit()
             if completion is None:
-                raise RuntimeError("CUDA execution domain is full")
+                raise RuntimeError("Execution domain is full")
             completion.close()
             return
         runtime = self._runtime
@@ -1220,7 +1225,7 @@ class PreparedCall(_Resource):
                 function = runtime._api.ti_try_submit_prepared_parameters_ext
                 suffix = (ready_only, len(parameters), self._submission_parameters.bind(parameters))
             elif ready_only:
-                runtime._api.load_cuda_ready_submit()
+                runtime._api.load_ready_submit()
                 function = runtime._api.ti_try_submit_prepared_ready_ext
             accepted = runtime._api.call(
                 function,

@@ -275,6 +275,18 @@ class CudaExecutionDomainInfo(C.Structure):
     ]
 
 
+class VulkanExecutionDomainCreateInfo(C.Structure):
+    _fields_ = [("capacity", UInt), ("instance_capacity", UInt), ("gpu_timing", UInt)]
+
+
+class VulkanExecutionDomainInfo(C.Structure):
+    _fields_ = [
+        ("identity", C.c_uint64), ("owner", C.c_uint64), ("queue_index", UInt),
+        ("capacity", C.c_uint64), ("pending", C.c_uint64),
+        ("accepting", UInt), ("closed", UInt),
+    ]
+
+
 class CompletionInfo(C.Structure):
     _fields_ = [("owner", C.c_uint64), ("sequence", C.c_uint64), ("has_backend_work", UInt)]
 
@@ -422,14 +434,14 @@ class Api:
         function.restype = Handle
         setattr(self, name, function)
 
-    def load_cuda_ready_submit(self):
+    def load_ready_submit(self):
         name = "ti_try_submit_prepared_ready_ext"
         if getattr(self, name, None) is not None:
             return
         try:
             function = getattr(self.library, name)
         except AttributeError as error:
-            raise NotImplementedError("The selected Forge runtime lacks ready-only CUDA submission") from error
+            raise NotImplementedError("The selected Forge runtime lacks ready-only domain submission") from error
         function.argtypes = [Handle, Handle, UInt, C.POINTER(Handle), C.POINTER(Handle)]
         function.restype = UInt
         setattr(self, name, function)
@@ -453,47 +465,62 @@ class Api:
         self._completion_sets_loaded = True
 
     def load_cuda_domains(self):
-        if getattr(self, "_cuda_domains_loaded", False):
+        self.load_execution_domains("cuda")
+
+    def load_vulkan_domains(self):
+        self.load_execution_domains("vulkan")
+
+    def load_execution_domains(self, backend):
+        if backend not in ("cuda", "vulkan"):
+            raise ValueError("Unsupported execution domain backend")
+        marker = "_" + backend + "_domains_loaded"
+        if getattr(self, marker, False):
             return
+        create_info = CudaExecutionDomainCreateInfo if backend == "cuda" else VulkanExecutionDomainCreateInfo
+        info = CudaExecutionDomainInfo if backend == "cuda" else VulkanExecutionDomainInfo
+        plan_arguments = [Handle, Handle, Handle, C.c_uint64, C.c_char_p, UInt,
+                          C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)]
         declarations = {
-            "ti_create_cuda_execution_domain_ext": ([Handle, C.POINTER(CudaExecutionDomainCreateInfo)], Handle),
-            "ti_get_cuda_execution_domain_info_ext": ([Handle, C.POINTER(CudaExecutionDomainInfo)], None),
-            "ti_stop_cuda_execution_domain_ext": ([Handle], None),
-            "ti_close_cuda_execution_domain_ext": ([Handle], None),
-            "ti_release_cuda_execution_domain_ext": ([Handle], None),
-            "ti_get_prepared_cuda_instance_ext": ([Handle, Handle], Handle),
-            "ti_retire_cuda_execution_instance_ext": ([Handle], None),
-            "ti_release_cuda_execution_instance_ext": ([Handle], None),
-            "ti_finish_prepared_cuda_instance_retirement_ext": ([Handle, Handle], None),
-            "ti_collect_cuda_execution_domain_ext": ([Handle, UInt], UInt),
-            "ti_get_cuda_execution_domain_completion_ext": ([Handle], Handle),
-            "ti_prepare_execution_plan_on_domain_ext": (
-                [Handle, Handle, Handle, C.c_uint64, C.c_char_p, UInt, C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)],
-                Handle,
-            ),
+            f"ti_create_{backend}_execution_domain_ext": ([Handle, C.POINTER(create_info)], Handle),
+            f"ti_get_{backend}_execution_domain_info_ext": ([Handle, C.POINTER(info)], None),
+            f"ti_stop_{backend}_execution_domain_ext": ([Handle], None),
+            f"ti_close_{backend}_execution_domain_ext": ([Handle], None),
+            f"ti_release_{backend}_execution_domain_ext": ([Handle], None),
+            f"ti_get_prepared_{backend}_instance_ext": ([Handle, Handle], Handle),
+            f"ti_retire_{backend}_execution_instance_ext": ([Handle], None),
+            f"ti_release_{backend}_execution_instance_ext": ([Handle], None),
+            "ti_finish_prepared_instance_retirement_ext": ([Handle, Handle], None),
+            f"ti_collect_{backend}_execution_domain_ext": ([Handle, UInt], UInt),
+            f"ti_get_{backend}_execution_domain_completion_ext": ([Handle], Handle),
             "ti_try_submit_prepared_ext": ([Handle, Handle, UInt, C.POINTER(Handle), C.POINTER(Handle)], UInt),
             "ti_query_completion_ext": ([Handle], UInt),
             "ti_wait_completion_ext": ([Handle], None),
             "ti_get_completion_info_ext": ([Handle, C.POINTER(CompletionInfo)], None),
             "ti_release_completion_ext": ([Handle], None),
         }
+        if backend == "cuda":
+            declarations.update({
+                "ti_create_timed_cuda_execution_domain_ext": ([Handle, C.POINTER(create_info)], Handle),
+                "ti_prepare_execution_plan_on_domain_ext": (plan_arguments, Handle),
+                "ti_prepare_execution_plan_parameters_on_domain_ext": (
+                    plan_arguments + [UInt, C.POINTER(C.c_char_p)], Handle),
+            })
+        else:
+            declarations["ti_prepare_execution_plan_on_vulkan_domain_ext"] = (
+                plan_arguments + [UInt, C.POINTER(C.c_char_p)], Handle)
         try:
             functions = {name: getattr(self.library, name) for name in declarations}
         except AttributeError as error:
-            raise NotImplementedError("The selected Forge runtime has no CUDA execution-domain API") from error
+            raise NotImplementedError(f"The selected Forge runtime has no {backend} execution-domain API") from error
         for name, function in functions.items():
             function.argtypes, function.restype = declarations[name]
             setattr(self, name, function)
-        self._cuda_domains_loaded = True
+        setattr(self, marker, True)
 
     def load_submission_parameters(self):
         if getattr(self, "_submission_parameters_loaded", False):
             return
         declarations = {
-            "ti_prepare_execution_plan_parameters_on_domain_ext": (
-                [Handle, Handle, Handle, C.c_uint64, C.c_char_p, UInt, C.POINTER(NamedArgument),
-                 UInt, C.POINTER(NamedBinding), UInt, C.POINTER(C.c_char_p)], Handle,
-            ),
             "ti_try_submit_prepared_parameters_ext": (
                 [Handle, Handle, UInt, C.POINTER(Handle), C.POINTER(Handle), UInt, UInt,
                  C.POINTER(C.c_uint64)], UInt,
@@ -512,7 +539,6 @@ class Api:
         if getattr(self, "_completion_timing_loaded", False):
             return
         declarations = {
-            "ti_create_timed_cuda_execution_domain_ext": ([Handle, C.POINTER(CudaExecutionDomainCreateInfo)], Handle),
             "ti_get_completion_gpu_timing_ext": ([Handle, C.POINTER(CompletionGpuTiming)], None),
             "ti_try_submit_prepared_sampled_ext": (
                 [Handle, Handle, UInt, C.POINTER(Handle), C.POINTER(Handle), UInt, UInt,

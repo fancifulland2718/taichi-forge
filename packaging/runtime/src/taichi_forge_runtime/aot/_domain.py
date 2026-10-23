@@ -77,34 +77,52 @@ class Completion:
             pass
 
 
-class CudaExecutionDomain:
-    """A bounded CUDA queue owned by one runtime generation.
+class ExecutionDomain:
+    """A bounded backend queue owned by one runtime generation.
 
     Create with Runtime.execution_domain(). Explicit close drains accepted
     work and destroys recordings; driver/provider cleanup may synchronize the
     context. For active scheduling, stop issuing work and wait an exact ticket.
     """
 
+    backend = None
+
     def __init__(self, runtime, handle):
+        if self.backend not in ("cuda", "vulkan"):
+            raise TypeError("ExecutionDomain requires a concrete backend")
         if not handle:
             raise RuntimeError("Native execution-domain creation returned no handle")
         self._runtime, self._api, self._handle = runtime, runtime._api, handle
         self._clients = weakref.WeakSet()
+        self._functions = {
+            key: getattr(self._api, name.format(backend=self.backend))
+            for key, name in {
+                "info": "ti_get_{backend}_execution_domain_info_ext",
+                "latest": "ti_get_{backend}_execution_domain_completion_ext",
+                "collect": "ti_collect_{backend}_execution_domain_ext",
+                "stop": "ti_stop_{backend}_execution_domain_ext",
+                "close": "ti_close_{backend}_execution_domain_ext",
+                "release": "ti_release_{backend}_execution_domain_ext",
+                "instance": "ti_get_prepared_{backend}_instance_ext",
+                "retire_instance": "ti_retire_{backend}_execution_instance_ext",
+                "release_instance": "ti_release_{backend}_execution_instance_ext",
+            }.items()
+        }
 
     def _native_handle(self):
         handle = self._handle
         if handle is None:
-            raise RuntimeError("CUDA execution-domain handle is released")
+            raise RuntimeError("Execution-domain handle is released")
         return handle
 
     @property
     def info(self):
-        info = abi.CudaExecutionDomainInfo()
-        self._api.call(self._api.ti_get_cuda_execution_domain_info_ext, self._native_handle(), C.byref(info))
+        info = self._info_type()
+        self._api.call(self._functions["info"], self._native_handle(), C.byref(info))
         return {name: getattr(info, name) for name, _ in info._fields_}
 
     def latest_completion(self):
-        handle = self._api.call(self._api.ti_get_cuda_execution_domain_completion_ext, self._native_handle())
+        handle = self._api.call(self._functions["latest"], self._native_handle())
         try:
             return Completion(self._api, handle)
         except BaseException:
@@ -118,17 +136,17 @@ class CudaExecutionDomain:
 
     def collect(self, budget=1):
         return self._api.call(
-            self._api.ti_collect_cuda_execution_domain_ext, self._native_handle(), _unsigned(budget, "budget")
+            self._functions["collect"], self._native_handle(), _unsigned(budget, "budget")
         )
 
     def stop(self):
         """Permanently close admission without waiting for accepted work."""
-        self._api.call(self._api.ti_stop_cuda_execution_domain_ext, self._native_handle())
+        self._api.call(self._functions["stop"], self._native_handle())
 
     def close(self):
         if self._handle is not None:
             handle = self._native_handle()
-            self._api.call(self._api.ti_close_cuda_execution_domain_ext, handle)
+            self._api.call(self._functions["close"], handle)
             for runtime in tuple(self._clients):
                 with runtime._lock:
                     runtime._domain_owners.pop(handle, None)
@@ -139,7 +157,7 @@ class CudaExecutionDomain:
         """Release this host handle; the runtime retains its bounded resources."""
         handle, self._handle = self._handle, None
         if handle is not None:
-            self._api.call(self._api.ti_release_cuda_execution_domain_ext, handle)
+            self._api.call(self._functions["release"], handle)
 
     def __enter__(self):
         self._native_handle()
@@ -155,6 +173,23 @@ class CudaExecutionDomain:
             pass
 
 
+class CudaExecutionDomain(ExecutionDomain):
+    backend = "cuda"
+    _info_type = abi.CudaExecutionDomainInfo
+
+
+class VulkanExecutionDomain(ExecutionDomain):
+    """One leased, additional Vulkan compute queue with immutable recordings.
+
+    Requires enabled timeline semaphores and available device-created queues.
+    Fixed buffer recipes share the common parameter/completion/retirement API.
+    Graphics, sparse runtime state and control recipes remain separate routes.
+    """
+
+    backend = "vulkan"
+    _info_type = abi.VulkanExecutionDomainInfo
+
+
 def create_domain(runtime, capacity, instance_capacity, priority, gpu_timing=False):
     if type(gpu_timing) is not bool:
         raise TypeError("gpu_timing must be bool")
@@ -165,19 +200,27 @@ def create_domain(runtime, capacity, instance_capacity, priority, gpu_timing=Fal
         raise ValueError("priority must fit int32")
     with runtime._lock:
         runtime._check()
-        if runtime.arch != "cuda":
-            raise NotImplementedError("Execution domains require a CUDA runtime")
-        runtime._api.load_cuda_domains()
-        options = abi.CudaExecutionDomainCreateInfo(capacity, instance_capacity, priority)
-        function = runtime._api.ti_create_cuda_execution_domain_ext
+        if runtime.arch not in ("cuda", "vulkan"):
+            raise NotImplementedError("Execution domains require a CUDA or Vulkan runtime")
+        if runtime.arch == "vulkan" and priority:
+            raise NotImplementedError("Vulkan queue priorities are fixed at device creation; use priority=0")
+        runtime._api.load_execution_domains(runtime.arch)
         if gpu_timing:
             runtime._api.load_completion_timing()
-            function = runtime._api.ti_create_timed_cuda_execution_domain_ext
+        if runtime.arch == "cuda":
+            options = abi.CudaExecutionDomainCreateInfo(capacity, instance_capacity, priority)
+            function = (runtime._api.ti_create_timed_cuda_execution_domain_ext if gpu_timing
+                        else runtime._api.ti_create_cuda_execution_domain_ext)
+            domain_type = CudaExecutionDomain
+        else:
+            options = abi.VulkanExecutionDomainCreateInfo(capacity, instance_capacity, gpu_timing)
+            function = runtime._api.ti_create_vulkan_execution_domain_ext
+            domain_type = VulkanExecutionDomain
         handle = runtime._api.call(function, runtime._handle, C.byref(options))
         try:
-            return CudaExecutionDomain(runtime, handle)
+            return domain_type(runtime, handle)
         except BaseException:
             if handle:
-                runtime._api.call(runtime._api.ti_close_cuda_execution_domain_ext, handle)
-                runtime._api.call(runtime._api.ti_release_cuda_execution_domain_ext, handle)
+                runtime._api.call(getattr(runtime._api, f"ti_close_{runtime.arch}_execution_domain_ext"), handle)
+                runtime._api.call(getattr(runtime._api, f"ti_release_{runtime.arch}_execution_domain_ext"), handle)
             raise
