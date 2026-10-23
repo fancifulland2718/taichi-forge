@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Vulkan replay slots specialize controller descriptors for scalar view biases.
-inline constexpr int kForgeNativeAbiRevision = 163;
+// Fixed Vulkan workspaces retain private image boundaries and their owners.
+inline constexpr int kForgeNativeAbiRevision = 164;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
@@ -46,6 +46,7 @@ inline constexpr std::uint64_t kForgeVulkanSubmissionParameters = 1ull << 24;
 inline constexpr std::uint64_t kForgeVulkanCompletionGpuTiming = 1ull << 25;
 inline constexpr std::uint64_t kForgeVulkanExecutionInstanceRetirement = 1ull << 26;
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainWhile = 1ull << 27;
+inline constexpr std::uint64_t kForgeVulkanExecutionDomainPrivateImages = 1ull << 28;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

@@ -87,9 +87,19 @@ while recipes, including chunks and nested control; the selected device must
 support each strategy. Prefix, initial condition, loop chunks and suffix share
 one queue submission. Parameter updates cover every physical dispatch copy, and
 timing covers the complete compute sequence. Native buffer operations still
-require a compatible fixed-recording factory. Image/graphics, host selection,
-parallel recipes and shared sparse/RNG/runtime-error state remain outside this
-independent Vulkan route. Ordinary Graph execution keeps
+require a compatible fixed-recording factory.
+
+`vulkan_execution_domain_private_images` supports private color images rebuilt
+for each prepared instance. Ordinary compute segments accept sampled/storage
+images and explicit color uploads. All phases share a fixed boundary layout;
+first transitions, initialization and replay run on the selected domain. Resource
+creation with initial pixels can still upload during cold preparation. Images
+remain owned until instance retirement, with no per-submit layout lookup or
+recording rebuild. External Texture/native image loans and image kernels inside
+device while bodies remain unsupported. AOT plans declare private images in
+`resources`; ordinary JIT Texture loans still require a shared layout contract.
+Graphics, host selection, parallel recipes and shared sparse/RNG/runtime-error
+state remain outside this independent Vulkan route. Ordinary Graph execution keeps
 its existing capabilities; CUDA Canvas and external-memory protocols are not
 implicitly enabled on Vulkan domains.
 

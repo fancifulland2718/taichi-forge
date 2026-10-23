@@ -43,6 +43,7 @@ _FEATURE_BITS = {
     "vulkan_completion_gpu_timing": 25,
     "vulkan_execution_instance_retirement": 26,
     "vulkan_execution_domain_while": 27,
+    "vulkan_execution_domain_private_images": 28,
 }
 
 

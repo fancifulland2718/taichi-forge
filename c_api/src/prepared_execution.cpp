@@ -311,6 +311,24 @@ struct PreparedExecution {
         selected_vulkan.domain = domain->vulkan;
         vulkan_workspace = gfx_runtime->create_fixed_graph_workspace();
         selected_vulkan.workspace = vulkan_workspace;
+        // Only factories invoked for this prepared instance populate this
+        // private owner list. Public/borrowed native resources remain outside
+        // it and need a separate cross-instance layout lease contract.
+        for (const auto &resource : native_resources) {
+          const auto image = std::dynamic_pointer_cast<NativeSampledImage>(resource);
+          if (!image)
+            continue;
+          const auto &params = image->parameters();
+          if (params.format == BufferFormat::depth16 ||
+              params.format == BufferFormat::depth24stencil8 ||
+              params.format == BufferFormat::depth32f)
+            throw MemoryBindingError("Independent Vulkan image recording requires color images");
+          gfx_runtime->prepare_fixed_private_image(
+              vulkan_workspace, image->gfx_sampled_allocation(),
+              bool(params.usage & ImageAllocUsage::Sampled)
+                  ? ImageLayout::shader_read : ImageLayout::shader_read_write,
+              image);
+        }
       }
       const auto *vulkan_binding = selected_vulkan.domain ? &selected_vulkan : nullptr;
 #else

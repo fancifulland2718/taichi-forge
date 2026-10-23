@@ -298,6 +298,81 @@ TEST(VulkanFixedCommands, RejectsSharedStateAndUnqualifiedCallbacksBeforeRecordi
   EXPECT_FALSE(queue.latest());
 }
 
+TEST(VulkanFixedCommands, PrivateImagePhasesDoNotUseTheDefaultQueue) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  gfx::GfxRuntime::Params params;
+  params.device = &device;
+  gfx::GfxRuntime runtime(params);
+  vulkan::VulkanExecutionQueue queue(device, 1);
+  ImageParams image_params;
+  image_params.dimension = ImageDimension::d2D;
+  image_params.format = BufferFormat::r32u;
+  image_params.x = image_params.y = image_params.z = 1;
+  image_params.usage = ImageAllocUsage::Storage;
+  const auto image = runtime.create_image(image_params);
+  auto owner = std::shared_ptr<void>(reinterpret_cast<void *>(1), [&](void *) {
+    runtime.untrack_image(image);
+    device.destroy_image(image);
+  });
+  auto [pixels, result] = device.allocate_memory_unique(
+      {4, false, true, false, AllocUsage::Storage});
+  ASSERT_EQ(result, RhiResult::success);
+  BufferImageCopyParams copy;
+  copy.buffer_row_length = copy.buffer_image_height = 1;
+  copy.image_extent = {1, 1, 1};
+  gfx::GfxRuntime::GraphRecordingOperation upload, download;
+  upload.inline_recording = download.inline_recording = true;
+  upload.buffers = download.buffers = std::vector<DeviceAllocation>{*pixels};
+  upload.images = {{image, ImageLayout::transfer_dst}};
+  download.images = {{image, ImageLayout::transfer_src}};
+  upload.external = [image, ptr = pixels->get_ptr(), copy](Device *, CommandList *commands) {
+    commands->buffer_fill(ptr, 4, 0xFEDCBA98u);
+    commands->buffer_barrier(ptr);
+    commands->buffer_to_image(image, ptr, ImageLayout::transfer_dst, copy);
+  };
+  download.external = [image, ptr = pixels->get_ptr(), copy](Device *, CommandList *commands) {
+    commands->image_to_buffer(ptr, image, ImageLayout::transfer_src, copy);
+    commands->memory_barrier();
+  };
+  auto workspace = runtime.create_fixed_graph_workspace();
+  EXPECT_ANY_THROW(runtime.prepare_fixed_commands(
+      {upload}, queue.new_command_list(), workspace, {}));
+  runtime.prepare_fixed_private_image(workspace, image, ImageLayout::shader_read_write, owner);
+  EXPECT_ANY_THROW(runtime.prepare_fixed_private_image(
+      workspace, image, ImageLayout::shader_read, owner));
+  auto first = runtime.prepare_fixed_commands(
+      {upload}, queue.new_command_list(), workspace, {});
+  auto second = runtime.prepare_fixed_commands(
+      {download}, queue.new_command_list(), workspace, {});
+  auto initialize = queue.new_command_list();
+  workspace->record_initialization(*initialize);
+  EXPECT_ANY_THROW(runtime.prepare_fixed_private_image(
+      workspace, image, ImageLayout::shader_read_write, owner));
+  {
+    TimelineGate gate(device, 0);
+    // First layout transition and both separately recorded phases must proceed
+    // while the default queue is pending. Their boundary layout is identical.
+    auto init = queue.prepare({initialize.get()}, workspace);
+    ASSERT_TRUE(ready_before_deadline(queue.submit(init)));
+    auto commands = queue.prepare({first->cmdlist.get(), second->cmdlist.get()}, workspace);
+    for (int replay = 0; replay < 3; ++replay) {
+      const auto before = device.queue_submission_snapshot();
+      ASSERT_TRUE(ready_before_deadline(queue.submit(commands)));
+      EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before.queue_submit_calls + 1);
+      void *mapped = nullptr;
+      ASSERT_EQ(device.map(*pixels, &mapped), RhiResult::success);
+      EXPECT_EQ(*static_cast<const uint32_t *>(mapped), 0xFEDCBA98u);
+      device.unmap(*pixels);
+    }
+  }
+  queue.close();
+}
+
 TEST(VulkanControlDescriptors, ScalarViewsRespectStorageAlignment) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();

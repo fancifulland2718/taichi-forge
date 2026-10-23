@@ -3082,6 +3082,28 @@ GfxRuntime::create_fixed_graph_workspace() {
   return std::shared_ptr<FixedGraphWorkspace>(new FixedGraphWorkspace(device_));
 }
 
+void GfxRuntime::prepare_fixed_private_image(
+    const std::shared_ptr<FixedGraphWorkspace> &workspace,
+    DeviceAllocation image,
+    ImageLayout boundary,
+    std::shared_ptr<void> owner) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ERROR_IF(!workspace || workspace->device_ != device_ ||
+                  workspace->initialization_recorded_ || !owner ||
+                  image.device != device_ || !image.alloc_id ||
+                  (boundary != ImageLayout::shader_read &&
+                   boundary != ImageLayout::shader_read_write),
+              "Private Graph images require an owned allocation and shader boundary");
+  const auto found = last_image_layouts_.find(image.alloc_id);
+  TI_ERROR_IF(found == last_image_layouts_.end(),
+              "Private Graph image is not registered on this device");
+  const auto [entry, inserted] = workspace->private_images_.emplace(
+      image.alloc_id, FixedGraphWorkspace::PrivateImage{
+          image, found->second, boundary, std::move(owner)});
+  TI_ERROR_IF(!inserted && entry->second.boundary != boundary,
+              "Private Graph image boundary differs between phases");
+}
+
 std::size_t GfxRuntime::FixedGraphWorkspace::bytes() const {
   return global_tmps_ ? kGtmpBufferSize : 0;
 }
@@ -3094,6 +3116,9 @@ void GfxRuntime::FixedGraphWorkspace::record_initialization(
     commands.buffer_fill(global_tmps_->get_ptr(), kGtmpBufferSize, 0);
     commands.memory_barrier();
   }
+  for (const auto &[id, image] : private_images_)
+    if (image.initial != image.boundary)
+      commands.image_transition(image.allocation, image.initial, image.boundary);
   initialization_recorded_ = true;
 }
 
@@ -3114,13 +3139,14 @@ GfxRuntime::prepare_fixed_commands(
 
 void GfxRuntime::prepare_detached_kernel_workspace(
     const CompiledTaichiKernel &kernel,
-    const std::shared_ptr<FixedGraphWorkspace> &workspace) {
+    const std::shared_ptr<FixedGraphWorkspace> &workspace,
+    bool allow_private_images) {
   TI_ERROR_IF(!workspace || workspace->device_ != device_,
               "Detached Graph requires same-device workspace");
   bool uses_global_tmps = false;
   const auto &tasks = kernel.ti_kernel_attribs().tasks_attribs;
   for (std::size_t i = 0; i < tasks.size(); ++i) {
-    TI_ERROR_IF(!tasks[i].texture_binds.empty() ||
+    TI_ERROR_IF((!allow_private_images && !tasks[i].texture_binds.empty()) ||
                     !tasks[i].acceleration_structure_binds.empty() ||
                     tasks[i].may_mutate_sparse_topology,
                 "Detached Graph requires buffer-only kernels without sparse mutation");
@@ -3186,12 +3212,12 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
               "Prepared mixed Graph requires a graphics device");
   for (const auto &operation : operations) {
     TI_ERROR_IF(detached &&
-                    (operation.graphics_queue || !operation.images.empty() ||
+                    (operation.graphics_queue ||
                      !operation.graphics_pipelines.empty() ||
                      !operation.ray_resources.empty() ||
                      (operation.external &&
                       (!operation.inline_recording || !operation.buffers))),
-                "Detached Graph requires described buffer-only inline commands");
+                "Detached Graph requires described compute inline commands");
     if (detached && operation.buffers) {
       for (const auto &buffer : *operation.buffers)
         TI_ERROR_IF(buffer.device != device_ || !buffer.alloc_id,
@@ -3219,7 +3245,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                 "Prepared Vulkan Graph requires fixed kernel dispatches");
     auto *kernel = found->second.get();
     if (detached)
-      prepare_detached_kernel_workspace(*kernel, workspace);
+      prepare_detached_kernel_workspace(*kernel, workspace, true);
     if (kernel->get_ret_buffer_size()) {
       const auto &result = dispatch.host_ctx->prepared_result;
       TI_ERROR_IF(!result || &result->device() != device_ ||
@@ -3368,6 +3394,28 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
   }
   commands->memory_barrier();
   std::size_t kernel_index = 0;
+  const auto record_image_use = [&](DeviceAllocation image, ImageLayout layout,
+                                    bool attachment_barrier = false) {
+    TI_ERROR_IF(image.device != device_ ||
+                    last_image_layouts_.find(image.alloc_id) ==
+                        last_image_layouts_.end(),
+                "Prepared Graph image is not owned by this device");
+    auto entry = independent_graphics ? ImageLayout::shader_read : layout;
+    if (detached) {
+      const auto owned = workspace->private_images_.find(image.alloc_id);
+      TI_ERROR_IF(owned == workspace->private_images_.end(),
+                  "Independent Vulkan Graph requires a private managed image; "
+                  "borrowed images require a shared layout contract");
+      entry = owned->second.boundary;
+    }
+    const auto [previous, first_use] =
+        recorded_image_layouts.emplace(image.alloc_id, entry);
+    if (first_use)
+      entry_images.emplace_back(image, entry);
+    if (previous->second != layout || (!first_use && attachment_barrier))
+      commands->image_transition(image, previous->second, layout);
+    previous->second = layout;
+  };
   StreamGpuTiming active_timing;
   const auto begin_timing = [&](std::size_t index, Stream *stream) {
     if (timings && (index == 0 || operations[index - 1].timing_path != operations[index].timing_path)) {
@@ -3400,26 +3448,10 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                                          : compute_timing_stream;
       begin_timing(operation_index, stream);
       for (const auto &[image, layout] : operation.images) {
-        TI_ERROR_IF(image.device != device_ ||
-                        last_image_layouts_.find(image.alloc_id) ==
-                            last_image_layouts_.end(),
-                    "Prepared native Graph image is not owned by this device");
-        const auto [previous, first_use] =
-            recorded_image_layouts.emplace(image.alloc_id, layout);
-        if (first_use) {
-          const auto entry =
-              independent_graphics ? ImageLayout::shader_read : layout;
-          entry_images.emplace_back(image, entry);
-          if (entry != layout) {
-            commands->image_transition(image, entry, layout);
-          }
-        } else if (previous->second != layout ||
-                   (operation.graphics_queue &&
-                    (layout == ImageLayout::color_attachment ||
-                     layout == ImageLayout::depth_attachment))) {
-          commands->image_transition(image, previous->second, layout);
-          previous->second = layout;
-        }
+        record_image_use(image, layout,
+                         operation.graphics_queue &&
+                             (layout == ImageLayout::color_attachment ||
+                              layout == ImageLayout::depth_attachment));
       }
       operation.external(device_, commands.get());
       end_timing(operation_index, stream);
@@ -3502,15 +3534,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                             usage->second != ImageLayout::shader_read,
                         "Prepared Vulkan Graph cannot bind one image as both "
                         "sampled and storage in the same task");
-            const auto [previous, first_use] = recorded_image_layouts.emplace(
-                image.alloc_id, ImageLayout::shader_read);
-            if (first_use) {
-              entry_images.emplace_back(image, ImageLayout::shader_read);
-            } else if (previous->second != ImageLayout::shader_read) {
-              commands->image_transition(image, previous->second,
-                                         ImageLayout::shader_read);
-              previous->second = ImageLayout::shader_read;
-            }
+            record_image_use(image, ImageLayout::shader_read);
             const auto sampler = image_sampler_configs_.find(image.alloc_id);
             TI_ERROR_IF(sampler == image_sampler_configs_.end(),
                         "Prepared Vulkan Graph TextureCollection member has "
@@ -3536,14 +3560,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
         TI_ERROR_IF(!inserted && usage->second != layout,
                     "Prepared Vulkan Graph cannot bind one image as both sampled "
                     "and storage in the same task");
-        const auto [previous, first_use] =
-            recorded_image_layouts.emplace(image.alloc_id, layout);
-        if (first_use) {
-          entry_images.emplace_back(image, layout);
-        } else if (previous->second != layout) {
-          commands->image_transition(image, previous->second, layout);
-          previous->second = layout;
-        }
+        record_image_use(image, layout);
         if (bind.is_storage) {
           resources->rw_image(bind.binding, image, bind.lod);
         } else {

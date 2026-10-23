@@ -70,8 +70,16 @@ kernel、显式 adjoint、初始化/重放、双独立实例、高位 u64 更新
 实例及 reset 退休。`vulkan_execution_domain_while` 能力位表示可重建已选设备 while，
 包括分块和嵌套 recipe；具体策略仍须满足所选设备能力。前段、首次条件、循环分块及收尾
 共用一次队列提交，逐提交参数更新覆盖所有物理 dispatch 副本，计时覆盖完整计算序列。
-native buffer 操作仍须具备适用的固定录制 factory。独立 Vulkan 路线不接纳
-image/graphics、host selection、并行 recipe，以及共享 sparse/RNG/runtime-error 状态。
+native buffer 操作仍须具备适用的固定录制 factory。
+
+`vulkan_execution_domain_private_images` 支持执行计划为每个实例重建的私有 color
+image：普通 compute 段可使用 sampled/storage image 和显式 color upload。各阶段共用
+固定边界布局，首次转换、初始化和重放都由所选域执行；资源创建时提供初始 pixels
+仍可能在冷准备阶段完成上传。图像保留到实例退休，无需每次提交查询布局或重建录制。
+这不包含外部借用 Texture/native image，也不包含设备 while 内的 image kernel。
+私有资源可在 AOT plan 的 `resources` 中声明；普通 JIT Texture 借用仍需独立的布局合同。
+独立 Vulkan 路线还不接纳 graphics、host selection、并行 recipe，以及共享
+sparse/RNG/runtime-error 状态。
 普通 Graph 保持既有能力；CUDA Canvas 和外部内存协议不会因此自动适用于 Vulkan 域。
 
 初始化导入普通队列已提交的准备前缀，并在所选队列执行实例初始化。暖态提交把依赖、

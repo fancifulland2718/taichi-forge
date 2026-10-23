@@ -586,10 +586,26 @@ class TI_DLL_EXPORT GfxRuntime {
     explicit FixedGraphWorkspace(Device *device) : device_(device) {}
     Device *device_;
     std::shared_ptr<DeviceAllocationGuard> global_tmps_;
+    struct PrivateImage {
+      DeviceAllocation allocation;
+      ImageLayout initial;
+      ImageLayout boundary;
+      std::shared_ptr<void> owner;
+    };
+    std::unordered_map<DeviceAllocationId, PrivateImage> private_images_;
     bool initialization_recorded_{false};
   };
   std::shared_ptr<FixedGraphWorkspace> create_fixed_graph_workspace();
-  // Produce immutable buffer-only commands for a caller-owned compute queue.
+  // Cold-only admission of an allocation owned exclusively by this instance.
+  // The caller proves privacy; external/borrowed image objects are not eligible.
+  // All phases use one boundary layout without consulting the default queue.
+  void prepare_fixed_private_image(
+      const std::shared_ptr<FixedGraphWorkspace> &workspace,
+      DeviceAllocation image,
+      ImageLayout boundary,
+      std::shared_ptr<void> owner);
+  // Produce immutable commands for a caller-owned compute queue. Images must
+  // be registered as private resources with this workspace before recording.
   // No default-queue submit, registration or replay closure is created. The
   // caller owns code/runtime retirement and must retain the returned payload
   // through every use of its primary command list.
@@ -831,7 +847,8 @@ class TI_DLL_EXPORT GfxRuntime {
       std::vector<std::shared_ptr<void>> &owners);
   void prepare_detached_kernel_workspace(
       const CompiledTaichiKernel &kernel,
-      const std::shared_ptr<FixedGraphWorkspace> &workspace);
+      const std::shared_ptr<FixedGraphWorkspace> &workspace,
+      bool allow_private_images = false);
   void attach_fixed_sparse_resources(GraphReplayState &state,
                                      FixedSparseReplayResources resources);
   std::unique_ptr<GraphReplayRegistration> prepare_fixed_control_graph(

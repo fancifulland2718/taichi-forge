@@ -585,9 +585,14 @@ class VulkanImageUpload final : public NativeOperation {
       const override {
     // Depth transfers are not universally supported by compute-only queues.
     // Use the existing graphics-capable recording for portable correctness.
+    std::vector<DeviceAllocation> buffers;
+    buffers.reserve(transfers_.size());
+    for (const auto &transfer : transfers_)
+      buffers.push_back({transfer.source.device, transfer.source.alloc_id});
     return {
         {{image_->gfx_sampled_allocation(), ImageLayout::transfer_dst}},
-        transfers_.front().copy.image_aspect_flag == VK_IMAGE_ASPECT_DEPTH_BIT};
+        transfers_.front().copy.image_aspect_flag == VK_IMAGE_ASPECT_DEPTH_BIT,
+        std::move(buffers)};
   }
   void record_vulkan(Device *, CommandList *commands) override {
     for (const auto &transfer : transfers_) {

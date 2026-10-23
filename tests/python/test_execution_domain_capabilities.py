@@ -27,6 +27,7 @@ VULKAN_NAMES = (
     "vulkan_completion_gpu_timing",
     "vulkan_execution_instance_retirement",
     "vulkan_execution_domain_while",
+    "vulkan_execution_domain_private_images",
 )
 
 
