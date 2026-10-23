@@ -183,7 +183,9 @@ def test_aot_selected_nested_conditions_and_order(tmp_path):
     module = ti.aot.Module()
     with definition.materialize() as baseline:
         selected = baseline.executor._spec.structured_control_nodes[0]._cuda_nested_control_lowering
-        if arch == "cuda" and selected != "cuda_conditional_nested_graph":
+        if arch == "cuda" and selected not in (
+            "cuda_conditional_nested_graph", "cuda_device_node_update", "cuda_masked_bounded_graph"
+        ):
             with pytest.raises(ti.TaichiRuntimeError, match="selected nested CUDA"):
                 module.add_execution_plan("unqualified", baseline.executor)
             assert not module._content and not module._graph_export_failed
