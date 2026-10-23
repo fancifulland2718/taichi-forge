@@ -61,11 +61,14 @@ constexpr std::size_t kNestedStructuredHeaderWords = 8;
 constexpr std::size_t kNestedStructuredTraceWords = 6;
 constexpr std::size_t kGraphReplayRetirementPollBudget = 8;
 
+using StructuredScalarOffsets = std::array<uint32_t, 3>;
+
 // Optional status must be absent from both declarations and the entry-point
 // interface. Otherwise descriptor reflection can retain the unused binding,
 // depending on optimization, while the recording correctly omits it.
 std::vector<uint32_t> make_compact_controller_spirv(
     const DeviceCapabilityConfig &caps,
+    const StructuredScalarOffsets &offsets,
     const std::vector<uint32_t> &group_counts,
     bool has_status,
     std::size_t control_word_offset = 0,
@@ -84,7 +87,8 @@ std::vector<uint32_t> make_compact_controller_spirv(
   const auto zero = builder.uint_immediate_number(u32, 0);
   const auto one = builder.uint_immediate_number(u32, 1);
   const auto predicate_value = builder.load_variable(
-      builder.struct_array_access(u32, predicate, zero), u32);
+      builder.struct_array_access(
+          u32, predicate, builder.uint_immediate_number(u32, offsets[0])), u32);
   const auto active = builder.ne(predicate_value, zero);
   if (observe) {
     const auto active_increment = builder.select(active, one, zero);
@@ -103,7 +107,8 @@ std::vector<uint32_t> make_compact_controller_spirv(
       const auto initial_status =
           builder.load_variable(initial_status_ptr, u32);
       const auto status_value = builder.load_variable(
-          builder.struct_array_access(u32, status, zero), u32);
+          builder.struct_array_access(
+          u32, status, builder.uint_immediate_number(u32, offsets[2])), u32);
       builder.store_variable(initial_status_ptr,
                              builder.select(builder.eq(logical_count, zero),
                                             status_value, initial_status));
@@ -149,6 +154,7 @@ std::vector<uint32_t> make_compact_controller_spirv(
 
 std::vector<uint32_t> make_structured_terminal_spirv(
     const DeviceCapabilityConfig &caps,
+    const StructuredScalarOffsets &offsets,
     std::size_t observation_word_offset,
     bool has_status) {
   spirv::IRBuilder builder(Arch::vulkan, &caps);
@@ -164,25 +170,26 @@ std::vector<uint32_t> make_structured_terminal_spirv(
 
   const auto zero = builder.uint_immediate_number(u32, 0);
   const auto observation_base = observation_word_offset;
-  const auto load_scalar = [&](spirv::Value buffer) {
+  const auto load_scalar = [&](spirv::Value buffer, uint32_t index) {
     return builder.load_variable(
-        builder.struct_array_access(u32, buffer, zero), u32);
+        builder.struct_array_access(
+            u32, buffer, builder.uint_immediate_number(u32, index)), u32);
   };
   builder.store_variable(
       builder.struct_array_access(
           u32, control,
           builder.uint_immediate_number(u32, observation_base + 1)),
-      load_scalar(predicate));
+      load_scalar(predicate, offsets[0]));
   builder.store_variable(
       builder.struct_array_access(
           u32, control,
           builder.uint_immediate_number(u32, observation_base + 2)),
-      load_scalar(counter));
+      load_scalar(counter, offsets[1]));
   builder.store_variable(
       builder.struct_array_access(
           u32, control,
           builder.uint_immediate_number(u32, observation_base + 3)),
-      has_status ? load_scalar(status) : zero);
+      has_status ? load_scalar(status, offsets[2]) : zero);
   const auto logical_count = builder.load_variable(
       builder.struct_array_access(
           u32, control,
@@ -193,7 +200,7 @@ std::vector<uint32_t> make_structured_terminal_spirv(
       builder.uint_immediate_number(u32, observation_base + 4));
   const auto initial_status =
       builder.load_variable(initial_status_ptr, u32);
-  const auto final_status = has_status ? load_scalar(status) : zero;
+  const auto final_status = has_status ? load_scalar(status, offsets[2]) : zero;
   builder.store_variable(
       initial_status_ptr,
       builder.select(builder.eq(logical_count, zero), final_status,
@@ -214,6 +221,7 @@ std::vector<uint32_t> make_structured_terminal_spirv(
 
 std::vector<uint32_t> make_nested_outer_snapshot_spirv(
     const DeviceCapabilityConfig &caps,
+    const StructuredScalarOffsets &offsets,
     std::size_t header_word_offset,
     bool has_status,
     bool terminal) {
@@ -230,22 +238,23 @@ std::vector<uint32_t> make_nested_outer_snapshot_spirv(
 
   const auto zero = builder.uint_immediate_number(u32, 0);
   const auto base = header_word_offset + (terminal ? 5 : 2);
-  const auto load_scalar = [&](spirv::Value buffer) {
+  const auto load_scalar = [&](spirv::Value buffer, uint32_t index) {
     return builder.load_variable(
-        builder.struct_array_access(u32, buffer, zero), u32);
+        builder.struct_array_access(
+            u32, buffer, builder.uint_immediate_number(u32, index)), u32);
   };
   builder.store_variable(
       builder.struct_array_access(
           u32, control, builder.uint_immediate_number(u32, base)),
-      load_scalar(predicate));
+      load_scalar(predicate, offsets[0]));
   builder.store_variable(
       builder.struct_array_access(
           u32, control, builder.uint_immediate_number(u32, base + 1)),
-      load_scalar(counter));
+      load_scalar(counter, offsets[1]));
   builder.store_variable(
       builder.struct_array_access(
           u32, control, builder.uint_immediate_number(u32, base + 2)),
-      has_status ? load_scalar(status) : zero);
+      has_status ? load_scalar(status, offsets[2]) : zero);
   builder.make_inst(spv::OpReturn);
   builder.make_inst(spv::OpFunctionEnd);
 
@@ -262,6 +271,7 @@ std::vector<uint32_t> make_nested_outer_snapshot_spirv(
 
 std::vector<uint32_t> make_nested_inner_initial_spirv(
     const DeviceCapabilityConfig &caps,
+    const StructuredScalarOffsets &offsets,
     std::size_t header_word_offset,
     std::size_t trace_word_offset,
     std::size_t trace_row_words,
@@ -305,7 +315,8 @@ std::vector<uint32_t> make_nested_inner_initial_spirv(
       builder.mul(row_index,
                   builder.uint_immediate_number(u32, trace_row_words)));
   const auto counter_value = builder.load_variable(
-      builder.struct_array_access(u32, counter, zero), u32);
+      builder.struct_array_access(
+          u32, counter, builder.uint_immediate_number(u32, offsets[1])), u32);
   builder.store_variable(
       builder.struct_array_access(
           u32, control,
@@ -314,7 +325,8 @@ std::vector<uint32_t> make_nested_inner_initial_spirv(
   const auto status_value =
       has_status
           ? builder.load_variable(
-                builder.struct_array_access(u32, status, zero), u32)
+                builder.struct_array_access(
+          u32, status, builder.uint_immediate_number(u32, offsets[2])), u32)
           : zero;
   builder.store_variable(
       builder.struct_array_access(
@@ -337,6 +349,7 @@ std::vector<uint32_t> make_nested_inner_initial_spirv(
 
 std::vector<uint32_t> make_nested_inner_terminal_spirv(
     const DeviceCapabilityConfig &caps,
+    const StructuredScalarOffsets &offsets,
     std::size_t inner_observation_word_offset,
     std::size_t header_word_offset,
     std::size_t trace_word_offset,
@@ -371,25 +384,26 @@ std::vector<uint32_t> make_nested_inner_terminal_spirv(
       u32);
   builder.store_variable(builder.struct_array_access(u32, control, row),
                          inner_logical);
-  const auto load_scalar = [&](spirv::Value buffer) {
+  const auto load_scalar = [&](spirv::Value buffer, uint32_t index) {
     return builder.load_variable(
-        builder.struct_array_access(u32, buffer, zero), u32);
+        builder.struct_array_access(
+            u32, buffer, builder.uint_immediate_number(u32, index)), u32);
   };
   builder.store_variable(
       builder.struct_array_access(
           u32, control,
           builder.add(row, builder.uint_immediate_number(u32, 2))),
-      load_scalar(counter));
+      load_scalar(counter, offsets[1]));
   builder.store_variable(
       builder.struct_array_access(
           u32, control,
           builder.add(row, builder.uint_immediate_number(u32, 3))),
-      load_scalar(predicate));
+      load_scalar(predicate, offsets[0]));
   builder.store_variable(
       builder.struct_array_access(
           u32, control,
           builder.add(row, builder.uint_immediate_number(u32, 5))),
-      has_status ? load_scalar(status) : zero);
+      has_status ? load_scalar(status, offsets[2]) : zero);
   builder.make_inst(spv::OpReturn);
   builder.make_inst(spv::OpFunctionEnd);
 
@@ -406,6 +420,7 @@ std::vector<uint32_t> make_nested_inner_terminal_spirv(
 
 std::vector<uint32_t> make_chained_controller_spirv(
     const DeviceCapabilityConfig &caps,
+    const StructuredScalarOffsets &offsets,
     const std::vector<uint32_t> &group_counts,
     std::uint32_t max_iterations,
     bool has_status) {
@@ -430,7 +445,8 @@ std::vector<uint32_t> make_chained_controller_spirv(
       builder.struct_array_access(u32, control, observation_base);
   const auto logical_count = builder.load_variable(logical_count_ptr, u32);
   const auto predicate_value = builder.load_variable(
-      builder.struct_array_access(u32, predicate, zero), u32);
+      builder.struct_array_access(
+          u32, predicate, builder.uint_immediate_number(u32, offsets[0])), u32);
   const auto active = builder.ne(predicate_value, zero);
   const auto active_increment = builder.select(active, one, zero);
 
@@ -442,7 +458,8 @@ std::vector<uint32_t> make_chained_controller_spirv(
     const auto initial_status =
         builder.load_variable(initial_status_ptr, u32);
     const auto status_value = builder.load_variable(
-        builder.struct_array_access(u32, status, zero), u32);
+        builder.struct_array_access(
+          u32, status, builder.uint_immediate_number(u32, offsets[2])), u32);
     builder.store_variable(
         initial_status_ptr,
         builder.select(builder.eq(logical_count, zero), status_value,
@@ -513,6 +530,7 @@ std::vector<uint32_t> make_chained_controller_spirv(
 
 std::vector<uint32_t> make_conditional_controller_spirv(
     const DeviceCapabilityConfig &caps,
+    const StructuredScalarOffsets &offsets,
     std::uint32_t max_iterations,
     bool has_status) {
   spirv::IRBuilder builder(Arch::vulkan, &caps);
@@ -533,7 +551,8 @@ std::vector<uint32_t> make_conditional_controller_spirv(
       builder.struct_array_access(u32, control, observation_base);
   const auto logical_count = builder.load_variable(logical_count_ptr, u32);
   const auto predicate_value = builder.load_variable(
-      builder.struct_array_access(u32, predicate, zero), u32);
+      builder.struct_array_access(
+          u32, predicate, builder.uint_immediate_number(u32, offsets[0])), u32);
   const auto active = builder.ne(predicate_value, zero);
   const auto sink_index = builder.uint_immediate_number(
       u32, max_iterations + kStructuredObservationWords);
@@ -551,7 +570,8 @@ std::vector<uint32_t> make_conditional_controller_spirv(
     const auto initial_status =
         builder.load_variable(initial_status_ptr, u32);
     const auto status_value = builder.load_variable(
-        builder.struct_array_access(u32, status, zero), u32);
+        builder.struct_array_access(
+          u32, status, builder.uint_immediate_number(u32, offsets[2])), u32);
     builder.store_variable(
         initial_status_ptr,
         builder.select(builder.eq(logical_count, zero), status_value,
@@ -576,6 +596,7 @@ std::vector<uint32_t> make_conditional_controller_spirv(
 
 std::vector<uint32_t> make_coarse_conditional_gate_spirv(
     const DeviceCapabilityConfig &caps,
+    const StructuredScalarOffsets &offsets,
     std::uint32_t stable_predicate_index) {
   spirv::IRBuilder builder(Arch::vulkan, &caps);
   builder.init_header();
@@ -587,7 +608,8 @@ std::vector<uint32_t> make_coarse_conditional_gate_spirv(
 
   const auto zero = builder.uint_immediate_number(u32, 0);
   const auto predicate_value = builder.load_variable(
-      builder.struct_array_access(u32, predicate, zero), u32);
+      builder.struct_array_access(
+          u32, predicate, builder.uint_immediate_number(u32, offsets[0])), u32);
   builder.store_variable(
       builder.struct_array_access(
           u32, control,
@@ -4715,11 +4737,41 @@ bool GfxRuntime::launch_graph_impl(
             nested_control->inner_controls[child].inner_has_status);
       }
     }
+    // Share the ndarray descriptor slicing rule: bind an aligned range and
+    // specialize the scalar word index. A control field need only be u32 aligned.
+    const auto scalar_offsets = [&](DevicePtr predicate, DevicePtr counter,
+                                    DevicePtr status, bool has_status) {
+      StructuredScalarOffsets offsets{};
+      const std::array<DevicePtr, 3> pointers{predicate, counter, status};
+      for (std::size_t i = 0; i < (has_status ? 3 : 2); ++i) {
+        const auto slice = describe_descriptor_buffer_slice(
+            device_->get_storage_buffer_binding_limits(), pointers[i].offset,
+            sizeof(uint32_t), true);
+        TI_ASSERT(slice.byte_bias % sizeof(uint32_t) == 0);
+        offsets[i] = slice.byte_bias / sizeof(uint32_t);
+      }
+      return offsets;
+    };
+    std::vector<StructuredScalarOffsets> scalar_word_offsets;
+    if (nested_structured) {
+      scalar_word_offsets.push_back(scalar_offsets(
+          nested_control->outer_predicate, nested_control->outer_counter,
+          nested_control->outer_status, nested_control->outer_has_status));
+      for (const auto &inner : nested_control->inner_controls)
+        scalar_word_offsets.push_back(scalar_offsets(
+            inner.inner_predicate, inner.inner_counter, inner.inner_status,
+            inner.inner_has_status));
+    } else {
+      scalar_word_offsets.push_back(scalar_offsets(
+          structured_control->predicate, structured_control->counter,
+          structured_control->status, structured_control->has_status));
+    }
     const bool rebuild_control =
         !slot->structured_control_buffer ||
         slot->structured_control_bytes != structured_control_bytes ||
         slot->structured_observation_bytes !=
             structured_observation_bytes ||
+        slot->structured_scalar_word_offsets != scalar_word_offsets ||
         slot->structured_group_counts != structured_group_counts ||
         slot->nested_group_counts != nested_group_counts ||
         slot->nested_has_status != nested_has_status ||
@@ -4764,6 +4816,7 @@ bool GfxRuntime::launch_graph_impl(
       slot->structured_control_bytes = structured_control_bytes;
       slot->structured_observation_bytes =
           structured_observation_bytes;
+      slot->structured_scalar_word_offsets = scalar_word_offsets;
       slot->structured_group_counts = structured_group_counts;
       slot->nested_group_counts = nested_group_counts;
       slot->nested_has_status = nested_has_status;
@@ -4781,7 +4834,7 @@ bool GfxRuntime::launch_graph_impl(
               create_structured_pipeline(
                   device_,
                   make_compact_controller_spirv(
-                      device_->get_caps(),
+                      device_->get_caps(), scalar_word_offsets[child + 1],
                       nested_task_ranges[child].group_counts,
                       nested_control->inner_controls[child].inner_has_status,
                       nested_task_ranges[child].packet_word_offset,
@@ -4797,16 +4850,16 @@ bool GfxRuntime::launch_graph_impl(
             device_,
             structured_strategy == GraphStructuredStrategy::conditional
                 ? make_conditional_controller_spirv(
-                      device_->get_caps(),
+                      device_->get_caps(), scalar_word_offsets.front(),
                       structured_control->max_iterations,
                       inner_has_status)
                 : structured_strategy == GraphStructuredStrategy::chained
                       ? make_chained_controller_spirv(
-                            device_->get_caps(), structured_group_counts,
+                            device_->get_caps(), scalar_word_offsets.front(), structured_group_counts,
                             structured_control->max_iterations,
                             inner_has_status)
                       : make_compact_controller_spirv(
-                            device_->get_caps(), structured_group_counts,
+                            device_->get_caps(), scalar_word_offsets.front(), structured_group_counts,
                             inner_has_status),
             structured_strategy == GraphStructuredStrategy::conditional
                 ? "vulkan_conditional_controller"
@@ -4829,7 +4882,7 @@ bool GfxRuntime::launch_graph_impl(
         slot->structured_gate_pipeline = create_structured_pipeline(
             device_,
             make_coarse_conditional_gate_spirv(
-                device_->get_caps(), stable_predicate_index),
+                device_->get_caps(), scalar_word_offsets.front(), stable_predicate_index),
             nested_structured ? "vulkan_nested_outer_gate"
                               : "vulkan_coarse_conditional_gate");
         slot->structured_gate_resources =
@@ -4842,7 +4895,7 @@ bool GfxRuntime::launch_graph_impl(
         slot->structured_terminal_pipeline = create_structured_pipeline(
             device_,
             make_structured_terminal_spirv(
-                device_->get_caps(), structured_observation_word_offset,
+                device_->get_caps(), scalar_word_offsets.front(), structured_observation_word_offset,
                 inner_has_status),
             "vulkan_structured_terminal");
         slot->structured_terminal_resources =
@@ -4855,7 +4908,7 @@ bool GfxRuntime::launch_graph_impl(
         slot->nested_outer_initial_pipeline = create_structured_pipeline(
             device_,
             make_nested_outer_snapshot_spirv(
-                device_->get_caps(), nested_header_word_offset,
+                device_->get_caps(), scalar_word_offsets.front(), nested_header_word_offset,
                 outer_has_status, /*terminal=*/false),
             "vulkan_nested_outer_initial");
         slot->nested_inner_initial_pipelines.clear();
@@ -4872,7 +4925,7 @@ bool GfxRuntime::launch_graph_impl(
               create_structured_pipeline(
                   device_,
                   make_nested_inner_initial_spirv(
-                      device_->get_caps(), nested_header_word_offset,
+                      device_->get_caps(), scalar_word_offsets[child + 1], nested_header_word_offset,
                       child_trace_offset, nested_trace_row_words,
                       child_has_status, child == 0),
                   "vulkan_nested_inner_initial"));
@@ -4880,7 +4933,7 @@ bool GfxRuntime::launch_graph_impl(
               create_structured_pipeline(
                   device_,
                   make_nested_inner_terminal_spirv(
-                      device_->get_caps(),
+                      device_->get_caps(), scalar_word_offsets[child + 1],
                       nested_task_ranges[child].observation_word_offset,
                       nested_header_word_offset, child_trace_offset,
                       nested_trace_row_words, child_has_status),
@@ -4894,7 +4947,7 @@ bool GfxRuntime::launch_graph_impl(
             create_structured_pipeline(
                 device_,
                 make_nested_outer_snapshot_spirv(
-                    device_->get_caps(), nested_header_word_offset,
+                    device_->get_caps(), scalar_word_offsets.front(), nested_header_word_offset,
                     outer_has_status, /*terminal=*/true),
                 "vulkan_nested_outer_terminal");
         slot->nested_outer_initial_resources =
@@ -4920,6 +4973,14 @@ bool GfxRuntime::launch_graph_impl(
     if (structured_control == nullptr && nested_control == nullptr) {
       return true;
     }
+    const auto bind_scalar = [&](ShaderResourceSet *resources, uint32_t binding,
+                                 DevicePtr pointer) {
+      const auto slice = describe_descriptor_buffer_slice(
+          device_->get_storage_buffer_binding_limits(), pointer.offset,
+          sizeof(uint32_t), true);
+      pointer.offset = slice.offset;
+      resources->rw_buffer(binding, pointer, slice.size);
+    };
     if (nested_control != nullptr) {
       auto *outer_gate = slot->structured_gate_resources.get();
       if (!structured_terminal_observation) {
@@ -4927,8 +4988,7 @@ bool GfxRuntime::launch_graph_impl(
             slot->nested_inner_controller_resources.size() !=
                 nested_control->inner_controls.size())
           return false;
-        outer_gate->rw_buffer(0, nested_control->outer_predicate,
-                              sizeof(std::uint32_t));
+        bind_scalar(outer_gate, 0, nested_control->outer_predicate);
         outer_gate->rw_buffer(1, *slot->structured_control_buffer);
         for (std::size_t child = 0;
              child < nested_control->inner_controls.size(); ++child) {
@@ -4936,9 +4996,7 @@ bool GfxRuntime::launch_graph_impl(
               slot->nested_inner_controller_resources[child].get();
           if (!controller)
             return false;
-          controller->rw_buffer(
-              0, nested_control->inner_controls[child].inner_predicate,
-              sizeof(std::uint32_t));
+          bind_scalar(controller, 0, nested_control->inner_controls[child].inner_predicate);
           controller->rw_buffer(1, *slot->structured_control_buffer);
           if (controller->prepare_for_replay(patch_existing) !=
               RhiResult::success)
@@ -4966,15 +5024,12 @@ bool GfxRuntime::launch_graph_impl(
           nested_control->outer_has_status
               ? nested_control->outer_status
               : nested_control->outer_counter;
-      outer_gate->rw_buffer(0, nested_control->outer_predicate,
-                            sizeof(std::uint32_t));
+      bind_scalar(outer_gate, 0, nested_control->outer_predicate);
       outer_gate->rw_buffer(1, *slot->structured_control_buffer);
-      outer_initial->rw_buffer(0, nested_control->outer_predicate,
-                               sizeof(std::uint32_t));
-      outer_initial->rw_buffer(1, nested_control->outer_counter,
-                               sizeof(std::uint32_t));
+      bind_scalar(outer_initial, 0, nested_control->outer_predicate);
+      bind_scalar(outer_initial, 1, nested_control->outer_counter);
       if (nested_control->outer_has_status) {
-        outer_initial->rw_buffer(2, outer_status, sizeof(std::uint32_t));
+        bind_scalar(outer_initial, 2, outer_status);
       }
       outer_initial->rw_buffer(3,
                                *slot->structured_control_buffer);
@@ -4995,24 +5050,20 @@ bool GfxRuntime::launch_graph_impl(
         const DevicePtr inner_status =
             inner.inner_has_status ? inner.inner_status
                                    : inner.inner_counter;
-        controller->rw_buffer(0, inner.inner_predicate,
-                              sizeof(std::uint32_t));
+        bind_scalar(controller, 0, inner.inner_predicate);
         controller->rw_buffer(1, *slot->structured_control_buffer);
         if (inner.inner_has_status) {
-          controller->rw_buffer(2, inner_status, sizeof(std::uint32_t));
+          bind_scalar(controller, 2, inner_status);
         }
-        inner_initial->rw_buffer(0, inner.inner_counter,
-                                 sizeof(std::uint32_t));
+        bind_scalar(inner_initial, 0, inner.inner_counter);
         if (inner.inner_has_status) {
-          inner_initial->rw_buffer(1, inner_status, sizeof(std::uint32_t));
+          bind_scalar(inner_initial, 1, inner_status);
         }
         inner_initial->rw_buffer(2, *slot->structured_control_buffer);
-        inner_terminal->rw_buffer(0, inner.inner_predicate,
-                                  sizeof(std::uint32_t));
-        inner_terminal->rw_buffer(1, inner.inner_counter,
-                                  sizeof(std::uint32_t));
+        bind_scalar(inner_terminal, 0, inner.inner_predicate);
+        bind_scalar(inner_terminal, 1, inner.inner_counter);
         if (inner.inner_has_status) {
-          inner_terminal->rw_buffer(2, inner_status, sizeof(std::uint32_t));
+          bind_scalar(inner_terminal, 2, inner_status);
         }
         inner_terminal->rw_buffer(3, *slot->structured_control_buffer);
         inner_ready =
@@ -5024,12 +5075,10 @@ bool GfxRuntime::launch_graph_impl(
             inner_terminal->prepare_for_replay(patch_existing) ==
                 RhiResult::success;
       }
-      outer_terminal->rw_buffer(0, nested_control->outer_predicate,
-                                sizeof(std::uint32_t));
-      outer_terminal->rw_buffer(1, nested_control->outer_counter,
-                                sizeof(std::uint32_t));
+      bind_scalar(outer_terminal, 0, nested_control->outer_predicate);
+      bind_scalar(outer_terminal, 1, nested_control->outer_counter);
       if (nested_control->outer_has_status) {
-        outer_terminal->rw_buffer(2, outer_status, sizeof(std::uint32_t));
+        bind_scalar(outer_terminal, 2, outer_status);
       }
       outer_terminal->rw_buffer(3,
                                 *slot->structured_control_buffer);
@@ -5049,20 +5098,17 @@ bool GfxRuntime::launch_graph_impl(
         !slot->structured_control_buffer) {
       return false;
     }
-    controller->rw_buffer(0, structured_control->predicate,
-                          sizeof(std::uint32_t));
+    bind_scalar(controller, 0, structured_control->predicate);
     controller->rw_buffer(1, *slot->structured_control_buffer);
     // Match the generated interface: status is only declared when present.
     if (structured_control->has_status) {
-      controller->rw_buffer(2, structured_control->status, sizeof(std::uint32_t));
+      bind_scalar(controller, 2, structured_control->status);
     }
     if (structured_terminal_observation) {
-      terminal->rw_buffer(0, structured_control->predicate,
-                          sizeof(std::uint32_t));
-      terminal->rw_buffer(1, structured_control->counter,
-                          sizeof(std::uint32_t));
+      bind_scalar(terminal, 0, structured_control->predicate);
+      bind_scalar(terminal, 1, structured_control->counter);
       if (structured_control->has_status) {
-        terminal->rw_buffer(2, structured_control->status, sizeof(std::uint32_t));
+        bind_scalar(terminal, 2, structured_control->status);
       }
       terminal->rw_buffer(3, *slot->structured_control_buffer);
     }
@@ -5071,8 +5117,7 @@ bool GfxRuntime::launch_graph_impl(
         GraphStructuredStrategy::coarse_conditional) {
       gate_ready = gate != nullptr;
       if (gate_ready) {
-        gate->rw_buffer(0, structured_control->predicate,
-                        sizeof(std::uint32_t));
+        bind_scalar(gate, 0, structured_control->predicate);
         gate->rw_buffer(1, *slot->structured_control_buffer);
         gate_ready = gate->prepare_for_replay(patch_existing) ==
                      RhiResult::success;

@@ -298,6 +298,83 @@ TEST(VulkanFixedCommands, RejectsSharedStateAndUnqualifiedCallbacksBeforeRecordi
   EXPECT_FALSE(queue.latest());
 }
 
+TEST(VulkanControlDescriptors, ScalarViewsRespectStorageAlignment) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  const auto *folder = std::getenv("TAICHI_AOT_FOLDER_PATH");
+  ASSERT_NE(folder, nullptr);
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  gfx::GfxRuntime::Params params;
+  params.device = &device;
+  gfx::GfxRuntime runtime(params);
+  gfx::AotModuleParams module_params;
+  module_params.module_path = folder;
+  module_params.runtime = &runtime;
+  auto module = aot::Module::load(Arch::vulkan, module_params);
+  ASSERT_TRUE(module);
+  auto *condition = dynamic_cast<gfx::KernelImpl *>(module->get_kernel("condition_at"));
+  auto *advance = dynamic_cast<gfx::KernelImpl *>(module->get_kernel("advance_at"));
+  ASSERT_TRUE(condition && advance);
+  auto [storage, status] = device.allocate_memory_unique(
+      {16 * sizeof(int), true, true, false, AllocUsage::Storage});
+  ASSERT_EQ(status, RhiResult::success);
+  Ndarray array(*storage, PrimitiveType::i32, {16});
+  LaunchContextBuilder cond(condition), body(advance);
+  cond.set_arg_ndarray({0}, array);
+  body.set_arg_ndarray({0}, array);
+  const std::vector<gfx::GfxRuntime::GraphDispatch> dispatches{
+      {condition->handle(), &cond}, {advance->handle(), &body},
+      {condition->handle(), &cond}};
+  using Strategy = gfx::GfxRuntime::GraphStructuredStrategy;
+  for (auto strategy : {Strategy::compact, Strategy::chained,
+                        Strategy::conditional, Strategy::coarse_conditional}) {
+    if ((strategy == Strategy::conditional || strategy == Strategy::coarse_conditional) &&
+        !device.supports_conditional_commands())
+      continue;
+    auto registration = runtime.register_graph_replay(1);
+    // More than one slot rotation, with different scalar biases and argument
+    // images, protects the controller pipeline's specialization identity.
+    for (int replay = 0; replay < 16; ++replay) {
+      const int base = 1 + replay % 10;
+      const bool observe = replay % 2 == 0;
+      std::array<int, 16> values{};
+      void *mapped = nullptr;
+      ASSERT_EQ(device.map(*storage, &mapped), RhiResult::success);
+      std::memcpy(mapped, values.data(), sizeof(values));
+      device.unmap(*storage);
+      cond.set_arg_int({1}, base);
+      body.set_arg_int({1}, base);
+      gfx::GfxRuntime::GraphStructuredControl control;
+      control.predicate = storage->get_ptr(base * sizeof(int));
+      control.counter = storage->get_ptr((base + 1) * sizeof(int));
+      control.status = storage->get_ptr((base + 2) * sizeof(int));
+      control.has_status = true;
+      control.initial_dispatch_count = 1;
+      control.max_iterations = 3;
+      control.strategy = strategy;
+      gfx::GfxRuntime::GraphStructuredResult result;
+      ASSERT_TRUE(runtime.try_launch_graph(dispatches, registration->replay_key(),
+                                          nullptr, &control, observe ? &result : nullptr));
+      runtime.synchronize();
+      ASSERT_EQ(device.map(*storage, &mapped), RhiResult::success);
+      std::memcpy(values.data(), mapped, sizeof(values));
+      device.unmap(*storage);
+      EXPECT_EQ(values[base], 0);
+      EXPECT_EQ(values[base + 1], 2);
+      EXPECT_EQ(values[base + 2], 2);
+      if (observe) {
+        EXPECT_TRUE(result.submitted);
+        EXPECT_EQ(result.logical_iterations, 2);
+        EXPECT_EQ(result.predicate, 0);
+        EXPECT_EQ(result.counter, 2);
+        EXPECT_EQ(result.status, 2);
+        EXPECT_EQ(result.initial_status, 1);
+      }
+    }
+  }
+}
+
 namespace {
 struct FixedOperands final : RuntimeCompletionResources {
   std::vector<std::shared_ptr<DeviceAllocationGuard>> allocations;

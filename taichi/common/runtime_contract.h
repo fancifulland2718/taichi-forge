@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Vulkan compute queue owners reserve physical queues and reusable timelines.
-inline constexpr int kForgeNativeAbiRevision = 162;
+// Vulkan replay slots specialize controller descriptors for scalar view biases.
+inline constexpr int kForgeNativeAbiRevision = 163;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

@@ -480,6 +480,7 @@ class TI_DLL_EXPORT GfxRuntime {
       std::vector<std::unique_ptr<Pipeline>> nested_inner_initial_pipelines;
       std::vector<std::unique_ptr<Pipeline>> nested_inner_terminal_pipelines;
       std::unique_ptr<Pipeline> nested_outer_terminal_pipeline;
+      std::vector<std::array<uint32_t, 3>> structured_scalar_word_offsets;
       std::vector<uint32_t> structured_group_counts;
       std::vector<std::vector<uint32_t>> nested_group_counts;
       std::vector<bool> nested_has_status;
