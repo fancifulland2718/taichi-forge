@@ -4,6 +4,7 @@
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_external_buffer.h"
+#include "taichi/rhi/vulkan/vulkan_execution_queue.h"
 #include <array>
 #include <cstring>
 #include <memory>
@@ -14,6 +15,7 @@ namespace {
 using taichi::lang::vulkan::VulkanCommandList;
 using taichi::lang::vulkan::VulkanDevice;
 using taichi::lang::vulkan::VulkanDeviceCreator;
+using taichi::lang::vulkan::VulkanExecutionQueue;
 using taichi::lang::vulkan::VulkanExternalBuffer;
 using taichi::lang::vulkan::VulkanExternalBufferDescription;
 using taichi::lang::vulkan::VulkanExternalBufferHandles;
@@ -432,12 +434,13 @@ struct Exported {
   VulkanExternalBufferDescription description;
 };
 
-TEST(VulkanExternalBufferImport,
-     RhiSubmissionPendingReadyAndResourceRetention) {
+void qualify_submission(bool independent) {
   VulkanDeviceCreator producer_creator(parameters()),
       consumer_creator(parameters());
   auto &pd = *producer_creator.device();
   auto &cd = *consumer_creator.device();
+  if (independent && cd.created_compute_queue_count() < 2)
+    GTEST_SKIP() << "Selected device has no independent compute queue";
   // Preserve producer flags, including optional device address.
   Exported exported(pd, false, cd.vk_caps().buffer_device_address);
   auto imported = VulkanExternalBuffer::import_borrowed(
@@ -456,14 +459,33 @@ TEST(VulkanExternalBufferImport,
   auto consumed = std::make_shared<VulkanStreamSemaphoreObject>(
       cd.backend_fault_reporter(), imported->consumed());
   auto &stream = *static_cast<VulkanStream *>(cd.get_compute_stream());
+  std::unique_ptr<VulkanExecutionQueue> queue;
+  if (independent) {
+    queue = std::make_unique<VulkanExecutionQueue>(cd, 1);
+    EXPECT_NE(queue->queue_index(), 0);
+    EXPECT_THROW(queue->prepare({}, {}, {imported->ready(), imported->ready()}),
+                 std::invalid_argument);
+    EXPECT_THROW(
+        queue->prepare({}, {}, {imported->ready()}, {imported->ready()}),
+        std::invalid_argument);
+    EXPECT_THROW(queue->prepare({}, {}, {exported.ready}),
+                 std::invalid_argument);
+  }
+  VulkanExecutionQueue::Point previous;
   Endpoint producer(pd), readback(cd);
   for (uint32_t epoch = 0; epoch < 8; ++epoch) {
     const std::array<uint32_t, 4> before{
         {epoch, 0x80000001u + epoch, 17u, 0xffffff00u + epoch}};
     const std::array<uint32_t, 4> after{
         {epoch + 100u, 0x81234567u, 29u, 0xfffffe00u + epoch}};
-    auto [commands, result] = stream.new_command_list_unique();
-    ASSERT_EQ(result, taichi::lang::RhiResult::success);
+    std::unique_ptr<taichi::lang::CommandList> commands;
+    if (independent) {
+      commands = queue->new_command_list();
+    } else {
+      auto created = stream.new_command_list_unique();
+      ASSERT_EQ(created.second, taichi::lang::RhiResult::success);
+      commands = std::move(created.first);
+    }
     auto &vk = *static_cast<VulkanCommandList *>(commands.get());
     imported->record_acquire(vk);
     const auto native_commands = vk.vk_command_buffer()->buffer;
@@ -504,9 +526,48 @@ TEST(VulkanExternalBufferImport,
     producer.submit({}, exported.ready->semaphore);
     gate.pending_fence = producer.fence;
     taichi::lang::StreamSemaphore completion;
+    std::shared_ptr<const VulkanExecutionQueue::Commands> fixed;
     try {
-      completion =
-          stream.submit_with_semaphores(commands.get(), {ready}, {consumed});
+      if (independent) {
+        fixed = queue->prepare({commands.get()}, {}, {imported->ready()},
+                               {imported->consumed()});
+        std::vector<VulkanExecutionQueue::Point> dependencies;
+        if (previous)
+          dependencies.push_back(previous);
+        const auto before_submit =
+            cd.queue_submission_snapshot().queue_submit_calls;
+        // Rejected host admission must not consume the pending ready signal,
+        // publish a completion, or occupy the only slot.
+        const auto old_tail = queue->latest();
+        EXPECT_THROW(
+            queue->submit(fixed, dependencies,
+                          [](auto, const auto &) {
+                            throw std::runtime_error("rejected external epoch");
+                          }),
+            std::runtime_error);
+        EXPECT_EQ(queue->latest(), old_tail);
+        EXPECT_EQ(queue->pending(), 0);
+        EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls,
+                  before_submit);
+        previous = queue->submit(fixed, dependencies);
+        EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls,
+                  before_submit + 1);
+        completion = previous;
+        const auto before_busy = queue->latest();
+        bool admitted = false;
+        EXPECT_THROW(
+            queue->submit(fixed, {},
+                          [&](auto, const auto &) { admitted = true; }),
+            VulkanExecutionQueue::Busy);
+        EXPECT_FALSE(admitted);
+        EXPECT_EQ(queue->latest(), before_busy);
+        EXPECT_EQ(queue->pending(), 1);
+        EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls,
+                  before_submit + 1);
+      } else {
+        completion =
+            stream.submit_with_semaphores(commands.get(), {ready}, {consumed});
+      }
     } catch (const taichi::lang::BackendRuntimeError &error) {
       std::cerr << "RHI submit epoch=" << epoch
                 << " backend_code=" << error.backend_code() << '\n';
@@ -528,8 +589,23 @@ TEST(VulkanExternalBufferImport,
     producer.wait();
     producer.expect(after);
   }
-  stream.command_sync();
+  if (independent) {
+    EXPECT_EQ(queue->collect(1), 1);
+    queue->close();
+  } else {
+    stream.command_sync();
+  }
   EXPECT_TRUE(weak.expired());
+}
+
+TEST(VulkanExternalBufferImport,
+     RhiSubmissionPendingReadyAndResourceRetention) {
+  qualify_submission(false);
+}
+
+TEST(VulkanExternalBufferImport,
+     IndependentQueueAdmissionAndMixedDependencies) {
+  qualify_submission(true);
 }
 
 // Inject errors into this device's immutable-in-production dispatch table.

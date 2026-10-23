@@ -213,8 +213,11 @@ StreamGpuTiming VulkanExecutionQueue::prepare_timing(CommandList &begin,
 }
 
 std::shared_ptr<const VulkanExecutionQueue::Commands>
-VulkanExecutionQueue::prepare(const std::vector<CommandList *> &commands,
-                               std::shared_ptr<void> operands) {
+VulkanExecutionQueue::prepare(
+    const std::vector<CommandList *> &commands,
+    std::shared_ptr<void> operands,
+    const std::vector<vkapi::IVkSemaphore> &binary_waits,
+    const std::vector<vkapi::IVkSemaphore> &binary_signals) {
   auto &state = *state_;
   std::lock_guard<std::mutex> lock(state.mutex);
   if (!state.accepting)
@@ -223,6 +226,24 @@ VulkanExecutionQueue::prepare(const std::vector<CommandList *> &commands,
     throw std::overflow_error("Vulkan command count exceeds uint32");
   auto result = std::shared_ptr<Commands>(new Commands);
   result->device = &state.device;
+  if (binary_waits.size() > UINT32_MAX || binary_signals.size() >= UINT32_MAX)
+    throw std::overflow_error("Vulkan external semaphore count exceeds uint32");
+  std::vector<VkSemaphore> seen;
+  const auto retain = [&](const auto &input, auto &output) {
+    for (const auto &semaphore : input) {
+      if (!semaphore || !semaphore->semaphore ||
+          semaphore->device != state.device.vk_device() ||
+          semaphore->semaphore == state.timeline->semaphore->semaphore ||
+          std::find(seen.begin(), seen.end(), semaphore->semaphore) !=
+              seen.end())
+        throw std::invalid_argument(
+            "Vulkan external semaphore is foreign, duplicate, or invalid");
+      seen.push_back(semaphore->semaphore);
+      output.push_back(semaphore);
+    }
+  };
+  retain(binary_waits, result->binary_waits);
+  retain(binary_signals, result->binary_signals);
   // Keep the parameter's reference until after the lock on every failure.
   result->operands = operands;
   for (auto *command : commands) {
@@ -300,10 +321,37 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
     commands = select(index);
   if (!commands || commands->device != &state.device)
     throw std::invalid_argument("Vulkan execution command device mismatch");
+  if (commands->binary_waits.size() > UINT32_MAX - semaphores.size())
+    throw std::overflow_error("Vulkan submission wait count exceeds uint32");
+  for (const auto &wait : commands->binary_waits) {
+    if (std::find(semaphores.begin(), semaphores.end(), wait->semaphore) !=
+        semaphores.end())
+      throw std::invalid_argument(
+          "Vulkan binary wait aliases a timeline dependency");
+    semaphores.push_back(wait->semaphore);
+    values.push_back(0);
+  }
   const auto previous = state.tail ? state.tail->value() : 0;
   if (previous == UINT64_MAX)
     throw std::overflow_error("Vulkan timeline counter exhausted");
   auto point = Point(new VulkanTimelinePoint(state.timeline, previous + 1));
+  std::vector<VkSemaphore> signals;
+  std::vector<std::uint64_t> signal_values;
+  if (!commands->binary_signals.empty()) {
+    signals.reserve(commands->binary_signals.size() + 1);
+    signal_values.reserve(commands->binary_signals.size() + 1);
+    signals.push_back(state.timeline->semaphore->semaphore);
+    signal_values.push_back(point->value());
+  }
+  for (const auto &signal : commands->binary_signals) {
+    if (signal->semaphore == signals.front() ||
+        std::find(semaphores.begin(), semaphores.end(), signal->semaphore) !=
+            semaphores.end())
+      throw std::invalid_argument(
+          "Vulkan binary signal aliases a submission dependency");
+    signals.push_back(signal->semaphore);
+    signal_values.push_back(0);
+  }
   pending.dependencies = dependencies;
   pending.commands = std::move(commands);
   pending.point = point;
@@ -319,8 +367,10 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
       VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
   timeline.waitSemaphoreValueCount = static_cast<uint32_t>(values.size());
   timeline.pWaitSemaphoreValues = values.data();
-  timeline.signalSemaphoreValueCount = 1;
-  timeline.pSignalSemaphoreValues = &point->value_;
+  timeline.signalSemaphoreValueCount =
+      signals.empty() ? 1 : static_cast<uint32_t>(signal_values.size());
+  timeline.pSignalSemaphoreValues =
+      signals.empty() ? &point->value_ : signal_values.data();
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   submit.pNext = &timeline;
   submit.waitSemaphoreCount = static_cast<uint32_t>(semaphores.size());
@@ -328,8 +378,9 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
   submit.pWaitDstStageMask = stages.data();
   submit.commandBufferCount = static_cast<uint32_t>(slot.commands->handles.size());
   submit.pCommandBuffers = slot.commands->handles.data();
-  submit.signalSemaphoreCount = 1;
-  submit.pSignalSemaphores = &state.timeline->semaphore->semaphore;
+  submit.signalSemaphoreCount = timeline.signalSemaphoreValueCount;
+  submit.pSignalSemaphores =
+      signals.empty() ? &state.timeline->semaphore->semaphore : signals.data();
   try {
     const auto queue = state.device.compute_queue_at(state.index);
     auto queue_lock = state.device.acquire_queue_lock(queue);

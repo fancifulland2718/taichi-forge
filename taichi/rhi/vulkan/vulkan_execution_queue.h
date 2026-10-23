@@ -21,6 +21,11 @@ class VulkanExecutionQueue {
     VulkanDevice *device{nullptr};
     std::vector<vkapi::IVkCommandBuffer> buffers;
     std::vector<VkCommandBuffer> handles;
+    // Cold, owned binary semaphore payloads. Ready/done epoch admission is
+    // the execution owner's responsibility; no wait or signal is submitted
+    // until this queue has admitted the entire command sequence.
+    std::vector<vkapi::IVkSemaphore> binary_waits;
+    std::vector<vkapi::IVkSemaphore> binary_signals;
     std::shared_ptr<void> operands;
   };
   using Point = std::shared_ptr<VulkanTimelinePoint>;
@@ -40,9 +45,15 @@ class VulkanExecutionQueue {
   // primary; operands own every allocation referenced by them.
   std::unique_ptr<CommandList> new_command_list();
   StreamGpuTiming prepare_timing(CommandList &begin, CommandList &end);
+  // External semaphores must be binary. The caller proves that each ready
+  // signal is already enqueued and owns the matching wait/signal epoch;
+  // Vulkan has no query that can infer those facts from a semaphore handle.
+  // They are retained with the commands through submission retirement.
   std::shared_ptr<const Commands> prepare(
       const std::vector<CommandList *> &commands,
-      std::shared_ptr<void> operands = {});
+      std::shared_ptr<void> operands = {},
+      const std::vector<vkapi::IVkSemaphore> &binary_waits = {},
+      const std::vector<vkapi::IVkSemaphore> &binary_signals = {});
   // All validation and admission precede this host-only callback. It may copy
   // into the selected preallocated slot and reserve a completion wrapper for
   // the unpublished point, but cannot submit/wait/reenter/publish the point.
