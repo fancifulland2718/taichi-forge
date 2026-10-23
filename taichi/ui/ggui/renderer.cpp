@@ -17,6 +17,19 @@ using namespace taichi::lang::vulkan;
 using namespace taichi::lang::metal;
 #endif
 
+namespace {
+
+void bind_cuda_display_domain(
+    const std::shared_ptr<DisplayStorage> &storage,
+    const std::shared_ptr<cuda::ExecutionDomain> &domain) {
+  auto cuda_image = std::dynamic_pointer_cast<SharedCudaVulkanImage>(storage);
+  TI_ERROR_IF(!cuda_image,
+              "CUDA display domain requires CUDA-Vulkan display storage");
+  cuda_image->set_execution_domain(domain);
+}
+
+}  // namespace
+
 void Renderer::init(Program *prog,
                     TaichiWindow *window,
                     const AppConfig &config,
@@ -80,7 +93,7 @@ void Renderer::set_image(const DisplayFrameInfo &info) {
   s->update_data(info);
 }
 
-std::shared_ptr<SharedCudaVulkanImage>
+std::shared_ptr<DisplayStorage>
 Renderer::acquire_shared_cuda_vulkan_image(int width, int height) {
   TI_ERROR_IF(prepared_display_width_ && (width != prepared_display_width_ ||
                                           height != prepared_display_height_),
@@ -100,7 +113,7 @@ Renderer::acquire_shared_cuda_vulkan_image(int width, int height) {
   previous.reset();
   auto image = set_image->acquire_shared_cuda_vulkan_image(width, height);
   if (image && display_execution_domain_)
-    image->set_execution_domain(display_execution_domain_);
+    bind_cuda_display_domain(image, display_execution_domain_);
   return image;
 }
 
@@ -124,7 +137,7 @@ void Renderer::set_display_execution_domain(
 #endif
 }
 
-std::vector<SharedCudaVulkanImage *>
+std::vector<DisplayStorage *>
 Renderer::prepare_display_pool(int width, int height, int capacity) {
   TI_ERROR_IF(!display_execution_domain_ || width <= 0 || height <= 0 ||
                   capacity < 2 || capacity > max_frames_in_flight() + 1,
@@ -148,7 +161,7 @@ Renderer::prepare_display_pool(int width, int height, int capacity) {
                   last_shared_display_image_->has_live_execution_domain(),
               "Close the previous display domain before replacing its pool");
   std::vector<std::unique_ptr<SetImage>> prepared;
-  std::vector<SharedCudaVulkanImage *> views;
+  std::vector<DisplayStorage *> views;
   const auto repeat_capacity = max_frames_in_flight() + 1;
   prepared.reserve(capacity + repeat_capacity);
   views.reserve(capacity);
@@ -156,7 +169,7 @@ Renderer::prepare_display_pool(int width, int height, int capacity) {
     auto image = std::make_unique<SetImage>(&app_context_, VboHelpers::all());
     auto storage = image->acquire_shared_cuda_vulkan_image(width, height);
     TI_ERROR_IF(!storage, "Unable to prepare CUDA/Vulkan display pool");
-    storage->set_execution_domain(display_execution_domain_);
+    bind_cuda_display_domain(storage, display_execution_domain_);
     views.push_back(storage.get());
     prepared.push_back(std::move(image));
   }
@@ -222,8 +235,8 @@ bool Renderer::set_image_shared_cuda_on_domain(
                     source_lease->handle() != info.img.runtime_resource_handle,
                 "Selected display copy requires a retained source ndarray");
   }
-  if (!image->try_copy_cuda_image(info.img.dev_alloc.get_ptr(), producer,
-                                  source_lease)) {
+  if (!image->try_copy_image(info.img.dev_alloc.get_ptr(), producer,
+                             source_lease)) {
     cancel_display_frame();
     return false;
   }
@@ -233,7 +246,7 @@ bool Renderer::set_image_shared_cuda_on_domain(
 void Renderer::finish_display_write() {
   TI_ERROR_IF(!pending_set_image_ || !pending_set_image_->shared_image(),
               "No borrowed display image");
-  pending_set_image_->shared_image()->finish_cuda_write();
+  pending_set_image_->shared_image()->finish_write();
   pending_set_image_->seal_display_write();
 }
 
@@ -246,7 +259,7 @@ bool Renderer::try_finish_display_write(const RuntimeCompletion &producer,
   // Missing observation must reject before sealing an already written frame.
   if (track_source && !producer.valid() && image->ready_for_vulkan_submit())
     (void)image->source_completion();
-  if (!image->try_finish_cuda_write(producer))
+  if (!image->try_finish_write(producer))
     return false;
   pending_set_image_->seal_display_write();
   return true;
@@ -294,8 +307,8 @@ bool Renderer::repeat_display_frame() {
   if (!last_shared_display_image_)
     return false;
   if (display_execution_domain_)
-    last_shared_display_image_->set_execution_domain(display_execution_domain_);
-  if (!last_shared_display_image_->try_finish_cuda_write())
+    bind_cuda_display_domain(last_shared_display_image_, display_execution_domain_);
+  if (!last_shared_display_image_->try_finish_write())
     return false;
   auto *image = get_set_image_renderable(/*reuse_last_image=*/true);
   image->use_shared_image(last_shared_display_image_);

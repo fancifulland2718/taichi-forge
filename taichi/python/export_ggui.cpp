@@ -598,7 +598,7 @@ struct PyCanvas {
     return display_canvas().repeat_display_frame();
   }
 
-  vulkan::SharedCudaVulkanImage *acquire_shared_cuda_vulkan_image(
+  vulkan::DisplayStorage *acquire_shared_cuda_vulkan_image(
       int width,
       int height) {
     auto *ggui_canvas = dynamic_cast<vulkan::Canvas *>(canvas);
@@ -607,7 +607,7 @@ struct PyCanvas {
     }
     return ggui_canvas->acquire_shared_cuda_vulkan_image(width, height).get();
   }
-  std::vector<vulkan::SharedCudaVulkanImage *>
+  std::vector<vulkan::DisplayStorage *>
   prepare_display_pool(int width, int height, int capacity) {
     return display_canvas().prepare_display_pool(width, height, capacity);
   }
@@ -1056,16 +1056,18 @@ void export_ggui(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("GUI", &PyWindow::gui);
 
-  py::class_<vulkan::SharedCudaVulkanImage,
-             std::shared_ptr<vulkan::SharedCudaVulkanImage>>(
-      m, "_SharedCudaVulkanImage")
-      .def_property_readonly("description",
-                             &vulkan::SharedCudaVulkanImage::description,
+  py::class_<vulkan::DisplayStorage, std::shared_ptr<vulkan::DisplayStorage>>(
+      m, "_DisplayStorage")
+      .def_property_readonly("description", &vulkan::DisplayStorage::description,
                              py::return_value_policy::copy)
-      .def_property_readonly("identity",
-                             &vulkan::SharedCudaVulkanImage::identity)
-      .def_property_readonly("width", &vulkan::SharedCudaVulkanImage::width)
-      .def_property_readonly("height", &vulkan::SharedCudaVulkanImage::height);
+      .def_property_readonly("identity", &vulkan::DisplayStorage::identity)
+      .def_property_readonly("width", &vulkan::DisplayStorage::width)
+      .def_property_readonly("height", &vulkan::DisplayStorage::height);
+
+  // Preserve the existing private Python type for the only current backend.
+  py::class_<vulkan::SharedCudaVulkanImage, vulkan::DisplayStorage,
+             std::shared_ptr<vulkan::SharedCudaVulkanImage>>(
+      m, "_SharedCudaVulkanImage");
 
   py::class_<vulkan::DisplayCompletion,
              std::shared_ptr<vulkan::DisplayCompletion>>(m,

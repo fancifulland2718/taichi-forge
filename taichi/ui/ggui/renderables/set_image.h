@@ -58,42 +58,74 @@ class TI_DLL_EXPORT DisplayCompletion final {
   taichi::lang::StreamSemaphore completion_;
 };
 
-class SharedCudaVulkanImage final {
+// Storage and producer handoff used by the existing display pool. This
+// interface owns no frame queue or scheduling policy. Prepared producers keep
+// their backend owner, not an extra reference to this renderer-facing object.
+class DisplayStorage {
+ public:
+  virtual ~DisplayStorage() = default;
+
+  virtual const taichi::lang::storage::DenseStorageBuildResult &description()
+      const = 0;
+  virtual std::uint64_t identity() const noexcept = 0;
+  virtual taichi::lang::DevicePtr vulkan_ptr() const noexcept = 0;
+  virtual int width() const noexcept = 0;
+  virtual int height() const noexcept = 0;
+  virtual bool ready_for_vulkan_submit() const noexcept = 0;
+  virtual void prepare_write() = 0;
+  virtual void finish_write() = 0;
+  virtual bool try_finish_write(
+      const taichi::lang::RuntimeCompletion &producer = {}) = 0;
+  virtual bool try_copy_image(
+      taichi::lang::DevicePtr source,
+      const taichi::lang::RuntimeCompletion &producer = {},
+      std::shared_ptr<taichi::lang::Program::NdarrayResourceLease>
+          source_lease = nullptr) = 0;
+  virtual taichi::lang::RuntimeCompletion source_completion() const = 0;
+  virtual bool has_live_execution_domain() const = 0;
+  virtual void close() = 0;
+  virtual taichi::lang::StreamSemaphore submit_vulkan_frame(
+      taichi::lang::vulkan::VulkanStream &stream,
+      taichi::lang::CommandList *command_list,
+      const std::vector<taichi::lang::StreamSemaphore> &additional_waits) = 0;
+};
+
+class SharedCudaVulkanImage final : public DisplayStorage {
  public:
   static std::shared_ptr<SharedCudaVulkanImage> create(
       AppContext *app_context,
       int width,
       int height);
 
-  ~SharedCudaVulkanImage();
+  ~SharedCudaVulkanImage() override;
   SharedCudaVulkanImage(const SharedCudaVulkanImage &) = delete;
   SharedCudaVulkanImage &operator=(const SharedCudaVulkanImage &) = delete;
 
-  const taichi::lang::storage::DenseStorageBuildResult &description() const;
-  std::uint64_t identity() const noexcept;
-  taichi::lang::DevicePtr vulkan_ptr() const noexcept;
-  int width() const noexcept;
-  int height() const noexcept;
-  bool ready_for_vulkan_submit() const noexcept;
-  void prepare_cuda_write();
-  void finish_cuda_write();
+  const taichi::lang::storage::DenseStorageBuildResult &description() const override;
+  std::uint64_t identity() const noexcept override;
+  taichi::lang::DevicePtr vulkan_ptr() const noexcept override;
+  int width() const noexcept override;
+  int height() const noexcept override;
+  bool ready_for_vulkan_submit() const noexcept override;
+  void prepare_write() override;
+  void finish_write() override;
   void copy_cuda_image(taichi::lang::DevicePtr source);
   void set_execution_domain(
       std::shared_ptr<taichi::lang::cuda::ExecutionDomain> domain);
-  bool try_finish_cuda_write(
-      const taichi::lang::RuntimeCompletion &producer = {});
-  bool try_copy_cuda_image(
+  bool try_finish_write(
+      const taichi::lang::RuntimeCompletion &producer = {}) override;
+  bool try_copy_image(
       taichi::lang::DevicePtr source,
       const taichi::lang::RuntimeCompletion &producer = {},
       std::shared_ptr<taichi::lang::Program::NdarrayResourceLease>
-          source_lease = nullptr);
-  taichi::lang::RuntimeCompletion source_completion() const;
-  bool has_live_execution_domain() const;
-  void close();
+          source_lease = nullptr) override;
+  taichi::lang::RuntimeCompletion source_completion() const override;
+  bool has_live_execution_domain() const override;
+  void close() override;
   taichi::lang::StreamSemaphore submit_vulkan_frame(
       taichi::lang::vulkan::VulkanStream &stream,
       taichi::lang::CommandList *command_list,
-      const std::vector<taichi::lang::StreamSemaphore> &additional_waits);
+      const std::vector<taichi::lang::StreamSemaphore> &additional_waits) override;
 
  private:
   class Impl;
@@ -150,8 +182,8 @@ class SetImage final : public Renderable {
 
   void set_transpose(bool transpose);
 
-  void use_shared_image(std::shared_ptr<SharedCudaVulkanImage> image);
-  std::shared_ptr<SharedCudaVulkanImage> shared_image() const {
+  void use_shared_image(std::shared_ptr<DisplayStorage> image);
+  std::shared_ptr<DisplayStorage> shared_image() const {
     return shared_cuda_vulkan_image_;
   }
   void track_display(std::shared_ptr<DisplayCompletion> completion,
@@ -169,7 +201,7 @@ class SetImage final : public Renderable {
   void retire_display();
   void cancel_display();
 
-  std::shared_ptr<SharedCudaVulkanImage> acquire_shared_cuda_vulkan_image(
+  std::shared_ptr<DisplayStorage> acquire_shared_cuda_vulkan_image(
       int width,
       int height);
 
@@ -191,7 +223,7 @@ class SetImage final : public Renderable {
   bool upload_staging_export_sharing_{false};
   taichi::lang::DevicePtr pending_upload_buffer_{taichi::lang::kDeviceNullPtr};
   bool pending_upload_{false};
-  std::shared_ptr<SharedCudaVulkanImage> shared_cuda_vulkan_image_;
+  std::shared_ptr<DisplayStorage> shared_cuda_vulkan_image_;
   bool shared_cuda_vulkan_disabled_{false};
   bool pending_shared_cuda_vulkan_{false};
   std::shared_ptr<DisplayCompletion> display_completion_;

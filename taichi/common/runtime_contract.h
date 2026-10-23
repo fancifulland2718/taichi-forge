@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Shared image admission changes GfxRuntime layout and native image vtables.
-inline constexpr int kForgeNativeAbiRevision = 168;
+// Display storage gains a shared polymorphic interface across the native shim.
+inline constexpr int kForgeNativeAbiRevision = 169;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

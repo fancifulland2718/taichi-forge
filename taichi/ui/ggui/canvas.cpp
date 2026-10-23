@@ -65,11 +65,11 @@ bool Canvas::repeat_display_frame() {
   return renderer_->repeat_display_frame();
 }
 
-std::shared_ptr<SharedCudaVulkanImage>
+std::shared_ptr<DisplayStorage>
 Canvas::acquire_shared_cuda_vulkan_image(int width, int height) {
   return renderer_->acquire_shared_cuda_vulkan_image(width, height);
 }
-std::vector<SharedCudaVulkanImage *>
+std::vector<DisplayStorage *>
 Canvas::prepare_display_pool(int width, int height, int capacity) {
   return renderer_->prepare_display_pool(width, height, capacity);
 }

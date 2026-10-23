@@ -81,11 +81,11 @@ class TI_DLL_EXPORT Renderer {
       const SetImageInfo &info,
       const taichi::lang::RuntimeCompletion &producer);
 
-  std::shared_ptr<SharedCudaVulkanImage>
+  std::shared_ptr<DisplayStorage>
   acquire_shared_cuda_vulkan_image(int width, int height);
-  std::vector<SharedCudaVulkanImage *> prepare_display_pool(int width,
-                                                            int height,
-                                                            int capacity);
+  std::vector<DisplayStorage *> prepare_display_pool(int width,
+                                                   int height,
+                                                   int capacity);
 
   std::shared_ptr<DisplayCompletion> track_display_frame(bool writable);
   void finish_display_write();
@@ -177,7 +177,7 @@ class TI_DLL_EXPORT Renderer {
   std::deque<InFlightFrame> in_flight_frames_;
   std::vector<std::unique_ptr<SetImage>> reusable_set_images_;
   SetImage *pending_set_image_{nullptr};
-  std::shared_ptr<SharedCudaVulkanImage> last_shared_display_image_;
+  std::shared_ptr<DisplayStorage> last_shared_display_image_;
   std::shared_ptr<taichi::lang::cuda::ExecutionDomain>
       display_execution_domain_;
   int prepared_display_width_{0};

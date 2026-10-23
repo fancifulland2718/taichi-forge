@@ -140,6 +140,13 @@ def test_selected_display_copy_cancel_and_empty_source():
         for _ in range(8):
             empty = canvas.acquire_frame(12, 20)
             assert empty is not None
+            # The common storage interface must preserve pybind downcasting
+            # and the cached ndarray view for the existing CUDA implementation.
+            assert isinstance(empty.pixels._source, core._DisplayStorage)
+            assert isinstance(empty.pixels._source, core._SharedCudaVulkanImage)
+            assert empty.pixels._source.identity > 0
+            assert (empty.pixels._source.width, empty.pixels._source.height) == (12, 20)
+            assert canvas._shared_view(empty.pixels._source) is empty.pixels
             before = domain.latest_completion().info["sequence"]
             empty.cancel()
             assert domain.latest_completion().info["sequence"] == before

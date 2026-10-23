@@ -64,11 +64,11 @@ class TI_DLL_EXPORT Canvas final : public CanvasBase {
   void cancel_display_frame();
   bool repeat_display_frame();
 
-  std::shared_ptr<SharedCudaVulkanImage>
+  std::shared_ptr<DisplayStorage>
   acquire_shared_cuda_vulkan_image(int width, int height);
-  std::vector<SharedCudaVulkanImage *> prepare_display_pool(int width,
-                                                            int height,
-                                                            int capacity);
+  std::vector<DisplayStorage *> prepare_display_pool(int width,
+                                                   int height,
+                                                   int capacity);
 
   void triangles(const TrianglesInfo &info) override;
 

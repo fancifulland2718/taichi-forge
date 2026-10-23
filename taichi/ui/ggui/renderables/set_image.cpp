@@ -583,11 +583,11 @@ bool SharedCudaVulkanImage::ready_for_vulkan_submit() const noexcept {
   return impl_->ready_for_vulkan_submit();
 }
 
-void SharedCudaVulkanImage::prepare_cuda_write() {
+void SharedCudaVulkanImage::prepare_write() {
   impl_->prepare_cuda_write();
 }
 
-void SharedCudaVulkanImage::finish_cuda_write() {
+void SharedCudaVulkanImage::finish_write() {
   impl_->finish_cuda_write();
 }
 
@@ -599,11 +599,11 @@ void SharedCudaVulkanImage::set_execution_domain(
     std::shared_ptr<cuda::ExecutionDomain> domain) {
   impl_->set_execution_domain(std::move(domain));
 }
-bool SharedCudaVulkanImage::try_finish_cuda_write(
+bool SharedCudaVulkanImage::try_finish_write(
     const RuntimeCompletion &producer) {
   return impl_->try_finish_cuda_write(producer);
 }
-bool SharedCudaVulkanImage::try_copy_cuda_image(
+bool SharedCudaVulkanImage::try_copy_image(
     DevicePtr source,
     const RuntimeCompletion &producer,
     std::shared_ptr<Program::NdarrayResourceLease> source_lease) {
@@ -741,7 +741,7 @@ void SetImage::use_texture_pipeline() {
   }
 }
 
-std::shared_ptr<SharedCudaVulkanImage>
+std::shared_ptr<DisplayStorage>
 SetImage::acquire_shared_cuda_vulkan_image(int width, int height) {
   if (shared_cuda_vulkan_disabled_ || app_context_->prog() == nullptr ||
       app_context_->config.ti_arch != Arch::cuda ||
@@ -759,7 +759,7 @@ SetImage::acquire_shared_cuda_vulkan_image(int width, int height) {
       shared_cuda_vulkan_image_ =
           SharedCudaVulkanImage::create(app_context_, width, height);
     }
-    shared_cuda_vulkan_image_->prepare_cuda_write();
+    shared_cuda_vulkan_image_->prepare_write();
   } catch (const std::exception &error) {
     shared_cuda_vulkan_image_.reset();
     shared_cuda_vulkan_disabled_ = true;
@@ -786,7 +786,7 @@ bool SetImage::has_pending_shared_cuda_vulkan_image() const noexcept {
          shared_cuda_vulkan_image_->ready_for_vulkan_submit();
 }
 
-void SetImage::use_shared_image(std::shared_ptr<SharedCudaVulkanImage> image) {
+void SetImage::use_shared_image(std::shared_ptr<DisplayStorage> image) {
   shared_cuda_vulkan_image_ = std::move(image);
   if (!shared_cuda_vulkan_image_) {
     pending_shared_cuda_vulkan_ = false;
