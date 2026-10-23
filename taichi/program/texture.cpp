@@ -16,6 +16,7 @@
 #endif
 #ifdef TI_WITH_VULKAN
 #include "taichi/rhi/vulkan/vulkan_common.h"
+#include "taichi/runtime/gfx/runtime.h"
 #endif
 
 namespace taichi::lang {
@@ -625,6 +626,11 @@ Texture::~Texture() {
   if (prog_) {
     GraphicsDevice *device =
         static_cast<GraphicsDevice *>(prog_->get_graphics_device());
+#ifdef TI_WITH_VULKAN
+    if (prog_->compile_config().arch == Arch::vulkan)
+      if (auto *runtime = prog_->get_gfx_runtime_for_borrowing())
+        runtime->untrack_image(texture_alloc_);
+#endif
     device->destroy_image(texture_alloc_);
   }
 }

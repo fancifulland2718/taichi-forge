@@ -111,6 +111,10 @@ NativeImageKernelBinding::NativeImageKernelBinding(
   }
 }
 
+bool NativeImageKernelBinding::sampled_only() const {
+  return kernel_->nested_parameters.at(argument_).ptype == ParameterType::kTexture;
+}
+
 void NativeImageKernelBinding::validate(
     Arch arch,
     Device &device,

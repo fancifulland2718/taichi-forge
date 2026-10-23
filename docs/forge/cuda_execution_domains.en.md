@@ -18,8 +18,8 @@ concurrent kernels or priority preemption.
 
 The shared preparation, submission, parameter, timing and retirement APIs cover
 both backends. CUDA control/parallel recipes, external storage and Canvas retain
-their existing scope. Vulkan currently accepts fixed buffer-only compute recipes;
-the precise Vulkan boundary is described below.
+their existing scope. Vulkan accepts fixed buffer compute recipes and the image
+routes with explicit ownership described below.
 
 ## Capability discovery
 
@@ -44,6 +44,7 @@ the DSL or creating a device. These are native implementation declarations:
 | `vulkan_submission_parameters_u64` | Declared replay-only u64 updates on the selected Vulkan queue |
 | `vulkan_completion_gpu_timing` | Preallocated timestamp queries and sparse compute-envelope samples |
 | `vulkan_execution_instance_retirement` | Per-instance retirement and resident-budget reuse |
+| `vulkan_execution_domain_shared_sampled_images` | Read-only sampling of same-Program managed color Textures across domains |
 
 Use `features.get(name, False)` for older packages. Missing declarations do not
 become support because a version or commit looks newer. Device/driver support,
@@ -101,9 +102,31 @@ chunked and nested recipes. Every recording restores the same boundary layout,
 including zero rounds, early exits and exhausted budgets. Consecutive storage
 uses also record a memory dependency; sampled/storage aliasing within one task
 is rejected during prepare. AOT plans declare private images in `resources`;
-external Texture/native image loans, including ordinary JIT Texture loans,
-still require a shared layout contract. Windows tests cover two instances,
+see below for shared external Texture/native image loans. Windows tests cover two instances,
 downstream explicit adjoints, failed preparation and retirement of pending work.
+
+`vulkan_execution_domain_shared_sampled_images` supports managed color 2D
+Textures from the same Program, device and compute queue family, currently with
+one mip, one layer and flat kernel dispatch sequences. Multiple domains sample
+the same image without copying pixels. Cold preparation retains its existing
+resource lease and seals ordinary-queue writes and the shader-read transition
+into a reusable timeline prefix. Each domain waits for that prefix before use.
+Ordinary sampled reads remain allowed. Uploads, storage writes, layout changes
+and Canvas copies requiring transfer-src layout are rejected during the loan.
+Previously recorded writers are also rejected, even if they restore the read-only
+layout. Permission lasts until instance retirement; completing one submission
+does not restore write access. `step.close()` waits for that instance's accepted
+work and releases its permission without waiting for other domains. Writes resume
+after the last reader retires. Releasing a raw prepared handle does not retire its
+instance: pending work and the domain retain permission.
+
+Images with existing raw VkImage aliases cannot enter this route, and new aliases
+of the same VkImage cannot be imported during a loan. External-memory aliasing,
+cross-family ownership, graphics, shared-image control flow and multiple mips or
+layers remain outside its scope. Windows tests cover pending readers on two
+queues, retiring one reader, failed preparation, source-view deletion and Program
+shutdown. This does not qualify full rendering-scene throughput.
+
 Graphics, host selection, parallel recipes and shared sparse/RNG/runtime-error
 state remain outside this independent Vulkan route. Ordinary Graph execution keeps
 its existing capabilities; CUDA Canvas and external-memory protocols are not

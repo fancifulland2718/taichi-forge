@@ -15,6 +15,9 @@
 #include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_kernel_result.h"
+#ifdef TI_WITH_VULKAN
+#include "taichi/rhi/vulkan/vulkan_device.h"
+#endif
 
 // FIXME: (penguinliong) Special offer for `run_codegen`. Find a new home for it
 // in the future.
@@ -1312,6 +1315,7 @@ GfxRuntime::~GfxRuntime() {
   // destructor may retain the registry object, but it can no longer call back
   // into this runtime after close() returns.
   graph_replay_registry_->close();
+  shared_image_admission_.close();
   if (device_->backend_calls_safe()) {
     try {
       synchronize_impl(/*check_hash_overflow=*/false);
@@ -1982,6 +1986,10 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
   auto kernel_iter = ti_kernels_.find(handle.get_launch_id());
   TI_ASSERT(handle.get_launch_id() >= 0 && kernel_iter != ti_kernels_.end());
   auto *ti_kernel = kernel_iter->second.get();
+  auto image_submission = shared_image_admission_.ordinary_scope();
+  // Check the complete task closure before recording any dispatch. A late
+  // storage use must not leave earlier mathematical tasks in the current list.
+  preflight_kernel_images(*ti_kernel, host_ctx);
 
 #if defined(__APPLE__)
   if (profiler_) {
@@ -3259,7 +3267,9 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
   executable.bind_device(device_);
   auto payload = detached ? detached : std::make_shared<GraphReplayExecutable::Slot>();
   auto &slot = *payload;
+  auto image_owners = std::make_shared<std::vector<std::shared_ptr<void>>>(owners);
   slot.retained_owners = std::move(owners);
+  std::vector<SharedImageReadAdmission<RuntimeCompletion>::PinnedUse> image_uses;
   for (const int tree_id : snode_tree_ids) {
     TI_ERROR_IF(tree_id < 0 ||
                     static_cast<std::size_t>(tree_id) >= root_buffers_.size() ||
@@ -3468,10 +3478,22 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
     auto entry = independent_graphics ? ImageLayout::shader_read : layout;
     if (detached) {
       const auto owned = workspace->private_images_.find(image.alloc_id);
-      TI_ERROR_IF(owned == workspace->private_images_.end(),
-                  "Independent Vulkan Graph requires a private managed image; "
-                  "borrowed images require a shared layout contract");
-      entry = owned->second.boundary;
+      if (owned != workspace->private_images_.end()) {
+        entry = owned->second.boundary;
+      } else {
+        TI_ERROR_IF(!workspace->shared_sampled_images_.count(image.alloc_id) ||
+                        layout != ImageLayout::shader_read,
+                    "Shared Vulkan image requires a sampled shader-read use");
+        entry = ImageLayout::shader_read;
+      }
+    }
+    if (!detached) {
+      const auto managed = managed_images_.find(image.alloc_id);
+      if (managed != managed_images_.end())
+        image_uses.push_back({{managed->second,
+            layout == ImageLayout::shader_read && entry == ImageLayout::shader_read
+                ? SharedImageUse::sampled_at_boundary : SharedImageUse::exclusive},
+            image_owners});
     }
     const auto [previous, first_use] =
         recorded_image_layouts.emplace(image.alloc_id, entry);
@@ -3513,6 +3535,16 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                                          : compute_timing_stream;
       begin_timing(operation_index, stream);
       for (const auto &[image, layout] : operation.images) {
+        // An opaque native/graphics command cannot establish sampled-only
+        // access merely by restoring the same boundary layout.
+        if (!detached) {
+          const auto managed = managed_images_.find(image.alloc_id);
+          if (managed != managed_images_.end())
+            image_uses.push_back({{managed->second, SharedImageUse::exclusive}, image_owners});
+        } else {
+          TI_ERROR_IF(workspace->shared_sampled_images_.count(image.alloc_id),
+                      "Shared Vulkan images require kernel sampled dispatches");
+        }
         record_image_use(image, layout,
                          operation.graphics_queue &&
                              (layout == ImageLayout::color_attachment ||
@@ -3709,6 +3741,12 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
           }
           launch();
         };
+  }
+  if (!image_uses.empty()) {
+    auto permit = shared_image_admission_.prepare(image_uses);
+    state.fixed_submit = [permit = std::move(permit), launch = std::move(state.fixed_submit)] {
+      permit->submit(launch);
+    };
   }
   attach_fixed_sparse_resources(state, std::move(sparse));
   return state;
@@ -6552,6 +6590,8 @@ void GfxRuntime::copy_image(DeviceAllocation dst,
                             DeviceAllocation src,
                             const ImageCopyParams &params) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  require_image_access(dst, SharedImageUse::exclusive);
+  require_image_access(src, SharedImageUse::exclusive);
   ensure_current_cmdlist();
   insert_pending_dispatch_barriers();
   transition_image(dst, ImageLayout::transfer_dst);
@@ -6574,11 +6614,38 @@ DeviceAllocation GfxRuntime::create_image(const ImageParams &params) {
 
 void GfxRuntime::track_image(DeviceAllocation image, ImageLayout layout) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  set_tracked_image_layout(image.alloc_id, layout);
-  image_sampler_configs_.try_emplace(image.alloc_id, ImageSamplerConfig{});
+  const auto storage_key = image_storage_key(image);
+  // Re-tracking is an external layout assertion, including shader_read to
+  // shader_read. Do not let raw-import aliases bypass an existing reservation.
+  for (const auto &[allocation, key] : image_storage_keys_)
+    if (storage_key && key == storage_key)
+      require_image_access({device_, allocation}, SharedImageUse::exclusive);
+  require_image_access(image, SharedImageUse::exclusive);
+  const auto [storage, inserted_storage] =
+      image_storage_keys_.try_emplace(image.alloc_id, storage_key);
+  bool inserted_sampler = false;
+  try {
+    inserted_sampler = image_sampler_configs_.try_emplace(
+        image.alloc_id, ImageSamplerConfig{}).second;
+    set_tracked_image_layout(image.alloc_id, layout);
+  } catch (...) {
+    if (inserted_sampler)
+      image_sampler_configs_.erase(image.alloc_id);
+    if (inserted_storage)
+      image_storage_keys_.erase(storage);
+    throw;
+  }
 }
 void GfxRuntime::untrack_image(DeviceAllocation image) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  // Physical retirement is also allowed after owner close. remove_image
+  // checks the reader count directly and revokes every surviving permit.
+  const auto managed = managed_images_.find(image.alloc_id);
+  if (managed != managed_images_.end()) {
+    shared_image_admission_.remove_image(managed->second);
+    managed_images_.erase(managed);
+  }
+  image_storage_keys_.erase(image.alloc_id);
   invalidate_graphics_command_replay_locked(image);
   last_image_layouts_.erase(image.alloc_id);
   ++image_layout_epoch_;
@@ -6587,10 +6654,166 @@ void GfxRuntime::untrack_image(DeviceAllocation image) {
 void GfxRuntime::transition_image(DeviceAllocation image, ImageLayout layout) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   ImageLayout &last_layout = last_image_layouts_.at(image.alloc_id);
+  require_image_access(image, layout == ImageLayout::shader_read &&
+                                 last_layout == ImageLayout::shader_read
+                             ? SharedImageUse::sampled_at_boundary
+                             : SharedImageUse::exclusive);
   ensure_current_cmdlist();
   insert_pending_dispatch_barriers();
   current_cmdlist_->image_transition(image, last_layout, layout);
   set_tracked_image_layout(image.alloc_id, layout);
+}
+
+
+std::uint64_t GfxRuntime::image_storage_key(DeviceAllocation image) const {
+#ifdef TI_WITH_VULKAN
+  if (auto *device = dynamic_cast<vulkan::VulkanDevice *>(device_)) {
+    TI_ERROR_IF(image.device != device_ || !image.alloc_id,
+                "Image belongs to another device or is closed");
+    const auto native = std::get<0>(device->get_vk_image(image))->image;
+    std::uint64_t key = 0;
+    static_assert(sizeof(native) <= sizeof(key));
+    std::memcpy(&key, &native, sizeof(native));
+    return key;
+  }
+#endif
+  return 0;
+}
+
+void GfxRuntime::register_managed_image(DeviceAllocation image,
+                                        RuntimeResourceHandle handle) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ERROR_IF(image.device != device_ || !handle ||
+                  !last_image_layouts_.count(image.alloc_id),
+              "Managed image requires a tracked same-device registry owner");
+  const auto [it, inserted] = managed_images_.emplace(image.alloc_id, handle);
+  TI_ERROR_IF(!inserted, "Managed image already has a registry identity");
+  try {
+    shared_image_admission_.register_image(handle);
+  } catch (...) {
+    managed_images_.erase(it);
+    throw;
+  }
+}
+
+void GfxRuntime::require_image_access(DeviceAllocation image, SharedImageUse use) {
+  TI_ERROR_IF(image.device != device_, "Image belongs to another device");
+  const auto found = managed_images_.find(image.alloc_id);
+  if (found != managed_images_.end())
+    shared_image_admission_.require_use({found->second, use});
+}
+
+void GfxRuntime::preflight_kernel_images(const CompiledTaichiKernel &kernel,
+                                         const LaunchContextBuilder &context) {
+  if (managed_images_.empty())
+    return;
+  for (const auto &task : kernel.ti_kernel_attribs().tasks_attribs)
+    for (const auto &bind : task.texture_binds) {
+      const auto use = bind.is_storage ? SharedImageUse::exclusive
+                                       : SharedImageUse::sampled_at_boundary;
+      const auto collection = context.texture_collections.find(bind.arg_id);
+      if (collection != context.texture_collections.end()) {
+        for (const auto image : collection->second)
+          require_image_access(image, use);
+      } else {
+        const auto found = context.array_ptrs.find(bind.arg_id);
+        TI_ERROR_IF(found == context.array_ptrs.end() || !found->second,
+                    "Kernel image is unbound");
+        require_image_access(*static_cast<DeviceAllocation *>(found->second), use);
+      }
+    }
+}
+
+void GfxRuntime::prepare_fixed_shared_sampled_images(
+    const std::shared_ptr<FixedGraphWorkspace> &workspace,
+    const std::vector<SharedSampledImage> &images,
+    const std::shared_ptr<RuntimeFaultDomain> &owner) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ERROR_IF(!workspace || workspace->device_ != device_ ||
+                  std::atomic_load(&workspace->shared_images_) ||
+                  workspace->initialization_recorded_ || !owner,
+              "Shared images require a new same-device workspace");
+  if (images.empty())
+    return;
+#ifdef TI_WITH_VULKAN
+  auto *device = dynamic_cast<vulkan::VulkanDevice *>(device_);
+  TI_ERROR_IF(!device, "Shared sampled image requires Vulkan");
+  std::vector<SharedImageReadAdmission<RuntimeCompletion>::PinnedUse> pinned;
+  std::unordered_set<DeviceAllocationId> allocations;
+  for (const auto &image : images) {
+    const auto managed = managed_images_.find(image.allocation.alloc_id);
+    TI_ERROR_IF(image.allocation.device != device_ || !image.owner ||
+                    managed == managed_images_.end() || managed->second != image.handle ||
+                    workspace->private_images_.count(image.allocation.alloc_id) ||
+                    !image.color_aspect || image.base_mip || image.mip_count != 1 ||
+                    image.base_layer || image.layer_count != 1,
+                "Shared image requires its existing Texture registry lease");
+    const auto native = std::get<0>(device->get_vk_image(image.allocation));
+    TI_ERROR_IF(native->mip_levels != 1 || native->array_layers != 1 ||
+                    native->type != VK_IMAGE_TYPE_2D || !native->allocation ||
+                    !(native->usage & VK_IMAGE_USAGE_SAMPLED_BIT) ||
+                    native->format == VK_FORMAT_D16_UNORM ||
+                    native->format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                    native->format == VK_FORMAT_D32_SFLOAT,
+                "Shared image requires an owned color 2D image with one mip and layer");
+    const auto storage_key = image_storage_keys_.at(image.allocation.alloc_id);
+    TI_ERROR_IF(std::count_if(image_storage_keys_.begin(), image_storage_keys_.end(),
+                    [&](const auto &entry) { return entry.second == storage_key; }) != 1,
+                "Shared image has raw aliases without a common owner contract");
+    pinned.push_back({{image.handle, SharedImageUse::sampled_at_boundary}, image.owner});
+    allocations.insert(image.allocation.alloc_id);
+  }
+  auto loan = shared_image_admission_.reserve(pinned);
+  if (!loan->needs_boundary().empty()) {
+    // The same GFX gate encloses reservation, the sole permitted layout
+    // transition and prefix publication. No general admission bypass exists.
+    ensure_current_cmdlist();
+    insert_pending_dispatch_barriers();
+    for (const auto handle : loan->needs_boundary()) {
+      const auto found = std::find_if(images.begin(), images.end(),
+          [&](const auto &image) { return image.handle == handle; });
+      const auto image = found->allocation;
+      const auto previous = last_image_layouts_.at(image.alloc_id);
+      current_cmdlist_->image_transition(image, previous, ImageLayout::shader_read);
+      set_tracked_image_layout(image.alloc_id, ImageLayout::shader_read);
+    }
+    auto prefix = std::make_shared<RuntimeCompletion>(RuntimeCompletion::from_stream_semaphore(
+        Arch::vulkan, owner->program_domain(), owner->allocate_submission_sequence(),
+        record_completion_semaphore(), owner));
+    // A preparation can be nested in the existing ordinary submission batch.
+    // Seal that exact prefix before handing it to another queue; otherwise
+    // its signal could remain host-pending while a domain waits for it.
+    device_->get_compute_stream()->flush_submission_batch();
+    // VulkanStreamSemaphoreObject already exposes a reusable timeline point.
+    // Validate it now; two readers must never consume one binary semaphore.
+    TI_ERROR_IF(!prefix->reusable_stream_dependency(Arch::vulkan, owner->program_domain(), owner),
+                "Shared image readiness requires a reusable queue prefix");
+    loan->publish_boundary(std::move(prefix));
+  }
+  workspace->shared_sampled_images_ = std::move(allocations);
+  std::atomic_store(&workspace->shared_images_, std::move(loan));
+#else
+  TI_ERROR("Shared sampled image requires Vulkan");
+#endif
+}
+
+std::vector<RuntimeCompletion>
+GfxRuntime::FixedGraphWorkspace::shared_image_dependencies() const {
+  std::vector<RuntimeCompletion> result;
+  const auto readers = std::atomic_load(&shared_images_);
+  if (readers)
+    for (const auto &dependency : readers->dependencies())
+      result.push_back(*dependency);
+  return result;
+}
+
+void GfxRuntime::FixedGraphWorkspace::retire_shared_image_reads() {
+  // Initialization can observe the workspace while a naked domain close
+  // retires it. Release permission atomically, then destroy the loan outside
+  // shared_ptr's internal synchronization; keep all storage owners unchanged.
+  auto retired = std::atomic_exchange(
+      &shared_images_,
+      std::shared_ptr<SharedImageReadAdmission<RuntimeCompletion>::ReadLoan>{});
 }
 
 void GfxRuntime::set_tracked_image_layout(DeviceAllocationId image,
@@ -7358,6 +7581,11 @@ void GfxRuntime::enqueue_compute_op_lambda(
     std::function<void(Device *device, CommandList *cmdlist)> op,
     const std::vector<ComputeOpImageRef> &image_refs) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  auto image_submission = shared_image_admission_.ordinary_scope();
+  // Opaque commands conservatively require exclusive access. A transfer-src
+  // copy is a layout writer even if it does not write source pixels.
+  for (const auto &ref : image_refs)
+    require_image_access(ref.image, SharedImageUse::exclusive);
   for (const auto &ref : image_refs) {
     TI_ASSERT(last_image_layouts_.find(ref.image.alloc_id) !=
               last_image_layouts_.end());
@@ -7379,6 +7607,9 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
     const std::vector<std::uint64_t> &replay_key) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   TI_ERROR_IF(!op, "Runtime graphics operation must not be empty");
+  auto image_submission = shared_image_admission_.ordinary_scope();
+  for (const auto &ref : image_refs)
+    require_image_access(ref.image, SharedImageUse::exclusive);
   auto *graphics_device = dynamic_cast<GraphicsDevice *>(device_);
   TI_ERROR_IF(graphics_device == nullptr,
               "The active runtime device does not support graphics commands");

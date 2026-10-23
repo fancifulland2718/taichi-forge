@@ -2,6 +2,7 @@
 
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_kernel_resource.h"
+#include "taichi/program/runtime_resource_registry.h"
 
 namespace taichi::lang {
 class CallableBase;
@@ -37,6 +38,9 @@ class NativeSampledImage : public NativeResource {
   virtual DeviceAllocation gfx_sampled_allocation() const {
     throw std::invalid_argument("Sampled image has no GFX allocation");
   }
+  // Only a BorrowedSampledImage backed by Program's existing Texture lease
+  // may return an identity. Raw imported/native factory images return null.
+  virtual RuntimeResourceHandle gfx_managed_owner() const { return {}; }
   // Packed texel bytes; CUDA array allocation/residency is driver-private.
   virtual std::size_t logical_bytes() const = 0;
 
@@ -62,6 +66,9 @@ class NativeImageKernelBinding final : public NativeKernelResourceBinding {
   const std::vector<int> &argument() const override {
     return argument_;
   }
+  const std::shared_ptr<NativeSampledImage> &image() const { return image_; }
+  bool sampled_only() const;
+
   void validate(Arch arch,
                 Device &device,
                 const CallableBase &kernel,

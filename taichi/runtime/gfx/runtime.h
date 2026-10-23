@@ -1,6 +1,8 @@
 #pragma once
 #include "taichi/runtime/snode_tree_id_registry.h"
 #include "taichi/runtime/gfx/snode_tree_resources.h"
+#include "taichi/runtime/gfx/shared_image_read_admission.h"
+#include "taichi/program/runtime_completion.h"
 #include "taichi/util/lang_util.h"
 
 #include <array>
@@ -580,6 +582,10 @@ class TI_DLL_EXPORT GfxRuntime {
    public:
     void record_initialization(CommandList &commands);
     std::size_t bytes() const;
+    std::vector<RuntimeCompletion> shared_image_dependencies() const;
+    // Called only after the owning instance's exact prefix and recordings
+    // retire. Resource storage may remain referenced by released C API handles.
+    void retire_shared_image_reads();
 
    private:
     friend class GfxRuntime;
@@ -593,9 +599,28 @@ class TI_DLL_EXPORT GfxRuntime {
       std::shared_ptr<void> owner;
     };
     std::unordered_map<DeviceAllocationId, PrivateImage> private_images_;
+    // Command payloads retain this workspace until their exact final prefix
+    // retires. Entries in the admission index only have weak reverse edges.
+    std::shared_ptr<SharedImageReadAdmission<RuntimeCompletion>::ReadLoan> shared_images_;
+    std::unordered_set<DeviceAllocationId> shared_sampled_images_;
     bool initialization_recorded_{false};
   };
   std::shared_ptr<FixedGraphWorkspace> create_fixed_graph_workspace();
+  struct SharedSampledImage {
+    RuntimeResourceHandle handle;
+    DeviceAllocation allocation;
+    std::shared_ptr<void> owner;  // Existing Texture registry lease facade.
+    // Explicit whole-image subresource contract for the first consumer.
+    bool color_aspect{true};
+    std::uint32_t base_mip{0}, mip_count{1};
+    std::uint32_t base_layer{0}, layer_count{1};
+  };
+  void register_managed_image(DeviceAllocation image, RuntimeResourceHandle handle);
+  void prepare_fixed_shared_sampled_images(
+      const std::shared_ptr<FixedGraphWorkspace> &workspace,
+      const std::vector<SharedSampledImage> &images,
+      const std::shared_ptr<RuntimeFaultDomain> &owner);
+
   // Cold-only admission of an allocation owned exclusively by this instance.
   // The caller proves privacy; external/borrowed image objects are not eligible.
   // All phases use one boundary layout without consulting the default queue.
@@ -754,6 +779,18 @@ class TI_DLL_EXPORT GfxRuntime {
   std::shared_ptr<std::recursive_mutex> host_api_mutex_owner_{
       std::make_shared<std::recursive_mutex>()};
   std::recursive_mutex &host_api_mutex_{*host_api_mutex_owner_};
+  SharedImageReadAdmission<RuntimeCompletion> shared_image_admission_{host_api_mutex_owner_};
+  // No lifetime owners here. Texture destruction removes its immutable
+  // registry identity, after the last ordinary/domain payload releases it.
+  std::unordered_map<DeviceAllocationId, RuntimeResourceHandle> managed_images_;
+  // Raw VkImage aliases are disallowed while shared, and pre-existing aliases
+  // exclude admission. This is a cold tracker, not a second generation clock.
+  std::unordered_map<DeviceAllocationId, std::uint64_t> image_storage_keys_;
+  std::uint64_t image_storage_key(DeviceAllocation image) const;
+  void require_image_access(DeviceAllocation image, SharedImageUse use);
+  void preflight_kernel_images(const CompiledTaichiKernel &kernel,
+                               const LaunchContextBuilder &context);
+
 
   // A graphics submission consumes the compute tail. Its signal is carried
   // by the next real compute submission (or an explicit completion marker),

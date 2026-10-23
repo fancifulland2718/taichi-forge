@@ -1,0 +1,434 @@
+#pragma once
+
+// Host admission used by GfxRuntime's ordinary image paths, fixed recordings,
+// and same-Program shared sampled-image workspace. The GFX bridge publishes
+// the ordinary queue's existing reusable prefix at the shader-read boundary.
+#include "taichi/program/runtime_resource_registry.h"
+
+#include <algorithm>
+#include <functional>
+#include <stdexcept>
+#include <unordered_map>
+#include <vector>
+
+namespace taichi::lang::gfx {
+
+// A layout change is exclusive even when it only reads pixels. A recording
+// that writes and restores shader_read is also exclusive; entry/final layouts
+// alone cannot classify its accesses.
+enum class SharedImageUse { sampled_at_boundary, exclusive };
+
+// Boundary is the existing RuntimeCompletion in the intended GFX consumer.
+// The isolated tests use an inert prefix so no driver/runtime is loaded.
+template <class Boundary>
+class SharedImageReadAdmission {
+  friend struct SharedImageReadAdmissionTestAccess;
+
+ public:
+  struct Use {
+    RuntimeResourceHandle image;
+    SharedImageUse access;
+  };
+
+  // Constructed by the Program bridge from a TextureResourceLease. The table
+  // itself never owns a resource lease: that would pin the Texture forever,
+  // because its destructor is what removes the tracked allocation.
+  struct PinnedUse {
+    Use use;
+    std::shared_ptr<void> owner;
+  };
+
+ private:
+  struct HandleHash {
+    std::size_t operator()(RuntimeResourceHandle h) const noexcept {
+      std::size_t result = std::hash<std::uint64_t>{}(h.domain);
+      for (auto word : {h.kind, h.index, h.generation})
+        result ^= std::hash<std::uint32_t>{}(word) + 0x9e3779b9u +
+                  (result << 6) + (result >> 2);
+      return result;
+    }
+  };
+  struct PermitState;
+  struct Entry {
+    RuntimeResourceHandle image;
+    std::size_t readers{0};
+    bool ready{false};
+    std::weak_ptr<const Boundary> boundary;
+    struct Edge {
+      std::weak_ptr<PermitState> permit;
+      SharedImageUse access;
+    };
+    std::vector<Edge> recordings;
+  };
+  struct BoundUse {
+    std::shared_ptr<Entry> entry;
+    SharedImageUse access;
+    std::shared_ptr<void> owner;
+    std::shared_ptr<const Boundary> boundary;
+  };
+  struct PermitState {
+    std::size_t blocked_images{0};
+    std::size_t removed_images{0};
+  };
+  struct Control {
+    explicit Control(std::shared_ptr<std::recursive_mutex> gate)
+        : gate(std::move(gate)) {
+    }
+    std::shared_ptr<std::recursive_mutex> gate;
+    bool closed{false};
+    std::size_t submitting{0};
+    std::
+        unordered_map<RuntimeResourceHandle, std::shared_ptr<Entry>, HandleHash>
+            images;
+  };
+  struct Submitting {
+    explicit Submitting(Control &control) : control(control) {
+      ++control.submitting;
+    }
+    ~Submitting() {
+      --control.submitting;
+    }
+    Control &control;
+  };
+
+  static bool blocked(const Entry &entry, SharedImageUse use) noexcept {
+    return entry.readers && (use == SharedImageUse::exclusive || !entry.ready);
+  }
+
+  // Allocation-free once the reservation is published. Weak edges avoid a
+  // cycle between image state and immutable recording owners.
+  template <class Mutation>
+  static void mutate(Entry &entry, Mutation mutation) noexcept {
+    const bool was_read_blocked =
+        blocked(entry, SharedImageUse::sampled_at_boundary);
+    const bool was_write_blocked = blocked(entry, SharedImageUse::exclusive);
+    mutation();
+    auto next = entry.recordings.begin();
+    for (auto it = entry.recordings.begin(); it != entry.recordings.end();
+         ++it) {
+      if (auto permit = it->permit.lock()) {
+        const bool before = it->access == SharedImageUse::exclusive
+                                ? was_write_blocked
+                                : was_read_blocked;
+        const bool after = blocked(entry, it->access);
+        if (before && !after)
+          --permit->blocked_images;
+        else if (!before && after)
+          ++permit->blocked_images;
+        *next++ = *it;
+      }
+    }
+    entry.recordings.erase(next, entry.recordings.end());
+  }
+
+  static void require_open(const Control &control) {
+    if (control.closed)
+      throw std::invalid_argument("Shared image owner is closed");
+  }
+
+  static std::shared_ptr<Entry> find(const Control &control,
+                                     RuntimeResourceHandle image) {
+    const auto found = control.images.find(image);
+    if (!image || found == control.images.end())
+      throw std::invalid_argument("Shared image identity is stale or foreign");
+    return found->second;
+  }
+
+  static std::vector<BoundUse> bind(const Control &control,
+                                    const std::vector<PinnedUse> &uses) {
+    std::vector<BoundUse> result;
+    result.reserve(uses.size());
+    for (const auto &use : uses) {
+      if (!use.owner)
+        throw std::invalid_argument("Shared image has no lifetime owner");
+      auto entry = find(control, use.use.image);
+      auto duplicate =
+          std::find_if(result.begin(), result.end(),
+                       [&](const auto &item) { return item.entry == entry; });
+      if (duplicate == result.end())
+        result.push_back({std::move(entry), use.use.access, use.owner, {}});
+      else if (use.use.access == SharedImageUse::exclusive)
+        duplicate->access = SharedImageUse::exclusive;
+    }
+    return result;
+  }
+
+ public:
+  // Opaque recorder callbacks may reenter host APIs. Keep the existing host
+  // gate and submission depth for the entire append transaction so a callback
+  // cannot establish a read loan between its preflight and command append.
+  class OrdinaryScope {
+   public:
+    OrdinaryScope(const OrdinaryScope &) = delete;
+    OrdinaryScope &operator=(const OrdinaryScope &) = delete;
+
+   private:
+    friend class SharedImageReadAdmission;
+    explicit OrdinaryScope(std::shared_ptr<Control> control)
+        : control_(std::move(control)),
+          lock_(*control_->gate),
+          submitting_(*control_) {
+      require_open(*control_);
+    }
+    std::shared_ptr<Control> control_;
+    std::unique_lock<std::recursive_mutex> lock_;
+    Submitting submitting_;
+  };
+
+  OrdinaryScope ordinary_scope() {
+    return OrdinaryScope(control_);
+  }
+
+  class Permit {
+   public:
+    // The same host gate must cover check + command append/submit. A separate
+    // allowed() test followed by an unlocked submit has a reservation race.
+    template <class Submit>
+    decltype(auto) submit(Submit &&submit) const {
+      std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+      require_open(*control_);
+      if (state_->removed_images || state_->blocked_images)
+        throw std::invalid_argument(
+            "Prepared recording conflicts with an image read loan");
+      // Constant work with respect to image count; no image/owner scan.
+      Submitting scope(*control_);
+      return std::forward<Submit>(submit)();
+    }
+
+   private:
+    friend class SharedImageReadAdmission;
+    Permit(std::shared_ptr<Control> control,
+           std::shared_ptr<PermitState> state,
+           std::vector<BoundUse> uses)
+        : control_(std::move(control)),
+          state_(std::move(state)),
+          uses_(std::move(uses)) {
+    }
+    std::shared_ptr<Control> control_;
+    std::shared_ptr<PermitState> state_;
+    // Reverse-edge weak_ptr::lock() must not temporarily become the last owner
+    // of a Texture lease while holding the host gate. Keep owners in Permit,
+    // never in the weakly observed PermitState.
+    std::vector<BoundUse> uses_;
+  };
+
+  class ReadLoan {
+   public:
+    ReadLoan(const ReadLoan &) = delete;
+    ReadLoan &operator=(const ReadLoan &) = delete;
+    ~ReadLoan() {
+      if (active_) {
+        std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+        for (const auto &use : uses_)
+          mutate(*use.entry, [&] {
+            if (--use.entry->readers == 0) {
+              use.entry->ready = false;
+              use.entry->boundary.reset();
+            }
+          });
+      }
+      // uses_ releases lifetime owners AFTER the gate above is released.
+      // Domain command retirement, not close() of a facade, drops this object.
+    }
+
+    const std::vector<RuntimeResourceHandle> &needs_boundary() const noexcept {
+      return needs_boundary_;
+    }
+
+    bool ready() const {
+      std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+      return ready_ && !control_->closed;
+    }
+
+    // Only the GFX bridge may call this after submitting/flushing the exact
+    // ordinary prefix containing the shader_read transition. Consumers must
+    // wait all dependencies on their own domain queue before first sampling.
+    // There is no host wait here and no new semaphore/completion type.
+    void publish_boundary(std::shared_ptr<const Boundary> boundary) {
+      std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+      require_open(*control_);
+      if (ready_)
+        return;
+      if (!boundary)
+        throw std::invalid_argument(
+            "Shared image boundary dependency is missing");
+      for (auto &use : uses_)
+        if (!use.entry->ready) {
+          use.boundary = boundary;
+          use.entry->boundary = boundary;
+          mutate(*use.entry, [&] { use.entry->ready = true; });
+        }
+      ready_ = true;
+    }
+
+    std::vector<std::shared_ptr<const Boundary>> dependencies() const {
+      std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+      require_open(*control_);
+      if (!ready_)
+        throw std::invalid_argument("Shared image boundary is not published");
+      std::vector<std::shared_ptr<const Boundary>> result;
+      for (const auto &use : uses_)
+        if (std::find(result.begin(), result.end(), use.boundary) ==
+            result.end())
+          result.push_back(use.boundary);
+      return result;
+    }
+
+   private:
+    friend class SharedImageReadAdmission;
+    ReadLoan(std::shared_ptr<Control> control,
+             std::vector<BoundUse> uses,
+             std::vector<RuntimeResourceHandle> needs_boundary)
+        : control_(std::move(control)),
+          uses_(std::move(uses)),
+          needs_boundary_(std::move(needs_boundary)),
+          ready_(needs_boundary_.empty()) {
+    }
+    std::shared_ptr<Control> control_;
+    std::vector<BoundUse> uses_;
+    const std::vector<RuntimeResourceHandle> needs_boundary_;
+    bool ready_{false};
+    bool active_{false};
+  };
+
+  explicit SharedImageReadAdmission(std::shared_ptr<std::recursive_mutex> gate)
+      : control_(std::make_shared<Control>(std::move(gate))) {
+    if (!control_->gate)
+      throw std::invalid_argument(
+          "Shared image admission requires the host gate");
+  }
+  ~SharedImageReadAdmission() {
+    close();
+  }
+  SharedImageReadAdmission(const SharedImageReadAdmission &) = delete;
+  SharedImageReadAdmission &operator=(const SharedImageReadAdmission &) =
+      delete;
+
+  void register_image(RuntimeResourceHandle image) {
+    std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+    require_open(*control_);
+    if (!image || control_->images.count(image))
+      throw std::invalid_argument("Invalid or duplicate shared image identity");
+    auto entry = std::make_shared<Entry>();
+    entry->image = image;
+    control_->images.emplace(image, std::move(entry));
+  }
+
+  // Physical untrack, not public Texture view deletion. Existing resource
+  // leases remain valid after the view retires and keep this mapping alive.
+  void remove_image(RuntimeResourceHandle image) {
+    std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+    auto entry = find(*control_, image);
+    if (entry->readers)
+      throw std::invalid_argument(
+          "Cannot untrack an image with active readers");
+    for (const auto &edge : entry->recordings)
+      if (auto permit = edge.permit.lock())
+        ++permit->removed_images;
+    control_->images.erase(image);
+  }
+
+  std::shared_ptr<Permit> prepare(const std::vector<PinnedUse> &uses) {
+    std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+    require_open(*control_);
+    auto state = std::make_shared<PermitState>();
+    auto bound = bind(*control_, uses);
+    auto permit =
+        std::shared_ptr<Permit>(new Permit(control_, state, std::move(bound)));
+    // Complete every potentially throwing allocation before adding any edge.
+    for (const auto &use : permit->uses_) {
+      auto &edges = use.entry->recordings;
+      if (edges.size() == edges.capacity()) {
+        // Ordinary recordings may churn without ever creating a read loan.
+        // Prune cold, without lock() temporarily retaining any observed owner.
+        edges.erase(std::remove_if(
+                        edges.begin(), edges.end(),
+                        [](const auto &edge) { return edge.permit.expired(); }),
+                    edges.end());
+        if (edges.size() == edges.capacity()) {
+          if (edges.size() == edges.max_size())
+            throw std::length_error(
+                "Shared image recording index is exhausted");
+          const auto growth = std::min(edges.max_size() - edges.size(),
+                                       std::max<std::size_t>(1, edges.size()));
+          edges.reserve(edges.size() + growth);
+        }
+      }
+    }
+    for (const auto &use : permit->uses_) {
+      if (blocked(*use.entry, use.access))
+        ++state->blocked_images;
+      use.entry->recordings.push_back({state, use.access});
+    }
+    return permit;
+  }
+
+  std::shared_ptr<ReadLoan> reserve(const std::vector<PinnedUse> &images) {
+    std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+    require_open(*control_);
+    if (control_->submitting)
+      throw std::invalid_argument(
+          "Cannot reserve a read loan inside a submission callback");
+    auto uses = bind(*control_, images);
+    if (uses.empty())
+      throw std::invalid_argument("Read loan has no images");
+    std::vector<RuntimeResourceHandle> needs_boundary;
+    needs_boundary.reserve(uses.size());
+    for (auto &use : uses) {
+      if (use.access != SharedImageUse::sampled_at_boundary)
+        throw std::invalid_argument(
+            "Read loan includes a write or layout change");
+      if (use.entry->readers && !use.entry->ready)
+        throw std::invalid_argument(
+            "Shared image boundary is still being prepared");
+      if (!use.entry->readers)
+        needs_boundary.push_back(use.entry->image);
+      else {
+        use.boundary = use.entry->boundary.lock();
+        if (!use.boundary)
+          throw std::logic_error("Live read loan lost its boundary dependency");
+      }
+      if (use.entry->readers == (std::numeric_limits<std::size_t>::max)())
+        throw std::overflow_error("Too many shared image readers");
+    }
+    auto loan = std::shared_ptr<ReadLoan>(
+        new ReadLoan(control_, std::move(uses), std::move(needs_boundary)));
+    loan->active_ = true;
+    for (const auto &use : loan->uses_)
+      mutate(*use.entry, [&] { ++use.entry->readers; });
+    return loan;
+  }
+
+  template <class Submit>
+  decltype(auto) ordinary(const std::vector<Use> &uses, Submit &&submit) {
+    std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+    require_open(*control_);
+    // Full preflight, before recording any image transition or submission.
+    for (const auto &use : uses)
+      if (blocked(*find(*control_, use.image), use.access))
+        throw std::invalid_argument(
+            "Ordinary image use conflicts with a read loan");
+    Submitting scope(*control_);
+    return std::forward<Submit>(submit)();
+  }
+
+  // The runtime already holds this same gate across its complete API call.
+  // Avoid allocating a temporary vector for its common single-image check.
+  void require_use(Use use) const {
+    std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+    require_open(*control_);
+    if (blocked(*find(*control_, use.image), use.access))
+      throw std::invalid_argument(
+          "Ordinary image use conflicts with a read loan");
+  }
+
+  void close() noexcept {
+    std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+    control_->closed = true;
+  }
+
+ private:
+  std::shared_ptr<Control> control_;
+};
+
+}  // namespace taichi::lang::gfx

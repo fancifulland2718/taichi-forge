@@ -91,6 +91,9 @@ class BorrowedSampledImage final : public NativeSampledImage {
   DeviceAllocation gfx_sampled_allocation() const override {
     return lease_->get_device_allocation();
   }
+  RuntimeResourceHandle gfx_managed_owner() const override {
+    return arch_ == Arch::vulkan ? lease_.handle() : RuntimeResourceHandle{};
+  }
 
  private:
   Program::TextureResourceLease lease_;

@@ -13,7 +13,7 @@ JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和�
 优先级是设备调度提示，不能保证 kernel 并行或抢占。
 
 两种后端共用准备、提交、参数、计时和退休接口。CUDA 控制流/并行、外部存储和 Canvas
-保留原有支持面；Vulkan 当前接纳固定、仅使用 buffer 的 compute recipe，具体边界见下文。
+保留原有支持面；Vulkan 接纳固定 buffer compute recipe 和下述有明确所有权的图像路线。
 
 ## 能力查询
 
@@ -37,6 +37,7 @@ JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和�
 | `vulkan_submission_parameters_u64` | 在所选 Vulkan 队列更新已声明的 replay-only u64 |
 | `vulkan_completion_gpu_timing` | 预分配 timestamp query 与稀疏完整计算区间采样 |
 | `vulkan_execution_instance_retirement` | 单实例退休及驻留预算复用 |
+| `vulkan_execution_domain_shared_sampled_images` | 同 Program 托管 color Texture 的跨域只读采样 |
 
 对旧包使用 `features.get(name, False)`；不能从版本号或较新的提交推定能力。具体设备/
 驱动、同 GPU 共享及 recipe 的编译/provider 条件在冷创建和准备时检查。声明为真不代表
@@ -80,8 +81,24 @@ image：普通 compute 段可使用 sampled/storage image 和显式 color upload
 使用这些私有图像，包括分块和嵌套 recipe。每段录制都恢复相同边界布局，覆盖零轮、
 早停和预算耗尽；连续 storage 使用同样记录内存依赖，同一 task 内 sampled/storage
 别名在 prepare 阶段拒绝。私有资源可在 AOT plan 的 `resources` 中声明；外部借用
-Texture/native image（包括普通 JIT Texture）仍需独立的布局合同。Windows 验证覆盖
+Texture/native image 的共享边界见下段。Windows 验证覆盖
 双实例、下游显式 adjoint、准备失败清理和在途退休。
+
+`vulkan_execution_domain_shared_sampled_images` 支持同 Program、同设备及 compute
+queue family 的托管 color 2D Texture，当前限单 mip、单 layer 和普通 kernel dispatch
+序列。多个域可借用同一图像直接采样，不复制像素。冷准备保留原有资源 lease，将普通
+队列的写入和 shader-read 转换封成可复用 timeline 前缀；各域在首次使用前等待该前缀。
+借用期间允许普通 sampled 读取，但拒绝上传、storage 写入、布局变更，以及需要
+transfer-src 布局的 Canvas 复制；提前录制的写者同样被拒绝，即使它最终恢复只读布局。
+读许可维持到实例退休，单次 completion 完成并不恢复写权限。`step.close()` 等待该
+实例自己的已接纳工作并释放许可，不等待其他域；最后一个读实例退休后恢复写入。
+仅释放底层 prepared handle 不等于退休，在途工作和域仍持有许可。
+
+已有 raw VkImage 别名的图像不能进入该路线，借用期间也不能导入同一 VkImage 的新别名。
+外部内存别名、跨 queue family、graphics、共享图像控制流及多 mip/layer 不在此能力范围。
+Windows 验证覆盖双队列在途读取、关闭其中一个实例、准备失败清理、源视图删除及
+Program 退出；这不是完整渲染场景的吞吐结论。
+
 独立 Vulkan 路线还不接纳 graphics、host selection、并行 recipe，以及共享
 sparse/RNG/runtime-error 状态。
 普通 Graph 保持既有能力；CUDA Canvas 和外部内存协议不会因此自动适用于 Vulkan 域。

@@ -36,7 +36,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **165**, persistent execution-plan version **26**, and
+- The frontend/native private ABI is **166**, persistent execution-plan version **26**, and
   compiled-cache schema **71**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
@@ -200,8 +200,11 @@ combination. Consult the linked API contracts and capability queries for exact s
   Polling uses a configurable interval, without per-ticket threads or extra GPU nodes.
 - Vulkan JIT/AOT fixed buffer-only recipes now use additional device-created compute queues,
   exact timeline dependencies, per-submit parameters, sparse GPU timing and independent instance
-  retirement. Queue/timeline availability is checked on the chosen device; image/graphics and
-  control/parallel recipes retain their ordinary routes. Qualification includes source-free AOT,
+  retirement. Queue/timeline availability is checked on the chosen device. Selected device while,
+  instance-private images and read-only sampling of same-Program managed Textures are also supported.
+  Shared Textures currently require flat dispatches and one mip/layer; writes and layout changes are
+  blocked until the last reader retires. Graphics/parallel recipes retain their ordinary routes.
+  Qualification includes source-free AOT,
   actual explicit gradients and controlled independent progress on Windows RTX 5090.
   See [execution-domain contracts](cuda_execution_domains.en.md).
 - Python/native `Window.get_scroll_delta()` returns horizontal/vertical floating increments and clears

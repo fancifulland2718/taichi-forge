@@ -34,7 +34,7 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **165**，持久执行计划为 **26**，
+- frontend 与 native runtime 使用私有 ABI **166**，持久执行计划为 **26**，
   编译缓存 schema 为 **71**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
@@ -161,7 +161,9 @@
   使用可配置间隔轮询，不创建逐票据线程或额外 GPU 节点。
 - Vulkan JIT/AOT 固定 buffer-only 配方使用设备创建时准备的额外 compute queue，具备
   精确 timeline 依赖、逐提交参数、稀疏 GPU 计时与独立实例退休。按所选设备检查队列和
-  timeline 条件；image/graphics、控制/并行配方保留普通路线。Windows RTX 5090 验收
+  timeline 条件；另支持已选设备 while、实例私有 image，以及同 Program 托管 Texture
+  的跨域只读采样。共享 Texture 当前限普通 dispatch、单 mip/layer；借用期间阻止写入及
+  布局变更，最后一个读实例退休后恢复。graphics/并行仍保留普通路线。Windows RTX 5090 验收
   包含无 DSL 的独立 AOT、真实显式梯度及受控独立推进。
   详见[执行域合同](cuda_execution_domains.zh.md)。
 - Python/native `Window.get_scroll_delta()` 返回水平/垂直浮点增量，读后清零，不额外

@@ -8556,6 +8556,9 @@ Texture *Program::create_texture(BufferFormat buffer_format,
   view->bind_runtime_resource_handle(handle);
   bool inserted = false;
   try {
+    if (compile_config().arch == Arch::vulkan)
+      if (auto *runtime = get_gfx_runtime_for_borrowing())
+        runtime->register_managed_image(view->get_device_allocation(), handle);
     if (texture_view_slots_.size() <= handle.index) {
       texture_view_slots_.resize(static_cast<std::size_t>(handle.index) + 1);
     }

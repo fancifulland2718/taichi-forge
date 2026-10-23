@@ -39,6 +39,9 @@ using namespace taichi::lang;
 // domain reservation counts the logical instance, independent of phase count.
 struct PreparedDomainInstance final : RuntimeClient {
   std::vector<std::shared_ptr<RuntimeClient>> parts;
+#ifdef TI_WITH_VULKAN
+  std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> shared_workspace;
+#endif
   std::mutex mutex;
   std::exception_ptr retirement_error;
   bool safely_released() {
@@ -60,6 +63,12 @@ struct PreparedDomainInstance final : RuntimeClient {
     if (retirement_error)
       std::rethrow_exception(retirement_error);
     parts.clear();
+#ifdef TI_WITH_VULKAN
+    if (shared_workspace) {
+      shared_workspace->retire_shared_image_reads();
+      shared_workspace.reset();
+    }
+#endif
   }
 };
 
@@ -311,6 +320,40 @@ struct PreparedExecution {
         selected_vulkan.domain = domain->vulkan;
         vulkan_workspace = gfx_runtime->create_fixed_graph_workspace();
         selected_vulkan.workspace = vulkan_workspace;
+        std::vector<gfx::GfxRuntime::SharedSampledImage> shared_images;
+        bool nonflat = false;
+        const auto collect = [&](const auto &steps) {
+          for (const auto &step : steps) {
+            const auto *dispatch = std::get_if<FixedExecution::Dispatch>(&step);
+            if (!dispatch) {
+              nonflat |= std::holds_alternative<std::shared_ptr<const FixedExecution::While>>(step) ||
+                         std::holds_alternative<std::shared_ptr<const FixedExecution::Branch>>(step) ||
+                         std::holds_alternative<std::shared_ptr<const FixedExecution::Parallel>>(step);
+              continue;
+            }
+            for (const auto &binding : dispatch->resources) {
+              const auto image_binding = std::dynamic_pointer_cast<NativeImageKernelBinding>(binding);
+              if (!image_binding)
+                continue;
+              const auto &image = image_binding->image();
+              const auto handle = image->gfx_managed_owner();
+              if (!handle)
+                continue;
+              if (!image_binding->sampled_only())
+                throw MemoryBindingError("Shared Vulkan image requires sampled dispatches");
+              shared_images.push_back({handle, image->gfx_sampled_allocation(), image});
+            }
+          }
+        };
+        collect(initializers);
+        collect(operations);
+        if (nonflat && !shared_images.empty())
+          throw MemoryBindingError("Shared Vulkan images currently require flat dispatches");
+        // Reserve after collecting every phase and before recording commands.
+        // The Program submission guard is held by the borrowed runtime entry;
+        // GFX uses its existing host gate for the reservation/prefix transaction.
+        gfx_runtime->prepare_fixed_shared_sampled_images(
+            vulkan_workspace, shared_images, runtime.runtime_fault_domain());
         // Only factories invoked for this prepared instance populate this
         // private owner list. Public/borrowed native resources remain outside
         // it and need a separate cross-instance layout lease contract.
@@ -351,6 +394,7 @@ struct PreparedExecution {
         selected.retirement_parts = &domain_instance->parts;
 #ifdef TI_WITH_VULKAN
         if (vulkan_binding) {
+          domain_instance->shared_workspace = vulkan_workspace;
           selected_vulkan.operands = selected.operands;
           selected_vulkan.retirement_parts = &domain_instance->parts;
         }
@@ -516,6 +560,12 @@ struct PreparedExecution {
     initialization.reset();
     retire_binding(true);
     native.reset();
+#ifdef TI_WITH_VULKAN
+    // In-flight commands also own the workspace. Releasing the public facade
+    // cannot release its read reservation before the final domain prefix.
+    vulkan_workspace_initialization.reset();
+    vulkan_workspace.reset();
+#endif
     release_native_resources();
     release_source_bindings();
     resources.reset();
@@ -552,8 +602,10 @@ struct PreparedExecution {
         // wrapper must not free a still-resident graph's argument storage.
 #ifdef TI_WITH_VULKAN
         if (domain->vulkan) {
+          auto dependencies = vulkan_workspace->shared_image_dependencies();
+          dependencies.push_back(bootstrap);
           domain->vulkan->submit_instance(domain_registration.vulkan,
-              vulkan_workspace_initialization, {bootstrap}).wait();
+              vulkan_workspace_initialization, dependencies).wait();
           if (initialization)
             initialization->submit().wait();
         } else

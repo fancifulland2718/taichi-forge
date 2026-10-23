@@ -363,6 +363,11 @@ void ExecutionDomain::retire_instance(const std::shared_ptr<ExecutionInstance> &
   try {
     if (prefix.valid())
       prefix.wait();
+    // Waiting a timeline point does not release the queue slot's Commands.
+    // Collect completed slots outside admission locks before retiring their
+    // operand owners (including shared image read loans). This never waits
+    // for a later prefix belonging to another instance.
+    collect_ready(state.options.capacity);
     client->retire();
   } catch (...) {
     failure = std::current_exception();

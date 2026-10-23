@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Fixed Vulkan workspaces retain private image boundaries and their owners.
-inline constexpr int kForgeNativeAbiRevision = 165;
+// Shared image admission changes GfxRuntime layout and native image vtables.
+inline constexpr int kForgeNativeAbiRevision = 166;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
@@ -48,6 +48,8 @@ inline constexpr std::uint64_t kForgeVulkanExecutionInstanceRetirement = 1ull <<
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainWhile = 1ull << 27;
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainPrivateImages = 1ull << 28;
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainImageControl = 1ull << 29;
+// Same-Program flat borrowed Texture sampling, color mip0/layer0 only.
+inline constexpr std::uint64_t kForgeVulkanExecutionDomainSharedSampledImages = 1ull << 30;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;
