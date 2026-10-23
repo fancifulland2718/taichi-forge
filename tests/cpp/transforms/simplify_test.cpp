@@ -10,6 +10,43 @@ namespace taichi::lang {
 
 // Basic tests within a basic block
 
+TEST(Simplify, LinearizedDependenciesRetainTypesAndDebugGuards) {
+  for (bool debug : {false, true}) {
+    SCOPED_TRACE(debug);
+    auto block = std::make_unique<Block>();
+    auto three = block->push_back<ConstStmt>(TypedConstant(int16(3)));
+    auto two = block->push_back<ConstStmt>(TypedConstant(2));
+    auto first = block->push_back<LinearizeStmt>(
+        std::vector<Stmt *>{three, two}, std::vector<int>{8, 4});
+    auto second = block->push_back<LinearizeStmt>(
+        std::vector<Stmt *>{first, two}, std::vector<int>{8, 5});
+    auto empty = block->push_back<LinearizeStmt>(
+        std::vector<Stmt *>{}, std::vector<int>{});
+    auto result = block->push_back<ReturnStmt>(
+        std::vector<Stmt *>{first, second, empty});
+    CompileConfig config;
+    config.debug = debug;
+    config.advanced_optimization = false;
+    irpass::type_check(block.get(), config);
+    irpass::simplify(block.get(), config);
+    EXPECT_FALSE(irpass::analysis::any_statement(block.get(), [](Stmt *stmt) {
+      return stmt->is<LinearizeStmt>();
+    }));
+    EXPECT_EQ(irpass::analysis::any_statement(block.get(), [](Stmt *stmt) {
+      return stmt->is<AssertStmt>();
+    }), debug);
+    for (int i = 0; i < 3; ++i)
+      EXPECT_EQ(result->operand(i)->ret_type, PrimitiveType::i32);
+    EXPECT_TRUE(irpass::analysis::any_statement(block.get(), [](Stmt *stmt) {
+      const auto *cast = stmt->cast<UnaryOpStmt>();
+      return cast && cast->op_type == UnaryOpType::cast_value &&
+             cast->operand->ret_type == PrimitiveType::i16 &&
+             cast->ret_type == PrimitiveType::i32;
+    }));
+    EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+  }
+}
+
 TEST(Simplify, ExistentialQueryStopsAcrossNestedBranches) {
   auto block = std::make_unique<Block>();
   auto condition = block->push_back<ConstStmt>(TypedConstant(1));

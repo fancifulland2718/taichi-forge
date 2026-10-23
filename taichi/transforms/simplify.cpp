@@ -50,6 +50,7 @@ class BasicBlockSimplify : public IRVisitor {
   StructForStmt *current_struct_for;
   CompileConfig config;
   DelayedIRModifier modifier;
+  bool linearized_block_{false};
   struct LoadCandidate {
     GlobalLoadStmt *load;
     int checked_through;
@@ -80,10 +81,16 @@ class BasicBlockSimplify : public IRVisitor {
 
   void accept_block() {
     global_loads_.clear();
+    linearized_block_ = false;
     for (int i = 0; i < (int)block->statements.size(); i++) {
       current_stmt_id = i;
       block->statements[i]->accept(this);
     }
+    // All delayed edits become visible together. Checking this same block
+    // once per lowered index would repeatedly visit the identical final IR.
+    // Keep the individual load/select checks queued by if simplification.
+    if (linearized_block_)
+      modifier.type_check(block, config);
   }
 
   static bool run(Block *block,
@@ -238,7 +245,7 @@ class BasicBlockSimplify : public IRVisitor {
     }
     modifier.erase(stmt);
     // get types of adds and muls
-    modifier.type_check(stmt->parent, config);
+    linearized_block_ = true;
   }
 
   void visit(SNodeLookupStmt *stmt) override {

@@ -54,6 +54,10 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Compilation cost and artifacts
 
+- Type checks after index linearization are coalesced per block edit batch,
+  avoiding repeated whole-block scans while preserving type promotion, debug
+  checks and forward/adjoint behavior. Static expansion has no new size limit.
+
 - Large static expansions and repeated inlining perform fewer AST copies, source formatting
   operations, per-statement rewrites and whole-block scans. Immutable preparation data is reused;
   each expansion retains independent mutable state. Excessive expansion produces a warning,
