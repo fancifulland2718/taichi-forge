@@ -1796,6 +1796,12 @@ void VulkanCommandList::memory_barrier() noexcept {
       /*pImageMemoryBarriers=*/nullptr);
 }
 
+void VulkanCommandList::runtime_timing_barrier() noexcept {
+  buffer_->device.functions().vkCmdPipelineBarrier(
+      buffer_->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
+}
+
 void VulkanCommandList::graphics_memory_barrier(bool before_renderpass) noexcept {
   VkMemoryBarrier barrier{};
   barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;

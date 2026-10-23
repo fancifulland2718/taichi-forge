@@ -58,6 +58,7 @@ class VulkanExecutionQueue {
   // Cold recording. Commands must be immutable, from this device/family, and
   // primary; operands own every allocation referenced by them.
   std::unique_ptr<CommandList> new_command_list();
+  StreamGpuTiming prepare_timing(CommandList &begin, CommandList &end);
   std::shared_ptr<const Commands> prepare(
       const std::vector<CommandList *> &commands,
       std::shared_ptr<void> operands = {});

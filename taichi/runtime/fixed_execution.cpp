@@ -147,22 +147,46 @@ struct FixedExecution::State {
   std::shared_ptr<vulkan::ExecutionDomain> vulkan_domain;
   std::shared_ptr<vulkan::ExecutionInstance> vulkan_registration;
   struct VulkanInstance final : RuntimeClient, RuntimeCompletionResources {
+    struct Slot {
+      DeviceAllocationUnique parameters;
+      StreamGpuTiming timing;
+    };
+    struct Variants {
+      std::shared_ptr<const vulkan::ExecutionDomain::Commands> ordinary;
+      std::shared_ptr<const vulkan::ExecutionDomain::Commands> first;
+      std::shared_ptr<const vulkan::ExecutionDomain::Commands> sampled;
+      std::shared_ptr<const vulkan::ExecutionDomain::Commands> sampled_first;
+    };
+    class UnsupportedTiming final : public StreamGpuTimingObject {
+     public:
+      StreamGpuTimingSnapshot snapshot() const override {
+        StreamGpuTimingSnapshot result;
+        result.status = "unsupported";
+        return result;
+      }
+    };
     struct Payload {
+      Device *device{nullptr};
       std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> workspace;
       std::vector<std::shared_ptr<NativeOperation>> operations;
       std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
       std::vector<std::shared_ptr<NativeKernelResultStorage>> results;
       std::shared_ptr<gfx::GfxRuntime::GraphReplayExecutable::Slot> recording;
+      std::vector<Slot> slots;
     };
     std::shared_ptr<RuntimeCompletionResources> operands;
     std::shared_ptr<Payload> payload;
     std::shared_ptr<const vulkan::ExecutionDomain::Commands> commands;
     std::shared_ptr<const vulkan::ExecutionDomain::Commands> first_commands;
+    std::vector<Variants> variants;
+    std::size_t parameter_count{0};
+    bool gpu_timing{false};
     std::mutex mutex;
     bool initialized{false};
     bool retired{false};
     void retire() override {
       std::lock_guard<std::mutex> lock(mutex);
+      variants.clear();
       first_commands.reset();
       commands.reset();
       payload.reset();
@@ -247,11 +271,24 @@ FixedExecution::FixedExecution(
           std::holds_alternative<std::shared_ptr<const Parallel>>(operation))
         throw std::invalid_argument(
             "Independent Vulkan control recording is not implemented");
-      if (const auto *dispatch = std::get_if<Dispatch>(&operation))
-        if (!dispatch->parameters.empty())
-          throw std::invalid_argument(
-              "Independent Vulkan submission parameters are not prepared");
+      if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+        std::set<std::size_t> offsets;
+        for (const auto &patch : dispatch->parameters) {
+          if (!dispatch->kernel || patch.slot >= vulkan_binding->parameter_count ||
+              patch.argument_offset % 4 ||
+              patch.argument_offset > dispatch->kernel->args_size ||
+              dispatch->kernel->args_size - patch.argument_offset < 8)
+            throw std::invalid_argument("Invalid Vulkan u64 submission parameter binding");
+          const auto next = offsets.lower_bound(patch.argument_offset);
+          if ((next != offsets.end() && *next - patch.argument_offset < 8) ||
+              (next != offsets.begin() && patch.argument_offset - *std::prev(next) < 8))
+            throw std::invalid_argument("Overlapping Vulkan submission parameter bindings");
+          offsets.insert(patch.argument_offset);
+        }
+      }
     }
+    if (vulkan_binding->parameter_count > std::numeric_limits<std::size_t>::max() / 8)
+      throw std::invalid_argument("Vulkan submission parameter size overflows address space");
     state_->vulkan_domain = vulkan_binding->domain;
     state_->vulkan_registration = vulkan_binding->instance;
 #else
@@ -1240,8 +1277,11 @@ FixedExecution::FixedExecution(
         auto instance = std::make_shared<State::VulkanInstance>();
         state_->vulkan_instance = instance;
         instance->operands = vulkan_binding->operands;
+        instance->parameter_count = vulkan_binding->parameter_count;
+        instance->gpu_timing = state_->vulkan_domain->gpu_timing_enabled();
         instance->payload = std::make_shared<State::VulkanInstance::Payload>();
         auto &payload = *instance->payload;
+        payload.device = &device;
         payload.operations = std::move(state_->native_operations);
         payload.resources = std::move(state_->kernel_resources);
         payload.results = std::move(state_->kernel_results);
@@ -1263,12 +1303,85 @@ FixedExecution::FixedExecution(
               payload.workspace, {}, std::move(roots));
           instance->commands = state_->vulkan_domain->prepare_commands(
               {payload.recording->cmdlist.get()}, instance->payload);
+          std::unique_ptr<CommandList> initialize;
           if (!vulkan_binding->workspace) {
-            auto initialize = state_->vulkan_domain->new_command_list();
+            initialize = state_->vulkan_domain->new_command_list();
             payload.workspace->record_initialization(*initialize);
             instance->first_commands = state_->vulkan_domain->prepare_commands(
                 {initialize.get(), payload.recording->cmdlist.get()},
                 instance->payload);
+          }
+          if (instance->parameter_count || instance->gpu_timing) {
+            const auto capacity = state_->vulkan_domain->snapshot().capacity;
+            const auto parameter_bytes = instance->parameter_count * 8;
+            if (parameter_bytes && capacity >
+                (std::numeric_limits<std::size_t>::max() - state_->bytes) / parameter_bytes)
+              throw std::invalid_argument("Vulkan parameter pool size overflows address space");
+            payload.slots.resize(capacity);
+            instance->variants.resize(capacity);
+            for (std::size_t slot = 0; slot < capacity; ++slot) {
+              std::unique_ptr<CommandList> upload;
+              if (parameter_bytes) {
+                auto [buffer, status] = device.allocate_memory_unique(
+                    {parameter_bytes, true, false, false, AllocUsage::None});
+                if (status != RhiResult::success)
+                  throw std::runtime_error("Cannot allocate Vulkan parameter staging");
+                payload.slots[slot].parameters = std::move(buffer);
+                upload = state_->vulkan_domain->new_command_list();
+                upload->memory_barrier();
+                std::size_t dispatch_index = 0;
+                for (const auto &operation : operations) {
+                  const auto *dispatch = std::get_if<Dispatch>(&operation);
+                  if (!dispatch)
+                    continue;
+                  const auto *arguments = payload.recording->args_buffers.at(dispatch_index++).get();
+                  for (const auto &patch : dispatch->parameters) {
+                    if (!arguments)
+                      throw std::invalid_argument("Vulkan parameter target has no argument buffer");
+                    const auto destination = arguments->get_ptr(patch.argument_offset);
+                    upload->buffer_transition(destination, 8,
+                        {BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead,
+                         BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite});
+                    upload->buffer_copy(destination,
+                        payload.slots[slot].parameters->get_ptr(patch.slot * 8), 8);
+                    upload->buffer_transition(destination, 8,
+                        {BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite,
+                         BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead});
+                  }
+                }
+                upload->memory_barrier();
+                state_->bytes += parameter_bytes;
+              }
+              std::vector<CommandList *> sequence;
+              if (upload)
+                sequence.push_back(upload.get());
+              sequence.push_back(payload.recording->cmdlist.get());
+              auto &variants = instance->variants[slot];
+              const auto record = [&](const std::vector<CommandList *> &steps, bool first) {
+                auto commands = steps;
+                if (first && initialize)
+                  commands.insert(commands.begin(), initialize.get());
+                return state_->vulkan_domain->prepare_commands(commands, instance->payload);
+              };
+              variants.ordinary = record(sequence, false);
+              variants.first = initialize ? record(sequence, true) : variants.ordinary;
+              if (instance->gpu_timing) {
+                auto begin = state_->vulkan_domain->new_command_list();
+                auto end = state_->vulkan_domain->new_command_list();
+                auto timing = state_->vulkan_domain->prepare_timing(*begin, *end);
+                if (timing) {
+                  sequence.insert(sequence.end() - 1, begin.get());
+                  sequence.push_back(end.get());
+                  variants.sampled = record(sequence, false);
+                  variants.sampled_first = initialize ? record(sequence, true) : variants.sampled;
+                } else {
+                  timing = std::make_shared<State::VulkanInstance::UnsupportedTiming>();
+                  variants.sampled = variants.ordinary;
+                  variants.sampled_first = variants.first;
+                }
+                payload.slots[slot].timing = std::move(timing);
+              }
+            }
           }
           for (const auto bytes : payload.recording->args_buffer_sizes)
             state_->bytes += bytes;
@@ -1446,18 +1559,35 @@ RuntimeCompletion FixedExecution::submit(
     bool sample_gpu) {
 #ifdef TI_WITH_VULKAN
   if (state_->vulkan_domain && state_->vulkan_instance) {
-    if (!parameters.empty() || sample_gpu)
-      throw std::invalid_argument(
-          "Vulkan submission parameters and timing were not prepared");
     const auto instance = state_->vulkan_instance;
+    if (parameters.size() != instance->parameter_count)
+      throw std::invalid_argument("Submission parameter count does not match preparation");
+    if (sample_gpu && !instance->gpu_timing)
+      throw std::invalid_argument("GPU timing was not enabled for this Vulkan domain");
     return state_->vulkan_domain->submit_instance_selected(
         state_->vulkan_registration,
-        [&](std::size_t) {
+        [&](std::size_t slot) {
+          if (!instance->variants.empty()) {
+            const auto &variant = instance->variants.at(slot);
+            return sample_gpu
+                       ? (instance->initialized ? variant.sampled : variant.sampled_first)
+                       : (instance->initialized ? variant.ordinary : variant.first);
+          }
           return !instance->initialized && instance->first_commands
                      ? instance->first_commands : instance->commands;
         }, dependencies, instance,
-        [&](std::size_t, const RuntimeCompletion &) {
+        [&](std::size_t slot, const RuntimeCompletion &) {
+          if (instance->parameter_count) {
+            const auto &payload = *instance->payload;
+            void *mapped = nullptr;
+            if (payload.device->map(*payload.slots.at(slot).parameters, &mapped) != RhiResult::success)
+              throw std::runtime_error("Cannot map Vulkan submission parameter staging");
+            std::memcpy(mapped, parameters.data(), instance->parameter_count * 8);
+            payload.device->unmap(*payload.slots[slot].parameters);
+          }
           instance->initialized = true;
+        }, [&](std::size_t slot) -> StreamGpuTiming {
+          return sample_gpu ? instance->payload->slots.at(slot).timing : nullptr;
         });
   }
 #endif

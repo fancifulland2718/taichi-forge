@@ -24,6 +24,7 @@ class ExecutionDomain {
   struct Options {
     std::size_t capacity{2};
     std::size_t instance_capacity{64};
+    bool gpu_timing{false};
   };
   struct Snapshot {
     std::uint64_t identity{0};
@@ -36,6 +37,7 @@ class ExecutionDomain {
   };
   using Commands = VulkanExecutionQueue::Commands;
   using CommandSelector = VulkanExecutionQueue::CommandSelector;
+  using TimingSelector = std::function<StreamGpuTiming(std::size_t)>;
   using Busy = VulkanExecutionQueue::Busy;
   using Admission =
       std::function<void(std::size_t, const RuntimeCompletion &)>;
@@ -50,6 +52,8 @@ class ExecutionDomain {
   // Cold recording only. Commands and their operand closure remain immutable;
   // per-submission parameter snapshots use the preallocated admission slot.
   std::unique_ptr<CommandList> new_command_list();
+  bool gpu_timing_enabled() const;
+  StreamGpuTiming prepare_timing(CommandList &begin, CommandList &end);
   std::shared_ptr<const Commands> prepare_commands(
       const std::vector<CommandList *> &commands,
       std::shared_ptr<void> operands = {});
@@ -78,7 +82,8 @@ class ExecutionDomain {
       const CommandSelector &select,
       const std::vector<RuntimeCompletion> &dependencies = {},
       std::shared_ptr<RuntimeCompletionResources> resources = {},
-      const Admission &admit = {});
+      const Admission &admit = {},
+      const TimingSelector &timing = {});
   std::size_t collect_ready(std::size_t budget);
   Snapshot snapshot() const;
   RuntimeCompletion latest_completion() const;
@@ -106,7 +111,8 @@ class ExecutionDomain {
       const std::vector<RuntimeCompletion> &dependencies,
       std::shared_ptr<RuntimeCompletionResources> resources,
       const Admission &admit,
-      const CommandSelector &select = {});
+      const CommandSelector &select = {},
+      const TimingSelector &timing = {});
   struct State;
   std::unique_ptr<State> state_;
 };

@@ -106,6 +106,20 @@ std::unique_ptr<CommandList> ExecutionDomain::new_command_list() {
   return state.queue.new_command_list();
 }
 
+bool ExecutionDomain::gpu_timing_enabled() const {
+  return state_->options.gpu_timing;
+}
+
+StreamGpuTiming ExecutionDomain::prepare_timing(CommandList &begin,
+                                                CommandList &end) {
+  auto &state = *state_;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.check_accepting("prepare Vulkan domain timing");
+  if (!state.options.gpu_timing)
+    throw std::invalid_argument("GPU timing was not enabled for this Vulkan domain");
+  return state.queue.prepare_timing(begin, end);
+}
+
 std::shared_ptr<const ExecutionDomain::Commands> ExecutionDomain::prepare_commands(
     const std::vector<CommandList *> &commands, std::shared_ptr<void> operands) {
   auto &state = *state_;
@@ -140,7 +154,8 @@ RuntimeCompletion ExecutionDomain::submit_impl(
     const std::vector<RuntimeCompletion> &dependencies,
     std::shared_ptr<RuntimeCompletionResources> resources,
     const Admission &admit,
-    const CommandSelector &select) {
+    const CommandSelector &select,
+    const TimingSelector &timing) {
   auto &state = *state_;
   // Both completion and command operand destruction run outside admission.
   collect_ready(1);
@@ -170,7 +185,8 @@ RuntimeCompletion ExecutionDomain::submit_impl(
         [&](std::size_t slot, const auto &point) {
           ticket = RuntimeCompletion::from_reusable_stream_dependency(
               Arch::vulkan, state.owner->program_domain(),
-              state.owner->allocate_submission_sequence(), point, state.owner);
+              state.owner->allocate_submission_sequence(), point, state.owner,
+              timing ? timing(slot) : nullptr);
           if (resources)
             ticket.attach_resources(resources);
           if (admit)
@@ -210,10 +226,11 @@ RuntimeCompletion ExecutionDomain::submit_instance_selected(
     const CommandSelector &select,
     const std::vector<RuntimeCompletion> &dependencies,
     std::shared_ptr<RuntimeCompletionResources> resources,
-    const Admission &admit) {
+    const Admission &admit,
+    const TimingSelector &timing) {
   if (!instance || !select)
     throw std::invalid_argument("Vulkan submission requires an instance and selector");
-  return submit_impl(instance, {}, dependencies, std::move(resources), admit, select);
+  return submit_impl(instance, {}, dependencies, std::move(resources), admit, select, timing);
 }
 
 std::size_t ExecutionDomain::collect_ready(std::size_t budget) {

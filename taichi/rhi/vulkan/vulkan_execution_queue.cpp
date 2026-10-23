@@ -199,6 +199,22 @@ std::unique_ptr<CommandList> VulkanExecutionQueue::new_command_list() {
   return std::move(commands);
 }
 
+StreamGpuTiming VulkanExecutionQueue::prepare_timing(CommandList &begin,
+                                                     CommandList &end) {
+  auto &state = *state_;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (!state.accepting)
+    throw std::runtime_error("Vulkan execution queue is closed");
+  auto *boundary = dynamic_cast<VulkanCommandList *>(&begin);
+  if (!boundary)
+    throw std::invalid_argument("Vulkan timing requires native commands");
+  boundary->runtime_timing_barrier();
+  auto timing = state.stream->begin_gpu_timing_inline(&begin);
+  boundary->runtime_timing_barrier();
+  state.stream->end_gpu_timing_inline(timing, &end);
+  return timing;
+}
+
 std::shared_ptr<const VulkanExecutionQueue::Commands>
 VulkanExecutionQueue::prepare(const std::vector<CommandList *> &commands,
                                std::shared_ptr<void> operands) {

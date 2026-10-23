@@ -20,6 +20,7 @@ struct FixedExecution::VulkanExecutionBinding {
   // orders that initialization before their first submission. Without one,
   // FixedExecution initializes its own workspace on its first accepted submit.
   std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> workspace;
+  std::size_t parameter_count{0};
 };
 
 }  // namespace taichi::lang

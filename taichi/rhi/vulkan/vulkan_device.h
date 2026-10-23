@@ -561,6 +561,9 @@ class VulkanCommandList : public CommandList {
                          const BufferTransition &transition) noexcept final;
   void buffer_barrier(DeviceAllocation alloc) noexcept final;
   void memory_barrier() noexcept final;
+  // Exact timing boundaries also order transfer/query/command-front-end work.
+  // Kept separate from the ordinary compute memory dependency.
+  void runtime_timing_barrier() noexcept;
   // Outside a render pass: order graphics against the surrounding command
   // stream, including shader, vertex/index, indirect and transfer accesses.
   void graphics_memory_barrier(bool before_renderpass) noexcept;

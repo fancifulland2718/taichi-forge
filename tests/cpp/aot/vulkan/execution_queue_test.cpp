@@ -11,11 +11,15 @@
 #include "taichi/runtime/vulkan_execution_domain.h"
 #include "taichi/runtime/fixed_execution_vulkan.h"
 #include "taichi/runtime/gfx/aot_graph_data.h"
+#include "taichi/runtime/gfx/aot_module_loader_impl.h"
 #include "taichi/runtime/native_operation.h"
+#include "taichi/program/ndarray.h"
 
 #include <chrono>
 #include <set>
 #include <thread>
+#include <cstdlib>
+#include <cstring>
 
 namespace taichi::lang {
 
@@ -519,6 +523,112 @@ TEST(VulkanFixedExecution, SharedPhaseOwnerRetiresAndRejectedPreparationReleases
   FixedExecution replacement(Arch::vulkan, device, &runtime, operations,
       nullptr, owner, nullptr, nullptr, nullptr, nullptr, nullptr, &binding);
   replacement.submit().wait();
+  registry.retire();
+}
+
+TEST(VulkanFixedExecution, SubmissionParametersAndSparseTimingUseReusableSlots) {
+  const auto *folder = std::getenv("TAICHI_VULKAN_PARAMETERS_AOT_DIR");
+  if (!folder || !vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 53);
+  device.set_backend_fault_reporter(owner);
+  gfx::GfxRuntime::Params params;
+  params.device = &device;
+  gfx::GfxRuntime runtime(params);
+  gfx::AotModuleParams module_params;
+  module_params.runtime = &runtime;
+  module_params.module_path = folder;
+  auto module = aot::Module::load(Arch::vulkan, module_params);
+  ASSERT_NE(module, nullptr);
+  auto *kernel = module->get_kernel("publish");
+  ASSERT_NE(kernel, nullptr);
+  vulkan::ExecutionDomainRegistry registry(device, owner);
+  auto domain = registry.create({2, 2, true});
+  std::array<std::unique_ptr<FixedExecution>, 2> calls;
+  std::array<std::shared_ptr<FixedOperands>, 2> operands;
+  for (int i = 0; i < 2; ++i) {
+    auto resources = std::make_shared<FixedOperands>();
+    auto [header, status] = device.allocate_memory_unique(
+        {24, false, true, false, AllocUsage::Storage});
+    ASSERT_EQ(status, RhiResult::success);
+    resources->allocations.push_back(std::move(header));
+    Ndarray array(*resources->allocations[0], PrimitiveType::u64, {3});
+    LaunchContextBuilder context(kernel);
+    for (int parameter = 0; parameter < 3; ++parameter)
+      context.set_arg_uint({parameter}, 0);
+    context.set_arg_ndarray({3}, array);
+    FixedExecution::Dispatch dispatch{kernel, &context};
+    for (int parameter = 0; parameter < 3; ++parameter)
+      dispatch.parameters.push_back({static_cast<std::size_t>(parameter),
+          kernel->args_type->get_element_offset({parameter})});
+    FixedExecution::VulkanExecutionBinding binding{domain, resources};
+    binding.parameter_count = 3;
+    const auto before = device.queue_submission_snapshot().queue_submit_calls;
+    calls[i] = std::make_unique<FixedExecution>(Arch::vulkan, device, &runtime,
+        std::vector<FixedExecution::Operation>{dispatch}, nullptr, owner,
+        nullptr, nullptr, nullptr, nullptr, nullptr, &binding);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before);
+    operands[i] = std::move(resources);
+  }
+  const auto values = [](std::uint64_t seed) {
+    return std::vector<std::uint64_t>{(std::uint64_t{1} << 63) + seed,
+        (std::uint64_t{1} << 53) + seed * 3, (std::uint64_t{1} << 61) + seed * 7};
+  };
+  const auto check = [&](int i, const std::vector<std::uint64_t> &expected) {
+    void *mapped = nullptr;
+    ASSERT_EQ(device.map(*operands[i]->allocations[0], &mapped), RhiResult::success);
+    std::array<std::uint64_t, 3> actual;
+    std::memcpy(actual.data(), mapped, 24);
+    device.unmap(*operands[i]->allocations[0]);
+    EXPECT_TRUE(std::equal(actual.begin(), actual.end(), expected.begin()));
+  };
+  RuntimeCompletion sampled;
+  {
+    TimelineGate default_gate(device, 0);
+    TimelineGate selected_gate(device, domain->snapshot().queue_index);
+    auto changed = values(1);
+    sampled = calls[0]->submit({}, changed, true);
+    changed.assign(3, 0);  // Accepted upload no longer observes caller storage.
+    const auto other = calls[1]->submit({}, values(2));
+    EXPECT_FALSE(sampled.done());
+    EXPECT_EQ(sampled.gpu_timing_snapshot().status, "pending");
+    const auto before = device.queue_submission_snapshot().queue_submit_calls;
+    EXPECT_THROW(calls[0]->submit({}, values(99), true), vulkan::ExecutionDomain::Busy);
+    EXPECT_THROW(calls[0]->submit({}, {1, 2}), std::invalid_argument);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before);
+    selected_gate.release();
+    other.wait();
+    sampled.wait();
+    check(0, values(1));
+    check(1, values(2));
+    EXPECT_EQ(other.gpu_timing_snapshot().status, "unavailable");
+    const auto original = sampled.gpu_timing_snapshot();
+    if (device.queue_timestamp_valid_bits(device.compute_queue_family_index()))
+      EXPECT_TRUE(original.available);
+    else
+      EXPECT_EQ(original.status, "unsupported");
+    for (std::uint64_t iteration = 0; iteration < 1000; ++iteration) {
+      const auto left = values(10 + iteration * 2);
+      const auto right = values(11 + iteration * 2);
+      const auto before_pair = device.queue_submission_snapshot().queue_submit_calls;
+      auto a = calls[0]->submit({}, left, iteration % 113 == 0);
+      auto b = calls[1]->submit({}, right, iteration % 127 == 0);
+      b.wait();
+      // Do not poll a: domain collection must freeze its query before reuse.
+      check(0, left);
+      check(1, right);
+      EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before_pair + 2);
+    }
+    const auto preserved = sampled.gpu_timing_snapshot();
+    EXPECT_EQ(preserved.available, original.available);
+    EXPECT_EQ(preserved.duration_ns, original.duration_ns);
+    domain->close();
+    EXPECT_EQ(sampled.gpu_timing_snapshot().duration_ns, original.duration_ns);
+  }
   registry.retire();
 }
 
