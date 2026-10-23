@@ -956,6 +956,7 @@ class Scalarize : public BasicStmtVisitor {
   }
 
   static bool run(IRNode *node, bool half2_optimization_enabled) {
+    TI_AUTO_PROF;
     Scalarize pass(node, half2_optimization_enabled);
     node->accept(&pass);
     return pass.delayed_modifier_.modify_ir();
@@ -1125,7 +1126,10 @@ class ScalarizePointers : public BasicStmtVisitor {
           new_offset, stmt->ret_type.ptr_removed().get_element_type());
       new_global_temp_stmt->ret_type.set_is_pointer(true);
 
-      stmt->replace_usages_with(new_global_temp_stmt.get());
+      // This pass already indexed all original users. New scalar storage
+      // pointers have no operands and are not revisited before delayed edits
+      // commit, so no replacement chain or newly inserted user is omitted.
+      immediate_modifier_.replace_usages_with(stmt, new_global_temp_stmt.get());
       delayed_modifier_.insert_before(stmt, std::move(new_global_temp_stmt));
       delayed_modifier_.erase(stmt);
       return;
@@ -1152,7 +1156,7 @@ class ScalarizePointers : public BasicStmtVisitor {
           new_offset, stmt->ret_type.ptr_removed().get_element_type());
       new_thread_local_stmt->ret_type.set_is_pointer(true);
 
-      stmt->replace_usages_with(new_thread_local_stmt.get());
+      immediate_modifier_.replace_usages_with(stmt, new_thread_local_stmt.get());
       delayed_modifier_.insert_before(stmt, std::move(new_thread_local_stmt));
       delayed_modifier_.erase(stmt);
       return;
@@ -1161,6 +1165,7 @@ class ScalarizePointers : public BasicStmtVisitor {
 
   static bool run(IRNode *node,
                   const std::unordered_set<Stmt *> &scalarizable_allocas) {
+    TI_AUTO_PROF;
     ScalarizePointers pass(node, scalarizable_allocas);
     node->accept(&pass);
     return pass.delayed_modifier_.modify_ir();
@@ -1256,6 +1261,7 @@ class ExtractLocalPointers : public BasicStmtVisitor {
   }
 
   static bool run(IRNode *node) {
+    TI_AUTO_PROF;
     ExtractLocalPointers pass(node);
     node->accept(&pass);
     return pass.delayed_modifier_.modify_ir();
@@ -1334,6 +1340,7 @@ class FuseMatrixPtr : public BasicStmtVisitor {
   }
 
   static bool run(IRNode *node) {
+    TI_AUTO_PROF;
     FuseMatrixPtr pass;
     node->accept(&pass);
     return pass.modifier_.modify_ir();
@@ -1360,6 +1367,7 @@ class FuseMatrixPtr : public BasicStmtVisitor {
 class DedupMatrixPtr {
  public:
   static bool run(IRNode *root) {
+    TI_AUTO_PROF;
     DedupMatrixPtr pass;
     pass.process(root);
     return pass.modified_;

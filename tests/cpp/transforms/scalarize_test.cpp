@@ -52,6 +52,39 @@ TEST(Scalarize, SparseMatrixUpdatesRespectMathAndMemoryBoundaries) {
   }
 }
 
+TEST(Scalarize, ScalarStoragePointersReachAllOriginalUsers) {
+  TestProgram test_prog;
+  test_prog.setup();
+  for (bool thread_local_storage : {false, true}) {
+    auto block = std::make_unique<Block>();
+    auto tensor = TypeFactory::create_tensor_type({3}, PrimitiveType::f32);
+    auto *storage = thread_local_storage
+                        ? block->push_back<ThreadLocalPtrStmt>(32, tensor)
+                        : block->push_back<GlobalTemporaryStmt>(32, tensor);
+    storage->ret_type.set_is_pointer(true);
+    auto *offset = block->push_back<ConstStmt>(TypedConstant(2));
+    auto *pointer = block->push_back<MatrixPtrStmt>(storage, offset);
+    pointer->ret_type = TypeFactory::get_instance().get_pointer_type(
+        PrimitiveType::f32);
+    auto *first = block->push_back<GlobalLoadStmt>(pointer)->as<GlobalLoadStmt>();
+    auto *condition = block->push_back<ConstStmt>(TypedConstant(1));
+    auto *branch = block->push_back<IfStmt>(condition)->as<IfStmt>();
+    branch->set_true_statements(std::make_unique<Block>());
+    auto *nested = branch->true_statements->push_back<GlobalLoadStmt>(pointer)
+                       ->as<GlobalLoadStmt>();
+    irpass::scalarize(block.get(), false, false);
+    EXPECT_EQ(first->src, nested->src);
+    EXPECT_FALSE(first->src->is<MatrixPtrStmt>());
+    if (thread_local_storage) {
+      ASSERT_TRUE(first->src->is<ThreadLocalPtrStmt>());
+      EXPECT_EQ(first->src->as<ThreadLocalPtrStmt>()->offset, 40);
+    } else {
+      ASSERT_TRUE(first->src->is<GlobalTemporaryStmt>());
+      EXPECT_EQ(first->src->as<GlobalTemporaryStmt>()->offset, 40);
+    }
+  }
+}
+
 TEST(Scalarize, ScalarizeGlobalStore) {
   // Basic tests within a basic block
   TestProgram test_prog;
