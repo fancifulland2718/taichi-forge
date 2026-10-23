@@ -304,8 +304,11 @@ timeline 点。`copied.done()/wait()` 覆盖源读取完成，调用方须在复
 
 当前 Vulkan 路线仅支持 prepared packed copy。`acquire_frame/prepare_frame_pool`、
 混合几何、GUI widgets、texture/host 输入和 runtime offscreen attachments 尚未接通，
-在对应入口拒绝。窗口销毁退休自己的复制实例，不关闭整个输出域；窗口关闭及重配仍是
-冷边界，现有图形设备排空可能等待其他队列，不承诺与无关尾部工作完全独立。
+在对应入口拒绝。窗口销毁退休自己的复制实例，不关闭整个输出域。始终只使用该选定
+Vulkan 图像路线的窗口，等待自己的复制与 graphics readers，不排空无关的默认计算或
+输出域尾部。曾使用普通显示路线的窗口仍保留保守设备排空。可见窗口仍需完成
+swapchain/present 退休，物理队列共享可能带来额外等待；读回、重配和 Program reset
+保留原有同步。缺少退休证明时保留窗口资源闭包，不释放可能仍在途的存储。
 源集合或形状变化时关闭旧域、绑定新域并重新准备。这里没有额外像素处理 kernel，
 但相对直接写显示槽多一次设备复制；不能据此推断应用帧率提升。
 

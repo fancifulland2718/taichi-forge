@@ -73,10 +73,11 @@ T *Renderer::get_renderable_of_type(VertexAttributes vbo_attrs) {
   return ret;
 }
 
-void Renderer::require_general_display_path() const {
+void Renderer::require_general_display_path() {
   TI_ERROR_IF(display_vulkan_execution_domain_,
               "Selected Vulkan display requires prepared packed sources; "
               "writable frames, mixed geometry and runtime targets are unsupported");
+  general_display_path_used_ = true;
 }
 
 void Renderer::set_background_color(const glm::vec3 &color) {
@@ -627,7 +628,7 @@ void Renderer::scene(SceneBase *scene) {
 Renderer::~Renderer() {
   discard_pending_frame();
   auto &device = app_context_.device();
-  if (device.backend_calls_safe()) {
+  if (!selected_vulkan_graphics_retired_ && device.backend_calls_safe()) {
     try {
       wait_for_in_flight_frames();
       device.wait_idle();
@@ -663,6 +664,32 @@ void Renderer::retire_shared_display_resources() {
     close(frame.renderables);
   if (last_shared_display_image_)
     last_shared_display_image_->close();
+}
+
+bool Renderer::retire_selected_vulkan_graphics() {
+  if (!display_vulkan_execution_domain_ || general_display_path_used_ ||
+      has_offscreen_targets()) {
+    return false;
+  }
+  if (selected_vulkan_graphics_retired_) {
+    return true;
+  }
+  TI_ERROR_IF(!app_context_.device().backend_calls_safe(),
+              "Cannot prove selected Vulkan graphics retirement after a fatal fault");
+  // Pool close retires only its instance's exact copy prefix, then all slot
+  // readers. It also rejects a graphics submit that returned no sealed proof.
+  retire_shared_display_resources();
+  while (!in_flight_frames_.empty()) {
+    auto &frame = in_flight_frames_.front();
+    // Do not route missing proof through wait_oldest_frame's stream-wide
+    // fallback. The Window caller keeps this closure if retirement fails.
+    TI_ERROR_IF(!frame.complete || !frame.complete->wait(),
+                "Selected Vulkan frame has no graphics retirement proof");
+    recycle_renderables(frame);
+    in_flight_frames_.pop_front();
+  }
+  selected_vulkan_graphics_retired_ = true;
+  return true;
 }
 
 void Renderer::prepare_for_next_frame() {
@@ -1106,6 +1133,9 @@ bool Renderer::draw_offscreen_targets(GuiBase *gui_base) {
 }
 
 bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
+  if (!display_vulkan_execution_domain_) {
+    general_display_path_used_ = true;
+  }
   if (display_vulkan_execution_domain_) {
     TI_ERROR_IF(has_offscreen_targets() || render_queue_.size() != 1 ||
                     !pending_set_image_ ||

@@ -246,8 +246,13 @@ void Window::present_frame() {
 
 Window::~Window() {
   if (renderer_) {
+    bool selected_graphics_retired = false;
     try {
-      renderer_->retire_shared_display_resources();
+      selected_graphics_retired =
+          renderer_->retire_selected_vulkan_graphics();
+      if (!selected_graphics_retired) {
+        renderer_->retire_shared_display_resources();
+      }
     } catch (...) {
       // A failed CUDA/external drain cannot authorize destruction of the
       // borrowed Vulkan device. Retain this bounded window closure as a unit;
@@ -260,7 +265,7 @@ Window::~Window() {
     }
     renderer_->discard_pending_frame();
     auto &device = renderer_->app_context().device();
-    if (device.backend_calls_safe()) {
+    if (!selected_graphics_retired && device.backend_calls_safe()) {
       try {
         renderer_->wait_for_in_flight_frames();
         device.wait_idle();

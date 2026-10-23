@@ -387,9 +387,14 @@ This Vulkan path currently supports prepared packed copies only. Writable
 `acquire_frame/prepare_frame_pool`, mixed geometry, GUI widgets, texture/host input
 and runtime offscreen attachments reject at their respective entry points.
 Window destruction retires its copy instance without closing the entire output
-domain. Close and reconfiguration remain cold boundaries: existing graphics-device
-draining can wait for other queues and does not promise independence from unrelated
-tails. For changed source sets or shapes, close the old domain, bind a new one and
+domain. A window that has used only this selected Vulkan image path waits for its
+own copy and graphics readers, without draining unrelated default-compute or output
+tails. A window with any earlier general display work retains conservative device
+draining. Visible windows still perform required swapchain/present retirement;
+physical queue sharing can therefore impose additional waits. Readback, reconfiguration
+and Program reset retain their existing synchronization. Missing retirement proof
+retains the window resource closure instead of freeing potentially in-flight storage.
+For changed source sets or shapes, close the old domain, bind a new one and
 prepare again. This adds no pixel-processing kernel, but adds one device copy
 compared with writing display storage directly; it is not an application frame-rate
 claim.

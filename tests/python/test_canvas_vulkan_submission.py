@@ -2,6 +2,7 @@
 
 import time
 
+import numpy as np
 import pytest
 import taichi_forge as ti
 from taichi_forge._lib import core
@@ -17,10 +18,15 @@ def _ready(ticket):
     assert ticket.done(), "exact prefix did not complete while unrelated gate was held"
 
 
-def _setup():
+def _setup(*, general_history=False):
     output, producer = _domains(2, capacity=3, instance_capacity=2)
     window = ti.ui.Window("Vulkan gated display", (6, 4), show_window=False)
     canvas = window.get_canvas()
+    if general_history:
+        # A cancelled general upload still counts as historical work.
+        canvas.set_image(np.ones((6, 4, 3), dtype=np.float32))
+        canvas.canvas._cancel_display_frame()
+        ti.sync()
     canvas.set_execution_domain(output)
     pixels, marker = ti.ndarray(ti.u32, (6, 4)), ti.ndarray(ti.u32, (1, 1))
 

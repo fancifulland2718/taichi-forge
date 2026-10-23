@@ -69,6 +69,9 @@ class TI_DLL_EXPORT Renderer {
   void discard_pending_frame();
   // Cold: prove CUDA/Vulkan retirement before destroying the graphics device.
   void retire_shared_display_resources();
+  // Cold teardown only. True proves this window's selected packed-copy
+  // resources, not WSI present retirement or shared Program work.
+  bool retire_selected_vulkan_graphics();
 
   void set_background_color(const glm::vec3 &color);
 
@@ -160,7 +163,7 @@ class TI_DLL_EXPORT Renderer {
   void validate_display_pool_replacement() const;
   void install_display_pool(std::vector<std::unique_ptr<SetImage>> prepared,
                             int width, int height);
-  void require_general_display_path() const;
+  void require_general_display_path();
   void resize_lights_ssbo(int new_ssbo_size);
   void update_scene_data(SceneBase *scene);
   void init_scene_ubo();
@@ -203,6 +206,10 @@ class TI_DLL_EXPORT Renderer {
   int prepared_display_width_{0};
   int prepared_display_height_{0};
   bool last_frame_used_shared_cuda_vulkan_{false};
+  // General uploads may outlive a cancelled renderable. Selecting a
+  // Vulkan domain later does not make that history exactly tracked.
+  bool general_display_path_used_{false};
+  bool selected_vulkan_graphics_retired_{false};
   std::vector<taichi::lang::RuntimeResourceHandle>
       pending_runtime_resource_handles_;
   std::vector<SharedNdarrayResourceLease>
