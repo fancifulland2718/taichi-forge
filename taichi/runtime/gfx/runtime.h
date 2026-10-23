@@ -847,8 +847,12 @@ class TI_DLL_EXPORT GfxRuntime {
       std::vector<std::shared_ptr<void>> &owners);
   void prepare_detached_kernel_workspace(
       const CompiledTaichiKernel &kernel,
-      const std::shared_ptr<FixedGraphWorkspace> &workspace,
-      bool allow_private_images = false);
+      const std::shared_ptr<FixedGraphWorkspace> &workspace);
+  void bind_graph_task_images(
+      const GraphReplayExecutable::PreparedDispatch &dispatch,
+      int task_index,
+      ShaderResourceSet *resources,
+      const std::function<void(DeviceAllocation, ImageLayout)> &record_image_use);
   void attach_fixed_sparse_resources(GraphReplayState &state,
                                      FixedSparseReplayResources resources);
   std::unique_ptr<GraphReplayRegistration> prepare_fixed_control_graph(

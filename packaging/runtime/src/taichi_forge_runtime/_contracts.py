@@ -44,6 +44,7 @@ _FEATURE_BITS = {
     "vulkan_execution_instance_retirement": 26,
     "vulkan_execution_domain_while": 27,
     "vulkan_execution_domain_private_images": 28,
+    "vulkan_execution_domain_image_control": 29,
 }
 
 

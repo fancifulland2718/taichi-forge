@@ -95,9 +95,15 @@ images and explicit color uploads. All phases share a fixed boundary layout;
 first transitions, initialization and replay run on the selected domain. Resource
 creation with initial pixels can still upload during cold preparation. Images
 remain owned until instance retirement, with no per-submit layout lookup or
-recording rebuild. External Texture/native image loans and image kernels inside
-device while bodies remain unsupported. AOT plans declare private images in
-`resources`; ordinary JIT Texture loans still require a shared layout contract.
+recording rebuild. `vulkan_execution_domain_image_control` additionally supports
+these private images in selected device while conditions and bodies, including
+chunked and nested recipes. Every recording restores the same boundary layout,
+including zero rounds, early exits and exhausted budgets. Consecutive storage
+uses also record a memory dependency; sampled/storage aliasing within one task
+is rejected during prepare. AOT plans declare private images in `resources`;
+external Texture/native image loans, including ordinary JIT Texture loans,
+still require a shared layout contract. Windows tests cover two instances,
+downstream explicit adjoints, failed preparation and retirement of pending work.
 Graphics, host selection, parallel recipes and shared sparse/RNG/runtime-error
 state remain outside this independent Vulkan route. Ordinary Graph execution keeps
 its existing capabilities; CUDA Canvas and external-memory protocols are not

@@ -8238,6 +8238,8 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeVulkanExecutionDomainWhile);
     features["vulkan_execution_domain_private_images"] =
         bool(bitmap & kForgeVulkanExecutionDomainPrivateImages);
+    features["vulkan_execution_domain_image_control"] =
+        bool(bitmap & kForgeVulkanExecutionDomainImageControl);
     result["features"] = std::move(features);
     result["legacy_runtime"] = false;
     return result;

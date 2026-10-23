@@ -3137,19 +3137,84 @@ GfxRuntime::prepare_fixed_commands(
   return payload;
 }
 
+void GfxRuntime::bind_graph_task_images(
+    const GraphReplayExecutable::PreparedDispatch &pd,
+    int task_index,
+    ShaderResourceSet *resources,
+    const std::function<void(DeviceAllocation, ImageLayout)> &record_image_use) {
+  std::unordered_map<DeviceAllocationId, ImageLayout> task_images;
+  const auto &task = pd.kernel->ti_kernel_attribs().tasks_attribs[task_index];
+  for (const auto &bind : task.texture_binds) {
+    const auto collection =
+        pd.host_ctx->texture_collections.find(bind.arg_id);
+    if (collection != pd.host_ctx->texture_collections.end()) {
+      TI_ERROR_IF(bind.is_storage || collection->second.empty(),
+                  "Prepared Vulkan Graph TextureCollection must be a "
+                  "nonempty sampled-image descriptor array");
+      std::vector<ImageSamplerConfig> samplers;
+      samplers.reserve(collection->second.size());
+      for (const auto image : collection->second) {
+        TI_ERROR_IF(image.device != device_ ||
+                        last_image_layouts_.find(image.alloc_id) ==
+                            last_image_layouts_.end(),
+                    "Prepared Vulkan Graph TextureCollection member is "
+                    "not owned by this device");
+        const auto [usage, inserted] =
+            task_images.emplace(image.alloc_id, ImageLayout::shader_read);
+        TI_ERROR_IF(!inserted &&
+                        usage->second != ImageLayout::shader_read,
+                    "Prepared Vulkan Graph cannot bind one image as both "
+                    "sampled and storage in the same task");
+        record_image_use(image, ImageLayout::shader_read);
+        const auto sampler = image_sampler_configs_.find(image.alloc_id);
+        TI_ERROR_IF(sampler == image_sampler_configs_.end(),
+                    "Prepared Vulkan Graph TextureCollection member has "
+                    "no sampler configuration");
+        TI_ERROR_IF(bind.uses_sampling && sampler->second.compare_op >= 0,
+                    "TextureCollection does not support comparison sampling");
+        samplers.push_back(sampler->second);
+      }
+      resources->image_array(bind.binding, collection->second, samplers);
+      continue;
+    }
+    const auto found = pd.host_ctx->array_ptrs.find(bind.arg_id);
+    TI_ERROR_IF(found == pd.host_ctx->array_ptrs.end() || !found->second,
+                "Prepared Vulkan Graph image is unbound");
+    const auto image = *static_cast<DeviceAllocation *>(found->second);
+    TI_ERROR_IF(image.device != device_ ||
+                    last_image_layouts_.find(image.alloc_id) ==
+                        last_image_layouts_.end(),
+                "Prepared Vulkan Graph image is not owned by this device");
+    const auto layout = bind.is_storage ? ImageLayout::shader_read_write
+                                        : ImageLayout::shader_read;
+    const auto [usage, inserted] = task_images.emplace(image.alloc_id, layout);
+    TI_ERROR_IF(!inserted && usage->second != layout,
+                "Prepared Vulkan Graph cannot bind one image as both sampled "
+                "and storage in the same task");
+    record_image_use(image, layout);
+    if (bind.is_storage) {
+      resources->rw_image(bind.binding, image, bind.lod);
+    } else {
+      TI_ERROR_IF(bind.uses_sampling && bind.comparison !=
+                      (image_sampler_configs_.at(image.alloc_id).compare_op >= 0),
+                  "Texture sampling operation and sampler compare_op do not match");
+      resources->image(bind.binding, image,
+                        image_sampler_configs_.at(image.alloc_id));
+    }
+  }
+}
+
 void GfxRuntime::prepare_detached_kernel_workspace(
     const CompiledTaichiKernel &kernel,
-    const std::shared_ptr<FixedGraphWorkspace> &workspace,
-    bool allow_private_images) {
+    const std::shared_ptr<FixedGraphWorkspace> &workspace) {
   TI_ERROR_IF(!workspace || workspace->device_ != device_,
               "Detached Graph requires same-device workspace");
   bool uses_global_tmps = false;
   const auto &tasks = kernel.ti_kernel_attribs().tasks_attribs;
   for (std::size_t i = 0; i < tasks.size(); ++i) {
-    TI_ERROR_IF((!allow_private_images && !tasks[i].texture_binds.empty()) ||
-                    !tasks[i].acceleration_structure_binds.empty() ||
+    TI_ERROR_IF(!tasks[i].acceleration_structure_binds.empty() ||
                     tasks[i].may_mutate_sparse_topology,
-                "Detached Graph requires buffer-only kernels without sparse mutation");
+                "Detached Graph cannot borrow acceleration structures or sparse mutation");
     for (const auto &bind : kernel.buffer_binding_plan(i)) {
       using BufferType = spirv::TaskAttributes::BufferType;
       uses_global_tmps |= bind.buffer.type == BufferType::GlobalTmps;
@@ -3245,7 +3310,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                 "Prepared Vulkan Graph requires fixed kernel dispatches");
     auto *kernel = found->second.get();
     if (detached)
-      prepare_detached_kernel_workspace(*kernel, workspace, true);
+      prepare_detached_kernel_workspace(*kernel, workspace);
     if (kernel->get_ret_buffer_size()) {
       const auto &result = dispatch.host_ctx->prepared_result;
       TI_ERROR_IF(!result || &result->device() != device_ ||
@@ -3512,65 +3577,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
           state.fixed_ray_resources.push_back(found->handle);
         }
       }
-      std::unordered_map<DeviceAllocationId, ImageLayout> task_images;
-      for (const auto &bind : tasks[i].texture_binds) {
-        const auto collection =
-            pd.host_ctx->texture_collections.find(bind.arg_id);
-        if (collection != pd.host_ctx->texture_collections.end()) {
-          TI_ERROR_IF(bind.is_storage || collection->second.empty(),
-                      "Prepared Vulkan Graph TextureCollection must be a "
-                      "nonempty sampled-image descriptor array");
-          std::vector<ImageSamplerConfig> samplers;
-          samplers.reserve(collection->second.size());
-          for (const auto image : collection->second) {
-            TI_ERROR_IF(image.device != device_ ||
-                            last_image_layouts_.find(image.alloc_id) ==
-                                last_image_layouts_.end(),
-                        "Prepared Vulkan Graph TextureCollection member is "
-                        "not owned by this device");
-            const auto [usage, inserted] =
-                task_images.emplace(image.alloc_id, ImageLayout::shader_read);
-            TI_ERROR_IF(!inserted &&
-                            usage->second != ImageLayout::shader_read,
-                        "Prepared Vulkan Graph cannot bind one image as both "
-                        "sampled and storage in the same task");
-            record_image_use(image, ImageLayout::shader_read);
-            const auto sampler = image_sampler_configs_.find(image.alloc_id);
-            TI_ERROR_IF(sampler == image_sampler_configs_.end(),
-                        "Prepared Vulkan Graph TextureCollection member has "
-                        "no sampler configuration");
-            TI_ERROR_IF(bind.uses_sampling && sampler->second.compare_op >= 0,
-                        "TextureCollection does not support comparison sampling");
-            samplers.push_back(sampler->second);
-          }
-          resources->image_array(bind.binding, collection->second, samplers);
-          continue;
-        }
-        const auto found = pd.host_ctx->array_ptrs.find(bind.arg_id);
-        TI_ERROR_IF(found == pd.host_ctx->array_ptrs.end() || !found->second,
-                    "Prepared Vulkan Graph image is unbound");
-        const auto image = *static_cast<DeviceAllocation *>(found->second);
-        TI_ERROR_IF(image.device != device_ ||
-                        last_image_layouts_.find(image.alloc_id) ==
-                            last_image_layouts_.end(),
-                    "Prepared Vulkan Graph image is not owned by this device");
-        const auto layout = bind.is_storage ? ImageLayout::shader_read_write
-                                            : ImageLayout::shader_read;
-        const auto [usage, inserted] = task_images.emplace(image.alloc_id, layout);
-        TI_ERROR_IF(!inserted && usage->second != layout,
-                    "Prepared Vulkan Graph cannot bind one image as both sampled "
-                    "and storage in the same task");
-        record_image_use(image, layout);
-        if (bind.is_storage) {
-          resources->rw_image(bind.binding, image, bind.lod);
-        } else {
-          TI_ERROR_IF(bind.uses_sampling && bind.comparison !=
-                          (image_sampler_configs_.at(image.alloc_id).compare_op >= 0),
-                      "Texture sampling operation and sampler compare_op do not match");
-          resources->image(bind.binding, image,
-                            image_sampler_configs_.at(image.alloc_id));
-        }
-      }
+      bind_graph_task_images(pd, i, resources.get(), record_image_use);
       TI_ERROR_IF(
           !bind_graph_task(pd, i, resources.get(), false, listgen.get(),
                            workspace ? workspace->global_tmps_.get() : nullptr),
@@ -4351,6 +4358,38 @@ bool GfxRuntime::launch_graph_impl(
           key.push_back(0xA003u);
           structure_key.push_back(0xA003u);
         }
+      } else if (detached &&
+                 (alloc_type == LaunchContextBuilder::DevAllocType::kTexture ||
+                  alloc_type == LaunchContextBuilder::DevAllocType::kRWTexture ||
+                  alloc_type ==
+                      LaunchContextBuilder::DevAllocType::kTextureCollection)) {
+        // Detached commands have immutable bindings. Include the allocation
+        // in both identities; image descriptors must never use buffer-only
+        // structural patching. Ownership is checked again during binding.
+        const auto add_image_key = [&](DeviceAllocation image) {
+          TI_ERROR_IF(!workspace || image.device != device_ ||
+                          !workspace->private_images_.count(image.alloc_id),
+                      "Independent Vulkan Graph requires a private managed image; "
+                      "borrowed images require a shared layout contract");
+          key.push_back(0xA007u);
+          structure_key.push_back(0xA007u);
+          push_graph_allocation_key(key, image);
+          push_graph_allocation_key(structure_key, image);
+        };
+        if (alloc_type == LaunchContextBuilder::DevAllocType::kTextureCollection) {
+          const auto found =
+              dispatch.host_ctx->texture_collections.find(array_arg.indices);
+          if (found == dispatch.host_ctx->texture_collections.end() ||
+              found->second.empty())
+            return reject();
+          for (const auto image : found->second)
+            add_image_key(image);
+        } else {
+          const auto found = dispatch.host_ctx->array_ptrs.find(array_arg.indices);
+          if (found == dispatch.host_ctx->array_ptrs.end() || !found->second)
+            return reject();
+          add_image_key(*static_cast<DeviceAllocation *>(found->second));
+        }
       } else {
         return reject();
       }
@@ -4362,7 +4401,7 @@ bool GfxRuntime::launch_graph_impl(
     }
     for (int task_index = 0; task_index < task_attribs.size(); ++task_index) {
       const auto &attribs = task_attribs[task_index];
-      if (!attribs.texture_binds.empty() ||
+      if ((!detached && !attribs.texture_binds.empty()) ||
           !attribs.acceleration_structure_binds.empty() ||
           (!prepare_only &&
            (attribs.task_type == OffloadedTaskType::listgen ||
@@ -5488,6 +5527,7 @@ bool GfxRuntime::launch_graph_impl(
       ShaderResourceSet *resources{nullptr};
       std::uint32_t group_x{0};
       StructuredBufferAccessMap accesses;
+      std::vector<std::pair<DeviceAllocation, ImageLayout>> images;
       bool global_read{false};
       bool global_write{false};
     };
@@ -5515,6 +5555,10 @@ bool GfxRuntime::launch_graph_impl(
         task.task_index = task_index;
         task.resources = resources;
         task.group_x = static_cast<std::uint32_t>(group_x);
+        bind_graph_task_images(pd, task_index, resources,
+                               [&](DeviceAllocation image, ImageLayout layout) {
+                                 task.images.emplace_back(image, layout);
+                               });
         for (const auto &bind : attribs.buffer_binds) {
           const bool may_read =
               (bind.access &
@@ -5575,6 +5619,36 @@ bool GfxRuntime::launch_graph_impl(
     const bool structured_hazard_planner_enabled =
         get_environ_config("TI_VULKAN_STRUCTURED_HAZARD_PLANNER", 1) != 0;
     StructuredBufferAccessMap pending_accesses;
+    // Barriers execute even inside a false conditional region, and indirect
+    // dispatch with zero groups also leaves them intact. Track the recorded
+    // layout sequence, then restore the private workspace boundary at every
+    // exit. This works for zero, early-exit and exhausted device loops.
+    std::unordered_map<DeviceAllocationId,
+                       std::pair<DeviceAllocation, ImageLayout>> image_layouts;
+    const auto record_task_images = [&](const StructuredTask &task) {
+      for (const auto &[image, layout] : task.images) {
+        TI_ASSERT(workspace);
+        const auto owned = workspace->private_images_.find(image.alloc_id);
+        TI_ERROR_IF(owned == workspace->private_images_.end(),
+                    "Independent Vulkan Graph requires a private managed image");
+        const auto previous = image_layouts.try_emplace(
+            image.alloc_id, image, owned->second.boundary).first;
+        const auto before = previous->second.second;
+        // GENERAL -> GENERAL needs a dependency as well: successive storage
+        // dispatches can read or overwrite the previous dispatch's writes.
+        if (before != layout || before == ImageLayout::shader_read_write)
+          cmdlist->image_transition(image, before, layout);
+        previous->second.second = layout;
+      }
+    };
+    const auto close_image_layouts = [&] {
+      for (const auto &[id, current] : image_layouts) {
+        const auto boundary = workspace->private_images_.at(id).boundary;
+        if (current.second != boundary ||
+            current.second == ImageLayout::shader_read_write)
+          cmdlist->image_transition(current.first, current.second, boundary);
+      }
+    };
     bool pending_global_read = false;
     bool pending_global_write = false;
     auto count_structured_barrier = [&](bool exit_boundary) {
@@ -5689,6 +5763,7 @@ bool GfxRuntime::launch_graph_impl(
         cmdlist->buffer_barrier(fixed_listgen->get_ptr(0), sizeof(uint32_t));
       }
       prepare_structured_task(task);
+      record_task_images(task);
       cmdlist->bind_pipeline(
           task.dispatch->kernel->get_pipeline(task.task_index));
       RhiResult status =
@@ -5925,6 +6000,8 @@ bool GfxRuntime::launch_graph_impl(
              BufferBarrierStage::Host, BufferBarrierAccess::HostRead});
       }
       flush_structured_pending(/*exit_boundary=*/true);
+
+      close_image_layouts();
 
       slot->key = std::move(key);
       slot->structure_key = std::move(structure_key);
@@ -6177,6 +6254,8 @@ bool GfxRuntime::launch_graph_impl(
            BufferBarrierAccess::HostRead});
     }
     flush_structured_pending(/*exit_boundary=*/true);
+
+    close_image_layouts();
 
     slot->key = std::move(key);
     slot->structure_key = std::move(structure_key);

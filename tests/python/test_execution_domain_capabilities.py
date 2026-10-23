@@ -28,6 +28,7 @@ VULKAN_NAMES = (
     "vulkan_execution_instance_retirement",
     "vulkan_execution_domain_while",
     "vulkan_execution_domain_private_images",
+    "vulkan_execution_domain_image_control",
 )
 
 

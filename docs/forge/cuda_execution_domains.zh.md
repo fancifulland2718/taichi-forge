@@ -76,8 +76,12 @@ native buffer 操作仍须具备适用的固定录制 factory。
 image：普通 compute 段可使用 sampled/storage image 和显式 color upload。各阶段共用
 固定边界布局，首次转换、初始化和重放都由所选域执行；资源创建时提供初始 pixels
 仍可能在冷准备阶段完成上传。图像保留到实例退休，无需每次提交查询布局或重建录制。
-这不包含外部借用 Texture/native image，也不包含设备 while 内的 image kernel。
-私有资源可在 AOT plan 的 `resources` 中声明；普通 JIT Texture 借用仍需独立的布局合同。
+`vulkan_execution_domain_image_control` 进一步支持已选设备 while 的条件和循环体中
+使用这些私有图像，包括分块和嵌套 recipe。每段录制都恢复相同边界布局，覆盖零轮、
+早停和预算耗尽；连续 storage 使用同样记录内存依赖，同一 task 内 sampled/storage
+别名在 prepare 阶段拒绝。私有资源可在 AOT plan 的 `resources` 中声明；外部借用
+Texture/native image（包括普通 JIT Texture）仍需独立的布局合同。Windows 验证覆盖
+双实例、下游显式 adjoint、准备失败清理和在途退休。
 独立 Vulkan 路线还不接纳 graphics、host selection、并行 recipe，以及共享
 sparse/RNG/runtime-error 状态。
 普通 Graph 保持既有能力；CUDA Canvas 和外部内存协议不会因此自动适用于 Vulkan 域。
