@@ -434,7 +434,7 @@ struct Exported {
   VulkanExternalBufferDescription description;
 };
 
-void qualify_submission(bool independent) {
+void qualify_submission(bool independent, bool compose = false) {
   VulkanDeviceCreator producer_creator(parameters()),
       consumer_creator(parameters());
   auto &pd = *producer_creator.device();
@@ -487,7 +487,8 @@ void qualify_submission(bool independent) {
       commands = std::move(created.first);
     }
     auto &vk = *static_cast<VulkanCommandList *>(commands.get());
-    imported->record_acquire(vk);
+    if (!compose)
+      imported->record_acquire(vk);
     const auto native_commands = vk.vk_command_buffer()->buffer;
     VkBufferCopy copy{0, 0, bytes};
     cd.vk_device().functions().vkCmdCopyBuffer(
@@ -510,7 +511,8 @@ void qualify_submission(bool independent) {
         nullptr, 2, barriers, 0, nullptr);
     cd.vk_device().functions().vkCmdUpdateBuffer(
         native_commands, imported->buffer, 0, bytes, after.data());
-    imported->record_release(vk);
+    if (!compose)
+      imported->record_release(vk);
     // Binary waits require the signal to have been submitted already. The
     // producer's host event holds that enqueued signal pending without a spin.
     HostGate gate(pd.vk_device());
@@ -529,8 +531,41 @@ void qualify_submission(bool independent) {
     std::shared_ptr<const VulkanExecutionQueue::Commands> fixed;
     try {
       if (independent) {
-        fixed = queue->prepare({commands.get()}, {}, {imported->ready()},
-                               {imported->consumed()});
+        std::weak_ptr<void> body_owner, boundary_owner;
+        if (compose) {
+          auto body_lifetime = std::make_shared<int>(1);
+          auto boundary_lifetime = std::make_shared<int>(2);
+          body_owner = body_lifetime;
+          boundary_owner = boundary_lifetime;
+          auto body = queue->prepare({commands.get()}, body_lifetime);
+          auto acquire = queue->new_command_list();
+          auto release = queue->new_command_list();
+          imported->record_acquire(*static_cast<VulkanCommandList *>(acquire.get()));
+          imported->record_release(*static_cast<VulkanCommandList *>(release.get()));
+          EXPECT_THROW(queue->prepare_external_access(
+                           nullptr, *acquire, *release, {imported->ready()},
+                           {imported->consumed()}),
+                       std::invalid_argument);
+          EXPECT_THROW(queue->prepare_external_access(
+                           body, *acquire, *release,
+                           {imported->ready(), imported->ready()},
+                           {imported->consumed()}),
+                       std::invalid_argument);
+          EXPECT_THROW(queue->prepare_external_access(
+                           body, *acquire, *release, {exported.ready},
+                           {imported->consumed()}),
+                       std::invalid_argument);
+          fixed = queue->prepare_external_access(
+              body, *acquire, *release, {imported->ready()},
+              {imported->consumed()}, boundary_lifetime);
+          EXPECT_THROW(queue->prepare_external_access(
+                           fixed, *acquire, *release, {imported->ready()},
+                           {imported->consumed()}),
+                       std::invalid_argument);
+        } else {
+          fixed = queue->prepare({commands.get()}, {}, {imported->ready()},
+                                 {imported->consumed()});
+        }
         std::vector<VulkanExecutionQueue::Point> dependencies;
         if (previous)
           dependencies.push_back(previous);
@@ -549,9 +584,17 @@ void qualify_submission(bool independent) {
         EXPECT_EQ(queue->pending(), 0);
         EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls,
                   before_submit);
+        const auto before_buffers =
+            cd.queue_submission_snapshot().submitted_command_buffers;
         previous = queue->submit(fixed, dependencies);
         EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls,
                   before_submit + 1);
+        EXPECT_EQ(cd.queue_submission_snapshot().submitted_command_buffers,
+                  before_buffers + (compose ? 3 : 1));
+        if (compose) {
+          EXPECT_FALSE(body_owner.expired());
+          EXPECT_FALSE(boundary_owner.expired());
+        }
         completion = previous;
         const auto before_busy = queue->latest();
         bool admitted = false;
@@ -606,6 +649,11 @@ TEST(VulkanExternalBufferImport,
 TEST(VulkanExternalBufferImport,
      IndependentQueueAdmissionAndMixedDependencies) {
   qualify_submission(true);
+}
+
+TEST(VulkanExternalBufferImport,
+     FrozenBodyCompositionPreservesAdmissionAndOwnership) {
+  qualify_submission(true, true);
 }
 
 // Inject errors into this device's immutable-in-production dispatch table.

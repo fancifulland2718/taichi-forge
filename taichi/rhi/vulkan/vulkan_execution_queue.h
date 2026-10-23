@@ -54,6 +54,17 @@ class VulkanExecutionQueue {
       std::shared_ptr<void> operands = {},
       const std::vector<vkapi::IVkSemaphore> &binary_waits = {},
       const std::vector<vkapi::IVkSemaphore> &binary_signals = {});
+  // Cold composition around an already selected immutable body. Reuses its
+  // exact command buffers and operand closure; no kernel recording or submit.
+  // The body must not already carry an external handshake. The caller supplies
+  // matching whole-resource barriers and retains epoch admission responsibility.
+  std::shared_ptr<const Commands> prepare_external_access(
+      std::shared_ptr<const Commands> body,
+      CommandList &acquire,
+      CommandList &release,
+      const std::vector<vkapi::IVkSemaphore> &binary_waits,
+      const std::vector<vkapi::IVkSemaphore> &binary_signals,
+      std::shared_ptr<void> operands = {});
   // All validation and admission precede this host-only callback. It may copy
   // into the selected preallocated slot and reserve a completion wrapper for
   // the unpublished point, but cannot submit/wait/reenter/publish the point.

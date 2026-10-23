@@ -261,6 +261,44 @@ VulkanExecutionQueue::prepare(
   return result;
 }
 
+std::shared_ptr<const VulkanExecutionQueue::Commands>
+VulkanExecutionQueue::prepare_external_access(
+    std::shared_ptr<const Commands> body,
+    CommandList &acquire,
+    CommandList &release,
+    const std::vector<vkapi::IVkSemaphore> &binary_waits,
+    const std::vector<vkapi::IVkSemaphore> &binary_signals,
+    std::shared_ptr<void> operands) {
+  if (!body || body->device != &state_->device ||
+      !body->binary_waits.empty() || !body->binary_signals.empty())
+    throw std::invalid_argument(
+        "External access requires an unbound body from this Vulkan device");
+  if (body->handles.size() > UINT32_MAX - 2u)
+    throw std::overflow_error("Vulkan command count exceeds uint32");
+  // Keep both original closures, including on partial construction failure.
+  // prepare() remains the single cold validator for family and semaphore facts.
+  const auto boundaries =
+      prepare({&acquire, &release}, std::move(operands), binary_waits,
+              binary_signals);
+  struct Closure {
+    std::shared_ptr<const Commands> body, boundaries;
+  };
+  auto result = std::shared_ptr<Commands>(new Commands);
+  result->device = body->device;
+  result->operands = std::make_shared<Closure>(Closure{body, boundaries});
+  result->binary_waits = boundaries->binary_waits;
+  result->binary_signals = boundaries->binary_signals;
+  result->buffers.reserve(body->buffers.size() + 2);
+  result->handles.reserve(body->handles.size() + 2);
+  result->buffers.push_back(boundaries->buffers.front());
+  result->buffers.insert(result->buffers.end(), body->buffers.begin(),
+                          body->buffers.end());
+  result->buffers.push_back(boundaries->buffers.back());
+  for (const auto &buffer : result->buffers)
+    result->handles.push_back(buffer->buffer);
+  return result;
+}
+
 VulkanExecutionQueue::Point VulkanExecutionQueue::submit(
     std::shared_ptr<const Commands> commands,
     const std::vector<Point> &dependencies,
