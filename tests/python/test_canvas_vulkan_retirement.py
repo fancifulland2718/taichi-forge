@@ -132,3 +132,36 @@ def test_vulkan_display_with_general_history_keeps_conservative_retirement():
         if release is not None:
             release.join()
         _close(resources, gates, tickets)
+
+
+@pytest.mark.skipif(not core.GGUI_AVAILABLE, reason="GGUI not available")
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_display_close_waits_its_graphics_reader():
+    resources = _setup()
+    output, _, window, canvas, frame, _, writer, tick = resources
+    gates, tickets = [], []
+    release = None
+    try:
+        source = writer.submit(values={"value": 0xFF332211})
+        tickets.append(source)
+        display = canvas.submit_frame(frame, source_completion=source,
+                                      track_source=True, track_completion=True)
+        assert display is not None
+        _ready(frame.source_completion)
+        graphics = VulkanQueueGate(output, graphics=True)
+        gates.append(graphics)
+        assert window.show() and not display.done()
+        late = VulkanQueueGate(output)
+        gates.append(late)
+        tail = tick.submit()
+        tickets.append(tail)
+        release = threading.Timer(0.05, graphics.release)
+        release.start()
+        window.destroy()
+        assert graphics.released and display.done()
+        assert not late.released and not tail.done()
+        assert all(not gate.timed_out for gate in gates)
+    finally:
+        if release is not None:
+            release.join()
+        _close(resources, gates, tickets)

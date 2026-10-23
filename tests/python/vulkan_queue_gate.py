@@ -23,7 +23,7 @@ class VulkanQueueGate:
     Always close gates before a Window/domain/runtime in a finally block.
     """
 
-    def __init__(self, domain, *, queue_index=None):
+    def __init__(self, domain, *, queue_index=None, graphics=False):
         self.domain = domain
         runtime = domain._runtime
         self.info = VkRuntimeInfo()
@@ -75,9 +75,16 @@ class VulkanQueueGate:
             C.POINTER(VkSubmit), C.c_uint64
         )
         self.queue = C.c_void_p()
-        self.queue_index = domain.info["queue_index"] if queue_index is None else queue_index
-        get_queue(self.info.device, self.info.compute_queue_family_index,
-                  self.queue_index, C.byref(self.queue))
+        if graphics and queue_index is not None:
+            raise ValueError("Choose the graphics queue or a compute queue index")
+        self.queue_index = None if graphics else (
+            domain.info["queue_index"] if queue_index is None else queue_index
+        )
+        if graphics:
+            self.queue.value = self.info.graphics_queue
+        else:
+            get_queue(self.info.device, self.info.compute_queue_family_index,
+                      self.queue_index, C.byref(self.queue))
         if not self.queue.value:
             raise RuntimeError("Vulkan queue gate requires an existing queue")
         self.semaphore, self.fence = C.c_uint64(), C.c_uint64()
