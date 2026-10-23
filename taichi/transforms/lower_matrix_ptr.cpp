@@ -72,6 +72,7 @@ class LowerAOSGlobalPtrStmt : public BasicStmtVisitor {
       std::unordered_set<Stmt *> &invalid_aos_global_ptr_stmts)
       : immediate_modifier_(node),
         invalid_aos_global_ptr_stmts_(invalid_aos_global_ptr_stmts) {
+    TI_AUTO_PROF;
     node->accept(this);
 
     delayed_modifier_.modify_ir();
@@ -89,7 +90,7 @@ class LowerAOSGlobalPtrStmt : public BasicStmtVisitor {
       new_stmt->ret_type = ret_type;
       new_stmt->ret_type.set_is_pointer(true);
 
-      stmt->replace_usages_with(new_stmt.get());
+      immediate_modifier_.replace_usages_with(stmt, new_stmt.get());
       delayed_modifier_.insert_before(stmt, std::move(new_stmt));
       delayed_modifier_.erase(stmt);
     }

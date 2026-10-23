@@ -1274,9 +1274,13 @@ class ExtractLocalPointers : public BasicStmtVisitor {
 class FuseMatrixPtr : public BasicStmtVisitor {
  private:
   using BasicStmtVisitor::visit;
+  ImmediateIRModifier uses_;
   DelayedIRModifier modifier_;
 
  public:
+  explicit FuseMatrixPtr(IRNode *node) : uses_(node) {
+  }
+
   void visit(MatrixPtrStmt *stmt) override {
     if (stmt->origin->is<ExternalPtrStmt>()) {
       auto origin = stmt->origin->as<ExternalPtrStmt>();
@@ -1308,7 +1312,9 @@ class FuseMatrixPtr : public BasicStmtVisitor {
           fused->ret_type.ptr_removed(), origin->ndim, needs_grad);
       origin->base_ptr->as<ArgLoadStmt>()->ret_type =
           TypeFactory::get_instance().get_pointer_type((Type *)type);
-      stmt->replace_usages_with(fused.get());
+      // All targets are fresh pointers; delayed insertions are not visited in
+      // this pass. Original operand slots therefore remain a complete index.
+      uses_.replace_usages_with(stmt, fused.get());
       modifier_.insert_before(stmt, std::move(fused));
       modifier_.erase(stmt);
       return;
@@ -1332,7 +1338,7 @@ class FuseMatrixPtr : public BasicStmtVisitor {
           input_ptr, input_snode, origin->chid + offset, is_bit_vectorized);
       new_get_ch_stmt->ret_type = stmt->ret_type;
 
-      stmt->replace_usages_with(new_get_ch_stmt.get());
+      uses_.replace_usages_with(stmt, new_get_ch_stmt.get());
       modifier_.insert_before(stmt, std::move(new_get_ch_stmt));
       modifier_.erase(stmt);
       return;
@@ -1341,7 +1347,7 @@ class FuseMatrixPtr : public BasicStmtVisitor {
 
   static bool run(IRNode *node) {
     TI_AUTO_PROF;
-    FuseMatrixPtr pass;
+    FuseMatrixPtr pass(node);
     node->accept(&pass);
     return pass.modifier_.modify_ir();
   }
