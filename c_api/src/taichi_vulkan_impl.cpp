@@ -374,7 +374,14 @@ TiImage ti_import_vulkan_image(TiRuntime runtime,
   taichi::lang::DeviceAllocation image2 =
       vk_runtime.import_vk_image(image, image_view, layout);
 
-  static_cast<VulkanRuntime *>(runtime2)->track_image(image2, *layout2);
+  try {
+    static_cast<VulkanRuntime *>(runtime2)->track_image(image2, *layout2);
+  } catch (...) {
+    // A shared managed owner can reject an imported alias. Release this new
+    // wrapper/view; the external VkImage itself still belongs to its caller.
+    vk_runtime.destroy_image(image2);
+    throw;
+  }
 
   out = devalloc2devimg(*runtime2, image2);
   TI_CAPI_TRY_CATCH_END();
