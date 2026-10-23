@@ -30,8 +30,9 @@ StmtUseIndex::StmtUseIndex(IRNode *root) {
   rebuild(root);
 }
 
-void StmtUseIndex::rebuild(IRNode *root) {
+void StmtUseIndex::rebuild(IRNode *root, Block *definition_block) {
   uses_.clear();
+  definition_block_ = definition_block;
   valid_ = true;
   IndexBuilder builder(*this);
   root->accept(&builder);
@@ -49,8 +50,10 @@ bool StmtUseIndex::valid() const {
 void StmtUseIndex::add_user(Stmt *stmt) {
   TI_ASSERT(valid_);
   for (int i = 0; i < stmt->num_operands(); ++i) {
-    if (auto *operand = stmt->operand(i))
-      uses_[operand].insert(stmt);
+    if (auto *operand = stmt->operand(i)) {
+      if (!definition_block_ || operand->parent == definition_block_)
+        uses_[operand].insert(stmt);
+    }
   }
 }
 
@@ -88,7 +91,8 @@ void StmtUseIndex::replace_uses(Stmt *old_stmt,
     if (user->erased)
       continue;
     user->replace_operand_with(old_stmt, new_stmt);
-    if (new_stmt)
+    if (new_stmt &&
+        (!definition_block_ || new_stmt->parent == definition_block_))
       uses_[new_stmt].insert(user);
     if (on_change)
       on_change(user);

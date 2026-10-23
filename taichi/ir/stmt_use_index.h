@@ -8,6 +8,7 @@ namespace taichi::lang {
 
 class IRNode;
 class Stmt;
+class Block;
 
 // A pass-scoped index of registered operands, including container operands.
 // The owner must register inserted statements, remove users before changing
@@ -24,7 +25,9 @@ class StmtUseIndex {
   StmtUseIndex() = default;
   explicit StmtUseIndex(IRNode *root);
 
-  void rebuild(IRNode *root);
+  // A pass rewriting only definitions in one block can omit all other
+  // definitions from its index. Users may still be in descendant blocks.
+  void rebuild(IRNode *root, Block *definition_block = nullptr);
   void invalidate();
   bool valid() const;
 
@@ -43,6 +46,7 @@ class StmtUseIndex {
 
  private:
   std::unordered_map<Stmt *, Users> uses_;
+  Block *definition_block_{nullptr};
   bool valid_{false};
 };
 

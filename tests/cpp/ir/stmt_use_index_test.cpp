@@ -111,5 +111,29 @@ TEST(StmtUseIndex, UnknownMutationRequiresRebuildAndNullOperandsAreIgnored) {
   EXPECT_TRUE(index.users(nullptr).empty());
 }
 
+TEST(StmtUseIndex, BlockDefinitionScopeStillReachesDescendantUsers) {
+  auto root = std::make_unique<Block>();
+  auto first = root->push_back<ConstStmt>(TypedConstant(1));
+  auto second = root->push_back<ConstStmt>(TypedConstant(2));
+  auto branch = root->push_back<IfStmt>(first)->as<IfStmt>();
+  branch->set_true_statements(std::make_unique<Block>());
+  auto inside =
+      branch->true_statements->push_back<UnaryOpStmt>(UnaryOpType::neg, first);
+  auto nested_user =
+      branch->true_statements->push_back<UnaryOpStmt>(UnaryOpType::neg, inside);
+  StmtUseIndex index;
+  index.rebuild(root.get(), root.get());
+  EXPECT_EQ(index.users(first).size(), 2);
+  EXPECT_TRUE(index.users(inside).empty());
+  index.replace_uses(first, second);
+  EXPECT_EQ(branch->operand(0), second);
+  EXPECT_EQ(inside->operand(0), second);
+  EXPECT_EQ(nested_user->operand(0), inside);
+  index.replace_uses(second, first);
+  EXPECT_EQ(inside->operand(0), first);
+  index.rebuild(root.get());
+  EXPECT_EQ(index.users(inside).size(), 1);
+}
+
 }  // namespace
 }  // namespace taichi::lang

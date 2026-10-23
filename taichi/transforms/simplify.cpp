@@ -81,17 +81,21 @@ class BasicBlockSimplify : public IRVisitor {
     visited.insert(stmt->instance_id);
   }
 
-  void replace_usages(Stmt *stmt, Stmt *replacement) {
-    if (!uses_.valid()) {
-      uses_.rebuild(block);
-      // Match the existing replacement scope: descendants plus registered
-      // operands in ancestor blocks, without walking sibling subtrees.
-      for (auto *parent = block->parent_block(); parent;
-           parent = parent->parent_block()) {
-        for (auto &ancestor_stmt : parent->statements)
-          uses_.add_user(ancestor_stmt.get());
-      }
+  void prepare_use_index() {
+    TI_AUTO_PROF;
+    uses_.rebuild(block, block);
+    // Match the existing replacement scope: descendants plus registered
+    // operands in ancestor blocks, without walking sibling subtrees.
+    for (auto *parent = block->parent_block(); parent;
+         parent = parent->parent_block()) {
+      for (auto &ancestor_stmt : parent->statements)
+        uses_.add_user(ancestor_stmt.get());
     }
+  }
+
+  void replace_usages(Stmt *stmt, Stmt *replacement) {
+    if (!uses_.valid())
+      prepare_use_index();
     uses_.replace_uses(stmt, replacement);
   }
 
