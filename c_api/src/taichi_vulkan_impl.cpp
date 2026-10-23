@@ -1,5 +1,6 @@
 #ifdef TI_WITH_VULKAN
 #include "taichi_vulkan_impl.h"
+#include "vulkan_image_layout.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/common/utils.h"
 #include "taichi/program/runtime_fault.h"
@@ -327,6 +328,13 @@ TiImage ti_import_vulkan_image(TiRuntime runtime,
   TI_CAPI_ARGUMENT_NULL_RV(interop_info->image);
   TI_CAPI_INVALID_INTEROP_ARCH_RV(((Runtime *)runtime)->arch, vulkan);
 
+  const auto layout2 = capi::decode_vulkan_image_import_layout(layout);
+  if (!layout2) {
+    ti_set_last_error(TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+                      "layout is not representable by Vulkan image import");
+    return TI_NULL_HANDLE;
+  }
+
   Runtime *runtime2 = ((Runtime *)runtime)->as_vk();
   taichi::lang::vulkan::VulkanDevice &vk_runtime =
       static_cast<VulkanRuntime *>(runtime2)->get_vk();
@@ -366,8 +374,7 @@ TiImage ti_import_vulkan_image(TiRuntime runtime,
   taichi::lang::DeviceAllocation image2 =
       vk_runtime.import_vk_image(image, image_view, layout);
 
-  taichi::lang::ImageLayout layout2 = (taichi::lang::ImageLayout)layout;
-  static_cast<VulkanRuntime *>(runtime2)->track_image(image2, layout2);
+  static_cast<VulkanRuntime *>(runtime2)->track_image(image2, *layout2);
 
   out = devalloc2devimg(*runtime2, image2);
   TI_CAPI_TRY_CATCH_END();

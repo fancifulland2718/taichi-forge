@@ -148,6 +148,11 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Autodiff and backend correctness
 
+- Vulkan C API image import translates the supplied `VkImageLayout` explicitly
+  instead of casting it to a different internal enum. The first transition now
+  preserves the external layout; layouts without an exact internal representation
+  are rejected before allocating a view. Import does not transfer queue ownership
+  or wait for an external producer.
 - Fixes cover reverse-loop values/scopes, local struct initialization and loop ordering, plus forward
   tensor shapes, dynamic component writes and zero-tangent singularities. Zero/one exponents avoid
   unnecessary invalid derivative terms.

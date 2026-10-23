@@ -131,7 +131,15 @@ ti_export_vulkan_memory(TiRuntime runtime,
 
 // Function `ti_import_vulkan_image` (1.4.0)
 //
-// Imports the Vulkan image owned by Taichi to external procedures.
+// Imports an externally owned Vulkan image into Taichi. The owner must keep the
+// image alive until imported-image use completes and the imported handle is freed.
+// `layout` is the image's current VkImageLayout; importing does not transition it.
+// Supported layouts are UNDEFINED, GENERAL, COLOR_ATTACHMENT_OPTIMAL,
+// DEPTH_STENCIL_ATTACHMENT_OPTIMAL, DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+// SHADER_READ_ONLY_OPTIMAL, TRANSFER_SRC_OPTIMAL, TRANSFER_DST_OPTIMAL and
+// PRESENT_SRC_KHR. Other layouts return null with TI_ERROR_ARGUMENT_OUT_OF_RANGE
+// before creating an image view. Queue ownership and producer completion remain
+// the caller's responsibility.
 TI_DLL_EXPORT TiImage TI_API_CALL
 ti_import_vulkan_image(TiRuntime runtime,
                        const TiVulkanImageInteropInfo *interop_info,
@@ -140,7 +148,7 @@ ti_import_vulkan_image(TiRuntime runtime,
 
 // Function `ti_export_vulkan_image` (1.4.0)
 //
-// Exports a Vulkan image from external procedures to Taichi.
+// Exports a Taichi image's Vulkan handles to external procedures.
 TI_DLL_EXPORT void TI_API_CALL
 ti_export_vulkan_image(TiRuntime runtime,
                        TiImage image,
