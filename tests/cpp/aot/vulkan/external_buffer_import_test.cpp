@@ -1,0 +1,732 @@
+// Windows RHI qualification, not an execution-domain or Flora capability gate.
+#if defined(TI_WITH_VULKAN) && defined(_WIN64)
+#include "gtest/gtest.h"
+#include "taichi/rhi/vulkan/vulkan_device_creator.h"
+#include "taichi/rhi/vulkan/vulkan_device.h"
+#include "taichi/rhi/vulkan/vulkan_external_buffer.h"
+#include <array>
+#include <cstring>
+#include <memory>
+#include <stdexcept>
+#include <cstdlib>
+
+namespace {
+using taichi::lang::vulkan::VulkanCommandList;
+using taichi::lang::vulkan::VulkanDevice;
+using taichi::lang::vulkan::VulkanDeviceCreator;
+using taichi::lang::vulkan::VulkanExternalBuffer;
+using taichi::lang::vulkan::VulkanExternalBufferDescription;
+using taichi::lang::vulkan::VulkanExternalBufferHandles;
+using taichi::lang::vulkan::VulkanStream;
+using taichi::lang::vulkan::VulkanStreamSemaphoreObject;
+constexpr VkDeviceSize bytes = 4 * sizeof(uint32_t);
+constexpr auto memory_handle_type =
+    VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+constexpr auto semaphore_handle_type =
+    VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+VulkanDeviceCreator::Params parameters() {
+  VulkanDeviceCreator::Params result;
+  result.enable_validation_layer = true;
+  if (const auto index = std::getenv("TI_TEST_VULKAN_DEVICE_INDEX"))
+    result.device_index = std::stoul(index);
+  return result;
+}
+
+void checked(VkResult result) {
+  if (result != VK_SUCCESS)
+    throw std::runtime_error("Vulkan probe result " + std::to_string(result));
+}
+
+struct NativeHandle {
+  HANDLE handle{};
+  ~NativeHandle() {
+    if (handle)
+      CloseHandle(handle);
+  }
+};
+
+struct HostGate {
+  explicit HostGate(vkapi::DeviceHandle device) : device(device) {
+    VkEventCreateInfo info{VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
+    checked(device.functions().vkCreateEvent(device, &info, nullptr, &event));
+  }
+  ~HostGate() {
+    device.functions().vkSetEvent(device, event);
+    if (pending_fence)
+      device.functions().vkWaitForFences(device, 1, &pending_fence, VK_TRUE,
+                                         UINT64_MAX);
+    device.functions().vkDestroyEvent(device, event, nullptr);
+  }
+  void release() {
+    checked(device.functions().vkSetEvent(device, event));
+  }
+  vkapi::DeviceHandle device;
+  VkEvent event{};
+  VkFence pending_fence{};
+};
+
+struct Buffer {
+  vkapi::DeviceHandle device;
+  VkBuffer buffer{};
+  VkDeviceMemory memory{};
+  VkDeviceSize allocation_size{};
+  uint32_t memory_type{};
+  VkBufferUsageFlags usage{};
+  VkMemoryAllocateFlags allocation_flags{};
+  ~Buffer() {
+    if (buffer)
+      device.functions().vkDestroyBuffer(device, buffer, nullptr);
+    if (memory)
+      device.functions().vkFreeMemory(device, memory, nullptr);
+  }
+};
+
+std::unique_ptr<Buffer> make_buffer(VulkanDevice &device,
+                                    bool external,
+                                    const Buffer *producer = nullptr,
+                                    HANDLE imported = nullptr,
+                                    bool padded = false,
+                                    bool address = false) {
+  auto result = std::make_unique<Buffer>();
+  result->device = device.vk_device();
+  const auto &api = result->device.functions();
+  VkExternalMemoryBufferCreateInfo sharing{
+      VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+  sharing.handleTypes = memory_handle_type;
+  VkBufferCreateInfo create{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  create.pNext = external ? &sharing : nullptr;
+  create.size = bytes;
+  create.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  if (address)
+    create.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+  result->usage = create.usage;
+  result->allocation_flags =
+      address ? VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT : 0;
+  create.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  checked(
+      api.vkCreateBuffer(result->device, &create, nullptr, &result->buffer));
+  VkMemoryRequirements requirements{};
+  api.vkGetBufferMemoryRequirements(result->device, result->buffer,
+                                    &requirements);
+  VkPhysicalDeviceMemoryProperties properties{};
+  result->device.instance_functions().vkGetPhysicalDeviceMemoryProperties(
+      device.vk_physical_device(), &properties);
+  result->allocation_size = requirements.size;
+  if (padded)
+    result->allocation_size += requirements.alignment;
+  if (producer) {
+    result->memory_type = producer->memory_type;
+    result->allocation_size = producer->allocation_size;
+    if (!(requirements.memoryTypeBits & (1u << result->memory_type)) ||
+        requirements.size > result->allocation_size)
+      throw std::runtime_error("Import requirements differ from the producer");
+  } else {
+    const auto required = external ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                                   : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    bool found = false;
+    for (uint32_t i = 0; i < properties.memoryTypeCount; ++i)
+      if ((requirements.memoryTypeBits & (1u << i)) &&
+          (properties.memoryTypes[i].propertyFlags & required) == required) {
+        result->memory_type = i;
+        found = true;
+        break;
+      }
+    if (!found)
+      throw std::runtime_error("No required memory type");
+  }
+  VkMemoryDedicatedAllocateInfo dedicated{
+      VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+  dedicated.buffer = result->buffer;
+  VkMemoryAllocateFlagsInfo flags{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+  flags.flags = result->allocation_flags;
+  dedicated.pNext = &flags;
+  VkExportMemoryAllocateInfo export_info{
+      VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
+  export_info.handleTypes = memory_handle_type;
+  export_info.pNext = &dedicated;
+  VkImportMemoryWin32HandleInfoKHR import_info{
+      VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR};
+  import_info.handleType = memory_handle_type;
+  import_info.handle = imported;
+  import_info.pNext = &dedicated;
+  VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  allocation.allocationSize = result->allocation_size;
+  allocation.memoryTypeIndex = result->memory_type;
+  allocation.pNext = imported   ? static_cast<void *>(&import_info)
+                     : external ? static_cast<void *>(&export_info)
+                                : nullptr;
+  checked(api.vkAllocateMemory(result->device, &allocation, nullptr,
+                               &result->memory));
+  checked(api.vkBindBufferMemory(result->device, result->buffer, result->memory,
+                                 0));
+  return result;
+}
+
+struct Endpoint {
+  explicit Endpoint(VulkanDevice &source)
+      : device(source), native(source.vk_device()) {
+    auto &api = native.functions();
+    api.vkGetDeviceQueue(native, source.compute_queue_family_index(), 0,
+                         &queue);
+    VkCommandPoolCreateInfo pool_info{
+        VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pool_info.queueFamilyIndex = source.compute_queue_family_index();
+    checked(api.vkCreateCommandPool(native, &pool_info, nullptr, &pool));
+    VkCommandBufferAllocateInfo allocate{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocate.commandPool = pool;
+    allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate.commandBufferCount = 1;
+    checked(api.vkAllocateCommandBuffers(native, &allocate, &commands));
+    VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    checked(api.vkCreateFence(native, &fence_info, nullptr, &fence));
+    readback = make_buffer(source, false);
+  }
+  ~Endpoint() {
+    if (fence)
+      native.functions().vkDestroyFence(native, fence, nullptr);
+    if (pool)
+      native.functions().vkDestroyCommandPool(native, pool, nullptr);
+  }
+  void begin() {
+    checked(native.functions().vkResetFences(native, 1, &fence));
+    checked(native.functions().vkResetCommandBuffer(commands, 0));
+    VkCommandBufferBeginInfo begin_info{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    checked(native.functions().vkBeginCommandBuffer(commands, &begin_info));
+  }
+  void barrier(Buffer &buffer,
+               VkAccessFlags src,
+               VkAccessFlags dst,
+               uint32_t from = VK_QUEUE_FAMILY_IGNORED,
+               uint32_t to = VK_QUEUE_FAMILY_IGNORED) {
+    VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    b.srcAccessMask = src;
+    b.dstAccessMask = dst;
+    b.srcQueueFamilyIndex = from;
+    b.dstQueueFamilyIndex = to;
+    b.buffer = buffer.buffer;
+    b.size = bytes;
+    const auto dst_stage = dst & VK_ACCESS_HOST_READ_BIT
+                               ? VK_PIPELINE_STAGE_HOST_BIT
+                               : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    native.functions().vkCmdPipelineBarrier(
+        commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dst_stage, 0, 0, nullptr,
+        1, &b, 0, nullptr);
+  }
+  void acquire(Buffer &buffer) {
+    barrier(buffer, 0,
+            VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_QUEUE_FAMILY_EXTERNAL, device.compute_queue_family_index());
+  }
+  void release(Buffer &buffer) {
+    barrier(buffer, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            0, device.compute_queue_family_index(), VK_QUEUE_FAMILY_EXTERNAL);
+  }
+  void copy(Buffer &buffer) {
+    VkBufferCopy copy{0, 0, bytes};
+    native.functions().vkCmdCopyBuffer(commands, buffer.buffer,
+                                       readback->buffer, 1, &copy);
+    barrier(*readback, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+  }
+  void update(Buffer &buffer, const std::array<uint32_t, 4> &values) {
+    native.functions().vkCmdUpdateBuffer(commands, buffer.buffer, 0, bytes,
+                                         values.data());
+  }
+  void submit(VkSemaphore wait = {}, VkSemaphore signal = {}) {
+    checked(native.functions().vkEndCommandBuffer(commands));
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkSubmitInfo submit_info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &commands;
+    submit_info.waitSemaphoreCount = wait ? 1 : 0;
+    submit_info.pWaitSemaphores = &wait;
+    submit_info.pWaitDstStageMask = &stage;
+    submit_info.signalSemaphoreCount = signal ? 1 : 0;
+    submit_info.pSignalSemaphores = &signal;
+    checked(native.functions().vkQueueSubmit(queue, 1, &submit_info, fence));
+  }
+  void wait() {
+    checked(native.functions().vkWaitForFences(native, 1, &fence, VK_TRUE,
+                                               2'000'000'000));
+  }
+  void expect(const std::array<uint32_t, 4> &values) {
+    void *pointer = nullptr;
+    checked(native.functions().vkMapMemory(native, readback->memory, 0, bytes,
+                                           0, &pointer));
+    std::array<uint32_t, 4> observed{};
+    std::memcpy(observed.data(), pointer, bytes);
+    native.functions().vkUnmapMemory(native, readback->memory);
+    EXPECT_EQ(observed, values);
+  }
+  VulkanDevice &device;
+  vkapi::DeviceHandle native;
+  VkQueue queue{};
+  VkCommandPool pool{};
+  VkCommandBuffer commands{};
+  VkFence fence{};
+  std::unique_ptr<Buffer> readback;
+};
+
+vkapi::IVkSemaphore semaphore(const vkapi::DeviceHandle &device,
+                              bool exported,
+                              HANDLE imported = nullptr) {
+  VkExportSemaphoreCreateInfo export_info{
+      VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO};
+  export_info.handleTypes = semaphore_handle_type;
+  auto result =
+      vkapi::create_semaphore(device, 0, exported ? &export_info : nullptr);
+  if (!result)
+    throw std::runtime_error("Cannot create semaphore");
+  if (imported) {
+    VkImportSemaphoreWin32HandleInfoKHR info{
+        VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR};
+    info.semaphore = result->semaphore;
+    info.handleType = semaphore_handle_type;
+    info.handle = imported;
+    checked(device.functions().vkImportSemaphoreWin32HandleKHR(device, &info));
+  }
+  return result;
+}
+
+TEST(VulkanWin32ExternalProbe, FourElementsAcrossTwoDevicesAndEightEpochs) {
+  auto params = parameters();
+  VulkanDeviceCreator producer_creator(params), consumer_creator(params);
+  auto &p_device = *producer_creator.device();
+  auto &c_device = *consumer_creator.device();
+  ASSERT_NE(static_cast<VkDevice>(p_device.vk_device()),
+            static_cast<VkDevice>(c_device.vk_device()));
+  ASSERT_TRUE(p_device.vk_caps().external_memory &&
+              p_device.vk_caps().external_semaphore);
+  ASSERT_TRUE(c_device.vk_caps().external_memory &&
+              c_device.vk_caps().external_semaphore);
+  auto identity = [](VulkanDevice &device) {
+    VkPhysicalDeviceIDProperties ids{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    properties.pNext = &ids;
+    device.vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
+        device.vk_physical_device(), &properties);
+    return ids;
+  };
+  const auto p_id = identity(p_device), c_id = identity(c_device);
+  ASSERT_EQ(std::memcmp(p_id.deviceUUID, c_id.deviceUUID, VK_UUID_SIZE), 0);
+  ASSERT_EQ(std::memcmp(p_id.driverUUID, c_id.driverUUID, VK_UUID_SIZE), 0);
+  auto source = make_buffer(p_device, true);
+  std::unique_ptr<Buffer> imported;
+  auto ready = semaphore(p_device.vk_device(), true);
+  auto consumed = semaphore(p_device.vk_device(), true);
+  vkapi::IVkSemaphore imported_ready, imported_consumed;
+  {
+    NativeHandle memory_handle, ready_handle, consumed_handle;
+    VkMemoryGetWin32HandleInfoKHR memory_info{
+        VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR};
+    memory_info.memory = source->memory;
+    memory_info.handleType = memory_handle_type;
+    checked(p_device.vk_device().functions().vkGetMemoryWin32HandleKHR(
+        p_device.vk_device(), &memory_info, &memory_handle.handle));
+    VkSemaphoreGetWin32HandleInfoKHR sem_info{
+        VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR};
+    sem_info.handleType = semaphore_handle_type;
+    sem_info.semaphore = ready->semaphore;
+    checked(p_device.vk_device().functions().vkGetSemaphoreWin32HandleKHR(
+        p_device.vk_device(), &sem_info, &ready_handle.handle));
+    sem_info.semaphore = consumed->semaphore;
+    checked(p_device.vk_device().functions().vkGetSemaphoreWin32HandleKHR(
+        p_device.vk_device(), &sem_info, &consumed_handle.handle));
+    imported = make_buffer(c_device, true, source.get(), memory_handle.handle);
+    imported_ready =
+        semaphore(c_device.vk_device(), false, ready_handle.handle);
+    imported_consumed =
+        semaphore(c_device.vk_device(), false, consumed_handle.handle);
+  }  // Close all exported NT handles before either device uses the payload.
+  Endpoint producer(p_device), consumer(c_device);
+  for (uint32_t epoch = 0; epoch < 8; ++epoch) {
+    const std::array<uint32_t, 4> before{
+        {epoch, 0x80000001u + epoch, 17u, 0xffffff00u + epoch}};
+    const std::array<uint32_t, 4> after{
+        {epoch + 100u, 0x81234567u, 29u, 0xfffffe00u + epoch}};
+    producer.begin();
+    if (epoch)
+      producer.barrier(*source, VK_ACCESS_TRANSFER_READ_BIT,
+                       VK_ACCESS_TRANSFER_WRITE_BIT);
+    producer.update(*source, before);
+    producer.release(*source);
+    producer.submit({}, ready->semaphore);
+    consumer.begin();
+    consumer.acquire(*imported);
+    consumer.copy(*imported);
+    consumer.barrier(*imported, VK_ACCESS_TRANSFER_READ_BIT,
+                     VK_ACCESS_TRANSFER_WRITE_BIT);
+    consumer.update(*imported, after);
+    consumer.release(*imported);
+    consumer.submit(imported_ready->semaphore, imported_consumed->semaphore);
+    consumer.wait();
+    consumer.expect(before);
+    producer.wait();
+    producer.begin();
+    producer.acquire(*source);
+    producer.copy(*source);
+    producer.submit(consumed->semaphore);
+    producer.wait();
+    producer.expect(after);
+  }
+  std::cout
+      << "opaque_win32_roundtrip_epochs=8 elements=4 matching_memory_type="
+      << source->memory_type << " allocation_bytes=" << source->allocation_size
+      << '\n';
+}
+
+struct Exported {
+  explicit Exported(VulkanDevice &device,
+                    bool padded = false,
+                    bool address = false) {
+    source = make_buffer(device, true, nullptr, nullptr, padded, address);
+    ready = semaphore(device.vk_device(), true);
+    consumed = semaphore(device.vk_device(), true);
+    VkMemoryGetWin32HandleInfoKHR memory_info{
+        VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR};
+    memory_info.memory = source->memory;
+    memory_info.handleType = memory_handle_type;
+    checked(device.vk_device().functions().vkGetMemoryWin32HandleKHR(
+        device.vk_device(), &memory_info, &memory_handle.handle));
+    VkSemaphoreGetWin32HandleInfoKHR info{
+        VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR};
+    info.handleType = semaphore_handle_type;
+    info.semaphore = ready->semaphore;
+    checked(device.vk_device().functions().vkGetSemaphoreWin32HandleKHR(
+        device.vk_device(), &info, &ready_handle.handle));
+    info.semaphore = consumed->semaphore;
+    checked(device.vk_device().functions().vkGetSemaphoreWin32HandleKHR(
+        device.vk_device(), &info, &consumed_handle.handle));
+    description.size = bytes;
+    description.allocation_size = source->allocation_size;
+    description.memory_type_index = source->memory_type;
+    description.usage = source->usage;
+    description.allocation_flags = source->allocation_flags;
+    VkPhysicalDeviceIDProperties ids{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+    VkPhysicalDeviceProperties2 props{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    props.pNext = &ids;
+    device.vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
+        device.vk_physical_device(), &props);
+    std::copy_n(ids.deviceUUID, VK_UUID_SIZE, description.device_uuid.begin());
+    std::copy_n(ids.driverUUID, VK_UUID_SIZE, description.driver_uuid.begin());
+  }
+  VulkanExternalBufferHandles handles() const {
+    return {reinterpret_cast<uintptr_t>(memory_handle.handle),
+            reinterpret_cast<uintptr_t>(ready_handle.handle),
+            reinterpret_cast<uintptr_t>(consumed_handle.handle)};
+  }
+  std::unique_ptr<Buffer> source;
+  vkapi::IVkSemaphore ready, consumed;
+  NativeHandle memory_handle, ready_handle, consumed_handle;
+  VulkanExternalBufferDescription description;
+};
+
+TEST(VulkanExternalBufferImport,
+     RhiSubmissionPendingReadyAndResourceRetention) {
+  VulkanDeviceCreator producer_creator(parameters()),
+      consumer_creator(parameters());
+  auto &pd = *producer_creator.device();
+  auto &cd = *consumer_creator.device();
+  // Preserve producer flags, including optional device address.
+  Exported exported(pd, false, cd.vk_caps().buffer_device_address);
+  auto imported = VulkanExternalBuffer::import_borrowed(
+      cd, exported.description, exported.handles());
+  std::weak_ptr<VulkanExternalBuffer> weak = imported;
+  // Caller originals are still valid, then closed before any GPU use.
+  for (auto handle : {&exported.memory_handle, &exported.ready_handle,
+                      &exported.consumed_handle}) {
+    DWORD flags{};
+    EXPECT_TRUE(GetHandleInformation(handle->handle, &flags));
+    CloseHandle(handle->handle);
+    handle->handle = nullptr;
+  }
+  auto ready = std::make_shared<VulkanStreamSemaphoreObject>(
+      cd.backend_fault_reporter(), imported->ready());
+  auto consumed = std::make_shared<VulkanStreamSemaphoreObject>(
+      cd.backend_fault_reporter(), imported->consumed());
+  auto &stream = *static_cast<VulkanStream *>(cd.get_compute_stream());
+  Endpoint producer(pd), readback(cd);
+  for (uint32_t epoch = 0; epoch < 8; ++epoch) {
+    const std::array<uint32_t, 4> before{
+        {epoch, 0x80000001u + epoch, 17u, 0xffffff00u + epoch}};
+    const std::array<uint32_t, 4> after{
+        {epoch + 100u, 0x81234567u, 29u, 0xfffffe00u + epoch}};
+    auto [commands, result] = stream.new_command_list_unique();
+    ASSERT_EQ(result, taichi::lang::RhiResult::success);
+    auto &vk = *static_cast<VulkanCommandList *>(commands.get());
+    imported->record_acquire(vk);
+    const auto native_commands = vk.vk_command_buffer()->buffer;
+    VkBufferCopy copy{0, 0, bytes};
+    cd.vk_device().functions().vkCmdCopyBuffer(
+        native_commands, imported->buffer, readback.readback->buffer, 1, &copy);
+    VkBufferMemoryBarrier barriers[2]{};
+    for (auto &b : barriers) {
+      b.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+      b.size = bytes;
+      b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    }
+    barriers[0].buffer = readback.readback->buffer;
+    barriers[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barriers[0].dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    barriers[1].buffer = imported->buffer;
+    barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    cd.vk_device().functions().vkCmdPipelineBarrier(
+        native_commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+        nullptr, 2, barriers, 0, nullptr);
+    cd.vk_device().functions().vkCmdUpdateBuffer(
+        native_commands, imported->buffer, 0, bytes, after.data());
+    imported->record_release(vk);
+    // Binary waits require the signal to have been submitted already. The
+    // producer's host event holds that enqueued signal pending without a spin.
+    HostGate gate(pd.vk_device());
+    producer.begin();
+    pd.vk_device().functions().vkCmdWaitEvents(
+        producer.commands, 1, &gate.event, VK_PIPELINE_STAGE_HOST_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, nullptr, 0, nullptr, 0, nullptr);
+    if (epoch)
+      producer.barrier(*exported.source, VK_ACCESS_TRANSFER_READ_BIT,
+                       VK_ACCESS_TRANSFER_WRITE_BIT);
+    producer.update(*exported.source, before);
+    producer.release(*exported.source);
+    producer.submit({}, exported.ready->semaphore);
+    gate.pending_fence = producer.fence;
+    taichi::lang::StreamSemaphore completion;
+    try {
+      completion =
+          stream.submit_with_semaphores(commands.get(), {ready}, {consumed});
+    } catch (const taichi::lang::BackendRuntimeError &error) {
+      std::cerr << "RHI submit epoch=" << epoch
+                << " backend_code=" << error.backend_code() << '\n';
+      throw;
+    }
+    commands.reset();
+    if (epoch == 7)
+      imported.reset();
+    EXPECT_FALSE(weak.expired());
+    EXPECT_FALSE(completion->is_ready());
+    gate.release();
+    producer.wait();
+    EXPECT_TRUE(completion->wait());
+    readback.expect(before);
+    producer.begin();
+    producer.acquire(*exported.source);
+    producer.copy(*exported.source);
+    producer.submit(exported.consumed->semaphore);
+    producer.wait();
+    producer.expect(after);
+  }
+  stream.command_sync();
+  EXPECT_TRUE(weak.expired());
+}
+
+// Inject errors into this device's immutable-in-production dispatch table.
+// This lets failed imports prove exact cleanup without feeding invalid handles
+// or mismatched allocation metadata to a real driver.
+class ImportCalls {
+ public:
+  explicit ImportCalls(VulkanDevice &device)
+      : api(const_cast<VolkDeviceTable &>(device.vk_device().functions())),
+        saved(api) {
+    EXPECT_EQ(active, nullptr);
+    active = this;
+    api.vkCreateBuffer = create_buffer;
+    api.vkDestroyBuffer = destroy_buffer;
+    api.vkAllocateMemory = allocate;
+    api.vkFreeMemory = free_memory;
+    api.vkBindBufferMemory = bind;
+    api.vkCreateSemaphore = create_semaphore;
+    api.vkDestroySemaphore = destroy_semaphore;
+    api.vkImportSemaphoreWin32HandleKHR = import_semaphore;
+  }
+  ~ImportCalls() {
+    api = saved;
+    active = nullptr;
+  }
+  int fail_stage{0}, buffers{0}, memories{0}, semaphores{0}, creates{0},
+      imports{0};
+  VkDeviceSize requested_bytes{0};
+
+ private:
+  static VKAPI_ATTR VkResult VKAPI_CALL
+  create_buffer(VkDevice d,
+                const VkBufferCreateInfo *i,
+                const VkAllocationCallbacks *a,
+                VkBuffer *b) {
+    ++active->creates;
+    auto r = active->saved.vkCreateBuffer(d, i, a, b);
+    if (r == VK_SUCCESS)
+      ++active->buffers;
+    return r;
+  }
+  static VKAPI_ATTR void VKAPI_CALL
+  destroy_buffer(VkDevice d, VkBuffer b, const VkAllocationCallbacks *a) {
+    --active->buffers;
+    active->saved.vkDestroyBuffer(d, b, a);
+  }
+  static VKAPI_ATTR VkResult VKAPI_CALL allocate(VkDevice d,
+                                                 const VkMemoryAllocateInfo *i,
+                                                 const VkAllocationCallbacks *a,
+                                                 VkDeviceMemory *m) {
+    active->requested_bytes = i->allocationSize;
+    if (active->fail_stage == 1)
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    auto r = active->saved.vkAllocateMemory(d, i, a, m);
+    if (r == VK_SUCCESS)
+      ++active->memories;
+    return r;
+  }
+  static VKAPI_ATTR void VKAPI_CALL
+  free_memory(VkDevice d, VkDeviceMemory m, const VkAllocationCallbacks *a) {
+    --active->memories;
+    active->saved.vkFreeMemory(d, m, a);
+  }
+  static VKAPI_ATTR VkResult VKAPI_CALL bind(VkDevice d,
+                                             VkBuffer b,
+                                             VkDeviceMemory m,
+                                             VkDeviceSize o) {
+    return active->fail_stage == 2
+               ? VK_ERROR_OUT_OF_DEVICE_MEMORY
+               : active->saved.vkBindBufferMemory(d, b, m, o);
+  }
+  static VKAPI_ATTR VkResult VKAPI_CALL
+  create_semaphore(VkDevice d,
+                   const VkSemaphoreCreateInfo *i,
+                   const VkAllocationCallbacks *a,
+                   VkSemaphore *s) {
+    auto r = active->saved.vkCreateSemaphore(d, i, a, s);
+    if (r == VK_SUCCESS)
+      ++active->semaphores;
+    return r;
+  }
+  static VKAPI_ATTR void VKAPI_CALL
+  destroy_semaphore(VkDevice d, VkSemaphore s, const VkAllocationCallbacks *a) {
+    --active->semaphores;
+    active->saved.vkDestroySemaphore(d, s, a);
+  }
+  static VKAPI_ATTR VkResult VKAPI_CALL
+  import_semaphore(VkDevice d, const VkImportSemaphoreWin32HandleInfoKHR *i) {
+    ++active->imports;
+    if ((active->fail_stage == 3 && active->imports == 1) ||
+        (active->fail_stage == 4 && active->imports == 2))
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+    return active->saved.vkImportSemaphoreWin32HandleKHR(d, i);
+  }
+  VolkDeviceTable &api;
+  VolkDeviceTable saved;
+  static ImportCalls *active;
+};
+ImportCalls *ImportCalls::active = nullptr;
+
+TEST(VulkanExternalBufferImport, ColdValidationAndFailureRollback) {
+  VulkanDeviceCreator producer(parameters()), consumer(parameters());
+  Exported exported(*producer.device());
+  auto &device = *consumer.device();
+  ImportCalls calls(device);
+  for (int variant = 0; variant < 10; ++variant) {
+    auto d = exported.description;
+    auto h = exported.handles();
+    switch (variant) {
+      case 0:
+        d.memory_type_index = UINT32_MAX;
+        break;
+      case 1:
+        d.driver_uuid.fill(0);
+        break;
+      case 2:
+        d.device_uuid[0] ^= 1;
+        break;
+      case 3:
+        d.bind_offset = 4;
+        break;
+      case 4:
+        d.size = d.allocation_size + 1;
+        break;
+      case 5:
+        d.flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT;
+        break;
+      case 6:
+        d.sharing_mode = VK_SHARING_MODE_CONCURRENT;
+        break;
+      case 7:
+        h.consumed = h.ready;
+        break;
+      case 8:
+        d.dedicated = false;
+        break;
+      case 9:
+        d.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        d.allocation_flags = 0;
+        break;
+    }
+    EXPECT_THROW(VulkanExternalBuffer::import_borrowed(device, d, h),
+                 std::invalid_argument);
+  }
+  EXPECT_EQ(calls.creates, 0);
+  {
+    NativeHandle alias;
+    ASSERT_TRUE(DuplicateHandle(
+        GetCurrentProcess(), exported.ready_handle.handle, GetCurrentProcess(),
+        &alias.handle, 0, FALSE, DUPLICATE_SAME_ACCESS));
+    auto handles = exported.handles();
+    handles.consumed = reinterpret_cast<uintptr_t>(alias.handle);
+    EXPECT_THROW(VulkanExternalBuffer::import_borrowed(
+                     device, exported.description, handles),
+                 std::invalid_argument);
+    EXPECT_EQ(calls.creates, 0);
+  }
+  DWORD before{}, after{};
+  ASSERT_TRUE(GetProcessHandleCount(GetCurrentProcess(), &before));
+  for (int stage = 1; stage <= 4; ++stage) {
+    calls.fail_stage = stage;
+    calls.imports = 0;
+    EXPECT_THROW(VulkanExternalBuffer::import_borrowed(
+                     device, exported.description, exported.handles()),
+                 std::runtime_error);
+    EXPECT_EQ(calls.buffers, 0);
+    EXPECT_EQ(calls.memories, 0);
+    EXPECT_EQ(calls.semaphores, 0);
+    for (auto h : {exported.handles().memory, exported.handles().ready,
+                   exported.handles().consumed}) {
+      DWORD flags{};
+      EXPECT_TRUE(GetHandleInformation(reinterpret_cast<HANDLE>(h), &flags));
+    }
+  }
+  ASSERT_TRUE(GetProcessHandleCount(GetCurrentProcess(), &after));
+  EXPECT_EQ(before, after);
+  // Current Vulkan allows dedicated allocation beyond minimum requirements.
+  // Verify producer bytes reach allocate without requiring an older installed
+  // validation layer to implement the revised dedicated-allocation VUID.
+  calls.fail_stage = 1;
+  auto padded = exported.description;
+  padded.allocation_size += 256;
+  EXPECT_THROW(
+      VulkanExternalBuffer::import_borrowed(device, padded, exported.handles()),
+      std::runtime_error);
+  EXPECT_EQ(calls.requested_bytes, padded.allocation_size);
+  EXPECT_EQ(calls.buffers, 0);
+  calls.fail_stage = 0;
+  auto imported = VulkanExternalBuffer::import_borrowed(
+      device, exported.description, exported.handles());
+  EXPECT_EQ(calls.buffers, 1);
+  EXPECT_EQ(calls.memories, 1);
+  EXPECT_EQ(calls.semaphores, 2);
+  imported.reset();
+  EXPECT_EQ(calls.buffers, 0);
+  EXPECT_EQ(calls.memories, 0);
+  EXPECT_EQ(calls.semaphores, 0);
+}
+}  // namespace
+#endif
