@@ -5168,6 +5168,52 @@ class TaskCodegen : public IRVisitor {
   void visit(IfStmt *if_stmt) override {
     spirv::Value cond_v = ir_->cast(
         ir_->bool_type(), ir_->query_value(if_stmt->cond->raw_name()));
+    // A branch which only assigns already available values to private scalar
+    // slots needs no control-flow diamond. In particular, nested diamonds for
+    // these assignments can crash the NVIDIA pipeline compiler when a loop
+    // also carries a mutable local index. Emit predicated stores directly,
+    // without depending on optional SSARewrite/IfConversion optimization.
+    // Do not speculate loads, arithmetic, atomics, or shared-memory writes.
+    auto private_assignments = [](const Block *block) {
+      if (!block) {
+        return true;
+      }
+      for (const auto &stmt : block->statements) {
+        if (stmt->is<ConstStmt>()) {
+          continue;
+        }
+        auto *store = stmt->cast<LocalStoreStmt>();
+        auto *slot = store ? store->dest->cast<AllocaStmt>() : nullptr;
+        if (!slot || slot->is_shared ||
+            !slot->ret_type.ptr_removed()->is<PrimitiveType>()) {
+          return false;
+        }
+      }
+      return true;
+    };
+    if (private_assignments(if_stmt->true_statements.get()) &&
+        private_assignments(if_stmt->false_statements.get())) {
+      auto emit = [&](Block *block, bool true_branch) {
+        if (!block) {
+          return;
+        }
+        for (const auto &stmt : block->statements) {
+          if (stmt->is<ConstStmt>()) {
+            stmt->accept(this);
+            continue;
+          }
+          auto *store = stmt->as<LocalStoreStmt>();
+          auto ptr = ir_->query_value(store->dest->raw_name());
+          auto value = ir_->query_value(store->val->raw_name());
+          auto old = ir_->load_variable(ptr, value.stype);
+          ir_->store_variable(ptr, true_branch ? ir_->select(cond_v, value, old)
+                                              : ir_->select(cond_v, old, value));
+        }
+      };
+      emit(if_stmt->true_statements.get(), true);
+      emit(if_stmt->false_statements.get(), false);
+      return;
+    }
     spirv::Value cond =
         ir_->ne(cond_v, ir_->cast(ir_->bool_type(), ir_->const_i32_zero_));
     spirv::Label then_label = ir_->new_label();

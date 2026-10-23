@@ -192,7 +192,8 @@ class Kernel;
 //  66 - Regenerate SPIR-V with valid shared float CAS storage and scalar types.
 //  67 - Identity uses resolved kernel targets, not the CUDA producer/provider.
 //  68 - Restore row-local multidimensional Graph resource footprints.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 68;
+//  69 - Select private SPIR-V branch assignments without optional optimizer passes.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 69;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

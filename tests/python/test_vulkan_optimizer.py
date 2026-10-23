@@ -171,18 +171,61 @@ def test_optimizer_runs_for_later_tasks_and_kernels(parallel, skip_unroll, disab
     vulkan_spv_stats=True,
     vulkan_spv_stats_filter="all",
 )
-def test_optimizer_disabled_modes_preserve_unoptimized_output(tier, level):
+def test_cursor_executes_without_optional_optimizer(tier, level):
     ti.cfg.compile_tier = tier
     ti.cfg.external_optimization_level = level
     for _ in range(2):
-        _, run, _ = _make_cursor_kernels()
+        setup, run, outputs = _make_cursor_kernels()
+        setup()
         stats = _compile_without_launch(run)
         assert stats
         for task in stats:
             assert not task["opt_run"]
             assert task["word_after"] == task["word_before"]
-    # Compile-only: this repair preserves opt-out semantics. The unoptimized
-    # cursor shader still triggers a compiler fault on affected NVIDIA drivers.
+        run()
+        ti.sync()
+        _assert_cursor_output(outputs)
+
+
+@pytest.mark.parametrize("level", [1, 2])
+@test_utils.test(arch=ti.vulkan, compile_tier="balanced", offline_cache=False)
+def test_cursor_executes_with_partial_optimizer(level):
+    ti.cfg.external_optimization_level = level
+    setup, run, outputs = _make_cursor_kernels()
+    setup()
+    run()
+    ti.sync()
+    _assert_cursor_output(outputs)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], compile_tier="fast", offline_cache=False)
+def test_private_assignment_branches_preserve_effects():
+    output = ti.field(ti.i32, shape=8)
+    visits = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def run():
+        for i in range(8):
+            x = 7
+            y = 11
+            old = x
+            if i % 2:
+                x = 13
+                x = 17
+                y = old
+            else:
+                x = 19
+                y = 23
+            # A branch-local read/arithmetic and an atomic effect cannot be
+            # speculated by the private-assignment codegen path.
+            if i < 4:
+                visits[None] += 1
+                x = x + i
+            output[i] = 100 * x + y
+
+    run()
+    assert visits[None] == 4
+    assert output.to_numpy().tolist() == [1923, 1807, 2123, 2007, 1923, 1707, 1923, 1707]
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)

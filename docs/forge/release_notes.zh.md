@@ -35,7 +35,7 @@
 ### 升级与编译设置
 
 - frontend 与 native runtime 使用私有 ABI **164**，持久执行计划为 **26**，
-  编译缓存 schema 为 **68**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
+  编译缓存 schema 为 **69**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、
@@ -125,6 +125,9 @@
   梯度可用，不能把它解释为 native 算法已有自动伴随。
 - 修复 Vulkan SIMT 线程索引、跨 task SSA、bool 指令/参数布局、局部数组装饰、
   SharedArray 浮点 CAS 存储、无符号取负和 ray 循环结构等 SPIR-V 问题。
+- Vulkan 对仅赋值线程私有标量的分支直接生成条件选择，修复可变 Struct cursor 与
+  嵌套分支组合在 NVIDIA 驱动创建 pipeline 时的崩溃；快速编译及关闭可选优化时同样生效。
+  不提前执行分支内的读取、算术、原子或共享内存操作。
   optimizer 按 task 正确运行；Field/view descriptor 对齐保留逻辑偏移，避免错误访问。
 - 修复 CUDA `real_func` 的根绑定和依赖、CPU worker ID 传递，以及 pointer SNode
   多子节点确定性槽位重叠；高级优化保留不同指针类型及条件分支的真实语义。

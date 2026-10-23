@@ -85,10 +85,10 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   //                but DCE/DeadBranchElim are cheap and their savings do not
   //                materialise over pass registration + Run() overhead on
   //                SPV-bound kernels. Going straight to 0 gives the largest
-  //                compile-time win for the "fast" tier and is safe because
-  //                TaskCodegen already emits legal SPIR-V (no optimiser
-  //                required to pass Vulkan driver validation). Constant dead
-  //                branches are removed before emission even in this tier.
+  //                compile-time win for the "fast" tier. Correctness cleanup
+  //                and driver-safe private-assignment selection belong to
+  //                lowering/codegen, independently of optional optimization.
+  //                Validator acceptance alone does not qualify driver execution.
   //   "balanced" — no change vs legacy (default external_optimization_level=3,
   //                23 passes). Preserves default runtime perf.
   //   "full"     — no change vs legacy (23 passes).

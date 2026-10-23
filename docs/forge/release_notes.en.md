@@ -37,7 +37,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 ### Upgrading and compilation settings
 
 - The frontend/native private ABI is **164**, persistent execution-plan version **26**, and
-  compiled-cache schema **68**. Update compatible components together; matching Git commits
+  compiled-cache schema **69**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
   Old compiled caches are invalidated; distinguish the resulting cold start from warm replay.
@@ -155,6 +155,10 @@ combination. Consult the linked API contracts and capability queries for exact s
 - Vulkan fixes cover SIMT thread indices, cross-task SSA, boolean instructions/parameter layouts,
   local-array decorations, SharedArray floating CAS storage, unsigned negation and ray-loop SPIR-V
   structure. Optimizer passes run for each task, and aligned Field/view descriptors retain logical offsets.
+- Vulkan emits conditional selection for branches that only assign private scalars. This avoids an
+  NVIDIA pipeline-compiler crash with mutable Struct cursors and nested branches, including fast
+  compilation and disabled optional optimization. Branch-local loads, arithmetic, atomics and
+  shared-memory operations are not speculated.
 - CUDA `real_func` root bindings/dependencies, CPU worker-ID propagation and deterministic pointer
   SNode child slots are corrected. Advanced optimization preserves pointer-type and branch distinctions.
 - OptiX typed-hit/compact-occlusion traversal filters one-/two-sided candidates per instance/primitive,
