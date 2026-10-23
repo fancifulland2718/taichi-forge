@@ -37,7 +37,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 ### Upgrading and compilation settings
 
 - The frontend/native private ABI is **164**, persistent execution-plan version **26**, and
-  compiled-cache schema **69**. Update compatible components together; matching Git commits
+  compiled-cache schema **70**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
   Old compiled caches are invalidated; distinguish the resulting cold start from warm replay.
@@ -70,6 +70,8 @@ combination. Consult the linked API contracts and capability queries for exact s
 - JIT caches and AOT share compiled ABI/task/resource metadata and codecs, with separate containers,
   invalidation and deployment policies. Demand loading and fewer duplicate serializations,
   unused helpers and diagnostic artifacts reduce unnecessary work and storage.
+- LLVM linking reuses immutable runtime/SNode bitcode and loads function bodies on demand,
+  avoiding complete library clones for each kernel. Retaining these snapshots uses additional memory.
 - CUDA prepares internal runtime modules by function group, separating base initialization from
   sparse functionality; using every group can increase cumulative cost. Workspace reuse, smaller
   initial host allocations and incremental native builds also reduce unnecessary allocation/build work.
@@ -78,6 +80,9 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Graph and runtime
 
+- Empty ordinary CUDA dynamic-range blocks exit before reduction setup and teardown, avoiding neutral
+  global atomics without useful iterations. Partially active blocks still participate fully in
+  reduction synchronization, and grid-stride iteration coverage is preserved.
 - Shared frozen-Graph lowering preserves selected physical dispatches, launch policies and binding
   constraints. JIT code loans borrow compiled code; AOT adapters construct deployment closures.
   Ordinary call execution/submission paths remain in place.

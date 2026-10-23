@@ -35,7 +35,7 @@
 ### 升级与编译设置
 
 - frontend 与 native runtime 使用私有 ABI **164**，持久执行计划为 **26**，
-  编译缓存 schema 为 **69**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
+  编译缓存 schema 为 **70**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、
@@ -59,6 +59,8 @@
   作用域，避免逐块复制映射。这些改动不等于默认启用整套高级优化。
 - JIT cache 与 AOT 共用编译后 ABI/task/resource 元数据及 codec；保留各自的容器、
   失效与部署策略。AOT 按需读取代码，减少重复序列化、无用 helper 和诊断产物。
+- LLVM 链接复用 runtime/SNode 的不可变 bitcode，按依赖装入所需函数体，减少每次
+  kernel 编译时完整克隆库的开销；代价是保留这些 bitcode 快照占用的内存。
 - CUDA runtime 按功能组准备内部模块，基础初始化与稀疏功能分开；用齐全部功能时累计
   成本可能增加。工作区复用、host 小请求预留及原生增量构建也减少无用分配/重建。
 - `inline_ir_cache=True` 仍为默认关闭的实验项；它只复用合格函数的前端 IR，
@@ -66,6 +68,8 @@
 
 ### Graph 与运行时
 
+- 普通 CUDA 动态 range 的空 block 在归约准备与收尾前退出，减少没有有效迭代时的中性值
+  全局原子操作；部分有效的 block 仍完整参与归约同步，原 grid-stride 范围保持。
 - 已冻结 Graph 的共同 lowering 保留选中的物理 dispatch、launch policy 和绑定约束；
   JIT code loan 借用已编译代码，AOT adapter 处理部署闭包。普通调用的执行与提交路径保持。
 - CPU/CUDA/Vulkan 的执行注册状态归执行 owner，编译代码可共享；在途租约、独立实例、
