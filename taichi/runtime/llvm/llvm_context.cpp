@@ -238,19 +238,24 @@ std::string libdevice_path() {
 std::unique_ptr<llvm::Module> TaichiLLVMContext::clone_module_to_context(
     llvm::Module *module,
     llvm::LLVMContext *target_context) {
+  TI_COMPILE_PROFILER("cpp.compile.llvm.context_transfer");
   // Dump a module from one context to bitcode and then parse the bitcode in a
   // different context
   std::string bitcode;
 
   {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.context_transfer.write_bitcode");
     std::lock_guard<std::mutex> _(mut_);
     llvm::raw_string_ostream sos(bitcode);
     // Use a scope to make sure sos flushes on destruction
     llvm::WriteBitcodeToFile(*module, sos);
   }
 
-  auto cloned = parseBitcodeFile(
-      llvm::MemoryBufferRef(bitcode, "runtime_bitcode"), *target_context);
+  auto cloned = [&] {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.context_transfer.parse_bitcode");
+    return parseBitcodeFile(
+        llvm::MemoryBufferRef(bitcode, "runtime_bitcode"), *target_context);
+  }();
   if (!cloned) {
     auto error = cloned.takeError();
     TI_ERROR("Bitcode cloned failed.");
@@ -1075,6 +1080,7 @@ void TaichiLLVMContext::delete_snode_tree(int id) {
 }
 
 void TaichiLLVMContext::fetch_this_thread_struct_module() {
+  TI_COMPILE_PROFILER("cpp.compile.llvm.fetch_struct_modules");
   ThreadLocalData *data = get_this_thread_data();
   if (data->struct_modules.empty()) {
     for (auto &[id, mod] : main_thread_data_->struct_modules) {
@@ -1153,6 +1159,7 @@ TaichiLLVMContext::ThreadLocalData::~ThreadLocalData() {
 
 LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
     std::vector<std::unique_ptr<LLVMCompiledTask>> data_list) {
+  TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks");
   // V8.e (2026-04-26): two-stage link for thread-safe parallel codegen.
   //
   // History:
@@ -1183,7 +1190,11 @@ LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
   //     typical kernels); the heavy optimization stage runs fully in
   //     parallel.
   fetch_this_thread_struct_module();
-  std::lock_guard<std::mutex> _(linking_mut_);
+  std::unique_lock<std::mutex> lock(linking_mut_, std::defer_lock);
+  {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.lock_wait");
+    lock.lock();
+  }
 
   LLVMCompiledKernel linked;
   std::unordered_set<int> used_tree_ids;
@@ -1192,6 +1203,7 @@ LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
   auto mod = new_module("kernel", linking_context_data->llvm_context);
   llvm::Linker linker(*mod);
   for (auto &datum : data_list) {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.task_modules");
     for (auto tree_id : datum->used_tree_ids) {
       used_tree_ids.insert(tree_id);
     }
@@ -1206,18 +1218,24 @@ LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
         datum->module.get(), linking_context_data->llvm_context));
   }
   for (auto tree_id : used_tree_ids) {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.struct_modules");
     linker.linkInModule(
         llvm::CloneModule(*linking_context_data->struct_modules[tree_id]),
         llvm::Linker::LinkOnlyNeeded | llvm::Linker::OverrideFromSrc);
   }
-  auto runtime_module =
-      llvm::CloneModule(*linking_context_data->runtime_module);
+  auto runtime_module = [&] {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.clone_runtime");
+    return llvm::CloneModule(*linking_context_data->runtime_module);
+  }();
   for (auto tls_size : tls_sizes) {
     add_struct_for_func(runtime_module.get(), tls_size);
   }
-  linker.linkInModule(
-      std::move(runtime_module),
-      llvm::Linker::LinkOnlyNeeded | llvm::Linker::OverrideFromSrc);
+  {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.link_runtime");
+    linker.linkInModule(
+        std::move(runtime_module),
+        llvm::Linker::LinkOnlyNeeded | llvm::Linker::OverrideFromSrc);
+  }
   eliminate_unused_functions(mod.get(), [&](std::string func_name) -> bool {
     return offloaded_names.count(func_name);
   });

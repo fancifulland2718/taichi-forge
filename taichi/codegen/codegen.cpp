@@ -20,6 +20,7 @@
 #include "taichi/codegen/amdgpu/codegen_amdgpu.h"
 #endif
 #include "taichi/system/timer.h"
+#include "taichi/system/profiler.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/analysis/offline_cache_util.h"
@@ -107,6 +108,7 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module(
       (compile_config_.compile_dag_scheduler &&
        Program::in_compile_kernels_worker());
   if (serial_offloads) {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.tasks.serial");
     for (int i = 0; i < (int)offloads.size(); i++) {
       tlctx_.fetch_this_thread_struct_module();
       auto offload = irpass::analysis::clone(offloads[i].get());
@@ -118,6 +120,7 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module(
       data[i] = std::make_unique<LLVMCompiledTask>(std::move(new_data));
     }
   } else {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.tasks.parallel");
     for (int i = 0; i < (int)offloads.size(); i++) {
       auto compile_func = [&, i] {
         tlctx_.fetch_this_thread_struct_module();
@@ -131,7 +134,10 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module(
       };
       worker.enqueue(compile_func);
     }
-    worker.flush();
+    {
+      TI_COMPILE_PROFILER("cpp.compile.llvm.tasks.wait");
+      worker.flush();
+    }
   }
 
   for (const auto &task : data) {
@@ -146,7 +152,10 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module(
     LLVM::resolve_cuda_root_bindings(*llvm_compiled_kernel.module,
                                      used_tree_ids);
   }
-  optimize_module(llvm_compiled_kernel.module.get());
+  {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.optimize_linked_module");
+    optimize_module(llvm_compiled_kernel.module.get());
+  }
   return llvm_compiled_kernel;
 }
 
