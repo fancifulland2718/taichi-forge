@@ -669,6 +669,15 @@ pipeline memory 仍为 unknown。typed caller 输出为每 ray 32 bytes，旧布
 word-aligned query storage 使用独立 adapter feature bit。没有此能力的旧 adapter 要求
 ray/hit 地址按 16 bytes 对齐，不满足时在准备阶段拒绝，不把未对齐指针传给旧 PTX。
 
+OptiX 查询把射线中的 f32 `t_min/t_max` 原样传给内置三角形遍历；typed、compact
+occlusion、普通 recording 和 AOT 重建均保留这一区间，不增加 epsilon 或自动扩大端点。
+精确位于数学端点的交点可能 miss，不能把 double 精度的闭区间几何参考作为端点必定
+命中的保证。Windows RTX 5090 / OptiX ABI118 的小夹具中，无缩放几何及缩放实例在精确
+端点均观察到此行为，两侧相邻 f32 输入的结果在上述路径间一致。该观察不规定其他
+硬件必须得到相同端点结果。应用应按自己的可见性/自相交语义选择射线区间。
+自定义求交的 [`optixReportIntersection`](https://raytracing-docs.nvidia.com/optix8/api/group__optix__device__api.html)
+区间检查不能单独证明内置三角形求交与 double 参考的精确端点一致。
+
 #### OptiX 紧凑遮挡查询
 
 阴影或可见性测试只需要是否命中时，triangle/instance scene 可使用

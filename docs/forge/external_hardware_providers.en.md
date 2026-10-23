@@ -856,6 +856,20 @@ Word-aligned query storage is a separate adapter feature bit. Legacy adapters
 without that feature require 16-byte aligned ray/hit addresses, rejected at
 preparation if unmet; no misaligned access is passed to their old PTX.
 
+OptiX queries pass the ray's f32 `t_min/t_max` unchanged to built-in triangle
+traversal. Typed hits, compact occlusion, ordinary recordings and reconstructed
+AOT plans preserve that interval without an epsilon or automatic expansion.
+An intersection exactly at a mathematical endpoint may miss; a double-precision
+closed-interval oracle does not guarantee endpoint acceptance. Small Windows
+RTX 5090 / OptiX ABI118 fixtures observed this for both unscaled geometry and
+scaled instances, with matching results across these paths for adjacent f32
+inputs. This observation does not require other devices to make the same endpoint
+decision. Applications should choose intervals for their visibility and
+self-intersection semantics. The interval check documented for custom
+[`optixReportIntersection`](https://raytracing-docs.nvidia.com/optix8/api/group__optix__device__api.html)
+does not establish exact endpoint agreement between built-in triangle
+intersection and a double-precision oracle.
+
 #### Compact OptiX occlusion
 
 For shadows or visibility tests that only consume a yes/no answer, triangle
