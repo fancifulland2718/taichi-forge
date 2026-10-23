@@ -7,8 +7,15 @@
 #include "taichi/rhi/vulkan/vulkan_execution_queue.h"
 #include "taichi/rhi/vulkan/vulkan_external_access.h"
 #include "taichi/runtime/vulkan_execution_domain.h"
+#include "taichi/runtime/fixed_execution_vulkan.h"
+#include "taichi/runtime/gfx/aot_module_loader_impl.h"
+#include "taichi/runtime/completion_wait_set.h"
+#include "taichi/program/launch_context_builder.h"
+#include "taichi/program/ndarray.h"
 #include "taichi/program/runtime_fault.h"
+#include "tests/cpp/aot/vulkan/timeline_gate.h"
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -457,12 +464,16 @@ void qualify_submission(bool independent, bool compose = false,
   int queries = 0;
   auto producer_lifetime = std::make_shared<int>(1);
   std::weak_ptr<void> producer_weak = producer_lifetime;
+  auto callback_lifetime = std::make_shared<int>(2);
+  std::weak_ptr<void> callback_weak = callback_lifetime;
   std::shared_ptr<VulkanExternalBufferOwner> owner;
   std::shared_ptr<VulkanExternalAccess> access;
   std::shared_ptr<VulkanExternalBuffer> imported;
   if (managed) {
     owner = VulkanExternalBufferOwner::import_borrowed(
-        cd, exported.description, exported.handles(), [&](auto epoch) {
+        cd, exported.description, exported.handles(),
+        [&, callback_marker = callback_lifetime](auto epoch) {
+          (void)callback_marker;
           ++queries;
           EXPECT_EQ(epoch, expected_epoch);
           if (query_throws)
@@ -478,6 +489,7 @@ void qualify_submission(bool independent, bool compose = false,
         cd, exported.description, exported.handles());
   }
   producer_lifetime.reset();
+  callback_lifetime.reset();
   std::weak_ptr<VulkanExternalBuffer> weak = imported;
   // Caller originals are still valid, then closed before any GPU use.
   for (auto handle : {&exported.memory_handle, &exported.ready_handle,
@@ -698,6 +710,7 @@ void qualify_submission(bool independent, bool compose = false,
       EXPECT_TRUE(owner->snapshot().closed);
       // The pending slot still retains its recorded imports and producer.
       EXPECT_FALSE(producer_weak.expired());
+      EXPECT_FALSE(callback_weak.expired());
     }
     readback.expect(before);
     producer.begin();
@@ -716,6 +729,7 @@ void qualify_submission(bool independent, bool compose = false,
   EXPECT_TRUE(weak.expired());
   if (managed) {
     EXPECT_TRUE(producer_weak.expired());
+    EXPECT_TRUE(callback_weak.expired());
     EXPECT_EQ(queries, 32);  // Deduplicated owner, four queries per epoch.
     EXPECT_THROW(queue->prepare_external_access(queue->prepare({}), access),
                  std::runtime_error);
@@ -739,6 +753,273 @@ TEST(VulkanExternalBufferImport,
 
 TEST(VulkanExternalBufferImport, ManagedEpochRollbackAndExactRetirement) {
   qualify_submission(true, true, true);
+}
+
+TEST(VulkanExternalBufferImport,
+     ManagedFixedShaderParametersTimingAndRetirement) {
+  using taichi::Arch;
+  using namespace taichi::lang;
+  const auto *folder =
+      std::getenv("TAICHI_VULKAN_EXTERNAL_PARAMETERS_AOT_DIR");
+  if (!folder)
+    GTEST_SKIP() << "Generate vulkan_external_parameters.py first";
+  VulkanDeviceCreator producer_creator(parameters()),
+      consumer_creator(parameters());
+  auto &pd = *producer_creator.device();
+  auto &cd = *consumer_creator.device();
+  const bool physical_addresses = cd.get_caps().get(
+      DeviceCapability::spirv_has_physical_storage_buffer);
+  if (cd.created_compute_queue_count() < 3 ||
+      !cd.vk_caps().timeline_semaphore ||
+      (physical_addresses && (!cd.vk_caps().buffer_device_address ||
+                              !pd.vk_caps().buffer_device_address)))
+    GTEST_SKIP() << "Requires two independent queues and the ndarray address mode";
+  RecordProperty("ndarray_address_mode",
+                 physical_addresses ? "physical" : "descriptor");
+  auto fault = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 926);
+  cd.set_backend_fault_reporter(fault);
+  gfx::GfxRuntime::Params params;
+  params.device = &cd;
+  gfx::GfxRuntime runtime(params);
+  gfx::AotModuleParams module_params;
+  module_params.runtime = &runtime;
+  module_params.module_path = folder;
+  auto module = aot::Module::load(Arch::vulkan, module_params);
+  ASSERT_NE(module, nullptr);
+  auto *kernel = module->get_kernel("publish_external");
+  ASSERT_NE(kernel, nullptr);
+
+  vulkan::ExecutionDomainRegistry registry(cd, fault);
+  std::array<std::shared_ptr<vulkan::ExecutionDomain>, 2> domains{
+      registry.create({1, 1, true}), registry.create({1, 1, true})};
+  std::array<std::shared_ptr<Exported>, 2> exported;
+  std::array<std::weak_ptr<Exported>, 2> producer_weak;
+  std::array<std::shared_ptr<VulkanExternalBufferOwner>, 2> owners;
+  std::array<std::weak_ptr<VulkanExternalBuffer>, 2> import_weak;
+  std::array<std::unique_ptr<Endpoint>, 2> producer;
+  std::array<std::unique_ptr<FixedExecution>, 2> calls;
+  struct Operands final : RuntimeCompletionResources {
+    std::shared_ptr<VulkanExternalBufferOwner> owner;
+    std::size_t retained_resource_count(std::uint32_t) const noexcept override {
+      return owner ? 1 : 0;
+    }
+  };
+  std::array<std::weak_ptr<Operands>, 2> operand_weak;
+  std::array<bool, 2> ready{false, false};
+  std::array<std::uint64_t, 2> expected_epoch{1, 1};
+  std::array<int, 2> queries{};
+  for (std::size_t i = 0; i < calls.size(); ++i) {
+    exported[i] = std::make_shared<Exported>(pd, false, physical_addresses);
+    producer_weak[i] = exported[i];
+    producer[i] = std::make_unique<Endpoint>(pd);
+    owners[i] = VulkanExternalBufferOwner::import_borrowed(
+        cd, exported[i]->description, exported[i]->handles(),
+        [&, i](auto epoch) {
+          EXPECT_EQ(epoch, expected_epoch[i]);
+          ++queries[i];
+          return ready[i];
+        }, exported[i]);
+    import_weak[i] = owners[i]->buffer();
+    auto allocation = owners[i]->ndarray_allocation();
+    EXPECT_EQ(allocation, owners[i]->ndarray_allocation());
+    Ndarray array(allocation, PrimitiveType::u32, {4});
+    LaunchContextBuilder context(kernel);
+    context.set_arg_uint({0}, 0);
+    context.set_arg_ndarray({1}, array);
+    FixedExecution::Dispatch dispatch{kernel, &context};
+    dispatch.parameters.push_back({0, kernel->args_type->get_element_offset({0})});
+    FixedExecution::VulkanExecutionBinding binding;
+    binding.domain = domains[i];
+    auto operands = std::make_shared<Operands>();
+    operands->owner = owners[i];
+    operand_weak[i] = operands;
+    binding.operands = std::move(operands);
+    binding.parameter_count = 1;
+    const auto before = cd.queue_submission_snapshot().queue_submit_calls;
+    calls[i] = std::make_unique<FixedExecution>(
+        Arch::vulkan, cd, &runtime,
+        std::vector<FixedExecution::Operation>{dispatch}, nullptr, fault,
+        nullptr, nullptr, nullptr, nullptr, nullptr, &binding);
+    calls[i]->bind_external_access({owners[i], owners[i]});
+    EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls, before);
+  }
+  // All ordinary cold setup finishes before queue zero is held pending.
+  runtime.synchronize();
+  RuntimeCompletion first_sampled;
+  std::uint64_t first_duration = 0;
+  bool first_timing_available = false;
+  {
+    test_detail::TimelineGate default_gate(cd, 0);
+    auto *ordinary = static_cast<VulkanStream *>(cd.get_compute_stream());
+    const auto ordinary_pending = ordinary->submit(nullptr);
+    for (std::uint32_t round = 0; round < 8; ++round) {
+      SCOPED_TRACE(round);
+      // Futures precede gates so exceptional unwind releases the device waits
+      // before joining an asynchronous owner close.
+      std::array<std::future<void>, 2> closing;
+      test_detail::TimelineGate left_gate(cd, domains[0]->snapshot().queue_index);
+      test_detail::TimelineGate right_gate(cd, domains[1]->snapshot().queue_index);
+      std::array<RuntimeCompletion, 2> tickets;
+      std::array<std::array<std::uint32_t, 4>, 2> expected;
+      for (std::size_t i = 0; i < calls.size(); ++i) {
+        SCOPED_TRACE(i);
+        domains[i]->collect_ready(1);
+        const std::array<std::uint32_t, 4> before{
+            0x11111111u + round, 0x22222222u + static_cast<std::uint32_t>(i),
+            0xfffffffeu - round, 0x83c00000u + round * 17u + static_cast<std::uint32_t>(i)};
+        const std::uint64_t value =
+            (0xfedcba9800000000ull | (0x81234560ull + round * 13u + i)) ^
+            (static_cast<std::uint64_t>(round) << 36) ^
+            (static_cast<std::uint64_t>(i) << 44);
+        expected[i] = {static_cast<std::uint32_t>(value),
+                       static_cast<std::uint32_t>(value >> 32),
+                       before[2] + 3u, before[3] ^ 0xa5c39e71u};
+        auto &endpoint = *producer[i];
+        auto &source = *exported[i]->source;
+        endpoint.begin();
+        if (round)
+          endpoint.barrier(source, VK_ACCESS_TRANSFER_READ_BIT,
+                           VK_ACCESS_TRANSFER_WRITE_BIT);
+        endpoint.update(source, before);
+        endpoint.release(source);
+        endpoint.submit({}, exported[i]->ready->semaphore);
+        endpoint.wait();  // The matching binary signal is actually enqueued.
+
+        const bool sample = (round + i) % 2 == 0;
+        const auto submits = cd.queue_submission_snapshot().queue_submit_calls;
+        const auto prior = domains[i]->latest_completion().sequence();
+        ready[i] = false;
+        EXPECT_THROW(calls[i]->submit({}, {value ^ UINT64_MAX}, sample),
+                     vulkan::ExecutionDomain::Busy);
+        EXPECT_EQ(owners[i]->snapshot().next_epoch, expected_epoch[i]);
+        EXPECT_EQ(domains[i]->latest_completion().sequence(), prior);
+        EXPECT_EQ(domains[i]->snapshot().pending, 0u);
+        EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls, submits);
+        ready[i] = true;
+        std::vector<SubmissionParameterValue> values{value};
+        tickets[i] = calls[i]->submit({}, values, sample);
+        values[0] = 0;  // Accepted parameters must no longer reference this vector.
+        ++expected_epoch[i];
+        EXPECT_EQ(owners[i]->snapshot().next_epoch, expected_epoch[i]);
+        EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls, submits + 1);
+        EXPECT_FALSE(tickets[i].done());
+        const auto busy_queries = queries[i];
+        EXPECT_THROW(calls[i]->submit({}, {value ^ UINT64_MAX}, !sample),
+                     vulkan::ExecutionDomain::Busy);
+        EXPECT_EQ(queries[i], busy_queries);
+        EXPECT_EQ(owners[i]->snapshot().next_epoch, expected_epoch[i]);
+        EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls, submits + 1);
+      }
+      if (round == 7) {
+        // Public recording destruction cannot release a resident instance.
+        calls[0].reset();
+        for (std::size_t i = 0; i < owners.size(); ++i)
+          closing[i] = std::async(std::launch::async,
+              [external = owners[i]] { external->close(); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        for (std::size_t i = 0; i < owners.size(); ++i) {
+          while (owners[i]->snapshot().accepting &&
+                 std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+          EXPECT_FALSE(owners[i]->snapshot().accepting);
+          EXPECT_EQ(closing[i].wait_for(std::chrono::milliseconds(0)),
+                    std::future_status::timeout);
+          EXPECT_FALSE(import_weak[i].expired());
+          EXPECT_FALSE(operand_weak[i].expired());
+        }
+      }
+      left_gate.release();
+      right_gate.release();
+      for (std::size_t i = 0; i < tickets.size(); ++i) {
+        CompletionWaitSet wait({tickets[i]}, std::chrono::milliseconds(1));
+        const auto status = wait.wait(std::chrono::seconds(3)).status;
+        // A regression onto queue zero must fail without stranding close futures.
+        if (status != CompletionWaitSet::Status::ready)
+          default_gate.release();
+        ASSERT_EQ(status, CompletionWaitSet::Status::ready);
+        const auto timing = tickets[i].gpu_timing_snapshot();
+        if ((round + i) % 2) {
+          EXPECT_EQ(timing.status, "unavailable");
+        } else if (cd.queue_timestamp_valid_bits(cd.compute_queue_family_index())) {
+          EXPECT_TRUE(timing.available);
+        } else {
+          EXPECT_EQ(timing.status, "unsupported");
+        }
+        if (round == 0 && i == 0) {
+          first_sampled = tickets[i];
+          first_duration = timing.duration_ns;
+          first_timing_available = timing.available;
+        }
+        if (closing[i].valid()) {
+          closing[i].get();
+          EXPECT_TRUE(owners[i]->snapshot().closed);
+          EXPECT_THROW(owners[i]->ndarray_allocation(), std::exception);
+          EXPECT_FALSE(import_weak[i].expired());
+        }
+        auto &endpoint = *producer[i];
+        endpoint.begin();
+        endpoint.acquire(*exported[i]->source);
+        endpoint.copy(*exported[i]->source);
+        endpoint.submit(exported[i]->consumed->semaphore);
+        endpoint.wait();
+        endpoint.expect(expected[i]);
+      }
+      EXPECT_FALSE(ordinary_pending->is_ready());
+    }
+    for (auto &source : exported)
+      source.reset();
+    for (std::size_t i = 0; i < domains.size(); ++i) {
+      EXPECT_FALSE(producer_weak[i].expired());
+      domains[i]->close();
+      EXPECT_TRUE(import_weak[i].expired());
+      EXPECT_TRUE(producer_weak[i].expired());
+      EXPECT_TRUE(operand_weak[i].expired());
+    }
+    EXPECT_THROW(calls[1]->submit({}, {1}), std::exception);
+    EXPECT_FALSE(ordinary_pending->is_ready());
+  }
+  registry.retire();
+  EXPECT_TRUE(first_sampled.done());
+  EXPECT_EQ(first_sampled.gpu_timing_snapshot().available, first_timing_available);
+  EXPECT_EQ(first_sampled.gpu_timing_snapshot().duration_ns, first_duration);
+}
+
+int ndarray_address_queries = 0;
+VKAPI_ATTR VkDeviceAddress VKAPI_CALL count_ndarray_address_query(
+    VkDevice, const VkBufferDeviceAddressInfo *) {
+  ++ndarray_address_queries;
+  return 0;
+}
+
+TEST(VulkanExternalBufferImport, ManagedNdarrayHonorsAddressModeBeforeQuery) {
+  VulkanDeviceCreator producer(parameters()), consumer(parameters());
+  auto &pd = *producer.device();
+  auto &cd = *consumer.device();
+  const bool physical_addresses = cd.get_caps().get(
+      taichi::lang::DeviceCapability::spirv_has_physical_storage_buffer);
+  // Native BDA support is not the ndarray ABI selection. The normal creator
+  // currently keeps physical storage disabled even on BDA-capable devices.
+  RecordProperty("ndarray_address_mode",
+                 physical_addresses ? "physical" : "descriptor");
+  Exported exported(pd);  // Valid raw transfer/storage import, without BDA usage.
+  auto owner = VulkanExternalBufferOwner::import_borrowed(
+      cd, exported.description, exported.handles(), [](auto) { return false; });
+  auto &api = const_cast<VolkDeviceTable &>(cd.vk_device().functions());
+  const auto original = api.vkGetBufferDeviceAddress;
+  auto restore = std::shared_ptr<void>(reinterpret_cast<void *>(1),
+      [&](void *) { api.vkGetBufferDeviceAddress = original; });
+  ndarray_address_queries = 0;
+  api.vkGetBufferDeviceAddress = count_ndarray_address_query;
+  if (physical_addresses) {
+    EXPECT_THROW(owner->ndarray_allocation(), std::invalid_argument);
+  } else {
+    auto allocation = owner->ndarray_allocation();
+    EXPECT_NE(allocation, taichi::lang::kDeviceNullAllocation);
+    EXPECT_EQ(allocation, owner->ndarray_allocation());
+  }
+  EXPECT_EQ(ndarray_address_queries, 0);
+  EXPECT_EQ(owner->snapshot().next_epoch, 1u);
+  owner->close();
 }
 
 TEST(VulkanExternalBufferImport, ManagedNotReadyPreservesRuntimeSequence) {

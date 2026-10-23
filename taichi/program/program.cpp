@@ -67,6 +67,7 @@
 #include "taichi/runtime/vulkan_execution_domain.h"
 #include "taichi/runtime/program_impls/vulkan/vulkan_program.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
+#include "taichi/rhi/vulkan/vulkan_external_access.h"
 #endif
 #ifdef TI_WITH_OPENGL
 #include "taichi/runtime/program_impls/opengl/opengl_program.h"
@@ -6132,9 +6133,18 @@ Program::DenseStorageBorrow Program::borrow_dense_storage(
     auto [status, lease] = external_dense_storage_resources_.acquire(
         external_dense_storage_handle(owner));
     TI_ERROR_IF(status != ExternalDenseStorageRegistry::Result::kSuccess ||
-                    !lease || compile_config().arch != Arch::cuda ||
-                    !lease->synchronization_domain,
-                "External borrowing requires live synchronized CUDA storage");
+                    !lease || !lease->synchronization_domain,
+                "External borrowing requires live synchronized storage");
+    bool qualified = compile_config().arch == Arch::cuda;
+#ifdef TI_WITH_VULKAN
+    if (compile_config().arch == Arch::vulkan) {
+      auto imported = std::dynamic_pointer_cast<vulkan::VulkanExternalBufferOwner>(
+          lease->synchronization_domain);
+      qualified = imported && imported->ndarray_allocation() == binding.allocation;
+    }
+#endif
+    TI_ERROR_IF(!qualified,
+                "External borrowing requires qualified CUDA or Vulkan storage");
     result.external_access = lease->synchronization_domain;
     result.lease =
         std::make_shared<ExternalDenseStorageLease>(std::move(lease));

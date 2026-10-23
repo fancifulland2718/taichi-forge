@@ -10,6 +10,7 @@
 #include <functional>
 #include <stdexcept>
 #include <limits>
+#include <map>
 #include <set>
 #include <unordered_set>
 #include "taichi/aot/graph_data.h"
@@ -35,6 +36,7 @@
 #ifdef TI_WITH_VULKAN
 #include "taichi/runtime/gfx/aot_graph_data.h"
 #include "taichi/runtime/fixed_execution_vulkan.h"
+#include "taichi/rhi/vulkan/vulkan_external_access.h"
 #endif
 
 namespace taichi::lang {
@@ -186,6 +188,7 @@ struct FixedExecution::State {
     std::vector<Variants> variants;
     std::size_t parameter_count{0};
     bool gpu_timing{false};
+    bool external_bound{false};
     std::mutex mutex;
     bool initialized{false};
     bool retired{false};
@@ -1578,6 +1581,58 @@ FixedExecution::FixedExecution(
 FixedExecution::~FixedExecution() = default;
 void FixedExecution::bind_external_access(
     std::vector<std::shared_ptr<ExternalSynchronizationDomain>> domains) {
+#ifdef TI_WITH_VULKAN
+  if (state_->vulkan_domain && state_->vulkan_instance) {
+    auto &instance = *state_->vulkan_instance;
+    std::lock_guard<std::mutex> lock(instance.mutex);
+    if (instance.retired || instance.initialized || instance.external_bound)
+      throw std::invalid_argument(
+          "External access requires an unbound unsubmitted instance");
+    std::vector<std::shared_ptr<vulkan::VulkanExternalBufferOwner>> owners;
+    owners.reserve(domains.size());
+    for (const auto &domain : domains) {
+      auto owner =
+          std::dynamic_pointer_cast<vulkan::VulkanExternalBufferOwner>(domain);
+      if (!owner || owner->buffer()->device !=
+                        static_cast<vulkan::VulkanDevice *>(
+                            instance.payload->device)->vk_device())
+        throw std::invalid_argument(
+            "External Vulkan binding requires this device's managed owner");
+      (void)owner->ndarray_allocation();
+      owners.push_back(std::move(owner));
+    }
+    auto access =
+        std::make_shared<vulkan::VulkanExternalAccess>(std::move(owners));
+    using Commands = vulkan::ExecutionDomain::Commands;
+    std::map<const Commands *, std::shared_ptr<const Commands>> wrapped;
+    const auto wrap = [&](const std::shared_ptr<const Commands> &body) {
+      if (!body)
+        return body;
+      const auto existing = wrapped.find(body.get());
+      if (existing != wrapped.end())
+        return existing->second;
+      auto result = state_->vulkan_domain->prepare_external_access(body, access);
+      wrapped.emplace(body.get(), result);
+      return result;
+    };
+    auto commands = wrap(instance.commands);
+    auto first = wrap(instance.first_commands);
+    auto variants = instance.variants;
+    for (auto &variant : variants) {
+      variant.ordinary = wrap(variant.ordinary);
+      variant.first = wrap(variant.first);
+      variant.sampled = wrap(variant.sampled);
+      variant.sampled_first = wrap(variant.sampled_first);
+    }
+    // Publish only after every variant succeeded. The caller publishes the
+    // instance to submitters afterwards; no preparation is done during replay.
+    instance.commands = std::move(commands);
+    instance.first_commands = std::move(first);
+    instance.variants.swap(variants);
+    instance.external_bound = true;
+    return;
+  }
+#endif
 #ifdef TI_WITH_CUDA
   if (state_->cuda_domain && state_->cuda_instance) {
     auto &instance = *state_->cuda_instance;
@@ -1599,7 +1654,7 @@ void FixedExecution::bind_external_access(
   }
 #endif
   throw std::invalid_argument(
-      "Prepared external access requires an independent CUDA instance");
+      "Prepared external access requires an independent CUDA or Vulkan instance");
 }
 RuntimeCompletion FixedExecution::submit(
     const std::vector<RuntimeCompletion> &dependencies,

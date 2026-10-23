@@ -141,7 +141,8 @@ class FixedExecution {
       const std::vector<SubmissionParameterValue> &parameters = {},
       bool sample_gpu = false);
   // Cold, once-only binding before publishing this instance to submitters.
-  // The whole replay owns one external epoch on its selected CUDA stream.
+  // The whole replay owns one external epoch on its selected CUDA stream or
+  // Vulkan queue; native Vulkan variants retain the same atomic access plan.
   // Initialization has its own separately qualified access closure.
   void bind_external_access(
       std::vector<std::shared_ptr<ExternalSynchronizationDomain>> domains);

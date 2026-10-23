@@ -2054,6 +2054,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
     };
     prepared->initial_access = external_access(plan.initialization_bindings);
     prepared->replay_access = external_access(plan.replay_bindings);
+    if (rt.arch == taichi::Arch::vulkan && !prepared->initial_access.empty())
+      throw MemoryBindingError(
+          "Vulkan external initialization requires a separately qualified producer epoch");
   }
   {
     for (const auto &name : plan.replay_bindings) {

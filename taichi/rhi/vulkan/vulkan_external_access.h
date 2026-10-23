@@ -6,6 +6,7 @@
 
 #include "taichi/rhi/vulkan/vulkan_external_buffer.h"
 #include "taichi/rhi/vulkan/vulkan_timeline.h"
+#include "taichi/rhi/interop/external_sync.h"
 
 namespace taichi::lang::vulkan {
 
@@ -15,7 +16,7 @@ class VulkanExternalAccess;
 // this owner. The producer serializes epochs through consumed and promises that
 // ready(epoch) means its matching signal is already enqueued (not merely
 // planned).
-class VulkanExternalBufferOwner final {
+class VulkanExternalBufferOwner final : public ExternalSynchronizationDomain {
  public:
   // Called under the owner lock: nonblocking, side-effect-free, and no Forge
   // reentry, GPU enqueue, or ownership transfer. False consumes nothing.
@@ -30,14 +31,26 @@ class VulkanExternalBufferOwner final {
       const VulkanExternalBufferHandles &handles,
       ReadyQuery ready,
       std::shared_ptr<void> producer_retention = {});
-  ~VulkanExternalBufferOwner();
+  ~VulkanExternalBufferOwner() override;
   VulkanExternalBufferOwner(const VulkanExternalBufferOwner &) = delete;
   VulkanExternalBufferOwner &operator=(const VulkanExternalBufferOwner &) =
       delete;
-  std::uint64_t identity() const noexcept;
+  std::uint64_t identity() const noexcept override;
+  bool retirement_waits_for_consumer() const noexcept override {
+    return true;
+  }
+  bool has_consumer_ready_query() const noexcept override {
+    return true;
+  }
+  bool consumer_ready() const override;
+  void acquire_for_consumer(const ExternalStreamDomain &) override;
+  void release_from_consumer(const ExternalStreamDomain &) override;
   Snapshot snapshot() const;
   // Cold trusted recording only. Managed consumers retain the owner/plan too.
   std::shared_ptr<VulkanExternalBuffer> buffer() const;
+  // Cold, idempotent view for the existing managed ndarray registry. Requires
+  // the producer's actual storage/address flags; never changes imported flags.
+  DeviceAllocation ndarray_allocation();
   // Stops admission, waits only the last proven prefix outside the owner lock,
   // then drops its import. Command references can retain imports longer; their
   // producer retention is released only after the actual import destruction.
