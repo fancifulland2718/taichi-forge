@@ -128,6 +128,11 @@ def persistent_recording(plan):
         raise TypeError("Persistent primitive requires a concrete sort or compact plan")
     if plan._backend not in ("cuda", "vulkan"):
         raise TaichiRuntimeError("Persistent native recording requires CUDA or Vulkan")
+    config = plan._program.config()
+    if config.debug or (plan._backend == "vulkan" and config.kernel_profiler):
+        raise TaichiRuntimeError(
+            "Persistent primitives require non-debug execution and no Vulkan kernel_profiler"
+        )
     if isinstance(plan, PreparedSortPlan) and plan._definition.parameters["nan_policy"] != "last":
         raise TaichiRuntimeError("Persistent native sort requires nan_policy='last'")
     operation = plan._definition.operation

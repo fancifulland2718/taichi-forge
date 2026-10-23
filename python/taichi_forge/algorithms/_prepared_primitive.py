@@ -47,6 +47,8 @@ class _PreparedNativePlan:
             type(self) in (PreparedSortPlan, PreparedCompactPlan)
             and self._command is not None
             and self._backend in ("cuda", "vulkan")
+            and not self._program.config().debug
+            and (self._backend != "vulkan" or not self._program.config().kernel_profiler)
             and self._definition.parameters.get("nan_policy", "last") == "last"
             and callable(getattr(self._program, "_record_primitive_" + self._definition.operation, None))
         )

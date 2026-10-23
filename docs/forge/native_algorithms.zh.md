@@ -96,6 +96,7 @@ GPU 全范围 Sort 和 Compact 可显式选择 `record(persistent=True)`，创�
 也可与相邻 kernel 一起录制。暖态不重建 provider 命令、不增长 Program arena。准备可能
 分配 scratch 和创建后端 pipeline，需与重放分开计时。此选项不接纳 CPU 或 CUDA
 `nan_policy="bitwise"`；这些情况继续使用已有普通执行。
+debug 执行及 Vulkan kernel profiler 同样使用普通路线，在创建快照前明确拒绝。
 `plan.report()["persistent_recording_available"]` 报告该选项的冷阶段准入；
 `recording.workspace_bytes` 报告其保留的原生 scratch，不代表 Graph 总内存。
 Graph 或调用方持有快照期间保留工作区，runtime 退休也会释放它。

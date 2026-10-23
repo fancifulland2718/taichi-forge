@@ -121,6 +121,24 @@ def test_persistent_sort_does_not_reinterpret_bitwise_nan_order():
     plan.close()
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], debug=True)
+def test_persistent_recording_rejects_debug_during_cold_admission():
+    plan = ti.algorithms.prepare_sort(ti.ndarray(ti.i32, 5))
+    assert not plan.report()["persistent_recording_available"]
+    with pytest.raises(RuntimeError, match="non-debug"):
+        plan.record(persistent=True)
+    plan.run()
+
+
+@test_utils.test(arch=ti.vulkan, kernel_profiler=True)
+def test_persistent_recording_rejects_vulkan_profiler_during_cold_admission():
+    plan = ti.algorithms.prepare_sort(ti.ndarray(ti.i32, 5))
+    assert not plan.report()["persistent_recording_available"]
+    with pytest.raises(RuntimeError, match="kernel_profiler"):
+        plan.record(persistent=True)
+    plan.run()
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False, vulkan_sparse_experimental=False)
 def test_persistent_primitives_between_kernels_and_automatic_ad(monkeypatch):
     n = 83

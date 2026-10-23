@@ -117,6 +117,7 @@ rebuild the provider command or grow the Program arena. Preparation can allocate
 scratch and create backend pipelines, so measure it separately from replay.
 CPU and CUDA `nan_policy="bitwise"` are not admitted by this explicit option;
 their existing ordinary execution remains available.
+Debug execution and Vulkan kernel profiling require the ordinary route as well.
 `plan.report()["persistent_recording_available"]` reports cold admission for the
 option; `recording.workspace_bytes` reports its retained native scratch, not total
 Graph memory. Scratch is retained while a Graph or caller owns the snapshot, or
