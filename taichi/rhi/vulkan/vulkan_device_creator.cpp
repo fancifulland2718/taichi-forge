@@ -1666,12 +1666,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
         const_cast<void *>(create_info.pNext), core12_features);
   }
 
-  if (params_.enable_validation_layer) {
-    create_info.enabledLayerCount = (uint32_t)kValidationLayers.size();
-    create_info.ppEnabledLayerNames = kValidationLayers.data();
-  } else {
-    create_info.enabledLayerCount = 0;
-  }
+  // Validation is enabled on the instance. Legacy device-layer fields must
+  // remain empty, including when the runtime requests validation explicitly.
+  create_info.enabledLayerCount = 0;
+  create_info.ppEnabledLayerNames = nullptr;
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(vkCreateDevice(physical_device_, &create_info,
                                                  kNoVkAllocCallbacks, &device_),
                                   "failed to create logical device");
