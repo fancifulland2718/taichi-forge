@@ -1,15 +1,19 @@
-# CUDA 执行域（开发中）
+# CUDA 与 Vulkan 执行域（开发中）
 
 [English](cuda_execution_domains.en.md)
 
-独立 AOT consumer 可以将保存的完整执行计划绑定到有界 CUDA 执行域。每个域拥有
-nonblocking stream，每个准备好的实例拥有自己的 executable、参数存储和编译临时区。
+独立 AOT consumer 可以将受支持的已保存执行计划绑定到有界 CUDA 或 Vulkan 执行域。
+CUDA 域拥有 nonblocking stream；Vulkan 域租用设备创建时准备的额外 compute queue。
+每个准备好的实例拥有自己的 recording、参数存储和编译临时区。
 该接口保留已经选择的完整计划。stream、优先级和完成票据只属于运行时，不写入 AOT 产物。
 
 JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和当前 Program 的 dense Field。
 这是 F3 的一部分；Canvas 显式选域已有 Windows CUDA/Vulkan 资格，跨平台真实窗口
 和应用 FPS 仍未完成资格验证。
 优先级是设备调度提示，不能保证 kernel 并行或抢占。
+
+两种后端共用准备、提交、参数、计时和退休接口。CUDA 控制流/并行、外部存储和 Canvas
+保留原有支持面；Vulkan 当前接纳固定、仅使用 buffer 的 compute recipe，具体边界见下文。
 
 ## 能力查询
 
@@ -27,11 +31,53 @@ JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和�
 | `cuda_submission_parameters_u64` | JIT/AOT 独立实例逐提交更新已声明的 u64 scalar |
 | `cuda_completion_gpu_timing` | 预分配、逐提交采样及 completion 的非阻塞 GPU 计时读取 |
 | `cuda_execution_instance_retirement` | 显式退休单个实例、复用驻留预算，并保留已有票据 |
+| `vulkan_execution_domains` | 额外 compute queue 与精确 timeline 依赖 |
+| `vulkan_aot_execution_domains` | 已保存固定 buffer-only 计划的准备与重放 |
+| `vulkan_jit_graph_execution_domains` | 已选 JIT buffer-only dispatch/code 借用 |
+| `vulkan_submission_parameters_u64` | 在所选 Vulkan 队列更新已声明的 replay-only u64 |
+| `vulkan_completion_gpu_timing` | 预分配 timestamp query 与稀疏完整计算区间采样 |
+| `vulkan_execution_instance_retirement` | 单实例退休及驻留预算复用 |
 
 对旧包使用 `features.get(name, False)`；不能从版本号或较新的提交推定能力。具体设备/
 驱动、同 GPU 共享及 recipe 的编译/provider 条件在冷创建和准备时检查。声明为真不代表
 Linux 窗口或所有 provider 已通过验收。版本见 [SDK 配对合同](aot_sdk.zh.md#component-pairing)；不匹配的 shim/
 native 在进入 C++ 绑定前拒绝。
+
+## Vulkan 队列与配方边界
+
+Vulkan 域要求已启用 timeline semaphore，并且 runtime 所选 queue family 中有未占用的
+额外 compute queue。队列零保留给普通 runtime；每个活域租用另一条队列，因此两个域
+至少需要三条已创建队列。耗尽时在冷创建阶段拒绝，不悄悄绕回队列零。导入设备也须提供
+相应的队列与 timeline 信息。不同队列未必对应独立 GPU 执行引擎，不能据此保证吞吐提升。
+
+现有接口可用于 Vulkan：
+
+```python
+# JIT 已经通过 ti.init(arch=ti.vulkan) 选择设备。
+domain = ti.graph.execution_domain(capacity=2, instance_capacity=2, gpu_timing=True)
+step = graph.prepare(arguments, execution_domain=domain, mutable_parameters=names)
+step.initialize()
+ticket = step.submit(values=metadata, sample_gpu=True)
+```
+
+无源码消费端使用 `Runtime("vulkan", device_index=...)`，再调用相同的
+`runtime.execution_domain()` / `module.prepare_execution()`。应明确选择设备：runtime-only
+的设备零与 JIT 自动选择不一定是同一 GPU。导出含 u64 的 AOT kernel 时声明
+`caps=["spirv_has_int64"]`。Vulkan 优先级在设备创建时固定，此处使用 `priority=0`。
+
+该路线复用已选编译 dispatch 和私有固定工作区。公开验收覆盖 scalar/tensor buffer
+kernel、显式 adjoint、初始化/重放、双独立实例、高位 u64 更新、稀疏计时、完成集合、
+实例及 reset 退休。native buffer 操作仍须具备适用的固定录制 factory。首版独立 Vulkan
+路线不接纳 image/graphics、条件/并行 recipe，以及共享 sparse/RNG/runtime-error 状态。
+普通 Graph 保持既有能力；CUDA Canvas 和外部内存协议不会因此自动适用于 Vulkan 域。
+
+初始化导入普通队列已提交的准备前缀，并在所选队列执行实例初始化。暖态提交把依赖、
+参数上传和固定命令放进一次 `vkQueueSubmit`；busy 不产生部分设备效果。实例退休只等待
+该实例已接纳的前缀，不等待无关默认队列工作。
+
+Windows 实机资格使用具有 16 条已创建 compute queue 的 RTX 5090，并含双向受控挂起
+推进检查。缺少足够队列的设备不能仅凭构建能力位视为可用。Linux、任意 provider 组合
+和应用吞吐尚未在此验证。
 
 ## 当前 JIT Graph
 
@@ -52,13 +98,13 @@ domain.close()  # 冷阶段，排空并退休资源
 调用点的启动策略，不导出文件、重新编译前端或复制 Field 根。不同准备拥有独立的参数、
 控制缓冲区和声明的私有工作区；共享应用 ndarray 和 Field 仍需精确依赖。
 
-当前覆盖 scalar/tensor JIT ndarray、live dense Field/ndarray 的紧凑 AOS
+CUDA 当前覆盖 scalar/tensor JIT ndarray、live dense Field/ndarray 的紧凑 AOS
 `ti.experimental.ndarray_view()` 范围、隐式 dense Field 访问、普通与 masked 控制及
 选定的 CUDA 并行区域。ndarray 的已有 `.grad` 同时借用，支持显式反向内核；不参与
 自动 Tape/FwdMode，初始化/提交会排斥该上下文及其并发进入过程。源 Graph 的 `close()`
 不会关闭已准备实例，Field 树销毁或 Program reset 则先退休相关实例再释放代码/存储。
 
-固定顺序 Graph 也支持嵌套 ArgPack：prepare 冻结设备上的纯值，各实例拥有私有包存储，
+CUDA 固定顺序 Graph 也支持嵌套 ArgPack：prepare 冻结设备上的纯值，各实例拥有私有包存储，
 ndarray 成员沿已有合同借用。sampled Texture 可作为普通参数或包成员借用，同一源图像
 只导入一次；不会复制像素。源图像应先初始化，更新像素与采样之间仍需显式依赖。
 已验证源 Graph/包释放及双域独立关闭；其他包含包的控制 recipe 需分别取得资格。
@@ -105,15 +151,18 @@ ticket = step.submit(values={"epoch": epoch, "simulation_step": step_id,
 `module.prepare_execution(..., mutable_parameters=names)` 提供相同的 AOT 合同。
 首版支持仅用于重放内核的 `u64` scalar；初始化阶段使用的 scalar、数组或其他类型在
 准备时拒绝。名称和数量由调用方声明，每次提交必须完整提供，值必须在 `[0, 2**64)`。
-接受提交后，修改原字典不影响该次执行。预分配的 pinned 参数和设备参数区属于实例，
+接受提交后，修改原字典不影响该次执行。预分配的 staging 参数和设备参数区属于实例，
 上传与完整 Graph 都进入所选域，completion 精确覆盖二者。
-上传使用读取 pinned 存储的小型 GPU kernel，避免 DMA 拷贝引擎的跨流队头阻塞。
+CUDA 上传使用读取 pinned 存储的小型 GPU kernel，避免 DMA 拷贝引擎的跨流队头阻塞。
 冷准备要求 CUDA unified addressing；重放不分配 pinned 内存。
+Vulkan 使用预备 staging 与 buffer copy，在租用队列上显式安排 transfer/compute 依赖，
+上传不会绕到普通队列。
 
-一个实例只有一份可变参数存储，在途时再次提交返回 `None`。需要重叠时，冷阶段准备
-多个独立实例；域容量由调用方配置。busy 或 ready-only 未就绪不上传、不消费外部信号、
+CUDA 实例只有一份可变参数存储，在途时再次提交返回 `None`。Vulkan 按实例及队列槽位
+预分配 staging，同一实例已接纳的提交在该队列依次执行，不覆盖此前快照。需要独立可变
+工作区时在冷阶段准备多个实例；域容量由调用方配置。busy 或 ready-only 未就绪不上传、不消费外部信号、
 不分配提交序号。重放不重新 prepare、不创建设备参数存储、不进行全局同步。
-独立执行域及其参数更新目前仅支持 CUDA；Vulkan 尚不声明独立队列能力。
+CUDA 和 Vulkan 固定 buffer-only 路线共用上述合同。
 
 ## Completion GPU 计时
 
@@ -137,11 +186,12 @@ if ticket is not None:
 范围 `compute_envelope` 是完整执行区间，排除前驱依赖等待、外部 acquire、参数上传和
 外部 release；包括 Graph 内部间隙以及 provider/Graph 内部声明的等待，因此不是逐
 kernel 耗时之和。不会拆开原 Graph，也不切换到默认域。AOT 使用相同接口。
-当前只声明 CUDA 独立域计时；普通 Vulkan Graph 已有的计时路线保持原合同。
+CUDA 与 Vulkan 独立域均提供上述计时。Vulkan 要求所选 queue family 支持 timestamp，
+不支持时采样返回 `unsupported`，没有时长。普通 Vulkan Graph 已有的计时路线保持原合同。
 
 ## Canvas 显式显示域
 
-用 `canvas.set_execution_domain(output)` 绑定当前 Program 的域。仿真开始前调用
+用 `canvas.set_execution_domain(output)` 绑定当前 Program 的 CUDA 域。仿真开始前调用
 `views = canvas.prepare_frame_pool(width, height, capacity=3)`，为各物理 view 准备完整
 Graph/AOT 写入实例并初始化；容量上限为 renderer 的在途数加最后显示图像。返回 view
 只用于提前绑定，只有 `acquire_frame()` 当前借出的同一图像才可写，不应逐帧 prepare。
@@ -264,7 +314,7 @@ owner 退休已建立的部分。实例预算拒绝，或未接纳实例的部�
 提交锁。驱动/provider 析构仍可能产生同步，因此 close 属于冷边界，外部生产者必须
 仍能发出已经提交的等待所需的信号。
 
-逐提交参数的 staging 在最后一次设备读取完成后归还域所属的锁页池，供后续准备复用。
+CUDA 逐提交参数的 staging 在最后一次设备读取完成后归还域所属的锁页池，供后续准备复用。
 空闲映射不足时在冷准备阶段替换，不为每一种历史大小持续积累分配。池保留并发使用的
 高水位存储到域关闭，避免每次实例退休解除锁页时同步其他队列；参数上传和重放路径不变。
 
@@ -299,7 +349,8 @@ CPU `wait()` 和字节缓冲区主机传输是显式同步边界，适用于初�
 元数据，驱动提交和呈现也有主机耗时，不能宣称呈现零成本或应用吞吐已通过。
 独立无头长跑检查每个版本，有头长跑检查实际呈现提交及最终像素版本。
 
-对应 C 接口在 `taichi_cuda.h`：`ti_prepare_execution_plan_on_domain_ext`、
-`ti_initialize_prepared_ext`、`ti_try_submit_prepared_ext` 和域/票据句柄接口。
+后端创建/准备接口分别位于 `taichi_cuda.h` 和 `taichi_vulkan.h`，包括
+`ti_prepare_execution_plan_on_domain_ext` 与 `ti_prepare_execution_plan_on_vulkan_domain_ext`。
+共同初始化、提交、completion 与退休接口位于 `taichi_core.h`。
 成功提交返回调用方拥有的 completion；返回 false 且无 C API 错误表示 busy，false
 伴随错误表示拒绝或失败。公开票据的主机登记在产生设备效果之前预留。

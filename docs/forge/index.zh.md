@@ -27,7 +27,7 @@ vendor 库及 Vulkan shader 编译 addon 另有显式依赖。
 | --- | --- |
 | 执行 kernel 并复用 Graph | [快速开始](quickstart.zh.md) |
 | 脱离 Python 部署 AOT | [独立 C/C++ SDK](aot_sdk.zh.md) |
-| CUDA 多域调度与 Vulkan 关联 | [执行域](cuda_execution_domains.zh.md)、[实验 CiG 初始化与限制](cuda_vulkan_cig.zh.md) |
+| CUDA/Vulkan compute 多域调度及两后端关联 | [执行域](cuda_execution_domains.zh.md)、[实验 CiG 初始化与限制](cuda_vulkan_cig.zh.md) |
 | 等待任意 JIT/AOT 提交完成 | [完成集合、超时与取消](completion_wait_sets.zh.md) |
 | 选择应用 AOT 格式和包结构 | [部署配置](aot_deployment_profiles.zh.md) |
 | 选择基础 AMD GPU 后端 | [ROCm/HIP 配置与限制](rocm_backend.zh.md) |

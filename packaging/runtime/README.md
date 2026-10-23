@@ -31,8 +31,10 @@ Exported plans can reconstruct supported native recordings, provider resources
 and structure bindings. Runtime APIs also expose supported external-memory
 imports. Availability depends on the selected backend, operation schema,
 provider and resource contract; an installed provider does not expose every
-function in its vendor library. Independent CUDA execution domains additionally
-support declared per-submission scalar updates and optional GPU timing.
+function in its vendor library. Independent CUDA and fixed buffer-only Vulkan
+execution domains additionally support declared per-submission scalar updates,
+optional GPU timing and individual instance retirement. Vulkan requires enabled
+timelines and available additional compute queues on the selected device.
 
 This is not a compiler-free runtime: CPU/CUDA bitcode still needs bundled LLVM,
 and GPU drivers may compile device code during loading. See

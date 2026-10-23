@@ -5,8 +5,8 @@
 `CompletionSet` waits for any member of a frozen collection of exact submission
 prefixes. The same implementation accepts ordinary JIT Graph tickets, ordinary
 AOT `SubmissionTicket`, and independent-domain `Completion`. CPU, CUDA and Vulkan
-use their existing completion primitives. Independent execution domains currently
-remain CUDA-specific; this API does not add Vulkan queues.
+use their existing completion primitives. CUDA and qualified fixed-compute Vulkan
+domains both provide these exact tickets; see [domain boundaries](cuda_execution_domains.en.md).
 
 Check `runtime_contract_manifest()["features"].get("completion_wait_any", False)`
 before using this addition. Runtime-only consumers import it without the DSL:

@@ -161,16 +161,20 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Execution domains, windows and qualification
 
-- Independent CUDA domains accept explicitly declared `u64` parameters frozen per accepted submission.
+- Independent CUDA and fixed-compute Vulkan domains accept explicitly declared `u64` parameters frozen per accepted submission.
   Upload and Graph execution use that domain; busy returns before upload. Domains can preallocate
   timing events for sparse `Completion.gpu_timing` samples. The compute interval excludes predecessor
   waits, parameter uploads and external acquire/release, and includes internal Graph/provider gaps.
   Unsampled, pending, unsupported and failed states are explicit, never a fabricated zero duration.
 - [Completion sets](completion_wait_sets.en.md) provide cancellable, timed wait-any for ordinary
-  CPU/CUDA/Vulkan JIT/AOT tickets and CUDA domain tickets without taking runtime submission locks.
+  CPU/CUDA/Vulkan JIT/AOT tickets and CUDA/Vulkan domain tickets without taking runtime submission locks.
   Polling uses a configurable interval, without per-ticket threads or extra GPU nodes.
-- Independent domains remain CUDA-only. Vulkan queue/domain parameters and timing parity remain
-  follow-up work. See [execution-domain contracts](cuda_execution_domains.en.md).
+- Vulkan JIT/AOT fixed buffer-only recipes now use additional device-created compute queues,
+  exact timeline dependencies, per-submit parameters, sparse GPU timing and independent instance
+  retirement. Queue/timeline availability is checked on the chosen device; image/graphics and
+  control/parallel recipes retain their ordinary routes. Qualification includes source-free AOT,
+  actual explicit gradients and controlled independent progress on Windows RTX 5090.
+  See [execution-domain contracts](cuda_execution_domains.en.md).
 - Python/native `Window.get_scroll_delta()` returns horizontal/vertical floating increments and clears
   them on read, without extra event polling or GPU waits. Vulkan resize/close no longer frees signal
   semaphores still referenced by the presentation queue.

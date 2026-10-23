@@ -4,7 +4,8 @@
 
 `CompletionSet` 等待一组冻结的精确提交前缀中任意一项完成。普通 JIT Graph 票据、
 普通 AOT `SubmissionTicket` 和独立域 `Completion` 共用这一实现；CPU、CUDA、Vulkan
-沿用各自已有的完成原语。独立执行域目前仍限 CUDA，本接口不增加 Vulkan 队列。
+沿用各自已有的完成原语。CUDA 及已资格的 Vulkan 固定 compute 域均提供这些精确票据，
+具体范围见[执行域合同](cuda_execution_domains.zh.md)。
 
 使用前检查 `runtime_contract_manifest()["features"].get("completion_wait_any", False)`。
 runtime-only 消费端无需导入 DSL：

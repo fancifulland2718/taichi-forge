@@ -1,10 +1,11 @@
-# CUDA execution domains (development)
+# CUDA and Vulkan execution domains (development)
 
 [中文](cuda_execution_domains.zh.md)
 
-The independent AOT consumer can bind a saved execution plan to a bounded CUDA
-execution domain. Each domain owns a nonblocking stream, and each prepared
-instance owns its executable, argument storage and compiler temporaries.
+The independent AOT consumer can bind a supported saved execution plan to a
+bounded CUDA or Vulkan execution domain. CUDA owns a nonblocking stream; Vulkan
+leases an additional device-created compute queue. Each prepared instance owns
+its recordings, argument storage and compiler temporaries.
 This API preserves the complete selected plan. Stream handles, priorities and
 completion tickets are runtime choices; they are never serialized into AOT.
 
@@ -14,6 +15,11 @@ Selected Canvas display has Windows CUDA/Vulkan qualification; cross-platform
 windows and application FPS remain unqualified. Queue priority is a device
 scheduling hint; it does not guarantee
 concurrent kernels or priority preemption.
+
+The shared preparation, submission, parameter, timing and retirement APIs cover
+both backends. CUDA control/parallel recipes, external storage and Canvas retain
+their existing scope. Vulkan currently accepts fixed buffer-only compute recipes;
+the precise Vulkan boundary is described below.
 
 ## Capability discovery
 
@@ -32,6 +38,12 @@ the DSL or creating a device. These are native implementation declarations:
 | `cuda_submission_parameters_u64` | Declared u64 scalar updates per submission for JIT/AOT independent instances |
 | `cuda_completion_gpu_timing` | Preallocated per-submission sampling and nonblocking completion GPU timing |
 | `cuda_execution_instance_retirement` | Explicit instance retirement and resident-budget reuse, preserving existing tickets |
+| `vulkan_execution_domains` | Additional compute queues with exact timeline dependencies |
+| `vulkan_aot_execution_domains` | Saved fixed buffer-only plan preparation and replay |
+| `vulkan_jit_graph_execution_domains` | Selected JIT buffer-only dispatch/code loans |
+| `vulkan_submission_parameters_u64` | Declared replay-only u64 updates on the selected Vulkan queue |
+| `vulkan_completion_gpu_timing` | Preallocated timestamp queries and sparse compute-envelope samples |
+| `vulkan_execution_instance_retirement` | Per-instance retirement and resident-budget reuse |
 
 Use `features.get(name, False)` for older packages. Missing declarations do not
 become support because a version or commit looks newer. Device/driver support,
@@ -39,6 +51,53 @@ same-GPU sharing and each recipe's compiler/provider facts are checked at cold
 creation/preparation. A true build declaration does not qualify Linux windows
 or every provider. See [SDK component pairing](aot_sdk.en.md#component-pairing); an
 incompatible shim/native pair is rejected before C++ bindings are entered.
+
+## Vulkan queue and recipe boundary
+
+Vulkan domains require enabled timeline semaphores and an unused additional
+compute queue in the runtime's selected queue family. Queue zero remains the
+ordinary runtime route. Each live domain leases one other queue; two domains
+therefore require at least three created queues. Exhaustion fails at cold domain
+creation without silently using queue zero. Imported devices must supply the
+corresponding queue/timeline facts. Distinct queues need not have distinct GPU
+execution engines, so queue availability is not a throughput guarantee.
+
+The ordinary API works on Vulkan too:
+
+```python
+# JIT: ti.init(arch=ti.vulkan) has already selected the device.
+domain = ti.graph.execution_domain(capacity=2, instance_capacity=2, gpu_timing=True)
+step = graph.prepare(arguments, execution_domain=domain, mutable_parameters=names)
+step.initialize()
+ticket = step.submit(values=metadata, sample_gpu=True)
+```
+
+A source-free consumer uses `Runtime("vulkan", device_index=...)` and the same
+`runtime.execution_domain()` / `module.prepare_execution()` methods. The device
+index is explicit: runtime-only device zero and JIT automatic selection need not
+choose the same GPU. AOT u64 kernels must declare `caps=["spirv_has_int64"]` when
+exporting. Vulkan priorities are fixed at device creation; use `priority=0` here.
+
+This route reuses selected compiled dispatches and private fixed workspaces.
+Qualified public cases include scalar/tensor buffer kernels, explicit adjoint
+kernels, initialization/replay, two independent instances, high-bit u64 updates,
+sparse timing, completion sets and instance/reset retirement. Native buffer
+operations still require a compatible fixed-recording factory. Image/graphics,
+conditional/parallel recipes and shared sparse/RNG/runtime-error state are not
+admitted by this first independent Vulkan route. Ordinary Graph execution keeps
+its existing capabilities; CUDA Canvas and external-memory protocols are not
+implicitly enabled on Vulkan domains.
+
+Initialization imports the ordinary queue's submitted preparation prefix and
+records instance initialization on the selected queue. Warm submission combines
+dependencies, parameter upload and fixed commands into one `vkQueueSubmit`.
+Busy admission changes none of these, and instance retirement waits for that
+instance's accepted prefix rather than unrelated default-queue work.
+
+Windows qualification uses an RTX 5090 with 16 created compute queues, including
+controlled pending-work tests in both directions. A device lacking enough queues
+does not qualify merely because the build reports the features. Linux, arbitrary
+provider combinations and application throughput have not been qualified here.
 
 ## Current JIT Graphs
 
@@ -63,7 +122,7 @@ artifact, recompile the frontend or copy Field roots. Separate preparations own
 independent arguments, control buffers and declared private workspace. Shared
 application ndarrays and Fields still require exact dependencies.
 
-The current scope includes scalar/tensor JIT ndarrays, compact AOS
+The CUDA scope includes scalar/tensor JIT ndarrays, compact AOS
 `ti.experimental.ndarray_view()` ranges over live dense Fields/ndarrays,
 implicit dense Field access, ordinary and masked control, and selected CUDA parallel regions.
 Existing ndarray `.grad` storage is borrowed for explicit adjoint kernels.
@@ -72,7 +131,7 @@ context and concurrent AD entry. Closing the source Graph leaves prepared
 instances usable. Field-tree destruction or Program reset retires dependent
 instances before releasing code or storage.
 
-Fixed sequential Graphs also accept nested ArgPacks. Preparation freezes actual
+On CUDA, fixed sequential Graphs also accept nested ArgPacks. Preparation freezes actual
 device values into private pack storage; ndarray members retain their existing loan
 contract. Sampled Texture arguments and packed members borrow each source image once,
 without copying pixels. Initialize images first and explicitly order pixel updates
@@ -128,20 +187,23 @@ contract. This first implementation accepts replay-only `u64` kernel scalars.
 Scalars also used in initialization, arrays and other types are rejected during
 preparation. Names and count are caller-defined. Every submit requires all
 declared values in `[0, 2**64)`. Mutating the original dictionary after acceptance
-cannot change accepted work. Each instance owns preallocated pinned staging and
-device arguments. Uploads and the complete Graph use the selected stream, and
+cannot change accepted work. Each instance owns preallocated staging and device
+arguments. Uploads and the complete Graph use the selected queue, and
 the completion covers both.
-Uploads use a small GPU kernel reading pinned storage to avoid cross-stream
+CUDA uploads use a small GPU kernel reading pinned storage to avoid cross-stream
 head-of-line blocking on the DMA engine. Preparation requires CUDA unified
 addressing; replay never allocates pinned memory.
+Vulkan uses prepared staging and buffer copies with explicit transfer/compute
+dependencies on its leased queue. No upload is redirected to the ordinary queue.
 
-One mutable argument frame permits one in-flight submission per instance;
-another returns `None`. Prepare independent instances for overlap and configure
-domain capacity as needed. Busy and unready calls enqueue no upload, consume no
+CUDA's mutable argument frame permits one in-flight submission per instance;
+another returns `None`. Vulkan preallocates staging per instance and queue slot,
+so accepted submissions of the same instance remain ordered on its queue without
+overwriting earlier snapshots. Prepare independent instances for separate mutable
+workspace and configure domain capacity as needed. Busy and unready calls enqueue no upload, consume no
 external signal and allocate no submission sequence. Replay does not prepare,
-allocate device parameter storage or synchronize globally. Independent domains
-and these updates currently support CUDA; Vulkan does not claim independent
-queue support.
+allocate device parameter storage or synchronize globally. CUDA and the fixed
+buffer-only Vulkan route share this contract.
 
 ## Completion GPU timing
 
@@ -166,12 +228,13 @@ The result belongs to that exact ticket and survives event reuse and domain clos
 external acquire, parameter uploads and external release. It includes gaps and
 waits inside the selected Graph/providers, so it is not a sum of kernel times.
 Sampling does not split the Graph or change its domain. AOT uses the same API.
-This currently covers independent CUDA domains; existing ordinary Vulkan Graph
-timing retains its own contract.
+This covers independent CUDA and Vulkan domains. Vulkan timestamps require support
+in the selected queue family; unsupported samples report `unsupported` without a duration.
+Existing ordinary Vulkan Graph timing retains its own contract.
 
 ## Selected Canvas display domain
 
-Bind the current Program's domain with `canvas.set_execution_domain(output)`.
+Bind the current Program's CUDA domain with `canvas.set_execution_domain(output)`.
 Before starting simulation, call
 `views = canvas.prepare_frame_pool(width, height, capacity=3)` and prepare the
 complete writer Graph/AOT bindings for those physical views. Capacity is bounded
@@ -338,7 +401,7 @@ tickets remain usable. Waiting does not hold the runtime submission lock.
 Driver/provider destruction can still synchronize, so close belongs at a cold
 boundary with external producers able to signal pending waits.
 
-Submission-parameter staging returns to a domain-owned pinned pool after its
+CUDA submission-parameter staging returns to a domain-owned pinned pool after its
 last device read completes. Later preparations reuse idle mappings; an idle
 mapping that is too small is replaced during cold preparation. The pool retains
 its peak concurrent storage until domain close, avoiding context-wide unpinning
@@ -390,9 +453,10 @@ calls retain their own host cost. This is not a zero-cost presentation or
 application throughput claim. The separate headless run checks every version;
 the headed run checks actual presentation submission and the final pixel version.
 
-The C equivalents are declared in `taichi_cuda.h`:
-`ti_prepare_execution_plan_on_domain_ext`, `ti_initialize_prepared_ext`,
-`ti_try_submit_prepared_ext`, and the execution-domain/completion handle APIs.
+Backend creation/preparation APIs are declared in `taichi_cuda.h` and
+`taichi_vulkan.h`, including `ti_prepare_execution_plan_on_domain_ext` and
+`ti_prepare_execution_plan_on_vulkan_domain_ext`. Common initialization,
+submission, completion and retirement APIs are declared in `taichi_core.h`.
 A successful submit returns an owned completion handle. A false result with no
 C API error means busy; a false result with an error means rejection/failure.
 Bindings reserve public ticket bookkeeping before device effects.
