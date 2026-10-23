@@ -3,6 +3,7 @@
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/visitors.h"
+#include "taichi/ir/stmt_use_index.h"
 #include "taichi/transforms/simplify.h"
 #include "taichi/program/kernel.h"
 #include "taichi/program/program.h"
@@ -50,6 +51,7 @@ class BasicBlockSimplify : public IRVisitor {
   StructForStmt *current_struct_for;
   CompileConfig config;
   DelayedIRModifier modifier;
+  StmtUseIndex uses_;
   bool linearized_block_{false};
   struct LoadCandidate {
     GlobalLoadStmt *load;
@@ -79,7 +81,33 @@ class BasicBlockSimplify : public IRVisitor {
     visited.insert(stmt->instance_id);
   }
 
+  void replace_usages(Stmt *stmt, Stmt *replacement) {
+    if (!uses_.valid()) {
+      uses_.rebuild(block);
+      // Match the existing replacement scope: descendants plus registered
+      // operands in ancestor blocks, without walking sibling subtrees.
+      for (auto *parent = block->parent_block(); parent;
+           parent = parent->parent_block()) {
+        for (auto &ancestor_stmt : parent->statements)
+          uses_.add_user(ancestor_stmt.get());
+      }
+    }
+    uses_.replace_uses(stmt, replacement);
+  }
+
+  template <typename Mutation>
+  void change_operands(Stmt *stmt, Mutation mutation) {
+    if (uses_.valid())
+      uses_.remove_user(stmt);
+    mutation();
+    if (uses_.valid())
+      uses_.add_user(stmt);
+  }
+
   void accept_block() {
+    // Delayed insertions/deletions and type checks became visible together.
+    // A no-op iteration does not need to rebuild any use information.
+    uses_.invalidate();
     global_loads_.clear();
     linearized_block_ = false;
     for (int i = 0; i < (int)block->statements.size(); i++) {
@@ -143,7 +171,7 @@ class BasicBlockSimplify : public IRVisitor {
       }
       candidate.checked_through = current_stmt_id;
       if (!has_store) {
-        stmt->replace_usages_with(candidate.load);
+        replace_usages(stmt, candidate.load);
         modifier.erase(stmt);
         return;
       }
@@ -157,7 +185,7 @@ class BasicBlockSimplify : public IRVisitor {
 
   void visit(IntegerOffsetStmt *stmt) override {
     if (stmt->offset == 0) {
-      stmt->replace_usages_with(stmt->input);
+      replace_usages(stmt, stmt->input);
       modifier.erase(stmt);
     }
   }
@@ -167,7 +195,7 @@ class BasicBlockSimplify : public IRVisitor {
       auto operand_type = stmt->operand->ret_type;
       if (is_integral(operand_type) && is_unsigned(operand_type)) {
         // abs(u) -> u
-        stmt->replace_usages_with(stmt->operand);
+        replace_usages(stmt, stmt->operand);
         modifier.erase(stmt);
       }
     }
@@ -193,8 +221,8 @@ class BasicBlockSimplify : public IRVisitor {
       auto offset_stmt =
           Stmt::make<IntegerOffsetStmt>(stmt, previous_offset->offset);
 
-      stmt->inputs.back() = previous_offset->input;
-      stmt->replace_usages_with(offset_stmt.get());
+      change_operands(stmt, [&] { stmt->inputs.back() = previous_offset->input; });
+      replace_usages(stmt, offset_stmt.get());
       offset_stmt->as<IntegerOffsetStmt>()->input = stmt;
       modifier.insert_after(stmt, std::move(offset_stmt));
       return;
@@ -237,10 +265,10 @@ class BasicBlockSimplify : public IRVisitor {
       modifier.insert_before(stmt, std::move(sum));
       modifier.insert_before(stmt, std::move(check_sum));
       modifier.insert_before(stmt, std::move(assert));
-      stmt->replace_usages_with(select.get());
+      replace_usages(stmt, select.get());
       modifier.insert_before(stmt, std::move(select));
     } else {
-      stmt->replace_usages_with(sum.get());
+      replace_usages(stmt, sum.get());
       modifier.insert_before(stmt, std::move(sum));
     }
     modifier.erase(stmt);
@@ -267,8 +295,8 @@ class BasicBlockSimplify : public IRVisitor {
       auto offset_stmt = Stmt::make<IntegerOffsetStmt>(
           stmt, previous_offset->offset * sizeof(int32) * (snode->ch.size()));
 
-      stmt->input_index = previous_offset->input;
-      stmt->replace_usages_with(offset_stmt.get());
+      change_operands(stmt, [&] { stmt->input_index = previous_offset->input; });
+      replace_usages(stmt, offset_stmt.get());
       offset_stmt->as<IntegerOffsetStmt>()->input = stmt;
       modifier.insert_after(stmt, std::move(offset_stmt));
       return;
@@ -289,8 +317,8 @@ class BasicBlockSimplify : public IRVisitor {
       auto offset_stmt = Stmt::make<IntegerOffsetStmt>(
           stmt, stmt->chid * sizeof(int32) + previous_offset->offset);
 
-      stmt->input_ptr = previous_offset->input;
-      stmt->replace_usages_with(offset_stmt.get());
+      change_operands(stmt, [&] { stmt->input_ptr = previous_offset->input; });
+      replace_usages(stmt, offset_stmt.get());
       stmt->chid = 0;
       stmt->output_snode = stmt->input_snode->ch[stmt->chid].get();
       offset_stmt->as<IntegerOffsetStmt>()->input = stmt;
@@ -303,7 +331,7 @@ class BasicBlockSimplify : public IRVisitor {
 
   void visit(WhileControlStmt *stmt) override {
     if (stmt->mask) {
-      stmt->mask = nullptr;
+      change_operands(stmt, [&] { stmt->mask = nullptr; });
       modifier.mark_as_modified();
       return;
     }
@@ -367,6 +395,10 @@ class BasicBlockSimplify : public IRVisitor {
             // do nothing. Keep the statement.
             continue;
           }
+          // Moving this user to the delayed insertion queue removes it from
+          // the currently visited IR. Reindex it when the edits are committed.
+          if (uses_.valid())
+            uses_.remove_user(clause[i].get());
           if (clause[i]->is<LocalStoreStmt>()) {
             auto store = clause[i]->as<LocalStoreStmt>();
             auto load = Stmt::make<LocalLoadStmt>(store->dest);
@@ -473,7 +505,7 @@ class BasicBlockSimplify : public IRVisitor {
 
   void visit(WhileStmt *stmt) override {
     if (stmt->mask) {
-      stmt->mask = nullptr;
+      change_operands(stmt, [&] { stmt->mask = nullptr; });
       modifier.mark_as_modified();
       return;
     }

@@ -10,6 +10,39 @@ namespace taichi::lang {
 
 // Basic tests within a basic block
 
+TEST(Simplify, IndexedRewritesFollowChainsAndMovedBranchUsers) {
+  for (bool flatten : {false, true}) {
+    auto block = std::make_unique<Block>();
+    auto *input = block->push_back<ArgLoadStmt>(
+        std::vector<int>{0}, PrimitiveType::u32, false, true, 0);
+    auto *first = block->push_back<UnaryOpStmt>(UnaryOpType::abs, input);
+    auto *second = block->push_back<UnaryOpStmt>(UnaryOpType::abs, first);
+    auto *local = block->push_back<AllocaStmt>(PrimitiveType::u32);
+    auto *condition = block->push_back<ConstStmt>(TypedConstant(1));
+    auto *branch = block->push_back<IfStmt>(condition)->as<IfStmt>();
+    branch->set_true_statements(std::make_unique<Block>());
+    auto *store = branch->true_statements->push_back<LocalStoreStmt>(local, second)
+                      ->as<LocalStoreStmt>();
+    auto *result = block->push_back<ReturnStmt>(
+        std::vector<Stmt *>{first, second});
+    CompileConfig config;
+    config.flatten_if = flatten;
+    irpass::type_check(block.get(), config);
+    irpass::simplify(block.get(), config);
+    EXPECT_EQ(result->operand(0), input);
+    EXPECT_EQ(result->operand(1), input);
+    if (flatten) {
+      ASSERT_TRUE(store->val->is<TernaryOpStmt>());
+      EXPECT_EQ(store->val->as<TernaryOpStmt>()->op2, input);
+      EXPECT_EQ(store->parent, block.get());
+    } else {
+      EXPECT_EQ(store->val, input);
+      EXPECT_EQ(store->parent, branch->true_statements.get());
+    }
+    EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+  }
+}
+
 TEST(Simplify, LinearizedDependenciesRetainTypesAndDebugGuards) {
   for (bool debug : {false, true}) {
     SCOPED_TRACE(debug);
