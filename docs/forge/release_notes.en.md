@@ -36,7 +36,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **163**, persistent execution-plan version **26**, and
+- The frontend/native private ABI is **164**, persistent execution-plan version **26**, and
   compiled-cache schema **68**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
@@ -57,7 +57,6 @@ combination. Consult the linked API contracts and capability queries for exact s
 - Type checks after index linearization are coalesced per block edit batch,
   avoiding repeated whole-block scans while preserving type promotion, debug
   checks and forward/adjoint behavior. Static expansion has no new size limit.
-
 - Large static expansions and repeated inlining perform fewer AST copies, source formatting
   operations, per-statement rewrites and whole-block scans. Immutable preparation data is reused;
   each expansion retains independent mutable state. Excessive expansion produces a warning,
