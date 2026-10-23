@@ -7,7 +7,8 @@ function(ti_get_c_api_sources OUT_SOURCES OUT_HEADERS)
         c_api/src/prepared_execution.cpp
         c_api/src/execution_resources.cpp c_api/src/execution_binding_family.cpp
         c_api/src/native_resource_registry.cpp c_api/src/submission_completion.cpp
-        c_api/src/completion.cpp c_api/src/execution_domain_binding.cpp)
+        c_api/src/completion.cpp c_api/src/execution_domain_binding.cpp
+        c_api/src/vulkan_execution_domain.cpp)
     if(TI_WITH_RUNTIME_C_API)
         list(APPEND _sources c_api/src/aot_runtime_client.cpp c_api/src/jit_module.cpp)
     endif()
@@ -36,8 +37,7 @@ function(ti_get_c_api_sources OUT_SOURCES OUT_HEADERS)
         list(APPEND _headers c_api/include/taichi/taichi_metal.h)
     endif()
     if(TI_WITH_VULKAN)
-        list(APPEND _sources c_api/src/taichi_vulkan_impl.cpp
-            c_api/src/vulkan_execution_domain.cpp)
+        list(APPEND _sources c_api/src/taichi_vulkan_impl.cpp)
         list(APPEND _headers c_api/include/taichi/taichi_vulkan.h)
     endif()
     set(${OUT_SOURCES} ${_sources} PARENT_SCOPE)

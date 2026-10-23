@@ -87,6 +87,22 @@ class CudaExternalMemoryImportInfo(C.Structure):
     ]
 
 
+class VulkanExternalBufferImportInfo(C.Structure):
+    _fields_ = [
+        ("struct_size", UInt), ("schema_version", UInt),
+        ("memory_handle", C.c_uint64),
+        ("ready_for_consumer", C.c_uint64),
+        ("ready_for_external", C.c_uint64),
+        ("buffer_size", C.c_uint64), ("allocation_size", C.c_uint64),
+        ("bind_offset", C.c_uint64),
+        ("memory_type_index", UInt), ("buffer_flags", UInt),
+        ("buffer_usage", UInt), ("allocation_flags", UInt),
+        ("sharing_mode", UInt), ("dedicated", UInt),
+        ("device_uuid", C.c_uint8 * 16), ("driver_uuid", C.c_uint8 * 16),
+        ("byte_offset", C.c_uint64), ("byte_size", C.c_uint64),
+    ]
+
+
 class Shape(C.Structure):
     _fields_ = [("dim_count", UInt), ("dims", UInt * 16)]
 
@@ -431,6 +447,20 @@ class Api:
         except AttributeError as error:
             raise NotImplementedError("The selected Forge runtime lacks native external ready gates") from error
         function.argtypes = [Handle, C.POINTER(CudaExternalMemoryImportInfo), C.POINTER(_ReadyGate)]
+        function.restype = Handle
+        setattr(self, name, function)
+
+    def load_vulkan_external_buffer(self):
+        from ._external_ready import _ReadyGate
+
+        name = "ti_import_vulkan_external_buffer_ext"
+        if getattr(self, name, None) is not None:
+            return
+        try:
+            function = getattr(self.library, name)
+        except AttributeError as error:
+            raise NotImplementedError("The selected Forge runtime lacks managed Vulkan external buffers") from error
+        function.argtypes = [Handle, C.POINTER(VulkanExternalBufferImportInfo), C.POINTER(_ReadyGate)]
         function.restype = Handle
         setattr(self, name, function)
 

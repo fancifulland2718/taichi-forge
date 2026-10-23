@@ -129,6 +129,74 @@ ti_export_vulkan_memory(TiRuntime runtime,
                         TiMemory memory,
                         TiVulkanMemoryInteropInfo *interop_info);
 
+// Actual producer allocation/buffer facts for an OPAQUE_WIN32 import. These
+// are runtime facts, never AOT artifact fields. All three HANDLE values remain
+// caller-owned on success and failure; Forge imports private duplicates.
+typedef struct TiVulkanExternalBufferImportInfo {
+  uint32_t struct_size;
+  uint32_t schema_version;  // 1
+  uint64_t memory_handle;
+  uint64_t ready_for_consumer;
+  uint64_t ready_for_external;
+  uint64_t buffer_size;
+  uint64_t allocation_size;
+  uint64_t bind_offset;
+  uint32_t memory_type_index;
+  uint32_t buffer_flags;
+  uint32_t buffer_usage;
+  uint32_t allocation_flags;
+  uint32_t sharing_mode;
+  uint32_t dedicated;
+  uint8_t device_uuid[16];
+  uint8_t driver_uuid[16];
+  // Finite ndarray view within buffer_size. Ownership always covers the whole
+  // buffer; a view does not create a separate semaphore pair or access epoch.
+  uint64_t byte_offset;
+  uint64_t byte_size;
+} TiVulkanExternalBufferImportInfo;
+
+// Native, noexcept callbacks, independent of Python. A successful retain must
+// keep the query state, producer device, allocation and both semaphores alive;
+// release drops exactly that reference after the last Forge import retires.
+typedef TiError(TI_API_CALL *TiVulkanExternalOwnerRetain)(void *owner);
+typedef void(TI_API_CALL *TiVulkanExternalOwnerRelease)(void *owner);
+typedef TiError(TI_API_CALL *TiVulkanExternalReadyQuery)(void *owner,
+                                                      uint64_t epoch,
+                                                      TiBool *ready);
+typedef struct TiVulkanExternalReadyGate {
+  uint32_t struct_size;
+  uint32_t schema_version;  // 1
+  void *owner;
+  TiVulkanExternalOwnerRetain retain_owner;
+  TiVulkanExternalOwnerRelease release_owner;
+  TiVulkanExternalReadyQuery query;
+} TiVulkanExternalReadyGate;
+
+// Cold import for independent Vulkan prepared executions only. Requires
+// Windows x64, the same physical GPU and driver, a dedicated EXCLUSIVE buffer
+// bound at offset zero, and its exact creation/allocation facts. Storage usage
+// is required; device-address usage/allocation flags must also be present when
+// the runtime's ndarray ABI requires them. No ownership transfer occurs here.
+// Import each physical buffer/semaphore pair once; derive aliases through plan
+// views. The producer releases the whole buffer to VK_QUEUE_FAMILY_EXTERNAL
+// before signaling ready_for_consumer, and waits ready_for_external before its
+// next acquire. Every accepted complete recipe waits/acquires and releases/
+// signals exactly once on its selected queue.
+//
+// ready_gate is mandatory and copied. Epochs start at 1. Query returns
+// TI_ERROR_SUCCESS and TI_TRUE only once that epoch's matching producer signal
+// is actually enqueued (it may still be pending). Preserve that signal until
+// Forge consumes it. Query must be nonblocking and side-effect-free: no GPU
+// work, waiting, Forge reentry or Python. Busy attempts consume neither epochs
+// nor signals. Ordinary launch/copy/map/export entrypoints reject this memory.
+// ti_free_memory retires dependent Forge consumption and imports; it does not
+// drain the producer's queued work. The producer remains responsible for its
+// own device/queue lifetime and for draining work before destroying resources.
+TI_DLL_EXPORT TiMemory TI_API_CALL ti_import_vulkan_external_buffer_ext(
+    TiRuntime runtime,
+    const TiVulkanExternalBufferImportInfo *import_info,
+    const TiVulkanExternalReadyGate *ready_gate);
+
 // Function `ti_import_vulkan_image` (1.4.0)
 //
 // Imports an externally owned Vulkan image into Taichi. The owner must keep the

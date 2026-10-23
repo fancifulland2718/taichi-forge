@@ -11,7 +11,20 @@ class _ReadyGate(C.Structure):
     ]
 
 
-class CudaExternalReadyGate:
+class _NativeReadyGate:
+    def __init__(self, capsule, name, backend):
+        get = C.pythonapi.PyCapsule_GetPointer
+        get.argtypes, get.restype = [C.py_object, C.c_char_p], C.c_void_p
+        address = get(capsule, name)
+        value = C.cast(address, C.POINTER(_ReadyGate)).contents
+        if (value.struct_size != C.sizeof(_ReadyGate) or value.schema_version != 1
+                or not all((value.owner, value.retain_owner, value.release_owner, value.query))):
+            raise ValueError(f"Unsupported native {backend} external ready gate descriptor")
+        self._capsule = capsule
+        self._address = address
+
+
+class CudaExternalReadyGate(_NativeReadyGate):
     """A producer-owned native readiness descriptor, independent of the DSL.
 
     The capsule ``taichi.cuda_external_ready_gate.v1`` points to the public
@@ -25,15 +38,27 @@ class CudaExternalReadyGate:
     """
 
     def __init__(self, capsule):
-        get = C.pythonapi.PyCapsule_GetPointer
-        get.argtypes, get.restype = [C.py_object, C.c_char_p], C.c_void_p
-        address = get(capsule, b"taichi.cuda_external_ready_gate.v1")
-        value = C.cast(address, C.POINTER(_ReadyGate)).contents
-        if (value.struct_size != C.sizeof(_ReadyGate) or value.schema_version != 1
-                or not all((value.owner, value.retain_owner, value.release_owner, value.query))):
-            raise ValueError("Unsupported native CUDA external ready gate descriptor")
-        self._capsule = capsule
-        self._address = address
+        super().__init__(capsule, b"taichi.cuda_external_ready_gate.v1", "CUDA")
 
 
-__all__ = ["CudaExternalReadyGate"]
+class VulkanExternalReadyGate(_NativeReadyGate):
+    """Native admission and producer lifetime for one Vulkan semaphore pair.
+
+    The capsule ``taichi.vulkan_external_ready_gate.v1`` contains the public
+    TiVulkanExternalReadyGate. Query identifies a handshake ordinal starting
+    at one, independently of application payload versions. True promises that
+    the matching producer signal is already enqueued; device work may remain
+    pending. False consumes nothing. Callbacks must be nonblocking, native,
+    independent of Python, and must not reenter Forge or submit GPU work.
+
+    The native owner retains the producer allocation, device and synchronization
+    objects through destruction of all imported objects. The capsule keeps the
+    descriptor alive until import. Ready queries never replace binary waits or
+    whole-buffer queue-family ownership transfers.
+    """
+
+    def __init__(self, capsule):
+        super().__init__(capsule, b"taichi.vulkan_external_ready_gate.v1", "Vulkan")
+
+
+__all__ = ["CudaExternalReadyGate", "VulkanExternalReadyGate"]

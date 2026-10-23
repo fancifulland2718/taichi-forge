@@ -580,6 +580,22 @@ class Runtime:
                     memory.close()
                 raise
 
+    def import_vulkan_external_buffer(
+        self, descriptor, *, ready_gate, dtype, shape, element_shape=(), byte_offset=0,
+    ):
+        """Import a managed Win32 buffer for an independent Vulkan recipe.
+
+        Descriptor and native gate are frozen at cold import. Each accepted
+        complete replay consumes one ready signal and publishes one consumed
+        signal on the selected queue. Ordinary launch/map/host-transfer and
+        external initialization are rejected. Close retires dependent Forge
+        work; the producer remains responsible for its own queued work.
+        """
+        from ._external_vulkan import import_buffer
+
+        return import_buffer(self, descriptor, ready_gate=ready_gate, dtype=dtype,
+                             shape=shape, element_shape=element_shape, byte_offset=byte_offset)
+
     def import_texture(self, texture):
         """Borrow existing JIT texture storage and sampler without copying pixels.
 

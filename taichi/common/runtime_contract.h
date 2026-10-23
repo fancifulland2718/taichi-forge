@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Shared image admission changes GfxRuntime layout and native image vtables.
-inline constexpr int kForgeNativeAbiRevision = 166;
+inline constexpr int kForgeNativeAbiRevision = 167;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

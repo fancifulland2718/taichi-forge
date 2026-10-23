@@ -168,6 +168,10 @@ VkDeviceMemory 绑定位置，因此拒绝非零 buffer-relative 偏移。两者
 默认 `Graph.run()`/`submit()` 合同不变。`ti.graph.execution_domain()` 的借用 runtime
 由 Program 的 Python owner 持有，避免丢弃最后一个域包装时意外触发破坏性关闭。
 
+独立 AOT runtime 另提供 [Vulkan 外部 buffer 导入](vulkan_external_buffers.zh.md)，
+以原生 ready gate 与 whole-buffer ownership 在所选域消费 Win32 共享缓冲。其
+初始化和公开入口边界见专页；不能把 CUDA 的已完成信号规则套用到 Vulkan gate。
+
 ## 逐提交参数
 
 在冷准备时声明可更新参数，其他绑定继续冻结：

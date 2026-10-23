@@ -214,6 +214,11 @@ admission and wait for the domain's latest completion while retaining its bounde
 instances and image pool. Destroy them only at the cold teardown boundary.
 Canvas stream selection and source completion are a separate interface boundary.
 
+The independent AOT runtime also provides [Vulkan external buffer import](vulkan_external_buffers.en.md)
+with native readiness and whole-buffer ownership on the selected domain. See its
+separate initialization and public-entry boundaries; the CUDA completed-signal
+rule does not apply to the Vulkan gate.
+
 ## Per-submission parameters
 
 Declare mutable scalars during cold preparation. Other bindings stay frozen:
