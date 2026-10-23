@@ -88,6 +88,35 @@ class VkSubmit(C.Structure):
     ]
 
 
+class VkSemaphoreTypeCreateInfo(C.Structure):
+    _fields_ = [
+        ("sType", C.c_uint32),
+        ("pNext", C.c_void_p),
+        ("semaphoreType", C.c_uint32),
+        ("initialValue", C.c_uint64),
+    ]
+
+
+class VkTimelineSemaphoreSubmitInfo(C.Structure):
+    _fields_ = [
+        ("sType", C.c_uint32),
+        ("pNext", C.c_void_p),
+        ("waitSemaphoreValueCount", C.c_uint32),
+        ("pWaitSemaphoreValues", C.POINTER(C.c_uint64)),
+        ("signalSemaphoreValueCount", C.c_uint32),
+        ("pSignalSemaphoreValues", C.POINTER(C.c_uint64)),
+    ]
+
+
+class VkSemaphoreSignalInfo(C.Structure):
+    _fields_ = [
+        ("sType", C.c_uint32),
+        ("pNext", C.c_void_p),
+        ("semaphore", C.c_uint64),
+        ("value", C.c_uint64),
+    ]
+
+
 class VkCommandPoolInfo(C.Structure):
     _fields_ = [
         ("sType", C.c_uint32),
@@ -117,109 +146,58 @@ class VkCommandBegin(C.Structure):
 
 
 class ReadyGate:
-    """Queue the Vulkan signal behind a host event before CUDA issues its wait."""
+    """Hold the Vulkan binary signal behind a host-signaled local timeline."""
 
     def __init__(self, producer):
         self.producer = producer
-        self.event, self.pool, self.command = C.c_uint64(), C.c_uint64(), C.c_void_p()
+        self.semaphore = C.c_uint64()
         self.lock = threading.Lock()
         self.released = self.timed_out = False
+        self.closed = False
         self.timer = None
-        function = producer.function
-        self.set_event = function("vkSetEvent", C.c_int32, C.c_void_p, C.c_uint64)
-        self.destroy_event = function(
-            "vkDestroyEvent", None, C.c_void_p, C.c_uint64, C.c_void_p
-        )
-        self.destroy_pool = function(
-            "vkDestroyCommandPool", None, C.c_void_p, C.c_uint64, C.c_void_p
-        )
-        create_event = function(
-            "vkCreateEvent",
+        self.signal_semaphore = producer.function(
+            "vkSignalSemaphore",
             C.c_int32,
             C.c_void_p,
-            C.POINTER(VkHeaderFlags),
-            C.c_void_p,
-            C.POINTER(C.c_uint64),
-        )
-        create_pool = function(
-            "vkCreateCommandPool",
-            C.c_int32,
-            C.c_void_p,
-            C.POINTER(VkCommandPoolInfo),
-            C.c_void_p,
-            C.POINTER(C.c_uint64),
-        )
-        allocate = function(
-            "vkAllocateCommandBuffers",
-            C.c_int32,
-            C.c_void_p,
-            C.POINTER(VkCommandAllocate),
-            C.POINTER(C.c_void_p),
-        )
-        begin = function(
-            "vkBeginCommandBuffer", C.c_int32, C.c_void_p, C.POINTER(VkCommandBegin)
-        )
-        end = function("vkEndCommandBuffer", C.c_int32, C.c_void_p)
-        wait = function(
-            "vkCmdWaitEvents",
-            None,
-            C.c_void_p,
-            C.c_uint32,
-            C.POINTER(C.c_uint64),
-            C.c_uint32,
-            C.c_uint32,
-            C.c_uint32,
-            C.c_void_p,
-            C.c_uint32,
-            C.c_void_p,
-            C.c_uint32,
-            C.c_void_p,
+            C.POINTER(VkSemaphoreSignalInfo),
         )
         device = producer.info.device
         try:
+            # Local timeline, not exported: CUDA still receives the existing
+            # producer binary semaphore after the host releases value 1.
+            semaphore_type = VkSemaphoreTypeCreateInfo(1000207002, None, 1, 0)
+            create_info = VkHeaderFlags(9, C.addressof(semaphore_type), 0)
             vk_check(
-                create_event(
-                    device, C.byref(VkHeaderFlags(10)), None, C.byref(self.event)
+                producer.create_semaphore(
+                    device, C.byref(create_info), None, C.byref(self.semaphore)
                 )
             )
-            vk_check(
-                create_pool(
-                    device,
-                    C.byref(
-                        VkCommandPoolInfo(
-                            39, None, 0, producer.info.compute_queue_family_index
-                        )
-                    ),
-                    None,
-                    C.byref(self.pool),
-                )
+            waits = (C.c_uint64 * 1)(self.semaphore.value)
+            signals = (C.c_uint64 * 1)(producer.semaphores[0])
+            stages = (C.c_uint32 * 1)(0x10000)  # ALL_COMMANDS
+            wait_values = (C.c_uint64 * 1)(1)
+            signal_values = (C.c_uint64 * 1)(0)  # Ignored for the binary signal.
+            timeline = VkTimelineSemaphoreSubmitInfo(
+                1000207003, None, 1, wait_values, 1, signal_values
             )
-            vk_check(
-                allocate(
-                    device,
-                    C.byref(VkCommandAllocate(40, None, self.pool.value, 0, 1)),
-                    C.byref(self.command),
-                )
-            )
-            vk_check(begin(self.command, C.byref(VkCommandBegin(42))))
-            wait(
-                self.command,
+            submit = VkSubmit(
+                4,
+                C.addressof(timeline),
                 1,
-                C.byref(self.event),
-                0x4000,
-                0x10000,
+                waits,
+                stages,
                 0,
                 None,
-                0,
-                None,
-                0,
-                None,
+                1,
+                signals,
             )
-            vk_check(end(self.command))
-            producer.submit(signal=True, command=self.command.value)
-            self.timer = threading.Timer(5, self._timeout)
-            self.timer.daemon = True
-            self.timer.start()
+            vk_check(
+                producer.submit_native(producer.info.compute_queue, 1, C.byref(submit), 0)
+            )
+            timer = threading.Timer(5, self._timeout)
+            timer.daemon = True
+            timer.start()
+            self.timer = timer
         except BaseException:
             self.close()
             raise
@@ -230,22 +208,25 @@ class ReadyGate:
 
     def release(self):
         with self.lock:
-            if not self.released and self.event.value:
-                vk_check(self.set_event(self.producer.info.device, self.event))
+            if not self.released and self.semaphore.value:
+                info = VkSemaphoreSignalInfo(1000207005, None, self.semaphore.value, 1)
+                vk_check(self.signal_semaphore(self.producer.info.device, C.byref(info)))
                 self.released = True
 
     def close(self):
+        if self.closed:
+            return
         self.release()
         if self.timer is not None:
             self.timer.cancel()
             self.timer.join()
         self.producer.runtime.wait()
-        if self.pool.value:
-            self.destroy_pool(self.producer.info.device, self.pool, None)
-            self.pool.value = 0
-        if self.event.value:
-            self.destroy_event(self.producer.info.device, self.event, None)
-            self.event.value = 0
+        if self.semaphore.value:
+            self.producer.destroy_semaphore(
+                self.producer.info.device, self.semaphore, None
+            )
+            self.semaphore.value = 0
+        self.closed = True
 
 
 def vk_check(result):
