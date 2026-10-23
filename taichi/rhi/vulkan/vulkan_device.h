@@ -1,6 +1,7 @@
 #pragma once
 
 #include "taichi/rhi/device.h"
+#include "taichi/rhi/reusable_stream_dependency.h"
 #include "taichi/rhi/common/runtime_telemetry.h"
 #include "taichi/rhi/vulkan/vulkan_api.h"
 #include "taichi/rhi/vulkan/vulkan_utils.h"
@@ -35,6 +36,7 @@ class VulkanDevice;
 class VulkanResourceBinder;
 class VulkanStream;
 class VulkanTimelineState;
+class VulkanTimelinePoint;
 struct VulkanRayTracingPipelineParams;
 class VulkanShaderBindingTable;
 
@@ -822,23 +824,29 @@ struct DescPool {
   }
 };
 
-class VulkanStreamSemaphoreObject : public StreamSemaphoreObject {
+class VulkanStreamSemaphoreObject : public StreamSemaphoreObject,
+                                    public ReusableStreamDependencySource {
  public:
   explicit VulkanStreamSemaphoreObject(
       std::shared_ptr<BackendFaultReporter> fault_reporter,
       vkapi::IVkSemaphore sema,
       vkapi::IVkFence fence = nullptr,
-      BackendWaitTelemetry *wait_telemetry = nullptr)
+      BackendWaitTelemetry *wait_telemetry = nullptr,
+      std::shared_ptr<ReusableStreamDependency> dependency = {})
       : vkapi_ref(sema),
         fence_ref(fence),
         fault_reporter_(std::move(fault_reporter)),
-        wait_telemetry_(wait_telemetry) {
+        wait_telemetry_(wait_telemetry),
+        dependency_(std::move(dependency)) {
   }
   ~VulkanStreamSemaphoreObject() override {
   }
 
   bool is_ready() const override;
   bool wait() const override;
+  std::shared_ptr<ReusableStreamDependency> reusable_dependency() const override {
+    return dependency_;
+  }
 
   vkapi::IVkSemaphore vkapi_ref{nullptr};
   vkapi::IVkFence fence_ref{nullptr};
@@ -846,6 +854,7 @@ class VulkanStreamSemaphoreObject : public StreamSemaphoreObject {
  private:
   std::shared_ptr<BackendFaultReporter> fault_reporter_;
   BackendWaitTelemetry *wait_telemetry_{nullptr};
+  std::shared_ptr<ReusableStreamDependency> dependency_;
 };
 
 using VulkanQueueLockTelemetry = SampledLockTelemetry<std::mutex>;
@@ -907,6 +916,7 @@ class VulkanStream : public Stream {
     vkapi::IVkFence fence;
     std::vector<vkapi::IVkCommandBuffer> buffers;
     std::vector<vkapi::IDeviceObj> submit_refs;
+    std::vector<std::shared_ptr<VulkanTimelinePoint>> timeline_refs;
   };
 
   struct PendingBatchSubmission {
@@ -916,6 +926,10 @@ class VulkanStream : public Stream {
     std::vector<VkSemaphore> signal_semaphores;
     std::vector<vkapi::IDeviceObj> submit_refs;
     std::vector<VulkanProfilerSampler> profiler_samplers;
+    std::vector<std::uint64_t> wait_values;
+    std::vector<std::uint64_t> signal_values;
+    std::vector<std::shared_ptr<VulkanTimelinePoint>> timeline_refs;
+    std::shared_ptr<VulkanTimelinePoint> prefix;
   };
 
   void retire_completed_cmdbuffers();
@@ -938,6 +952,10 @@ class VulkanStream : public Stream {
   vkapi::IVkFence submission_batch_fence_;
   std::vector<PendingBatchSubmission> pending_batch_submissions_;
   StreamSemaphore submission_batch_completion_;
+  // Created lazily, only if the device actually enabled timeline semaphores.
+  std::shared_ptr<VulkanTimelineState> timeline_;
+  std::uint64_t timeline_reserved_{0};
+  std::uint64_t timeline_completed_{0};
 };
 
 struct VulkanCooperativeMatrixProperty {
@@ -1401,6 +1419,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   std::unique_lock<std::mutex> acquire_queue_lock(VkQueue queue);
   std::weak_ptr<vkapi::DeviceObjVkFence> &queue_tail_fence_locked(VkQueue queue);
   void retire_execution_timelines(bool backend_complete) noexcept;
+  std::shared_ptr<VulkanTimelineState> create_execution_timeline();
   void create_vma_allocator();
   [[nodiscard]] RhiResult new_descriptor_pool_locked(
       const VulkanResourceSet *required_resources = nullptr);

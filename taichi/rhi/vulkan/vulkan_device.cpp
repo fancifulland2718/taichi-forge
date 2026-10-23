@@ -22,6 +22,7 @@
 #include "taichi/util/environ_config.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
+#include "taichi/rhi/vulkan/vulkan_timeline.h"
 #include "taichi/rhi/vulkan/vulkan_pipeline_diagnostics.h"
 #include "taichi/rhi/vulkan/vulkan_present_policy.h"
 #include "taichi/system/profiler.h"
@@ -3950,12 +3951,37 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
   std::vector<VkSemaphore> vk_wait_semaphores;
   std::vector<VkPipelineStageFlags> vk_wait_stages;
   std::vector<vkapi::IDeviceObj> submit_refs;
+  std::vector<std::shared_ptr<VulkanTimelinePoint>> timeline_refs;
+  std::vector<std::uint64_t> wait_values;
+  std::vector<std::uint64_t> signal_values;
 
   for (const StreamSemaphore &sema_ : wait_semaphores) {
-    auto sema = std::static_pointer_cast<VulkanStreamSemaphoreObject>(sema_);
-    vk_wait_semaphores.push_back(sema->vkapi_ref->semaphore);
+    if (auto point = std::dynamic_pointer_cast<VulkanTimelinePoint>(sema_)) {
+      const auto &state = *point->state_;
+      const auto highest = state.highest_enqueued.load(std::memory_order_acquire);
+      if (state.device != device_.vk_device() || !state.semaphore ||
+          point->value() > highest || highest - point->value() > state.max_difference)
+        throw std::invalid_argument("Vulkan dependency is foreign, retired, or not enqueued");
+      const auto prior = std::find(vk_wait_semaphores.begin(), vk_wait_semaphores.end(),
+                                   state.semaphore->semaphore);
+      if (prior != vk_wait_semaphores.end()) {
+        const auto index = std::distance(vk_wait_semaphores.begin(), prior);
+        wait_values[index] = std::max(wait_values[index], point->value());
+        timeline_refs.push_back(std::move(point));
+        continue;
+      }
+      vk_wait_semaphores.push_back(state.semaphore->semaphore);
+      wait_values.push_back(point->value());
+      timeline_refs.push_back(std::move(point));
+    } else {
+      auto sema = std::dynamic_pointer_cast<VulkanStreamSemaphoreObject>(sema_);
+      if (!sema || !sema->vkapi_ref || sema->vkapi_ref->device != device_.vk_device())
+        throw std::invalid_argument("Vulkan submission received an invalid wait semaphore");
+      vk_wait_semaphores.push_back(sema->vkapi_ref->semaphore);
+      wait_values.push_back(0);
+      submit_refs.push_back(sema->vkapi_ref);
+    }
     vk_wait_stages.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-    submit_refs.push_back(sema->vkapi_ref);
   }
 
   submit_info.pWaitSemaphores = vk_wait_semaphores.data();
@@ -3968,12 +3994,41 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
   std::vector<VkSemaphore> vk_signal_semaphores;
   vk_signal_semaphores.reserve(signal_semaphores.size() + 1);
   vk_signal_semaphores.push_back(semaphore->semaphore);
+  signal_values.push_back(0);
   for (const StreamSemaphore &sema_ : signal_semaphores) {
-    auto sema = std::static_pointer_cast<VulkanStreamSemaphoreObject>(sema_);
-    TI_ERROR_IF(!sema || !sema->vkapi_ref,
+    auto sema = std::dynamic_pointer_cast<VulkanStreamSemaphoreObject>(sema_);
+    TI_ERROR_IF(!sema || !sema->vkapi_ref ||
+                    sema->vkapi_ref->device != device_.vk_device(),
                 "Vulkan submission received an invalid signal semaphore");
     vk_signal_semaphores.push_back(sema->vkapi_ref->semaphore);
     submit_refs.push_back(sema->vkapi_ref);
+    signal_values.push_back(0);
+  }
+  std::shared_ptr<VulkanTimelinePoint> prefix;
+  if (device_.vk_caps().timeline_semaphore) {
+    if (!timeline_)
+      timeline_ = device_.create_execution_timeline();
+    if (timeline_reserved_ == UINT64_MAX)
+      throw std::overflow_error("Vulkan stream timeline counter exhausted");
+    const auto value = timeline_reserved_ + 1;
+    if (value - timeline_completed_ > timeline_->max_difference) {
+      timeline_completed_ = timeline_->completed();
+      if (value - timeline_completed_ > timeline_->max_difference)
+        throw std::overflow_error("Vulkan stream exceeds device timeline value-difference limit");
+    }
+    prefix.reset(new VulkanTimelinePoint(timeline_, value));
+    vk_signal_semaphores.push_back(timeline_->semaphore->semaphore);
+    signal_values.push_back(value);
+    timeline_refs.push_back(prefix);
+  }
+  VkTimelineSemaphoreSubmitInfo timeline_info{
+      VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+  if (!timeline_refs.empty()) {
+    timeline_info.waitSemaphoreValueCount = static_cast<uint32_t>(wait_values.size());
+    timeline_info.pWaitSemaphoreValues = wait_values.data();
+    timeline_info.signalSemaphoreValueCount = static_cast<uint32_t>(signal_values.size());
+    timeline_info.pSignalSemaphoreValues = signal_values.data();
+    submit_info.pNext = &timeline_info;
   }
   submit_info.signalSemaphoreCount =
       static_cast<uint32_t>(vk_signal_semaphores.size());
@@ -3985,7 +4040,7 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
     }
     auto completion = std::make_shared<VulkanStreamSemaphoreObject>(
         device_.backend_fault_reporter(), semaphore,
-        submission_batch_fence_, device_.backend_wait_telemetry());
+        submission_batch_fence_, device_.backend_wait_telemetry(), prefix);
     pending_batch_submissions_.push_back(
         PendingBatchSubmission{
             buffer,
@@ -3993,12 +4048,20 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
             std::move(vk_wait_stages),
             std::move(vk_signal_semaphores),
             std::move(submit_refs),
-            std::move(profiler_samplers)});
+            std::move(profiler_samplers),
+            std::move(wait_values),
+            std::move(signal_values),
+            std::move(timeline_refs), prefix});
+    if (prefix)
+      timeline_reserved_ = prefix->value();
     submission_batch_completion_ = completion;
     return completion;
   }
 
   auto fence = vkapi::create_fence(device_.vk_device(), 0);
+  auto completion = std::make_shared<VulkanStreamSemaphoreObject>(
+      device_.backend_fault_reporter(), semaphore, fence,
+      device_.backend_wait_telemetry(), prefix);
 
   // Resource tracking, check previously submitted commands
   retire_completed_cmdbuffers();
@@ -4021,18 +4084,20 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
         static_cast<std::int64_t>(submit_result), "vkQueueSubmit",
         "Vulkan queue submission failed");
   }
+  if (prefix) {
+    timeline_reserved_ = prefix->value();
+    timeline_->highest_enqueued.store(prefix->value(), std::memory_order_release);
+  }
   device_.queue_submit_calls_.fetch_add(1, std::memory_order_relaxed);
   device_.submitted_command_buffers_.fetch_add(
       1, std::memory_order_relaxed);
   submitted_cmdbuffers_.push_back(
-      TrackedCmdbuf{fence, {buffer}, std::move(submit_refs)});
+      TrackedCmdbuf{fence, {buffer}, std::move(submit_refs), std::move(timeline_refs)});
   for (auto &sampler : profiler_samplers) {
     sampler.fence = fence;
   }
   device_.profiler_add_samplers(std::move(profiler_samplers));
-  return std::make_shared<VulkanStreamSemaphoreObject>(
-      device_.backend_fault_reporter(), semaphore, fence,
-      device_.backend_wait_telemetry());
+  return completion;
 }
 
 StreamSemaphore VulkanStream::submit_dependency(
@@ -4090,6 +4155,7 @@ StreamSemaphore VulkanStream::flush_submission_batch_locked() {
 
   std::vector<VkSubmitInfo> submit_infos(
       pending_batch_submissions_.size());
+  std::vector<VkTimelineSemaphoreSubmitInfo> timeline_infos(submit_infos.size());
   for (std::size_t i = 0; i < pending_batch_submissions_.size(); ++i) {
     auto &pending = pending_batch_submissions_[i];
     auto &info = submit_infos[i];
@@ -4103,6 +4169,15 @@ StreamSemaphore VulkanStream::flush_submission_batch_locked() {
     info.signalSemaphoreCount =
         static_cast<std::uint32_t>(pending.signal_semaphores.size());
     info.pSignalSemaphores = pending.signal_semaphores.data();
+    if (!pending.timeline_refs.empty()) {
+      auto &timeline_info = timeline_infos[i];
+      timeline_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+      timeline_info.waitSemaphoreValueCount = static_cast<uint32_t>(pending.wait_values.size());
+      timeline_info.pWaitSemaphoreValues = pending.wait_values.data();
+      timeline_info.signalSemaphoreValueCount = static_cast<uint32_t>(pending.signal_values.size());
+      timeline_info.pSignalSemaphoreValues = pending.signal_values.data();
+      info.pNext = &timeline_info;
+    }
   }
 
   retire_completed_cmdbuffers();
@@ -4127,6 +4202,8 @@ StreamSemaphore VulkanStream::flush_submission_batch_locked() {
         static_cast<std::int64_t>(submit_result), "vkQueueSubmit",
         "Vulkan batched queue submission failed");
   }
+  if (const auto &prefix = pending_batch_submissions_.back().prefix)
+    timeline_->highest_enqueued.store(prefix->value(), std::memory_order_release);
   device_.queue_submit_calls_.fetch_add(1, std::memory_order_relaxed);
   device_.submitted_command_buffers_.fetch_add(
       pending_batch_submissions_.size(), std::memory_order_relaxed);
@@ -4144,6 +4221,10 @@ StreamSemaphore VulkanStream::flush_submission_batch_locked() {
         tracked.submit_refs.end(),
         std::make_move_iterator(pending.submit_refs.begin()),
         std::make_move_iterator(pending.submit_refs.end()));
+    tracked.timeline_refs.insert(
+        tracked.timeline_refs.end(),
+        std::make_move_iterator(pending.timeline_refs.begin()),
+        std::make_move_iterator(pending.timeline_refs.end()));
     for (auto &sampler : pending.profiler_samplers) {
       sampler.fence = submission_batch_fence_;
     }

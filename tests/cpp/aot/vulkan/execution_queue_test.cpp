@@ -632,6 +632,136 @@ TEST(VulkanFixedExecution, SubmissionParametersAndSparseTimingUseReusableSlots) 
   registry.retire();
 }
 
+TEST(VulkanExecutionQueue, OrdinaryPrefixesSupportBidirectionalDependenciesAndFanout) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 41);
+  device.set_backend_fault_reporter(owner);
+  auto *ordinary = static_cast<vulkan::VulkanStream *>(device.get_compute_stream());
+  using Queue = vulkan::VulkanExecutionQueue;
+  Queue first(device, 2), second(device, 2);
+  auto [storage, result] = device.allocate_memory_unique(
+      {12, false, true, false, AllocUsage::Storage});
+  ASSERT_EQ(result, RhiResult::success);
+  auto [publish, status] = ordinary->new_command_list_unique();
+  ASSERT_EQ(status, RhiResult::success);
+  publish->buffer_fill(storage->get_ptr(), 4, 17);
+  auto copy1 = first.new_command_list();
+  copy1->buffer_copy(storage->get_ptr(4), storage->get_ptr(), 4);
+  auto copy2 = second.new_command_list();
+  copy2->buffer_copy(storage->get_ptr(8), storage->get_ptr(), 4);
+  auto commands1 = first.prepare({copy1.get()});
+  auto commands2 = second.prepare({copy2.get()});
+  RuntimeCompletion ticket;
+  Queue::Point prefix;
+  {
+    TimelineGate gate(device, 0);
+    const auto before = device.queue_submission_snapshot().queue_submit_calls;
+    auto binary = ordinary->submit(publish.get());
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before + 1);
+    ticket = RuntimeCompletion::from_stream_semaphore(Arch::vulkan, 41, 1, binary, owner);
+    prefix = std::dynamic_pointer_cast<vulkan::VulkanTimelinePoint>(
+        ticket.reusable_stream_dependency(Arch::vulkan, 41, owner));
+    ASSERT_TRUE(prefix);
+    const auto a = first.submit(commands1, {prefix});
+    const auto b = second.submit(commands2, {prefix});
+    EXPECT_FALSE(a->is_ready());
+    EXPECT_FALSE(b->is_ready());
+    EXPECT_FALSE(ticket.done());
+    gate.release();
+    // Binary waits also require the producer's transitive signal operations
+    // to be submitted. Release the artificial host gate before consuming the
+    // legacy token; timeline fanout above can safely precede that release.
+    auto consumed = ordinary->submit_dependency({binary});
+    EXPECT_TRUE(a->wait());
+    EXPECT_TRUE(b->wait());
+    ticket.wait();
+    EXPECT_TRUE(consumed->wait());
+  }
+  EXPECT_EQ(ticket.reusable_stream_dependency(Arch::vulkan, 41, owner), prefix);
+  void *mapped = nullptr;
+  ASSERT_EQ(device.map(*storage, &mapped), RhiResult::success);
+  const auto *values = static_cast<const uint32_t *>(mapped);
+  EXPECT_EQ(values[1], 17u);
+  EXPECT_EQ(values[2], 17u);
+  device.unmap(*storage);
+  // Reverse direction: ordinary submission waits on the exact independent
+  // prefix, including two values from one timeline (deduplicated to the tail).
+  auto update = first.new_command_list();
+  update->buffer_fill(storage->get_ptr(), 4, 91);
+  {
+    TimelineGate gate(device, first.queue_index());
+    auto a = first.submit(first.prepare({update.get()}));
+    auto b = first.submit(first.prepare({}), {a});
+    auto [consume, created] = ordinary->new_command_list_unique();
+    ASSERT_EQ(created, RhiResult::success);
+    consume->buffer_copy(storage->get_ptr(8), storage->get_ptr(), 4);
+    const auto before = device.queue_submission_snapshot().queue_submit_calls;
+    auto observed = ordinary->submit(consume.get(), {a, b});
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before + 1);
+    EXPECT_FALSE(observed->is_ready());
+    gate.release();
+    EXPECT_TRUE(observed->wait());
+  }
+  ASSERT_EQ(device.map(*storage, &mapped), RhiResult::success);
+  EXPECT_EQ(static_cast<const uint32_t *>(mapped)[2], 91u);
+  device.unmap(*storage);
+  // A host-observed prefix can still be waited on repeatedly.
+  EXPECT_TRUE(first.submit(commands1, {prefix})->wait());
+  EXPECT_TRUE(second.submit(commands2, {prefix})->wait());
+  ordinary->command_sync();
+}
+
+TEST(VulkanExecutionQueue, OrdinaryBatchPublishesOnlyEnqueuedPrefixesAndRetiresThem) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  RuntimeCompletion ticket;
+  std::shared_ptr<vulkan::VulkanTimelinePoint> retained;
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 42);
+  {
+    vulkan::VulkanDeviceCreator creator({});
+    auto &device = *creator.device();
+    if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 2)
+      GTEST_SKIP();
+    device.set_backend_fault_reporter(owner);
+    auto *ordinary = static_cast<vulkan::VulkanStream *>(device.get_compute_stream());
+    vulkan::VulkanExecutionQueue consumer(device, 2);
+    auto commands = consumer.prepare({});
+    const auto before = device.queue_submission_snapshot();
+    ordinary->begin_submission_batch();
+    auto first = ordinary->submit(nullptr);
+    auto last = ordinary->submit(nullptr);
+    ticket = RuntimeCompletion::from_stream_semaphore(Arch::vulkan, 42, 1, last, owner);
+    retained = std::dynamic_pointer_cast<vulkan::VulkanTimelinePoint>(
+        ticket.reusable_stream_dependency(Arch::vulkan, 42, owner));
+    ASSERT_TRUE(retained);
+    EXPECT_FALSE(retained->is_ready());
+    EXPECT_THROW(retained->wait(), std::invalid_argument);
+    EXPECT_THROW(consumer.submit(commands, {retained}), std::invalid_argument);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before.queue_submit_calls);
+    EXPECT_FALSE(consumer.latest());
+    EXPECT_EQ(ordinary->end_submission_batch(), last);
+    auto submitted = device.queue_submission_snapshot();
+    EXPECT_EQ(submitted.queue_submit_calls, before.queue_submit_calls + 1);
+    EXPECT_EQ(submitted.batched_queue_submit_calls, before.batched_queue_submit_calls + 1);
+    EXPECT_EQ(submitted.batched_command_buffers, before.batched_command_buffers + 2);
+    EXPECT_TRUE(consumer.submit(commands, {retained})->wait());
+    ticket.wait();
+    EXPECT_TRUE(ordinary->is_last_submission(first));
+    EXPECT_TRUE(ordinary->is_last_submission(last));
+    ordinary->command_sync();
+  }
+  // Device retirement freezes the prefix without requiring surviving streams.
+  EXPECT_TRUE(retained->is_ready());
+  EXPECT_TRUE(retained->wait());
+  EXPECT_TRUE(ticket.done());
+  EXPECT_NO_THROW(ticket.wait());
+}
+
 TEST(VulkanExecutionQueue, PhysicalLeasesAreExclusiveAndReusable) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();

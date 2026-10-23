@@ -14,4 +14,15 @@ class ReusableStreamDependency : public StreamSemaphoreObject {
   ~ReusableStreamDependency() override = default;
 };
 
+// A legacy completion can expose an additional reusable prefix without
+// changing its consumable semaphore or its host fence semantics. Acquisition
+// happens when the completion is created, never while replaying a prepared
+// operation. The returned prefix must remain queryable after owner retirement.
+class ReusableStreamDependencySource {
+ public:
+  virtual ~ReusableStreamDependencySource() = default;
+  virtual std::shared_ptr<ReusableStreamDependency>
+  reusable_dependency() const = 0;
+};
+
 }  // namespace taichi::lang

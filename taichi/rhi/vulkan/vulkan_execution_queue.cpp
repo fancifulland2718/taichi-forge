@@ -7,64 +7,65 @@
 
 namespace taichi::lang::vulkan {
 
-class VulkanTimelineState {
- public:
-  explicit VulkanTimelineState(VulkanDevice &device)
-      : device(device.vk_device()), reporter(device.backend_fault_reporter()) {
-    VkPhysicalDeviceTimelineSemaphoreProperties timeline{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES};
-    VkPhysicalDeviceProperties2 properties{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-    properties.pNext = &timeline;
-    this->device.instance_functions().vkGetPhysicalDeviceProperties2(
-        device.vk_physical_device(), &properties);
-    max_difference = timeline.maxTimelineSemaphoreValueDifference;
-    VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
-    type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-    semaphore = vkapi::create_semaphore(this->device, 0, &type);
+VulkanTimelineState::VulkanTimelineState(VulkanDevice &owner)
+    : device(owner.vk_device()), reporter(owner.backend_fault_reporter()) {
+  VkPhysicalDeviceTimelineSemaphoreProperties timeline{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES};
+  VkPhysicalDeviceProperties2 properties{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+  properties.pNext = &timeline;
+  device.instance_functions().vkGetPhysicalDeviceProperties2(
+      owner.vk_physical_device(), &properties);
+  max_difference = timeline.maxTimelineSemaphoreValueDifference;
+  VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+  type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+  semaphore = vkapi::create_semaphore(device, 0, &type);
+}
+
+std::uint64_t VulkanTimelineState::completed() const {
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!semaphore) {
+    check_retired();
+    return retired_value;
   }
-  std::uint64_t completed() const {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (!semaphore) {
-      check_retired();
-      return retired_value;
-    }
-    if (reporter)
-      reporter->throw_if_submission_disallowed("query Vulkan timeline");
-    std::uint64_t value = 0;
-    check(device.functions().vkGetSemaphoreCounterValue(
-              device, semaphore->semaphore, &value),
-          "vkGetSemaphoreCounterValue");
-    return value;
-  }
-  // Called with mutex held; never touches a retired Vulkan device.
-  void check_retired() const {
-    if (!retirement_failed)
-      return;
-    if (reporter)
-      reporter->throw_if_submission_disallowed("query retired Vulkan timeline");
-    throw std::runtime_error(
-        "Vulkan timeline retired without device completion proof");
-  }
-  void check(VkResult result, const char *operation) const {
-    if (result == VK_SUCCESS)
-      return;
-    BackendRuntimeError error(Arch::vulkan, result, operation,
-                              "Vulkan execution timeline failed");
-    if (reporter)
-      reporter->report_backend_error(error, 0);
-    throw error;
-  }
-  vkapi::DeviceHandle device;
-  std::shared_ptr<BackendFaultReporter> reporter;
-  mutable std::mutex mutex;
-  mutable std::shared_mutex backend_mutex;
-  vkapi::IVkSemaphore semaphore;
-  std::uint64_t retired_value{0};
-  bool retirement_failed{false};
-  std::uint64_t max_difference{0};
-  std::atomic<std::uint64_t> highest_enqueued{0};
-};
+  if (reporter)
+    reporter->throw_if_submission_disallowed("query Vulkan timeline");
+  std::uint64_t value = 0;
+  check(device.functions().vkGetSemaphoreCounterValue(
+            device, semaphore->semaphore, &value),
+        "vkGetSemaphoreCounterValue");
+  return value;
+}
+
+void VulkanTimelineState::check_retired() const {
+  if (!retirement_failed)
+    return;
+  if (reporter)
+    reporter->throw_if_submission_disallowed("query retired Vulkan timeline");
+  throw std::runtime_error(
+      "Vulkan timeline retired without device completion proof");
+}
+
+void VulkanTimelineState::check(VkResult result, const char *operation) const {
+  if (result == VK_SUCCESS)
+    return;
+  BackendRuntimeError error(Arch::vulkan, result, operation,
+                            "Vulkan execution timeline failed");
+  if (reporter)
+    reporter->report_backend_error(error, 0);
+  throw error;
+}
+
+std::shared_ptr<VulkanTimelineState> VulkanDevice::create_execution_timeline() {
+  auto timeline = std::make_shared<VulkanTimelineState>(*this);
+  std::lock_guard<std::mutex> lock(execution_queue_mutex_);
+  execution_timelines_.erase(
+      std::remove_if(execution_timelines_.begin(), execution_timelines_.end(),
+                     [](const auto &entry) { return entry.use_count() == 1; }),
+      execution_timelines_.end());
+  execution_timelines_.push_back(timeline);
+  return timeline;
+}
 
 void VulkanDevice::retire_execution_timelines(bool backend_complete) noexcept {
   // Device teardown already excludes new domain creation/submission. Keep the
@@ -94,6 +95,8 @@ bool VulkanTimelinePoint::is_ready() const {
 }
 
 bool VulkanTimelinePoint::wait() const {
+  if (value_ > state_->highest_enqueued.load(std::memory_order_acquire))
+    throw std::invalid_argument("Vulkan timeline prefix has not been enqueued");
   std::shared_lock<std::shared_mutex> backend_lock(state_->backend_mutex);
   vkapi::IVkSemaphore semaphore;
   {
@@ -160,17 +163,11 @@ VulkanExecutionQueue::VulkanExecutionQueue(VulkanDevice &device,
     throw std::runtime_error("No independent Vulkan compute queue is available");
   try {
     state.stream = device.create_compute_stream(state.index);
-    state.timeline = std::make_shared<VulkanTimelineState>(device);
+    state.timeline = device.create_execution_timeline();
     if (capacity > state.timeline->max_difference)
       throw std::invalid_argument(
           "Capacity exceeds the device timeline value-difference limit");
-    std::lock_guard<std::mutex> lock(device.execution_queue_mutex_);
-    auto &timelines = device.execution_timelines_;
-    timelines.erase(std::remove_if(timelines.begin(), timelines.end(),
-                                   [](const auto &entry) {
-                                     return entry.use_count() == 1;
-                                   }), timelines.end());
-    timelines.push_back(state.timeline);
+
   } catch (...) {
     std::lock_guard<std::mutex> lock(device.execution_queue_mutex_);
     device.additional_compute_queues_[state.index - 1]->leased = false;
@@ -276,7 +273,8 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
       throw std::invalid_argument("Vulkan dependency device is foreign or retired");
     const auto highest =
         point->state_->highest_enqueued.load(std::memory_order_acquire);
-    if (highest - point->value() > point->state_->max_difference)
+    if (point->value() > highest ||
+        highest - point->value() > point->state_->max_difference)
       throw std::invalid_argument(
           "Dependency exceeds the device timeline value-difference limit");
     waits.emplace_back(point->state_->semaphore->semaphore, point->value());

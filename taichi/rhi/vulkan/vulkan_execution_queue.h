@@ -5,28 +5,9 @@
 #include <vector>
 
 #include "taichi/rhi/vulkan/vulkan_device.h"
-#include "taichi/rhi/reusable_stream_dependency.h"
+#include "taichi/rhi/vulkan/vulkan_timeline.h"
 
 namespace taichi::lang::vulkan {
-
-class VulkanTimelineState;
-
-// A reusable device dependency, unlike a consumable binary semaphore. The
-// owning runtime must retire all queue users before retiring the timeline.
-// Completion wrappers may then retain the frozen host result after device exit.
-class VulkanTimelinePoint final : public ReusableStreamDependency {
- public:
-  bool is_ready() const override;
-  bool wait() const override;
-  std::uint64_t value() const noexcept { return value_; }
-
- private:
-  friend class VulkanExecutionQueue;
-  VulkanTimelinePoint(std::shared_ptr<VulkanTimelineState> state,
-                      std::uint64_t value);
-  std::shared_ptr<VulkanTimelineState> state_;
-  std::uint64_t value_;
-};
 
 // Internal RHI owner used by fixed execution domains. Queue zero remains with
 // the ordinary runtime. Admission capacity is chosen by the caller; queue count

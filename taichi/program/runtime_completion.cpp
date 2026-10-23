@@ -981,11 +981,14 @@ RuntimeCompletion RuntimeCompletion::from_stream_semaphore(
     return completed(backend, program_domain, sequence,
                      std::move(fault_domain));
   }
+  auto source = std::dynamic_pointer_cast<ReusableStreamDependencySource>(semaphore);
+  auto dependency = source ? source->reusable_dependency() : nullptr;
   auto primitive =
       std::make_unique<StreamSemaphoreCompletion>(std::move(semaphore));
   auto state = std::make_shared<State>(std::move(primitive), fault_domain,
                                        sequence, std::move(gpu_timing),
                                        std::move(gpu_region_timings));
+  state->reusable_dependency = std::move(dependency);
   return RuntimeCompletion(backend, program_domain, sequence,
                            std::move(state), std::move(fault_domain));
 }
