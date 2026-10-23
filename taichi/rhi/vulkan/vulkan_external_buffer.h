@@ -48,7 +48,8 @@ class VulkanExternalBuffer final
   static std::shared_ptr<VulkanExternalBuffer> import_borrowed(
       VulkanDevice &device,
       const VulkanExternalBufferDescription &description,
-      const VulkanExternalBufferHandles &handles);
+      const VulkanExternalBufferHandles &handles,
+      std::shared_ptr<void> producer_retention = {});
   ~VulkanExternalBuffer() override;
 
   VulkanExternalBuffer(const VulkanExternalBuffer &) = delete;
@@ -76,11 +77,16 @@ class VulkanExternalBuffer final
   void record_release(VulkanCommandList &commands);
 
  private:
-  explicit VulkanExternalBuffer(VulkanExternalBufferDescription description)
-      : description_(std::move(description)) {
+  explicit VulkanExternalBuffer(VulkanExternalBufferDescription description,
+                                std::shared_ptr<void> producer_retention)
+      : description_(std::move(description)),
+        producer_retention_(std::move(producer_retention)) {
   }
   void record_transfer(VulkanCommandList &commands, bool acquire);
   const VulkanExternalBufferDescription description_;
+  // Declared before native members; survives destruction of all imports even
+  // when command references outlive the public allocation owner.
+  const std::shared_ptr<void> producer_retention_;
   VkDeviceMemory memory_{VK_NULL_HANDLE};
   vkapi::IVkSemaphore ready_;
   vkapi::IVkSemaphore consumed_;

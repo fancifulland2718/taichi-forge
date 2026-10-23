@@ -145,7 +145,8 @@ vkapi::IVkSemaphore import_semaphore(const vkapi::DeviceHandle &device,
 std::shared_ptr<VulkanExternalBuffer> VulkanExternalBuffer::import_borrowed(
     VulkanDevice &device,
     const VulkanExternalBufferDescription &description,
-    const VulkanExternalBufferHandles &handles) {
+    const VulkanExternalBufferHandles &handles,
+    std::shared_ptr<void> producer_retention) {
 #ifdef _WIN64
   validate(device, description, handles);
   // Duplicate all handles before allocating any GPU objects. Vulkan does not
@@ -164,7 +165,7 @@ std::shared_ptr<VulkanExternalBuffer> VulkanExternalBuffer::import_borrowed(
     throw std::invalid_argument(
         "External Vulkan import handles alias one payload");
   auto result = std::shared_ptr<VulkanExternalBuffer>(
-      new VulkanExternalBuffer(description));
+      new VulkanExternalBuffer(description, std::move(producer_retention)));
   result->device = device.vk_device();
   result->usage = description.usage;
   const auto &api = result->device.functions();

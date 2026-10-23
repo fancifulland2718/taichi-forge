@@ -9,6 +9,8 @@
 
 namespace taichi::lang::vulkan {
 
+class VulkanExternalAccess;
+
 // Internal RHI owner used by fixed execution domains. Queue zero remains with
 // the ordinary runtime. Admission capacity is chosen by the caller; queue count
 // comes from the device. No Vulkan object is allocated during submit.
@@ -27,6 +29,7 @@ class VulkanExecutionQueue {
     std::vector<vkapi::IVkSemaphore> binary_waits;
     std::vector<vkapi::IVkSemaphore> binary_signals;
     std::shared_ptr<void> operands;
+    std::shared_ptr<const VulkanExternalAccess> external_access;
   };
   using Point = std::shared_ptr<VulkanTimelinePoint>;
   using CommandSelector =
@@ -65,6 +68,11 @@ class VulkanExecutionQueue {
       const std::vector<vkapi::IVkSemaphore> &binary_waits,
       const std::vector<vkapi::IVkSemaphore> &binary_signals,
       std::shared_ptr<void> operands = {});
+  // Managed cold binding: records matching ownership boundaries and retains
+  // the exact epoch plan in Commands. Admission cannot use a different plan.
+  std::shared_ptr<const Commands> prepare_external_access(
+      std::shared_ptr<const Commands> body,
+      std::shared_ptr<const VulkanExternalAccess> access);
   // All validation and admission precede this host-only callback. It may copy
   // into the selected preallocated slot and reserve a completion wrapper for
   // the unpublished point, but cannot submit/wait/reenter/publish the point.

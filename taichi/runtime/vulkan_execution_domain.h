@@ -57,6 +57,9 @@ class ExecutionDomain {
   std::shared_ptr<const Commands> prepare_commands(
       const std::vector<CommandList *> &commands,
       std::shared_ptr<void> operands = {});
+  std::shared_ptr<const Commands> prepare_external_access(
+      std::shared_ptr<const Commands> body,
+      std::shared_ptr<const VulkanExternalAccess> access);
 
   // Capacity and every predecessor are checked before the host-only callback.
   // It may fill its preallocated slot and reserve completion publication, but

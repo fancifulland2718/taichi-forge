@@ -10,6 +10,7 @@ target_sources(${VULKAN_RHI}
     vulkan_device.cpp
     vulkan_device_creator.cpp
     vulkan_execution_queue.cpp
+    vulkan_external_access.cpp
     vulkan_external_buffer.cpp
     vulkan_loader.cpp
     vulkan_memory_allocator.cpp

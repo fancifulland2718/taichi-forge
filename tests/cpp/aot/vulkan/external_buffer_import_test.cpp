@@ -5,11 +5,16 @@
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_external_buffer.h"
 #include "taichi/rhi/vulkan/vulkan_execution_queue.h"
+#include "taichi/rhi/vulkan/vulkan_external_access.h"
+#include "taichi/runtime/vulkan_execution_domain.h"
+#include "taichi/program/runtime_fault.h"
 #include <array>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <cstdlib>
+#include <future>
+#include <thread>
 
 namespace {
 using taichi::lang::vulkan::VulkanCommandList;
@@ -19,6 +24,8 @@ using taichi::lang::vulkan::VulkanExecutionQueue;
 using taichi::lang::vulkan::VulkanExternalBuffer;
 using taichi::lang::vulkan::VulkanExternalBufferDescription;
 using taichi::lang::vulkan::VulkanExternalBufferHandles;
+using taichi::lang::vulkan::VulkanExternalBufferOwner;
+using taichi::lang::vulkan::VulkanExternalAccess;
 using taichi::lang::vulkan::VulkanStream;
 using taichi::lang::vulkan::VulkanStreamSemaphoreObject;
 constexpr VkDeviceSize bytes = 4 * sizeof(uint32_t);
@@ -434,7 +441,8 @@ struct Exported {
   VulkanExternalBufferDescription description;
 };
 
-void qualify_submission(bool independent, bool compose = false) {
+void qualify_submission(bool independent, bool compose = false,
+                        bool managed = false) {
   VulkanDeviceCreator producer_creator(parameters()),
       consumer_creator(parameters());
   auto &pd = *producer_creator.device();
@@ -443,8 +451,33 @@ void qualify_submission(bool independent, bool compose = false) {
     GTEST_SKIP() << "Selected device has no independent compute queue";
   // Preserve producer flags, including optional device address.
   Exported exported(pd, false, cd.vk_caps().buffer_device_address);
-  auto imported = VulkanExternalBuffer::import_borrowed(
-      cd, exported.description, exported.handles());
+  bool epoch_ready = false;
+  bool query_throws = false;
+  std::uint64_t expected_epoch = 1;
+  int queries = 0;
+  auto producer_lifetime = std::make_shared<int>(1);
+  std::weak_ptr<void> producer_weak = producer_lifetime;
+  std::shared_ptr<VulkanExternalBufferOwner> owner;
+  std::shared_ptr<VulkanExternalAccess> access;
+  std::shared_ptr<VulkanExternalBuffer> imported;
+  if (managed) {
+    owner = VulkanExternalBufferOwner::import_borrowed(
+        cd, exported.description, exported.handles(), [&](auto epoch) {
+          ++queries;
+          EXPECT_EQ(epoch, expected_epoch);
+          if (query_throws)
+            throw std::runtime_error("ready query failed");
+          return epoch_ready;
+        }, producer_lifetime);
+    access = std::make_shared<VulkanExternalAccess>(
+        std::vector<std::shared_ptr<VulkanExternalBufferOwner>>{owner, owner});
+    EXPECT_EQ(access->size(), 1u);
+    imported = owner->buffer();
+  } else {
+    imported = VulkanExternalBuffer::import_borrowed(
+        cd, exported.description, exported.handles());
+  }
+  producer_lifetime.reset();
   std::weak_ptr<VulkanExternalBuffer> weak = imported;
   // Caller originals are still valid, then closed before any GPU use.
   for (auto handle : {&exported.memory_handle, &exported.ready_handle,
@@ -454,9 +487,9 @@ void qualify_submission(bool independent, bool compose = false) {
     CloseHandle(handle->handle);
     handle->handle = nullptr;
   }
-  auto ready = std::make_shared<VulkanStreamSemaphoreObject>(
+  auto ready = managed ? nullptr : std::make_shared<VulkanStreamSemaphoreObject>(
       cd.backend_fault_reporter(), imported->ready());
-  auto consumed = std::make_shared<VulkanStreamSemaphoreObject>(
+  auto consumed = managed ? nullptr : std::make_shared<VulkanStreamSemaphoreObject>(
       cd.backend_fault_reporter(), imported->consumed());
   auto &stream = *static_cast<VulkanStream *>(cd.get_compute_stream());
   std::unique_ptr<VulkanExecutionQueue> queue;
@@ -532,7 +565,12 @@ void qualify_submission(bool independent, bool compose = false) {
     try {
       if (independent) {
         std::weak_ptr<void> body_owner, boundary_owner;
-        if (compose) {
+        if (managed) {
+          auto body = queue->prepare({commands.get()});
+          fixed = queue->prepare_external_access(body, access);
+          EXPECT_THROW(queue->prepare_external_access(fixed, access),
+                       std::invalid_argument);
+        } else if (compose) {
           auto body_lifetime = std::make_shared<int>(1);
           auto boundary_lifetime = std::make_shared<int>(2);
           body_owner = body_lifetime;
@@ -574,6 +612,19 @@ void qualify_submission(bool independent, bool compose = false) {
         // Rejected host admission must not consume the pending ready signal,
         // publish a completion, or occupy the only slot.
         const auto old_tail = queue->latest();
+        if (managed) {
+          bool admitted = false;
+          epoch_ready = false;
+          EXPECT_THROW(queue->submit(fixed, dependencies, [&](auto, const auto &) {
+            admitted = true;
+          }), VulkanExecutionQueue::Busy);
+          EXPECT_FALSE(admitted);
+          query_throws = true;
+          EXPECT_THROW(queue->submit(fixed, dependencies), std::runtime_error);
+          query_throws = false;
+          EXPECT_EQ(owner->snapshot().next_epoch, expected_epoch);
+          epoch_ready = true;  // Matching producer signal is already submitted.
+        }
         EXPECT_THROW(
             queue->submit(fixed, dependencies,
                           [](auto, const auto &) {
@@ -584,25 +635,33 @@ void qualify_submission(bool independent, bool compose = false) {
         EXPECT_EQ(queue->pending(), 0);
         EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls,
                   before_submit);
+        if (managed)
+          EXPECT_EQ(owner->snapshot().next_epoch, expected_epoch);
         const auto before_buffers =
             cd.queue_submission_snapshot().submitted_command_buffers;
         previous = queue->submit(fixed, dependencies);
+        if (managed) {
+          ++expected_epoch;
+          EXPECT_EQ(owner->snapshot().next_epoch, expected_epoch);
+        }
         EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls,
                   before_submit + 1);
         EXPECT_EQ(cd.queue_submission_snapshot().submitted_command_buffers,
                   before_buffers + (compose ? 3 : 1));
-        if (compose) {
+        if (compose && !managed) {
           EXPECT_FALSE(body_owner.expired());
           EXPECT_FALSE(boundary_owner.expired());
         }
         completion = previous;
         const auto before_busy = queue->latest();
         bool admitted = false;
+        const auto queries_before_busy = queries;
         EXPECT_THROW(
             queue->submit(fixed, {},
                           [&](auto, const auto &) { admitted = true; }),
             VulkanExecutionQueue::Busy);
         EXPECT_FALSE(admitted);
+        EXPECT_EQ(queries, queries_before_busy);
         EXPECT_EQ(queue->latest(), before_busy);
         EXPECT_EQ(queue->pending(), 1);
         EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls,
@@ -621,9 +680,25 @@ void qualify_submission(bool independent, bool compose = false) {
       imported.reset();
     EXPECT_FALSE(weak.expired());
     EXPECT_FALSE(completion->is_ready());
+    std::future<void> closing;
+    if (managed && epoch == 7) {
+      closing = std::async(std::launch::async, [&] { owner->close(); });
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (owner->snapshot().accepting && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+      EXPECT_FALSE(owner->snapshot().accepting);
+      EXPECT_EQ(closing.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+      EXPECT_FALSE(producer_weak.expired());
+    }
     gate.release();
     producer.wait();
     EXPECT_TRUE(completion->wait());
+    if (closing.valid()) {
+      closing.get();
+      EXPECT_TRUE(owner->snapshot().closed);
+      // The pending slot still retains its recorded imports and producer.
+      EXPECT_FALSE(producer_weak.expired());
+    }
     readback.expect(before);
     producer.begin();
     producer.acquire(*exported.source);
@@ -639,6 +714,12 @@ void qualify_submission(bool independent, bool compose = false) {
     stream.command_sync();
   }
   EXPECT_TRUE(weak.expired());
+  if (managed) {
+    EXPECT_TRUE(producer_weak.expired());
+    EXPECT_EQ(queries, 32);  // Deduplicated owner, four queries per epoch.
+    EXPECT_THROW(queue->prepare_external_access(queue->prepare({}), access),
+                 std::runtime_error);
+  }
 }
 
 TEST(VulkanExternalBufferImport,
@@ -654,6 +735,161 @@ TEST(VulkanExternalBufferImport,
 TEST(VulkanExternalBufferImport,
      FrozenBodyCompositionPreservesAdmissionAndOwnership) {
   qualify_submission(true, true);
+}
+
+TEST(VulkanExternalBufferImport, ManagedEpochRollbackAndExactRetirement) {
+  qualify_submission(true, true, true);
+}
+
+TEST(VulkanExternalBufferImport, ManagedNotReadyPreservesRuntimeSequence) {
+  VulkanDeviceCreator producer(parameters()), consumer(parameters());
+  auto &pd = *producer.device();
+  auto &cd = *consumer.device();
+  if (cd.created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  auto fault = std::make_shared<taichi::lang::RuntimeFaultDomain>(
+      taichi::Arch::vulkan, 925);
+  cd.set_backend_fault_reporter(fault);
+  taichi::lang::vulkan::ExecutionDomain domain(cd, fault, {1, 1});
+  bool cold_released = false;
+  auto reentrant = std::shared_ptr<void>(reinterpret_cast<void *>(1), [&](void *) {
+    (void)domain.snapshot();
+    cold_released = true;
+  });
+  auto rejected_body = domain.prepare_commands({}, reentrant);
+  reentrant.reset();
+  EXPECT_THROW(domain.prepare_external_access(std::move(rejected_body), nullptr),
+               std::invalid_argument);
+  EXPECT_TRUE(cold_released);
+  Exported exported(pd);
+  int queries = 0;
+  auto owner = VulkanExternalBufferOwner::import_borrowed(
+      cd, exported.description, exported.handles(), [&](auto epoch) {
+        EXPECT_EQ(epoch, 1u);
+        ++queries;
+        return false;
+      });
+  auto access = std::make_shared<VulkanExternalAccess>(
+      std::vector<std::shared_ptr<VulkanExternalBufferOwner>>{owner});
+  auto body = domain.prepare_commands({});
+  auto commands = domain.prepare_external_access(body, access);
+  auto first = domain.submit(body);
+  first.wait();
+  bool admitted = false;
+  const auto submits = cd.queue_submission_snapshot().queue_submit_calls;
+  EXPECT_THROW(domain.submit(commands, {}, {}, [&](auto, const auto &) {
+    admitted = true;
+  }), taichi::lang::vulkan::ExecutionDomain::Busy);
+  EXPECT_FALSE(admitted);
+  EXPECT_EQ(queries, 1);
+  EXPECT_EQ(domain.latest_completion().sequence(), first.sequence());
+  EXPECT_EQ(domain.snapshot().pending, 0u);
+  EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls, submits);
+  auto next = domain.submit(body);
+  next.wait();
+  EXPECT_EQ(next.sequence(), first.sequence() + 1);
+  EXPECT_EQ(owner->snapshot().next_epoch, 1u);
+  domain.close();
+  owner->close();
+}
+
+TEST(VulkanExternalBufferImport, ManagedMultipleOwnersRollbackInIdentityOrder) {
+  VulkanDeviceCreator producer(parameters()), consumer(parameters());
+  auto &pd = *producer.device();
+  auto &cd = *consumer.device();
+  if (cd.created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  VulkanExecutionQueue first(cd, 1), second(cd, 1);
+  Exported a(pd), b(pd);
+  std::vector<int> queries;
+  auto left = VulkanExternalBufferOwner::import_borrowed(
+      cd, a.description, a.handles(), [&](auto epoch) {
+        EXPECT_EQ(epoch, 1u);
+        queries.push_back(1);
+        return true;
+      });
+  auto right = VulkanExternalBufferOwner::import_borrowed(
+      cd, b.description, b.handles(), [&](auto epoch) {
+        EXPECT_EQ(epoch, 1u);
+        queries.push_back(2);
+        return false;
+      });
+  auto forward = std::make_shared<VulkanExternalAccess>(
+      std::vector<std::shared_ptr<VulkanExternalBufferOwner>>{left, right, left});
+  auto reverse = std::make_shared<VulkanExternalAccess>(
+      std::vector<std::shared_ptr<VulkanExternalBufferOwner>>{right, left});
+  auto fc = first.prepare_external_access(first.prepare({}), forward);
+  auto sc = second.prepare_external_access(second.prepare({}), reverse);
+  auto reject = [](auto &queue, auto &commands) {
+    for (int i = 0; i < 8; ++i)
+      EXPECT_THROW(queue.submit(commands), VulkanExecutionQueue::Busy);
+  };
+  auto concurrent = std::async(std::launch::async, [&] { reject(second, sc); });
+  reject(first, fc);
+  concurrent.get();
+  ASSERT_EQ(queries.size(), 32u);
+  for (std::size_t i = 0; i < queries.size(); i += 2) {
+    EXPECT_EQ(queries[i], 1);
+    EXPECT_EQ(queries[i + 1], 2);
+  }
+  EXPECT_EQ(left->snapshot().next_epoch, 1u);
+  EXPECT_EQ(right->snapshot().next_epoch, 1u);
+  EXPECT_FALSE(first.latest());
+  EXPECT_FALSE(second.latest());
+  first.close();
+  second.close();
+  left->close();
+  right->close();
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL reject_queue_submit(
+    VkQueue, uint32_t, const VkSubmitInfo *, VkFence) {
+  return VK_ERROR_OUT_OF_HOST_MEMORY;
+}
+
+TEST(VulkanExternalBufferImport, ManagedEnqueueFailurePoisonsUntilQueueDrain) {
+  VulkanDeviceCreator producer(parameters()), consumer(parameters());
+  auto &pd = *producer.device();
+  auto &cd = *consumer.device();
+  if (cd.created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  VulkanExecutionQueue queue(cd, 1);
+  Exported exported(pd);
+  auto retention = std::make_shared<int>(1);
+  std::weak_ptr<void> weak = retention;
+  auto owner = VulkanExternalBufferOwner::import_borrowed(
+      cd, exported.description, exported.handles(), [](auto) { return true; },
+      retention);
+  retention.reset();
+  auto access = std::make_shared<VulkanExternalAccess>(
+      std::vector<std::shared_ptr<VulkanExternalBufferOwner>>{owner});
+  auto commands = queue.prepare_external_access(queue.prepare({}), access);
+  // No native work is sent by this injection. Keep a real ready signal anyway,
+  // so the fixture obeys the producer contract before reaching driver failure.
+  Endpoint endpoint(pd);
+  endpoint.begin();
+  endpoint.release(*exported.source);
+  endpoint.submit({}, exported.ready->semaphore);
+  endpoint.wait();
+  auto &api = const_cast<VolkDeviceTable &>(cd.vk_device().functions());
+  const auto submit = api.vkQueueSubmit;
+  api.vkQueueSubmit = reject_queue_submit;
+  EXPECT_THROW(queue.submit(commands), taichi::lang::BackendRuntimeError);
+  api.vkQueueSubmit = submit;
+  EXPECT_EQ(owner->snapshot().next_epoch, 1u);
+  EXPECT_TRUE(owner->snapshot().poisoned);
+  EXPECT_FALSE(owner->snapshot().accepting);
+  EXPECT_EQ(queue.pending(), 1u);
+  EXPECT_THROW(owner->close(), std::runtime_error);
+  EXPECT_FALSE(weak.expired());
+  EXPECT_THROW(queue.submit(commands), taichi::lang::BackendRuntimeError);
+  queue.close();  // Successful native queue drain proves safe retirement.
+  owner->close();
+  EXPECT_TRUE(owner->snapshot().closed);
+  EXPECT_TRUE(owner->snapshot().poisoned);  // Never made usable again.
+  EXPECT_FALSE(weak.expired());  // Cold recorded imports still own the peer.
+  commands.reset();
+  EXPECT_TRUE(weak.expired());
 }
 
 // Inject errors into this device's immutable-in-production dispatch table.

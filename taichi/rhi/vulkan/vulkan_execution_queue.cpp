@@ -5,6 +5,8 @@
 #include <limits>
 #include <shared_mutex>
 
+#include "taichi/rhi/vulkan/vulkan_external_access.h"
+
 namespace taichi::lang::vulkan {
 
 VulkanTimelineState::VulkanTimelineState(VulkanDevice &owner)
@@ -307,6 +309,24 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit(
   return submit_precollected(std::move(commands), dependencies, admit);
 }
 
+std::shared_ptr<const VulkanExecutionQueue::Commands>
+VulkanExecutionQueue::prepare_external_access(
+    std::shared_ptr<const Commands> body,
+    std::shared_ptr<const VulkanExternalAccess> access) {
+  if (!access)
+    throw std::invalid_argument("Null Vulkan external access plan");
+  auto acquire = new_command_list();
+  auto release = new_command_list();
+  std::vector<vkapi::IVkSemaphore> waits, signals;
+  access->record(*static_cast<VulkanCommandList *>(acquire.get()),
+                 *static_cast<VulkanCommandList *>(release.get()), waits,
+                 signals);
+  auto result = std::const_pointer_cast<Commands>(prepare_external_access(
+      std::move(body), *acquire, *release, waits, signals));
+  result->external_access = std::move(access);
+  return result;
+}
+
 VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
     std::shared_ptr<const Commands> commands,
     const std::vector<Point> &dependencies,
@@ -395,8 +415,13 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
   pending.point = point;
   std::vector<VkPipelineStageFlags> stages(semaphores.size(),
                                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+  VulkanExternalAccess::Transaction external(pending.commands->external_access.get());
+  // In particular, not-ready rejects before the runtime's admit constructs a
+  // completion/sequence or writes its selected parameter slot.
+  external.reserve();
   if (admit)
     admit(index, point);
+  external.arm(point);
   auto &slot = state.slots[index];
   slot = std::move(pending);
   state.tail = point;
@@ -435,6 +460,7 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
     state.accepting = false;
     throw;
   }
+  external.seal();  // highest_enqueued is visible before owner close can wait.
   return point;
 }
 
@@ -501,6 +527,12 @@ void VulkanExecutionQueue::close() {
       retired = std::move(state.slots);
       state.count = 0;
     }
+    // A failed enqueue has no signal proof. Only the successful queue drain
+    // above permits its external owners to retire; they remain fail-stop.
+    if (state.error)
+      for (const auto &slot : retired)
+        if (slot.commands && slot.commands->external_access)
+          slot.commands->external_access->confirm_drained(slot.point);
     retired.clear();
     state.stream.reset();
     {

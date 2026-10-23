@@ -136,6 +136,18 @@ RuntimeCompletion ExecutionDomain::submit(
   return submit_impl({}, std::move(commands), dependencies, std::move(resources), admit);
 }
 
+std::shared_ptr<const ExecutionDomain::Commands>
+ExecutionDomain::prepare_external_access(
+    std::shared_ptr<const Commands> body,
+    std::shared_ptr<const VulkanExternalAccess> access) {
+  auto &state = *state_;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.check_accepting("prepare Vulkan external access");
+  // Keep the parameter references until the domain lock has unwound, including
+  // cold rejection. Their last owner/producer callbacks may reenter retirement.
+  return state.queue.prepare_external_access(body, access);
+}
+
 RuntimeCompletion ExecutionDomain::submit_instance(
     const std::shared_ptr<ExecutionInstance> &instance,
     std::shared_ptr<const Commands> commands,
