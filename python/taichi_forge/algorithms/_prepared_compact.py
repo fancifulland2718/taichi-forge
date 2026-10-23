@@ -32,8 +32,11 @@ class PreparedCompactPlan(_PreparedNativePlan):
 
     @classmethod
     def _from_columns(cls, columns, flags, count):
+        columns = tuple(tuple(column) for column in columns)
+        if not columns or any(len(column) != 2 for column in columns):
+            raise ValueError("Compact columns require one or more (values, output) pairs")
         plan = cls.__new__(cls)
-        plan._prepare_columns(tuple(columns), flags, count)
+        plan._prepare_columns(columns, flags, count)
         return plan
 
     def _prepare_columns(self, columns, flags, count):
@@ -95,4 +98,17 @@ def prepare_compact(values, flags, output, count):
     return PreparedCompactPlan(values, flags, output, count)
 
 
-__all__ = ["PreparedCompactPlan", "prepare_compact"]
+def prepare_compact_columns(columns, flags, count):
+    """Prepare stable selection of aligned columns with one shared flag scan.
+
+    ``columns`` is a nonempty iterable of ``(values, output)`` pairs. Each
+    input has the flag capacity; each output has at least that capacity.
+    Columns may have different scalar types or record shapes. Every pair
+    preserves the storage, alias, output-prefix and lifetime contract of
+    :class:`PreparedCompactPlan`. One device count applies to all outputs.
+    Bindings are frozen at preparation; execution reads their current contents.
+    """
+    return PreparedCompactPlan._from_columns(columns, flags, count)
+
+
+__all__ = ["PreparedCompactPlan", "prepare_compact", "prepare_compact_columns"]

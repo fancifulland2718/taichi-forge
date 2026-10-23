@@ -57,8 +57,6 @@ def test_prepared_compact_vector_subranges_and_changing_predicates(monkeypatch, 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_prepared_compact_columns_reuse_prefix_with_offset_views():
-    from taichi_forge.algorithms._prepared_compact import PreparedCompactPlan
-
     n = 17
     view = ti.experimental.ndarray_view
     values = [ti.ndarray(dtype, n + 3) for dtype in (ti.i32, ti.u64)]
@@ -68,7 +66,11 @@ def test_prepared_compact_columns_reuse_prefix_with_offset_views():
     source[1] += np.uint64(1 << 45)
     for value, data in zip(values, source):
         value.from_numpy(data)
-    plan = PreparedCompactPlan._from_columns(
+    with pytest.raises(ValueError, match="pairs"):
+        ti.algorithms.prepare_compact_columns((), flags, count)
+    with pytest.raises(ValueError, match="pairs"):
+        ti.algorithms.prepare_compact_columns(((values[0],),), flags, count)
+    plan = ti.algorithms.prepare_compact_columns(
         tuple(
             (view(value, slices=slice(1, n + 1)), view(output, slices=slice(1, n + 1)))
             for value, output in zip(values, outputs)

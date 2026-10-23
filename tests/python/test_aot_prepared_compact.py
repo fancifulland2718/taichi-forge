@@ -14,7 +14,6 @@ from tests import test_utils
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_prepared_compact_definition_and_offset_reconstruction(tmp_path, monkeypatch):
-    from taichi_forge.algorithms._prepared_compact import PreparedCompactPlan
     from taichi_forge.graph._native_definition import NativeDefinition, NativeOperationBinding
 
     n = 17
@@ -22,7 +21,7 @@ def test_prepared_compact_definition_and_offset_reconstruction(tmp_path, monkeyp
     outputs = [ti.ndarray(dtype, n + 3) for dtype in (ti.i32, ti.u64)]
     flags, count = ti.ndarray(ti.i32, n + 2), ti.ndarray(ti.i32, 3)
     view = lambda value: ti.experimental.ndarray_view(value, slices=slice(1, n + 1))
-    plan = PreparedCompactPlan._from_columns(
+    plan = ti.algorithms.prepare_compact_columns(
         tuple((view(source), view(output)) for source, output in zip(inputs, outputs)),
         view(flags),
         ti.experimental.ndarray_view(count, slices=slice(1, 2)),

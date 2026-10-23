@@ -1666,10 +1666,16 @@ a runtime-ordered Graph action, not a capture-safe CUDA sort. See
 NaN policy and lifetime boundaries.
 
 #### `ti.algorithms.prepare_compact(values, flags, output, count)`
+#### `ti.algorithms.prepare_compact_columns(columns, flags, count)`
 
 Returns `PreparedCompactPlan` for stable nonzero-i32-flag selection over fixed
 CUDA/Vulkan dense bindings. Scalar/vector/matrix records use 32/64-bit lanes;
 the count stays on device. Preparation does not execute the operation.
+The columns variant (0.6.4) freezes a nonempty iterable of `(values, output)` pairs
+and shares one flag scan and device count. Columns can have different record
+types; each input matches the flag capacity. Output tails remain undefined.
+Direct execution, root Graph recording and AOT export use the same definition;
+existing workspace ownership and capture restrictions remain unchanged.
 
 #### `ti.algorithms.prepare_unique(values, output, count, *, size=None)`
 #### `ti.algorithms.prepare_unique_by_key(keys, values, unique_keys, unique_values, count, *, size=None)`

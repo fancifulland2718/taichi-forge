@@ -1366,6 +1366,11 @@ kernel fallback，scan 与 grouped-reduce 明确拒绝；离散/不可微 family
 sort。dtype、对齐、NaN 策略和生命周期边界见 [prepared sort](native_algorithms.zh.md#prepared-sort063)。
 
 #### `ti.algorithms.prepare_compact(values, flags, output, count)`
+#### `ti.algorithms.prepare_compact_columns(columns, flags, count)`
+
+多列版本（0.6.4）冻结非空 `(values, output)` 配对序列，共用一次 flag 扫描与设备 count。
+列可使用不同的记录类型，各输入容量与 flags 一致；输出尾部未定义。直接执行、根 Graph
+recording 和 AOT 导出共用已有描述，workspace 所有权和 capture 限制保持不变。
 
 返回 `PreparedCompactPlan`，对固定 CUDA/Vulkan dense 绑定按非零 i32 flags 稳定筛选；支持 32/64 位分量的
 标量、向量、矩阵 record，计数留在设备。准备不执行数学操作。

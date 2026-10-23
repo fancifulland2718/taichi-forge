@@ -23,6 +23,7 @@ capability.
 | `ti.algorithms.sort_by_key(keys, values, ...)` | Sort keys and permute payload values. |
 | `ti.algorithms.prepare_sort(keys, values=None, ...)` | Prepare fixed dense bindings for repeated native stable sort (0.6.3). |
 | `ti.algorithms.prepare_compact(values, flags, output, count)` | Prepare fixed-binding stable compaction with a device count (0.6.3). |
+| `ti.algorithms.prepare_compact_columns(columns, flags, count)` | Compact `(values, output)` column pairs with one shared flag scan and device count (0.6.4). |
 | `ti.algorithms.prepare_unique(values, output, count, ...)` / `prepare_unique_by_key(...)` | Prepare consecutive unique, sharing one prefix across key/payload outputs (0.6.3). |
 | `ti.algorithms.parallel_sort(keys, values=None)` | Vanilla-compatible legacy sorter. |
 | `ti.algorithms.PrefixSumExecutor(n).run(values)` | Prefix sum / scan. |

@@ -18,6 +18,7 @@
 | `ti.algorithms.sort_by_key(keys, values, ...)` | 排序 keys 并同步移动 payload values。 |
 | `ti.algorithms.prepare_sort(keys, values=None, ...)` | 为重复 native 稳定排序准备固定 dense 绑定（0.6.3）。 |
 | `ti.algorithms.prepare_compact(values, flags, output, count)` | 固定绑定的稳定 compact，计数保留在设备（0.6.3）。 |
+| `ti.algorithms.prepare_compact_columns(columns, flags, count)` | 多组 `(values, output)` 列共用一次 flag 扫描与设备计数（0.6.4）。 |
 | `ti.algorithms.prepare_unique(...)` / `prepare_unique_by_key(...)` | 连续 unique 的公开 prepared plan，key/payload 共享一次前缀计算（0.6.3）。 |
 | `ti.algorithms.parallel_sort(keys, values=None)` | vanilla 兼容的 legacy sorter。 |
 | `ti.algorithms.PrefixSumExecutor(n).run(values)` | Prefix sum / scan。 |
