@@ -4,6 +4,7 @@
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/program/program.h"
+#include "taichi/transforms/sink_serial_integer_prelude.h"
 
 #include <set>
 #include <unordered_map>
@@ -905,6 +906,18 @@ void offload(IRNode *root, const CompileConfig &config) {
   TI_AUTO_PROF;
   auto offloaded_ranges = Offloader::run(root, config);
   type_check(root, config);
+  if (config.opt_level > 0) {
+    std::unordered_set<Stmt *> range_bounds;
+    for (const auto &[task, stmt] : offloaded_ranges.begin_stmts) {
+      range_bounds.insert(stmt);
+    }
+    for (const auto &[task, stmt] : offloaded_ranges.end_stmts) {
+      range_bounds.insert(stmt);
+    }
+    auto *kernel = dynamic_cast<Kernel *>(root->as<Block>()->parent_callable());
+    TI_ASSERT(kernel);
+    sink_serial_integer_preludes(root, kernel->autodiff_mode, range_bounds);
+  }
   {
     auto stmt_to_offloaded = StmtToOffloaded::run(root);
     const auto local_to_global_offset = IdentifyValuesUsedInOtherOffloads::run(

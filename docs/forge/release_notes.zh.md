@@ -35,7 +35,7 @@
 ### 升级与编译设置
 
 - frontend 与 native runtime 使用私有 ABI **165**，持久执行计划为 **26**，
-  编译缓存 schema 为 **70**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
+  编译缓存 schema 为 **71**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、
@@ -59,6 +59,10 @@
   作用域，避免逐块复制映射。这些改动不等于默认启用整套高级优化。
 - JIT cache 与 AOT 共用编译后 ABI/task/resource 元数据及 codec；保留各自的容器、
   失效与部署策略。AOT 按需读取代码，减少重复序列化、无用 helper 和诊断产物。
+- 普通固定 range 可吸收已证明安全的整数前段，减少独立 serial 任务及跨任务临时值。
+  CUDA/Vulkan 还可吸收循环内不会修改的 dense 标量 i32 Field 读取；CPU 保留 Field
+  快照以避免重复寻址。Field 路径遇到外部别名或不透明操作时保持原样；自动微分不应用
+  此变换，不设规模阈值。
 - LLVM 链接复用 runtime/SNode 的不可变 bitcode，按依赖装入所需函数体，减少每次
   kernel 编译时完整克隆库的开销；代价是保留这些 bitcode 快照占用的内存。
 - CUDA runtime 按功能组准备内部模块，基础初始化与稀疏功能分开；用齐全部功能时累计

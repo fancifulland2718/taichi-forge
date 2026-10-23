@@ -37,7 +37,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 ### Upgrading and compilation settings
 
 - The frontend/native private ABI is **165**, persistent execution-plan version **26**, and
-  compiled-cache schema **70**. Update compatible components together; matching Git commits
+  compiled-cache schema **71**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
   Old compiled caches are invalidated; distinguish the resulting cold start from warm replay.
@@ -53,6 +53,12 @@ combination. Consult the linked API contracts and capability queries for exact s
   This release makes no universal compile-time or runtime speedup claim.
 
 ### Compilation cost and artifacts
+
+- Ordinary fixed ranges can absorb proven-safe integer preludes, removing a serial task
+  and cross-task temporaries. CUDA/Vulkan also admit dense scalar i32 Field reads when
+  the loop cannot modify that source. CPU retains Field snapshots to avoid repeated
+  address work. Field snapshots with external aliases or opaque operations remain in
+  place. Autodiff does not apply this transform; no workload-size threshold is introduced.
 
 - Type checks after index linearization are coalesced per block edit batch,
   avoiding repeated whole-block scans while preserving type promotion, debug
