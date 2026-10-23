@@ -72,6 +72,9 @@
   全局原子操作；部分有效的 block 仍完整参与归约同步，原 grid-stride 范围保持。
 - 已冻结 Graph 的共同 lowering 保留选中的物理 dispatch、launch policy 和绑定约束；
   JIT code loan 借用已编译代码，AOT adapter 处理部署闭包。普通调用的执行与提交路径保持。
+- CUDA AOT 保留每个入口选定的 occupancy waves/work-per-thread 启动策略，普通执行与
+  Graph 录制共用消费端的冷阶段解析，不再静默回到基线网格。同一代码的不同策略保持
+  独立；带非基线策略的产物要求 LLVM AOT metadata schema 9，旧 reader 明确拒绝。
 - CPU/CUDA/Vulkan 的执行注册状态归执行 owner，编译代码可共享；在途租约、独立实例、
   reset/close 和进程退出按资源依赖退休，修复借用 runtime 及 Vulkan 退出访问异常。
 - CUDA 独立域按完整 prepared 实例计数，初始化和 replay 共享一个容量名额；部分构造

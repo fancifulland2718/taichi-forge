@@ -1,6 +1,7 @@
 #pragma once
 
 #include "taichi/runtime/cuda/kernel_launch_abi.h"
+#include "taichi/runtime/cuda/persisted_task_launch_policy.h"
 
 #include <atomic>
 #include <array>
@@ -101,6 +102,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::vector<int> snode_tree_ids;
     std::vector<std::pair<std::vector<int>, Callable::Parameter>> parameters;
     std::vector<OffloadedTask> offloaded_tasks;
+    // Consumer-owned default requests. Keep baseline tasks intact so explicit
+    // live overrides resolve independently instead of applying a second cap.
+    std::optional<PersistedTaskLaunchPolicy> default_task_launch_policy;
     mutable std::once_flag root_binding_once;
     mutable void *root_binding{nullptr};
     mutable std::shared_ptr<void> root_binding_owner;
@@ -302,6 +306,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
       std::int32_t waves,
       std::int32_t range_work_per_thread_target);
   const Context::ResolvedTaskExecutionPlan *resolve_task_execution_plan(
+      const Context &context,
+      const LaunchContextBuilder &launch_context);
+  const Context::ResolvedTaskExecutionPlan *resolve_selected_task_execution_plan(
       const Context &context,
       const LaunchContextBuilder &launch_context);
 

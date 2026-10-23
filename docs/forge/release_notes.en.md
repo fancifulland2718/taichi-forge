@@ -80,6 +80,12 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Graph and runtime
 
+- CUDA AOT preserves each entry's selected occupancy waves/work-per-thread launch policy.
+  Ordinary execution and Graph recording share cold resolution on the consumer device
+  instead of silently using the baseline grid. Different policies on shared code remain
+  independent; artifacts with nonbaseline policies require LLVM AOT metadata schema 9
+  and are rejected by older readers.
+
 - Empty ordinary CUDA dynamic-range blocks exit before reduction setup and teardown, avoiding neutral
   global atomics without useful iterations. Partially active blocks still participate fully in
   reduction synchronization, and grid-stride iteration coverage is preserved.

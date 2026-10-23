@@ -421,6 +421,30 @@ TEST(LlvmAotMetadataTest, GatedLaunchAbiExtendsExistingArtifactContracts) {
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(decoded));
 }
 
+TEST(LlvmAotMetadataTest, PersistedTaskPolicyRequiresNewReaderAndExistingAbi) {
+  LLVM::LlvmAotMetadata metadata;
+  metadata.schema_version = LLVM::kTaskLaunchPolicyAotSchemaVersion;
+  metadata.abi_sha256 = std::string(64, 'a');
+  metadata.kernel_launch_abis["body"] = cuda::kContextLaunchABI;
+  metadata.launch_abi_sha256 = LLVM::aot_launch_abi_sha256(metadata);
+  for (const auto *format : {"bc", "ptx", "cubin"}) {
+    metadata.kernel_format = format;
+    EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  }
+  auto malformed = metadata;
+  malformed.schema_version = LLVM::kTaskLaunchPolicyAotSchemaVersion + 1;
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(malformed));
+  malformed = metadata;
+  malformed.kernel_launch_abis.clear();
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(malformed));
+  malformed = metadata;
+  malformed.abi_sha256.clear();
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(malformed));
+  malformed = metadata;
+  malformed.kernel_format = "ll";
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(malformed));
+}
+
 TEST(LlvmAotMetadataTest, InitialRootDataValidatesExactStorageAndUniqueIds) {
   const std::vector<size_t> sizes{32, 64};
   std::vector<aot::InitialRootData> entries{{1, 64, std::string(64, 'a')}};

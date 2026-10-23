@@ -10,6 +10,7 @@
 #include "taichi/program/program.h"
 #include "taichi/program/sparse_matrix.h"
 #include "taichi/system/profiler_annotation.h"
+#include "picosha2.h"
 
 namespace taichi::lang {
 namespace {
@@ -649,6 +650,12 @@ void validate_cuda_cufft_args(std::uint64_t plan_handle,
 aot::CompiledDispatch Dispatch::compile_dispatch() const {
   aot::CompiledDispatch dispatch;
   dispatch.kernel_name = kernel_->get_name();
+  if (const auto &plan = kernel_->get_offload_execution_plan(); plan.has_value()) {
+    // Source names and compiled code keys can be shared by launch-only
+    // specializations. CGraph exports still need a distinct entry per policy.
+    dispatch.kernel_name += "_execution_" +
+                            picosha2::hash256_hex_string(plan->execution_identity);
+  }
   dispatch.dispatch_label = dispatch_label_;
   dispatch.symbolic_args = symbolic_args_;
   dispatch.indirect_dispatch_arg = indirect_dispatch_arg_;

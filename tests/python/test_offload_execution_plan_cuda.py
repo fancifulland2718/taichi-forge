@@ -1,3 +1,6 @@
+import json
+import re
+
 import numpy as np
 import pytest
 
@@ -9,6 +12,135 @@ from taichi_forge.lang._offload_execution_plan import (
     _bind_offload_execution_plan,
 )
 from tests import test_utils
+
+
+@pytest.mark.parametrize("artifact_format", ["bc", "ptx"])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_aot_graph_keeps_distinct_launch_only_entries(tmp_path, artifact_format):
+    count = 8193
+
+    @ti.kernel
+    def stages(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(count):
+            out[i] = i + 2
+        for i in range(out.shape[0]):
+            out[i] *= 5
+
+    values = ti.ndarray(ti.i32, shape=count)
+    baseline = _OffloadExecutionPlan.from_task_manifests(stages.task_manifest(values))
+    fixed, dynamic = tuple(task for task in baseline.tasks if task.task_kind == "range_for")
+    baseline = baseline.replace_task(fixed.task_index, workgroup_size=64)
+    plans = tuple(
+        baseline.replace_task(fixed.task_index, range_work_per_thread_target=work)
+        .replace_task(dynamic.task_index, grid_residency_waves=waves)
+        for waves, work in ((1, 2), (2, 4))
+    )
+    assert plans[0].compilation_identity == plans[1].compilation_identity
+    builder = ti.graph.GraphBuilder()
+    argument = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+    for plan in plans:
+        builder.dispatch(_bind_offload_execution_plan(stages, plan), argument)
+    graph = builder.compile()
+    module = ti.aot.Module(artifact_format=artifact_format)
+    module.add_graph("both", graph)
+    execution = json.loads(module.add_execution_plan("both_execution", graph).to_json())
+    entries = [operation["entry"] for operation in execution["operations"]]
+    assert len(entries) == 2 and len(set(entries)) == 2
+    assert len(module._exported_kernels) == 2
+    module.save(str(tmp_path))
+    assert json.loads((tmp_path / "aot_metadata.json").read_text())["schema_version"] == 9
+    # LLVM metadata.json is a diagnostic TextSerializer dump, not JSON.
+    diagnostic = (tmp_path / "metadata.json").read_text()
+    requests = re.findall(
+        r'"requested_grid_residency_waves": (\d+),\s*'
+        r'"requested_range_work_per_thread_target": (\d+)', diagnostic
+    )
+    expected = sorted(
+        (str(task.grid_residency_waves or 0), str(task.range_work_per_thread_target))
+        for plan in plans for task in plan.materialized_tasks
+    )
+    assert sorted(requests) == expected
+    # Exporting both selected policies must leave the shared source baseline.
+    assert all(task.requested_grid_residency_waves is None
+               and task.requested_range_work_per_thread_target == 1
+               for task in stages.task_manifest(values))
+
+    keys = (
+        "cuda_grid_residency_resolution_calls",
+        "cuda_grid_residency_resolution_failures",
+        "cuda_grid_residency_last_requested_waves",
+        "cuda_grid_residency_last_baseline_grid",
+        "cuda_grid_residency_last_resolved_grid",
+        "cuda_grid_residency_last_active_blocks_per_multiprocessor",
+        "cuda_grid_residency_last_multiprocessor_count",
+        "cuda_range_coarsening_resolution_calls",
+        "cuda_range_coarsening_resolution_failures",
+        "cuda_range_coarsening_last_work_per_thread_target",
+        "cuda_range_coarsening_last_baseline_grid",
+        "cuda_range_coarsening_last_resolved_grid",
+    )
+
+    def telemetry():
+        return {key: int(ti_core.query_int64(key)) for key in keys}
+
+    expected_values = (np.arange(count, dtype=np.int32) + 2) * 5
+    with ti.aot.borrow_runtime() as runtime:
+        loaded = runtime.load_module(tmp_path)
+        output = runtime.ndarray("i32", count)
+        for entry, (waves, work) in zip(entries, ((1, 2), (2, 4))):
+            before = telemetry()
+            kernel = loaded.kernel(entry)
+            kernel(output)
+            runtime.wait()
+            cold = telemetry()
+            for prefix in ("cuda_grid_residency", "cuda_range_coarsening"):
+                assert cold[prefix + "_resolution_calls"] == before[prefix + "_resolution_calls"] + 1
+                assert cold[prefix + "_resolution_failures"] == before[prefix + "_resolution_failures"]
+            assert cold["cuda_grid_residency_last_requested_waves"] == waves
+            assert cold["cuda_range_coarsening_last_work_per_thread_target"] == work
+            assert cold["cuda_range_coarsening_last_resolved_grid"] == min(
+                cold["cuda_range_coarsening_last_baseline_grid"],
+                (count + 64 * work - 1) // (64 * work),
+            )
+            assert cold["cuda_grid_residency_last_resolved_grid"] == min(
+                cold["cuda_grid_residency_last_baseline_grid"],
+                cold["cuda_grid_residency_last_active_blocks_per_multiprocessor"]
+                * cold["cuda_grid_residency_last_multiprocessor_count"] * waves,
+            )
+            np.testing.assert_array_equal(np.frombuffer(output.read(), dtype=np.int32), expected_values)
+            # Preparing capture after an ordinary launch uses the same entry's
+            # cold resolution; repeated capture replays must stay warm.
+            with kernel.prepare(output) as prepared:
+                assert telemetry() == cold
+                prepared()
+                prepared()
+                runtime.wait()
+                assert telemetry() == cold
+                np.testing.assert_array_equal(np.frombuffer(output.read(), dtype=np.int32), expected_values)
+        warm = telemetry()
+        with loaded.graph("both").prepare({"out": output}) as prepared:
+            prepared()
+            prepared()
+            runtime.wait()
+            assert telemetry() == warm
+        with loaded.prepare_execution("both_execution", {"out": output}) as prepared:
+            prepared()
+            runtime.wait()
+            assert telemetry() == warm
+        np.testing.assert_array_equal(np.frombuffer(output.read(), dtype=np.int32), expected_values)
+
+        from taichi_forge_runtime.aot import AotError
+
+        # The checksum binds binary task requests; changing only the declared
+        # reader version must still fail before registering a selected entry.
+        metadata_path = tmp_path / "aot_metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["schema_version"] = 8
+        metadata_path.write_text(json.dumps(metadata))
+        downgraded = runtime.load_module(tmp_path)
+        with pytest.raises(AotError, match="task launch policy requires AOT schema 9"):
+            downgraded.kernel(entries[0])
+        assert telemetry() == warm
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False, kernel_profiler=True)

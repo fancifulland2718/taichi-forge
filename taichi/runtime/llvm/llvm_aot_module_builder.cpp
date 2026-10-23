@@ -224,6 +224,20 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
           taichi::join_path(output_dir, "metadata.tcb")));
     metadata.runtime_state_sha256 = LLVM::aot_runtime_state_sha256(metadata);
   }
+  const bool task_launch_policy = std::any_of(
+      cache_.kernels.begin(), cache_.kernels.end(), [](const auto &entry) {
+        const auto &tasks = entry.second.compiled_data.tasks;
+        return std::any_of(tasks.begin(), tasks.end(), [](const auto &task) {
+          return task.requested_grid_residency_waves != 0 ||
+                 task.requested_range_work_per_thread_target != 1;
+        });
+      });
+  if (task_launch_policy) {
+    TI_ERROR_IF(compile_config_.arch != Arch::cuda ||
+                    metadata.kernel_launch_abis.empty(),
+                "AOT task launch policy requires the current CUDA launch ABI");
+    metadata.schema_version = LLVM::kTaskLaunchPolicyAotSchemaVersion;
+  }
   const std::string json =
       liong::json::print(liong::json::serialize(metadata));
   std::fstream f(taichi::join_path(output_dir,
@@ -345,8 +359,13 @@ LLVM::CompiledKernelData::InternalData LlvmAotModuleBuilder::compile_kernel(
   const auto &ckd = compilation_manager_.load_or_compile(
       request, *kernel);
   TI_ASSERT(arch_uses_llvm(ckd.arch()));
-  return dynamic_cast<const LLVM::CompiledKernelData &>(ckd)
-      .get_internal_data();
+  auto exported = dynamic_cast<const LLVM::CompiledKernelData &>(ckd)
+                      .get_internal_data();
+  if (const auto &plan = kernel->get_offload_execution_plan(); plan.has_value()) {
+    LLVM::project_aot_task_launch_policy(exported.compiled_data, *plan,
+                                         compile_config_.arch);
+  }
+  return exported;
 }
 
 }  // namespace taichi::lang

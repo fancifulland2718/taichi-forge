@@ -3,9 +3,114 @@
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/llvm_offline_cache.h"
+#include "taichi/runtime/llvm/aot_kernel_contract.h"
 
 namespace taichi::lang {
 namespace {
+
+LLVMCompiledKernel launch_policy_source() {
+  LLVMCompiledKernel compiled;
+  compiled.tasks.emplace_back("serial", 1, 1);
+  compiled.tasks.emplace_back("range", 64, 128);
+  compiled.tasks.back().task_type = OffloadedTaskType::range_for;
+  compiled.tasks.back().constant_range_size = 8193;
+  return compiled;
+}
+
+Kernel::OffloadExecutionPlan launch_policy(int waves, int work) {
+  Kernel::OffloadExecutionPlan plan;
+  plan.tasks.resize(2);
+  plan.tasks[0].task_kind = "serial";
+  plan.tasks[1].task_index = 1;
+  plan.tasks[1].task_kind = "range_for";
+  plan.tasks[1].grid_residency_waves = waves;
+  plan.tasks[1].range_work_per_thread_target = work;
+  return plan;
+}
+
+TEST(LLVMAotLaunchPolicy, ProjectsIndependentEntriesAndRoundTripsExistingWire) {
+  LLVM::CompiledKernelData::InternalData source_data;
+  source_data.compiled_data = launch_policy_source();
+  source_data.compiled_data.module_context_owner =
+      std::make_shared<llvm::LLVMContext>();
+  source_data.compiled_data.module = std::make_unique<llvm::Module>(
+      "shared-code", *source_data.compiled_data.module_context_owner);
+  const LLVM::CompiledKernelData artifact(Arch::cuda, std::move(source_data));
+  // Match the exporter: copy the same immutable compiler artifact twice.
+  auto first_data = artifact.get_internal_data();
+  auto second_data = artifact.get_internal_data();
+  auto &first = first_data.compiled_data;
+  auto &second = second_data.compiled_data;
+  const auto &source = artifact.get_internal_data().compiled_data;
+  EXPECT_NE(first.module.get(), source.module.get());
+  EXPECT_NE(second.module.get(), source.module.get());
+  LLVM::project_aot_task_launch_policy(first, launch_policy(1, 2), Arch::cuda);
+  LLVM::project_aot_task_launch_policy(second, launch_policy(2, 4), Arch::cuda);
+  EXPECT_EQ(source.tasks[1].requested_grid_residency_waves, 0);
+  EXPECT_EQ(source.tasks[1].requested_range_work_per_thread_target, 1);
+  EXPECT_EQ(first.tasks[1].grid_dim, source.tasks[1].grid_dim);
+  EXPECT_EQ(second.tasks[1].grid_dim, source.tasks[1].grid_dim);
+  const auto first_policy = cuda::make_persisted_task_launch_policy(first.tasks);
+  const auto second_policy = cuda::make_persisted_task_launch_policy(second.tasks);
+  ASSERT_TRUE(first_policy);
+  ASSERT_TRUE(second_policy);
+  EXPECT_NE(first_policy->identity, second_policy->identity);
+  EXPECT_NE(first_policy->content_digest, second_policy->content_digest);
+  EXPECT_EQ(first_policy->grid_residency_waves, (std::vector<int>{0, 1}));
+  EXPECT_EQ(second_policy->range_work_per_thread_targets,
+            (std::vector<int>{1, 4}));
+  BinaryOutputSerializer output;
+  output.initialize();
+  output(first);
+  output(second);
+  output.finalize();
+  LLVMCompiledKernel loaded_first, loaded_second;
+  BinaryInputSerializer input;
+  input.initialize(output.data.data());
+  input(loaded_first);
+  input(loaded_second);
+  EXPECT_EQ(cuda::make_persisted_task_launch_policy(loaded_first.tasks)->identity,
+            first_policy->identity);
+  EXPECT_EQ(cuda::make_persisted_task_launch_policy(loaded_second.tasks)->identity,
+            second_policy->identity);
+  EXPECT_EQ(loaded_first.tasks[1].native_function, nullptr);
+}
+
+TEST(LLVMAotLaunchPolicy, RejectsUnrepresentableRequestsBeforeProjection) {
+  auto compiled = launch_policy_source();
+  auto plan = launch_policy(1, 2);
+  plan.tasks[0].sparse_list_policy = "parent_capacity_bound";
+  EXPECT_ANY_THROW(LLVM::project_aot_task_launch_policy(compiled, plan, Arch::cuda));
+  EXPECT_EQ(compiled.tasks[1].requested_grid_residency_waves, 0);
+  plan = launch_policy(3, 2);
+  EXPECT_ANY_THROW(LLVM::project_aot_task_launch_policy(compiled, plan, Arch::cuda));
+  plan = launch_policy(1, 2);
+  plan.tasks[1].task_kind = "serial";
+  EXPECT_ANY_THROW(LLVM::project_aot_task_launch_policy(compiled, plan, Arch::cuda));
+  EXPECT_ANY_THROW(LLVM::project_aot_task_launch_policy(
+      compiled, launch_policy(1, 2), Arch::x64));
+  compiled.tasks[1].constant_range_size = -1;
+  EXPECT_ANY_THROW(LLVM::project_aot_task_launch_policy(
+      compiled, launch_policy(1, 2), Arch::cuda));
+  // Residency can still cap a dynamic grid-stride range on the consumer.
+  LLVM::project_aot_task_launch_policy(compiled, launch_policy(1, 1), Arch::cuda);
+  EXPECT_TRUE(cuda::make_persisted_task_launch_policy(compiled.tasks));
+}
+
+TEST(LLVMAotLaunchPolicy, PreservesBaselineSparseAndRejectsMalformedPayloads) {
+  auto compiled = launch_policy_source();
+  compiled.tasks[1].task_type = OffloadedTaskType::listgen;
+  compiled.tasks[1].sparse_list_op = OffloadedTask::kSparseListOpListgen;
+  auto plan = launch_policy(0, 1);
+  plan.tasks[1].task_kind = "listgen";
+  LLVM::project_aot_task_launch_policy(compiled, plan, Arch::cuda);
+  EXPECT_FALSE(cuda::make_persisted_task_launch_policy(compiled.tasks));
+  compiled.tasks[1].requested_grid_residency_waves = 1;
+  EXPECT_ANY_THROW(cuda::make_persisted_task_launch_policy(compiled.tasks));
+  compiled.tasks[1].requested_grid_residency_waves = 0;
+  compiled.tasks[1].requested_range_work_per_thread_target = 3;
+  EXPECT_ANY_THROW(cuda::make_persisted_task_launch_policy(compiled.tasks));
+}
 
 TEST(LLVMCompiledKernelOwnership, MoveAssignmentRetiresModuleBeforeItsContext) {
   auto make_data = [](const std::string &name) {

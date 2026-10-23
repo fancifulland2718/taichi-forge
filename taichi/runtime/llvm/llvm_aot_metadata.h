@@ -21,6 +21,9 @@ inline constexpr std::uint32_t kRelocatableLlvmAotSchemaVersion = 5;
 inline constexpr std::uint32_t kCudaCubinAotSchemaVersion = 6;
 inline constexpr std::uint32_t kInitialRootDataAotSchemaVersion = 7;
 inline constexpr std::uint32_t kKernelLaunchAbiAotSchemaVersion = 8;
+// Existing task wire fields acquire deployment-default launch semantics.
+// Older readers know those fields but ignore them, so they must reject 9.
+inline constexpr std::uint32_t kTaskLaunchPolicyAotSchemaVersion = 9;
 
 inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";
@@ -102,10 +105,11 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                         metadata.abi_sha256.size() != 64,
               "AOT runtime-state inventory requires its metadata checksum");
   auto base_schema = metadata.schema_version;
-  const bool launch_abi = base_schema == kKernelLaunchAbiAotSchemaVersion;
+  const bool launch_abi = base_schema == kKernelLaunchAbiAotSchemaVersion ||
+                          base_schema == kTaskLaunchPolicyAotSchemaVersion;
   TI_ERROR_IF(launch_abi != !metadata.kernel_launch_abis.empty() ||
                   (!launch_abi && !metadata.launch_abi_sha256.empty()),
-              "AOT kernel launch ABI declarations require schema 8");
+              "AOT kernel launch ABI declarations require schema 8 or 9");
   if (launch_abi) {
     TI_ERROR_IF(metadata.abi_sha256.size() != 64 ||
                     metadata.launch_abi_sha256.size() != 64 ||

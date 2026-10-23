@@ -224,6 +224,8 @@ std::shared_ptr<void> own_cuda_allocation(void *ptr) {
 void KernelLauncher::configure_launch_bindings(
     const LLVM::CompiledKernelData::InternalData &compiled,
     Context &context) {
+  context.default_task_launch_policy =
+      make_persisted_task_launch_policy(context.offloaded_tasks);
   context.uses_bounded_range = std::any_of(
       context.offloaded_tasks.begin(), context.offloaded_tasks.end(),
       [](const auto &task) { return task.one_to_one; });
@@ -398,10 +400,15 @@ const KernelLauncher::Context::ResolvedTaskExecutionPlan *
 KernelLauncher::resolve_task_execution_plan(
     const Context &context,
     const LaunchContextBuilder &launch_context) {
+  const auto *persisted = launch_context.has_cuda_task_execution_plan()
+                              ? nullptr
+                              : &context.default_task_launch_policy.value();
   const auto &identity =
-      launch_context.cuda_task_execution_plan_identity();
+      persisted ? persisted->identity
+                : launch_context.cuda_task_execution_plan_identity();
   const auto &content_digest =
-      launch_context.cuda_task_execution_plan_content_digest();
+      persisted ? persisted->content_digest
+                : launch_context.cuda_task_execution_plan_content_digest();
   if (const auto *cached = context.task_execution_plan_mru.load(
           std::memory_order_acquire);
       cached != nullptr && cached->content_digest == content_digest &&
@@ -409,12 +416,17 @@ KernelLauncher::resolve_task_execution_plan(
     return cached;
   }
   const auto &task_kinds =
-      launch_context.cuda_task_execution_plan_kinds();
-  const auto &waves = launch_context.cuda_task_grid_residency_waves();
+      persisted ? persisted->task_kinds
+                : launch_context.cuda_task_execution_plan_kinds();
+  const auto &waves =
+      persisted ? persisted->grid_residency_waves
+                : launch_context.cuda_task_grid_residency_waves();
   const auto &work =
-      launch_context.cuda_task_range_work_per_thread_targets();
+      persisted ? persisted->range_work_per_thread_targets
+                : launch_context.cuda_task_range_work_per_thread_targets();
   const auto &sparse_policies =
-      launch_context.cuda_task_sparse_list_policies();
+      persisted ? persisted->sparse_list_policies
+                : launch_context.cuda_task_sparse_list_policies();
   TI_ERROR_IF(identity.empty(),
               "CUDA task execution plan requires a non-empty identity");
   TI_ERROR_IF(task_kinds.size() != context.offloaded_tasks.size() ||
@@ -573,6 +585,25 @@ KernelLauncher::resolve_task_execution_plan(
   context.task_execution_plan_mru.store(inserted->second.get(),
                                         std::memory_order_release);
   return inserted->second.get();
+}
+
+const KernelLauncher::Context::ResolvedTaskExecutionPlan *
+KernelLauncher::resolve_selected_task_execution_plan(
+    const Context &context,
+    const LaunchContextBuilder &launch_context) {
+  const bool call_wide = launch_context.cuda_grid_residency_waves() != 0 ||
+                         launch_context.cuda_range_work_per_thread_target() != 1;
+  if (launch_context.has_cuda_task_execution_plan()) {
+    TI_ERROR_IF(call_wide,
+                "task-indexed and call-wide CUDA launch controls cannot be "
+                "combined");
+    return resolve_task_execution_plan(context, launch_context);
+  }
+  // Explicit live controls replace the persisted default, and always resolve
+  // from original tasks. A baseline explicit task plan can opt out as well.
+  if (call_wide || !context.default_task_launch_policy)
+    return nullptr;
+  return resolve_task_execution_plan(context, launch_context);
 }
 
 bool KernelLauncher::on_cuda_device(void *ptr) {
@@ -762,15 +793,10 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
   }
   ensure_root_binding(*launcher_ctx);
   const auto &parameters = launcher_ctx->parameters;
-  const Context::ResolvedTaskExecutionPlan *plan = nullptr;
+  const auto *plan = resolve_selected_task_execution_plan(*launcher_ctx, ctx);
   const std::vector<OffloadedTask> *offloaded_tasks_ptr =
       &launcher_ctx->offloaded_tasks;
-  if (ctx.has_cuda_task_execution_plan()) {
-    TI_ERROR_IF(ctx.cuda_grid_residency_waves() != 0 ||
-                    ctx.cuda_range_work_per_thread_target() != 1,
-                "task-indexed and call-wide CUDA launch controls cannot be "
-                "combined during Graph capture");
-    plan = resolve_task_execution_plan(*launcher_ctx, ctx);
+  if (plan != nullptr) {
     offloaded_tasks_ptr = &plan->tasks;
   } else if (ctx.cuda_grid_residency_waves() != 0 ||
              ctx.cuda_range_work_per_thread_target() != 1) {
@@ -915,7 +941,7 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
     *resolved_task_count = offloaded_tasks.size();
   }
   if (task_plan_identity != nullptr) {
-    *task_plan_identity = ctx.cuda_task_execution_plan_identity();
+    *task_plan_identity = plan != nullptr ? plan->identity : std::string{};
   }
   if (sparse_lease) {
     *sparse_lease = uses_sparse
@@ -1439,16 +1465,11 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   const auto &parameters = launcher_ctx->parameters;
 
   auto context_guard = CUDAContext::get_instance().get_guard();
-  const Context::ResolvedTaskExecutionPlan *task_execution_plan = nullptr;
+  const auto *task_execution_plan =
+      resolve_selected_task_execution_plan(*launcher_ctx, ctx);
   const std::vector<OffloadedTask> *offloaded_tasks_ptr =
       &launcher_ctx->offloaded_tasks;
-  if (ctx.has_cuda_task_execution_plan()) {
-    TI_ERROR_IF(ctx.cuda_grid_residency_waves() != 0 ||
-                    ctx.cuda_range_work_per_thread_target() != 1,
-                "task-indexed and call-wide CUDA launch controls cannot be "
-                "combined");
-    task_execution_plan =
-        resolve_task_execution_plan(*launcher_ctx, ctx);
+  if (task_execution_plan != nullptr) {
     offloaded_tasks_ptr = &task_execution_plan->tasks;
   } else if (ctx.cuda_grid_residency_waves() != 0 ||
              ctx.cuda_range_work_per_thread_target() != 1) {

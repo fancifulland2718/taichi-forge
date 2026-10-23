@@ -56,6 +56,9 @@ LlvmAotModule::LlvmAotModule(
                                  contents.data() + contents.size());
   liong::json::deserialize(json, metadata);
   validate_llvm_aot_metadata(metadata);
+  TI_ERROR_IF(metadata.schema_version == kTaskLaunchPolicyAotSchemaVersion &&
+                  arch() != Arch::cuda,
+              "Persisted task launch policies require a CUDA AOT runtime");
   if (!metadata.kernel_runtime_state.empty())
     TI_ERROR_IF(
         metadata.runtime_state_sha256 != aot_runtime_state_sha256(metadata),
@@ -243,6 +246,14 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
                       *executor_->get_llvm_context()->get_this_thread_context());
   if (!ok) {
     throw aot::ArtifactLoadError("Failed to read LLVM AOT kernel: " + name);
+  }
+  for (const auto &task : loaded.compiled_data.tasks) {
+    TI_ERROR_IF((task.requested_grid_residency_waves != 0 ||
+                 task.requested_range_work_per_thread_target != 1) &&
+                    (arch() != Arch::cuda ||
+                     metadata_.schema_version != kTaskLaunchPolicyAotSchemaVersion),
+                "Persisted CUDA task launch policy requires AOT schema 9: {}",
+                name);
   }
   for (int tree_id : loaded.used_snode_tree_ids) {
     TI_ERROR_IF(!std::binary_search(snode_tree_ids_.begin(),
