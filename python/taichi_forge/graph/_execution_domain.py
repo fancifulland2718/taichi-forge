@@ -1,4 +1,4 @@
-"""Cold adoption of a complete JIT recipe into an independent CUDA instance."""
+"""Cold adoption of a selected JIT recipe into an independent GPU instance."""
 
 import ctypes
 
@@ -18,23 +18,25 @@ from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.matrix import MatrixField
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge_runtime.aot import ExecutionPlan, Scalar
-from taichi_forge_runtime.aot._domain import CudaExecutionDomain
+from taichi_forge_runtime.aot._domain import ExecutionDomain
 from taichi_forge_runtime.aot._runtime import Module, NativeResource, NdArray as AotNdArray
 
 
 def execution_domain(*, capacity=2, instance_capacity=64, priority=0, gpu_timing=False):
-    """Create a bounded persistent CUDA queue on the current JIT Program.
+    """Create an independent CUDA stream or Vulkan compute queue on this Program.
 
     Prepare immutable instances with ``graph.prepare(..., execution_domain=...)``.
     Explicit close/reset drains accepted work. Dropping a domain handle only
     releases that handle; the Program retains its resources until retirement.
+    Vulkan requires an unused device-created compute queue and timeline support;
+    its current independent route accepts fixed buffer-only recipes.
     """
     from taichi_forge.aot import borrow_runtime
 
     owner = impl.get_runtime()
     with owner._graph_execution_runtime_lock:
-        if impl.current_cfg().arch != core.Arch.cuda:
-            raise NotImplementedError("Graph execution domains require CUDA")
+        if impl.current_cfg().arch not in (core.Arch.cuda, core.Arch.vulkan):
+            raise NotImplementedError("Graph execution domains require CUDA or Vulkan")
         runtime = owner._graph_execution_runtime
         if runtime is None:
             runtime = borrow_runtime()
@@ -67,7 +69,7 @@ class _JitContext(GraphLoweringContext):
     def __init__(self, graph, arguments):
         spec = graph._spec
         super().__init__(
-            core.Arch.cuda,
+            impl.current_cfg().arch,
             set(spec.runtime_arg_names) | set(spec.fixed_runtime_args),
             source_arrays=SourceArrayBindings(None, spec.fixed_runtime_args),
             source_resources=SourceResourceBindings(
@@ -151,7 +153,7 @@ class _JitContext(GraphLoweringContext):
 
 
 class GraphExecution:
-    """An immutable complete Graph instance bound to one CUDA execution domain.
+    """An immutable selected Graph instance bound to one GPU execution domain.
 
     The native closure survives source Graph.close(). Explicit close waits for
     this instance's final submission and reclaims its resident capacity. Release
@@ -217,23 +219,23 @@ class GraphExecution:
 
 def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
     """Resolve immutable bindings once; submit reuses the native closure."""
-    if not isinstance(execution_domain, CudaExecutionDomain):
-        raise TypeError("execution_domain must be a CudaExecutionDomain")
+    if not isinstance(execution_domain, ExecutionDomain):
+        raise TypeError("execution_domain must be an ExecutionDomain")
     runtime = execution_domain._runtime
-    if runtime._borrower is None or runtime.arch != "cuda":
-        raise ValueError("A JIT Graph requires a domain borrowed from its CUDA Program")
+    if runtime._borrower is None or runtime.arch not in ("cuda", "vulkan"):
+        raise ValueError("A JIT Graph requires a domain borrowed from its GPU Program")
     runtime._check()
     with graph._lifecycle_lock:
         graph._check_runtime_valid()
         spec = graph._spec
         if (
-            graph._execution_arch != "cuda"
+            graph._execution_arch != execution_domain.backend
             or graph._workspace_lane_capacity != 1
             or graph._qualified_fusion_selector is not None
             or getattr(spec, "_binding_executor_factory", None) is not None
         ):
             raise TaichiRuntimeError(
-                "JIT preparation requires a fixed single-frame CUDA recipe"
+                "JIT preparation requires a fixed single-frame recipe on the domain backend"
             )
         arguments, version = graph._snapshot_binding_source(arguments)
         spec._validate_runtime_arg_names(arguments, "Graph.prepare")
