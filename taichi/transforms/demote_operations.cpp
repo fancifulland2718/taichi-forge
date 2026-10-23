@@ -12,8 +12,19 @@ class DemoteOperations : public BasicStmtVisitor {
  public:
   using BasicStmtVisitor::visit;
   DelayedIRModifier modifier;
+  IRNode *root;
+  std::unique_ptr<ImmediateIRModifier> uses;
 
-  DemoteOperations() {
+  explicit DemoteOperations(IRNode *root) : root(root) {
+  }
+
+  void replace_usages(Stmt *stmt, Stmt *replacement) {
+    // Replacements are fresh definitions emitted in SSA traversal order. No
+    // inserted statement is visited until the next fixed-point iteration.
+    // Build once on the first actual rewrite, and rebuild after delayed edits.
+    if (!uses)
+      uses = std::make_unique<ImmediateIRModifier>(root);
+    uses->replace_usages_with(stmt, replacement);
   }
 
   Stmt *transform_pow_op_impl(IRBuilder &builder, Stmt *lhs, Stmt *rhs) {
@@ -71,7 +82,7 @@ class DemoteOperations : public BasicStmtVisitor {
 
     auto final_result = transform_pow_op_impl(builder, lhs, rhs);
 
-    stmt->replace_usages_with(final_result);
+    replace_usages(stmt, final_result);
     modifier.insert_before(
         stmt, VecStatement(std::move(builder.extract_ir()->statements)));
     modifier.erase(stmt);
@@ -122,7 +133,7 @@ class DemoteOperations : public BasicStmtVisitor {
     }
     auto new_matrix = Stmt::make<MatrixInitStmt>(ret_stmts);
     new_matrix->ret_type = stmt->ret_type;
-    stmt->replace_usages_with(new_matrix.get());
+    replace_usages(stmt, new_matrix.get());
     modifier.insert_before(stmt, std::move(new_matrix));
     modifier.erase(stmt);
   }
@@ -221,7 +232,7 @@ class DemoteOperations : public BasicStmtVisitor {
         // the situation of `b = 0` is ignored since we get FPE anyway.
         auto real_ret = demote_ifloordiv(stmt, lhs, rhs);
         real_ret->ret_type = stmt->ret_type;
-        stmt->replace_usages_with(real_ret.get());
+        replace_usages(stmt, real_ret.get());
         modifier.insert_before(stmt, std::move(real_ret));
         modifier.erase(stmt);
 
@@ -232,7 +243,7 @@ class DemoteOperations : public BasicStmtVisitor {
         //     return ti.floor(r)
         auto floor = demote_ffloor(stmt, lhs, rhs);
         floor->ret_type = stmt->ret_type;
-        stmt->replace_usages_with(floor.get());
+        replace_usages(stmt, floor.get());
         modifier.insert_before(stmt, std::move(floor));
         modifier.erase(stmt);
       }
@@ -253,7 +264,7 @@ class DemoteOperations : public BasicStmtVisitor {
           Stmt::make<UnaryOpStmt>(UnaryOpType::cast_bits, shift.get());
       signed_cast->as<UnaryOpStmt>()->cast_type = lhs_prim_type;
       signed_cast->ret_type = stmt->ret_type;
-      stmt->replace_usages_with(signed_cast.get());
+      replace_usages(stmt, signed_cast.get());
       modifier.insert_before(stmt, std::move(unsigned_cast));
       modifier.insert_before(stmt, std::move(shift));
       modifier.insert_before(stmt, std::move(signed_cast));
@@ -289,9 +300,10 @@ class DemoteOperations : public BasicStmtVisitor {
   }
 
   static bool run(IRNode *node, const CompileConfig &config) {
-    DemoteOperations demoter;
+    DemoteOperations demoter(node);
     bool modified = false;
     while (true) {
+      demoter.uses.reset();
       node->accept(&demoter);
       if (demoter.modifier.modify_ir())
         modified = true;

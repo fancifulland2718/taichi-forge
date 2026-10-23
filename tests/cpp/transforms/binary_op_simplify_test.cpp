@@ -2,6 +2,7 @@
 
 #include "taichi/ir/statements.h"
 #include "taichi/ir/ir_builder.h"
+#include "taichi/ir/analysis.h"
 #include "taichi/ir/transforms.h"
 #include "tests/cpp/program/test_program.h"
 
@@ -15,6 +16,33 @@ class BinaryOpSimplifyTest : public ::testing::Test {
 
   TestProgram tp_;
 };
+
+TEST_F(BinaryOpSimplifyTest, DemotionKeepsChainedAndNestedUses) {
+  IRBuilder builder;
+  auto *x = builder.create_arg_load({0}, PrimitiveType::i32, false, 0);
+  auto *exponent = builder.create_arg_load({1}, PrimitiveType::i32, false, 0);
+  auto *quotient = builder.create_floordiv(x, builder.get_int32(3));
+  auto *shifted = builder.create_shr(quotient, builder.get_int32(1));
+  auto *power = builder.create_pow(shifted, exponent);
+  auto *branch = builder.create_if(quotient);
+  {
+    auto guard = builder.get_if_guard(branch, true);
+    builder.create_return(builder.create_floordiv(power, quotient));
+  }
+  builder.create_return(shifted);
+  auto ir = builder.extract_ir();
+  CompileConfig config;
+  irpass::type_check(ir.get(), config);
+  EXPECT_TRUE(irpass::demote_operations(ir.get(), config));
+  EXPECT_FALSE(irpass::analysis::any_statement(ir.get(), [](Stmt *stmt) {
+    auto *binary = stmt->cast<BinaryOpStmt>();
+    return binary && (binary->op_type == BinaryOpType::floordiv ||
+                      binary->op_type == BinaryOpType::pow ||
+                      binary->op_type == BinaryOpType::bit_shr);
+  }));
+  EXPECT_NO_THROW(irpass::analysis::verify(ir.get()));
+  EXPECT_FALSE(irpass::demote_operations(ir.get(), config));
+}
 
 TEST_F(BinaryOpSimplifyTest, MultiplyPOT) {
   IRBuilder builder;
