@@ -162,6 +162,37 @@ def test_mixed_scalar_tensor_reduction_tls_layout():
     assert tuple(result) == (64, 128)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], saturating_grid_dim=7)
+def test_dynamic_range_reduction_empty_blocks_and_partial_tail():
+    bounds = ti.field(ti.i32, shape=2)
+    total = ti.field(ti.f32, shape=())
+    minimum = ti.field(ti.i32, shape=())
+    maximum = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def reduce():
+        ti.loop_config(block_dim=64)
+        for i in range(bounds[0], bounds[1]):
+            total[None] += ti.cast(i % 7, ti.f32)
+            ti.atomic_min(minimum[None], i)
+            ti.atomic_max(maximum[None], i)
+
+    # One compiled device-bound loop visits empty/reversed ranges, partial
+    # warps/blocks, and a range requiring several grid-stride iterations.
+    # Nonzero initial values must survive empty blocks and repeated calls.
+    for begin, count in [(-37, 0), (11, -1), (-37, 31), (5, 257), (-19, 4097)]:
+        bounds.from_numpy(np.array([begin, begin + count], dtype=np.int32))
+        total[None] = 13.0
+        minimum[None] = 10000
+        maximum[None] = -10000
+        reduce()
+        reduce()
+        values = list(range(begin, begin + count))
+        assert total[None] == 13.0 + 2 * sum(i % 7 for i in values)
+        assert minimum[None] == min([10000, *values])
+        assert maximum[None] == max([-10000, *values])
+
+
 @test_utils.test()
 def test_reduction_different_scale():
     @ti.kernel

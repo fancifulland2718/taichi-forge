@@ -2956,6 +2956,16 @@ void gpu_parallel_range_for_with_tls(RuntimeContext *context,
                                      RangeForTaskFunc *func,
                                      range_for_xlogue epilogue,
                                      char *tls_ptr) {
+#ifdef ARCH_cuda
+  // Dynamic ranges use a saturation-sized launch. Whole blocks beyond the
+  // range have no contribution, but their TLS epilogues would still issue
+  // neutral global atomics. Keep this decision block-uniform: inactive lanes
+  // in the last participating block must join warp/block reductions.
+  const int64 block_begin =
+      int64(begin) + int64(block_dim()) * int64(block_idx());
+  if (block_begin >= int64(end))
+    return;
+#endif
   int idx = thread_idx() + block_dim() * block_idx() + begin;
   if (prologue)
     prologue(context, tls_ptr);
