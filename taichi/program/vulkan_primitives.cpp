@@ -8307,6 +8307,16 @@ class FixedVulkanCompact final : public NativeOperation {
     commands->buffer_barrier(operation_.count);
   }
 
+  NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{operation_.flags, operation_.count};
+    for (const auto &column : operation_.columns) {
+      result.buffers->push_back(column.values);
+      result.buffers->push_back(column.output);
+    }
+    return result;
+  }
+
  private:
   Device &device_;
   CompactOperation operation_;

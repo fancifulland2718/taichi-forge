@@ -41,6 +41,15 @@ class _PreparedNativePlan:
         self.close()
 
     def report(self):
+        from ._prepared_compact import PreparedCompactPlan
+
+        persistent_available = (
+            type(self) in (PreparedSortPlan, PreparedCompactPlan)
+            and self._command is not None
+            and self._backend in ("cuda", "vulkan")
+            and self._definition.parameters.get("nan_policy", "last") == "last"
+            and callable(getattr(self._program, "_record_primitive_" + self._definition.operation, None))
+        )
         return {
             **self._description,
             "physical_plan_id": self._physical_id,
@@ -52,16 +61,27 @@ class _PreparedNativePlan:
             "workspace_preparation": "lazy_first_execution",
             "workspace_bytes_last_observed": self._workspace_bytes,
             "device_capture": False,
+            "persistent_recording_available": persistent_available,
         }
 
-    def record(self):
-        """Return a runtime-ordered root-Graph action, not a capture recipe.
+    def record(self, *, persistent=False):
+        """Return a fixed-binding root-Graph action.
 
         The action retains these fixed bindings. Explicitly closing this plan
         invalidates its recordings; an enclosing Graph may use segmented or
-        ordinary execution.
+        ordinary execution. With ``persistent=True``, GPU NaNs-last sort and
+        compact explicitly allocate a private recording workspace. That
+        immutable snapshot retains its bindings independently of this plan;
+        closing the source plan does not invalidate the snapshot. Runtime reset
+        or destruction of a referenced Field tree still retires its Graph.
         """
         self._validate_lifetime()
+        if type(persistent) is not bool:
+            raise TypeError("persistent must be a bool")
+        if persistent:
+            from ._prepared_recording import persistent_recording
+
+            return persistent_recording(self)
         return _native_recording(self)
 
 
@@ -83,8 +103,10 @@ class PreparedSortPlan(_PreparedNativePlan):
 
     Contents may change in place between runs. Replacement, shape/layout change
     or runtime reset requires a new plan. ``close()`` invalidates this plan and
-    recordings made from it, but does not clear shared Program scratch or wait
-    for the GPU. Existing runtime completion owns in-flight allocation release.
+    ordinary recordings made from it, but does not clear shared Program scratch
+    or wait for the GPU. Explicit ``record(persistent=True)`` snapshots have an
+    independent lifetime and private scratch. Existing runtime completion owns
+    in-flight allocation release.
     """
 
     _ad_kind = "sort"

@@ -12,8 +12,9 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@pytest.mark.parametrize("persistent", (False, True))
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
-def test_prepared_compact_definition_and_offset_reconstruction(tmp_path, monkeypatch):
+def test_prepared_compact_definition_and_offset_reconstruction(tmp_path, monkeypatch, persistent):
     from taichi_forge.graph._native_definition import NativeDefinition, NativeOperationBinding
 
     n = 17
@@ -28,7 +29,7 @@ def test_prepared_compact_definition_and_offset_reconstruction(tmp_path, monkeyp
     )
     plan._description["columns"] = ()  # Reporting is not the reconstruction authority.
     builder = ti.graph.GraphBuilder()
-    builder.append_native(plan.record())
+    builder.append_native(plan.record(persistent=persistent))
     graph = builder.compile()
     bindings = dict(flags=flags, count=count)
     bindings.update({f"values_{i}": value for i, value in enumerate(inputs)})

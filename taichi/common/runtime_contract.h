@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Fixed Vulkan workspaces retain private image boundaries and their owners.
-inline constexpr int kForgeNativeAbiRevision = 164;
+inline constexpr int kForgeNativeAbiRevision = 165;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

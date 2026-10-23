@@ -109,6 +109,28 @@ scratch or waiting for GPU completion. Pending native work retains storage throu
 the existing runtime completion mechanism. Do not close a plan before its Graph's
 last submission; close the Graph first when retiring both objects.
 
+For full-range GPU Sort and Compact, `record(persistent=True)` instead creates
+an immutable recording snapshot with a private workspace, using the same native
+operation implementation as AOT. CUDA embeds it in capture; Vulkan retains native
+commands and can co-record them with neighboring kernels. Warm replay does not
+rebuild the provider command or grow the Program arena. Preparation can allocate
+scratch and create backend pipelines, so measure it separately from replay.
+CPU and CUDA `nan_policy="bitwise"` are not admitted by this explicit option;
+their existing ordinary execution remains available.
+`plan.report()["persistent_recording_available"]` reports cold admission for the
+option; `recording.workspace_bytes` reports its retained native scratch, not total
+Graph memory. Scratch is retained while a Graph or caller owns the snapshot, or
+until runtime retirement.
+
+The snapshot retains its fixed ndarray/Field bindings, including view offsets.
+Closing the source plan does not invalidate it. Keep storage contents mutable in
+place; replacing storage requires a new snapshot. A Field tree's destruction or
+runtime reset invalidates recorded execution. Several Graphs may retain one
+snapshot on the existing ordered queue; closing one does not retire another's
+workspace. This is not permission to use the same mutable workspace concurrently
+on unrelated queues. AOT export consumes the same frozen definition and rebuilds
+instance-owned workspace. Neither option adds an automatic derivative.
+
 Prepared full-range/prefix sorting and compaction reject execution inside
 `ti.ad.Tape()` or `ti.ad.FwdMode()` before writing outputs, matching their ordinary
 primitive policy. Run these discrete operations before entering automatic AD;

@@ -6,8 +6,11 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@pytest.mark.parametrize("persistent", (False, True))
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_prepared_tensor_sort_offsets_recording_and_retirement():
+def test_prepared_tensor_sort_offsets_recording_and_retirement(persistent):
+    if persistent and ti.cfg.arch == ti.cpu:
+        pytest.skip("Persistent recording is a GPU policy")
     n = 19
     keys = ti.ndarray(ti.u64, n)
     identities = []
@@ -40,11 +43,17 @@ def test_prepared_tensor_sort_offsets_recording_and_retirement():
         before = program._runtime_statistics_snapshot()
         plan = ti.algorithms.prepare_sort(key_view, value_view)
         builder = ti.graph.GraphBuilder()
-        builder.append_native(plan.record())
+        builder.append_native(plan.record(persistent=persistent))
         graph = builder.compile()
         after = program._runtime_statistics_snapshot()
         assert before["submission"] == after["submission"]
-        assert before["synchronization"] == after["synchronization"]
+        # Explicit private-workspace preparation acquires the backend lock;
+        # that instrumentation counter is not a GPU wait or synchronization.
+        synchronization = lambda snapshot: {
+            key: value for key, value in snapshot["synchronization"].items()
+            if not persistent or key != "backend_lock_samples"
+        }
+        assert synchronization(before) == synchronization(after)
         assert values.to_numpy().tobytes() == payload.tobytes()
         assert plan.report()["workspace_bytes_last_observed"] is None
         identities.append(plan.report()["physical_plan_id"])

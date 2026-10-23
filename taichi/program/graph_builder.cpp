@@ -522,6 +522,7 @@ class CudaCaptureCommandDispatch final : public Node {
     dispatch.kernel_name = "cuda_capture_" + std::string(command_->kind());
     dispatch.symbolic_args = symbolic_args_;
     dispatch.cuda_capture_command = command_;
+    dispatch.snode_tree_dependencies = command_->snode_tree_dependencies();
     // Preserve one logical source item for Forge pipeline attribution. The
     // provider recipe cannot participate in kernel composition or AOT
     // serialization.
@@ -1165,6 +1166,16 @@ void GraphBuilder::dispatch_cuda_capture_cudss(
   }
   all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
       std::move(command), arguments));
+  seq()->append(all_nodes_.back().get());
+}
+
+void GraphBuilder::dispatch_cuda_capture_command(
+    const std::shared_ptr<aot::CudaGraphCaptureCommand> &command,
+    const std::vector<aot::Arg> &arguments) {
+  TI_ERROR_IF(!command, "CUDA capture command is null");
+  for (const auto &argument : arguments)
+    register_arg(argument);
+  all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(command, arguments));
   seq()->append(all_nodes_.back().get());
 }
 

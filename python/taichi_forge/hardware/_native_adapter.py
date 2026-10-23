@@ -179,6 +179,7 @@ class HardwareRecordingNode(NativeGraphNode):
         runtime_bindings,
         lifetime_leases,
         debug_info,
+        fixed_bindings=None,
         publish_time_binding_validation_stable=False,
     ):
         self._recording = recording
@@ -186,6 +187,7 @@ class HardwareRecordingNode(NativeGraphNode):
             "runtime_bindings": runtime_bindings,
             "lifetime_leases": lifetime_leases,
             "debug_info": debug_info,
+            "fixed_bindings": fixed_bindings,
             "publish_time_binding_validation_stable": (
                 publish_time_binding_validation_stable
             ),
@@ -201,6 +203,7 @@ def native_recording_node(
     runtime_bindings=None,
     lifetime_leases=(),
     debug_info=None,
+    fixed_bindings=None,
     publish_time_binding_validation_stable=False,
 ):
     """Builds the common recordable-action Graph adapter.
@@ -224,6 +227,7 @@ def native_recording_node(
         runtime_bindings=runtime_bindings,
         lifetime_leases=lifetime_leases,
         debug_info=debug_info,
+        fixed_bindings=fixed_bindings,
         publish_time_binding_validation_stable=publish_time_binding_validation_stable,
     )
 

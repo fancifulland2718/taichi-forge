@@ -1417,6 +1417,13 @@ void export_lang(py::module &m) {
       m, "_PreparedPrimitiveSort");
   py::class_<PreparedPrimitiveCompact, std::shared_ptr<PreparedPrimitiveCompact>>(
       m, "_PreparedPrimitiveCompact");
+  py::class_<aot::CudaGraphCaptureCommand, std::shared_ptr<aot::CudaGraphCaptureCommand>>(
+      m, "_CudaGraphCaptureCommand");
+  py::class_<PreparedPrimitiveRecording, std::shared_ptr<PreparedPrimitiveRecording>>(
+      m, "_PreparedPrimitiveRecording")
+      .def("cuda_command", &PreparedPrimitiveRecording::cuda_command)
+      .def("vulkan_command", &PreparedPrimitiveRecording::vulkan_command)
+      .def("workspace_bytes", &PreparedPrimitiveRecording::workspace_bytes);
   py::class_<PreparedExternalCudaStorage>(m, "_PreparedExternalCudaStorage")
       .def_readonly("pointers", &PreparedExternalCudaStorage::pointers)
       .def_readonly("texture_objects",
@@ -3172,6 +3179,10 @@ void export_lang(py::module &m) {
            py::arg("keys"), py::arg("values") = nullptr,
            py::arg("nan_policy") = 0,
            py::call_guard<py::gil_scoped_release>())
+      .def("_record_primitive_sort", &Program::record_primitive_sort,
+             py::call_guard<py::gil_scoped_release>())
+      .def("_record_primitive_compact", &Program::record_primitive_compact,
+             py::call_guard<py::gil_scoped_release>())
       .def("_execute_primitive_sort",
            tracked_native_program_method(&Program::execute_primitive_sort),
            py::call_guard<py::gil_scoped_release>())
@@ -6053,6 +6064,7 @@ void export_lang(py::module &m) {
            py::arg("stream_offset"), py::arg("arguments"),
            py::arg("pointer_offsets"), py::arg("scalar_counts"),
            py::arg("writable"), py::arg("error_address") = 0)
+      .def("_dispatch_cuda_capture_command", &GraphBuilder::dispatch_cuda_capture_command)
       .def("_dispatch_cuda_scan_capture_recipe",
            &GraphBuilder::dispatch_cuda_capture_scan,
            py::arg("program"), py::arg("values"), py::arg("workspace"),

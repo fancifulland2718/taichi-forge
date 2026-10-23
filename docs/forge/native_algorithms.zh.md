@@ -91,6 +91,21 @@ Vulkan 混合位宽 field 布局可能把 u64 放在仅 4 字节对齐的偏移�
 recording 失效，不清共享 scratch、不等待 GPU；已提交工作的存储由原有 runtime completion 保留。
 不要在 Graph 最后一次提交前关闭 plan；同时退休时先关闭 Graph。
 
+GPU 全范围 Sort 和 Compact 可显式选择 `record(persistent=True)`，创建持有私有工作区的
+不可变录制快照，复用 AOT 的原生操作实现。CUDA 将其嵌入 capture；Vulkan 保留原生命令，
+也可与相邻 kernel 一起录制。暖态不重建 provider 命令、不增长 Program arena。准备可能
+分配 scratch 和创建后端 pipeline，需与重放分开计时。此选项不接纳 CPU 或 CUDA
+`nan_policy="bitwise"`；这些情况继续使用已有普通执行。
+`plan.report()["persistent_recording_available"]` 报告该选项的冷阶段准入；
+`recording.workspace_bytes` 报告其保留的原生 scratch，不代表 Graph 总内存。
+Graph 或调用方持有快照期间保留工作区，runtime 退休也会释放它。
+
+快照保留固定 ndarray/Field 及 view 偏移；关闭源 plan 不使快照失效。内容可原位更新，
+更换存储需创建新快照。Field tree 销毁或 runtime reset 仍使录制执行失效。多个 Graph
+可在现有有序队列上保留同一快照，关闭其中一个不会退休其他 Graph 的工作区；这不允许
+在无关队列上并发使用同一可变工作区。AOT 导出读取同一冻结定义，并重建实例私有工作区。
+两种录制方式都不增加自动导数。
+
 prepared 全范围／前缀排序与 compaction 在 `ti.ad.Tape()` 或 `ti.ad.FwdMode()` 内
 会在写输出前拒绝执行，与普通 primitive 的策略一致。先在自动微分上下文外执行这些
 离散操作，再对后续 kernel 正常求导；unique recording 继续由所属 Graph 的 primal-only 检查保护。

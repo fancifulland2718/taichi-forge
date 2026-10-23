@@ -137,6 +137,9 @@ class PreparedNativeStorage {
   const Binding &binding(std::size_t index) const {
     return bindings_[index];
   }
+  const std::vector<SNodeTreeDependency> &tree_dependencies() const {
+    return trees_;
+  }
 
  private:
   friend class Program;
@@ -151,6 +154,7 @@ class PreparedNativeStorage {
 
 class PreparedPrimitiveSort;
 class PreparedPrimitiveCompact;
+class PreparedPrimitiveRecording;
 
 // Cold storage bindings for a Python-owned CUDA C-ABI adapter. No vendor API
 // or resource ownership is introduced into Program by this packet.
@@ -1262,6 +1266,14 @@ class TI_DLL_EXPORT Program {
       const storage::DenseStorageDescriptor *values,
       int nan_policy);
   std::size_t execute_primitive_sort(const PreparedPrimitiveSort &plan);
+  std::shared_ptr<PreparedPrimitiveRecording> record_primitive_sort(
+      const PreparedPrimitiveSort &plan,
+      const std::vector<aot::Arg> &arguments,
+      const std::vector<std::size_t> &binding_indices);
+  std::shared_ptr<PreparedPrimitiveRecording> record_primitive_compact(
+      const PreparedPrimitiveCompact &plan,
+      const std::vector<aot::Arg> &arguments,
+      const std::vector<std::size_t> &binding_indices);
   std::shared_ptr<PreparedPrimitiveCompact> prepare_primitive_compact(
       const std::vector<const storage::DenseStorageDescriptor *> &inputs,
       const storage::DenseStorageDescriptor &flags,

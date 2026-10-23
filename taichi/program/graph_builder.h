@@ -244,6 +244,10 @@ class GraphBuilder {
       const CudaCublasLtCapturePlan &plan,
       const std::vector<aot::Arg> &arguments);
 
+  void dispatch_cuda_capture_command(
+      const std::shared_ptr<aot::CudaGraphCaptureCommand> &command,
+      const std::vector<aot::Arg> &arguments);
+
   void dispatch_cuda_capture_scan(Program *program,
                                   const aot::Arg &values,
                                   const aot::Arg &workspace,

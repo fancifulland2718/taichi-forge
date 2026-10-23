@@ -367,6 +367,9 @@ class CudaGraphCaptureCommand {
   virtual std::shared_ptr<CudaGraphCaptureResources> take_capture_resources() {
     return {};
   }
+  virtual std::vector<SNodeTreeDependency> snode_tree_dependencies() const {
+    return {};
+  }
 };
 
 struct CompiledGraphKernelInvocation;
