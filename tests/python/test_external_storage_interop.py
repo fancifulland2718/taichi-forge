@@ -145,6 +145,22 @@ def test_dlpack_view_close_is_safe_after_runtime_reset():
     assert view.closed
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_external_typed_descriptor_rejects_retired_program():
+    # Exercise the shared native typed-view guard without requiring a vendor
+    # Vulkan producer. A retained Program wrapper outlives its finalized owner.
+    old_program = impl.get_runtime().prog
+    view = ti.interop.from_dlpack(np.arange(8, dtype=np.int32))
+    native = view._source
+    assert native._describe_typed_view(ti.i32, [4], [], 0).ok
+    ti.reset()
+    ti.init(arch=ti.cpu, offline_cache=False)
+    assert impl.get_runtime().prog is not old_program
+    with pytest.raises(BufferError, match="closed or retired"):
+        native._describe_typed_view(ti.i32, [4], [], 0)
+    view.close()
+
+
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_dlpack_view_rejects_pointer_only_vulkan_import():
     values = np.zeros(4, dtype=np.float32)
@@ -170,6 +186,9 @@ def test_dlpack_capabilities_require_initialized_runtime():
     assert vulkan_cuda["provider"] == "vulkan_cuda"
     assert vulkan_cuda["available"] is False
     assert vulkan_cuda["copy_fallback"] is False
+    vulkan = capabilities["providers"]["vulkan"]
+    assert vulkan["available"] is False
+    assert vulkan["copy_fallback"] is False
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

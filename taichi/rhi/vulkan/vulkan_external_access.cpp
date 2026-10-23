@@ -25,6 +25,23 @@ auto normalize(std::vector<std::shared_ptr<VulkanExternalBufferOwner>> owners) {
 }
 }  // namespace
 
+void VulkanExternalBufferImport::validate_ndarray(VulkanDevice &device) const {
+  if (buffer.allocation_size > (std::numeric_limits<std::size_t>::max)() ||
+      !byte_size || byte_offset > buffer.size ||
+      byte_size > buffer.size - byte_offset ||
+      !(buffer.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT))
+    throw std::invalid_argument(
+        "Invalid external Vulkan ndarray range or storage usage");
+  // One source for flags, handle distinctness, UUID and native import support.
+  // These queries touch only the local physical device, before retaining producer.
+  VulkanExternalBuffer::validate_import(device, buffer, handles);
+  if (device.get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer) &&
+      (!(buffer.usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) ||
+       !(buffer.allocation_flags & VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)))
+    throw std::invalid_argument(
+        "External Vulkan ndarray requires producer device-address flags");
+}
+
 struct VulkanExternalBufferOwner::State {
   VulkanDevice &device;
   const std::uint64_t identity;

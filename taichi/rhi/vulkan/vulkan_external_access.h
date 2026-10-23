@@ -1,16 +1,68 @@
 #pragma once
 
+#include <algorithm>
 #include <functional>
+#include <iterator>
+#include <limits>
 #include <memory>
 #include <vector>
 
 #include "taichi/rhi/vulkan/vulkan_external_buffer.h"
 #include "taichi/rhi/vulkan/vulkan_timeline.h"
 #include "taichi/rhi/interop/external_sync.h"
+#include "taichi/rhi/interop/native_ready_gate.h"
 
 namespace taichi::lang::vulkan {
 
 class VulkanExternalAccess;
+
+// Canonical cold import and finite view. Transport adapters copy facts here;
+// all Vulkan flags/UUID/requirements rules remain in the RHI importer.
+struct VulkanExternalBufferImport {
+  VulkanExternalBufferDescription buffer;
+  VulkanExternalBufferHandles handles;
+  std::uint64_t byte_offset{0}, byte_size{0};
+  void validate_ndarray(VulkanDevice &device) const;
+};
+
+// Accept the exact public C ABI structure without depending on its header.
+// Both the C API and JIT use this decoder; no function-pointer reinterpretation.
+template <typename Info>
+VulkanExternalBufferImport decode_vulkan_external_buffer_import(const Info &info) {
+  static_assert(std::is_standard_layout_v<Info> &&
+                std::is_trivially_copyable_v<Info>);
+  static_assert(sizeof(info.device_uuid) == VK_UUID_SIZE &&
+                sizeof(info.driver_uuid) == VK_UUID_SIZE);
+  if (info.struct_size != sizeof(Info) || info.schema_version != 1)
+    throw std::invalid_argument("Invalid external Vulkan import size or version");
+  constexpr auto max_handle = (std::numeric_limits<std::uintptr_t>::max)();
+  if (info.dedicated != 1 || info.memory_handle >= max_handle ||
+      info.ready_for_consumer >= max_handle ||
+      info.ready_for_external >= max_handle)
+    throw std::invalid_argument(
+        "Invalid external Vulkan dedicated or handle facts");
+  VulkanExternalBufferImport result;
+  auto &d = result.buffer;
+  d.size = info.buffer_size;
+  d.allocation_size = info.allocation_size;
+  d.bind_offset = info.bind_offset;
+  d.memory_type_index = info.memory_type_index;
+  d.flags = info.buffer_flags;
+  d.usage = info.buffer_usage;
+  d.allocation_flags = info.allocation_flags;
+  d.sharing_mode = static_cast<VkSharingMode>(info.sharing_mode);
+  d.dedicated = true;
+  std::copy(std::begin(info.device_uuid), std::end(info.device_uuid),
+            d.device_uuid.begin());
+  std::copy(std::begin(info.driver_uuid), std::end(info.driver_uuid),
+            d.driver_uuid.begin());
+  result.handles = {static_cast<std::uintptr_t>(info.memory_handle),
+                    static_cast<std::uintptr_t>(info.ready_for_consumer),
+                    static_cast<std::uintptr_t>(info.ready_for_external)};
+  result.byte_offset = info.byte_offset;
+  result.byte_size = info.byte_size;
+  return result;
+}
 
 // One producer allocation and one binary handshake. Views/instances must share
 // this owner. The producer serializes epochs through consumed and promises that
@@ -62,6 +114,20 @@ class VulkanExternalBufferOwner final : public ExternalSynchronizationDomain {
   explicit VulkanExternalBufferOwner(std::unique_ptr<State> state);
   std::unique_ptr<State> state_;
 };
+
+// Complete native cold transaction; frontends own their runtime submission
+// guard and register the returned owner's idempotent ndarray wrapper once.
+template <typename Gate>
+std::shared_ptr<VulkanExternalBufferOwner> import_vulkan_external_ndarray(
+    VulkanDevice &device, const VulkanExternalBufferImport &info,
+    const Gate &gate) {
+  validate_native_ready_gate(gate);
+  info.validate_ndarray(device);
+  auto owner = VulkanExternalBufferOwner::import_borrowed(
+      device, info.buffer, info.handles, retain_native_ready_gate(gate));
+  owner->ndarray_allocation();
+  return owner;
+}
 
 // Immutable cold binding, deduplicated and sorted by owner identity. No runtime
 // registry or backend callback is queried by the command-body replay itself.

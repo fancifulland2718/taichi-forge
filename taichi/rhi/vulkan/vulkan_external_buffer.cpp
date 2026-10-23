@@ -142,13 +142,25 @@ vkapi::IVkSemaphore import_semaphore(const vkapi::DeviceHandle &device,
 #endif
 }  // namespace
 
+void VulkanExternalBuffer::validate_import(
+    VulkanDevice &device,
+    const VulkanExternalBufferDescription &description,
+    const VulkanExternalBufferHandles &handles) {
+#ifdef _WIN64
+  validate(device, description, handles);
+#else
+  throw std::invalid_argument(
+      "Vulkan OPAQUE_WIN32 buffer import requires Windows x64");
+#endif
+}
+
 std::shared_ptr<VulkanExternalBuffer> VulkanExternalBuffer::import_borrowed(
     VulkanDevice &device,
     const VulkanExternalBufferDescription &description,
     const VulkanExternalBufferHandles &handles,
     std::shared_ptr<void> producer_retention) {
 #ifdef _WIN64
-  validate(device, description, handles);
+  validate_import(device, description, handles);
   // Duplicate all handles before allocating any GPU objects. Vulkan does not
   // consume NT handle ownership; every copy closes on success or rollback.
   BorrowedHandleCopy memory_handle(handles.memory), ready_handle(handles.ready),

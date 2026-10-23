@@ -2,10 +2,11 @@
 
 [中文](vulkan_external_buffers.zh.md) · [Execution domains](cuda_execution_domains.en.md)
 
-The source-free AOT runtime can import a native producer's Win32 Vulkan buffer
-and execute acquire, the selected plan and release on an independent compute
-domain. Import is cold. Handles, native owners and handshake ordinals never enter
-the AOT artifact.
+The source-free AOT runtime and JIT `Graph.prepare()` can import a native
+producer's Win32 Vulkan buffer and execute acquire, the selected plan and release
+on an independent compute domain. They share native import validation and
+ownership. Import is cold. Handles, native owners and handshake ordinals never
+enter the AOT artifact.
 
 ## Import contract
 
@@ -60,7 +61,43 @@ caller-owned on every outcome; callers may close their copies after import.
 
 The C entrypoint is `ti_import_vulkan_external_buffer_ext()` in `taichi_vulkan.h`.
 `TiVulkanExternalBufferImportInfo` and `TiVulkanExternalReadyGate` both use schema
-1. The Python/native pairing ABI is 167; the execution-plan format is unchanged.
+1. The Python/native pairing ABI is 168; the execution-plan format is unchanged.
+
+## JIT allocation and typed views
+
+After `ti.init(arch=ti.vulkan)`, use the same descriptor and native gate:
+
+```python
+allocation = ti.interop.import_external_allocation(
+    "vulkan", description, ready_gate=gate, byte_offset=packet_offset,
+    byte_size=64 + record_count * 48,
+)
+header = allocation.view(dtype=ti.u32, shape=16)
+transforms = allocation.view(
+    dtype=ti.f32, shape=(record_count, 12), offset_bytes=64,
+)
+domain = ti.graph.execution_domain(capacity=2)
+call = graph.prepare(
+    {"header": header, "transforms": transforms}, execution_domain=domain,
+)
+call.initialize()
+ticket = call.submit()
+if ticket is not None:
+    ticket.wait()
+call.close()
+domain.close()
+allocation.close()
+```
+
+`ti.interop.import_vulkan_external_buffer()` is the named equivalent. Import
+registers one Program owner; `view()` only describes compact scalar/vector/matrix
+aliases. Its `offset_bytes` is relative to the finite imported range, not the
+allocation base. Views retain the root, share one handshake, and have no separate
+`close()`. Dropping a view leaves its siblings valid. Explicit allocation close
+retires dependent prepared instances and invalidates every alias. Prepare again
+with a new import after a cold replacement; do not import the same pair per view.
+`ti.interop.capabilities()["providers"]["vulkan"]` reports adapter availability;
+actual flags, UUIDs and native support are validated at import.
 
 ## Native readiness, ownership and retirement
 
@@ -81,15 +118,15 @@ The producer releases the whole buffer to `VK_QUEUE_FAMILY_EXTERNAL` before
 signaling `ready_for_consumer`, and waits `ready_for_external` before its next
 acquire. Each complete Forge replay waits/acquires and releases/signals once on
 the selected domain, regardless of kernel or alias count. Import each physical
-buffer/semaphore pair once; derive aliases with execution-plan views. Completion
+buffer/semaphore pair once; derive aliases with execution-plan views or the JIT
+allocation's typed views. Completion
 covers upload and execution, while timestamps keep the existing
 `compute_envelope` scope.
 
 Separate initialization cannot access this external storage and is rejected
 during preparation. Ordinary kernel/Graph.run, default prepared execution and
-host copy/map/export also reject it rather than bypass ownership. The current
-public route is the independent AOT runtime; this page does not qualify DSL
-managed views or an application provider.
+host copy/map/export also reject it rather than bypass ownership. This page
+qualifies fixed independent AOT/JIT buffer execution, not an application provider integration.
 
 Stop admission, retire dependent instances and imports, then destroy the
 producer. Closing a Forge view retires Forge consumption, not the producer's

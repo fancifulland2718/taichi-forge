@@ -76,76 +76,11 @@ TiMemory ti_import_vulkan_external_buffer_ext(
       "import external Vulkan buffer");
   try {
     using namespace taichi::lang;
-    if (import_info->struct_size != sizeof(TiVulkanExternalBufferImportInfo) ||
-        import_info->schema_version != 1)
-      throw std::invalid_argument(
-          "Invalid external Vulkan import descriptor size or version");
-    const auto info = *import_info;
-    constexpr std::uint32_t supported_usage =
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-    constexpr auto max_handle = std::numeric_limits<std::uintptr_t>::max();
-    if (!info.buffer_size || info.allocation_size < info.buffer_size ||
-        info.allocation_size > std::numeric_limits<std::size_t>::max() ||
-        info.bind_offset || info.dedicated != 1 || info.buffer_flags ||
-        info.sharing_mode != VK_SHARING_MODE_EXCLUSIVE ||
-        !(info.buffer_usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
-        (info.buffer_usage & ~supported_usage) ||
-        (info.allocation_flags & ~VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT) ||
-        info.memory_type_index >= VK_MAX_MEMORY_TYPES || !info.byte_size ||
-        info.byte_offset > info.buffer_size ||
-        info.byte_size > info.buffer_size - info.byte_offset ||
-        !info.memory_handle || !info.ready_for_consumer ||
-        !info.ready_for_external || info.memory_handle >= max_handle ||
-        info.ready_for_consumer >= max_handle ||
-        info.ready_for_external >= max_handle ||
-        info.memory_handle == info.ready_for_consumer ||
-        info.memory_handle == info.ready_for_external ||
-        info.ready_for_consumer == info.ready_for_external ||
-        std::all_of(std::begin(info.device_uuid), std::end(info.device_uuid),
-                    [](auto value) { return value == 0; }) ||
-        std::all_of(std::begin(info.driver_uuid), std::end(info.driver_uuid),
-                    [](auto value) { return value == 0; }))
-      throw std::invalid_argument(
-          "Invalid external Vulkan buffer import descriptor");
+    const auto info = vulkan::decode_vulkan_external_buffer_import(*import_info);
     validate_native_ready_gate(*ready_gate);
 #ifdef _WIN64
     auto &device = static_cast<vulkan::VulkanDevice &>(rt.get());
-    const bool address =
-        info.buffer_usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-    const bool allocation_address =
-        info.allocation_flags & VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-    if ((address && !allocation_address) ||
-        ((address || allocation_address) &&
-         !device.vk_caps().buffer_device_address) ||
-        (device.get_caps().get(
-             DeviceCapability::spirv_has_physical_storage_buffer) &&
-         (!address || !allocation_address)))
-      throw std::invalid_argument(
-          "External Vulkan buffer lacks required device-address flags");
-    vulkan::VulkanExternalBufferDescription description;
-    description.size = info.buffer_size;
-    description.allocation_size = info.allocation_size;
-    description.bind_offset = info.bind_offset;
-    description.memory_type_index = info.memory_type_index;
-    description.flags = info.buffer_flags;
-    description.usage = info.buffer_usage;
-    description.allocation_flags = info.allocation_flags;
-    description.sharing_mode = static_cast<VkSharingMode>(info.sharing_mode);
-    description.dedicated = true;
-    std::copy(std::begin(info.device_uuid), std::end(info.device_uuid),
-              description.device_uuid.begin());
-    std::copy(std::begin(info.driver_uuid), std::end(info.driver_uuid),
-              description.driver_uuid.begin());
-    const vulkan::VulkanExternalBufferHandles handles{
-        static_cast<std::uintptr_t>(info.memory_handle),
-        static_cast<std::uintptr_t>(info.ready_for_consumer),
-        static_cast<std::uintptr_t>(info.ready_for_external)};
-    // Device/driver identity, native import support and buffer requirements
-    // are checked by the RHI importer while the producer lease is retained.
-    auto owner = vulkan::VulkanExternalBufferOwner::import_borrowed(
-        device, description, handles, retain_native_ready_gate(*ready_gate));
+    auto owner = vulkan::import_vulkan_external_ndarray(device, info, *ready_gate);
     const auto allocation = owner->ndarray_allocation();
     auto storage = std::make_shared<Runtime::BorrowedMemory>();
     storage->owner = owner;

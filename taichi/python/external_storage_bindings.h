@@ -16,6 +16,19 @@
 #include "taichi/python/export.h"
 #include "taichi/rhi/arch.h"
 #include "taichi/rhi/interop/cuda_external_interop.h"
+#ifdef TI_WITH_VULKAN
+#include "taichi/rhi/vulkan/vulkan_device.h"
+#include "taichi/rhi/vulkan/vulkan_external_access.h"
+#ifdef TI_WITH_OPENGL
+#include "glad/gl.h"
+#endif
+// Public ABI transport types only: no C API function or library dependency.
+// Preserve the DSL runtime's import/export macro after the C transport header.
+#pragma push_macro("TI_DLL_EXPORT")
+#undef TI_DLL_EXPORT
+#include "c_api/include/taichi/taichi_vulkan.h"
+#pragma pop_macro("TI_DLL_EXPORT")
+#endif
 #if defined(TI_WITH_CUDA)
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/rhi/llvm/llvm_device.h"
@@ -175,6 +188,12 @@ class PythonExternalDenseStorage final {
   const lang::storage::DenseStorageBuildResult &description() const noexcept {
     return description_;
   }
+  lang::storage::DenseStorageBuildResult describe_typed_view(
+      lang::DataType scalar_type,
+      const std::vector<std::int64_t> &index_shape,
+      const std::vector<std::int64_t> &element_shape,
+      std::int64_t relative_byte_offset) const;
+
   const std::string &provider() const noexcept {
     return provider_;
   }
@@ -301,6 +320,120 @@ std::vector<std::int64_t> compact_element_strides(
   }
   return result;
 }
+
+lang::storage::DenseStorageBuildResult
+PythonExternalDenseStorage::describe_typed_view(
+    lang::DataType scalar_type,
+    const std::vector<std::int64_t> &index_shape,
+    const std::vector<std::int64_t> &element_shape,
+    std::int64_t relative_byte_offset) const {
+  using namespace lang::storage;
+  if (closed_ || program_lifetime_.expired() || !description_ || !program_ ||
+      !program_->validate_external_dense_storage_owner(owner_))
+    throw py::buffer_error("external allocation is closed or retired");
+  const auto &root = *description_.descriptor;
+  const auto &bounds = root.properties();
+  if (!bounds.compact_contiguous || bounds.reachable_begin < 0 ||
+      bounds.reachable_end < bounds.reachable_begin ||
+      relative_byte_offset < 0 || element_shape.size() > 2 ||
+      index_shape.size() + element_shape.size() > kMaxDenseStorageRank)
+    throw py::buffer_error("external typed view requires a compact finite range");
+  std::vector<std::int64_t> shape = index_shape;
+  shape.insert(shape.end(), element_shape.begin(), element_shape.end());
+  for (auto extent : shape)
+    if (extent < 0 || extent > (std::numeric_limits<std::int32_t>::max)())
+      throw py::value_error("external typed view extent is out of range");
+  for (auto extent : element_shape)
+    if (!extent)
+      throw py::value_error("external typed element extent must be positive");
+  DenseStorageLayoutSpec scalar;
+  scalar.scalar_type = scalar_type;
+  const auto scalar_layout = analyze_dense_storage_layout(scalar);
+  if (!scalar_layout)
+    throw py::value_error("external typed view requires a supported scalar dtype");
+  const auto width =
+      static_cast<std::int64_t>(scalar_layout.properties.scalar_size);
+  if (relative_byte_offset > bounds.reachable_end - bounds.reachable_begin)
+    throw py::value_error("external typed view offset is out of range");
+  auto strides = compact_element_strides(shape);
+  for (auto &stride : strides) {
+    if (stride > (std::numeric_limits<std::int64_t>::max)() / width)
+      throw py::value_error("external typed view stride overflows");
+    stride *= width;
+  }
+  DenseStorageLayoutSpec spec;
+  spec.scalar_type = scalar_type;
+  spec.index_shape = index_shape;
+  spec.element_shape = element_shape;
+  spec.index_strides_bytes.assign(strides.begin(),
+                                  strides.begin() + index_shape.size());
+  spec.element_strides_bytes.assign(strides.begin() + index_shape.size(),
+                                    strides.end());
+  spec.byte_offset = bounds.reachable_begin + relative_byte_offset;
+  spec.access = root.access();
+  auto result = build_dense_storage_descriptor(
+      owner_, StorageSourceKind::kExternalDense, spec);
+  if (!result || !result.descriptor->properties().aligned ||
+      !result.descriptor->properties().ndarray_abi_compatible ||
+      result.descriptor->properties().reachable_begin < bounds.reachable_begin ||
+      result.descriptor->properties().reachable_end > bounds.reachable_end)
+    throw py::buffer_error("external typed view exceeds its finite imported range");
+  return result;  // Same StorageOwnerRef; no registration, lease or import here.
+}
+
+#ifdef TI_WITH_VULKAN
+std::shared_ptr<PythonExternalDenseStorage> import_vulkan_external_buffer(
+    lang::Program &program, const py::bytes &descriptor_bytes,
+    const py::capsule &ready_capsule) {
+  using namespace lang;
+  if (program.compile_config().arch != Arch::vulkan)
+    throw py::buffer_error("external Vulkan import requires arch=ti.vulkan");
+  const std::string bytes = descriptor_bytes;
+  if (bytes.size() != sizeof(TiVulkanExternalBufferImportInfo))
+    throw py::value_error("invalid Vulkan external descriptor byte size");
+  TiVulkanExternalBufferImportInfo transport{};
+  std::memcpy(&transport, bytes.data(), sizeof(transport));
+  const auto info = vulkan::decode_vulkan_external_buffer_import(transport);
+  const auto limit = static_cast<std::uint64_t>(
+      (std::numeric_limits<std::int64_t>::max)());
+  if (info.byte_offset > limit || info.byte_size > limit - info.byte_offset)
+    throw py::value_error("external root view exceeds signed storage coordinates");
+  constexpr auto capsule_name = "taichi.vulkan_external_ready_gate.v1";
+  if (!PyCapsule_IsValid(ready_capsule.ptr(), capsule_name))
+    throw py::value_error("expected a native Vulkan ready gate capsule");
+  const auto *gate = static_cast<const TiVulkanExternalReadyGate *>(
+      PyCapsule_GetPointer(ready_capsule.ptr(), capsule_name));
+  if (!gate)
+    throw py::error_already_set();
+  auto submission = program.acquire_runtime_resource_submission_guard();
+  auto *device =
+      dynamic_cast<vulkan::VulkanDevice *>(program.get_compute_device());
+  if (!device)
+    throw py::buffer_error("active runtime has no Vulkan compute device");
+  auto allocation = vulkan::import_vulkan_external_ndarray(*device, info, *gate);
+  auto owner = program.register_external_dense_storage(
+      allocation->ndarray_allocation(), info.buffer.size,
+      [allocation]() mutable { allocation.reset(); }, allocation);
+  try {
+    storage::DenseStorageLayoutSpec spec;
+    spec.scalar_type = PrimitiveType::u8;
+    spec.index_shape = {static_cast<std::int64_t>(info.byte_size)};
+    spec.index_strides_bytes = {1};
+    spec.byte_offset = static_cast<std::int64_t>(info.byte_offset);
+    auto description = storage::build_dense_storage_descriptor(
+        owner, storage::StorageSourceKind::kExternalDense, spec);
+    if (!description)
+      throw py::buffer_error("external Vulkan root cannot form a byte view");
+    return std::make_shared<PythonExternalDenseStorage>(
+        &program, owner, std::move(description), "vulkan",
+        python::dlpack_abi::kVulkan, 0, info.buffer.size);
+  } catch (...) {
+    // No facade escaped: retire the single registry row on any cold failure.
+    program.retire_external_dense_storage(owner);
+    throw;
+  }
+}
+#endif
 
 class PythonVulkanCudaExternalAllocation final {
  public:
@@ -831,7 +964,16 @@ void export_external_storage_bindings(py::module &m) {
                              &PythonExternalDenseStorage::allocation_bytes)
       .def_property_readonly("closed",
                              &PythonExternalDenseStorage::closed)
-      .def("close", &PythonExternalDenseStorage::close);
+      .def("close", &PythonExternalDenseStorage::close)
+      .def("_describe_typed_view", &PythonExternalDenseStorage::describe_typed_view,
+           py::arg("scalar_type"), py::arg("shape"), py::arg("element_shape"),
+           py::arg("offset_bytes"));
+
+#ifdef TI_WITH_VULKAN
+  m.def("_import_vulkan_external_buffer", &import_vulkan_external_buffer,
+        py::arg("program"), py::arg("descriptor_bytes"), py::arg("ready_capsule"),
+        py::keep_alive<0, 1>());
+#endif
 
   py::class_<PythonVulkanCudaExternalAllocation,
              std::shared_ptr<PythonVulkanCudaExternalAllocation>>(

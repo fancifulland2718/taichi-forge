@@ -45,6 +45,11 @@ class VulkanExternalBuffer final
     : public vkapi::DeviceObjVkBuffer,
       public std::enable_shared_from_this<VulkanExternalBuffer> {
  public:
+  // Read-only cold qualification shared by native frontends. The actual
+  // importer repeats it before touching handles; no rule is copied by callers.
+  static void validate_import(VulkanDevice &device,
+                             const VulkanExternalBufferDescription &description,
+                             const VulkanExternalBufferHandles &handles);
   static std::shared_ptr<VulkanExternalBuffer> import_borrowed(
       VulkanDevice &device,
       const VulkanExternalBufferDescription &description,

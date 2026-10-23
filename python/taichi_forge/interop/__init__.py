@@ -17,19 +17,31 @@ from ._vulkan_cuda import (
     current_cuda_device_uuid,
     import_vulkan_cuda_allocation as _import_vulkan_cuda_allocation,
 )
+from ._vulkan import (
+    VulkanExternalAllocation,
+    capabilities as _vulkan_capabilities,
+    import_vulkan_external_buffer,
+)
+from taichi_forge_runtime.aot import (
+    VulkanExternalBufferDescriptor,
+    VulkanExternalReadyGate,
+)
 
 
 def import_external_allocation(provider, *args, **kwargs):
     """Import a raw external allocation through a qualified provider.
 
-    ``"vulkan_cuda"`` is the only raw-allocation provider currently exposed.
+    ``"vulkan_cuda"`` consumes a Vulkan producer from CUDA; ``"vulkan"`` uses
+    the current Vulkan Program's fixed independent execution domains.
     Provider-specific entry points remain available for source compatibility.
     """
 
     if provider == "vulkan_cuda":
         return _import_vulkan_cuda_allocation(*args, **kwargs)
+    if provider == "vulkan":
+        return import_vulkan_external_buffer(*args, **kwargs)
     raise ValueError(
-        "unsupported external allocation provider; expected 'vulkan_cuda'"
+        "unsupported external allocation provider; expected 'vulkan_cuda' or 'vulkan'"
     )
 
 
@@ -47,6 +59,7 @@ def capabilities():
     result["providers"] = {
         "dlpack": dict(_dlpack_capabilities()),
         "vulkan_cuda": _vulkan_cuda_capabilities(),
+        "vulkan": _vulkan_capabilities(),
     }
     return result
 
@@ -54,10 +67,14 @@ def capabilities():
 __all__ = [
     "ExternalDenseView",
     "VulkanCudaExternalAllocation",
+    "VulkanExternalAllocation",
+    "VulkanExternalBufferDescriptor",
+    "VulkanExternalReadyGate",
     "capabilities",
     "current_cuda_device_uuid",
     "from_dlpack",
     "from_external",
     "import_external_allocation",
     "import_vulkan_cuda_allocation",
+    "import_vulkan_external_buffer",
 ]
