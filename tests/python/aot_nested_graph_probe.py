@@ -1,6 +1,7 @@
 """Independent nested-loop reference, private state and retirement checks."""
 
 import json
+import os
 import struct
 import sys
 
@@ -39,7 +40,8 @@ def main(mode, arch, artifact):
         ti.init(arch=getattr(ti, arch), offline_cache=False)
         runtime = ti.aot.borrow_runtime()
     else:
-        runtime = Runtime(arch)
+        device_index = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", "0")) if arch == "vulkan" else 0
+        runtime = Runtime(arch, device_index=device_index)
     with runtime:
         module = runtime.load_module(artifact)
         prepared = []
@@ -53,6 +55,25 @@ def main(mode, arch, artifact):
                     ("external", (2, 1, 1), (3, 4, 3)),
                 )
             )
+        domain = None
+        if mode == "domain":
+            # A bounded independent-route sample; ordinary cases above retain
+            # the wider budget/alias matrix without duplicating it here.
+            cases = [cases[i] for i in (0, 1, 4, 5)]
+            try:
+                domain = runtime.execution_domain(capacity=1, instance_capacity=len(cases))
+            except RuntimeError as error:
+                if "No independent Vulkan compute queue is available" in str(error) or "timeline support" in str(error):
+                    print("DOMAIN_HARDWARE_UNAVAILABLE:", error)
+                    raise SystemExit(77)
+                raise
+
+        def run(call):
+            if domain is None:
+                call()
+            else:
+                call.submit().wait()
+
         for name, limits, budgets in cases:
             arrays = {name: runtime.ndarray("f32", 17) for name in ("x", "y", "dx")}
             arrays["terminal"] = runtime.ndarray("i32", 9)
@@ -81,7 +102,9 @@ def main(mode, arch, artifact):
                     assert "disjoint" in str(error).lower(), str(error)
                 else:
                     raise AssertionError("Inner/outer control alias was accepted")
-            call = module.prepare_execution(name, args)
+            call = module.prepare_execution(name, args, execution_domain=domain)
+            if domain is not None:
+                call.initialize()
             assert call.info["execution_kind"] == ("cuda_graph" if arch == "cuda" else "vulkan_commands")
             assert struct.unpack("<17f", arrays["y"].read()) == (-99,) * 17
             prepared.append((name, limits, budgets, arrays, call))
@@ -100,7 +123,7 @@ def main(mode, arch, artifact):
                 )
                 if program is not None:
                     before = program._debug_vulkan_queue_submission_stats()["queue_submit_calls"]
-                call()
+                run(call)
                 if program is not None:
                     after = program._debug_vulkan_queue_submission_stats()["queue_submit_calls"]
                     assert after == before + 1, (name, limits, before, after)
@@ -110,20 +133,20 @@ def main(mode, arch, artifact):
                     actual = struct.unpack("<17f", arrays[name].read())
                     assert all(abs(a - b) <= 1e-5 + abs(b) * 2e-5 for a, b in zip(actual, expected)), (name, limits)
         prepared[0][-1].close()
-        prepared[1][-1]()
+        run(prepared[1][-1])
         if mode == "borrowed":
             ti.reset()
         else:
             module.close()
         for _, _, _, _, call in prepared[1:]:
             try:
-                call()
+                run(call)
             except RuntimeError:
                 pass
             else:
                 raise AssertionError("Retired nested Graph remained callable")
             call.close()
-    if mode == "standalone":
+    if mode != "borrowed":
         assert "taichi_forge" not in sys.modules
 
 

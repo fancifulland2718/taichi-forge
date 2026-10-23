@@ -81,10 +81,15 @@ exporting. Vulkan priorities are fixed at device creation; use `priority=0` here
 This route reuses selected compiled dispatches and private fixed workspaces.
 Qualified public cases include scalar/tensor buffer kernels, explicit adjoint
 kernels, initialization/replay, two independent instances, high-bit u64 updates,
-sparse timing, completion sets and instance/reset retirement. Native buffer
-operations still require a compatible fixed-recording factory. Image/graphics,
-conditional/parallel recipes and shared sparse/RNG/runtime-error state are not
-admitted by this first independent Vulkan route. Ordinary Graph execution keeps
+sparse timing, completion sets and instance/reset retirement. The
+`vulkan_execution_domain_while` feature declares reconstruction of selected device
+while recipes, including chunks and nested control; the selected device must
+support each strategy. Prefix, initial condition, loop chunks and suffix share
+one queue submission. Parameter updates cover every physical dispatch copy, and
+timing covers the complete compute sequence. Native buffer operations still
+require a compatible fixed-recording factory. Image/graphics, host selection,
+parallel recipes and shared sparse/RNG/runtime-error state remain outside this
+independent Vulkan route. Ordinary Graph execution keeps
 its existing capabilities; CUDA Canvas and external-memory protocols are not
 implicitly enabled on Vulkan domains.
 

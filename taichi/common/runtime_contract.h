@@ -45,6 +45,7 @@ inline constexpr std::uint64_t kForgeVulkanJitGraphExecutionDomains = 1ull << 23
 inline constexpr std::uint64_t kForgeVulkanSubmissionParameters = 1ull << 24;
 inline constexpr std::uint64_t kForgeVulkanCompletionGpuTiming = 1ull << 25;
 inline constexpr std::uint64_t kForgeVulkanExecutionInstanceRetirement = 1ull << 26;
+inline constexpr std::uint64_t kForgeVulkanExecutionDomainWhile = 1ull << 27;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

@@ -1190,7 +1190,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
                   &operation)) {
         const auto &branch = **value;
         using Lowering = aot::ExecutionPlan::Branch::Lowering;
-        if (domain && branch.lowering == Lowering::cuda_host)
+        if (domain && (branch.lowering == Lowering::cuda_host ||
+                       branch.lowering == Lowering::vulkan_host))
           throw MemoryBindingError(
               "Independent execution domains require device branch selection");
         const bool matches = branch.lowering == Lowering::cpu

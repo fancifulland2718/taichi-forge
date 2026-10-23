@@ -696,6 +696,103 @@ TEST(VulkanFixedExecution, SharedPhaseOwnerRetiresAndRejectedPreparationReleases
   registry.retire();
 }
 
+TEST(VulkanFixedExecution, PrefixChunkedControlAndSuffixShareOneSubmission) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  const auto *folder = std::getenv("TAICHI_AOT_FOLDER_PATH");
+  ASSERT_NE(folder, nullptr);
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 54);
+  device.set_backend_fault_reporter(owner);
+  gfx::GfxRuntime::Params params;
+  params.device = &device;
+  gfx::GfxRuntime runtime(params);
+  runtime.add_root_buffer(4);
+  gfx::AotModuleParams module_params;
+  module_params.module_path = folder;
+  module_params.runtime = &runtime;
+  auto module = aot::Module::load(Arch::vulkan, module_params);
+  ASSERT_TRUE(module);
+  auto *condition = dynamic_cast<gfx::KernelImpl *>(module->get_kernel("condition"));
+  auto *advance = dynamic_cast<gfx::KernelImpl *>(module->get_kernel("advance"));
+  auto *adjoint = dynamic_cast<gfx::KernelImpl *>(module->get_kernel("adjoint"));
+  ASSERT_TRUE(condition && advance && adjoint);
+  auto resources = std::make_shared<FixedOperands>();
+  auto [state, status] = device.allocate_memory_unique(
+      {7 * sizeof(int), true, true, false, AllocUsage::Storage});
+  ASSERT_EQ(status, RhiResult::success);
+  resources->allocations.push_back(std::move(state));
+  auto &storage = *resources->allocations[0];
+  Ndarray array(storage, PrimitiveType::i32, {7});
+  LaunchContextBuilder cond(condition), body(advance), grad(adjoint);
+  for (auto *context : {&cond, &body, &grad})
+    context->set_arg_ndarray({0}, array);
+  vulkan::ExecutionDomainRegistry registry(device, owner);
+  auto domain = registry.create({1, 1});
+  FixedExecution::VulkanExecutionBinding binding{domain, resources};
+  auto loop = std::make_shared<FixedExecution::While>();
+  loop->predicate = storage.get_ptr();
+  loop->max_iterations = 3;
+  loop->condition = {FixedExecution::Dispatch{condition, &cond}};
+  loop->body = {FixedExecution::Dispatch{advance, &body}};
+  loop->vulkan.emplace();
+  loop->vulkan->counter = storage.get_ptr(4);
+  loop->vulkan->status = storage.get_ptr(8);
+  loop->vulkan->recipe.chunks = {
+      {1, VulkanControlStrategy::compact}, {2, VulkanControlStrategy::compact}};
+  // Reject a shared-state loop only after recording the valid prefix. The
+  // failed transaction must return the one instance reservation without submit.
+  CallableBase callable;
+  LaunchContextBuilder invalid_context(&callable);
+  const auto invalid_handle = temporary_counter(runtime, 0, true);
+  gfx::GfxRuntime::RegisterParams metadata;
+  metadata.snode_tree_ids = {0};
+  gfx::KernelImpl invalid_kernel(&runtime, std::move(metadata), &invalid_handle);
+  auto invalid_loop = std::make_shared<FixedExecution::While>(*loop);
+  invalid_loop->body = {FixedExecution::Dispatch{&invalid_kernel, &invalid_context}};
+  const auto before_prepare = device.queue_submission_snapshot().queue_submit_calls;
+  EXPECT_ANY_THROW(FixedExecution(Arch::vulkan, device, &runtime,
+      {FixedExecution::BufferFill{storage.get_ptr(4), 4, 0},
+       std::shared_ptr<const FixedExecution::While>(invalid_loop)},
+      nullptr, owner, nullptr, nullptr, nullptr, nullptr, nullptr, &binding));
+  EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before_prepare);
+  FixedExecution call(Arch::vulkan, device, &runtime,
+      {FixedExecution::BufferFill{storage.get_ptr(4), 4, 0},
+       std::shared_ptr<const FixedExecution::While>(loop),
+       FixedExecution::Dispatch{adjoint, &grad}},
+      nullptr, owner, nullptr, nullptr, nullptr, nullptr, nullptr, &binding);
+  EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before_prepare);
+  runtime.synchronize();
+  {
+    TimelineGate default_gate(device, 0);
+    for (int target : {0, 1, 7}) {
+      const std::array<int, 7> values{0, 99, 0, 3, target, 0, 0};
+      void *mapped = nullptr;
+      ASSERT_EQ(device.map(storage, &mapped), RhiResult::success);
+      std::memcpy(mapped, values.data(), sizeof(values));
+      device.unmap(storage);
+      const auto before = device.queue_submission_snapshot().queue_submit_calls;
+      auto done = call.submit();
+      CompletionWaitSet ready({done}, std::chrono::milliseconds(1));
+      ASSERT_EQ(ready.wait(std::chrono::seconds(3)).status, CompletionWaitSet::Status::ready);
+      EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before + 1);
+      const int rounds = std::min(target, 3);
+      std::array<int, 7> observed{};
+      ASSERT_EQ(device.map(storage, &mapped), RhiResult::success);
+      std::memcpy(observed.data(), mapped, sizeof(observed));
+      device.unmap(storage);
+      EXPECT_EQ(observed, (std::array<int, 7>{target > rounds, rounds,
+          target > rounds ? 1 : 2, 3 << rounds, target, rounds + 1,
+          6 * (1 << (2 * rounds))}));
+    }
+    domain->close();
+  }
+  registry.retire();
+}
+
 TEST(VulkanFixedExecution, SubmissionParametersAndSparseTimingUseReusableSlots) {
   const auto *folder = std::getenv("TAICHI_VULKAN_PARAMETERS_AOT_DIR");
   if (!folder || !vulkan::is_vulkan_api_available())

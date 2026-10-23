@@ -67,8 +67,11 @@ ticket = step.submit(values=metadata, sample_gpu=True)
 
 该路线复用已选编译 dispatch 和私有固定工作区。公开验收覆盖 scalar/tensor buffer
 kernel、显式 adjoint、初始化/重放、双独立实例、高位 u64 更新、稀疏计时、完成集合、
-实例及 reset 退休。native buffer 操作仍须具备适用的固定录制 factory。首版独立 Vulkan
-路线不接纳 image/graphics、条件/并行 recipe，以及共享 sparse/RNG/runtime-error 状态。
+实例及 reset 退休。`vulkan_execution_domain_while` 能力位表示可重建已选设备 while，
+包括分块和嵌套 recipe；具体策略仍须满足所选设备能力。前段、首次条件、循环分块及收尾
+共用一次队列提交，逐提交参数更新覆盖所有物理 dispatch 副本，计时覆盖完整计算序列。
+native buffer 操作仍须具备适用的固定录制 factory。独立 Vulkan 路线不接纳
+image/graphics、host selection、并行 recipe，以及共享 sparse/RNG/runtime-error 状态。
 普通 Graph 保持既有能力；CUDA Canvas 和外部内存协议不会因此自动适用于 Vulkan 域。
 
 初始化导入普通队列已提交的准备前缀，并在所选队列执行实例初始化。暖态提交把依赖、

@@ -8234,6 +8234,8 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeVulkanCompletionGpuTiming);
     features["vulkan_execution_instance_retirement"] =
         bool(bitmap & kForgeVulkanExecutionInstanceRetirement);
+    features["vulkan_execution_domain_while"] =
+        bool(bitmap & kForgeVulkanExecutionDomainWhile);
     result["features"] = std::move(features);
     result["legacy_runtime"] = false;
     return result;

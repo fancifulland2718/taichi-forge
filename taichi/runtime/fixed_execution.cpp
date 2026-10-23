@@ -171,7 +171,12 @@ struct FixedExecution::State {
       std::vector<std::shared_ptr<NativeOperation>> operations;
       std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
       std::vector<std::shared_ptr<NativeKernelResultStorage>> results;
-      std::shared_ptr<gfx::GfxRuntime::GraphReplayExecutable::Slot> recording;
+      std::vector<std::shared_ptr<gfx::GfxRuntime::GraphReplayExecutable::Slot>> recordings;
+      struct ParameterTarget {
+        DevicePtr destination;
+        std::size_t slot;
+      };
+      std::vector<ParameterTarget> parameter_targets;
       std::vector<Slot> slots;
     };
     std::shared_ptr<RuntimeCompletionResources> operands;
@@ -265,28 +270,6 @@ FixedExecution::FixedExecution(
           "Grouped Vulkan preparation requires its logical instance owner");
     if (operations.empty())
       throw std::invalid_argument("Independent Vulkan execution is empty");
-    for (const auto &operation : operations) {
-      if (std::holds_alternative<std::shared_ptr<const Branch>>(operation) ||
-          std::holds_alternative<std::shared_ptr<const While>>(operation) ||
-          std::holds_alternative<std::shared_ptr<const Parallel>>(operation))
-        throw std::invalid_argument(
-            "Independent Vulkan control recording is not implemented");
-      if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
-        std::set<std::size_t> offsets;
-        for (const auto &patch : dispatch->parameters) {
-          if (!dispatch->kernel || patch.slot >= vulkan_binding->parameter_count ||
-              patch.argument_offset % 4 ||
-              patch.argument_offset > dispatch->kernel->args_size ||
-              dispatch->kernel->args_size - patch.argument_offset < 8)
-            throw std::invalid_argument("Invalid Vulkan u64 submission parameter binding");
-          const auto next = offsets.lower_bound(patch.argument_offset);
-          if ((next != offsets.end() && *next - patch.argument_offset < 8) ||
-              (next != offsets.begin() && patch.argument_offset - *std::prev(next) < 8))
-            throw std::invalid_argument("Overlapping Vulkan submission parameter bindings");
-          offsets.insert(patch.argument_offset);
-        }
-      }
-    }
     if (vulkan_binding->parameter_count > std::numeric_limits<std::size_t>::max() / 8)
       throw std::invalid_argument("Vulkan submission parameter size overflows address space");
     state_->vulkan_domain = vulkan_binding->domain;
@@ -417,6 +400,28 @@ FixedExecution::FixedExecution(
   validate = [&](const std::vector<Operation> &operations,
                  NativeRecordingState &recording_state, bool inside_control) {
     for (const auto &operation : operations) {
+      if (vulkan_binding) {
+        if (std::holds_alternative<std::shared_ptr<const Branch>>(operation) ||
+            std::holds_alternative<std::shared_ptr<const Parallel>>(operation))
+          throw std::invalid_argument(
+              "Independent Vulkan execution requires fixed device while control");
+        if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+          std::set<std::size_t> offsets;
+          for (const auto &patch : dispatch->parameters) {
+            if (!dispatch->kernel || patch.slot >= vulkan_binding->parameter_count ||
+                patch.argument_offset % 4 ||
+                patch.argument_offset > dispatch->kernel->args_size ||
+                dispatch->kernel->args_size - patch.argument_offset < 8)
+              throw std::invalid_argument("Invalid Vulkan u64 submission parameter binding");
+            const auto next = offsets.lower_bound(patch.argument_offset);
+            if ((next != offsets.end() && *next - patch.argument_offset < 8) ||
+                (next != offsets.begin() && patch.argument_offset - *std::prev(next) < 8))
+              throw std::invalid_argument("Overlapping Vulkan submission parameter bindings");
+            offsets.insert(patch.argument_offset);
+          }
+        }
+      }
+
       if (const auto *value =
               std::get_if<std::shared_ptr<const Branch>>(&operation)) {
         const auto &branch = *value;
@@ -1250,12 +1255,20 @@ FixedExecution::FixedExecution(
         submission_recipe &&
         submission_recipe->kind ==
             VulkanSubmissionRecipe::Kind::independent_graphics;
+    std::shared_ptr<State::VulkanInstance> instance;
+    std::vector<const Dispatch *> dispatch_sources;
     const auto bind_dispatch = [&](const Dispatch &dispatch) {
       auto *loaded = dynamic_cast<gfx::KernelImpl *>(dispatch.kernel);
       if (!loaded || (gfx_runtime && gfx_runtime != &loaded->runtime()))
         throw std::invalid_argument(
             "Fixed Vulkan entries must share a runtime");
       gfx_runtime = &loaded->runtime();
+      if (vulkan_binding) {
+        dispatch_sources.push_back(&dispatch);
+        if (!instance->payload->workspace)
+          instance->payload->workspace = vulkan_binding->workspace
+              ? vulkan_binding->workspace : gfx_runtime->create_fixed_graph_workspace();
+      }
       return gfx::GfxRuntime::GraphDispatch{
           loaded->handle(), dispatch.context, dispatch.indirect_dispatch};
     };
@@ -1267,6 +1280,30 @@ FixedExecution::FixedExecution(
           state_->workspace_bytes += info.known_persistent_control_bytes;
           state_->vulkan_graphs.push_back(std::move(graph));
         };
+    const auto roots = [&] {
+      std::vector<int> ids;
+      for (const auto *dispatch : dispatch_sources) {
+        const auto &trees = static_cast<gfx::KernelImpl *>(dispatch->kernel)->params().snode_tree_ids;
+        ids.insert(ids.end(), trees.begin(), trees.end());
+      }
+      std::sort(ids.begin(), ids.end());
+      ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+      return ids;
+    };
+    const auto retain_detached = [&](std::shared_ptr<gfx::GfxRuntime::GraphReplayExecutable::Slot> recording) {
+      auto &payload = *instance->payload;
+      if (recording->args_buffers.size() != dispatch_sources.size())
+        throw std::runtime_error("Vulkan control dispatch argument mapping changed");
+      for (std::size_t i = 0; i < dispatch_sources.size(); ++i) {
+        const auto *arguments = recording->args_buffers[i].get();
+        for (const auto &patch : dispatch_sources[i]->parameters) {
+          if (!arguments)
+            throw std::invalid_argument("Vulkan parameter target has no argument buffer");
+          payload.parameter_targets.push_back({arguments->get_ptr(patch.argument_offset), patch.slot});
+        }
+      }
+      payload.recordings.push_back(std::move(recording));
+    };
     const auto flush = [&] {
       if (native.empty())
         return;
@@ -1274,249 +1311,260 @@ FixedExecution::FixedExecution(
         throw std::invalid_argument(
             "Fixed Vulkan operations require a runtime");
       if (vulkan_binding) {
-        auto instance = std::make_shared<State::VulkanInstance>();
-        state_->vulkan_instance = instance;
-        instance->operands = vulkan_binding->operands;
-        instance->parameter_count = vulkan_binding->parameter_count;
-        instance->gpu_timing = state_->vulkan_domain->gpu_timing_enabled();
-        instance->payload = std::make_shared<State::VulkanInstance::Payload>();
         auto &payload = *instance->payload;
-        payload.device = &device;
-        payload.operations = std::move(state_->native_operations);
-        payload.resources = std::move(state_->kernel_resources);
-        payload.results = std::move(state_->kernel_results);
-        const auto prepare = [&] {
-          payload.workspace = vulkan_binding->workspace
-                                  ? vulkan_binding->workspace
-                                  : gfx_runtime->create_fixed_graph_workspace();
-          std::vector<int> roots;
-          for (const auto &operation : operations)
-            if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
-              const auto &ids = static_cast<gfx::KernelImpl *>(dispatch->kernel)
-                                    ->params().snode_tree_ids;
-              roots.insert(roots.end(), ids.begin(), ids.end());
-            }
-          std::sort(roots.begin(), roots.end());
-          roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
-          payload.recording = gfx_runtime->prepare_fixed_commands(
-              native, state_->vulkan_domain->new_command_list(),
-              payload.workspace, {}, std::move(roots));
-          instance->commands = state_->vulkan_domain->prepare_commands(
-              {payload.recording->cmdlist.get()}, instance->payload);
-          std::unique_ptr<CommandList> initialize;
-          if (!vulkan_binding->workspace) {
-            initialize = state_->vulkan_domain->new_command_list();
-            payload.workspace->record_initialization(*initialize);
-            instance->first_commands = state_->vulkan_domain->prepare_commands(
-                {initialize.get(), payload.recording->cmdlist.get()},
-                instance->payload);
-          }
-          if (instance->parameter_count || instance->gpu_timing) {
-            const auto capacity = state_->vulkan_domain->snapshot().capacity;
-            const auto parameter_bytes = instance->parameter_count * 8;
-            if (parameter_bytes && capacity >
-                (std::numeric_limits<std::size_t>::max() - state_->bytes) / parameter_bytes)
-              throw std::invalid_argument("Vulkan parameter pool size overflows address space");
-            payload.slots.resize(capacity);
-            instance->variants.resize(capacity);
-            for (std::size_t slot = 0; slot < capacity; ++slot) {
-              std::unique_ptr<CommandList> upload;
-              if (parameter_bytes) {
-                auto [buffer, status] = device.allocate_memory_unique(
-                    {parameter_bytes, true, false, false, AllocUsage::None});
-                if (status != RhiResult::success)
-                  throw std::runtime_error("Cannot allocate Vulkan parameter staging");
-                payload.slots[slot].parameters = std::move(buffer);
-                upload = state_->vulkan_domain->new_command_list();
-                upload->memory_barrier();
-                std::size_t dispatch_index = 0;
-                for (const auto &operation : operations) {
-                  const auto *dispatch = std::get_if<Dispatch>(&operation);
-                  if (!dispatch)
-                    continue;
-                  const auto *arguments = payload.recording->args_buffers.at(dispatch_index++).get();
-                  for (const auto &patch : dispatch->parameters) {
-                    if (!arguments)
-                      throw std::invalid_argument("Vulkan parameter target has no argument buffer");
-                    const auto destination = arguments->get_ptr(patch.argument_offset);
-                    upload->buffer_transition(destination, 8,
-                        {BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead,
-                         BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite});
-                    upload->buffer_copy(destination,
-                        payload.slots[slot].parameters->get_ptr(patch.slot * 8), 8);
-                    upload->buffer_transition(destination, 8,
-                        {BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite,
-                         BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead});
-                  }
-                }
-                upload->memory_barrier();
-                state_->bytes += parameter_bytes;
-              }
-              std::vector<CommandList *> sequence;
-              if (upload)
-                sequence.push_back(upload.get());
-              sequence.push_back(payload.recording->cmdlist.get());
-              auto &variants = instance->variants[slot];
-              const auto record = [&](const std::vector<CommandList *> &steps, bool first) {
-                auto commands = steps;
-                if (first && initialize)
-                  commands.insert(commands.begin(), initialize.get());
-                return state_->vulkan_domain->prepare_commands(commands, instance->payload);
-              };
-              variants.ordinary = record(sequence, false);
-              variants.first = initialize ? record(sequence, true) : variants.ordinary;
-              if (instance->gpu_timing) {
-                auto begin = state_->vulkan_domain->new_command_list();
-                auto end = state_->vulkan_domain->new_command_list();
-                auto timing = state_->vulkan_domain->prepare_timing(*begin, *end);
-                if (timing) {
-                  sequence.insert(sequence.end() - 1, begin.get());
-                  sequence.push_back(end.get());
-                  variants.sampled = record(sequence, false);
-                  variants.sampled_first = initialize ? record(sequence, true) : variants.sampled;
-                } else {
-                  timing = std::make_shared<State::VulkanInstance::UnsupportedTiming>();
-                  variants.sampled = variants.ordinary;
-                  variants.sampled_first = variants.first;
-                }
-                payload.slots[slot].timing = std::move(timing);
-              }
-            }
-          }
-          for (const auto bytes : payload.recording->args_buffer_sizes)
-            state_->bytes += bytes;
-          if (!vulkan_binding->workspace)
-            state_->workspace_bytes += payload.workspace->bytes();
-        };
-        if (vulkan_binding->retirement_parts) {
-          vulkan_binding->retirement_parts->push_back(instance);
-          prepare();
-        } else {
-          state_->vulkan_registration =
-              state_->vulkan_domain->prepare_owned_instance(
-                  instance, [&](const auto &) { prepare(); });
-        }
+        retain_detached(gfx_runtime->prepare_fixed_commands(
+            native, state_->vulkan_domain->new_command_list(),
+            payload.workspace, {}, roots()));
+        dispatch_sources.clear();
         native.clear();
         return;
       }
       retain(gfx_runtime->prepare_fixed_graph(native, {}, {}, independent));
       native.clear();
     };
-    std::size_t operation_index = 0, segment_index = 0;
-    for (const auto &operation : operations) {
-      // The descriptor is consumed at prepare time only. Existing registrations
-      // retain the actual commands, dependencies and completion protocol.
-      if (submission_recipe && !independent && operation_index &&
-          operation_index == submission_recipe->ends[segment_index]) {
-        flush();
-        ++segment_index;
-      }
-      ++operation_index;
-      if (const auto *value =
-              std::get_if<std::shared_ptr<const While>>(&operation)) {
-        const auto &loop = **value;
-        if (!loop.max_iterations) {
-          for (const auto &op : loop.condition)
-            native.push_back({bind_dispatch(std::get<Dispatch>(op)), {}});
-          continue;
+    const auto record_sequence = [&] {
+      std::size_t operation_index = 0, segment_index = 0;
+      for (const auto &operation : operations) {
+        // The descriptor is consumed at prepare time only. Existing registrations
+        // retain the actual commands, dependencies and completion protocol.
+        if (submission_recipe && !independent && operation_index &&
+            operation_index == submission_recipe->ends[segment_index]) {
+          flush();
+          ++segment_index;
         }
-        flush();
-        std::vector<gfx::GfxRuntime::GraphDispatch> dispatches;
-        const auto append = [&](const auto &region) {
-          for (const auto &op : region)
-            dispatches.push_back(bind_dispatch(std::get<Dispatch>(op)));
-        };
-        append(loop.condition);
-        append(loop.body);
-        if (loop.vulkan->nested) {
-          gfx::GfxRuntime::GraphNestedStructuredControl control;
-          control.outer_predicate = loop.predicate;
-          control.outer_counter = loop.vulkan->counter;
-          control.outer_status = loop.vulkan->status;
-          control.outer_has_status = control.outer_status != kDeviceNullPtr;
-          control.outer_condition_dispatch_count = loop.condition.size();
-          control.outer_max_iterations =
-              static_cast<std::uint32_t>(loop.max_iterations);
-          for (const auto &source : loop.vulkan->nested->inners) {
-            gfx::GfxRuntime::GraphNestedStructuredInnerControl inner;
-            inner.inner_predicate = source.predicate;
-            inner.inner_counter = source.counter;
-            inner.inner_has_status = bool(source.status);
-            inner.inner_status = source.status.value_or(kDeviceNullPtr);
-            inner.inner_condition_dispatch_begin = source.condition_begin;
-            inner.inner_body_dispatch_begin = source.body_begin;
-            inner.inner_dispatch_end = source.end;
-            inner.inner_max_iterations = source.max_iterations;
-            inner.inner_chunk_size = source.chunk_size;
-            control.inner_controls.push_back(inner);
+        ++operation_index;
+        if (const auto *value =
+                std::get_if<std::shared_ptr<const While>>(&operation)) {
+          const auto &loop = **value;
+          if (!loop.max_iterations) {
+            for (const auto &op : loop.condition)
+              native.push_back({bind_dispatch(std::get<Dispatch>(op)), {}});
+            continue;
           }
-          retain(gfx_runtime->prepare_fixed_nested_structured_graph(
-              dispatches, control, {}));
-          continue;
-        }
-        append(loop.condition);
-        gfx::GfxRuntime::GraphStructuredControl control;
-        control.predicate = loop.predicate;
-        control.counter = loop.vulkan->counter;
-        control.status = loop.vulkan->status;
-        control.has_status = control.status != kDeviceNullPtr;
-        control.initial_dispatch_count = loop.condition.size();
-        for (const auto &chunk : loop.vulkan->recipe.chunks) {
-          control.max_iterations = chunk.iterations;
-          control.strategy = chunk.strategy;
-          retain(gfx_runtime->prepare_fixed_structured_graph(dispatches,
-                                                             control, {}));
-          control.execute_initial_dispatches = false;
-        }
-      } else if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
-        native.push_back({bind_dispatch(*dispatch), {}});
-      } else if (const auto *external =
-                     std::get_if<std::shared_ptr<NativeOperation>>(
-                         &operation)) {
-        gfx::GfxRuntime::GraphRecordingOperation op;
-        op.inline_recording = true;
-        auto requirements = (*external)->vulkan_recording_requirements();
-        op.images = std::move(requirements.images);
-        op.graphics_queue = requirements.graphics_queue;
-        op.buffers = std::move(requirements.buffers);
-        op.external = [external = *external](Device *device,
-                                             CommandList *commands) {
-          commands->memory_barrier();
-          external->record_vulkan(device, commands);
-          commands->memory_barrier();
-        };
-        native.push_back(std::move(op));
-      } else {
-        gfx::GfxRuntime::GraphRecordingOperation op;
-        op.inline_recording = true;
-        if (const auto *copy = std::get_if<BufferCopy>(&operation)) {
-          if (copy->source.offset % 4 || copy->destination.offset % 4 ||
-              copy->bytes % 4)
-            throw std::invalid_argument(
-                "Vulkan copies require 4-byte alignment");
-          op.buffers = {{copy->source, copy->destination}};
-          op.external = [copy = *copy](Device *, CommandList *commands) {
-            if (copy.bytes) {
-              commands->memory_barrier();
-              commands->buffer_copy(copy.destination, copy.source, copy.bytes);
-              commands->memory_barrier();
-            }
+          flush();
+          std::vector<gfx::GfxRuntime::GraphDispatch> dispatches;
+          const auto append = [&](const auto &region) {
+            for (const auto &op : region)
+              dispatches.push_back(bind_dispatch(std::get<Dispatch>(op)));
           };
+          append(loop.condition);
+          append(loop.body);
+          if (loop.vulkan->nested) {
+            gfx::GfxRuntime::GraphNestedStructuredControl control;
+            control.outer_predicate = loop.predicate;
+            control.outer_counter = loop.vulkan->counter;
+            control.outer_status = loop.vulkan->status;
+            control.outer_has_status = control.outer_status != kDeviceNullPtr;
+            control.outer_condition_dispatch_count = loop.condition.size();
+            control.outer_max_iterations =
+                static_cast<std::uint32_t>(loop.max_iterations);
+            for (const auto &source : loop.vulkan->nested->inners) {
+              gfx::GfxRuntime::GraphNestedStructuredInnerControl inner;
+              inner.inner_predicate = source.predicate;
+              inner.inner_counter = source.counter;
+              inner.inner_has_status = bool(source.status);
+              inner.inner_status = source.status.value_or(kDeviceNullPtr);
+              inner.inner_condition_dispatch_begin = source.condition_begin;
+              inner.inner_body_dispatch_begin = source.body_begin;
+              inner.inner_dispatch_end = source.end;
+              inner.inner_max_iterations = source.max_iterations;
+              inner.inner_chunk_size = source.chunk_size;
+              control.inner_controls.push_back(inner);
+            }
+            if (vulkan_binding) {
+              retain_detached(gfx_runtime->prepare_fixed_control_commands(
+                  dispatches, nullptr, &control, state_->vulkan_domain->new_command_list(),
+                  instance->payload->workspace, {}, roots()));
+              dispatch_sources.clear();
+            } else {
+              retain(gfx_runtime->prepare_fixed_nested_structured_graph(
+                  dispatches, control, {}));
+            }
+            continue;
+          }
+          append(loop.condition);
+          gfx::GfxRuntime::GraphStructuredControl control;
+          control.predicate = loop.predicate;
+          control.counter = loop.vulkan->counter;
+          control.status = loop.vulkan->status;
+          control.has_status = control.status != kDeviceNullPtr;
+          control.initial_dispatch_count = loop.condition.size();
+          for (const auto &chunk : loop.vulkan->recipe.chunks) {
+            control.max_iterations = chunk.iterations;
+            control.strategy = chunk.strategy;
+            if (vulkan_binding) {
+              retain_detached(gfx_runtime->prepare_fixed_control_commands(
+                  dispatches, &control, nullptr, state_->vulkan_domain->new_command_list(),
+                  instance->payload->workspace, {}, roots()));
+            } else {
+              retain(gfx_runtime->prepare_fixed_structured_graph(dispatches, control, {}));
+            }
+            control.execute_initial_dispatches = false;
+          }
+          dispatch_sources.clear();
+        } else if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+          native.push_back({bind_dispatch(*dispatch), {}});
+        } else if (const auto *external =
+                       std::get_if<std::shared_ptr<NativeOperation>>(
+                           &operation)) {
+          gfx::GfxRuntime::GraphRecordingOperation op;
+          op.inline_recording = true;
+          auto requirements = (*external)->vulkan_recording_requirements();
+          op.images = std::move(requirements.images);
+          op.graphics_queue = requirements.graphics_queue;
+          op.buffers = std::move(requirements.buffers);
+          op.external = [external = *external](Device *device,
+                                               CommandList *commands) {
+            commands->memory_barrier();
+            external->record_vulkan(device, commands);
+            commands->memory_barrier();
+          };
+          native.push_back(std::move(op));
         } else {
-          const auto &fill = std::get<BufferFill>(operation);
-          op.buffers = {{fill.destination}};
-          op.external = [fill](Device *, CommandList *commands) {
-            if (fill.bytes) {
-              commands->memory_barrier();
-              commands->buffer_fill(fill.destination, fill.bytes, fill.value);
-              commands->memory_barrier();
-            }
-          };
+          gfx::GfxRuntime::GraphRecordingOperation op;
+          op.inline_recording = true;
+          if (const auto *copy = std::get_if<BufferCopy>(&operation)) {
+            if (copy->source.offset % 4 || copy->destination.offset % 4 ||
+                copy->bytes % 4)
+              throw std::invalid_argument(
+                  "Vulkan copies require 4-byte alignment");
+            op.buffers = {{copy->source, copy->destination}};
+            op.external = [copy = *copy](Device *, CommandList *commands) {
+              if (copy.bytes) {
+                commands->memory_barrier();
+                commands->buffer_copy(copy.destination, copy.source, copy.bytes);
+                commands->memory_barrier();
+              }
+            };
+          } else {
+            const auto &fill = std::get<BufferFill>(operation);
+            op.buffers = {{fill.destination}};
+            op.external = [fill](Device *, CommandList *commands) {
+              if (fill.bytes) {
+                commands->memory_barrier();
+                commands->buffer_fill(fill.destination, fill.bytes, fill.value);
+                commands->memory_barrier();
+              }
+            };
+          }
+          native.push_back(std::move(op));
         }
-        native.push_back(std::move(op));
       }
+      flush();
+    };
+    if (vulkan_binding) {
+      instance = std::make_shared<State::VulkanInstance>();
+      state_->vulkan_instance = instance;
+      instance->operands = vulkan_binding->operands;
+      instance->parameter_count = vulkan_binding->parameter_count;
+      instance->gpu_timing = state_->vulkan_domain->gpu_timing_enabled();
+      instance->payload = std::make_shared<State::VulkanInstance::Payload>();
+      auto &payload = *instance->payload;
+      payload.device = &device;
+      payload.operations = std::move(state_->native_operations);
+      payload.resources = std::move(state_->kernel_resources);
+      payload.results = std::move(state_->kernel_results);
+      const auto prepare = [&] {
+        if (gfx_runtime)
+          payload.workspace = vulkan_binding->workspace
+                                  ? vulkan_binding->workspace
+                                  : gfx_runtime->create_fixed_graph_workspace();
+        record_sequence();
+        std::vector<CommandList *> compute;
+        for (const auto &recording : payload.recordings)
+          compute.push_back(recording->cmdlist.get());
+        instance->commands = state_->vulkan_domain->prepare_commands(
+            compute, instance->payload);
+        std::unique_ptr<CommandList> initialize;
+        if (!vulkan_binding->workspace) {
+          initialize = state_->vulkan_domain->new_command_list();
+          payload.workspace->record_initialization(*initialize);
+          auto first = compute;
+          first.insert(first.begin(), initialize.get());
+          instance->first_commands = state_->vulkan_domain->prepare_commands(first, instance->payload);
+        }
+        if (instance->parameter_count || instance->gpu_timing) {
+          const auto capacity = state_->vulkan_domain->snapshot().capacity;
+          const auto parameter_bytes = instance->parameter_count * 8;
+          if (parameter_bytes && capacity >
+              (std::numeric_limits<std::size_t>::max() - state_->bytes) / parameter_bytes)
+            throw std::invalid_argument("Vulkan parameter pool size overflows address space");
+          payload.slots.resize(capacity);
+          instance->variants.resize(capacity);
+          for (std::size_t slot = 0; slot < capacity; ++slot) {
+            std::unique_ptr<CommandList> upload;
+            if (parameter_bytes) {
+              auto [buffer, status] = device.allocate_memory_unique(
+                  {parameter_bytes, true, false, false, AllocUsage::None});
+              if (status != RhiResult::success)
+                throw std::runtime_error("Cannot allocate Vulkan parameter staging");
+              payload.slots[slot].parameters = std::move(buffer);
+              upload = state_->vulkan_domain->new_command_list();
+              upload->memory_barrier();
+              for (const auto &patch : payload.parameter_targets) {
+                const auto destination = patch.destination;
+                upload->buffer_transition(destination, 8,
+                    {BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead,
+                     BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite});
+                upload->buffer_copy(destination,
+                    payload.slots[slot].parameters->get_ptr(patch.slot * 8), 8);
+                upload->buffer_transition(destination, 8,
+                    {BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite,
+                     BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead});
+              }
+              upload->memory_barrier();
+              state_->bytes += parameter_bytes;
+            }
+            std::vector<CommandList *> sequence;
+            if (upload)
+              sequence.push_back(upload.get());
+            sequence.insert(sequence.end(), compute.begin(), compute.end());
+            auto &variants = instance->variants[slot];
+            const auto record = [&](const std::vector<CommandList *> &steps, bool first) {
+              auto commands = steps;
+              if (first && initialize)
+                commands.insert(commands.begin(), initialize.get());
+              return state_->vulkan_domain->prepare_commands(commands, instance->payload);
+            };
+            variants.ordinary = record(sequence, false);
+            variants.first = initialize ? record(sequence, true) : variants.ordinary;
+            if (instance->gpu_timing) {
+              auto begin = state_->vulkan_domain->new_command_list();
+              auto end = state_->vulkan_domain->new_command_list();
+              auto timing = state_->vulkan_domain->prepare_timing(*begin, *end);
+              if (timing) {
+                sequence.insert(sequence.begin() + (upload ? 1 : 0), begin.get());
+                sequence.push_back(end.get());
+                variants.sampled = record(sequence, false);
+                variants.sampled_first = initialize ? record(sequence, true) : variants.sampled;
+              } else {
+                timing = std::make_shared<State::VulkanInstance::UnsupportedTiming>();
+                variants.sampled = variants.ordinary;
+                variants.sampled_first = variants.first;
+              }
+              payload.slots[slot].timing = std::move(timing);
+            }
+          }
+        }
+        for (const auto &recording : payload.recordings) {
+          for (const auto bytes : recording->args_buffer_sizes)
+            state_->bytes += bytes;
+          state_->workspace_bytes += recording->structured_control_bytes +
+                                     recording->structured_observation_bytes;
+        }
+        if (!vulkan_binding->workspace)
+          state_->workspace_bytes += payload.workspace->bytes();
+      };
+      if (vulkan_binding->retirement_parts) {
+        vulkan_binding->retirement_parts->push_back(instance);
+        prepare();
+      } else {
+        state_->vulkan_registration = state_->vulkan_domain->prepare_owned_instance(
+            instance, [&](const auto &) { prepare(); });
+      }
+    } else {
+      record_sequence();
     }
-    flush();
     state_->vulkan_runtime = gfx_runtime;
     state_->kind = 2;
     if (sequence_state)

@@ -211,6 +211,23 @@ def test_aot_selected_nested_conditions_and_order(tmp_path):
         assert list(arrays["y"].to_numpy()) == [3249] * 17
         assert list(arrays["dx"].to_numpy()) == [4104] * 17
         assert list(arrays["terminal"].to_numpy()) == [2, 1, 1, 3, 4, 4, 12, 11, 11]
+        if arch == "vulkan":
+            domain = None
+            try:
+                domain = ti.graph.execution_domain(capacity=1, instance_capacity=1)
+            except RuntimeError as error:
+                if "No independent Vulkan compute queue is available" not in str(error) and "timeline support" not in str(error):
+                    raise
+            if domain is not None:
+                with domain:
+                    call = graph.prepare(dict(arrays, outer_limit=2, first_limit=1, second_limit=1),
+                                         execution_domain=domain)
+                    call.initialize()
+                    call.submit().wait()
+                    assert list(arrays["y"].to_numpy()) == [3249] * 17
+                    assert list(arrays["dx"].to_numpy()) == [4104] * 17
+                    assert list(arrays["terminal"].to_numpy()) == [2, 1, 1, 3, 4, 4, 12, 11, 11]
+                    call.close()
         entries = len(module._exported_kernels)
         module.add_execution_plan("again", graph)
         assert len(module._exported_kernels) == entries
@@ -238,11 +255,11 @@ def test_aot_selected_nested_conditions_and_order(tmp_path):
             assert len(module._exported_kernels) == entries
     artifact = tmp_path / "nested-graph.tcm"
     module.archive(str(artifact))
-    for mode in ("standalone", "borrowed"):
+    for mode in ("standalone", "borrowed", *(("domain",) if arch == "vulkan" else ())):
         result = subprocess.run(
             [
                 sys.executable,
-                *(["-S"] if mode == "standalone" else []),
+                *(["-S"] if mode != "borrowed" else []),
                 str(Path(__file__).with_name("aot_nested_graph_probe.py")),
                 mode,
                 arch,
@@ -253,4 +270,8 @@ def test_aot_selected_nested_conditions_and_order(tmp_path):
             text=True,
             timeout=90,
         )
+        if mode == "domain" and result.returncode == 77:
+            assert "DOMAIN_HARDWARE_UNAVAILABLE" in result.stdout
+            continue
         assert result.returncode == 0, result.stdout + result.stderr
+        assert "VUID-" not in result.stderr and "SYNC-HAZARD" not in result.stderr, result.stderr

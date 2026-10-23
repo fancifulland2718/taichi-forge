@@ -183,7 +183,8 @@ class VulkanExecutionDomain(ExecutionDomain):
 
     Requires enabled timeline semaphores and available device-created queues.
     Fixed buffer recipes share the common parameter/completion/retirement API.
-    Graphics, sparse runtime state and control recipes remain separate routes.
+    Selected device while recipes retain prefix, chunks and suffix in one submit.
+    Graphics, sparse runtime state, host selection and parallel remain separate routes.
     """
 
     backend = "vulkan"
