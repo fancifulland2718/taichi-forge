@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Display storage gains a shared polymorphic interface across the native shim.
-inline constexpr int kForgeNativeAbiRevision = 169;
+inline constexpr int kForgeNativeAbiRevision = 170;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

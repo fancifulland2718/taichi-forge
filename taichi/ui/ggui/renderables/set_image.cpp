@@ -1100,6 +1100,12 @@ void SetImage::record_this_frame_commands(CommandList *command_list) {
 }
 
 void SetImage::record_prepass_this_frame_commands(CommandList *command_list) {
+  if (shared_cuda_vulkan_image_ && app_context_->config.ti_arch == Arch::vulkan) {
+    // The selected copy timeline publishes this buffer to graphics. Renderer
+    // records a graphics memory barrier before the pass; the generic buffer
+    // barrier below includes compute stages unsupported by some graphics queues.
+    return;
+  }
   if (auto *state = find_direct_state(this); state && state->enabled) {
     if (state->display_buffer != kDeviceNullPtr) {
       command_list->buffer_barrier(state->display_buffer);

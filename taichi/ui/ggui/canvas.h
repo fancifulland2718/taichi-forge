@@ -50,6 +50,14 @@ class TI_DLL_EXPORT Canvas final : public CanvasBase {
 
   void set_image_transpose(bool transpose);
   bool set_image_shared_cuda(const SetImageInfo &info);
+  void set_display_vulkan_execution_domain(
+      std::shared_ptr<taichi::lang::vulkan::ExecutionDomain> domain);
+  void prepare_vulkan_display_sources(const std::vector<FieldInfo> &sources,
+                                      std::size_t capacity);
+  bool set_image_vulkan_on_domain(
+      const SetImageInfo &info,
+      const taichi::lang::RuntimeCompletion &producer);
+
   void set_display_execution_domain(
       std::shared_ptr<taichi::lang::cuda::ExecutionDomain> domain);
   bool set_image_shared_cuda_on_domain(

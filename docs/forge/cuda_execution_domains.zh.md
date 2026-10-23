@@ -272,6 +272,43 @@ prepared writer 或 packed buffer。
 直接替换仍绑定活域的存储会在退休前拒绝。reset 使旧租约失效；窗口关闭先排空依赖的
 CUDA/外部访问，再释放 Vulkan 设备。无法完成退休证明时保留有界图形资源闭包，不提前释放。
 
+### Vulkan retained packed copy
+
+Vulkan Program 也可用 `canvas.set_execution_domain(output)` 选择独立输出域。
+这条路线接收同 Program 的二维 `u32` ndarray；在冷阶段用
+`canvas.prepare_frame_sources(frames, capacity=3)` 冻结源集合并分配显示槽。
+容量由调用方选择，至少两个槽以保留最后显示图像并接收下一帧；不设置额外的源数量或
+槽数量上限，实际分配、地址和设备存储缓冲范围仍须合法。所有源必须具有相同形状。
+
+```python
+frame = ti.ui.DisplayFrame.from_packed_u32_ndarray(pixels)
+canvas.set_execution_domain(output)
+canvas.prepare_frame_sources([frame], capacity=3)  # 冷阶段
+
+producer = writer.submit()  # 同 Program 的 output 或 peer 域
+if producer is not None:
+    display = canvas.submit_frame(
+        frame, source_completion=producer, track_source=True, track_completion=True
+    )
+    if display is not None:
+        copied = frame.source_completion
+        window.show()
+```
+
+每次接受执行一次设备内复制；复制在选中的输出域运行，图形队列等待该次复制的精确
+timeline 点。`copied.done()/wait()` 覆盖源读取完成，调用方须在复用或改写源数组之前
+遵守这一依赖；该原生票据目前不是 Graph `wait_for` 的公共输入。
+`display` 覆盖图形消费，不代表屏幕呈现。repeat 使用已有显示槽，不再次复制源。
+忙碌时返回 `None`，不排队复制、不替换 `frame.source_completion`；取消待显示帧也不
+取消已接受的复制，其槽和源租约保持到复制完成。
+
+当前 Vulkan 路线仅支持 prepared packed copy。`acquire_frame/prepare_frame_pool`、
+混合几何、GUI widgets、texture/host 输入和 runtime offscreen attachments 尚未接通，
+在对应入口拒绝。窗口销毁退休自己的复制实例，不关闭整个输出域；窗口关闭及重配仍是
+冷边界，现有图形设备排空可能等待其他队列，不承诺与无关尾部工作完全独立。
+源集合或形状变化时关闭旧域、绑定新域并重新准备。这里没有额外像素处理 kernel，
+但相对直接写显示槽多一次设备复制；不能据此推断应用帧率提升。
+
 ## 准备、初始化与提交
 
 无前端的独立 runtime 还提供 `runtime.import_cuda_external_memory()`，导入同一 GPU

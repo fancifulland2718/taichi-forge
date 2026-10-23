@@ -24,6 +24,9 @@ namespace py = pybind11;
 #include "taichi/program/storage_view.h"
 #include "taichi/ui/common/gui_base.h"
 #include "taichi/program/ndarray.h"
+#ifdef TI_WITH_VULKAN
+#include "taichi/runtime/vulkan_execution_domain.h"
+#endif
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/execution_domain.h"
 #endif
@@ -575,6 +578,22 @@ struct PyCanvas {
         SetImageInfo{info}, producer.value_or(RuntimeCompletion{}));
   }
 
+#ifdef TI_WITH_VULKAN
+  void set_display_vulkan_execution_domain(
+      std::shared_ptr<taichi::lang::vulkan::ExecutionDomain> domain) {
+    display_canvas().set_display_vulkan_execution_domain(std::move(domain));
+  }
+  void prepare_vulkan_display_sources(const std::vector<FieldInfo> &sources,
+                                       std::size_t capacity) {
+    display_canvas().prepare_vulkan_display_sources(sources, capacity);
+  }
+  bool set_image_vulkan_on_domain(
+      FieldInfo info, const std::optional<RuntimeCompletion> &producer) {
+    return display_canvas().set_image_vulkan_on_domain(
+        SetImageInfo{info}, producer.value_or(RuntimeCompletion{}));
+  }
+#endif
+
   std::shared_ptr<vulkan::DisplayCompletion> track_display_frame(
       bool writable) {
     return display_canvas().track_display_frame(writable);
@@ -1090,6 +1109,16 @@ void export_ggui(py::module &m) {
 #ifdef TI_WITH_CUDA
       .def("_set_display_execution_domain",
            &PyCanvas::set_display_execution_domain,
+           py::call_guard<py::gil_scoped_release>())
+#endif
+#ifdef TI_WITH_VULKAN
+      .def("_set_display_vulkan_execution_domain",
+           &PyCanvas::set_display_vulkan_execution_domain,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_prepare_vulkan_display_sources",
+           &PyCanvas::prepare_vulkan_display_sources,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_set_image_vulkan_on_domain", &PyCanvas::set_image_vulkan_on_domain,
            py::call_guard<py::gil_scoped_release>())
 #endif
       .def("_set_image_shared_cuda_on_domain",

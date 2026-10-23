@@ -17,6 +17,9 @@ class RuntimeCompletion;
 namespace cuda {
 class ExecutionDomain;
 }
+namespace vulkan {
+class ExecutionDomain;
+}
 namespace storage {
 class DenseStorageDescriptor;
 }
@@ -59,6 +62,8 @@ class AotRuntimeClient final : public RuntimeClient {
       const std::vector<JitKernelImport> &kernels);
   // Cold GGUI bridge. Hot drawing never resolves an opaque domain handle.
   std::shared_ptr<cuda::ExecutionDomain> execution_domain(
+      std::uintptr_t handle);
+  std::shared_ptr<vulkan::ExecutionDomain> vulkan_execution_domain(
       std::uintptr_t handle);
 
  private:

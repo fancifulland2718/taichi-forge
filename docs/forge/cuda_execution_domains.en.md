@@ -349,6 +349,51 @@ Existing `Graph.run()`/`submit()` contracts stay unchanged. The Python Program
 owner retains the borrower used by `ti.graph.execution_domain()` so dropping
 the last domain wrapper cannot accidentally trigger destructive runtime close.
 
+### Vulkan retained packed copy
+
+A Vulkan Program can select an independent output domain with
+`canvas.set_execution_domain(output)`. This path accepts same-Program 2D `u32`
+ndarrays. Cold-prepare the fixed source set and display slots with
+`canvas.prepare_frame_sources(frames, capacity=3)`. The caller chooses capacity;
+at least two slots retain the last image while accepting an update. There is no
+additional source-count or slot-count cap, but allocation, addressing and device
+storage-buffer limits still apply. All sources must have the same shape.
+
+```python
+frame = ti.ui.DisplayFrame.from_packed_u32_ndarray(pixels)
+canvas.set_execution_domain(output)
+canvas.prepare_frame_sources([frame], capacity=3)  # Cold preparation
+
+producer = writer.submit()  # The output domain or a same-Program peer domain
+if producer is not None:
+    display = canvas.submit_frame(
+        frame, source_completion=producer, track_source=True, track_completion=True
+    )
+    if display is not None:
+        copied = frame.source_completion
+        window.show()
+```
+
+An accepted frame performs one device buffer copy on the selected output domain.
+Graphics waits for that copy's exact timeline point. `copied.done()/wait()` covers
+source-read completion: respect this dependency before reusing or overwriting
+the source. This native ticket is not currently a public Graph `wait_for` input.
+`display` covers graphics consumption, not presentation. Repeat uses the retained
+display slot without another source copy. Busy returns `None`, enqueues no copy
+and leaves `frame.source_completion` unchanged. Cancelling a pending display does
+not cancel an accepted copy; its slot and source leases remain until completion.
+
+This Vulkan path currently supports prepared packed copies only. Writable
+`acquire_frame/prepare_frame_pool`, mixed geometry, GUI widgets, texture/host input
+and runtime offscreen attachments reject at their respective entry points.
+Window destruction retires its copy instance without closing the entire output
+domain. Close and reconfiguration remain cold boundaries: existing graphics-device
+draining can wait for other queues and does not promise independence from unrelated
+tails. For changed source sets or shapes, close the old domain, bind a new one and
+prepare again. This adds no pixel-processing kernel, but adds one device copy
+compared with writing display storage directly; it is not an application frame-rate
+claim.
+
 ## Prepare, initialize and submit
 
 The source-free runtime also exposes `runtime.import_cuda_external_memory()`

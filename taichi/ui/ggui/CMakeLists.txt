@@ -24,6 +24,10 @@ target_sources(taichi_ui_ggui
     renderables/triangles.cpp
   )
 
+if(TI_WITH_VULKAN)
+  target_sources(taichi_ui_ggui PRIVATE renderables/vulkan_display_buffer.cpp)
+endif()
+
 if(NOT ANDROID)
   target_sources(taichi_ui_ggui PRIVATE window.cpp)
 endif()

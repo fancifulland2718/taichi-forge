@@ -47,6 +47,9 @@
 #include "taichi/runtime/native_operation_registry.h"
 #ifdef TI_WITH_RUNTIME_C_API
 #include "taichi/runtime/aot_runtime_client.h"
+#ifdef TI_WITH_VULKAN
+#include "taichi/runtime/vulkan_execution_domain.h"
+#endif
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/execution_domain.h"
 #endif
@@ -608,6 +611,11 @@ void export_lang(py::module &m) {
              std::shared_ptr<lang::cuda::ExecutionDomain>>(
       m, "_CudaExecutionDomain");
 #endif
+#ifdef TI_WITH_VULKAN
+  py::class_<lang::vulkan::ExecutionDomain,
+             std::shared_ptr<lang::vulkan::ExecutionDomain>>(
+      m, "_VulkanExecutionDomain");
+#endif
   py::class_<AotRuntimeClient, std::shared_ptr<AotRuntimeClient>>(
       m, "_AotRuntimeClient")
       .def("__enter__", &AotRuntimeClient::enter,
@@ -629,6 +637,10 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
 #ifdef TI_WITH_CUDA
       .def("execution_domain", &AotRuntimeClient::execution_domain,
+           py::call_guard<py::gil_scoped_release>())
+#endif
+#ifdef TI_WITH_VULKAN
+      .def("vulkan_execution_domain", &AotRuntimeClient::vulkan_execution_domain,
            py::call_guard<py::gil_scoped_release>())
 #endif
       .def_property_readonly("closed", &AotRuntimeClient::closed)

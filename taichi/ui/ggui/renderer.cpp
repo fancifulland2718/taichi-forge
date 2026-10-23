@@ -1,6 +1,11 @@
 #include "renderer.h"
 
 #include "taichi/ui/utils/utils.h"
+#include <limits>
+#ifdef TI_WITH_VULKAN
+#include "taichi/runtime/vulkan_execution_domain.h"
+#include "taichi/ui/ggui/renderables/vulkan_display_buffer.h"
+#endif
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/execution_domain.h"
 #endif
@@ -68,11 +73,18 @@ T *Renderer::get_renderable_of_type(VertexAttributes vbo_attrs) {
   return ret;
 }
 
+void Renderer::require_general_display_path() const {
+  TI_ERROR_IF(display_vulkan_execution_domain_,
+              "Selected Vulkan display requires prepared packed sources; "
+              "writable frames, mixed geometry and runtime targets are unsupported");
+}
+
 void Renderer::set_background_color(const glm::vec3 &color) {
   background_color_ = color;
 }
 
 void Renderer::set_image(const SetImageInfo &info) {
+  require_general_display_path();
   retain_field_info(info.img);
   SetImage *s = pending_set_image_;
   if (!s) {
@@ -84,6 +96,7 @@ void Renderer::set_image(const SetImageInfo &info) {
 }
 
 void Renderer::set_image(const DisplayFrameInfo &info) {
+  require_general_display_path();
   SetImage *s = pending_set_image_;
   if (!s) {
     s = get_set_image_renderable();
@@ -95,6 +108,7 @@ void Renderer::set_image(const DisplayFrameInfo &info) {
 
 std::shared_ptr<DisplayStorage>
 Renderer::acquire_shared_cuda_vulkan_image(int width, int height) {
+  require_general_display_path();
   TI_ERROR_IF(prepared_display_width_ && (width != prepared_display_width_ ||
                                           height != prepared_display_height_),
               "Reprepare the display pool at a cold resize boundary");
@@ -120,6 +134,7 @@ Renderer::acquire_shared_cuda_vulkan_image(int width, int height) {
 void Renderer::set_display_execution_domain(
     std::shared_ptr<cuda::ExecutionDomain> domain) {
 #ifdef TI_WITH_CUDA
+  require_general_display_path();
   TI_ERROR_IF(pending_set_image_,
               "Submit or cancel the display frame before binding a domain");
   TI_ERROR_IF(
@@ -139,10 +154,30 @@ void Renderer::set_display_execution_domain(
 
 std::vector<DisplayStorage *>
 Renderer::prepare_display_pool(int width, int height, int capacity) {
+  require_general_display_path();
   TI_ERROR_IF(!display_execution_domain_ || width <= 0 || height <= 0 ||
                   capacity < 2 || capacity > max_frames_in_flight() + 1,
               "Display pool requires a selected domain and bounded positive "
               "dimensions/capacity");
+  validate_display_pool_replacement();
+  std::vector<std::unique_ptr<SetImage>> prepared;
+  std::vector<DisplayStorage *> views;
+  const auto repeat_capacity = max_frames_in_flight() + 1;
+  prepared.reserve(capacity + repeat_capacity);
+  views.reserve(capacity);
+  for (int i = 0; i < capacity; ++i) {
+    auto image = std::make_unique<SetImage>(&app_context_, VboHelpers::all());
+    auto storage = image->acquire_shared_cuda_vulkan_image(width, height);
+    TI_ERROR_IF(!storage, "Unable to prepare CUDA/Vulkan display pool");
+    bind_cuda_display_domain(storage, display_execution_domain_);
+    views.push_back(storage.get());
+    prepared.push_back(std::move(image));
+  }
+  install_display_pool(std::move(prepared), width, height);
+  return views;
+}
+
+void Renderer::validate_display_pool_replacement() const {
   TI_ERROR_IF(pending_set_image_ || !renderables_.empty(),
               "Submit or cancel pending work before preparing display storage");
   const auto require_retired = [](const auto &items) {
@@ -160,19 +195,15 @@ Renderer::prepare_display_pool(int width, int height, int capacity) {
   TI_ERROR_IF(last_shared_display_image_ &&
                   last_shared_display_image_->has_live_execution_domain(),
               "Close the previous display domain before replacing its pool");
-  std::vector<std::unique_ptr<SetImage>> prepared;
-  std::vector<DisplayStorage *> views;
+}
+
+void Renderer::install_display_pool(
+    std::vector<std::unique_ptr<SetImage>> prepared, int width, int height) {
   const auto repeat_capacity = max_frames_in_flight() + 1;
-  prepared.reserve(capacity + repeat_capacity);
-  views.reserve(capacity);
-  for (int i = 0; i < capacity; ++i) {
-    auto image = std::make_unique<SetImage>(&app_context_, VboHelpers::all());
-    auto storage = image->acquire_shared_cuda_vulkan_image(width, height);
-    TI_ERROR_IF(!storage, "Unable to prepare CUDA/Vulkan display pool");
-    bind_cuda_display_domain(storage, display_execution_domain_);
-    views.push_back(storage.get());
-    prepared.push_back(std::move(image));
-  }
+  TI_ERROR_IF(prepared.empty() || prepared.size() >
+                  std::numeric_limits<std::size_t>::max() - repeat_capacity,
+              "Invalid prepared display pool size");
+  prepared.reserve(prepared.size() + repeat_capacity);
   // Repeating an image whose earlier Vulkan read is still in flight needs a
   // distinct renderable, but no new pixel storage. Prepare its tiny UBO and
   // pipeline state here so that overlap cannot allocate them in repeat().
@@ -197,11 +228,95 @@ Renderer::prepare_display_pool(int width, int height, int capacity) {
   reusable_set_images_ = std::move(prepared);
   prepared_display_width_ = width;
   prepared_display_height_ = height;
-  return views;
+}
+
+void Renderer::set_display_vulkan_execution_domain(
+    std::shared_ptr<taichi::lang::vulkan::ExecutionDomain> domain) {
+#ifdef TI_WITH_VULKAN
+  TI_ERROR_IF(pending_set_image_ || !render_queue_.empty() || has_offscreen_targets(),
+              "Bind a Vulkan display domain before recording image-only work");
+  auto *program = app_context_.prog();
+  TI_ERROR_IF(!program || app_context_.config.ti_arch != Arch::vulkan ||
+                  app_context_.config.ggui_arch != Arch::vulkan ||
+                  program->get_graphics_device() != &app_context_.device() ||
+                  !domain || !domain->belongs_to(program->runtime_fault_domain()) ||
+                  !domain->snapshot().accepting || display_execution_domain_,
+              "Canvas domain requires the current live Vulkan Program");
+  TI_ERROR_IF(display_vulkan_execution_domain_ &&
+                  display_vulkan_execution_domain_ != domain &&
+                  !display_vulkan_execution_domain_->snapshot().closed,
+              "Close the previous display domain before replacing it");
+  display_vulkan_execution_domain_ = std::move(domain);
+#else
+  TI_ERROR("Vulkan execution domains are unavailable");
+#endif
+}
+
+void Renderer::prepare_vulkan_display_sources(const std::vector<FieldInfo> &sources,
+                                               std::size_t capacity) {
+#ifdef TI_WITH_VULKAN
+  TI_ERROR_IF(!display_vulkan_execution_domain_, "Select a Vulkan display domain first");
+  validate_display_pool_replacement();
+  auto buffers = VulkanDisplayBuffer::create_pool(
+      app_context_, display_vulkan_execution_domain_, sources, capacity,
+      max_frames_in_flight() + 1);
+  std::vector<std::unique_ptr<SetImage>> prepared;
+  prepared.reserve(buffers.size());
+  for (const auto &buffer : buffers) {
+    auto image = std::make_unique<SetImage>(&app_context_, VboHelpers::all());
+    image->use_shared_image(buffer);
+    prepared.push_back(std::move(image));
+  }
+  // All allocation/recording completes before the old pool is replaced.
+  render_queue_.reserve(1);
+  renderables_.reserve(1);
+  install_display_pool(std::move(prepared), buffers.front()->width(),
+                        buffers.front()->height());
+  prepared_vulkan_display_ = std::dynamic_pointer_cast<VulkanDisplayBuffer>(buffers.front());
+#else
+  TI_ERROR("Vulkan execution domains are unavailable");
+#endif
+}
+
+bool Renderer::set_image_vulkan_on_domain(const SetImageInfo &info,
+                                          const RuntimeCompletion &producer) {
+#ifdef TI_WITH_VULKAN
+  TI_ERROR_IF(!display_vulkan_execution_domain_, "Select a Vulkan display domain first");
+  TI_ERROR_IF(pending_set_image_ || !render_queue_.empty(),
+              "Show or cancel the pending Vulkan display frame first");
+  auto prepared = prepared_vulkan_display_.lock();
+  TI_ERROR_IF(!prepared, "Call prepare_frame_sources before submitting Vulkan display");
+  auto source = prepared->source_lease(info.img);
+  prepared->validate_producer(producer);
+  // This probe must not pin a facade while the pool checks shared_ptr counts.
+  prepared.reset();
+  auto *image = get_set_image_renderable();
+  if (!image)
+    return false;
+  pending_set_image_ = image;
+  render_queue_.push_back(image);
+  try {
+    auto storage = image->shared_image();
+    TI_ERROR_IF(!storage, "Vulkan display pool lost its storage binding");
+    image->use_shared_image(storage);  // Prepared UBO/pipeline, before enqueue.
+    if (!storage->try_copy_image(info.img.dev_alloc.get_ptr(), producer, source)) {
+      cancel_display_frame();
+      return false;
+    }
+    return true;
+  } catch (...) {
+    cancel_display_frame();
+    throw;
+  }
+#else
+  TI_ERROR("Vulkan execution domains are unavailable");
+#endif
 }
 
 std::shared_ptr<DisplayCompletion> Renderer::track_display_frame(
     bool writable) {
+  TI_ERROR_IF(writable && display_vulkan_execution_domain_,
+              "Vulkan display storage is copy-only");
   TI_ERROR_IF(!pending_set_image_, "No pending display image");
   auto completion = std::make_shared<DisplayCompletion>();
   pending_set_image_->track_display(completion, writable);
@@ -215,6 +330,7 @@ bool Renderer::set_image_shared_cuda(const SetImageInfo &info) {
 bool Renderer::set_image_shared_cuda_on_domain(
     const SetImageInfo &info,
     const RuntimeCompletion &producer) {
+  require_general_display_path();
   TI_ERROR_IF(
       info.img.shape.size() != 2 || info.img.dtype != PrimitiveType::u32,
       "Shared packed display input must be a 2D u32 image");
@@ -266,7 +382,7 @@ bool Renderer::try_finish_display_write(const RuntimeCompletion &producer,
 }
 
 RuntimeCompletion Renderer::record_display_source_completion() {
-  if (display_execution_domain_) {
+  if (display_execution_domain_ || display_vulkan_execution_domain_) {
     TI_ERROR_IF(!pending_set_image_ || !pending_set_image_->shared_image(),
                 "No pending shared display image");
     return pending_set_image_->shared_image()->source_completion();
@@ -318,6 +434,7 @@ bool Renderer::repeat_display_frame() {
 }
 
 void Renderer::set_image(Texture *tex) {
+  require_general_display_path();
   retain_texture(tex);
   SetImage *s = pending_set_image_;
   if (!s) {
@@ -334,6 +451,7 @@ void Renderer::set_image_transpose(bool transpose) {
 }
 
 void Renderer::triangles(const TrianglesInfo &info) {
+  require_general_display_path();
   retain_renderable_info(info.renderable_info);
   Triangles *triangles =
       get_renderable_of_type<Triangles>(info.renderable_info.vbo_attrs);
@@ -342,6 +460,7 @@ void Renderer::triangles(const TrianglesInfo &info) {
 }
 
 void Renderer::lines(const LinesInfo &info) {
+  require_general_display_path();
   retain_renderable_info(info.renderable_info);
   Lines *lines = get_renderable_of_type<Lines>(info.renderable_info.vbo_attrs);
   lines->update_data(info);
@@ -349,6 +468,7 @@ void Renderer::lines(const LinesInfo &info) {
 }
 
 void Renderer::circles(const CirclesInfo &info) {
+  require_general_display_path();
   retain_renderable_info(info.renderable_info);
   Circles *circles =
       get_renderable_of_type<Circles>(info.renderable_info.vbo_attrs);
@@ -357,6 +477,7 @@ void Renderer::circles(const CirclesInfo &info) {
 }
 
 void Renderer::scene_lines(const SceneLinesInfo &info) {
+  require_general_display_path();
   retain_renderable_info(info.renderable_info);
   SceneLines *scene_lines =
       get_renderable_of_type<SceneLines>(info.renderable_info.vbo_attrs);
@@ -365,6 +486,7 @@ void Renderer::scene_lines(const SceneLinesInfo &info) {
 }
 
 void Renderer::mesh(const MeshInfo &info) {
+  require_general_display_path();
   retain_renderable_info(info.renderable_info);
   if (info.mesh_attribute_info.has_attribute) {
     retain_field_info(info.mesh_attribute_info.mesh_attribute);
@@ -375,6 +497,7 @@ void Renderer::mesh(const MeshInfo &info) {
 }
 
 void Renderer::particles(const ParticlesInfo &info) {
+  require_general_display_path();
   retain_renderable_info(info.renderable_info);
   Particles *particles =
       get_renderable_of_type<Particles>(info.renderable_info.vbo_attrs);
@@ -434,6 +557,7 @@ void Renderer::update_scene_data(SceneBase *scene) {
 }
 
 void Renderer::scene_v2(SceneBase *scene) {
+  require_general_display_path();
   if (scene->point_lights_.size() == 0) {
     TI_WARN("warning, there are no light sources in the scene.\n");
   }
@@ -453,6 +577,7 @@ void Renderer::scene_v2(SceneBase *scene) {
 }
 
 void Renderer::scene(SceneBase *scene) {
+  require_general_display_path();
   if (scene->point_lights_.size() == 0) {
     TI_WARN("warning, there are no light sources in the scene.\n");
   }
@@ -599,6 +724,13 @@ SetImage *Renderer::get_set_image_renderable(bool reuse_last_image) {
           const auto image = item->shared_image();
           if (!image || image == last_shared_display_image_)
             return false;
+#ifdef TI_WITH_VULKAN
+          if (display_vulkan_execution_domain_) {
+            auto *buffer = dynamic_cast<VulkanDisplayBuffer *>(image.get());
+            if (!buffer || !buffer->copy_ready())
+              return false;
+          }
+#endif
           // Idle repeat renderables may alias this storage. Every other
           // reference (in particular an in-flight Vulkan read) prevents a
           // write. Count only the bounded pool, then detach idle aliases below.
@@ -892,6 +1024,7 @@ bool Renderer::has_offscreen_targets() const noexcept {
 }
 
 void Renderer::set_offscreen_targets(Texture *color, Texture *depth) {
+  require_general_display_path();
   Program *program = app_context_.prog();
   TI_ERROR_IF(!program || app_context_.config.show_window ||
                   program->compile_config().arch != Arch::vulkan,
@@ -973,6 +1106,13 @@ bool Renderer::draw_offscreen_targets(GuiBase *gui_base) {
 }
 
 bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
+  if (display_vulkan_execution_domain_) {
+    TI_ERROR_IF(has_offscreen_targets() || render_queue_.size() != 1 ||
+                    !pending_set_image_ ||
+                    !pending_set_image_->has_pending_shared_cuda_vulkan_image() ||
+                    (gui_base && static_cast<Gui *>(gui_base)->has_widgets()),
+                "Selected Vulkan display requires one prepared image without GUI or geometry");
+  }
   TI_ERROR_IF(pending_set_image_ && pending_set_image_->display_write_open(),
               "Submit or cancel the current display write before rendering");
   last_frame_used_shared_cuda_vulkan_ = false;
@@ -1046,11 +1186,13 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
     render_complete_semaphore_ =
         stream->submit(cmd_list.get(), wait_semaphores);
   }
-  last_frame_used_shared_cuda_vulkan_ = use_shared_cuda_vulkan;
+  last_frame_used_shared_cuda_vulkan_ =
+      use_shared_cuda_vulkan && !display_vulkan_execution_domain_;
   if (pending_set_image_) {
     pending_set_image_->attach_display_completion(render_complete_semaphore_);
     last_shared_display_image_ =
-        use_shared_cuda_vulkan && pending_set_image_->tracks_display()
+        use_shared_cuda_vulkan &&
+                (pending_set_image_->tracks_display() || display_vulkan_execution_domain_)
             ? pending_set_image_->shared_image()
             : nullptr;
   }

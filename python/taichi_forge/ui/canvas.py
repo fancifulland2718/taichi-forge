@@ -47,26 +47,70 @@ class Canvas:
             raise RuntimeError("Display window is closed")
 
     def set_execution_domain(self, domain):
-        """Cold-bind CUDA display handoffs to an independent execution domain.
+        """Cold-bind display handoffs to an independent CUDA or Vulkan domain.
 
-        Use acquire_frame() with prepared producers, or a packed DisplayFrame.
+        CUDA supports acquire_frame() writers or packed DisplayFrame copies.
+        Vulkan supports retained packed copies prepared with prepare_frame_sources;
+        writable views, mixed geometry, GUI overlays and runtime render targets
+        are not supported on that path.
         Prepare all physical image bindings before starting the steady pipeline.
-        Resize/owner destruction retires dependent domains; rebind after that
-        cold boundary. A live display domain cannot be replaced.
+        Close the old domain and bind its replacement before changing
+        prepared storage. Destroying a Vulkan window retires its copy instance;
+        unrelated instances on that domain remain live. A live display domain
+        cannot be replaced.
         """
-        from taichi_forge_runtime.aot._domain import CudaExecutionDomain
+        from taichi_forge_runtime.aot._domain import CudaExecutionDomain, VulkanExecutionDomain
 
         self._check_display_owner()
-        if not isinstance(domain, CudaExecutionDomain):
-            raise TypeError("Expected a CUDA execution domain")
+        if not isinstance(domain, (CudaExecutionDomain, VulkanExecutionDomain)):
+            raise TypeError("Expected a CUDA or Vulkan execution domain")
         if self._display_write is not None:
             raise RuntimeError("Submit or cancel the current display write first")
         borrower = domain._runtime._borrower
         if borrower is None:
             raise ValueError("Canvas requires a domain borrowed from its JIT Program")
-        native = borrower.execution_domain(domain._native_handle())
-        self.canvas._set_display_execution_domain(native)
+        if isinstance(domain, VulkanExecutionDomain):
+            native = borrower.vulkan_execution_domain(domain._native_handle())
+            self.canvas._set_display_vulkan_execution_domain(native)
+        else:
+            native = borrower.execution_domain(domain._native_handle())
+            self.canvas._set_display_execution_domain(native)
         self._execution_domain = domain
+
+    def _vulkan_display_selected(self):
+        return self._execution_domain is not None and self._execution_domain.backend == "vulkan"
+
+    def _require_general_display_path(self):
+        if self._vulkan_display_selected():
+            raise ValueError("Selected Vulkan display supports prepared packed copies only")
+
+    def prepare_frame_sources(self, frames, *, capacity=3):
+        """Cold-prepare retained Vulkan packed sources and a private display pool.
+
+        Frames must contain same-Program compact 2D u32 Ndarrays of one shape.
+        The caller chooses the pool capacity (at least two for last-frame
+        pinning). All source/slot copy commands are recorded here; submit never
+        adds sources or buffers. This returns no writable views. Close the old
+        domain and bind its replacement before reconfiguring a prepared pool.
+
+        Every submit needs the exact producer source_completion. With
+        track_source=True, frame.source_completion covers the accepted copy;
+        poll done() before reusing that source for another producer write.
+        """
+        self._check_display_owner()
+        if not self._vulkan_display_selected():
+            raise ValueError("prepare_frame_sources requires a selected Vulkan domain")
+        if self._display_write is not None:
+            raise RuntimeError("Submit or cancel the current display write first")
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 2:
+            raise ValueError("Display copy capacity must be an integer of at least two")
+        frames = tuple(frames)
+        if not frames or any(not isinstance(frame, DisplayFrame) or
+                             frame.kind != DisplayFrame.PACKED_U32 for frame in frames):
+            raise TypeError("prepare_frame_sources expects packed DisplayFrames")
+        self.canvas._prepare_vulkan_display_sources(
+            [frame.field_info for frame in frames], capacity
+        )
 
     def _native_source_completion(self, completion):
         if completion is None:
@@ -86,6 +130,7 @@ class Canvas:
         pool. To resize, close the old domain, bind its replacement and prepare
         new storage. Reconfiguration retires the previous Vulkan consumers.
         """
+        self._require_general_display_path()
         self._check_display_owner()
         if self._execution_domain is None:
             raise ValueError("Select an execution domain before preparing display storage")
@@ -102,6 +147,7 @@ class Canvas:
         Requires CUDA compute and GGUI Vulkan external sharing. No staging
         fallback is used. Submit/cancel before another image or Window.show().
         """
+        self._require_general_display_path()
         self._check_display_owner()
         if self._display_write is not None:
             raise RuntimeError("Submit or cancel the current display write first")
@@ -317,6 +363,12 @@ class Canvas:
         this parameter is a device dependency and ``frame.source_completion``
         covers the accepted copy. Busy leaves a writable frame unsealed.
         """
+        if self._vulkan_display_selected():
+            self._check_display_owner()
+            if isinstance(frame, WritableDisplayFrame):
+                raise ValueError("Vulkan display storage is copy-only")
+            if source_completion is None:
+                raise ValueError("Vulkan display copy requires source_completion")
         producer = self._native_source_completion(source_completion)
         if track_completion:
             self._check_display_owner()
@@ -346,7 +398,7 @@ class Canvas:
         if not isinstance(frame, DisplayFrame):
             raise TypeError("submit_frame expects a DisplayFrame")
         if self._execution_domain is not None and frame.kind != DisplayFrame.PACKED_U32:
-            raise ValueError("Selected display domains require packed CUDA image storage")
+            raise ValueError("Selected display domains require packed u32 image storage")
         default_transpose = frame.kind != DisplayFrame.TEXTURE
         set_transpose = None
         if frame.kind != DisplayFrame.HOST_RGBA8 and frame.transpose != default_transpose:
@@ -366,7 +418,9 @@ class Canvas:
             )
         elif frame.kind == DisplayFrame.PACKED_U32:
             if self._execution_domain is not None:
-                if not self.canvas._set_image_shared_cuda_on_domain(frame.field_info, producer):
+                submit = (self.canvas._set_image_vulkan_on_domain if self._vulkan_display_selected()
+                          else self.canvas._set_image_shared_cuda_on_domain)
+                if not submit(frame.field_info, producer):
                     self.window.record_display_frame_dropped()
                     return None if track_completion else False
                 if track_source:
@@ -407,6 +461,7 @@ class Canvas:
             normalize (bool, Optional): Display the normalized scalar field if set to True.
             Default is False.
         """
+        self._require_general_display_path()
         try:
             import numpy as np  # pylint: disable=import-outside-toplevel
             from matplotlib import cm  # pylint: disable=import-outside-toplevel
@@ -448,6 +503,7 @@ class Canvas:
             per_vertex_color (Tuple[float]): a taichi 3D vector field, \
                 where each element indicate the RGB color of a vertex.
         """
+        self._require_general_display_path()
         vbo = get_vbo_field_v2(vertices)
         has_per_vertex_color = per_vertex_color is not None
         copy_all_to_vbo(vbo, vertices, 0, 0, per_vertex_color if has_per_vertex_color else 0)
@@ -480,6 +536,7 @@ class Canvas:
             per_vertex_color (tuple[float]): a taichi 3D vector field, where \
                 each element indicate the RGB color of a vertex.
         """
+        self._require_general_display_path()
         vbo = get_vbo_field_v2(vertices)
         has_per_vertex_color = per_vertex_color is not None
         copy_all_to_vbo(vbo, vertices, 0, 0, per_vertex_color if has_per_vertex_color else 0)
@@ -504,6 +561,7 @@ class Canvas:
             per_vertex_radius: a taichi float field, where \
                 each element indicates the radius of a circle.
         """
+        self._require_general_display_path()
         vbo = get_vbo_field_v2(centers)
         has_per_vertex_color = per_vertex_color is not None
         has_per_vertex_radius = per_vertex_radius is not None
@@ -590,6 +648,7 @@ class Canvas:
         Args:
             scene (:class:`~taichi_forge.ui.Scene`): an instance of :class:`~taichi_forge.ui.Scene`.
         """
+        self._require_general_display_path()
         # FIXME: (penguinliong) Add a point light to ensure the allocation of light source SSBO.
         scene.point_light((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
         if isinstance(scene, SceneV2):

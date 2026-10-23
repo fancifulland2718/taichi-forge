@@ -21,6 +21,8 @@
 #endif
 #ifdef TI_WITH_VULKAN
 #include "taichi_vulkan_impl.h"
+#include "vulkan_execution_domain.h"
+#include "taichi/runtime/vulkan_execution_domain.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #endif
 
@@ -294,6 +296,25 @@ std::shared_ptr<cuda::ExecutionDomain> AotRuntimeClient::execution_domain(
   return domain;
 #else
   throw std::runtime_error("CUDA execution domains are unavailable");
+#endif
+}
+
+std::shared_ptr<vulkan::ExecutionDomain>
+AotRuntimeClient::vulkan_execution_domain(std::uintptr_t handle) {
+#ifdef TI_WITH_VULKAN
+  auto &state = *state_;
+  std::lock_guard<std::recursive_mutex> lock(state.mutex);
+  if (state.closed || !state.runtime || state.arch != Arch::vulkan)
+    throw std::runtime_error("Canvas domain requires a live Vulkan borrower");
+  auto domain = capi::get_execution_domain(
+      reinterpret_cast<TiVulkanExecutionDomain>(handle));
+  if (!domain->belongs_to(state.runtime->runtime_fault_domain()) ||
+      !domain->snapshot().accepting)
+    throw std::invalid_argument(
+        "Canvas domain belongs to another or closed runtime");
+  return domain;
+#else
+  throw std::runtime_error("Vulkan execution domains are unavailable");
 #endif
 }
 

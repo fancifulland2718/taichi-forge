@@ -44,6 +44,19 @@ bool Canvas::set_image_shared_cuda_on_domain(
   return renderer_->set_image_shared_cuda_on_domain(info, producer);
 }
 
+void Canvas::set_display_vulkan_execution_domain(
+    std::shared_ptr<taichi::lang::vulkan::ExecutionDomain> domain) {
+  renderer_->set_display_vulkan_execution_domain(std::move(domain));
+}
+void Canvas::prepare_vulkan_display_sources(const std::vector<FieldInfo> &sources,
+                                             std::size_t capacity) {
+  renderer_->prepare_vulkan_display_sources(sources, capacity);
+}
+bool Canvas::set_image_vulkan_on_domain(const SetImageInfo &info,
+                                        const RuntimeCompletion &producer) {
+  return renderer_->set_image_vulkan_on_domain(info, producer);
+}
+
 std::shared_ptr<DisplayCompletion> Canvas::track_display_frame(bool writable) {
   return renderer_->track_display_frame(writable);
 }

@@ -40,12 +40,17 @@
 #endif
 
 namespace taichi::lang {
+namespace vulkan {
+class ExecutionDomain;
+}
 class Program;
 }  // namespace taichi::lang
 
 namespace taichi::ui {
 
 namespace vulkan {
+
+class VulkanDisplayBuffer;
 
 class TI_DLL_EXPORT Renderer {
  public:
@@ -75,6 +80,14 @@ class TI_DLL_EXPORT Renderer {
 
   void set_image_transpose(bool transpose);
   bool set_image_shared_cuda(const SetImageInfo &info);
+  void set_display_vulkan_execution_domain(
+      std::shared_ptr<taichi::lang::vulkan::ExecutionDomain> domain);
+  void prepare_vulkan_display_sources(const std::vector<FieldInfo> &sources,
+                                      std::size_t capacity);
+  bool set_image_vulkan_on_domain(
+      const SetImageInfo &info,
+      const taichi::lang::RuntimeCompletion &producer);
+
   void set_display_execution_domain(
       std::shared_ptr<taichi::lang::cuda::ExecutionDomain> domain);
   bool set_image_shared_cuda_on_domain(
@@ -144,6 +157,10 @@ class TI_DLL_EXPORT Renderer {
     taichi::lang::DeviceAllocationUnique scene_lights;
   };
 
+  void validate_display_pool_replacement() const;
+  void install_display_pool(std::vector<std::unique_ptr<SetImage>> prepared,
+                            int width, int height);
+  void require_general_display_path() const;
   void resize_lights_ssbo(int new_ssbo_size);
   void update_scene_data(SceneBase *scene);
   void init_scene_ubo();
@@ -180,6 +197,9 @@ class TI_DLL_EXPORT Renderer {
   std::shared_ptr<DisplayStorage> last_shared_display_image_;
   std::shared_ptr<taichi::lang::cuda::ExecutionDomain>
       display_execution_domain_;
+  std::shared_ptr<taichi::lang::vulkan::ExecutionDomain>
+      display_vulkan_execution_domain_;
+  std::weak_ptr<VulkanDisplayBuffer> prepared_vulkan_display_;
   int prepared_display_width_{0};
   int prepared_display_height_{0};
   bool last_frame_used_shared_cuda_vulkan_{false};
