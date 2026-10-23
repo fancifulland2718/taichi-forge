@@ -599,6 +599,17 @@ class TI_DLL_EXPORT GfxRuntime {
       const std::shared_ptr<FixedGraphWorkspace> &workspace,
       std::vector<std::shared_ptr<void>> owners,
       std::vector<int> snode_tree_ids = {});
+  // The same selected controller, recorded into a caller-owned primary list.
+  // Exactly one control description must be present. No registration or submit
+  // touches the default queue; workspace and payload belong to the caller.
+  std::shared_ptr<GraphReplayExecutable::Slot> prepare_fixed_control_commands(
+      const std::vector<GraphDispatch> &dispatches,
+      const GraphStructuredControl *control,
+      const GraphNestedStructuredControl *nested_control,
+      std::unique_ptr<CommandList> commands,
+      const std::shared_ptr<FixedGraphWorkspace> &workspace,
+      std::vector<std::shared_ptr<void>> owners,
+      std::vector<int> snode_tree_ids = {});
   // Record the existing GPU-controlled strategy without executing it. Contexts
   // are cold-only; owners retain code and external storage through retirement.
   std::unique_ptr<GraphReplayRegistration> prepare_fixed_structured_graph(
@@ -818,6 +829,9 @@ class TI_DLL_EXPORT GfxRuntime {
   void prepare_fixed_sparse_resources(
       FixedSparseReplayResources &resources,
       std::vector<std::shared_ptr<void>> &owners);
+  void prepare_detached_kernel_workspace(
+      const CompiledTaichiKernel &kernel,
+      const std::shared_ptr<FixedGraphWorkspace> &workspace);
   void attach_fixed_sparse_resources(GraphReplayState &state,
                                      FixedSparseReplayResources resources);
   std::unique_ptr<GraphReplayRegistration> prepare_fixed_control_graph(
@@ -834,7 +848,10 @@ class TI_DLL_EXPORT GfxRuntime {
                          const GraphNestedStructuredControl *nested_control,
                          GraphNestedStructuredResult *nested_result,
                          bool prepare_only,
-                         DeviceAllocation *fixed_listgen = nullptr);
+                         DeviceAllocation *fixed_listgen = nullptr,
+                         GraphReplayState *detached_state = nullptr,
+                         std::unique_ptr<CommandList> commands = {},
+                         const std::shared_ptr<FixedGraphWorkspace> &workspace = {});
 
   struct HashOverflowWatch {
     int root_id{-1};

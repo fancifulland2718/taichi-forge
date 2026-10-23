@@ -375,6 +375,140 @@ TEST(VulkanControlDescriptors, ScalarViewsRespectStorageAlignment) {
   }
 }
 
+TEST(VulkanFixedCommands, StructuredControlOwnsQueueAndTemporaryStorage) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  const auto *folder = std::getenv("TAICHI_AOT_FOLDER_PATH");
+  ASSERT_NE(folder, nullptr);
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  gfx::GfxRuntime::Params params;
+  params.device = &device;
+  gfx::GfxRuntime runtime(params);
+  runtime.add_root_buffer(4);
+  runtime.add_root_buffer(4);
+  gfx::AotModuleParams module_params;
+  module_params.module_path = folder;
+  module_params.runtime = &runtime;
+  std::shared_ptr<aot::Module> module = aot::Module::load(Arch::vulkan, module_params);
+  ASSERT_TRUE(module);
+  auto *condition = dynamic_cast<gfx::KernelImpl *>(module->get_kernel("condition"));
+  auto *advance = dynamic_cast<gfx::KernelImpl *>(module->get_kernel("advance"));
+  auto *adjoint = dynamic_cast<gfx::KernelImpl *>(module->get_kernel("adjoint"));
+  ASSERT_TRUE(condition && advance && adjoint);
+  using Queue = vulkan::VulkanExecutionQueue;
+  Queue left(device, 1), right(device, 1);
+  using Strategy = gfx::GfxRuntime::GraphStructuredStrategy;
+  for (auto strategy : {Strategy::compact, Strategy::conditional}) {
+    if (strategy == Strategy::conditional && !device.supports_conditional_commands())
+      continue;
+    for (uint32_t budget : {0u, 3u}) {
+      struct Frame {
+        std::shared_ptr<DeviceAllocationGuard> state, count;
+        std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> workspace;
+        std::shared_ptr<gfx::GfxRuntime::GraphReplayExecutable::Slot> loop, finish;
+        std::shared_ptr<const Queue::Commands> first, replay;
+      };
+      std::array<Frame, 2> frames;
+      for (int lane = 0; lane < 2; ++lane) {
+        auto &frame = frames[lane];
+        auto &queue = lane == 0 ? left : right;
+        auto [state, status] = device.allocate_memory_unique(
+            {7 * sizeof(int), true, true, false, AllocUsage::Storage});
+        ASSERT_EQ(status, RhiResult::success);
+        frame.state = std::move(state);
+        auto [count, count_status] = device.allocate_memory_unique(
+            {4, false, true, false, AllocUsage::Storage});
+        ASSERT_EQ(count_status, RhiResult::success);
+        frame.count = std::move(count);
+        frame.workspace = runtime.create_fixed_graph_workspace();
+        Ndarray array(*frame.state, PrimitiveType::i32, {7});
+        LaunchContextBuilder cond(condition), body(advance), grad(adjoint);
+        for (auto *context : {&cond, &body, &grad})
+          context->set_arg_ndarray({0}, array);
+        CallableBase callable;
+        LaunchContextBuilder temporary(&callable);
+        const auto counter = temporary_counter(runtime, lane);
+        const std::vector<gfx::GfxRuntime::GraphDispatch> dispatches{
+            {condition->handle(), &cond}, {counter, &temporary},
+            {advance->handle(), &body}, {condition->handle(), &cond}};
+        gfx::GfxRuntime::GraphStructuredControl control;
+        control.predicate = frame.state->get_ptr();
+        control.counter = frame.state->get_ptr(4);
+        control.status = frame.state->get_ptr(8);
+        control.has_status = true;
+        control.initial_dispatch_count = 1;
+        control.max_iterations = budget;
+        control.strategy = budget ? strategy : Strategy::compact;
+        const auto before = device.queue_submission_snapshot().queue_submit_calls;
+        auto invalid = control;
+        invalid.initial_dispatch_count = dispatches.size();
+        EXPECT_ANY_THROW(runtime.prepare_fixed_control_commands(
+            dispatches, &invalid, nullptr, queue.new_command_list(),
+            frame.workspace, {module, frame.state}, {lane}));
+        frame.loop = runtime.prepare_fixed_control_commands(
+            dispatches, &control, nullptr, queue.new_command_list(),
+            frame.workspace, {module, frame.state}, {lane});
+        frame.finish = runtime.prepare_fixed_commands(
+            {{{adjoint->handle(), &grad}, {}}}, queue.new_command_list(),
+            frame.workspace, {module, frame.state});
+        auto initialize = queue.new_command_list();
+        frame.workspace->record_initialization(*initialize);
+        auto copy = queue.new_command_list();
+        copy->memory_barrier();
+        copy->buffer_copy(frame.count->get_ptr(), runtime.get_root_buffer(lane)->get_ptr(), 4);
+        copy->memory_barrier();
+        // Initialize observable output when a zero-trip loop never writes it.
+        initialize->buffer_fill(runtime.get_root_buffer(lane)->get_ptr(), 4, 0);
+        initialize->memory_barrier();
+        frame.first = queue.prepare({initialize.get(), frame.loop->cmdlist.get(),
+                                     frame.finish->cmdlist.get(), copy.get()});
+        frame.replay = queue.prepare({frame.loop->cmdlist.get(), frame.finish->cmdlist.get(), copy.get()});
+        EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before);
+      }
+      runtime.synchronize();
+      std::array<int, 2> cumulative{};
+      {
+        TimelineGate default_gate(device, 0);
+        bool first = true;
+        for (int target : {0, 2, 7, 0}) {
+          for (int lane = 0; lane < 2; ++lane) {
+            auto &frame = frames[lane];
+            auto &queue = lane == 0 ? left : right;
+            const int initial = lane + 3;
+            const std::array<int, 7> values{0, 0, 0, initial, target, 0, 0};
+            void *mapped = nullptr;
+            ASSERT_EQ(device.map(*frame.state, &mapped), RhiResult::success);
+            std::memcpy(mapped, values.data(), sizeof(values));
+            device.unmap(*frame.state);
+            const auto before = device.queue_submission_snapshot().queue_submit_calls;
+            auto point = queue.submit(first ? frame.first : frame.replay);
+            ASSERT_TRUE(ready_before_deadline(point));
+            EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before + 1);
+            const int rounds = std::min(target, static_cast<int>(budget));
+            cumulative[lane] += rounds;
+            ASSERT_EQ(device.map(*frame.state, &mapped), RhiResult::success);
+            std::array<int, 7> observed{};
+            std::memcpy(observed.data(), mapped, sizeof(observed));
+            device.unmap(*frame.state);
+            EXPECT_EQ(observed, (std::array<int, 7>{target > rounds, rounds,
+                target > rounds ? 1 : 2, initial << rounds, target, rounds + 1,
+                2 * initial * (1 << (2 * rounds))}));
+            ASSERT_EQ(device.map(*frame.count, &mapped), RhiResult::success);
+            EXPECT_EQ(*static_cast<const int *>(mapped), cumulative[lane]);
+            device.unmap(*frame.count);
+          }
+          first = false;
+        }
+      }
+    }
+  }
+  left.close();
+  right.close();
+}
+
 namespace {
 struct FixedOperands final : RuntimeCompletionResources {
   std::vector<std::shared_ptr<DeviceAllocationGuard>> allocations;

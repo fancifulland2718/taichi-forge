@@ -3112,6 +3112,38 @@ GfxRuntime::prepare_fixed_commands(
   return payload;
 }
 
+void GfxRuntime::prepare_detached_kernel_workspace(
+    const CompiledTaichiKernel &kernel,
+    const std::shared_ptr<FixedGraphWorkspace> &workspace) {
+  TI_ERROR_IF(!workspace || workspace->device_ != device_,
+              "Detached Graph requires same-device workspace");
+  bool uses_global_tmps = false;
+  const auto &tasks = kernel.ti_kernel_attribs().tasks_attribs;
+  for (std::size_t i = 0; i < tasks.size(); ++i) {
+    TI_ERROR_IF(!tasks[i].texture_binds.empty() ||
+                    !tasks[i].acceleration_structure_binds.empty() ||
+                    tasks[i].may_mutate_sparse_topology,
+                "Detached Graph requires buffer-only kernels without sparse mutation");
+    for (const auto &bind : kernel.buffer_binding_plan(i)) {
+      using BufferType = spirv::TaskAttributes::BufferType;
+      uses_global_tmps |= bind.buffer.type == BufferType::GlobalTmps;
+      TI_ERROR_IF(bind.buffer.type == BufferType::ListGen ||
+                      bind.buffer.type == BufferType::HashOverflow ||
+                      bind.buffer.type == BufferType::NodeAllocatorPool,
+                  "Detached Graph cannot borrow shared sparse runtime state");
+    }
+  }
+  if (uses_global_tmps && !workspace->global_tmps_) {
+    TI_ERROR_IF(workspace->initialization_recorded_,
+                "Fixed Graph workspace was sealed before temporary storage preparation");
+    auto [buffer, result] = device_->allocate_memory_unique(
+        {kGtmpBufferSize, false, false, false, AllocUsage::Storage});
+    TI_ERROR_IF(result != RhiResult::success,
+                "Fixed Graph private temporary allocation failed");
+    workspace->global_tmps_ = std::move(buffer);
+  }
+}
+
 GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
     const std::vector<GraphRecordingOperation> &operations,
     std::vector<std::shared_ptr<void>> owners,
@@ -3173,7 +3205,6 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                                      operation.ray_resources.end());
   }
   std::vector<GraphReplayExecutable::PreparedDispatch> prepared;
-  bool uses_global_tmps = false;
   FixedSparseReplayResources sparse;
   using ImageBinding = std::pair<DeviceAllocation, ImageLayout>;
   std::vector<ImageBinding> entry_images;
@@ -3187,6 +3218,8 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
     TI_ERROR_IF(!dispatch.host_ctx || found == ti_kernels_.end(),
                 "Prepared Vulkan Graph requires fixed kernel dispatches");
     auto *kernel = found->second.get();
+    if (detached)
+      prepare_detached_kernel_workspace(*kernel, workspace);
     if (kernel->get_ret_buffer_size()) {
       const auto &result = dispatch.host_ctx->prepared_result;
       TI_ERROR_IF(!result || &result->device() != device_ ||
@@ -3220,19 +3253,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                 "Prepared Vulkan indirect dispatch requires one task and an "
                 "aligned device packet");
     for (std::size_t i = 0; i < tasks.size(); ++i) {
-      TI_ERROR_IF(detached &&
-                      (!tasks[i].texture_binds.empty() ||
-                       !tasks[i].acceleration_structure_binds.empty() ||
-                       tasks[i].may_mutate_sparse_topology),
-                  "Detached Graph requires buffer-only kernels without sparse mutation");
       for (const auto &bind : kernel->buffer_binding_plan(i)) {
-        using BufferType = spirv::TaskAttributes::BufferType;
-        uses_global_tmps |= bind.buffer.type == BufferType::GlobalTmps;
-        TI_ERROR_IF(detached &&
-                        (bind.buffer.type == BufferType::ListGen ||
-                         bind.buffer.type == BufferType::HashOverflow ||
-                         bind.buffer.type == BufferType::NodeAllocatorPool),
-                    "Detached Graph cannot borrow shared sparse runtime state");
         TI_ERROR_IF(
             bind.kind == CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray,
             "Unsupported prepared Vulkan Graph resource binding");
@@ -3246,15 +3267,6 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
     TI_ERROR_IF(sparse.uses_listgen || sparse.unknown_mutation ||
                     !sparse.mutated_trees.empty(),
                 "Detached Graph cannot borrow shared sparse runtime state");
-    if (uses_global_tmps && !workspace->global_tmps_) {
-      TI_ERROR_IF(workspace->initialization_recorded_,
-                  "Fixed Graph workspace was sealed before temporary storage preparation");
-      auto [buffer, result] = device_->allocate_memory_unique(
-          {kGtmpBufferSize, false, false, false, AllocUsage::Storage});
-      TI_ERROR_IF(result != RhiResult::success,
-                  "Fixed Graph private temporary allocation failed");
-      workspace->global_tmps_ = std::move(buffer);
-    }
     slot.retained_owners.push_back(workspace);
   }
   prepare_fixed_sparse_resources(sparse, slot.retained_owners);
@@ -3758,6 +3770,50 @@ GfxRuntime::prepare_fixed_control_graph(
   return registration;
 }
 
+std::shared_ptr<GfxRuntime::GraphReplayExecutable::Slot>
+GfxRuntime::prepare_fixed_control_commands(
+    const std::vector<GraphDispatch> &dispatches,
+    const GraphStructuredControl *control,
+    const GraphNestedStructuredControl *nested_control,
+    std::unique_ptr<CommandList> commands,
+    const std::shared_ptr<FixedGraphWorkspace> &workspace,
+    std::vector<std::shared_ptr<void>> owners,
+    std::vector<int> snode_tree_ids) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ERROR_IF(!commands || !workspace || workspace->device_ != device_ ||
+                  bool(control) == bool(nested_control),
+              "Detached control requires owned commands, workspace and one recipe");
+  std::unordered_set<const NativeKernelResultStorage *> results;
+  for (const auto &dispatch : dispatches) {
+    const auto found = ti_kernels_.find(dispatch.handle.get_launch_id());
+    TI_ERROR_IF(found == ti_kernels_.end(),
+                "Detached control requires registered kernels");
+    prepare_detached_kernel_workspace(*found->second, workspace);
+    if (dispatch.host_ctx && dispatch.host_ctx->prepared_result &&
+        results.insert(dispatch.host_ctx->prepared_result.get()).second)
+      owners.push_back(dispatch.host_ctx->prepared_result);
+  }
+  for (const int tree_id : snode_tree_ids) {
+    TI_ERROR_IF(tree_id < 0 ||
+                    static_cast<std::size_t>(tree_id) >= root_buffers_.size() ||
+                    !root_buffers_[tree_id],
+                "Detached control SNodeTree root {} is unavailable", tree_id);
+    owners.push_back(root_buffers_[tree_id]);
+  }
+  GraphReplayState state;
+  TI_ERROR_IF(!launch_graph_impl(dispatches, 0, nullptr, control, nullptr,
+                                 nested_control, nullptr, true, nullptr, &state,
+                                 std::move(commands), workspace),
+              "Detached control cannot record the selected strategy");
+  TI_ASSERT(state.executable.slots.size() == 1);
+  auto payload = std::make_shared<GraphReplayExecutable::Slot>(
+      std::move(state.executable.slots.front()));
+  TI_ASSERT(payload->recorded && payload->cmdlist && !payload->completion);
+  payload->retained_owners = std::move(owners);
+  payload->retained_owners.push_back(workspace);
+  return payload;
+}
+
 void GfxRuntime::launch_prepared_graph(std::uint64_t replay_key) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   // Fixed argument images, commands and owners: no signature building,
@@ -3826,14 +3882,21 @@ bool GfxRuntime::launch_graph_impl(
     const GraphNestedStructuredControl *nested_control,
     GraphNestedStructuredResult *nested_result,
     bool prepare_only,
-    DeviceAllocation *fixed_listgen) {
+    DeviceAllocation *fixed_listgen,
+    GraphReplayState *detached_state,
+    std::unique_ptr<CommandList> commands,
+    const std::shared_ptr<FixedGraphWorkspace> &workspace) {
   TI_ASSERT(!prepare_only ||
             ((bool(structured_control) != bool(nested_control)) &&
              !structured_result && !nested_result));
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  collect_ready_graph_replays(kGraphReplayRetirementPollBudget);
-  TI_ASSERT(replay_key != 0);
-  GraphReplayState &state = graph_replay_states_[replay_key];
+  const bool detached = detached_state != nullptr;
+  TI_ASSERT(!detached || (prepare_only && commands && workspace));
+  if (!detached)
+    collect_ready_graph_replays(kGraphReplayRetirementPollBudget);
+  TI_ASSERT(detached || replay_key != 0);
+  GraphReplayState &state = detached ? *detached_state
+                                    : graph_replay_states_[replay_key];
   TI_ASSERT(!state.retirement_requested);
   TI_ERROR_IF(state.fixed_submit,
               "Prepared Vulkan Graph arguments and commands are immutable");
@@ -3919,6 +3982,8 @@ bool GfxRuntime::launch_graph_impl(
   };
 
   executable.bind_device(device_);
+  if (detached)
+    executable.slots.resize(1);
   if (structured_control != nullptr) {
     const auto valid_scalar = [&](DevicePtr ptr) {
       return ptr.device == device_ && ptr.alloc_id != 0 &&
@@ -4132,7 +4197,8 @@ bool GfxRuntime::launch_graph_impl(
       DeviceAllocation packet_allocation{
           dispatch.indirect_dispatch.device,
           dispatch.indirect_dispatch.alloc_id};
-      ndarrays_in_use_.insert(packet_allocation.alloc_id);
+      if (!detached)
+        ndarrays_in_use_.insert(packet_allocation.alloc_id);
       key.push_back(0xD000u);
       push_graph_allocation_key(
           key, packet_allocation,
@@ -4170,7 +4236,8 @@ bool GfxRuntime::launch_graph_impl(
       if (alloc_type == LaunchContextBuilder::DevAllocType::kDenseStorage) {
         const auto &binding =
             dispatch.host_ctx->get_resolved_dense_storage(array_arg.indices);
-        ndarrays_in_use_.insert(binding.allocation.alloc_id);
+        if (!detached)
+          ndarrays_in_use_.insert(binding.allocation.alloc_id);
         key.push_back(0xA004u);
         structure_key.push_back(0xA004u);
         push_graph_allocation_key(key, binding.allocation,
@@ -4181,7 +4248,8 @@ bool GfxRuntime::launch_graph_impl(
         if (const auto *gradient =
                 dispatch.host_ctx->get_resolved_dense_storage_gradient(
                     array_arg.indices)) {
-          ndarrays_in_use_.insert(gradient->allocation.alloc_id);
+          if (!detached)
+            ndarrays_in_use_.insert(gradient->allocation.alloc_id);
           key.push_back(0xA004u);
           structure_key.push_back(0xA004u);
           push_graph_allocation_key(key, gradient->allocation,
@@ -4216,7 +4284,8 @@ bool GfxRuntime::launch_graph_impl(
         }
         DeviceAllocation devalloc =
             *static_cast<DeviceAllocation *>(data_it->second);
-        ndarrays_in_use_.insert(devalloc.alloc_id);
+        if (!detached)
+          ndarrays_in_use_.insert(devalloc.alloc_id);
         key.push_back(0xA001u);
         structure_key.push_back(0xA001u);
         push_graph_allocation_key(key, devalloc);
@@ -4245,7 +4314,8 @@ bool GfxRuntime::launch_graph_impl(
           }
           DeviceAllocation grad_alloc =
               *static_cast<DeviceAllocation *>(grad_it->second);
-          ndarrays_in_use_.insert(grad_alloc.alloc_id);
+          if (!detached)
+            ndarrays_in_use_.insert(grad_alloc.alloc_id);
           key.push_back(0xA002u);
           structure_key.push_back(0xA002u);
           push_graph_allocation_key(key, grad_alloc);
@@ -4535,8 +4605,9 @@ bool GfxRuntime::launch_graph_impl(
   // fixed slot ring is busy. Indirect dispatch cannot: its device-written
   // packet is consumed by the recorded command, so applying bounded
   // backpressure is the only semantics-preserving fixed-memory path.
-  GfxRuntime::GraphReplayExecutable::Slot *slot =
-      executable.acquire_ready_slot(
+  GfxRuntime::GraphReplayExecutable::Slot *slot = detached
+      ? &executable.slots.front()
+      : executable.acquire_ready_slot(
           key, structure_key,
           has_indirect_dispatch ||
           (structured_control != nullptr && structured_result == nullptr) ||
@@ -4597,7 +4668,8 @@ bool GfxRuntime::launch_graph_impl(
                                   ShaderResourceSet *bindings,
                                   bool patch_existing) {
     return bind_graph_task(pd, task_index, bindings, patch_existing,
-                           fixed_listgen);
+                           fixed_listgen,
+                           workspace ? workspace->global_tmps_.get() : nullptr);
   };
 
   auto patch_all_task_bindings = [&]() {
@@ -5372,10 +5444,14 @@ bool GfxRuntime::launch_graph_impl(
     return finish_structured_submission();
   }
 
-  auto [recorded_cmdlist, cmd_res] =
-      device_->get_compute_stream()->new_command_list_unique();
-  TI_ASSERT_INFO(cmd_res == RhiResult::success,
-                 "Failed to allocate Vulkan graph command list");
+  auto recorded_cmdlist = std::move(commands);
+  if (!recorded_cmdlist) {
+    auto [created, cmd_res] =
+        device_->get_compute_stream()->new_command_list_unique();
+    TI_ASSERT_INFO(cmd_res == RhiResult::success,
+                   "Failed to allocate Vulkan graph command list");
+    recorded_cmdlist = std::move(created);
+  }
   auto *cmdlist = recorded_cmdlist.get();
 
   if (structured_control != nullptr || nested_control != nullptr) {
@@ -5450,7 +5526,9 @@ bool GfxRuntime::launch_graph_impl(
             allocation = pd.any_arrays->at(bind.buffer.root_id);
           } else {
             DeviceAllocation *resolved =
-                bind.buffer.type == BufferType::ListGen && fixed_listgen
+                bind.buffer.type == BufferType::GlobalTmps && workspace
+                    ? workspace->global_tmps_.get()
+                : bind.buffer.type == BufferType::ListGen && fixed_listgen
                     ? fixed_listgen
                     : pd.kernel->get_buffer_bind(bind.buffer);
             if (resolved != nullptr) {
