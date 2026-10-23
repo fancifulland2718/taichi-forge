@@ -255,30 +255,6 @@ ti_prepare_execution_plan_on_domain_ext(TiRuntime runtime,
                                         const TiNamedArgument *args,
                                         uint32_t binding_count,
                                         const TiNamedNdArrayBinding *bindings);
-// True publishes an owned exact completion. False with no error means full
-// or an optional external ready gate is not ready;
-// no work/dependency wait is queued and *completion is null. All dependencies
-// must belong to the same runtime generation. Does not implicitly initialize.
-// Releasing a domain-bound prepared handle retains its finite recording and
-// dependency closure until domain close; explicit module/memory destruction is
-// a cold boundary and closes each affected domain before freeing storage.
-TI_DLL_EXPORT TiBool TI_API_CALL
-ti_try_submit_prepared_ext(TiRuntime runtime,
-                           TiPreparedExecution execution,
-                           uint32_t dependency_count,
-                           const TiCompletion *dependencies,
-                           TiCompletion *completion);
-
-// Ready-only variant: additionally returns false/no error if any validated
-// completion dependency is still pending. It does not wait or enqueue partial
-// dependencies. Completed dependencies retain the ordinary ownership checks.
-TI_DLL_EXPORT TiBool TI_API_CALL
-ti_try_submit_prepared_ready_ext(TiRuntime runtime,
-                                 TiPreparedExecution execution,
-                                 uint32_t dependency_count,
-                                 const TiCompletion *dependencies,
-                                 TiCompletion *completion);
-
 // Cold declaration of replay-only u64 scalar parameters in positional order.
 // Each independent instance owns preallocated pinned/device argument storage.
 // A parameterized instance accepts one in-flight submission; prepare separate
@@ -296,30 +272,6 @@ ti_prepare_execution_plan_parameters_on_domain_ext(
     const TiNamedNdArrayBinding *bindings,
     uint32_t parameter_count,
     const char *const *parameter_names);
-
-// Values are copied before return; all declared parameters must be supplied.
-// Busy consumes no sequence, device upload, dependency or external signal.
-// Accepted completion covers both uploads and execution on the selected stream.
-TI_DLL_EXPORT TiBool TI_API_CALL
-ti_try_submit_prepared_parameters_ext(TiRuntime runtime,
-                                      TiPreparedExecution execution,
-                                      uint32_t dependency_count,
-                                      const TiCompletion *dependencies,
-                                      TiCompletion *completion,
-                                      TiBool ready_only,
-                                      uint32_t parameter_count,
-                                      const uint64_t *parameters);
-
-TI_DLL_EXPORT TiBool TI_API_CALL
-ti_try_submit_prepared_sampled_ext(TiRuntime runtime,
-                                   TiPreparedExecution execution,
-                                   uint32_t dependency_count,
-                                   const TiCompletion *dependencies,
-                                   TiCompletion *completion,
-                                   TiBool ready_only,
-                                   TiBool sample_gpu,
-                                   uint32_t parameter_count,
-                                   const uint64_t *parameters);
 
 #ifdef __cplusplus
 }  // extern "C"

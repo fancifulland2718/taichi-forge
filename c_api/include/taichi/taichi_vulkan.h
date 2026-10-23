@@ -146,6 +146,61 @@ ti_export_vulkan_image(TiRuntime runtime,
                        TiImage image,
                        TiVulkanImageInteropInfo *interop_info);
 
+// Independent compute queues use only queues actually created on this device.
+// Creation requires enabled timeline semaphores and an unused additional queue
+// from the ordinary compute family. There is no default-queue fallback.
+typedef struct TiVulkanExecutionDomain_t *TiVulkanExecutionDomain;
+typedef struct TiVulkanExecutionInstance_t *TiVulkanExecutionInstance;
+typedef struct TiVulkanExecutionDomainCreateInfo {
+  uint32_t capacity;
+  uint32_t instance_capacity;
+  TiBool gpu_timing;
+} TiVulkanExecutionDomainCreateInfo;
+typedef struct TiVulkanExecutionDomainInfo {
+  uint64_t identity;
+  uint64_t owner;
+  uint32_t queue_index;
+  uint64_t capacity;
+  uint64_t pending;
+  TiBool accepting;
+  TiBool closed;
+} TiVulkanExecutionDomainInfo;
+
+TI_DLL_EXPORT TiVulkanExecutionDomain TI_API_CALL
+ti_create_vulkan_execution_domain_ext(TiRuntime runtime,
+                                      const TiVulkanExecutionDomainCreateInfo *info);
+TI_DLL_EXPORT void TI_API_CALL
+ti_get_vulkan_execution_domain_info_ext(TiVulkanExecutionDomain domain,
+                                        TiVulkanExecutionDomainInfo *info);
+TI_DLL_EXPORT void TI_API_CALL ti_stop_vulkan_execution_domain_ext(TiVulkanExecutionDomain domain);
+TI_DLL_EXPORT void TI_API_CALL ti_close_vulkan_execution_domain_ext(TiVulkanExecutionDomain domain);
+// Host-only release; runtime ownership remains until close/retirement.
+TI_DLL_EXPORT void TI_API_CALL ti_release_vulkan_execution_domain_ext(TiVulkanExecutionDomain domain);
+TI_DLL_EXPORT uint32_t TI_API_CALL
+ti_collect_vulkan_execution_domain_ext(TiVulkanExecutionDomain domain, uint32_t budget);
+TI_DLL_EXPORT TiCompletion TI_API_CALL
+ti_get_vulkan_execution_domain_completion_ext(TiVulkanExecutionDomain domain);
+
+TI_DLL_EXPORT TiVulkanExecutionInstance TI_API_CALL
+ti_get_prepared_vulkan_instance_ext(TiRuntime runtime, TiPreparedExecution execution);
+// Retires only this instance's exact prefix; no runtime pointer or lock needed.
+TI_DLL_EXPORT void TI_API_CALL
+ti_retire_vulkan_execution_instance_ext(TiVulkanExecutionInstance instance);
+TI_DLL_EXPORT void TI_API_CALL
+ti_release_vulkan_execution_instance_ext(TiVulkanExecutionInstance instance);
+
+// Cold preparation of a fixed buffer-only plan. Call ti_initialize_prepared_ext
+// before submission. Mutable parameters are replay-only u64 scalars; count=0
+// freezes every scalar. Commands, parameter pools and sampled timestamps stay
+// on the chosen queue. Unsupported control/image/sparse routes are rejected.
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_execution_plan_on_vulkan_domain_ext(
+    TiRuntime runtime, TiAotModule module, TiVulkanExecutionDomain domain,
+    uint64_t description_size, const char *description,
+    uint32_t arg_count, const TiNamedArgument *args,
+    uint32_t binding_count, const TiNamedNdArrayBinding *bindings,
+    uint32_t parameter_count, const char *const *parameter_names);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus
