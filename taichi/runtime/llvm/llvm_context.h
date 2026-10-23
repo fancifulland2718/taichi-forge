@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 
@@ -34,6 +35,11 @@ class TaichiLLVMContext {
     llvm::LLVMContext *llvm_context{nullptr};
     std::unique_ptr<llvm::Module> runtime_module{nullptr};
     std::unordered_map<int, std::unique_ptr<llvm::Module>> struct_modules;
+    // Only populated on linking_context_data, under the existing link/lifecycle
+    // exclusion. Each link consumes a fresh lazy module from immutable bytes;
+    // neither source IR nor a previous link's materializer is shared.
+    std::string runtime_link_bitcode;
+    std::unordered_map<int, std::string> struct_link_bitcode;
     explicit ThreadLocalData(std::unique_ptr<llvm::orc::ThreadSafeContext> ctx);
     ~ThreadLocalData();
   };

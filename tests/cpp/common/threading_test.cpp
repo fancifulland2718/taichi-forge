@@ -11,6 +11,8 @@
 #include "taichi/program/compile_config.h"
 #include "taichi/rhi/arch.h"
 #include "taichi/runtime/llvm/llvm_context.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Verifier.h"
 #endif
 
 #include <array>
@@ -400,6 +402,62 @@ TEST(LLVMContextThreadData, CompiledModuleRetainsExitedWorkerContext) {
 
   compiled.reset();
   EXPECT_TRUE(context_lifetime.expired());
+}
+
+TEST(LLVMContextThreadData, LazyLinkInputsPreserveClosureAndTreeReplacement) {
+  lang::CompileConfig config;
+  lang::TaichiLLVMContext context(config, host_arch());
+  auto &ctx = *context.get_this_thread_context();
+  auto *i32 = llvm::Type::getInt32Ty(ctx);
+  auto *signature = llvm::FunctionType::get(i32, {}, false);
+  constexpr int tree_id = 7;
+  for (int value : {17, 29}) {
+    auto library = context.new_module("tree");
+    auto *constant = new llvm::GlobalVariable(
+        *library, i32, true, llvm::GlobalValue::PrivateLinkage,
+        llvm::ConstantInt::get(i32, value), "tree_constant");
+    auto *leaf = llvm::Function::Create(
+        signature, llvm::GlobalValue::InternalLinkage, "tree_leaf", *library);
+    llvm::IRBuilder<> builder(llvm::BasicBlock::Create(ctx, "body", leaf));
+    builder.CreateRet(builder.CreateLoad(i32, constant));
+    auto *root = llvm::Function::Create(
+        signature, llvm::GlobalValue::ExternalLinkage, "tree_root", *library);
+    builder.SetInsertPoint(llvm::BasicBlock::Create(ctx, "body", root));
+    builder.CreateRet(builder.CreateCall(leaf));
+    auto *unused = llvm::Function::Create(
+        signature, llvm::GlobalValue::ExternalLinkage, "unused_tree", *library);
+    builder.SetInsertPoint(llvm::BasicBlock::Create(ctx, "body", unused));
+    builder.CreateRet(builder.getInt32(-1));
+    context.add_struct_module(std::move(library), tree_id);
+
+    // A fresh kernel must see the complete closure on both the initial and
+    // repeated link; consuming the first lazy input cannot drain the snapshot.
+    for (int repeat = 0; repeat < 2; ++repeat) {
+      auto task = std::make_unique<lang::LLVMCompiledTask>();
+      task->module = context.new_module("task");
+      auto callee = task->module->getOrInsertFunction("tree_root", signature);
+      auto *entry = llvm::Function::Create(
+          signature, llvm::GlobalValue::ExternalLinkage, "entry", *task->module);
+      builder.SetInsertPoint(llvm::BasicBlock::Create(ctx, "body", entry));
+      builder.CreateRet(builder.CreateCall(callee));
+      task->tasks.emplace_back("entry");
+      task->used_tree_ids.insert(tree_id);
+      std::vector<std::unique_ptr<lang::LLVMCompiledTask>> tasks;
+      tasks.push_back(std::move(task));
+      auto linked = context.link_compiled_tasks(std::move(tasks));
+      EXPECT_FALSE(llvm::verifyModule(*linked.module));
+      EXPECT_EQ(linked.module->getFunction("unused_tree"), nullptr);
+      ASSERT_NE(linked.module->getFunction("tree_leaf"), nullptr);
+      auto *retained = linked.module->getNamedGlobal("tree_constant");
+      ASSERT_NE(retained, nullptr);
+      EXPECT_EQ(llvm::cast<llvm::ConstantInt>(retained->getInitializer())
+                    ->getSExtValue(),
+                value);
+      EXPECT_FALSE(context.get_struct_function("tree_root", tree_id)
+                       ->isDeclaration());
+    }
+    context.delete_snode_tree(tree_id);
+  }
 }
 #endif
 

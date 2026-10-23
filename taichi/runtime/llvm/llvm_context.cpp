@@ -711,6 +711,7 @@ void TaichiLLVMContext::add_struct_module(std::unique_ptr<Module> module,
     TI_ERROR("module broken");
   }
 
+  linking_context_data->struct_link_bitcode.erase(tree_id);
   linking_context_data->struct_modules[tree_id] =
       clone_module_to_context(module.get(), linking_context_data->llvm_context);
 
@@ -1069,6 +1070,7 @@ void TaichiLLVMContext::init_runtime_module(llvm::Module *runtime_module) {
 
 void TaichiLLVMContext::delete_snode_tree(int id) {
   TI_ASSERT(linking_context_data->struct_modules.erase(id));
+  linking_context_data->struct_link_bitcode.erase(id);
   auto registry = thread_data_registry_;
   std::lock_guard<std::mutex> registry_lock(registry->mutex);
   for (auto &entry : registry->data) {
@@ -1157,6 +1159,37 @@ TaichiLLVMContext::ThreadLocalData::~ThreadLocalData() {
   thread_safe_llvm_context.reset();
 }
 
+namespace {
+
+std::unique_ptr<llvm::Module> lazy_link_input(llvm::Module &source,
+                                            std::string &bitcode) {
+  if (bitcode.empty()) {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.snapshot_bitcode");
+    std::string snapshot;
+    {
+      llvm::raw_string_ostream stream(snapshot);
+      llvm::WriteBitcodeToFile(source, stream);
+    }
+    bitcode = std::move(snapshot);
+    TI_TRACE("LLVM link input {} snapshot: {} bytes",
+              source.getModuleIdentifier(), bitcode.size());
+  }
+  // LinkOnlyNeeded discovers the transitive dependency closure, including
+  // globals and address-taken functions. Do not clone all function bodies only
+  // to discard most of them in the linker. The consumed module owns its buffer
+  // so failed links and later snapshot invalidation cannot leave dangling data.
+  auto module = llvm::getOwningLazyBitcodeModule(
+      llvm::MemoryBuffer::getMemBufferCopy(bitcode, source.getModuleIdentifier()),
+      source.getContext());
+  if (!module) {
+    TI_ERROR("Failed to load LLVM link input: {}",
+              llvm::toString(module.takeError()));
+  }
+  return std::move(*module);
+}
+
+}  // namespace
+
 LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
     std::vector<std::unique_ptr<LLVMCompiledTask>> data_list) {
   TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks");
@@ -1220,12 +1253,14 @@ LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
   for (auto tree_id : used_tree_ids) {
     TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.struct_modules");
     linker.linkInModule(
-        llvm::CloneModule(*linking_context_data->struct_modules[tree_id]),
+        lazy_link_input(*linking_context_data->struct_modules.at(tree_id),
+                        linking_context_data->struct_link_bitcode[tree_id]),
         llvm::Linker::LinkOnlyNeeded | llvm::Linker::OverrideFromSrc);
   }
   auto runtime_module = [&] {
-    TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.clone_runtime");
-    return llvm::CloneModule(*linking_context_data->runtime_module);
+    TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.runtime_input");
+    return lazy_link_input(*linking_context_data->runtime_module,
+                           linking_context_data->runtime_link_bitcode);
   }();
   for (auto tls_size : tls_sizes) {
     add_struct_for_func(runtime_module.get(), tls_size);
@@ -1262,6 +1297,14 @@ void TaichiLLVMContext::add_struct_for_func(llvm::Module *module,
   auto func_name = get_struct_for_func_name(tls_size);
   if (module->getFunction(func_name)) {
     return;
+  }
+  // The runtime link input can be lazy. The TLS specialization pass clones the
+  // template body directly instead of asking the linker to materialize it.
+  auto *struct_for = module->getFunction("parallel_struct_for");
+  TI_ASSERT(struct_for);
+  if (auto error = struct_for->materialize()) {
+    TI_ERROR("Failed to materialize parallel_struct_for: {}",
+              llvm::toString(std::move(error)));
   }
   llvm::legacy::PassManager module_pass_manager;
   if (config_.arch == Arch::amdgpu) {
