@@ -38,6 +38,13 @@ inline constexpr std::uint64_t kForgeCudaSubmissionParameters = 1ull << 17;
 inline constexpr std::uint64_t kForgeCudaCompletionGpuTiming = 1ull << 18;
 inline constexpr std::uint64_t kForgeCudaExecutionInstanceRetirement = 1ull << 19;
 inline constexpr std::uint64_t kForgeCompletionWaitAny = 1ull << 20;
+// Build declarations; queue/timeline availability is checked on the chosen device.
+inline constexpr std::uint64_t kForgeVulkanExecutionDomains = 1ull << 21;
+inline constexpr std::uint64_t kForgeVulkanAotExecutionDomains = 1ull << 22;
+inline constexpr std::uint64_t kForgeVulkanJitGraphExecutionDomains = 1ull << 23;
+inline constexpr std::uint64_t kForgeVulkanSubmissionParameters = 1ull << 24;
+inline constexpr std::uint64_t kForgeVulkanCompletionGpuTiming = 1ull << 25;
+inline constexpr std::uint64_t kForgeVulkanExecutionInstanceRetirement = 1ull << 26;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

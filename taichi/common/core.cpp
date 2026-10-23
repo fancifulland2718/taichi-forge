@@ -104,6 +104,12 @@ std::uint64_t get_forge_native_feature_bitmap() {
                          kForgeCompletionBlockingWait;
 #if defined(TI_FORGE_BUILD_RUNTIME_C_API)
   result |= kForgeCompletionWaitAny;
+#if defined(TI_WITH_VULKAN)
+  result |= kForgeVulkanExecutionDomains | kForgeVulkanAotExecutionDomains |
+            kForgeVulkanJitGraphExecutionDomains |
+            kForgeVulkanSubmissionParameters | kForgeVulkanCompletionGpuTiming |
+            kForgeVulkanExecutionInstanceRetirement;
+#endif
 #endif
 #if defined(TI_WITH_CUDA) && defined(TI_WITH_VULKAN) && defined(TI_WITH_GGUI)
   result |= kForgeDisplaySharedImageReuse;

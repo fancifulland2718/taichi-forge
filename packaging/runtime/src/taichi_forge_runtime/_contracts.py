@@ -36,6 +36,12 @@ _FEATURE_BITS = {
     "cuda_submission_parameters_u64": 17,
     "cuda_completion_gpu_timing": 18,
     "cuda_execution_instance_retirement": 19,
+    "vulkan_execution_domains": 21,
+    "vulkan_aot_execution_domains": 22,
+    "vulkan_jit_graph_execution_domains": 23,
+    "vulkan_submission_parameters_u64": 24,
+    "vulkan_completion_gpu_timing": 25,
+    "vulkan_execution_instance_retirement": 26,
 }
 
 

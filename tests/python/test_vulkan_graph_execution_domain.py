@@ -36,6 +36,20 @@ def test_vulkan_jit_domain_parameters_timing_and_source_close():
     source.close()
     expected = [np.empty((1000, 3), dtype=np.uint64) for _ in calls]
     kept = []
+    # Vulkan stages each admitted queue slot separately, including consecutive
+    # submissions of the same immutable instance without an intervening wait.
+    burst = []
+    for index in (0, 1):
+        mapping = values(index, 0)
+        ticket = calls[0].submit(values=mapping, sample_gpu=True)
+        assert ticket is not None
+        mapping.update(dict.fromkeys(NAMES, 0))
+        burst.append(ticket)
+    for ticket in burst:
+        ticket.wait()
+        kept.append((ticket, ticket.gpu_timing))
+    np.testing.assert_array_equal(outputs[0].to_numpy()[:2], np.asarray(
+        [tuple(values(i, 0).values()) for i in (0, 1)], dtype=np.uint64))
     for index in range(1000):
         tickets = []
         for lane, call in enumerate(calls):

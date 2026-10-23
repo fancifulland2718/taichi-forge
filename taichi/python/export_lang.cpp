@@ -8222,6 +8222,18 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeCudaCompletionGpuTiming);
     features["cuda_execution_instance_retirement"] =
         bool(bitmap & kForgeCudaExecutionInstanceRetirement);
+    features["vulkan_execution_domains"] =
+        bool(bitmap & kForgeVulkanExecutionDomains);
+    features["vulkan_aot_execution_domains"] =
+        bool(bitmap & kForgeVulkanAotExecutionDomains);
+    features["vulkan_jit_graph_execution_domains"] =
+        bool(bitmap & kForgeVulkanJitGraphExecutionDomains);
+    features["vulkan_submission_parameters_u64"] =
+        bool(bitmap & kForgeVulkanSubmissionParameters);
+    features["vulkan_completion_gpu_timing"] =
+        bool(bitmap & kForgeVulkanCompletionGpuTiming);
+    features["vulkan_execution_instance_retirement"] =
+        bool(bitmap & kForgeVulkanExecutionInstanceRetirement);
     result["features"] = std::move(features);
     result["legacy_runtime"] = false;
     return result;

@@ -19,6 +19,15 @@ NAMES = (
     "cuda_canvas_execution_domains",
 )
 
+VULKAN_NAMES = (
+    "vulkan_execution_domains",
+    "vulkan_aot_execution_domains",
+    "vulkan_jit_graph_execution_domains",
+    "vulkan_submission_parameters_u64",
+    "vulkan_completion_gpu_timing",
+    "vulkan_execution_instance_retirement",
+)
+
 
 def test_domain_manifest_matches_runtime_only_without_initializing_a_device():
     from taichi_forge_runtime import runtime_contract_manifest
@@ -40,6 +49,8 @@ def test_domain_manifest_matches_runtime_only_without_initializing_a_device():
     assert native["features"]["cuda_completion_gpu_timing"] == cuda_api
     assert native["features"]["cuda_execution_instance_retirement"] == cuda_api
     assert native["features"]["completion_wait_any"] == hasattr(ti._lib.core, "_borrow_aot_runtime")
+    vulkan_api = jit["features"]["vulkan"] and hasattr(ti._lib.core, "_borrow_aot_runtime")
+    assert all(native["features"][name] == vulkan_api for name in VULKAN_NAMES)
     assert ti.lang.impl.get_runtime().prog is None
     with pytest.raises(TypeError):
         native["features"][NAMES[0]] = False
@@ -92,6 +103,7 @@ def test_old_native_bits_do_not_infer_domains_from_version_or_abi(monkeypatch, b
     assert not manifest["features"]["cuda_submission_parameters_u64"]
     assert not manifest["features"]["cuda_completion_gpu_timing"]
     assert not manifest["features"]["completion_wait_any"]
+    assert not any(manifest["features"][name] for name in VULKAN_NAMES)
     assert all(
         manifest["features"][name] == bool(bitmap & (1 << (12 + i)))
         for i, name in enumerate(NAMES)
