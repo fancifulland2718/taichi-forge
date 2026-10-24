@@ -33,7 +33,11 @@ CUDARuntimeGroup cuda_runtime_group(const std::string &entry) {
       "runtime_initialize_snode_element_list",
       "runtime_element_list_set_backing_pool",
       "runtime_element_lists_prepare_backing_pool",
-      "runtime_element_lists_finalize_backing_pool"};
+      "runtime_element_lists_finalize_backing_pool",
+      "runtime_sparse_view_get_size",
+      "runtime_sparse_view_initialize",
+      "runtime_sparse_view_bind",
+      "runtime_sparse_view_release"};
   static const std::unordered_set<std::string> statistics{
       "runtime_get_snode_element_list",
       "runtime_get_snode_node_allocator",

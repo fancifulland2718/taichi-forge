@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Native Vulkan AS access facts and retirement carry the selected queue contract.
-inline constexpr int kForgeNativeAbiRevision = 200;
+// Embedded LLVM runtime views carry a source allocator and private tree directory.
+inline constexpr int kForgeNativeAbiRevision = 201;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

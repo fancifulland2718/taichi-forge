@@ -30,6 +30,7 @@
 #include "taichi/runtime/llvm/snode_runtime_state.h"
 #include "taichi/runtime/llvm/sparse_tree_statistics.h"
 #include "taichi/runtime/llvm/runtime_initialization.h"
+#include "taichi/runtime/llvm/sparse_runtime_view.h"
 
 struct RuntimeContext;
 using assert_failed_type = void (*)(const char *);
@@ -725,6 +726,12 @@ struct LLVMRuntime {
   ListManager *cpu_parallel_listgen_offsets;
   bool sparse_listgen_reused;
 #endif
+
+  // A sparse execution view owns diagnostics and its tree directory, but uses
+  // the source allocator's cursor and lock together. Ordinary runtimes are
+  // null here. Appended to preserve all preceding field offsets.
+  LLVMRuntime *sparse_allocation_source;
+  i32 sparse_view_tree_count;
 
   template <typename T>
   void set_result(std::size_t i, T t) {
@@ -1519,11 +1526,19 @@ Ptr LLVMRuntime::allocate_aligned(PreallocatedMemoryChunk &memory_chunk,
                                   std::size_t size,
                                   std::size_t alignment,
                                   bool request) {
+  auto *owner = sparse_allocation_source ? sparse_allocation_source : this;
+  auto *chunk = &memory_chunk;
+  if (owner != this) {
+    if (chunk == &runtime_memory_chunk)
+      chunk = &owner->runtime_memory_chunk;
+    else if (chunk == &runtime_objects_chunk)
+      chunk = &owner->runtime_objects_chunk;
+  }
   if (request)
-    atomic_add_i64(&total_requested_memory, size);
+    atomic_add_i64(&owner->total_requested_memory, size);
 
-  if (memory_chunk.preallocated_size > 0) {
-    return allocate_from_reserved_memory(memory_chunk, size, alignment);
+  if (chunk->preallocated_size > 0) {
+    return allocate_from_reserved_memory(*chunk, size, alignment);
   }
 
   return (Ptr)host_allocator(memory_pool, size, alignment);
@@ -1536,7 +1551,8 @@ Ptr LLVMRuntime::allocate_from_reserved_memory(
     std::size_t alignment) {
   Ptr ret = nullptr;
   bool success = false;
-  locked_task(&allocator_lock, [&] {
+  auto *owner = sparse_allocation_source ? sparse_allocation_source : this;
+  locked_task(&owner->allocator_lock, [&] {
     std::size_t preallocated_head = (std::size_t)memory_chunk.preallocated_head;
     std::size_t preallocated_tail = (std::size_t)memory_chunk.preallocated_tail;
 
@@ -1644,6 +1660,8 @@ void runtime_initialize(
   runtime->snode_tree_state_capacity = 0;
 
   runtime->total_requested_memory = 0;
+  runtime->sparse_allocation_source = nullptr;
+  runtime->sparse_view_tree_count = -1;
   runtime->materializing_element_list_backing_chunk = nullptr;
   runtime_hash_probe_stats_reset(runtime);
 #if !ARCH_cuda && !ARCH_amdgpu
@@ -1946,6 +1964,8 @@ void runtime_element_lists_finalize_backing_pool(LLVMRuntime *runtime) {
       runtime->runtime_memory_chunk.preallocated_tail;
   runtime->materializing_element_list_backing_chunk = nullptr;
 }
+
+#include "taichi/runtime/llvm/runtime_module/sparse_runtime_view.inc.h"
 
 void mutex_lock_i32(Ptr mutex) {
   while (atomic_exchange_i32((i32 *)mutex, 1) == 1)

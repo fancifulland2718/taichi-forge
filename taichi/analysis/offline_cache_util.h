@@ -196,7 +196,8 @@ class Kernel;
 //  70 - Skip empty CUDA range blocks before TLS reduction epilogues.
 //  71 - Sink proven read-only integer preludes before offload promotion.
 // 73 - compiled SPIR-V device-range dispatch qualification.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 74;
+// 75 - LLVM sparse views forward allocation through the source cursor and lock.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 75;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still
