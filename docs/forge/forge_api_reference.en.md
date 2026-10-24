@@ -3468,7 +3468,11 @@ Constructors:
 ### `Canvas.acquire_frame(width, height)` / `Canvas.repeat_frame()`
 
 `acquire_frame` borrows a Canvas-owned `WritableDisplayFrame` for same-GPU
-CUDA-Vulkan sharing. Write packed RGBA8 into `frame.pixels`, then submit or
+CUDA-Vulkan sharing or a cold-prepared pool on a selected Vulkan domain.
+Vulkan accepts only that domain's prepared Graph/AOT writers and requires the
+written frame's exact `source_completion`; see the
+[execution-domain display contract](cuda_execution_domains.en.md#vulkan-prepared-writable-display-slots).
+Write packed RGBA8 into `frame.pixels`, then submit or
 cancel; a context-manager exit cancels unsubmitted writes. Unsupported sharing
 raises; visible-window backpressure returns `None`. This is not an arbitrary
 external-image import API.

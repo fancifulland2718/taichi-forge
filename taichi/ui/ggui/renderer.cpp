@@ -75,8 +75,8 @@ T *Renderer::get_renderable_of_type(VertexAttributes vbo_attrs) {
 
 void Renderer::require_general_display_path() {
   TI_ERROR_IF(display_vulkan_execution_domain_,
-              "Selected Vulkan display requires prepared packed sources; "
-              "writable frames, mixed geometry and runtime targets are unsupported");
+              "Selected Vulkan display requires prepared image-only frames; "
+              "mixed geometry and runtime targets are unsupported");
   general_display_path_used_ = true;
 }
 
@@ -109,6 +109,34 @@ void Renderer::set_image(const DisplayFrameInfo &info) {
 
 std::shared_ptr<DisplayStorage>
 Renderer::acquire_shared_cuda_vulkan_image(int width, int height) {
+#ifdef TI_WITH_VULKAN
+  if (display_vulkan_execution_domain_) {
+    TI_ERROR_IF(pending_set_image_ || !render_queue_.empty(),
+                "Submit or cancel the pending Vulkan display frame first");
+    TI_ERROR_IF(!prepared_display_width_ || width != prepared_display_width_ ||
+                    height != prepared_display_height_,
+                "Prepare the Vulkan writable pool at a cold boundary");
+    auto *image = get_set_image_renderable();
+    if (!image)
+      return nullptr;
+    pending_set_image_ = image;
+    render_queue_.push_back(image);
+    try {
+      auto storage = std::dynamic_pointer_cast<VulkanWritableDisplayBuffer>(
+          image->shared_image());
+      TI_ERROR_IF(!storage, "Vulkan acquire_frame requires prepare_frame_pool");
+      image->use_shared_image(storage);
+      storage->prepare_write();
+      return storage;
+    } catch (const taichi::lang::vulkan::ExecutionDomain::Busy &) {
+      cancel_display_frame();
+      return nullptr;
+    } catch (...) {
+      cancel_display_frame();
+      throw;
+    }
+  }
+#endif
   require_general_display_path();
   TI_ERROR_IF(prepared_display_width_ && (width != prepared_display_width_ ||
                                           height != prepared_display_height_),
@@ -154,7 +182,30 @@ void Renderer::set_display_execution_domain(
 }
 
 std::vector<DisplayStorage *>
-Renderer::prepare_display_pool(int width, int height, int capacity) {
+Renderer::prepare_display_pool(int width, int height, std::size_t capacity) {
+#ifdef TI_WITH_VULKAN
+  if (display_vulkan_execution_domain_) {
+    validate_display_pool_replacement();
+    auto buffers = VulkanWritableDisplayBuffer::create_pool(
+        app_context_, display_vulkan_execution_domain_, width, height, capacity,
+        max_frames_in_flight() + 1);
+    std::vector<std::unique_ptr<SetImage>> prepared;
+    std::vector<DisplayStorage *> views;
+    prepared.reserve(buffers.size());
+    views.reserve(buffers.size());
+    for (const auto &buffer : buffers) {
+      auto image = std::make_unique<SetImage>(&app_context_, VboHelpers::all());
+      image->use_shared_image(buffer);
+      views.push_back(buffer.get());
+      prepared.push_back(std::move(image));
+    }
+    render_queue_.reserve(1);
+    renderables_.reserve(1);
+    install_display_pool(std::move(prepared), width, height);
+    prepared_vulkan_display_.reset();
+    return views;
+  }
+#endif
   require_general_display_path();
   TI_ERROR_IF(!display_execution_domain_ || width <= 0 || height <= 0 ||
                   capacity < 2 || capacity > max_frames_in_flight() + 1,
@@ -166,7 +217,7 @@ Renderer::prepare_display_pool(int width, int height, int capacity) {
   const auto repeat_capacity = max_frames_in_flight() + 1;
   prepared.reserve(capacity + repeat_capacity);
   views.reserve(capacity);
-  for (int i = 0; i < capacity; ++i) {
+  for (std::size_t i = 0; i < capacity; ++i) {
     auto image = std::make_unique<SetImage>(&app_context_, VboHelpers::all());
     auto storage = image->acquire_shared_cuda_vulkan_image(width, height);
     TI_ERROR_IF(!storage, "Unable to prepare CUDA/Vulkan display pool");
@@ -316,9 +367,12 @@ bool Renderer::set_image_vulkan_on_domain(const SetImageInfo &info,
 
 std::shared_ptr<DisplayCompletion> Renderer::track_display_frame(
     bool writable) {
-  TI_ERROR_IF(writable && display_vulkan_execution_domain_,
-              "Vulkan display storage is copy-only");
   TI_ERROR_IF(!pending_set_image_, "No pending display image");
+#ifdef TI_WITH_VULKAN
+  TI_ERROR_IF(writable && display_vulkan_execution_domain_ &&
+                  !dynamic_cast<VulkanWritableDisplayBuffer *>(pending_set_image_->shared_image().get()),
+              "Vulkan display write requires its prepared writable pool");
+#endif
   auto completion = std::make_shared<DisplayCompletion>();
   pending_set_image_->track_display(completion, writable);
   return completion;
@@ -369,7 +423,7 @@ void Renderer::finish_display_write() {
 
 bool Renderer::try_finish_display_write(const RuntimeCompletion &producer,
                                         bool track_source) {
-  TI_ERROR_IF(!display_execution_domain_ || !pending_set_image_ ||
+  TI_ERROR_IF((!display_execution_domain_ && !display_vulkan_execution_domain_) || !pending_set_image_ ||
                   !pending_set_image_->shared_image(),
               "No borrowed image on a selected display domain");
   auto image = pending_set_image_->shared_image();
@@ -402,7 +456,7 @@ void Renderer::cancel_display_frame() {
   // Cancellation does not consume a ready signal. A completed CUDA producer
   // is rearmed by prepare_cuda_write on reuse; an unwritten image remains
   // ready.
-  pending_set_image_->cancel_display();
+  pending_set_image_->discard_display_write();
   render_queue_.erase(std::remove(render_queue_.begin(), render_queue_.end(),
                                   pending_set_image_),
                       render_queue_.end());
@@ -718,7 +772,7 @@ bool Renderer::last_frame_used_shared_cuda_vulkan() const noexcept {
 void Renderer::discard_pending_frame() {
   for (const auto &item : renderables_) {
     if (auto *image = dynamic_cast<SetImage *>(item.get()))
-      image->cancel_display();
+      image->discard_display_write();
   }
   recycle_renderable_list(renderables_);
   render_queue_.clear();
@@ -754,7 +808,9 @@ SetImage *Renderer::get_set_image_renderable(bool reuse_last_image) {
 #ifdef TI_WITH_VULKAN
           if (display_vulkan_execution_domain_) {
             auto *buffer = dynamic_cast<VulkanDisplayBuffer *>(image.get());
-            if (!buffer || !buffer->copy_ready())
+            auto *writable = dynamic_cast<VulkanWritableDisplayBuffer *>(image.get());
+            if ((!buffer || !buffer->copy_ready()) &&
+                (!writable || !writable->write_ready()))
               return false;
           }
 #endif
@@ -929,6 +985,8 @@ void Renderer::recycle_renderables(InFlightFrame &frame) {
 void Renderer::retire_completed_frames() {
   while (!in_flight_frames_.empty()) {
     auto &frame = in_flight_frames_.front();
+    TI_ERROR_IF(display_vulkan_execution_domain_ && !frame.complete,
+                "Selected Vulkan frame has no graphics retirement proof");
     if (frame.complete && !frame.complete->is_ready()) {
       return;
     }
@@ -942,7 +1000,11 @@ void Renderer::wait_oldest_frame() {
     return;
   }
   auto &frame = in_flight_frames_.front();
+  TI_ERROR_IF(display_vulkan_execution_domain_ && !frame.complete,
+              "Selected Vulkan frame has no graphics retirement proof");
   if (!frame.complete || !frame.complete->wait()) {
+    TI_ERROR_IF(display_vulkan_execution_domain_,
+                "Selected Vulkan frame has no graphics retirement proof");
     app_context_.device().wait_idle();
     while (!in_flight_frames_.empty()) {
       recycle_renderables(in_flight_frames_.front());
@@ -1203,6 +1265,35 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
 
   if (semaphore) {
     wait_semaphores.push_back(semaphore);
+  }
+
+  if (display_vulkan_execution_domain_) {
+    auto *vulkan_stream = dynamic_cast<VulkanStream *>(stream);
+    TI_ERROR_IF(!vulkan_stream, "Selected display requires its Vulkan graphics stream");
+    // The deque allocation precedes moving any owner or enqueuing work. Once
+    // submit begins, even a missing proof must retain commands, descriptors,
+    // buffers and acquire/presentation semaphores as one window closure.
+    in_flight_frames_.emplace_back();
+    auto &frame = in_flight_frames_.back();
+    frame.commands = std::move(cmd_list);
+    frame.submit_waits = std::move(wait_semaphores);
+    frame.present_waits_after_acquire = std::move(present_waits_after_acquire);
+    frame.renderables = std::move(renderables_);
+    frame.ndarray_resource_leases = std::move(pending_ndarray_resource_leases_);
+    frame.texture_resource_leases = std::move(pending_texture_resource_leases_);
+    auto *submitted_image = pending_set_image_;
+    render_queue_.clear();
+    pending_set_image_ = nullptr;
+    pending_runtime_resource_handles_.clear();
+    // Store the exact proof first. All later host failures remain drainable;
+    // a submit exception leaves this record unsealed and cannot be recycled.
+    frame.complete = submitted_image->submit_shared_cuda_vulkan_frame(
+        *vulkan_stream, frame.commands.get(), frame.submit_waits);
+    render_complete_semaphore_ = frame.complete;
+    submitted_image->attach_display_completion(frame.complete);
+    last_shared_display_image_ = submitted_image->shared_image();
+    render_surface_image_ = surface_image;
+    return true;
   }
 
   if (use_shared_cuda_vulkan) {

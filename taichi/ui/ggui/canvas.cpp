@@ -83,7 +83,7 @@ Canvas::acquire_shared_cuda_vulkan_image(int width, int height) {
   return renderer_->acquire_shared_cuda_vulkan_image(width, height);
 }
 std::vector<DisplayStorage *>
-Canvas::prepare_display_pool(int width, int height, int capacity) {
+Canvas::prepare_display_pool(int width, int height, std::size_t capacity) {
   return renderer_->prepare_display_pool(width, height, capacity);
 }
 

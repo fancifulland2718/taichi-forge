@@ -5,6 +5,7 @@
 #include "taichi/program/ndarray.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/program/storage_view.h"
+#include "taichi/rhi/vulkan/vulkan_external_access.h"
 #include "taichi/runtime/vulkan_execution_domain.h"
 
 namespace taichi::ui::vulkan {
@@ -371,6 +372,278 @@ StreamSemaphore VulkanDisplayBuffer::submit_vulkan_frame(
     owner.graphics_unsealed = true;
     throw;
   }
+}
+
+namespace {
+using WriteOwner = taichi::lang::vulkan::VulkanDisplayBufferOwner;
+using WriteAccess = taichi::lang::vulkan::VulkanExternalAccess;
+using WritePoint = std::shared_ptr<taichi::lang::vulkan::VulkanTimelinePoint>;
+
+// Program retains one adapter per physical slot. It must not own Program or
+// the selected domain, or invoke their retirement callbacks recursively.
+class WriteSlot final : public RuntimeClient {
+ public:
+  std::shared_ptr<WriteOwner> owner;
+  storage::StorageOwnerRef registration;
+  storage::DenseStorageBuildResult description{
+      storage::StorageFailureReason::kUnsupportedStorageKind, std::nullopt};
+  std::shared_ptr<const Domain::Commands> empty;
+  RuntimeCompletion source;
+  mutable std::mutex mutex;
+  std::uint64_t lease{0};
+  bool closed{false};
+
+  void retire() override {
+    std::unique_lock<std::mutex> lock(mutex);
+    if (closed)
+      return;
+    owner->close();  // Exact writer and graphics proofs; no Program callback.
+    auto retired_empty = std::move(empty);
+    auto retired_source = std::move(source);
+    lease = 0;
+    closed = true;
+    lock.unlock();
+    // Even a late public ticket/loan must not keep a command buffer alive
+    // beyond Program's device. Destructors may detach borrowed clients.
+    retired_empty.reset();
+    retired_source = {};
+  }
+};
+}  // namespace
+
+struct VulkanWritableDisplayBuffer::Pool {
+  std::shared_ptr<Domain> domain;
+  std::shared_ptr<RuntimeFaultDomain> fault;
+  Program *program{nullptr};
+  std::weak_ptr<ProgramLifetimeToken> lifetime;
+  int width{0}, height{0};
+  std::vector<std::shared_ptr<WriteSlot>> slots;
+
+  void check(const WriteSlot &slot) const {
+    fault->throw_if_new_submission_disallowed("Vulkan display write");
+    TI_ERROR_IF(slot.closed || !domain->snapshot().accepting,
+                "Vulkan display storage or domain is closed");
+  }
+  WritePoint point(const RuntimeCompletion &completion) const {
+    TI_ERROR_IF(!completion.valid(), "Provide the exact producer completion for this display write");
+    auto result = std::dynamic_pointer_cast<taichi::lang::vulkan::VulkanTimelinePoint>(
+        completion.reusable_stream_dependency(Arch::vulkan, fault->program_domain(), fault));
+    TI_ERROR_IF(!result, "Vulkan display requires an enqueued exact producer");
+    return result;
+  }
+  void close() {
+    for (const auto &slot : slots)
+      slot->owner->stop();
+    std::exception_ptr failure;
+    for (const auto &slot : slots) {
+      try {
+        if (!Program::close_external_dense_storage_if_alive(
+                program, lifetime, slot->registration))
+          slot->retire();
+      } catch (...) {
+        if (!failure)
+          failure = std::current_exception();
+      }
+    }
+    if (failure)
+      std::rethrow_exception(failure);
+  }
+  ~Pool() {
+    try {
+      close();
+    } catch (...) {
+      // Program's registered clients retain every failed native closure.
+    }
+  }
+};
+
+std::vector<std::shared_ptr<DisplayStorage>> VulkanWritableDisplayBuffer::create_pool(
+    AppContext &context, std::shared_ptr<Domain> domain,
+    int width, int height, std::size_t capacity, std::size_t graphics_capacity) {
+  auto *program = context.prog();
+  TI_ERROR_IF(!program || context.config.ti_arch != Arch::vulkan ||
+                  context.config.ggui_arch != Arch::vulkan ||
+                  program->get_graphics_device() != &context.device() || !domain ||
+                  !domain->belongs_to(program->runtime_fault_domain()),
+              "Vulkan display requires its borrowed Program and device");
+  TI_ERROR_IF(width <= 0 || height <= 0 || capacity < 2 || !graphics_capacity,
+              "Vulkan writable display requires positive dimensions and at least two slots");
+  auto guard = program->acquire_runtime_resource_submission_guard();
+  program->ensure_runtime_submission_allowed("prepare Vulkan writable display");
+  const auto pixels = static_cast<std::uint64_t>(width) * height;
+  TI_ERROR_IF(pixels - 1 > std::numeric_limits<std::int32_t>::max() ||
+                  pixels > std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t),
+              "Vulkan display extent exceeds its signed shader or address ABI");
+  const auto bytes = static_cast<std::size_t>(pixels) * sizeof(std::uint32_t);
+  TI_ERROR_IF(capacity > std::numeric_limits<std::size_t>::max() / bytes,
+              "Vulkan display pool byte extent overflows");
+  auto &device = static_cast<taichi::lang::vulkan::VulkanDevice &>(context.device());
+  const auto selected = domain->snapshot();
+  TI_ERROR_IF(!selected.accepting, "Vulkan display domain is not accepting work");
+  auto pool = std::make_shared<Pool>();
+  pool->program = program;
+  pool->lifetime = program->weak_resource_lifetime_token();
+  pool->fault = program->runtime_fault_domain();
+  pool->domain = std::move(domain);
+  pool->width = width;
+  pool->height = height;
+  pool->slots.reserve(capacity);
+  auto initialize = pool->domain->new_command_list();
+  std::vector<WriteAccess::Owner> initialization_access;
+  initialization_access.reserve(capacity);
+  for (std::size_t i = 0; i < capacity; ++i) {
+    auto slot = std::make_shared<WriteSlot>();
+    slot->owner = WriteOwner::create(device, bytes,
+        {selected.owner, selected.identity, selected.queue_index}, graphics_capacity);
+    pool->slots.push_back(slot);
+    slot->registration = program->register_external_dense_storage(
+        slot->owner->ndarray_allocation(), bytes,
+        [owner = slot->owner] {
+          TI_ERROR_IF(!owner->snapshot().closed,
+                      "Vulkan display storage released before its retirement adapter");
+        }, slot->owner);
+    try {
+      program->retain_external_storage_client(slot, slot->registration);
+    } catch (...) {
+      slot->retire();
+      program->retire_external_dense_storage(slot->registration);
+      throw;
+    }
+    storage::DenseStorageLayoutSpec layout;
+    layout.scalar_type = PrimitiveType::u32;
+    layout.index_shape = {width, height};
+    layout.index_strides_bytes = {static_cast<std::int64_t>(height) * 4, 4};
+    layout.access = storage::StorageAccess::kReadWrite;
+    slot->description = storage::build_dense_storage_descriptor(
+        slot->registration, storage::StorageSourceKind::kExternalDense, layout);
+    TI_ERROR_IF(!slot->description, "Cannot describe Vulkan writable display storage");
+    auto access = std::make_shared<WriteAccess>(
+        std::vector<WriteAccess::Owner>{slot->owner});
+    slot->empty = pool->domain->prepare_external_access(
+        pool->domain->prepare_commands({}), access);
+    initialize->buffer_fill(slot->owner->ndarray_allocation().get_ptr(), bytes, 0);
+    initialization_access.emplace_back(slot->owner);
+  }
+  initialize->memory_barrier();
+  auto initialization = pool->domain->prepare_external_access(
+      pool->domain->prepare_commands({initialize.get()}),
+      std::make_shared<WriteAccess>(std::move(initialization_access)));
+  for (const auto &slot : pool->slots)
+    slot->lease = slot->owner->acquire_write();
+  // Cold zero initialization defines the first empty frame. It uses this
+  // selected queue once, never the default runtime or a steady fill kernel.
+  const auto initialized = pool->domain->submit(initialization);
+  initialized.wait();
+  const auto prefix = pool->point(initialized);
+  for (const auto &slot : pool->slots) {
+    slot->owner->seal_write(slot->lease, prefix);
+    slot->lease = 0;
+  }
+  std::vector<std::shared_ptr<DisplayStorage>> result;
+  result.reserve(capacity);
+  for (std::size_t i = 0; i < capacity; ++i)
+    result.emplace_back(new VulkanWritableDisplayBuffer(pool, i));
+  return result;
+}
+
+VulkanWritableDisplayBuffer::VulkanWritableDisplayBuffer(
+    std::shared_ptr<Pool> pool, std::size_t slot)
+    : pool_(std::move(pool)), slot_(slot),
+      pointer_(pool_->slots[slot_]->owner->ndarray_allocation().get_ptr()) {}
+VulkanWritableDisplayBuffer::~VulkanWritableDisplayBuffer() = default;
+const storage::DenseStorageBuildResult &VulkanWritableDisplayBuffer::description() const {
+  return pool_->slots[slot_]->description;
+}
+std::uint64_t VulkanWritableDisplayBuffer::identity() const noexcept {
+  return pool_->slots[slot_]->owner->identity();
+}
+DevicePtr VulkanWritableDisplayBuffer::vulkan_ptr() const noexcept { return pointer_; }
+int VulkanWritableDisplayBuffer::width() const noexcept { return pool_->width; }
+int VulkanWritableDisplayBuffer::height() const noexcept { return pool_->height; }
+bool VulkanWritableDisplayBuffer::ready_for_vulkan_submit() const noexcept {
+  try {
+    const auto &slot = *pool_->slots[slot_];
+    std::lock_guard<std::mutex> lock(slot.mutex);
+    const auto owner = slot.owner->snapshot();
+    return !slot.closed && !slot.lease && slot.source.valid() && owner.sealed &&
+           owner.accepting && !owner.closed && pool_->domain->snapshot().accepting;
+  } catch (...) {
+    return false;
+  }
+}
+bool VulkanWritableDisplayBuffer::write_ready() const {
+  const auto &slot = *pool_->slots[slot_];
+  std::lock_guard<std::mutex> lock(slot.mutex);
+  pool_->check(slot);
+  return slot.owner->ready_for_write();
+}
+void VulkanWritableDisplayBuffer::prepare_write() {
+  auto &slot = *pool_->slots[slot_];
+  RuntimeCompletion retired;
+  {
+    std::lock_guard<std::mutex> lock(slot.mutex);
+    pool_->check(slot);
+    slot.lease = slot.owner->acquire_write();
+    retired = std::move(slot.source);
+  }
+}
+void VulkanWritableDisplayBuffer::cancel_write() {
+  auto &slot = *pool_->slots[slot_];
+  std::lock_guard<std::mutex> lock(slot.mutex);
+  if (!slot.closed && slot.lease) {
+    slot.owner->cancel_write(slot.lease);
+    slot.lease = 0;
+  }
+}
+void VulkanWritableDisplayBuffer::finish_write() {
+  TI_ERROR_IF(!try_finish_write(), "Vulkan display domain is full");
+}
+bool VulkanWritableDisplayBuffer::try_finish_write(const RuntimeCompletion &producer) {
+  auto &slot = *pool_->slots[slot_];
+  std::lock_guard<std::mutex> lock(slot.mutex);
+  pool_->check(slot);
+  if (!slot.lease) {
+    TI_ERROR_IF(producer.valid(), "Vulkan display write lease is already sealed");
+    return slot.source.valid();  // Repeat retains exactly the previous point.
+  }
+  RuntimeCompletion accepted = producer;
+  if (!accepted.valid()) {
+    TI_ERROR_IF(slot.owner->snapshot().has_writer,
+                "Provide the exact producer completion for this display write");
+    try {
+      accepted = pool_->domain->submit(slot.empty);
+    } catch (const Domain::Busy &) {
+      return false;
+    }
+  }
+  slot.owner->seal_write(slot.lease, pool_->point(accepted));
+  slot.source = std::move(accepted);
+  slot.lease = 0;
+  return true;
+}
+bool VulkanWritableDisplayBuffer::try_copy_image(DevicePtr, const RuntimeCompletion &, Lease) {
+  TI_ERROR("Use prepare_frame_sources for retained Vulkan packed copies");
+}
+RuntimeCompletion VulkanWritableDisplayBuffer::source_completion() const {
+  const auto &slot = *pool_->slots[slot_];
+  std::lock_guard<std::mutex> lock(slot.mutex);
+  TI_ERROR_IF(slot.closed || !slot.source.valid(), "Vulkan display write has no source completion");
+  return slot.source;
+}
+bool VulkanWritableDisplayBuffer::has_live_execution_domain() const {
+  const auto &slot = *pool_->slots[slot_];
+  std::lock_guard<std::mutex> lock(slot.mutex);
+  return !slot.closed && !pool_->domain->snapshot().closed;
+}
+void VulkanWritableDisplayBuffer::close() { pool_->close(); }
+StreamSemaphore VulkanWritableDisplayBuffer::submit_vulkan_frame(
+    taichi::lang::vulkan::VulkanStream &stream, CommandList *commands,
+    const std::vector<StreamSemaphore> &waits) {
+  const auto &slot = *pool_->slots[slot_];
+  std::lock_guard<std::mutex> lock(slot.mutex);
+  pool_->check(slot);
+  TI_ERROR_IF(slot.lease, "Submit or cancel the current Vulkan display write first");
+  return slot.owner->submit_graphics(stream, commands, waits, pool_->point(slot.source));
 }
 
 }  // namespace taichi::ui::vulkan

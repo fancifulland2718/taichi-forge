@@ -159,12 +159,12 @@ def test_vulkan_canvas_source_validation_is_cold_and_recoverable():
             canvas.submit_frame(frame)
         with pytest.raises(RuntimeError, match="prepared binding|not cold-prepared"):
             canvas.submit_frame(wrong_shape, source_completion=producer)
-        with pytest.raises(ValueError, match="packed copies only"):
+        with pytest.raises(ValueError, match="prepare_frame_pool"):
             canvas.acquire_frame(8, 11)
-        with pytest.raises(ValueError, match="packed copies only"):
+        with pytest.raises(RuntimeError, match="previous display domain"):
             canvas.prepare_frame_pool(8, 11)
         # Reject before Python geometry helpers can create/stage any buffers.
-        with pytest.raises(ValueError, match="packed copies only"):
+        with pytest.raises(ValueError, match="image-only"):
             canvas.circles(None, radius=0.1)
         assert output.latest_completion().info["sequence"] == before
         assert canvas.submit_frame(frame, source_completion=producer, track_source=True)

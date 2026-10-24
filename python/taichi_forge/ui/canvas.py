@@ -50,12 +50,12 @@ class Canvas:
         """Cold-bind display handoffs to an independent CUDA or Vulkan domain.
 
         CUDA supports acquire_frame() writers or packed DisplayFrame copies.
-        Vulkan supports retained packed copies prepared with prepare_frame_sources;
-        writable views, mixed geometry, GUI overlays and runtime render targets
-        are not supported on that path.
+        Vulkan supports retained packed copies with prepare_frame_sources and
+        prepared writable views with prepare_frame_pool. Mixed geometry, GUI
+        overlays and runtime render targets are not supported on that path.
         Prepare all physical image bindings before starting the steady pipeline.
         Close the old domain and bind its replacement before changing
-        prepared storage. Destroying a Vulkan window retires its copy instance;
+        prepared storage. Destroying a Vulkan window retires its storage consumers;
         unrelated instances on that domain remain live. A live display domain
         cannot be replaced.
         """
@@ -82,7 +82,7 @@ class Canvas:
 
     def _require_general_display_path(self):
         if self._vulkan_display_selected():
-            raise ValueError("Selected Vulkan display supports prepared packed copies only")
+            raise ValueError("Selected Vulkan display supports prepared image-only frames")
 
     def prepare_frame_sources(self, frames, *, capacity=3):
         """Cold-prepare retained Vulkan packed sources and a private display pool.
@@ -111,6 +111,8 @@ class Canvas:
         self.canvas._prepare_vulkan_display_sources(
             [frame.field_info for frame in frames], capacity
         )
+        self._prepared_frame_pool = False
+        self._shared_cuda_vulkan_views.clear()
 
     def _native_source_completion(self, completion):
         if completion is None:
@@ -130,7 +132,6 @@ class Canvas:
         pool. To resize, close the old domain, bind its replacement and prepare
         new storage. Reconfiguration retires the previous Vulkan consumers.
         """
-        self._require_general_display_path()
         self._check_display_owner()
         if self._execution_domain is None:
             raise ValueError("Select an execution domain before preparing display storage")
@@ -142,13 +143,15 @@ class Canvas:
         return tuple(self._shared_view(native) for native in natives)
 
     def acquire_frame(self, width, height):
-        """Borrow a packed RGBA8 CUDA write target, or return None when busy.
+        """Borrow a packed RGBA8 write target, or return None when busy.
 
-        Requires CUDA compute and GGUI Vulkan external sharing. No staging
-        fallback is used. Submit/cancel before another image or Window.show().
+        Vulkan requires a selected domain and a cold prepared writable pool.
+        CUDA uses its existing shared display path. Submit/cancel before another
+        image or Window.show(); prepared storage never expands while acquiring.
         """
-        self._require_general_display_path()
         self._check_display_owner()
+        if self._vulkan_display_selected() and not self._prepared_frame_pool:
+            raise ValueError("Vulkan acquire_frame requires prepare_frame_pool")
         if self._display_write is not None:
             raise RuntimeError("Submit or cancel the current display write first")
         if any(isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in (width, height)):
@@ -246,7 +249,7 @@ class Canvas:
                 )
             view = DenseNdarrayView(native, description)
             self._shared_cuda_vulkan_views[key] = view
-            if len(self._shared_cuda_vulkan_views) > 16:
+            if not self._prepared_frame_pool and len(self._shared_cuda_vulkan_views) > 16:
                 oldest = next(iter(self._shared_cuda_vulkan_views))
                 if oldest != key:
                     self._shared_cuda_vulkan_views.pop(oldest, None)
@@ -358,16 +361,16 @@ class Canvas:
         and uses the existing display submission, without a producer wait.
 
         With a selected domain, supply the exact ``source_completion`` from
-        the prepared writer when tracking a writable frame. Later work on that
-        domain cannot extend the returned source ticket. For packed copies,
+        the prepared writer for a written Vulkan frame, with or without tracking.
+        An unwritten Vulkan frame can be submitted without a producer. CUDA
+        writable frames retain the existing producer requirement when tracking.
+        Later work on that domain cannot extend the returned source ticket. For packed copies,
         this parameter is a device dependency and ``frame.source_completion``
         covers the accepted copy. Busy leaves a writable frame unsealed.
         """
         if self._vulkan_display_selected():
             self._check_display_owner()
-            if isinstance(frame, WritableDisplayFrame):
-                raise ValueError("Vulkan display storage is copy-only")
-            if source_completion is None:
+            if not isinstance(frame, WritableDisplayFrame) and source_completion is None:
                 raise ValueError("Vulkan display copy requires source_completion")
         producer = self._native_source_completion(source_completion)
         if track_completion:

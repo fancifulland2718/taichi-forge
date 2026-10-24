@@ -121,8 +121,8 @@ class VulkanExternalBufferOwner final : public ExternalSynchronizationDomain {
 // before acquisition, but admission requires one outstanding write lease and
 // consumes that lease's one complete producer submission. This owner stores
 // only native points, never RuntimeCompletion/Commands/instance closures.
-// Canvas graphics readers and last-image pinning are added at the UI boundary;
-// this native contract alone does not enable writable Canvas frames.
+// Graphics submission retains exact reader proofs here. The renderer still
+// owns last-image pinning and chooses from its one physical display pool.
 class VulkanDisplayBufferOwner final : public ExternalSynchronizationDomain {
  public:
   struct Selection {
@@ -136,7 +136,8 @@ class VulkanDisplayBufferOwner final : public ExternalSynchronizationDomain {
   // Real local storage, not an external-handle round trip. The caller gets a
   // finite allocation for Program's existing external-managed registry.
   static std::shared_ptr<VulkanDisplayBufferOwner> create(
-      VulkanDevice &device, std::size_t bytes, Selection selected);
+      VulkanDevice &device, std::size_t bytes, Selection selected,
+      std::size_t graphics_capacity = 0);
   ~VulkanDisplayBufferOwner() override;
   VulkanDisplayBufferOwner(const VulkanDisplayBufferOwner &) = delete;
   VulkanDisplayBufferOwner &operator=(const VulkanDisplayBufferOwner &) = delete;
@@ -150,6 +151,7 @@ class VulkanDisplayBufferOwner final : public ExternalSynchronizationDomain {
   Selection selection() const noexcept;
   DeviceAllocation ndarray_allocation() const;
   void validate_binding(VulkanDevice &device, Selection selected) const;
+  bool ready_for_write() const;
   // A fresh lease nonce rejects stale host calls even if an unwritten lease
   // was cancelled. Cancellation does not consume a producer epoch.
   std::uint64_t acquire_write();
@@ -158,6 +160,10 @@ class VulkanDisplayBufferOwner final : public ExternalSynchronizationDomain {
   // accepted for this lease can seal it. Failure leaves the lease retryable.
   std::shared_ptr<VulkanTimelinePoint> seal_write(
       std::uint64_t lease, const std::shared_ptr<VulkanTimelinePoint> &producer);
+  StreamSemaphore submit_graphics(
+      VulkanStream &stream, CommandList *commands,
+      const std::vector<StreamSemaphore> &additional_waits,
+      const std::shared_ptr<VulkanTimelinePoint> &producer);
   void stop();
   // Cold retirement only. Stop admission, wait the exact proven writer outside
   // the lock, and release device storage now, even if ticket/loan shells live.

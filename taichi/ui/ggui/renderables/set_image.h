@@ -45,6 +45,7 @@ namespace vulkan {
 // presentation.
 class TI_DLL_EXPORT DisplayCompletion final {
  public:
+  DisplayCompletion();
   bool done();
   void wait();
   std::string status();
@@ -73,6 +74,9 @@ class DisplayStorage {
   virtual int height() const noexcept = 0;
   virtual bool ready_for_vulkan_submit() const noexcept = 0;
   virtual void prepare_write() = 0;
+  // Explicit discard of an acquired host lease. Completion association (for
+  // example track_display) must not call this hook.
+  virtual void cancel_write() {}
   virtual void finish_write() = 0;
   virtual bool try_finish_write(
       const taichi::lang::RuntimeCompletion &producer = {}) = 0;
@@ -200,6 +204,7 @@ class SetImage final : public Renderable {
   void attach_display_completion(taichi::lang::StreamSemaphore completion);
   void retire_display();
   void cancel_display();
+  void discard_display_write();
 
   std::shared_ptr<DisplayStorage> acquire_shared_cuda_vulkan_image(
       int width,

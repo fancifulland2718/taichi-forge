@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Display storage gains a shared polymorphic interface across the native shim.
-inline constexpr int kForgeNativeAbiRevision = 170;
+// DisplayStorage cancellation and sized pool preparation cross the native shim.
+inline constexpr int kForgeNativeAbiRevision = 171;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

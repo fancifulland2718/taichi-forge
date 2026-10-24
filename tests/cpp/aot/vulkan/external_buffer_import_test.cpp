@@ -982,6 +982,128 @@ TEST(VulkanExternalBufferImport,
   EXPECT_EQ(first_sampled.gpu_timing_snapshot().duration_ns, first_duration);
 }
 
+TEST(VulkanExternalBufferImport, ManagedImportedInputAndLocalDisplayShareOneRecipe) {
+  using taichi::Arch;
+  using namespace taichi::lang;
+  using Local = vulkan::VulkanDisplayBufferOwner;
+  VulkanDeviceCreator producer_creator(parameters()), consumer_creator(parameters());
+  auto &pd = *producer_creator.device();
+  auto &cd = *consumer_creator.device();
+  const bool addresses = cd.get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer);
+  if (cd.created_compute_queue_count() < 2 || !cd.vk_caps().timeline_semaphore ||
+      (addresses && (!pd.vk_caps().buffer_device_address || !cd.vk_caps().buffer_device_address)))
+    GTEST_SKIP() << "Requires an independent queue and the actual ndarray address mode";
+  auto fault = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 927);
+  cd.set_backend_fault_reporter(fault);
+  gfx::GfxRuntime::Params parameters;
+  parameters.device = &cd;
+  gfx::GfxRuntime runtime(parameters);
+  vulkan::ExecutionDomainRegistry registry(cd, fault);
+  auto domain = registry.create({1, 1});
+  auto exported = std::make_shared<Exported>(pd, false, addresses);
+  Endpoint endpoint(pd);
+  bool ready = false;
+  std::uint64_t epoch = 1;
+  auto imported = VulkanExternalBufferOwner::import_borrowed(
+      cd, exported->description, exported->handles(), [&](auto observed) {
+        EXPECT_EQ(observed, epoch);
+        return ready;
+      }, exported);
+  const auto selected = domain->snapshot();
+  auto local = Local::create(cd, bytes,
+      {selected.owner, selected.identity, selected.queue_index});
+  struct Operands final : RuntimeCompletionResources {
+    std::shared_ptr<VulkanExternalBufferOwner> imported;
+    std::shared_ptr<Local> local;
+    DeviceAllocationUnique readback;
+    std::size_t retained_resource_count(std::uint32_t) const noexcept override { return 3; }
+  };
+  auto operands = std::make_shared<Operands>();
+  operands->imported = imported;
+  operands->local = local;
+  auto readback = cd.allocate_memory_unique({bytes, false, true, false, AllocUsage::Storage});
+  ASSERT_EQ(readback.second, RhiResult::success);
+  operands->readback = std::move(readback.first);
+  FixedExecution::VulkanExecutionBinding binding{domain, operands};
+  FixedExecution recipe(Arch::vulkan, cd, &runtime,
+      {FixedExecution::BufferCopy{local->ndarray_allocation().get_ptr(),
+                                 imported->ndarray_allocation().get_ptr(), bytes},
+       FixedExecution::BufferCopy{operands->readback->get_ptr(),
+                                 local->ndarray_allocation().get_ptr(), bytes}},
+      nullptr, fault, nullptr, nullptr, nullptr, nullptr, nullptr, &binding);
+  // Duplicated views of both kinds still enter exactly one ordered transaction.
+  recipe.bind_external_access({local, imported, local, imported});
+  const auto idle = domain->prepare_commands({});
+  runtime.synchronize();
+  test_detail::TimelineGate default_gate(cd, 0);
+  for (unsigned iteration = 0; iteration < 2; ++iteration) {
+    const std::array<std::uint32_t, 4> expected{
+        0xff332211u + iteration, 0x80000001u + iteration,
+        0x44556677u + iteration, 0xffffffffu - iteration};
+    endpoint.begin();
+    if (iteration)
+      endpoint.barrier(*exported->source, VK_ACCESS_TRANSFER_READ_BIT,
+                       VK_ACCESS_TRANSFER_WRITE_BIT);
+    endpoint.update(*exported->source, expected);
+    endpoint.release(*exported->source);
+    endpoint.submit({}, exported->ready->semaphore);
+    endpoint.wait();
+    auto lease = local->acquire_write();
+    ready = false;
+    auto sequence = fault->next_submission_sequence();
+    auto submissions = cd.queue_submission_snapshot().queue_submit_calls;
+    EXPECT_THROW(recipe.submit(), vulkan::ExecutionDomain::Busy);
+    EXPECT_EQ(fault->next_submission_sequence(), sequence);
+    EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls, submissions);
+    EXPECT_EQ(imported->snapshot().next_epoch, epoch);
+    EXPECT_EQ(local->snapshot().next_epoch, epoch);
+    ready = true;
+    local->cancel_write(lease);
+    EXPECT_THROW(recipe.submit(), std::invalid_argument);
+    EXPECT_EQ(imported->snapshot().next_epoch, epoch);
+    EXPECT_EQ(fault->next_submission_sequence(), sequence);
+    lease = local->acquire_write();
+    {
+      test_detail::TimelineGate gate(cd, selected.queue_index);
+      auto full = domain->submit(idle);
+      sequence = fault->next_submission_sequence();
+      EXPECT_THROW(recipe.submit(), vulkan::ExecutionDomain::Busy);
+      EXPECT_EQ(fault->next_submission_sequence(), sequence);
+      EXPECT_EQ(imported->snapshot().next_epoch, epoch);
+      EXPECT_EQ(local->snapshot().next_epoch, epoch);
+      gate.release();
+      full.wait();
+    }
+    submissions = cd.queue_submission_snapshot().queue_submit_calls;
+    auto ticket = recipe.submit();
+    EXPECT_EQ(cd.queue_submission_snapshot().queue_submit_calls, submissions + 1);
+    ++epoch;
+    EXPECT_EQ(imported->snapshot().next_epoch, epoch);
+    EXPECT_EQ(local->snapshot().next_epoch, epoch);
+    CompletionWaitSet wait({ticket}, std::chrono::milliseconds(1));
+    ASSERT_EQ(wait.wait(std::chrono::seconds(3)).status, CompletionWaitSet::Status::ready);
+    auto point = std::dynamic_pointer_cast<vulkan::VulkanTimelinePoint>(
+        ticket.reusable_stream_dependency(Arch::vulkan, fault->program_domain(), fault));
+    local->seal_write(lease, point);
+    void *mapped = nullptr;
+    ASSERT_EQ(cd.map(*operands->readback, &mapped), RhiResult::success);
+    std::array<std::uint32_t, 4> observed{};
+    std::memcpy(observed.data(), mapped, bytes);
+    cd.unmap(*operands->readback);
+    EXPECT_EQ(observed, expected);
+    endpoint.begin();
+    endpoint.acquire(*exported->source);
+    endpoint.copy(*exported->source);
+    endpoint.submit(exported->consumed->semaphore);
+    endpoint.wait();
+    endpoint.expect(expected);
+  }
+  domain->close();
+  imported->close();
+  local->close();
+  registry.retire();
+}
+
 int ndarray_address_queries = 0;
 VKAPI_ATTR VkDeviceAddress VKAPI_CALL count_ndarray_address_query(
     VkDevice, const VkBufferDeviceAddressInfo *) {

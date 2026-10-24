@@ -302,7 +302,7 @@ timeline 点。`copied.done()/wait()` 覆盖源读取完成，调用方须在复
 忙碌时返回 `None`，不排队复制、不替换 `frame.source_completion`；取消待显示帧也不
 取消已接受的复制，其槽和源租约保持到复制完成。
 
-当前 Vulkan 路线仅支持 prepared packed copy。`acquire_frame/prepare_frame_pool`、
+当前选定 Vulkan 域支持 prepared packed copy 和下述 prepared writable 路线。
 混合几何、GUI widgets、texture/host 输入和 runtime offscreen attachments 尚未接通，
 在对应入口拒绝。窗口销毁退休自己的复制实例，不关闭整个输出域。始终只使用该选定
 Vulkan 图像路线的窗口，等待自己的复制与 graphics readers，不排空无关的默认计算或
@@ -311,6 +311,27 @@ swapchain/present 退休，物理队列共享可能带来额外等待；读回�
 保留原有同步。缺少退休证明时保留窗口资源闭包，不释放可能仍在途的存储。
 源集合或形状变化时关闭旧域、绑定新域并重新准备。这里没有额外像素处理 kernel，
 但相对直接写显示槽多一次设备复制；不能据此推断应用帧率提升。
+
+### Vulkan prepared writable 显示槽
+
+选定 Vulkan 输出域后，可用 `canvas.prepare_frame_pool(width, height, capacity=3)`
+冷准备本地显示槽，并为返回的每个物理 view 准备 Graph/AOT writer；使用上面的 CUDA
+池示例，但 Vulkan 的已写帧必须传入该 writer 的精确 `source_completion`，无论是否
+开启票据跟踪。writer 必须属于同一个输出域，普通 kernel/default launch 不能直接写。
+每次 `acquire_frame()` 允许一个完整 prepared recipe；其中可含多次 dispatch 和该槽的
+多个别名。错误、较晚或旧租约的 completion 会在封存前拒绝，当前租约仍可重试。
+
+这条路线直接写显示存储，不执行 packed-copy 的额外复制。graphics 等待精确 writer，
+槽只有在 writer 和全部 graphics readers 完成后才能复用。取消不取消已接受的 writer；
+repeat 不重新提交 writer 或空 marker。未写入的帧可不传 producer：首次内容为冷阶段
+清零值，后续保留该槽已有内容；空帧提交仍服从输出域容量，Busy 不消费租约。
+容量由调用方决定，至少两个槽用于保留最后图像；只检查实际分配、地址、设备范围和
+shader 索引约束。没有额外槽数上限，也不在热路径扩容。
+
+窗口关闭只撤销使用这些显示槽的实例，不关闭同域的其他实例。resize 先关闭旧域，
+绑定新域并重新准备。reset 后遗留 view/ticket 只保留已退休的安全对象，不能继续写。
+packed-copy 和 writable 是两种冷准备模式；不能在活域中切换模式或替换存储。此能力
+不等于完整 下游应用 GUI 路由或应用帧率资格。
 
 ## 准备、初始化与提交
 

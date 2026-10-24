@@ -47,6 +47,11 @@ class DisplaySubmission final : public StreamSemaphoreObject {
     return !completion_ || completion_->wait();
   }
 
+  void attach(StreamSemaphore completion) {
+    std::unique_lock<std::shared_mutex> lock(backend_mutex_);
+    completion_ = std::move(completion);
+  }
+
   void retire() {
     std::unique_lock<std::shared_mutex> lock(backend_mutex_);
     completion_.reset();
@@ -58,6 +63,12 @@ class DisplaySubmission final : public StreamSemaphoreObject {
 };
 
 }  // namespace
+
+DisplayCompletion::DisplayCompletion()
+    : completion_(std::make_shared<DisplaySubmission>(nullptr)) {
+  // Every status and backend wrapper is allocated before Window.show enqueue.
+  status_.reserve(11);
+}
 
 bool DisplayCompletion::done() {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -103,7 +114,7 @@ void DisplayCompletion::attach(StreamSemaphore completion) {
   std::lock_guard<std::mutex> lock(mutex_);
   TI_ERROR_IF(status_ != "pending" || !completion,
               "Invalid display completion attachment");
-  completion_ = std::make_shared<DisplaySubmission>(std::move(completion));
+  static_cast<DisplaySubmission *>(completion_.get())->attach(std::move(completion));
   status_ = "submitted";
 }
 
@@ -113,6 +124,8 @@ void DisplayCompletion::retire() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (status_ == "submitted")
       status_ = "complete";
+    else if (status_ == "pending")
+      status_ = "cancelled";
     completion = std::move(completion_);
   }
   if (completion)
@@ -830,6 +843,12 @@ void SetImage::cancel_display() {
     display_completion_->cancel();
   display_completion_.reset();
   display_write_open_ = false;
+}
+
+void SetImage::discard_display_write() {
+  if (shared_cuda_vulkan_image_)
+    shared_cuda_vulkan_image_->cancel_write();
+  cancel_display();
 }
 
 StreamSemaphore SetImage::submit_shared_cuda_vulkan_frame(

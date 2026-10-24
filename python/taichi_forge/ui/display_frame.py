@@ -27,10 +27,12 @@ class WritableDisplayFrame:
     """Canvas-owned packed RGBA8 write lease from Canvas.acquire_frame().
 
     pixels is a (width, height) u32 dense view, x-major, y=0 at the bottom.
-    Use it only before submit/cancel, on the canvas's selected CUDA domain or
-    the legacy ordered path. Prepared bindings may retain the physical view,
+    Use it only before submit/cancel, on the canvas's selected CUDA/Vulkan
+    domain or the legacy CUDA ordered path. Prepared bindings retain the view,
     but may only write while that image has a current writable Canvas lease.
-    Cancelling does not publish pixels.
+    Cancelling does not publish pixels. Vulkan accepts one complete prepared
+    writer per acquired lease and requires its exact source_completion when
+    sealing; omitting it is valid only for an unwritten empty frame.
     """
 
     def __init__(self, canvas, pixels, completion):

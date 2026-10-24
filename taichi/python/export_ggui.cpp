@@ -627,7 +627,7 @@ struct PyCanvas {
     return ggui_canvas->acquire_shared_cuda_vulkan_image(width, height).get();
   }
   std::vector<vulkan::DisplayStorage *>
-  prepare_display_pool(int width, int height, int capacity) {
+  prepare_display_pool(int width, int height, std::size_t capacity) {
     return display_canvas().prepare_display_pool(width, height, capacity);
   }
 

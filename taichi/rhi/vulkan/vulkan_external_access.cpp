@@ -215,10 +215,12 @@ struct VulkanDisplayBufferOwner::State {
   const Selection selected;
   mutable std::mutex mutex;
   DeviceAllocationUnique allocation;
+  std::vector<StreamSemaphore> readers;
   std::shared_ptr<VulkanTimelinePoint> latest, uncertain;
   std::uint64_t next_epoch{1}, next_lease{1}, lease{0}, writer_lease{0};
   bool accepting{true}, closed{false}, poisoned{false};
   bool acquired{false}, sealed{false};
+  bool graphics_unsealed{false};
 
   State(VulkanDevice &device, Selection selected)
       : device(device),
@@ -228,8 +230,17 @@ struct VulkanDisplayBufferOwner::State {
       throw std::overflow_error("Vulkan display owner identity exhausted");
   }
   void check() const {
-    if (!accepting || closed || poisoned)
+    if (!accepting || closed || poisoned || graphics_unsealed)
       throw std::runtime_error("Vulkan display buffer owner is closed or poisoned");
+  }
+  bool ready_for_write() const {
+    check();
+    if (acquired || (latest && !latest->is_ready()))
+      return false;
+    for (const auto &reader : readers)
+      if (reader && !reader->is_ready())
+        return false;
+    return true;
   }
   void check_lease(std::uint64_t value) const {
     check();
@@ -243,7 +254,8 @@ VulkanDisplayBufferOwner::VulkanDisplayBufferOwner(std::unique_ptr<State> state)
 }
 
 std::shared_ptr<VulkanDisplayBufferOwner> VulkanDisplayBufferOwner::create(
-    VulkanDevice &device, std::size_t bytes, Selection selected) {
+    VulkanDevice &device, std::size_t bytes, Selection selected,
+    std::size_t graphics_capacity) {
   if (!bytes || bytes % sizeof(std::uint32_t) ||
       bytes > device.get_storage_buffer_binding_limits().max_range)
     throw std::invalid_argument("Invalid local Vulkan display storage extent");
@@ -251,6 +263,7 @@ std::shared_ptr<VulkanDisplayBufferOwner> VulkanDisplayBufferOwner::create(
       selected.queue_index >= device.created_compute_queue_count())
     throw std::invalid_argument("Vulkan display storage requires a selected independent domain");
   auto state = std::make_unique<State>(device, selected);
+  state->readers.resize(graphics_capacity);
   auto allocation = device.allocate_memory_unique(
       {bytes, false, false, false, AllocUsage::Storage});
   if (allocation.second != RhiResult::success)
@@ -280,8 +293,10 @@ VulkanDisplayBufferOwner::Selection VulkanDisplayBufferOwner::selection()
 
 VulkanDisplayBufferOwner::Snapshot VulkanDisplayBufferOwner::snapshot() const {
   std::lock_guard<std::mutex> lock(state_->mutex);
-  return {state_->next_epoch, state_->lease, state_->accepting, state_->closed,
-          state_->poisoned, state_->acquired, state_->writer_lease != 0,
+  return {state_->next_epoch, state_->lease,
+          state_->accepting && !state_->graphics_unsealed, state_->closed,
+          state_->poisoned || state_->graphics_unsealed, state_->acquired,
+          state_->writer_lease != 0,
           state_->sealed};
 }
 
@@ -319,7 +334,7 @@ std::uint64_t VulkanDisplayBufferOwner::acquire_write() {
   auto &state = *state_;
   std::lock_guard<std::mutex> lock(state.mutex);
   state.check();
-  if (state.acquired || (state.latest && !state.latest->is_ready()))
+  if (!state.ready_for_write())
     throw VulkanExecutionQueue::Busy();
   if (state.next_lease == UINT64_MAX)
     throw std::overflow_error("Vulkan display lease counter exhausted");
@@ -328,6 +343,11 @@ std::uint64_t VulkanDisplayBufferOwner::acquire_write() {
   state.acquired = true;
   state.sealed = false;
   return state.lease;
+}
+
+bool VulkanDisplayBufferOwner::ready_for_write() const {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  return state_->ready_for_write();
 }
 
 void VulkanDisplayBufferOwner::cancel_write(std::uint64_t lease) {
@@ -350,6 +370,35 @@ std::shared_ptr<VulkanTimelinePoint> VulkanDisplayBufferOwner::seal_write(
   return state.latest;
 }
 
+StreamSemaphore VulkanDisplayBufferOwner::submit_graphics(
+    VulkanStream &stream, CommandList *commands,
+    const std::vector<StreamSemaphore> &additional_waits,
+    const std::shared_ptr<VulkanTimelinePoint> &producer) {
+  auto &state = *state_;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.check();
+  if (!state.sealed || state.acquired || !producer || producer != state.latest)
+    throw std::invalid_argument("Vulkan display reader requires the sealed producer");
+  auto available = std::find_if(state.readers.begin(), state.readers.end(),
+      [](const auto &reader) { return !reader || reader->is_ready(); });
+  if (available == state.readers.end())
+    throw std::runtime_error("Vulkan display reader capacity is full");
+  auto waits = additional_waits;
+  waits.push_back(producer);
+  // Every fallible host preparation precedes enqueue. The RHI stream can still
+  // throw after vkQueueSubmit, so no returned proof means sticky quarantine.
+  try {
+    auto complete = stream.submit(commands, waits);
+    if (!complete)
+      throw std::runtime_error("Vulkan display reader returned no completion");
+    *available = complete;
+    return complete;
+  } catch (...) {
+    state.graphics_unsealed = true;
+    throw;
+  }
+}
+
 void VulkanDisplayBufferOwner::stop() {
   std::lock_guard<std::mutex> lock(state_->mutex);
   state_->accepting = false;
@@ -358,21 +407,27 @@ void VulkanDisplayBufferOwner::stop() {
 void VulkanDisplayBufferOwner::close() {
   auto &state = *state_;
   std::shared_ptr<VulkanTimelinePoint> prefix;
+  std::vector<StreamSemaphore> readers;
   {
     std::lock_guard<std::mutex> lock(state.mutex);
     state.accepting = false;
     if (state.closed)
       return;
-    if (state.uncertain)
+    if (state.uncertain || state.graphics_unsealed)
       throw std::runtime_error("Vulkan display enqueue has no retirement proof");
     prefix = state.latest;
+    readers = state.readers;
   }
   if (prefix)
     prefix->wait();
+  for (const auto &reader : readers)
+    if (reader && !reader->wait())
+      throw std::runtime_error("Vulkan display reader has no retirement proof");
   DeviceAllocationUnique retired;
   {
     std::lock_guard<std::mutex> lock(state.mutex);
     retired = std::move(state.allocation);
+    readers = std::move(state.readers);
     state.latest.reset();
     state.acquired = false;
     state.closed = true;

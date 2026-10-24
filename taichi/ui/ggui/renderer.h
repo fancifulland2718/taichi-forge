@@ -101,7 +101,7 @@ class TI_DLL_EXPORT Renderer {
   acquire_shared_cuda_vulkan_image(int width, int height);
   std::vector<DisplayStorage *> prepare_display_pool(int width,
                                                    int height,
-                                                   int capacity);
+                                                   std::size_t capacity);
 
   std::shared_ptr<DisplayCompletion> track_display_frame(bool writable);
   void finish_display_write();
@@ -148,6 +148,9 @@ class TI_DLL_EXPORT Renderer {
 
   struct InFlightFrame {
     taichi::lang::StreamSemaphore complete;
+    // Selected Vulkan keeps the complete host closure before enqueue.
+    std::unique_ptr<taichi::lang::CommandList> commands;
+    std::vector<taichi::lang::StreamSemaphore> submit_waits;
     // Kept alive until this frame completes because its acquire wait proves the
     // previous present using the same swapchain image has finished.
     std::vector<taichi::lang::StreamSemaphore> present_waits_after_acquire;

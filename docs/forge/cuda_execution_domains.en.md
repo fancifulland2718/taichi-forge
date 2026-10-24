@@ -383,8 +383,8 @@ display slot without another source copy. Busy returns `None`, enqueues no copy
 and leaves `frame.source_completion` unchanged. Cancelling a pending display does
 not cancel an accepted copy; its slot and source leases remain until completion.
 
-This Vulkan path currently supports prepared packed copies only. Writable
-`acquire_frame/prepare_frame_pool`, mixed geometry, GUI widgets, texture/host input
+The selected Vulkan domain supports prepared packed copies and the prepared
+writable path below. Mixed geometry, GUI widgets, texture/host input
 and runtime offscreen attachments reject at their respective entry points.
 Window destruction retires its copy instance without closing the entire output
 domain. A window that has used only this selected Vulkan image path waits for its
@@ -398,6 +398,35 @@ For changed source sets or shapes, close the old domain, bind a new one and
 prepare again. This adds no pixel-processing kernel, but adds one device copy
 compared with writing display storage directly; it is not an application frame-rate
 claim.
+
+### Vulkan prepared writable display slots
+
+After selecting a Vulkan output domain, cold-prepare local display slots with
+`canvas.prepare_frame_pool(width, height, capacity=3)` and prepare a Graph/AOT
+writer for each returned physical view. Use the CUDA pool example above, but
+always supply the written Vulkan frame's exact writer `source_completion`, even
+when tracking is disabled. Writers must use that same output domain; ordinary
+kernel/default launches cannot write these views. Each acquired lease accepts
+one complete prepared recipe, which can contain multiple dispatches and aliases
+of the slot. Wrong, later or stale completions reject before sealing and leave
+the current lease available for retry.
+
+This writes display storage directly, avoiding the extra packed-copy transfer.
+Graphics waits for the exact writer; a slot can be reused only after its writer
+and every graphics reader complete. Cancellation does not cancel accepted work.
+Repeat submits no writer or empty marker. An unwritten frame may omit its
+producer: the initial contents are cold-zeroed; later empty frames retain that
+slot's previous contents. Empty submission still obeys output-domain capacity;
+Busy does not consume its lease. The caller chooses capacity, with at least two
+slots to retain the last image. Only allocation, addressing, device ranges and
+shader indexing impose limits; there is no extra slot cap or hot pool growth.
+
+Window close revokes only instances consuming these slots, leaving unrelated
+instances on the domain usable. For resize, close the old domain, bind a new one
+and prepare again. Views/tickets surviving reset retain retired safe objects,
+not permission to write. Packed-copy and writable pools are separate cold modes;
+storage and mode cannot change on a live bound domain. This capability does not
+qualify the full downstream application GUI route or establish application frame-rate gains.
 
 ## Prepare, initialize and submit
 

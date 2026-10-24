@@ -2844,7 +2844,9 @@ shared storage 或经过优化的 device-side staging 路径。
 
 ### `Canvas.acquire_frame(width, height)` / `Canvas.repeat_frame()`
 
-`acquire_frame` 在同 GPU 的 CUDA-Vulkan sharing 路径借用 Canvas 管理的 `WritableDisplayFrame`。
+`acquire_frame` 在同 GPU 的 CUDA-Vulkan sharing 路径，或已选 Vulkan 域的冷准备显示池中，
+借用 Canvas 管理的 `WritableDisplayFrame`。Vulkan 仅接受该域的 prepared Graph/AOT writer，
+且已写帧必须传入其精确 `source_completion`，见[执行域显示合同](cuda_execution_domains.zh.md#vulkan-prepared-writable-显示槽)。
 向 `frame.pixels` 写入 packed RGBA8 后提交或取消；context manager 退出会取消未提交写入。
 共享能力不支持时抛异常，可见窗口背压时返回 `None`。这不是任意外部图像导入 API。
 

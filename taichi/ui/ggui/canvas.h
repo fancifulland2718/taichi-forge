@@ -76,7 +76,7 @@ class TI_DLL_EXPORT Canvas final : public CanvasBase {
   acquire_shared_cuda_vulkan_image(int width, int height);
   std::vector<DisplayStorage *> prepare_display_pool(int width,
                                                    int height,
-                                                   int capacity);
+                                                   std::size_t capacity);
 
   void triangles(const TrianglesInfo &info) override;
 
