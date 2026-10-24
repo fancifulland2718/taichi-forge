@@ -495,8 +495,8 @@ TEST_F(CudaRangeConditionalStandalone, ReadsBoundsInsideEachWhileIteration) {
   }
   std::uint32_t error = 0;
   ASSERT_TRUE(recording.ranges.initialize(packets, selections,
-                                          taichi_global_tmp_buffer_size, &error));
-  EXPECT_EQ(recording.ranges.device_bytes(), 96);
+                                          taichi_global_tmp_buffer_size, &error, {2, 1}));
+  EXPECT_EQ(recording.ranges.device_bytes(), 144);
   cuda::driver_graph_prepare_conditional_setter();
   driver.graph_create(&recording.graph, 0);
   cuda::GraphRegionBuilder builder(recording.graph, recording.stream);
@@ -508,6 +508,8 @@ TEST_F(CudaRangeConditionalStandalone, ReadsBoundsInsideEachWhileIteration) {
   const auto loop = builder.add_while(recording.graph, prefix, handle);
   builder.capture(loop.body, {}, [&](void *stream) {
     TI_ASSERT(recording.ranges.capture(1, launcher, packets[1], stream) == CUDA_SUCCESS);
+    // Repeated logical condition, different physical target node.
+    TI_ASSERT(recording.ranges.capture(0, launcher, packets[0], stream) == CUDA_SUCCESS);
     cuda::driver_graph_set_conditional(control, handle, stream, false);
   });
   builder.capture(recording.graph, {loop.node}, [&](void *stream) {
@@ -537,11 +539,116 @@ TEST_F(CudaRangeConditionalStandalone, ReadsBoundsInsideEachWhileIteration) {
     for (int i = 0; i < 65; ++i) {
       int expected = 0;
       for (int k = 0; k <= iterations; ++k)
-        expected += i < std::max(0, n - 17 * k);
+        expected += (k == 0 ? 1 : 2) * (i < std::max(0, n - 17 * k));
       EXPECT_EQ(values[i], expected) << "n=" << n << ", index=" << i;
     }
     EXPECT_EQ((read<int, 6>(state)[5]), iterations);
   }
+}
+
+class CudaRangeConditionalInstances : public CudaRangeGraph {};
+
+TEST_F(CudaRangeConditionalInstances, RepeatedConditionBusyAndIndependentRetirement) {
+  auto context = CUDAContext::get_instance().get_guard();
+  auto *entry = kernel("loop_stage");
+  ASSERT_NE(entry, nullptr);
+  std::array<void *, 2> states{allocate(6 * 4), allocate(6 * 4)};
+  std::array<void *, 2> outputs{allocate(65 * 4), allocate(65 * 4)};
+  std::array<std::array<std::unique_ptr<LaunchContextBuilder>, 2>, 2> arguments;
+  std::array<std::unique_ptr<cuda::FixedGraph>, 2> graphs;
+  testing::CudaExternalGate gate;
+  for (int lane = 0; lane < 2; ++lane) {
+    std::array<cuda::FixedGraph::Dispatch, 2> calls;
+    for (int advance = 0; advance < 2; ++advance) {
+      auto &args = arguments[lane][advance];
+      args = std::make_unique<LaunchContextBuilder>(entry);
+      args->set_arg_external_array_with_shape(
+          {0}, reinterpret_cast<std::uintptr_t>(states[lane]), 6 * 4, {6});
+      args->set_arg_external_array_with_shape(
+          {1}, reinterpret_cast<std::uintptr_t>(outputs[lane]), 65 * 4, {65});
+      args->set_arg_int({2}, advance);
+      calls[advance] = dispatch(entry, *args);
+      ASSERT_EQ(calls[advance].device_range_tasks.size(), 1);
+    }
+    auto loop = std::make_shared<cuda::FixedGraph::While>();
+    loop->predicate = static_cast<int *>(states[lane]) + 4;
+    loop->max_iterations = 4;
+    loop->condition = {calls[0]};
+    loop->body = {calls[1]};
+    std::vector<cuda::FixedGraph::Operation> operations;
+    if (!lane)
+      operations.push_back(cuda::FixedGraph::Dispatch{
+          nullptr, {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); }});
+    operations.push_back(calls[0]);
+    operations.push_back(loop);
+    operations.push_back(cuda::FixedGraph::Dispatch{
+        nullptr, {}, nullptr, [&, lane](void *stream) {
+          auto *state = static_cast<int *>(states[lane]);
+          CUDADriver::get_instance().memcpy_device_to_device_async(
+              state + 5, state + 2, sizeof(int), stream);
+        }});
+    graphs[lane] = cuda::FixedGraph::prepare_execution_instance(
+        operations, owner, domains[lane], std::make_shared<RangeOperands>());
+    EXPECT_EQ(graphs[lane]->control_bytes(),
+              taichi_global_tmp_buffer_size + 4 * 48 + sizeof(cuda::CudaGraphConditionalControl64));
+  }
+  EXPECT_NE(graphs[0]->instance_snapshot().temporary_storage,
+            graphs[1]->instance_snapshot().temporary_storage);
+  bool captured_invalid = false;
+  auto invalid_loop = std::make_shared<cuda::FixedGraph::While>();
+  invalid_loop->predicate = static_cast<int *>(states[0]) + 4;
+  invalid_loop->max_iterations = 4;
+  auto bad = dispatch(entry, *arguments[0][1]);
+  bad.device_range_tasks = {0};  // Serial producer has no final-IR range proof.
+  invalid_loop->body = {bad};
+  for (int attempt = 0; attempt < 2; ++attempt)
+    EXPECT_THROW(cuda::FixedGraph::prepare_execution_instance(
+                     {cuda::FixedGraph::Dispatch{
+                          nullptr, {}, nullptr,
+                          [&](void *) { captured_invalid = true; }}, invalid_loop},
+                     owner, domains[0], std::make_shared<RangeOperands>()),
+                 std::invalid_argument);
+  EXPECT_FALSE(captured_invalid);
+  const auto reset = [&](int lane, int n, int target) {
+    write(states[lane], std::array<int, 6>{n, target, 0, -99, -99, -99});
+    write(outputs[lane], std::array<int, 65>{});
+  };
+  const auto check = [&](int lane, int n, int target) {
+    const auto iterations = std::min(4, target);
+    const auto result = read<int, 65>(outputs[lane]);
+    for (int i = 0; i < 65; ++i) {
+      int expected = 0;
+      for (int k = 0; k <= iterations; ++k)
+        expected += 2 * (i < std::max(0, n - 17 * k));
+      EXPECT_EQ(result[i], expected);
+    }
+    EXPECT_EQ((read<int, 6>(states[lane])[5]), iterations);
+  };
+  reset(0, 65, 99);
+  reset(1, 33, 2);
+  auto a = graphs[0]->submit();
+  auto b = graphs[1]->submit();
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (!b.done() && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  EXPECT_TRUE(b.done());
+  EXPECT_FALSE(a.done());
+  const auto sequence = domains[0]->latest_completion().sequence();
+  EXPECT_THROW(graphs[0]->submit(), cuda::ExecutionDomainBusy);
+  EXPECT_EQ(domains[0]->latest_completion().sequence(), sequence);
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  a.wait();
+  b.wait();
+  check(0, 65, 99);
+  check(1, 33, 2);
+  graphs[0]->retire_execution_instance();
+  for (const auto &test : {std::pair{65, 0}, {65, 99}, {0, 3}, {5, 2}}) {
+    reset(1, test.first, test.second);
+    graphs[1]->submit().wait();
+    check(1, test.first, test.second);
+  }
+  graphs[1]->retire_execution_instance();
 }
 
 class CudaRangeAotEntry : public CudaRangeGraph {};

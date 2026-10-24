@@ -72,12 +72,12 @@ def test_native_range_conditional_composition(tmp_path):
     module.add_kernel(loop_stage)
     module.save(tmp_path)
     result = subprocess.run(
-        [str(executable.resolve()), "--gtest_filter=CudaRangeConditionalStandalone.*"],
+        [str(executable.resolve()), "--gtest_filter=CudaRangeConditionalStandalone.*:CudaRangeConditionalInstances.*"],
         env={**os.environ, "TAICHI_CUDA_RANGE_AOT_FOLDER": str(tmp_path)},
         capture_output=True, text=True, timeout=90,
     )
     print(result.stdout)
     print(result.stderr)
     assert result.returncode == 0
-    assert "[  PASSED  ] 1 test." in result.stdout
+    assert "[  PASSED  ] 2 tests." in result.stdout
     assert "[  SKIPPED ]" not in result.stdout

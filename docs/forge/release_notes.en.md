@@ -36,7 +36,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **179**, persistent execution-plan version **26**, and
+- The frontend/native private ABI is **180**, persistent execution-plan version **26**, and
   compiled-cache schema **74**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
@@ -97,6 +97,12 @@ combination. Consult the linked API contracts and capability queries for exact s
   each prepared instance retains its own range controls and workspace policy. Direct kernel
   launch cannot bypass the selected recording policy. This remains an explicit choice;
   it adds a controller per selected task and does not imply a runtime speedup.
+- Explicit CUDA device-range tasks can compose with a native WHILE's prefix, body and
+  suffix in one root submission. JIT, AOT and independent instances share the range
+  recorder. Repeated conditions retain separate controls for each physical capture
+  site, without unrolling the iteration budget. Each selected task occurrence adds
+  48 bytes and one controller; masked, branch, parallel and binding-frame combinations
+  remain outside this qualification.
 
 - Empty ordinary CUDA dynamic-range blocks exit before reduction setup and teardown, avoiding neutral
   global atomics without useful iterations. Partially active blocks still participate fully in

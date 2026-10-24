@@ -13,13 +13,15 @@ bool RangeGraphControls::initialize(
     const std::vector<KernelLauncher::GraphLaunchPacket> &packets,
     const std::vector<std::vector<std::size_t>> &selections,
     std::size_t temporary_bytes,
-    std::uint32_t *driver_error) {
+    std::uint32_t *driver_error,
+    const std::vector<std::size_t> &recording_counts) {
   TI_ASSERT(driver_error);
   *driver_error = CUDA_SUCCESS;
-  if (!dispatches_.empty() || device_ || packets.size() != selections.size())
+  if (!dispatches_.empty() || device_ || packets.size() != selections.size() ||
+      (!recording_counts.empty() && recording_counts.size() != packets.size()))
     throw std::invalid_argument("Invalid CUDA range-control construction");
   // Validate the complete selection before allocating or capturing any work.
-  std::vector<std::vector<TaskControl>> dispatches(packets.size());
+  std::vector<DispatchControl> dispatches(packets.size());
   std::vector<CudaGraphRangeControl> host;
   auto &driver = CUDADriver::get_instance();
   int hardware_grid = 0;
@@ -39,6 +41,14 @@ bool RangeGraphControls::initialize(
     std::sort(selected.begin(), selected.end());
     LLVM::validate_device_range_selection(packet.offloaded_tasks, selected,
                                           temporary_bytes);
+    auto &dispatch = dispatches[i];
+    dispatch.count = recording_counts.empty() ? 1 : recording_counts[i];
+    const auto max_controls =
+        std::numeric_limits<std::size_t>::max() / sizeof(host[0]);
+    if (!dispatch.count ||
+        selected.size() > (max_controls - host.size()) / dispatch.count)
+      throw std::invalid_argument("Invalid CUDA range recording count");
+    const auto first = host.size();
     for (auto index : selected) {
       const auto &task = packet.offloaded_tasks[index];
       if (!task.native_function)
@@ -58,9 +68,16 @@ bool RangeGraphControls::initialize(
       bind(task.range_bounds->end, control.end_pointer, control.end_constant);
       control.block_dim = task.block_dim;
       control.max_grid_dim = std::min(task.grid_dim, hardware_grid);
-      dispatches[i].push_back({index, host.size()});
+      dispatch.tasks.push_back({index, host.size()});
       host.push_back(control);
     }
+    // The same packet can appear at several static capture sites. Allocate
+    // all of their controls before stream capture, never during replay.
+    for (std::size_t occurrence = 1; occurrence < dispatch.count; ++occurrence)
+      for (std::size_t task = 0; task < selected.size(); ++task) {
+        const auto control = host[first + task];
+        host.push_back(control);
+      }
   }
   if (host.empty())
     throw std::invalid_argument("CUDA range controls require a selected task");
@@ -86,11 +103,15 @@ std::uint32_t RangeGraphControls::capture(
     void *stream) {
   if (!device_ || dispatch >= dispatches_.size())
     return CUDA_ERROR_NOT_SUPPORTED;
-  const auto &selected = dispatches_[dispatch];
+  auto &recording = dispatches_[dispatch];
+  const auto &selected = recording.tasks;
   if (selected.empty()) {
     launcher.capture_cuda_graph_launch(packet, stream);
     return CUDA_SUCCESS;
   }
+  if (recording.next >= recording.count)
+    return CUDA_ERROR_NOT_SUPPORTED;
+  const auto offset = recording.next++ * selected.size();
   // Packet slicing is cold only. Every serial producer/finalizer remains in
   // order; a controller reads its snapshot immediately before that payload.
   auto slice = packet;
@@ -102,7 +123,7 @@ std::uint32_t RangeGraphControls::capture(
       launcher.capture_cuda_graph_launch(slice, stream);
       continue;
     }
-    const auto index = selected[cursor++].control;
+    const auto index = selected[cursor++].control + offset;
     driver_graph_update_range(device_ + index, stream);
     std::vector<void *> nodes;
     std::uint32_t error = CUDA_SUCCESS;

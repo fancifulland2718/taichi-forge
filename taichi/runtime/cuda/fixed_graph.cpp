@@ -687,14 +687,14 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
       [](const auto *d) { return !d->device_range_tasks.empty(); });
   if (range_selected &&
       (state.binding_frame ||
-       !std::all_of(operations.begin(), operations.end(),
-                    [](const auto &op) { return std::holds_alternative<Dispatch>(op); }) ||
+       !branch_controls.empty() || !masked_branches.empty() ||
+       !parallel_regions.empty() || !selected_regions.empty() ||
        std::any_of(dispatches.begin(), dispatches.end(), [](const auto *d) {
          return d->bounded_extent || d->adaptive_block_dim ||
                 (d->external && !d->device_range_tasks.empty());
        })))
     throw std::invalid_argument(
-        "CUDA device range requires a flat ordinary graph");
+        "CUDA device range requires ordinary dispatches or native while regions");
   const auto gated_begin = dispatches.size();
   struct GateBinding {
     void *pointer;
@@ -974,13 +974,31 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
                                 "Selected adaptive CUDA graph is unavailable");
   }
   if (range_selected) {
+    std::vector<std::size_t> recording_counts(dispatches.size());
+    std::function<void(const std::vector<Operation> &)> count_recordings;
+    count_recordings = [&](const std::vector<Operation> &sequence) {
+      for (const auto &operation : sequence) {
+        if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+          auto &count = recording_counts[dispatch_index.at(dispatch)];
+          if (count == std::numeric_limits<std::size_t>::max())
+            throw std::invalid_argument("CUDA range recording count overflow");
+          ++count;
+        } else {
+          const auto &loop = *std::get<std::shared_ptr<const While>>(operation);
+          count_recordings(loop.condition);
+          count_recordings(loop.body);
+          count_recordings(loop.condition);
+        }
+      }
+    };
+    count_recordings(operations);
     std::vector<std::vector<std::size_t>> selections;
     selections.reserve(dispatches.size());
     for (const auto *dispatch : dispatches)
       selections.push_back(dispatch->device_range_tasks);
     std::uint32_t error = CUDA_SUCCESS;
     if (!state.range.initialize(packets, selections, taichi_global_tmp_buffer_size,
-                                &error))
+                                &error, recording_counts))
       throw BackendRuntimeError(Arch::cuda, error, "prepare CUDA range controls",
                                 "Selected CUDA range control is unavailable");
   }
