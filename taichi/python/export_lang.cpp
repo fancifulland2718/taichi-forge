@@ -8320,6 +8320,8 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeVulkanExecutionDomainNativeRayLoans);
     features["vulkan_execution_domain_opacity_micromaps"] =
         bool(bitmap & kForgeVulkanExecutionDomainOpacityMicromaps);
+    features["vulkan_execution_domain_sparse_fields"] =
+        bool(bitmap & kForgeVulkanExecutionDomainSparseFields);
     result["features"] = std::move(features);
     result["legacy_runtime"] = false;
     return result;

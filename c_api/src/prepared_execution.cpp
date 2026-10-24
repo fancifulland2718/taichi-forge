@@ -31,6 +31,7 @@
 #ifdef TI_WITH_VULKAN
 #include "taichi_gfx_impl.h"
 #include "taichi/runtime/fixed_execution_vulkan.h"
+#include "taichi/runtime/gfx/aot_graph_data.h"
 #endif
 
 namespace capi {
@@ -395,6 +396,45 @@ struct PreparedExecution {
         collect(operations);
         if (nonflat && (!shared_images.empty() || !shared_rays.empty()))
           throw MemoryBindingError("Shared Vulkan resources currently require flat dispatches");
+        // Sparse state belongs to the complete prepared instance, including
+        // initialization and every control-flow arm. Borrow the selected
+        // physical kernels once, before recording any of those phases.
+        std::vector<gfx::GfxRuntime::KernelHandle> sparse_kernels;
+        std::unordered_set<int> selected_kernels;
+        std::function<void(const std::vector<FixedExecution::Operation> &)>
+            collect_sparse;
+        collect_sparse = [&](const auto &steps) {
+          for (const auto &step : steps) {
+            if (const auto *dispatch = std::get_if<FixedExecution::Dispatch>(&step)) {
+              const auto *kernel = dynamic_cast<gfx::KernelImpl *>(dispatch->kernel);
+              if (!kernel || &kernel->runtime() != gfx_runtime)
+                throw MemoryBindingError("Vulkan domain kernels require the same runtime");
+              if (selected_kernels.insert(kernel->handle().get_launch_id()).second)
+                sparse_kernels.push_back(kernel->handle());
+            } else if (const auto *loop = std::get_if<
+                           std::shared_ptr<const FixedExecution::While>>(&step)) {
+              if (!*loop)
+                throw MemoryBindingError("Vulkan domain has an empty loop");
+              collect_sparse((*loop)->condition);
+              collect_sparse((*loop)->body);
+            } else if (const auto *branch = std::get_if<
+                           std::shared_ptr<const FixedExecution::Branch>>(&step)) {
+              if (!*branch)
+                throw MemoryBindingError("Vulkan domain has an empty branch");
+              collect_sparse((*branch)->condition);
+              for (const auto &body : (*branch)->bodies)
+                collect_sparse(body);
+            } else if (const auto *parallel = std::get_if<
+                           std::shared_ptr<const FixedExecution::Parallel>>(&step)) {
+              if (!*parallel)
+                throw MemoryBindingError("Vulkan domain has an empty parallel region");
+              for (const auto &body : (*parallel)->branches)
+                collect_sparse(body);
+            }
+          }
+        };
+        collect_sparse(initializers);
+        collect_sparse(operations);
         // Reserve after collecting every phase and before recording commands.
         // The Program submission guard is held by the borrowed runtime entry;
         // GFX uses its existing host gate for the reservation/prefix transaction.
@@ -402,6 +442,8 @@ struct PreparedExecution {
             vulkan_workspace, shared_images, runtime.runtime_fault_domain());
         gfx_runtime->prepare_fixed_shared_ray_resources(
             vulkan_workspace, shared_rays, runtime.runtime_fault_domain());
+        gfx_runtime->prepare_fixed_shared_sparse_resources(
+            vulkan_workspace, sparse_kernels, runtime.runtime_fault_domain());
         // These exact loans already publish a complete producer prefix. They
         // do not justify skipping any other public or unknown dependency.
         for (const auto &use : shared_rays)

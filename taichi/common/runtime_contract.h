@@ -61,6 +61,9 @@ inline constexpr std::uint64_t kForgeVulkanExecutionDomainPrivateGraphicsAs = 1u
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainNativeRayLoans = 1ull << 37;
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainOpacityMicromaps =
     1ull << 38;
+// Generation-qualified exclusive Field loans with private lists/diagnostics.
+inline constexpr std::uint64_t kForgeVulkanExecutionDomainSparseFields =
+    1ull << 39;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

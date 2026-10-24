@@ -3060,7 +3060,11 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
                             pd.host_ctx->prepared_result->allocation());
         break;
       case CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray:
-        TI_NOT_IMPLEMENTED;
+        TI_ERROR_IF(!bind.chunk_array ||
+                        bind.chunk_array->size() != bind.chunk_count,
+                    "Prepared sparse allocator descriptor count changed");
+        bindings->rw_buffer_array(bind.binding, *bind.chunk_array);
+        break;
     }
   }
   return bindings->prepare_for_replay(patch_existing) == RhiResult::success;
@@ -3765,9 +3769,10 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                 "aligned device packet");
     for (std::size_t i = 0; i < tasks.size(); ++i) {
       for (const auto &bind : kernel->buffer_binding_plan(i)) {
-        TI_ERROR_IF(
-            bind.kind == CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray,
-            "Unsupported prepared Vulkan Graph resource binding");
+        if (bind.kind == CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray)
+          TI_ERROR_IF(!bind.chunk_array ||
+                          bind.chunk_array->size() != bind.chunk_count,
+                      "Prepared sparse allocator descriptor count changed");
       }
     }
     sparse.include(*kernel);
@@ -5011,7 +5016,18 @@ bool GfxRuntime::launch_graph_impl(
             break;
           }
           case CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray:
-            return reject();
+            if (!bind.chunk_array || bind.chunk_array->size() != bind.chunk_count)
+              return reject();
+            // Both descriptors and recorded hazards depend on every physical
+            // chunk. A changed pool cannot reuse the old command structure.
+            for (auto *identity : {&key, &structure_key}) {
+              identity->push_back(0xB105u);
+              identity->push_back(static_cast<uint64_t>(bind.binding));
+              identity->push_back(bind.chunk_count);
+              for (const auto &allocation : *bind.chunk_array)
+                push_graph_allocation_key(*identity, allocation);
+            }
+            break;
         }
       }
     }
