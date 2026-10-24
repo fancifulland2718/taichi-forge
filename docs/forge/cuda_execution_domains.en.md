@@ -276,7 +276,26 @@ Cold `initial_data` uploads still use the default queue and `initialize()` waits
 for bootstrap; cold preparation is not fully independent of that queue. Warm
 native queries and updates do not return to it.
 
-Host selection, public parallel recipes and shared sparse/RNG/runtime-error
+`vulkan_execution_domain_sparse_fields` declares fixed preparation for sparse
+Fields with a complete tree-generation proof. AOT reconstruction and selected JIT
+code loans share admission. Preparation collects kernels from initialization and
+control regions once, then exclusively borrows their actual roots and allocator
+pools. Conflicting ordinary kernels, Graphs and other instances are rejected
+before submission while the instance owns the loan. Different trees may execute
+on different domains.
+
+Each recording retains private traversal lists. Completion snapshots preserve
+domain diagnostics without reading another pending domain's live counters.
+Closing the instance waits for its accepted work, returns tree access and
+invalidates that tree's ordinary traversal cache. Tree destruction first retires
+dependent instances. Workspace accounting includes actual list and diagnostic
+storage; replay does not allocate lists. Preparation retains the ordinary-queue
+producer prefix for the source trees. Windows qualification covers
+pointer/bitmasked/dynamic storage, independent and chunked pools, zero/early/budget
+termination, nested loops and explicit gradients; it is not qualification of
+every sparse layout. CUDA sparse independent-domain state is a separate contract.
+
+Host selection, public parallel recipes and unisolated RNG/runtime-error
 state remain outside this independent Vulkan route. Ordinary Graph execution keeps
 its existing capabilities; CUDA Canvas and external-memory protocols are not
 implicitly enabled on Vulkan domains.
@@ -667,11 +686,14 @@ Cold preparation uses persisted compiler facts to qualify internal state.
 Qualified dense-field kernels, `real_func` calls, vector arguments and cross-task
 temporaries use the existing compiler and AOT loader. BC, PTX and cubin retain
 these facts. Unknown older artifacts and kernels using unisolated shared RNG,
-runtime errors, sparse lists/allocators, printing, mesh state or unqualified
+runtime errors, CUDA sparse lists/allocators, printing, mesh state or unqualified
 external calls are rejected for independent execution. Ordinary default-queue
 APIs remain available under their existing contracts. Selected binding families,
 storage rings and host-selected branches are not silently converted to another
 execution route. Each native operation must admit the independent domain route.
+
+Qualified Vulkan sparse Fields use the tree-loan contract described above,
+independently of LLVM's shared runtime state.
 
 The caller owns application data hazards. Domains do not infer that two array
 views or dense fields alias. Explicit dependencies must order every overlapping

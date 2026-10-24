@@ -205,8 +205,19 @@ graphics 使用具备图形能力的域。ray-program buffer 必须逐 Graph 端
 冷 `initial_data` 上传仍走默认队列，`initialize()` 仍等待 bootstrap；
 这不表示冷准备能完全脱离默认队列，暖态 native 查询与更新无需回到该队列。
 
-独立 Vulkan 路线还不接纳 host selection、公共并行 recipe，以及共享
-sparse/RNG/runtime-error 状态。
+`vulkan_execution_domain_sparse_fields` 表示固定准备支持有完整树代次证明的稀疏
+Field。AOT 重建与 JIT 已选代码借用共用这一准入；准备一次收集初始化及控制区域的
+完整 kernel 闭包，并排他借用实际 root/allocator pool。实例存活期间，普通 kernel、
+Graph 或另一实例对同一树的冲突访问会在提交前被拒绝。不同树可在不同域执行。
+
+每份录制持有私有遍历列表；域内诊断在完成时保留快照，不在查询完成状态时读取其他
+在途域的活动计数器。关闭实例会等待已接纳工作，归还树访问，并失效该树的普通遍历
+缓存。树销毁会先退休相关实例。工作区按实际列表和诊断源计费，重放不分配列表存储。
+准备仍保留源树的普通队列生产前缀。Windows 已验证 pointer/bitmasked/dynamic、独立
+与 chunked pool、零轮/早停/耗尽/嵌套循环及显式梯度；这不表示任意稀疏布局已获资格。
+
+独立 Vulkan 路线还不接纳 host selection、公共并行 recipe，以及尚未隔离的
+RNG/runtime-error 状态。CUDA 稀疏独立域状态合同另行处理。
 普通 Graph 保持既有能力；CUDA Canvas 和外部内存协议不会因此自动适用于 Vulkan 域。
 
 初始化导入普通队列已提交的准备前缀，并在所选队列执行实例初始化。暖态提交把依赖、
@@ -509,10 +520,12 @@ with Runtime("cuda") as runtime:
 
 冷准备消费持久化的编译事实。已经资格验证的 dense field、`real_func`、向量参数和
 跨 task 临时量沿用现有编译器及 AOT loader，BC/PTX/cubin 均保存这些事实。缺少事实的旧
-产物，以及使用尚未隔离的共享 RNG、runtime error、sparse list/allocator、打印、mesh
+产物，以及使用尚未隔离的共享 RNG、runtime error、CUDA sparse list/allocator、打印、mesh
 或未资格外部调用的 kernel，会被独立域拒绝。旧默认队列 API 维持原合同。绑定帧、storage
 ring 和 host selection 不会被悄悄改写为其他物理路线；native operation 也必须明确允许
 独立域路线。
+
+Vulkan 的已资格稀疏 Field 沿上文树借用合同接入，不依赖 LLVM 的共享 runtime 状态。
 
 应用数据 hazard 由调用方负责。域不会自动推断数组视图或 dense field 是否 alias；所有
 重叠读写和写写都需要显式依赖，包括 snapshot 覆写和槽复用。
