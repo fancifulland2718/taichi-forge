@@ -830,6 +830,8 @@ class TI_DLL_EXPORT GfxRuntime {
                                 const std::shared_ptr<RuntimeFaultDomain> &owner);
   std::vector<NativeRayAdmission::PinnedUse> bind_ray_uses(
       const std::vector<NativeResourceUse> &uses) const;
+  std::vector<NativeResourceUse> collect_kernel_ray_uses(
+      const CompiledTaichiKernel &kernel, const LaunchContextBuilder &context);
   void preflight_kernel_ray_resources(const CompiledTaichiKernel &kernel,
                                        const LaunchContextBuilder &context);
   // No lifetime owners here. Texture destruction removes its immutable

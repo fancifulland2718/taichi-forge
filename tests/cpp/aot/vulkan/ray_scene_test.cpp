@@ -8,16 +8,129 @@
 #include "taichi/runtime/native_ray_admission.h"
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/gfx/runtime.h"
+#include "taichi/runtime/gfx/aot_module_loader_impl.h"
 #include "taichi/program/program.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/common/operation_json.h"
 
 #include <array>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
 namespace taichi::lang {
+
+TEST(VulkanRayScene, ProgramKernelReadersHonorLoansAndRetireRecordings) {
+  const auto *folder = std::getenv("TAICHI_VULKAN_RAY_DOMAIN_AOT_DIR");
+  if (!folder || !vulkan::is_vulkan_api_available())
+    GTEST_SKIP() << "Requires the compiled ray query fixture";
+  Program program(Arch::vulkan);
+  program.materialize_runtime();
+  auto &device = static_cast<vulkan::VulkanDevice &>(*program.get_compute_device());
+  if (!device.vk_caps().acceleration_structure || !device.vk_caps().ray_query ||
+      !device.vk_caps().timeline_semaphore)
+    GTEST_SKIP();
+  auto *runtime = program.get_gfx_runtime_for_borrowing();
+  auto allocate = [&](DataType dtype, std::vector<int> shape) {
+    return program.create_ndarray(dtype, shape, ExternalArrayLayout::kNull, false);
+  };
+  auto *vertices = allocate(PrimitiveType::f32, {3, 3});
+  auto *indices = allocate(PrimitiveType::i32, {1, 3});
+  auto *rays = allocate(PrimitiveType::f32, {1, 8});
+  auto *hits = allocate(PrimitiveType::f32, {1, 4});
+  auto *ids = allocate(PrimitiveType::i32, {1, 4});
+  auto upload = [&](Ndarray *array, const auto &values) {
+    auto pointer = array->get_device_allocation().get_ptr();
+    const void *source = values.data();
+    std::size_t bytes = sizeof(values);
+    ASSERT_EQ(device.upload_data(&pointer, &source, &bytes), RhiResult::success);
+  };
+  upload(vertices, std::array<float, 9>{0, 0, 0, 2, 0, 0, 0, 2, 0});
+  upload(indices, std::array<int32_t, 3>{0, 1, 2});
+  upload(rays, std::array<float, 8>{.5f, .5f, 3, .01f, 0, 0, -1, 10});
+  const auto v = storage::describe_ndarray_storage(*vertices);
+  const auto ix = storage::describe_ndarray_storage(*indices);
+  const auto blas_id = program.create_vulkan_triangle_blas_resource(3, 1);
+  program.execute_vulkan_ray_geometry(program.prepare_vulkan_ray_geometry(
+      blas_id, true, *v.descriptor, &*ix.descriptor, 3, 1));
+  const auto tlas_id = program.create_vulkan_instance_tlas_resource({blas_id});
+  VulkanRayInstanceInfo metadata;
+  metadata.custom_index = 37;
+  program.vulkan_instance_tlas_build(tlas_id, {metadata}, false);
+  program.synchronize();
+
+  gfx::AotModuleParams params;
+  params.runtime = runtime;
+  params.module_path = folder;
+  auto module = aot::Module::load(Arch::vulkan, params);
+  ASSERT_NE(module, nullptr);
+  auto *kernel = dynamic_cast<gfx::KernelImpl *>(module->get_kernel("query_kernel"));
+  ASSERT_NE(kernel, nullptr);
+  LaunchContextBuilder context(kernel);
+  context.set_arg_acceleration_structure({0}, &program, tlas_id);
+  context.set_arg_ndarray({1}, *rays);
+  context.set_arg_ndarray({2}, *hits);
+  context.set_arg_ndarray({3}, *ids);
+  program.resolve_ndarray_launch_context(context);
+  const std::vector<gfx::GfxRuntime::GraphRecordingOperation> operations{
+      {{kernel->handle(), &context}, {}}};
+  // Materialize before any loan. Permission must be rechecked on replay, not
+  // merely at descriptor binding or command recording time.
+  auto fixed = runtime->prepare_fixed_graph(operations, {});
+  const auto read = [&] {
+    program.synchronize();
+    std::array<float, 4> result{};
+    auto pointer = hits->get_device_allocation().get_ptr();
+    void *destination = result.data();
+    std::size_t bytes = sizeof(result);
+    EXPECT_EQ(device.readback_data(&pointer, &destination, &bytes), RhiResult::success);
+    return result;
+  };
+  const auto run_both = [&] {
+    kernel->launch(context);
+    program.mark_runtime_submission_pending();
+    EXPECT_EQ(read(), (std::array<float, 4>{3, .25f, .25f, 1}));
+    fixed->launch_prepared();
+    program.mark_runtime_submission_pending();
+    EXPECT_EQ(read(), (std::array<float, 4>{3, .25f, .25f, 1}));
+  };
+  run_both();
+  for (const auto id : {tlas_id, blas_id}) {
+    auto root = program.acquire_vulkan_ray_native_resource(id);
+    for (bool writes : {true, false}) {
+      auto workspace = runtime->create_fixed_graph_workspace();
+      runtime->prepare_fixed_shared_ray_resources(
+          workspace, collect_native_ray_uses(root, writes), program.runtime_fault_domain());
+      for (const auto &dependency : workspace->shared_resource_dependencies())
+        dependency.wait();
+      if (writes) {
+        upload(hits, std::array<float, 4>{-42, -42, -42, -42});
+        const auto before = device.queue_submission_snapshot().queue_submit_calls;
+        EXPECT_ANY_THROW(kernel->launch(context));
+        EXPECT_ANY_THROW(fixed->launch_prepared());
+        EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before);
+        // Flush to catch rejected kernels appended without a queue submit.
+        EXPECT_EQ(read(), (std::array<float, 4>{-42, -42, -42, -42}));
+      } else {
+        run_both();
+      }
+      // This admission-only fixture issued no selected-domain GPU commands.
+      // Exact in-flight retirement remains covered by the domain tests.
+      workspace->retire_shared_ray_loans({});
+      run_both();
+    }
+  }
+  std::weak_ptr<NativeResource> retained =
+      program.acquire_vulkan_ray_native_resource(tlas_id);
+  program.destroy_vulkan_ray_resource(tlas_id);
+  EXPECT_ANY_THROW(fixed->launch_prepared());
+  EXPECT_ANY_THROW(kernel->launch(context));
+  program.synchronize();
+  // An old public recording facade must not retain the AS core after close.
+  EXPECT_TRUE(retained.expired());
+  program.destroy_vulkan_ray_resource(blas_id);
+}
 
 TEST(VulkanRayScene, ProgramOwnersUseTheNativeOperationContracts) {
   if (!vulkan::is_vulkan_api_available())

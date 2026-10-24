@@ -3434,8 +3434,15 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
     TI_ERROR_IF(!dispatch.host_ctx || found == ti_kernels_.end(),
                 "Prepared Vulkan Graph requires fixed kernel dispatches");
     auto *kernel = found->second.get();
-    if (detached)
+    if (detached) {
       prepare_detached_kernel_workspace(*kernel, *dispatch.host_ctx, workspace);
+    } else {
+      // Ordinary Program AS arguments need the same replay permit as native
+      // resource arguments. Resolve the complete TLAS/BLAS closure once here;
+      // the immutable recording checks its aggregated permit on each submit.
+      auto bound = bind_ray_uses(collect_kernel_ray_uses(*kernel, *dispatch.host_ctx));
+      ray_uses.insert(ray_uses.end(), bound.begin(), bound.end());
+    }
     if (kernel->get_ret_buffer_size()) {
       const auto &result = dispatch.host_ctx->prepared_result;
       TI_ERROR_IF(!result || &result->device() != device_ ||
@@ -7046,21 +7053,37 @@ void GfxRuntime::require_ray_uses(const std::vector<NativeResourceUse> &uses) {
     shared_ray_admission_->require_use(use.use);
 }
 
-void GfxRuntime::preflight_kernel_ray_resources(
+std::vector<NativeResourceUse> GfxRuntime::collect_kernel_ray_uses(
     const CompiledTaichiKernel &kernel, const LaunchContextBuilder &context) {
+  std::vector<NativeResourceUse> uses;
+  std::unordered_set<int> seen;
   for (const auto &task : kernel.ti_kernel_attribs().tasks_attribs)
     for (const auto &binding : task.acceleration_structure_binds) {
       const auto offset = context.args_type->get_element_offset(binding.arg_id);
+      if (!seen.insert(offset).second)
+        continue;
       const auto ref = std::find_if(context.acceleration_structure_ptrs.begin(),
           context.acceleration_structure_ptrs.end(),
           [offset](const auto &entry) { return entry.arg_offset == offset; });
-      if (ref == context.acceleration_structure_ptrs.end() || !ref->native_resource)
-        continue;  // Program resources retain their existing binding contract.
-      // A no-op alias is only a cold traversal view. The launch context's
-      // qualified argument owner, not this alias, retains the actual resource.
-      auto root = std::shared_ptr<NativeResource>(ref->native_resource, [](auto *) {});
-      require_ray_uses(collect_native_ray_uses(root));
+      TI_ERROR_IF(ref == context.acceleration_structure_ptrs.end() ||
+                      (!ref->native_resource && (!ref->owner || !ref->handle)),
+                  "Kernel acceleration structure is unbound");
+      // Native arguments retain their qualified owner in the launch/recording
+      // resources. Program arguments resolve the original registered owner,
+      // including every BLAS dependency; the public TLAS handle is not enough
+      // to detect a loan that writes one of its referenced BLAS objects.
+      auto root = ref->native_resource
+                      ? std::shared_ptr<NativeResource>(ref->native_resource, [](auto *) {})
+                      : ref->owner->acquire_vulkan_ray_native_resource(ref->handle);
+      auto closure = collect_native_ray_uses(root);
+      uses.insert(uses.end(), closure.begin(), closure.end());
     }
+  return uses;
+}
+
+void GfxRuntime::preflight_kernel_ray_resources(
+    const CompiledTaichiKernel &kernel, const LaunchContextBuilder &context) {
+  require_ray_uses(collect_kernel_ray_uses(kernel, context));
 }
 
 void GfxRuntime::prepare_fixed_shared_ray_resources(

@@ -152,6 +152,29 @@ def test_private_ray_domain_initialization_refit_and_adjoint(tmp_path, kernel_qu
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_program_ray_kernel_admission_and_recording_retirement(tmp_path):
+    executable = os.environ.get("TI_TEST_CPP_EXECUTABLE")
+    if not executable:
+        pytest.skip("Requires the native Program AS contract test executable")
+    if not ti.hardware.ray.is_available():
+        pytest.skip("Vulkan ray query unavailable")
+    folder = tmp_path / "module"
+    build_fixture(folder, kernel_query=True)
+    ti.reset()
+    env = os.environ.copy()
+    env["TAICHI_VULKAN_RAY_DOMAIN_AOT_DIR"] = str(folder)
+    result = subprocess.run(
+        [executable, "--gtest_filter=VulkanRayScene.ProgramKernelReadersHonorLoansAndRetireRecordings"],
+        env=env, capture_output=True, text=True, timeout=60)
+    (tmp_path / "program-kernel-native.log").write_text(result.stdout + result.stderr, encoding="utf8")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[  PASSED  ] 1 test." in result.stdout
+    assert "[  SKIPPED ]" not in result.stdout
+    assert "VUID-" not in result.stdout + result.stderr
+    assert "SYNC-HAZARD" not in result.stdout + result.stderr
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_live_native_ray_readers_writers_and_retirement(tmp_path):
     if not ti.hardware.ray.is_available():
         pytest.skip("Vulkan ray query unavailable")
