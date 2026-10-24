@@ -1,6 +1,8 @@
 """Standalone SPD pyramid oracle and downstream AD; no shader compiler imports."""
 
 import json
+import os
+from contextlib import ExitStack
 from pathlib import Path
 import statistics
 import sys
@@ -71,14 +73,86 @@ def pyramid(values, width, height, levels, reduction):
     return result
 
 
+def independent(artifact):
+    folder = Path(artifact).parent
+    spec = json.loads((folder / "spec.json").read_text())
+    width, height = spec["shape"]
+    total = sum((width >> (i + 1)) * (height >> (i + 1)) for i in range(spec["levels"]))
+    assert spec["levels"] > 6  # Exercise SPD's global atomic counter continuation.
+    with ExitStack() as scope:
+        def owned(resource):
+            scope.callback(resource.close)
+            return resource
+
+        runtime = scope.enter_context(Runtime(
+            "vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))))
+        module = scope.enter_context(runtime.load_module(artifact))
+        instances = []
+        for queue in ("compute", "graphics"):
+            domain = scope.enter_context(runtime.execution_domain(capacity=1, instance_capacity=1, queue=queue))
+            frame = {name: owned(runtime.ndarray("f32", shape)) for name, shape in dict(
+                pixels=(width, height), output=(total,), doutput=(total,), loss=(1,), dloss=(1,)).items()}
+            call = scope.enter_context(module.prepare_execution("private", frame, execution_domain=domain))
+            assert call.info["workspace_bytes"] == 4
+            call.initialize()
+            instances.append((call, frame, domain))
+        for phase in (1, 0, -2):
+            expected = []
+            for lane, (_, frame, _) in enumerate(instances):
+                pixels = [phase * ((x * 17 + y * 31 + lane * 53) % 251) / 256
+                          for y in range(height) for x in range(width)]
+                write(frame["pixels"], pixels)
+                expected.append(pyramid(pixels, width, height, spec["levels"], spec["reduction"]))
+            runtime.wait()  # Finish this test's new public input producers.
+            with ExitStack() as tickets:
+                pending = [tickets.enter_context(call.submit()) for call, _, _ in instances]
+                for ticket in pending:
+                    ticket.wait()
+            for (_, frame, _), values in zip(instances, expected):
+                for name in ("output", "doutput"):
+                    assert all(abs(a - b) < 3e-6 for a, b in zip(read(frame[name]), values)), name
+                loss = sum(x * x / 2 for x in values)
+                assert abs(read(frame["loss"])[0] - loss) < max(3e-6, loss * 3e-5)
+        instances[0][0].close()
+        with instances[1][0].submit() as ticket:
+            ticket.wait()
+        assert all(abs(a - b) < 3e-6 for a, b in zip(read(instances[1][1]["doutput"]), expected[1]))
+
+        # A public SPD plan owns one mutable counter, so it cannot be lent to
+        # independent domains merely by retaining its resource handle.
+        code = owned(runtime.host_blob((folder / "shader.spv").read_bytes()))
+        source, output = [owned(runtime.native_resource(
+            "image", "sampled", parameters=dict(format="r32f", storage=True, shape=shape, mip_levels=levels)))
+            for shape, levels in (([width, height], 1), ([width // 2, height // 2], spec["levels"]))]
+        plan = owned(runtime.native_resource(
+            "spd", "plan", parameters=dict(reduction=spec["reduction"], expected_plan=spec["expected_plan"]),
+            bindings=dict(source=source, output=output, shader=code)))
+        frame, domain = instances[0][1:]
+        raises(lambda: module.prepare_execution("public", dict(frame, plan=plan, source=source, pyramid=output),
+                                                execution_domain=domain), "same-runtime registration")
+        # Failed public admission must return the reserved instance slot.
+        with module.prepare_execution("private", frame, execution_domain=domain) as retry:
+            retry.initialize()
+            with retry.submit() as ticket:
+                ticket.wait()
+            assert all(abs(a - b) < 3e-6 for a, b in zip(read(frame["output"]), expected[0]))
+    assert "taichi_forge" not in sys.modules
+    (folder / "independent.json").write_text(json.dumps(dict(
+        queues=["compute", "graphics"], levels=spec["levels"], phases=[1, 0, -2],
+        private_counter_bytes=4, peer_close=True, public_rejected=True, retry=True)))
+
+
 def main(mode, artifact):
+    if mode == "independent":
+        independent(artifact)
+        return
     if mode == "borrowed":
         import taichi_forge as ti
 
         ti.init(arch=ti.vulkan, offline_cache=False)
         runtime = ti.aot.borrow_runtime()
     else:
-        runtime = Runtime("vulkan")
+        runtime = Runtime("vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0)))
     folder, costs = Path(artifact).parent, []
     spec = json.loads((folder / "spec.json").read_text())
     width, height = spec["shape"]

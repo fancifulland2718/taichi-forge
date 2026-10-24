@@ -118,6 +118,17 @@ VulkanSpdCommands prepare_vulkan_spd(vulkan::VulkanDevice &device,
                          {"device_vendor_id", props.vendorID},
                          {"device_id", props.deviceID},
                          {"vulkan_driver_version", props.driverVersion}};
+  if (!secondary_replay) {
+    // The selected domain may use a different queue family. Its own primary
+    // records the one-time clear; do not import a default-pool secondary.
+    prepared.initialize = [resources](CommandList *commands) {
+      auto *list = static_cast<vulkan::VulkanCommandList *>(commands);
+      list->begin_external_compute(resources);
+      list->buffer_fill(resources->counter->get_ptr(0), 4, 0);
+      list->memory_barrier();
+    };
+    return prepared;
+  }
   auto initialize = device.get_compute_stream()->new_secondary_command_list();
   TI_ERROR_IF(!initialize, "SPD counter initialization recording failed.");
   initialize->buffer_fill(resources->counter->get_ptr(0), 4, 0);

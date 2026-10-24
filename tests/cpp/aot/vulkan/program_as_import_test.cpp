@@ -17,7 +17,10 @@
 #include "tests/cpp/aot/vulkan/pending_domain_action.h"
 
 #include <array>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 
 namespace taichi::lang {
 
@@ -598,6 +601,82 @@ TEST(VulkanColdPreparation, PayloadUploadPreservesLiveOutputBootstrap) {
   ASSERT_EQ(session.device().map(allocation, &mapped), RhiResult::success);
   EXPECT_EQ(*static_cast<uint32_t *>(mapped), value);
   session.device().unmap(allocation);
+}
+TEST(VulkanColdPreparation, SpdCounterClearDoesNotWaitForDefaultQueue) {
+  const auto *shader_path = std::getenv("TI_TEST_SPD_SHADER");
+  if (!shader_path || !vulkan::is_vulkan_api_available())
+    GTEST_SKIP() << "Provide the 129x131, seven-level mean SPD shader";
+  std::ifstream input(shader_path, std::ios::binary);
+  ASSERT_TRUE(input.good());
+  const std::string shader((std::istreambuf_iterator<char>(input)),
+                           std::istreambuf_iterator<char>());
+  ASSERT_GE(shader.size(), 20);
+  PendingProgramAs session;
+  if (session.device().created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  session.borrowers[0] = AotRuntimeClient::create(session.program);
+  session.runtimes[0] =
+      reinterpret_cast<TiRuntime>(session.borrowers[0]->handle());
+  const auto key = picosha2::hash256_hex_string(shader);
+  session.modules[0] = reinterpret_cast<TiAotModule>(
+      session.borrowers[0]->import_jit_kernels({}, {{key, shader}}));
+  TiNamedArgument pixels{};
+  {
+    BorrowScope scope(*session.borrowers[0]);
+    const TiVulkanExecutionDomainCreateInfo options{1, 1, TI_FALSE};
+    session.domains[0] =
+        ti_create_vulkan_execution_domain_ext(session.runtimes[0], &options);
+    require_success();
+    pixels = session.array(0, "pixels", {129, 131}, TI_DATA_TYPE_F32);
+  }
+  const std::string plan =
+      R"({"version":26,"resources":[
+    {"kind":"host_blob","name":"shader","data":")" +
+      key + "\",\"byte_size\":" + std::to_string(shader.size()) + R"(},
+    {"kind":"native","name":"source","provider":"image","operation":"sampled","version":1,
+     "parameters":{"shape":[129,131],"format":"r32f","storage":true},"bindings":{}},
+    {"kind":"native","name":"pyramid","provider":"image","operation":"sampled","version":1,
+     "parameters":{"shape":[64,65],"mip_levels":7,"format":"r32f","storage":true},"bindings":{}},
+    {"kind":"native","name":"plan","provider":"spd","operation":"plan","version":1,
+     "parameters":{"reduction":"mean"},"bindings":{"source":"source","output":"pyramid","shader":"shader"}}],
+    "initialization":[
+    {"kind":"native","provider":"image","operation":"upload","version":1,
+     "parameters":{},"bindings":{"image":"source","pixels":"pixels"}}],
+    "operations":[
+    {"kind":"native","provider":"spd","operation":"run","version":1,
+     "parameters":{},"bindings":{"plan":"plan","source":"source","output":"pyramid"}}]})";
+  session.program.synchronize();
+  session.program.retain_runtime_client(session.gates);
+  session.gates->gates[0] =
+      std::make_unique<test_detail::TimelineGate>(session.device(), 0);
+  test_detail::PendingAction prepare(session.gates, [&] {
+    BorrowScope scope(*session.borrowers[0]);
+    session.executions[0] = ti_prepare_execution_plan_on_vulkan_domain_ext(
+        session.runtimes[0], session.modules[0], session.domains[0],
+        plan.size(), plan.data(), 1, &pixels, 0, nullptr, 0, nullptr);
+    require_success();
+    if (!session.executions[0])
+      throw std::runtime_error("SPD cold preparation failed");
+  });
+  const auto status = prepare.status(2s);
+  EXPECT_EQ(status, std::future_status::ready);
+  if (status != std::future_status::ready)
+    session.gates->release(0);
+  prepare.finish();
+  // The public pixel input still requires its real producer boundary. Only
+  // the private counter's clear moved into the domain initialization phase.
+  session.gates->release(0);
+  {
+    BorrowScope scope(*session.borrowers[0]);
+    ti_initialize_prepared_ext(session.runtimes[0], session.executions[0]);
+    require_success();
+    ASSERT_TRUE(ti_try_submit_prepared_ext(session.runtimes[0],
+                                           session.executions[0], 0, nullptr,
+                                           &session.completions[0]));
+    require_success();
+  }
+  ti_wait_completion_ext(session.completions[0]);
+  require_success();
 }
 }  // namespace taichi::lang
 #endif

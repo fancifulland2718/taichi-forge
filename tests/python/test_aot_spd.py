@@ -82,11 +82,12 @@ def test_aot_spd_resources_pyramid_and_downstream_gradients(tmp_path, shape, red
     artifact = tmp_path / "spd.tcm"
     module.archive(str(artifact))
     ti.reset()
-    for mode in ("standalone", "borrowed"):
+    modes = ("standalone", "borrowed", "independent") if levels > 6 else ("standalone", "borrowed")
+    for mode in modes:
         run = subprocess.run(
             [
                 sys.executable,
-                *(["-S"] if mode == "standalone" else []),
+                *(["-S"] if mode != "borrowed" else []),
                 str(Path(__file__).with_name("aot_spd_probe.py")),
                 mode,
                 str(artifact),
@@ -96,8 +97,10 @@ def test_aot_spd_resources_pyramid_and_downstream_gradients(tmp_path, shape, red
             text=True,
             timeout=90,
         )
-        assert run.returncode == 0, run.stdout + run.stderr
-        assert "Validation Error" not in run.stdout + run.stderr
+        log = run.stdout + run.stderr
+        (tmp_path / f"{mode}.log").write_text(log, encoding="utf8")
+        assert run.returncode == 0, log
+        assert not any(marker in log for marker in ("Validation Error", "Validation Warning", "VUID-", "SYNC-HAZARD")), log
     (tmp_path / "producer.json").write_text(
         json.dumps(
             dict(shader_ms=shader_ms, build_ms=build_ms, shader_bytes=len(code), artifact_bytes=artifact.stat().st_size)

@@ -3414,7 +3414,18 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
     const auto &uses = operation.external ? operation.stateful_resources
                                          : operation.dispatch.stateful_resources;
     if (!detached) {
-      auto bound = bind_ray_uses(uses);
+      // Ordinary recording serializes non-AS provider state on its owner
+      // queue. Only AS resources participate in the shared ray admission
+      // registry; detached recording separately requires the complete state
+      // closure to be private or covered by a qualified loan.
+      std::vector<NativeResourceUse> ray_resources;
+      for (const auto &use : uses) {
+        TI_ERROR_IF(!use.resource || &use.resource->device() != device_,
+                    "Recorded provider state belongs to another device");
+        if (dynamic_cast<const NativeRayResourceAccess *>(use.resource.get()))
+          ray_resources.push_back(use);
+      }
+      auto bound = bind_ray_uses(ray_resources);
       ray_uses.insert(ray_uses.end(), bound.begin(), bound.end());
     }
   }

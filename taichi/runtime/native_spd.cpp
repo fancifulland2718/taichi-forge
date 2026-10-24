@@ -169,6 +169,9 @@ class VulkanSpdPlan final : public SpdPlanResource {
   void record(CommandList *list) override {
     commands_.record_inline(list);
   }
+  void record_initialization(CommandList *list) {
+    commands_.initialize(list);
+  }
 
  private:
   Device &device_;
@@ -176,6 +179,35 @@ class VulkanSpdPlan final : public SpdPlanResource {
   std::shared_ptr<RuntimeFaultDomain> fault_;
   VulkanSpdCommands commands_;
   bool initialization_pending_{false};
+};
+class VulkanSpdInitialization final : public NativeOperation {
+ public:
+  explicit VulkanSpdInitialization(std::shared_ptr<VulkanSpdPlan> plan)
+      : plan_(std::move(plan)) {
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return plan_->device();
+  }
+  size_t workspace_bytes() const override {
+    return 0;
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements()
+      const override {
+    NativeVulkanRecordingRequirements requirements;
+    requirements.buffers.emplace();
+    requirements.image_uses.emplace();
+    requirements.stateful_resources = {{plan_, true}};
+    return requirements;
+  }
+  void record_vulkan(Device *, CommandList *list) override {
+    plan_->record_initialization(list);
+  }
+
+ private:
+  std::shared_ptr<VulkanSpdPlan> plan_;
 };
 class VulkanSpdRun final : public NativeOperation {
  public:
@@ -198,11 +230,18 @@ class VulkanSpdRun final : public NativeOperation {
   }
   NativeVulkanRecordingRequirements vulkan_recording_requirements()
       const override {
-    return {{{plan_->source->gfx_sampled_allocation(),
-              ImageLayout::shader_read_write},
-             {plan_->output->gfx_sampled_allocation(),
-              ImageLayout::shader_read_write}},
-            false};
+    NativeVulkanRecordingRequirements requirements;
+    requirements.images = {{plan_->source->gfx_sampled_allocation(),
+                            ImageLayout::shader_read_write},
+                           {plan_->output->gfx_sampled_allocation(),
+                            ImageLayout::shader_read_write}};
+    requirements.buffers.emplace();
+    // The source uses storage-image loads, so it cannot use the sampled-only
+    // shared-image route. The counter is mutable even though every full run
+    // restores it to zero; independent instances require their own plan.
+    requirements.image_uses = {{plan_->source, false}, {plan_->output, false}};
+    requirements.stateful_resources = {{plan_, true}};
+    return requirements;
   }
   void record_vulkan(Device *, CommandList *list) override {
     plan_->record(list);
@@ -261,7 +300,11 @@ void register_spd_operations(NativeOperationRegistry &registry) {
           throw std::invalid_argument(
               "SPD requires its owner's GFX runtime and retirement domain");
         auto plan = std::make_shared<VulkanSpdPlan>(context, d);
-        plan->initialize();
+        if (context.defer_vulkan_initialization)
+          context.defer_vulkan_initialization(
+              std::make_shared<VulkanSpdInitialization>(plan));
+        else
+          plan->initialize();
         return plan;
       });
   registry.register_factory<SpdRun>(
