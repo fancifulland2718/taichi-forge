@@ -131,6 +131,86 @@ TEST(VulkanExecutionQueueFamilies, ImportedSharedFamilyUsesOnePhysicalLeasePool)
   EXPECT_TRUE(replacement.submit(shared)->wait());
 }
 
+TEST(VulkanExecutionQueueFamilies, DistinctImportedFamiliesRejectForeignCommands) {
+  using Kind = vulkan::VulkanExecutionQueueKind;
+  using Queue = vulkan::VulkanExecutionQueue;
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &original = *creator.device();
+  if (!original.vk_caps().timeline_semaphore)
+    GTEST_SKIP();
+  uint32_t count = 0;
+  vkGetPhysicalDeviceQueueFamilyProperties(original.vk_physical_device(), &count, nullptr);
+  std::vector<VkQueueFamilyProperties> properties(count);
+  vkGetPhysicalDeviceQueueFamilyProperties(original.vk_physical_device(), &count, properties.data());
+  uint32_t graphics_family = UINT32_MAX, compute_family = UINT32_MAX;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (properties[i].queueCount < 2 || !(properties[i].queueFlags & VK_QUEUE_COMPUTE_BIT))
+      continue;
+    if (properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
+      graphics_family = i;
+    else
+      compute_family = i;
+  }
+  if (graphics_family == UINT32_MAX || compute_family == UINT32_MAX)
+    GTEST_SKIP() << "Requires distinct universal and compute-only families";
+  // Create exactly the queues supplied to the imported owner. The ordinary
+  // creator may select a universal family on a headless device, so its defaults
+  // cannot prove the distinct-family case and must not make this test vacuous.
+  float priorities[] = {1.0f, 1.0f};
+  VkDeviceQueueCreateInfo queues[2]{};
+  for (int i = 0; i < 2; ++i) {
+    queues[i].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queues[i].queueFamilyIndex = i ? graphics_family : compute_family;
+    queues[i].queueCount = 2;
+    queues[i].pQueuePriorities = priorities;
+  }
+  VkPhysicalDeviceTimelineSemaphoreFeatures timeline{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+  timeline.timelineSemaphore = VK_TRUE;
+  VkDeviceCreateInfo create{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+  create.pNext = &timeline;
+  create.queueCreateInfoCount = 2;
+  create.pQueueCreateInfos = queues;
+  VkDevice raw = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDevice(original.vk_physical_device(), &create, nullptr, &raw), VK_SUCCESS);
+  const auto destroy = reinterpret_cast<PFN_vkDestroyDevice>(vkGetDeviceProcAddr(raw, "vkDestroyDevice"));
+  std::shared_ptr<void> owner(raw, [destroy](void *device) { destroy(static_cast<VkDevice>(device), nullptr); });
+  const auto get_queue = reinterpret_cast<PFN_vkGetDeviceQueue>(vkGetDeviceProcAddr(raw, "vkGetDeviceQueue"));
+  vulkan::VulkanDevice::Params params;
+  params.instance = original.vk_instance();
+  params.physical_device = original.vk_physical_device();
+  params.device = raw;
+  params.compute_queue_family_index = compute_family;
+  params.graphics_queue_family_index = graphics_family;
+  params.timeline_semaphore = true;
+  get_queue(raw, compute_family, 0, &params.compute_queue);
+  get_queue(raw, graphics_family, 0, &params.graphics_queue);
+  params.additional_compute_queues.resize(1);
+  params.additional_graphics_queues.resize(1);
+  get_queue(raw, compute_family, 1, params.additional_compute_queues.data());
+  get_queue(raw, graphics_family, 1, params.additional_graphics_queues.data());
+  vulkan::VulkanDevice device;
+  device.init_vulkan_structs(params);
+  Queue compute(device, 1), graphics(device, 1, Kind::graphics);
+  ASSERT_NE(compute.queue_family_index(), graphics.queue_family_index());
+  RecordProperty("compute_family", compute.queue_family_index());
+  RecordProperty("graphics_family", graphics.queue_family_index());
+  auto command = graphics.new_command_list();
+  auto recorded = graphics.prepare({command.get()});
+  EXPECT_THROW(compute.prepare({command.get()}), std::invalid_argument);
+  bool admitted = false;
+  EXPECT_THROW(compute.submit(recorded, {}, [&](auto, const auto &) { admitted = true; }), std::invalid_argument);
+  EXPECT_THROW(compute.submit_precollected({}, {}, [&](auto, const auto &) { admitted = true; },
+                                          [&](auto) { return recorded; }), std::invalid_argument);
+  EXPECT_FALSE(admitted);
+  EXPECT_EQ(compute.pending(), 0u);
+  EXPECT_FALSE(compute.latest());
+  EXPECT_TRUE(graphics.submit(recorded)->wait());
+  EXPECT_TRUE(compute.submit(compute.prepare({}))->wait());
+}
+
 TEST(VulkanExecutionQueues, UsesCreatedSameFamilyCapacityAndIndependentTails) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();
