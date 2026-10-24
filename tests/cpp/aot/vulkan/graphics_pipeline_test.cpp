@@ -4,12 +4,60 @@
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
+#include "taichi/program/program.h"
+#include "taichi/program/ndarray.h"
+#include "taichi/program/texture.h"
+#include "taichi/runtime/gfx/runtime.h"
 #include <algorithm>
 #include <array>
 #include <limits>
 
 using namespace taichi::lang;
 using namespace taichi::lang::vulkan;
+
+TEST(VulkanGraphicsPipeline, OrdinaryImageTransferCrossesAttachmentLayouts) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP();
+  Program program(taichi::Arch::vulkan);
+  program.materialize_runtime();
+  auto &device = *program.get_compute_device();
+  auto *runtime = program.get_gfx_runtime_for_borrowing();
+  auto *source = program.create_ndarray(PrimitiveType::f32, {2, 2, 4},
+                                       ExternalArrayLayout::kNull, false);
+  auto *target = program.create_ndarray(PrimitiveType::f32, {2, 2, 4},
+                                       ExternalArrayLayout::kNull, false);
+  auto *image = program.create_texture(BufferFormat::rgba32f, {2, 2});
+  auto *copy_image = program.create_texture(BufferFormat::rgba32f, {2, 2});
+  auto *depth = program.create_texture(BufferFormat::depth32f, {2, 2});
+  const std::array<float, 16> expected{1, 2, 3, 4, 5, 6, 7, 8,
+                                      9, 10, 11, 12, 13, 14, 15, 16};
+  auto pointer = source->get_device_allocation().get_ptr();
+  const void *data = expected.data();
+  size_t bytes = sizeof(expected);
+  ASSERT_EQ(device.upload_data(&pointer, &data, &bytes), RhiResult::success);
+  // No intermediate host waits: the ordinary upload, attachment transitions,
+  // image copy and readback must carry their device dependencies themselves.
+  for (int repeat = 0; repeat < 2; ++repeat) {
+    program.vulkan_copy_ndarray_to_texture(image, source, 0, 0, 0,
+                                           {0, 0, 0}, {2, 2, 1}, 0, 0, 1);
+    runtime->transition_image(image->get_device_allocation(), ImageLayout::color_attachment);
+    runtime->transition_image(copy_image->get_device_allocation(), ImageLayout::color_attachment);
+    runtime->transition_image(depth->get_device_allocation(), ImageLayout::depth_attachment);
+    runtime->transition_image(depth->get_device_allocation(), ImageLayout::depth_attachment_read);
+    runtime->transition_image(depth->get_device_allocation(), ImageLayout::shader_read);
+    ImageCopyParams copy{};
+    copy.width = copy.height = 2;
+    runtime->copy_image(copy_image->get_device_allocation(), image->get_device_allocation(), copy);
+    program.vulkan_copy_texture_to_ndarray(target, copy_image, 0, 0, 0,
+                                           {0, 0, 0}, {2, 2, 1}, 0, 0, 1);
+    program.synchronize();
+    std::array<float, 16> actual{};
+    pointer = target->get_device_allocation().get_ptr();
+    void *output = actual.data();
+    ASSERT_EQ(device.readback_data(&pointer, &output, &bytes), RhiResult::success);
+    EXPECT_EQ(actual, expected);
+  }
+}
 
 namespace {
 const uint32_t vertex[] =

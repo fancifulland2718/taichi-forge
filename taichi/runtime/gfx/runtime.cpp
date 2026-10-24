@@ -6861,6 +6861,23 @@ void GfxRuntime::transition_image(DeviceAllocation image, ImageLayout layout) {
                                  last_layout == ImageLayout::shader_read
                              ? SharedImageUse::read
                              : SharedImageUse::exclusive);
+  const auto attachment = [](ImageLayout value) {
+    return value == ImageLayout::color_attachment ||
+           value == ImageLayout::color_attachment_read ||
+           value == ImageLayout::depth_attachment ||
+           value == ImageLayout::depth_attachment_read;
+  };
+  if (attachment(last_layout) || attachment(layout)) {
+    // A fixed graphics recording can leave an attachment as the next ordinary
+    // compute consumer's source. Its barrier needs graphics stages; preserve
+    // the existing compute -> graphics -> compute semaphore chain.
+    enqueue_graphics_op_lambda([](GraphicsDevice *, CommandList *) {},
+                               {{image, layout, layout}});
+    // Callers may already be recording a kernel or copy into the compute list.
+    // The graphics bridge flushed it, so restore a list before they continue.
+    ensure_current_cmdlist();
+    return;
+  }
   ensure_current_cmdlist();
   insert_pending_dispatch_barriers();
   current_cmdlist_->image_transition(image, last_layout, layout);
