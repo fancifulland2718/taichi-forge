@@ -1,7 +1,7 @@
 #pragma once
 #include "taichi/runtime/snode_tree_id_registry.h"
 #include "taichi/runtime/gfx/snode_tree_resources.h"
-#include "taichi/runtime/gfx/shared_image_read_admission.h"
+#include "taichi/runtime/gfx/shared_image_admission.h"
 #include "taichi/runtime/gfx/range_dispatch.h"
 #include "taichi/program/runtime_completion.h"
 #include "taichi/util/lang_util.h"
@@ -609,7 +609,7 @@ class TI_DLL_EXPORT GfxRuntime {
     std::unordered_map<DeviceAllocationId, PrivateImage> private_images_;
     // Command payloads retain this workspace until their exact final prefix
     // retires. Entries in the admission index only have weak reverse edges.
-    std::shared_ptr<SharedImageReadAdmission<RuntimeCompletion>::ReadLoan> shared_images_;
+    std::shared_ptr<SharedImageAdmission<RuntimeCompletion>::Loan> shared_images_;
     std::unordered_set<DeviceAllocationId> shared_sampled_images_;
     bool initialization_recorded_{false};
   };
@@ -787,7 +787,7 @@ class TI_DLL_EXPORT GfxRuntime {
   std::shared_ptr<std::recursive_mutex> host_api_mutex_owner_{
       std::make_shared<std::recursive_mutex>()};
   std::recursive_mutex &host_api_mutex_{*host_api_mutex_owner_};
-  SharedImageReadAdmission<RuntimeCompletion> shared_image_admission_{host_api_mutex_owner_};
+  SharedImageAdmission<RuntimeCompletion> shared_image_admission_{host_api_mutex_owner_};
   // No lifetime owners here. Texture destruction removes its immutable
   // registry identity, after the last ordinary/domain payload releases it.
   std::unordered_map<DeviceAllocationId, RuntimeResourceHandle> managed_images_;

@@ -3325,7 +3325,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
   auto &slot = *payload;
   auto image_owners = std::make_shared<std::vector<std::shared_ptr<void>>>(owners);
   slot.retained_owners = std::move(owners);
-  std::vector<SharedImageReadAdmission<RuntimeCompletion>::PinnedUse> image_uses;
+  std::vector<SharedImageAdmission<RuntimeCompletion>::PinnedUse> image_uses;
   for (const int tree_id : snode_tree_ids) {
     TI_ERROR_IF(tree_id < 0 ||
                     static_cast<std::size_t>(tree_id) >= root_buffers_.size() ||
@@ -6869,7 +6869,7 @@ void GfxRuntime::prepare_fixed_shared_sampled_images(
 #ifdef TI_WITH_VULKAN
   auto *device = dynamic_cast<vulkan::VulkanDevice *>(device_);
   TI_ERROR_IF(!device, "Shared sampled image requires Vulkan");
-  std::vector<SharedImageReadAdmission<RuntimeCompletion>::PinnedUse> pinned;
+  std::vector<SharedImageAdmission<RuntimeCompletion>::PinnedUse> pinned;
   std::unordered_set<DeviceAllocationId> allocations;
   for (const auto &image : images) {
     const auto managed = managed_images_.find(image.allocation.alloc_id);
@@ -6944,7 +6944,7 @@ void GfxRuntime::FixedGraphWorkspace::retire_shared_image_reads() {
   // shared_ptr's internal synchronization; keep all storage owners unchanged.
   auto retired = std::atomic_exchange(
       &shared_images_,
-      std::shared_ptr<SharedImageReadAdmission<RuntimeCompletion>::ReadLoan>{});
+      std::shared_ptr<SharedImageAdmission<RuntimeCompletion>::Loan>{});
 }
 
 void GfxRuntime::set_tracked_image_layout(DeviceAllocationId image,

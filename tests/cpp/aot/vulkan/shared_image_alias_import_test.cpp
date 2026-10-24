@@ -58,7 +58,7 @@ TEST(VulkanSharedImageImport, RejectedAliasLeavesReaderAndLaterImportUsable) {
     char message[512]{};
     std::uint64_t size = sizeof(message);
     EXPECT_EQ(ti_get_last_error(&size, message), TI_ERROR_INVALID_STATE);
-    EXPECT_NE(std::string(message).find("read loan"), std::string::npos);
+    EXPECT_NE(std::string(message).find("image loan"), std::string::npos);
   }
   const auto prefixes = workspace->shared_image_dependencies();
   ASSERT_EQ(prefixes.size(), 1);

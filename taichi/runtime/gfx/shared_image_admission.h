@@ -1,7 +1,7 @@
 #pragma once
 
 // Host admission used by GfxRuntime's ordinary image paths, fixed recordings,
-// and same-Program shared sampled-image workspace. The GFX bridge publishes
+// and same-Program borrowed-image workspaces. The GFX bridge publishes
 // the ordinary queue's existing reusable prefix at the shader-read boundary.
 #include "taichi/program/runtime_resource_registry.h"
 
@@ -21,8 +21,8 @@ enum class SharedImageUse { sampled_at_boundary, exclusive };
 // Boundary is the existing RuntimeCompletion in the intended GFX consumer.
 // The isolated tests use an inert prefix so no driver/runtime is loaded.
 template <class Boundary>
-class SharedImageReadAdmission {
-  friend struct SharedImageReadAdmissionTestAccess;
+class SharedImageAdmission {
+  friend struct SharedImageAdmissionTestAccess;
 
  public:
   struct Use {
@@ -52,6 +52,7 @@ class SharedImageReadAdmission {
   struct Entry {
     RuntimeResourceHandle image;
     std::size_t readers{0};
+    bool exclusive{false};
     bool ready{false};
     std::weak_ptr<const Boundary> boundary;
     struct Edge {
@@ -92,7 +93,8 @@ class SharedImageReadAdmission {
   };
 
   static bool blocked(const Entry &entry, SharedImageUse use) noexcept {
-    return entry.readers && (use == SharedImageUse::exclusive || !entry.ready);
+    return entry.exclusive ||
+           (entry.readers && (use == SharedImageUse::exclusive || !entry.ready));
   }
 
   // Allocation-free once the reservation is published. Weak edges avoid a
@@ -156,14 +158,14 @@ class SharedImageReadAdmission {
  public:
   // Opaque recorder callbacks may reenter host APIs. Keep the existing host
   // gate and submission depth for the entire append transaction so a callback
-  // cannot establish a read loan between its preflight and command append.
+  // cannot establish an image loan between its preflight and command append.
   class OrdinaryScope {
    public:
     OrdinaryScope(const OrdinaryScope &) = delete;
     OrdinaryScope &operator=(const OrdinaryScope &) = delete;
 
    private:
-    friend class SharedImageReadAdmission;
+    friend class SharedImageAdmission;
     explicit OrdinaryScope(std::shared_ptr<Control> control)
         : control_(std::move(control)),
           lock_(*control_->gate),
@@ -189,14 +191,14 @@ class SharedImageReadAdmission {
       require_open(*control_);
       if (state_->removed_images || state_->blocked_images)
         throw std::invalid_argument(
-            "Prepared recording conflicts with an image read loan");
+            "Prepared recording conflicts with an image loan");
       // Constant work with respect to image count; no image/owner scan.
       Submitting scope(*control_);
       return std::forward<Submit>(submit)();
     }
 
    private:
-    friend class SharedImageReadAdmission;
+    friend class SharedImageAdmission;
     Permit(std::shared_ptr<Control> control,
            std::shared_ptr<PermitState> state,
            std::vector<BoundUse> uses)
@@ -212,16 +214,20 @@ class SharedImageReadAdmission {
     std::vector<BoundUse> uses_;
   };
 
-  class ReadLoan {
+  class Loan {
    public:
-    ReadLoan(const ReadLoan &) = delete;
-    ReadLoan &operator=(const ReadLoan &) = delete;
-    ~ReadLoan() {
+    Loan(const Loan &) = delete;
+    Loan &operator=(const Loan &) = delete;
+    ~Loan() {
       if (active_) {
         std::lock_guard<std::recursive_mutex> lock(*control_->gate);
         for (const auto &use : uses_)
           mutate(*use.entry, [&] {
-            if (--use.entry->readers == 0) {
+            if (use.access == SharedImageUse::exclusive)
+              use.entry->exclusive = false;
+            else
+              --use.entry->readers;
+            if (!use.entry->exclusive && !use.entry->readers) {
               use.entry->ready = false;
               use.entry->boundary.reset();
             }
@@ -242,7 +248,9 @@ class SharedImageReadAdmission {
 
     // Only the GFX bridge may call this after submitting/flushing the exact
     // ordinary prefix containing the shader_read transition. Consumers must
-    // wait all dependencies on their own domain queue before first sampling.
+    // wait all dependencies on their own domain queue before the first use.
+    // Exclusive owners restore this boundary before their exact retirement;
+    // publishing it never grants another reader access during the loan.
     // There is no host wait here and no new semaphore/completion type.
     void publish_boundary(std::shared_ptr<const Boundary> boundary) {
       std::lock_guard<std::recursive_mutex> lock(*control_->gate);
@@ -275,8 +283,8 @@ class SharedImageReadAdmission {
     }
 
    private:
-    friend class SharedImageReadAdmission;
-    ReadLoan(std::shared_ptr<Control> control,
+    friend class SharedImageAdmission;
+    Loan(std::shared_ptr<Control> control,
              std::vector<BoundUse> uses,
              std::vector<RuntimeResourceHandle> needs_boundary)
         : control_(std::move(control)),
@@ -291,17 +299,17 @@ class SharedImageReadAdmission {
     bool active_{false};
   };
 
-  explicit SharedImageReadAdmission(std::shared_ptr<std::recursive_mutex> gate)
+  explicit SharedImageAdmission(std::shared_ptr<std::recursive_mutex> gate)
       : control_(std::make_shared<Control>(std::move(gate))) {
     if (!control_->gate)
       throw std::invalid_argument(
           "Shared image admission requires the host gate");
   }
-  ~SharedImageReadAdmission() {
+  ~SharedImageAdmission() {
     close();
   }
-  SharedImageReadAdmission(const SharedImageReadAdmission &) = delete;
-  SharedImageReadAdmission &operator=(const SharedImageReadAdmission &) =
+  SharedImageAdmission(const SharedImageAdmission &) = delete;
+  SharedImageAdmission &operator=(const SharedImageAdmission &) =
       delete;
 
   void register_image(RuntimeResourceHandle image) {
@@ -319,9 +327,9 @@ class SharedImageReadAdmission {
   void remove_image(RuntimeResourceHandle image) {
     std::lock_guard<std::recursive_mutex> lock(*control_->gate);
     auto entry = find(*control_, image);
-    if (entry->readers)
+    if (entry->readers || entry->exclusive)
       throw std::invalid_argument(
-          "Cannot untrack an image with active readers");
+          "Cannot untrack an image with active loans");
     for (const auto &edge : entry->recordings)
       if (auto permit = edge.permit.lock())
         ++permit->removed_images;
@@ -339,7 +347,7 @@ class SharedImageReadAdmission {
     for (const auto &use : permit->uses_) {
       auto &edges = use.entry->recordings;
       if (edges.size() == edges.capacity()) {
-        // Ordinary recordings may churn without ever creating a read loan.
+        // Ordinary recordings may churn without ever creating an image loan.
         // Prune cold, without lock() temporarily retaining any observed owner.
         edges.erase(std::remove_if(
                         edges.begin(), edges.end(),
@@ -363,21 +371,22 @@ class SharedImageReadAdmission {
     return permit;
   }
 
-  std::shared_ptr<ReadLoan> reserve(const std::vector<PinnedUse> &images) {
+  std::shared_ptr<Loan> reserve(const std::vector<PinnedUse> &images) {
     std::lock_guard<std::recursive_mutex> lock(*control_->gate);
     require_open(*control_);
     if (control_->submitting)
       throw std::invalid_argument(
-          "Cannot reserve a read loan inside a submission callback");
+          "Cannot reserve an image loan inside a submission callback");
     auto uses = bind(*control_, images);
     if (uses.empty())
-      throw std::invalid_argument("Read loan has no images");
+      throw std::invalid_argument("Image loan has no images");
     std::vector<RuntimeResourceHandle> needs_boundary;
     needs_boundary.reserve(uses.size());
     for (auto &use : uses) {
-      if (use.access != SharedImageUse::sampled_at_boundary)
+      if (use.entry->exclusive ||
+          (use.access == SharedImageUse::exclusive && use.entry->readers))
         throw std::invalid_argument(
-            "Read loan includes a write or layout change");
+            "Shared image has a conflicting active loan");
       if (use.entry->readers && !use.entry->ready)
         throw std::invalid_argument(
             "Shared image boundary is still being prepared");
@@ -391,11 +400,16 @@ class SharedImageReadAdmission {
       if (use.entry->readers == (std::numeric_limits<std::size_t>::max)())
         throw std::overflow_error("Too many shared image readers");
     }
-    auto loan = std::shared_ptr<ReadLoan>(
-        new ReadLoan(control_, std::move(uses), std::move(needs_boundary)));
+    auto loan = std::shared_ptr<Loan>(
+        new Loan(control_, std::move(uses), std::move(needs_boundary)));
     loan->active_ = true;
     for (const auto &use : loan->uses_)
-      mutate(*use.entry, [&] { ++use.entry->readers; });
+      mutate(*use.entry, [&] {
+        if (use.access == SharedImageUse::exclusive)
+          use.entry->exclusive = true;
+        else
+          ++use.entry->readers;
+      });
     return loan;
   }
 
@@ -407,7 +421,7 @@ class SharedImageReadAdmission {
     for (const auto &use : uses)
       if (blocked(*find(*control_, use.image), use.access))
         throw std::invalid_argument(
-            "Ordinary image use conflicts with a read loan");
+            "Ordinary image use conflicts with an image loan");
     Submitting scope(*control_);
     return std::forward<Submit>(submit)();
   }
@@ -419,7 +433,7 @@ class SharedImageReadAdmission {
     require_open(*control_);
     if (blocked(*find(*control_, use.image), use.access))
       throw std::invalid_argument(
-          "Ordinary image use conflicts with a read loan");
+          "Ordinary image use conflicts with an image loan");
   }
 
   void close() noexcept {

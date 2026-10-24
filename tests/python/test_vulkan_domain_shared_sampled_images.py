@@ -90,20 +90,20 @@ def test_two_shared_readers_block_prepared_writer_and_restore_same_recording():
             for operation in (lambda: texture.from_ndarray(values),
                               lambda: write(texture, values),
                               lambda: writer.run(binding)):
-                with pytest.raises((ValueError, RuntimeError), match="read loan"):
+                with pytest.raises((ValueError, RuntimeError), match="image loan"):
                     operation()
             assert frame.argument_bytes() == fixed_bytes
             # Ordinary sampled dispatch remains legal after all rejections.
             sample(texture, outputs[2])
             np.testing.assert_array_equal(outputs[2].to_numpy(), expected)
             calls[0].close()
-            with pytest.raises((ValueError, RuntimeError), match="read loan"):
+            with pytest.raises((ValueError, RuntimeError), match="image loan"):
                 writer.run(binding)
             # A completed submit does not release the surviving instance loan.
             remaining = calls[1].submit()
             remaining.wait()
             remaining.close()
-            with pytest.raises((ValueError, RuntimeError), match="read loan"):
+            with pytest.raises((ValueError, RuntimeError), match="image loan"):
                 texture.from_ndarray(values)
             calls[1].close()
             # Reuse the exact previously blocked recording: no re-prepare.
@@ -142,7 +142,7 @@ def test_read_loan_survives_handle_release_until_domain_retirement():
     # release does not wait or retire the logical instance, even if the GPU
     # happens to complete this small dispatch before the following assertion.
     call.release()
-    with pytest.raises((ValueError, RuntimeError), match="read loan"):
+    with pytest.raises((ValueError, RuntimeError), match="image loan"):
         texture.from_ndarray(source)
     queues[0].close()
     assert pending.done()
@@ -207,7 +207,7 @@ def test_initialized_reader_without_replay_releases_loan():
     call = reader.prepare(dict(image=texture, output=output), execution_domain=queues[0])
     try:
         call.initialize()
-        with pytest.raises((ValueError, RuntimeError), match="read loan"):
+        with pytest.raises((ValueError, RuntimeError), match="image loan"):
             texture.from_ndarray(source)
         call.close()
         # Initialization itself submitted Commands that retain the workspace.
@@ -262,7 +262,7 @@ def test_canvas_transfer_source_conflicts_with_shared_sampled_boundary():
     call = reader.prepare(dict(image=texture, output=output), execution_domain=queues[0])
     call.initialize()
     try:
-        with pytest.raises((ValueError, RuntimeError), match="read loan"):
+        with pytest.raises((ValueError, RuntimeError), match="image loan"):
             window.get_canvas().set_image(texture)
         ticket = call.submit()
         ticket.wait()
