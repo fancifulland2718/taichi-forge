@@ -122,8 +122,9 @@ Graph 显式准入及 `queue="graphics"` 使用该路线。record 创建时保�
 dispatch；prepare 借用其代码，为每实例重建私有 VBO/normal/index scratch。
 camera/light 和 draw uniform 在 `Graph.prepare()` 时冻结；之后修改相机须关闭并
 重新准备实例，普通 recording 的相机行为保持原样。提交前调用一次 `initialize()`。
-不可变数据沿 AOT 相同的完整性检查及资源初始化在所选域上传，不重新编译前端，
-不执行 host 几何上传。Windows 已验证四种 draw 及采样后计算的梯度；光栅化本身
+不可变数据沿 AOT 相同的完整性检查，在冷准备阶段经默认 RHI compute 队列同步上传；
+`initialize()` 仍等待普通队列的准备前缀。暖态绘制和计算在所选域执行，不重新编译
+前端或逐次执行 host 几何上传。Windows 已验证四种 draw 及采样后计算的梯度；光栅化本身
 并不可微。共享可变几何仍须与写入者建立显式依赖。
 
 含 AS 的 pass、显示互操作和 graphics fork/join 仍需分别验证。原始图像别名、

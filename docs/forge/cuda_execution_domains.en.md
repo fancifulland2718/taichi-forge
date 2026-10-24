@@ -158,8 +158,11 @@ borrows that code and rebuilds private VBO/normal/index scratch for each instanc
 Camera/light and draw uniforms are frozen at `Graph.prepare()`. Later camera
 changes require closing and preparing the instance again; ordinary recording
 execution keeps its existing camera behavior. Call `initialize()` once before
-submission. Immutable bytes use the same checked resource initialization as AOT,
-on the selected domain, without a frontend recompilation or host geometry upload.
+submission. Immutable bytes use the same integrity checks as AOT and upload
+synchronously through the default RHI compute queue during cold preparation.
+`initialize()` still waits for the ordinary queue's preparation prefix. Warm
+drawing and computation use the selected domain without frontend recompilation
+or per-submission host geometry uploads.
 Windows tests cover all four draw types and downstream sampled-computation
 gradients; rasterization itself is not differentiable. Shared mutable geometry
 still requires explicit ordering against its writers.
