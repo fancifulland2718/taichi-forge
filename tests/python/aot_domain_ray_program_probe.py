@@ -183,10 +183,11 @@ def main(mode, artifact, output_file, recipe="domain"):
                         ordinary.initialize()
                         ordinary.run()
                         check(frames[0], False, 2, 0)
-                    raises(
-                        lambda: shared.prepare(module, arguments, execution_domain=domains[0]),
-                        "must belong to this prepared instance",
-                    )
+                    with shared.prepare(module, arguments, execution_domain=domains[0]) as reader:
+                        reader.initialize()
+                        with reader.submit() as ticket:
+                            ticket.wait()
+                            check(frames[0], False, 2, 0)
 
                 with plan.prepare(
                     module, frames[0], execution_domain=domains[0], mutable_parameters=("phase",)

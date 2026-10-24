@@ -440,13 +440,16 @@ FixedExecution::FixedExecution(
                                                bool inside_control) {
 #ifdef TI_WITH_VULKAN
     if (vulkan_binding) {
-      for (const auto &resource : resources) {
+      for (const auto &use : resources) {
+        const auto &resource = use.resource;
         if (!resource || resource->arch() != arch ||
             &resource->device() != &device ||
-            !vulkan_binding->private_resources.count(resource.get()))
+            (!vulkan_binding->private_resources.count(resource.get()) &&
+             (!gfx_runtime || !gfx_runtime->has_fixed_shared_ray_access(
+                                  vulkan_binding->workspace, use))))
           throw std::invalid_argument(
               "Independent Vulkan stateful resource must belong to this "
-              "prepared instance");
+              "prepared instance or hold a qualified AS loan");
         if (inside_control)
           throw std::invalid_argument(
               "Independent Vulkan stateful resources require a flat region");
@@ -1349,19 +1352,24 @@ FixedExecution::FixedExecution(
         // The complete owner closure was validated above. Register only these
         // qualified kernel resources with the detached command workspace.
         for (const auto &binding : dispatch.resources)
-          for (const auto &resource : binding->vulkan_stateful_resources())
+          for (const auto &use : binding->vulkan_stateful_resources())
             if (auto scene =
-                    std::dynamic_pointer_cast<NativeAccelerationStructure>(resource))
-              gfx_runtime->prepare_fixed_private_acceleration_structure(
+                    std::dynamic_pointer_cast<NativeAccelerationStructure>(use.resource))
+              gfx_runtime->prepare_fixed_acceleration_structure(
                   instance->payload->workspace, std::move(scene));
       }
       const auto &live = dispatch.context->device_range_tasks();
       const auto &persisted = loaded->device_range_tasks();
       TI_ERROR_IF(!live.empty() && !persisted.empty() && live != persisted,
                   "Borrowed and persisted range dispatch policies differ");
-      return gfx::GfxRuntime::GraphDispatch{
+      gfx::GfxRuntime::GraphDispatch result{
           loaded->handle(), dispatch.context, dispatch.indirect_dispatch, 1,
           live.empty() ? persisted : live};
+      for (const auto &binding : dispatch.resources) {
+        const auto &uses = binding->vulkan_stateful_resources();
+        result.stateful_resources.insert(result.stateful_resources.end(), uses.begin(), uses.end());
+      }
+      return result;
     };
     const auto retain =
         [&](std::unique_ptr<gfx::GraphReplayRegistration> graph) {
@@ -1502,6 +1510,7 @@ FixedExecution::FixedExecution(
           gfx::GfxRuntime::GraphRecordingOperation op;
           op.inline_recording = true;
           auto requirements = (*external)->vulkan_recording_requirements();
+          op.stateful_resources = std::move(requirements.stateful_resources);
           op.images = std::move(requirements.images);
           op.graphics_queue = requirements.graphics_queue;
           op.buffers = std::move(requirements.buffers);
@@ -1514,10 +1523,13 @@ FixedExecution::FixedExecution(
                                            use.sampled_only);
             }
           }
-          op.external = [external = *external](Device *device,
+          op.external = [external = *external, independent = bool(vulkan_binding)](Device *device,
                                                CommandList *commands) {
             commands->memory_barrier();
-            external->record_vulkan(device, commands);
+            if (independent)
+              external->record_vulkan_independent(device, commands);
+            else
+              external->record_vulkan(device, commands);
             commands->memory_barrier();
           };
           native.push_back(std::move(op));

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include "taichi/rhi/device.h"
 
@@ -27,6 +28,14 @@ class NativeResource {
   virtual bool retains_input(const std::string &) const {
     return true;
   }
+};
+
+// Complete cold access facts for a stateful resource closure. A TLAS writer
+// writes its root while reading its BLAS dependencies; retaining either owner
+// alone does not authorize concurrent mutation.
+struct NativeResourceUse {
+  std::shared_ptr<NativeResource> resource;
+  bool writes{false};
 };
 
 enum class NativeObjectKind { operation, resource };

@@ -404,7 +404,7 @@ void ExecutionDomain::retire_instance(const std::shared_ptr<ExecutionInstance> &
     // operand owners (including shared image read loans). This never waits
     // for a later prefix belonging to another instance.
     collect_ready(state.options.capacity);
-    client->retire();
+    client->retire_after(prefix);
   } catch (...) {
     failure = std::current_exception();
     report(state.owner, failure, prefix.sequence());
@@ -481,7 +481,7 @@ void ExecutionDomain::close() {
     try {
       if (instance->error)
         std::rethrow_exception(instance->error);
-      instance->client->retire();
+      instance->client->retire_after(instance->latest);
       instance->client.reset();
       instance->latest = {};
       instance->accepting = false;

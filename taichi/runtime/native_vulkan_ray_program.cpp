@@ -275,6 +275,7 @@ class PreparedLaunch final : public NativeOperation {
     VulkanRayProgramResourceSets sets;
     std::unique_ptr<vulkan::VulkanShaderBindingTable> sbt;
     std::vector<std::function<void(CommandList *)>> reads;
+    std::vector<std::shared_ptr<NativeShaderAccelerationStructure>> scene_reads;
     std::vector<std::shared_ptr<NativeSampledImage>> read_images;
     std::vector<std::shared_ptr<NativeSampledImage>> image_owners;
   };
@@ -377,11 +378,7 @@ class PreparedLaunch final : public NativeOperation {
         throw std::invalid_argument(
             "Ray hit records do not cover bound instance SBT offsets");
       input.scene->bind_for_shader(&get_set(input.point), input.point.binding);
-      payload_->reads.push_back([scene = input.scene](CommandList *commands) {
-        scene->record_shader_read(
-            commands, native_shader_stage(PipelineStageType::raytracing),
-            false);
-      });
+      payload_->scene_reads.push_back(input.scene);
     }
     prepare_vulkan_ray_program_bindings(pipeline, payload_->sets);
     payload_->sbt = prepare_vulkan_ray_program_sbt(device_, pipeline, d.raygen,
@@ -437,9 +434,21 @@ class PreparedLaunch final : public NativeOperation {
   }
   NativeVulkanRecordingRequirements vulkan_recording_requirements()
       const override {
-    return {images_, false, buffers_, image_uses_, scenes_};
+    NativeVulkanRecordingRequirements result{images_, false, buffers_, image_uses_};
+    for (const auto &scene : scenes_)
+      result.stateful_resources.push_back({scene, false});
+    return result;
   }
   void record_vulkan(Device *, CommandList *commands) override {
+    record(commands, false);
+  }
+  void record_vulkan_independent(Device *, CommandList *commands) override {
+    record(commands, true);
+  }
+  void record(CommandList *commands, bool independent) {
+    for (const auto &scene : payload_->scene_reads)
+      scene->record_shader_read(commands, native_shader_stage(PipelineStageType::raytracing),
+                                false, independent);
     record_vulkan_ray_program(commands, payload_->program->pipeline(),
                               *payload_->sbt, payload_->sets, payload_->reads,
                               dimensions_, push_);

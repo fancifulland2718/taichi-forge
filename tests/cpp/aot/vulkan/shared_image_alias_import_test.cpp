@@ -60,7 +60,7 @@ TEST(VulkanSharedImageImport, RejectedAliasLeavesReaderAndLaterImportUsable) {
     EXPECT_EQ(ti_get_last_error(&size, message), TI_ERROR_INVALID_STATE);
     EXPECT_NE(std::string(message).find("image loan"), std::string::npos);
   }
-  const auto prefixes = workspace->shared_image_dependencies();
+  const auto prefixes = workspace->shared_resource_dependencies();
   ASSERT_EQ(prefixes.size(), 1);
   prefixes.front().wait();
   EXPECT_THROW(gfx->track_image(image->get_device_allocation(),

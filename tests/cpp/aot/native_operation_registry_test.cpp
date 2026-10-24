@@ -13,6 +13,7 @@
 #include "taichi/runtime/texture_storage.h"
 #include "taichi/runtime/texture_collection.h"
 #include "taichi/runtime/native_acceleration_structure.h"
+#include "taichi/runtime/native_ray_admission.h"
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/common/operation_json.h"
@@ -28,6 +29,36 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, RayRegistrationRetainsAndRecyclesCanonicalIdentity) {
+  auto gate = std::make_shared<std::recursive_mutex>();
+  auto admission = std::make_shared<NativeRayAdmission>(gate);
+  auto registry = std::make_shared<NativeRayResourceRegistration::Registry>(57);
+  auto owner = NativeRayResourceRegistration::create(registry, admission);
+  const auto first = owner->handle();
+  ASSERT_TRUE(first);
+  EXPECT_TRUE(owner->belongs_to(*admission));
+  NativeRayAdmission foreign(gate);
+  EXPECT_FALSE(owner->belongs_to(foreign));
+  std::weak_ptr<NativeRayResourceRegistration> weak = owner;
+  auto permit = admission->prepare({{{first, SharedResourceUse::read}, owner}});
+  auto loan = admission->reserve({{{first, SharedResourceUse::exclusive}, owner}});
+  loan->publish_boundary(std::make_shared<RuntimeCompletion>());
+  owner.reset();
+  EXPECT_FALSE(weak.expired());
+  EXPECT_THROW(permit->submit([] {}), std::invalid_argument);
+  loan.reset();
+  EXPECT_NO_THROW(permit->submit([] {}));
+  permit.reset();
+  EXPECT_TRUE(weak.expired());
+  EXPECT_THROW(admission->require_use({first, SharedResourceUse::read}), std::invalid_argument);
+  auto next = NativeRayResourceRegistration::create(registry, admission);
+  EXPECT_EQ(next->handle().index, first.index);
+  EXPECT_NE(next->handle().generation, first.generation);
+  admission->close();
+  EXPECT_NO_THROW(next.reset());
+  EXPECT_EQ(registry->stats().live, 0);
+}
+
 TEST(NativeOperationRegistry, PrimitiveSchemasPreserveLayoutAndPolicyContracts) {
   const auto &registry = native_operation_registry();
   auto sort = NativeOperationDescription::parse(liong::json::parse_complete(R"(
@@ -555,6 +586,16 @@ TEST(NativeOperationRegistry,
   auto binding = prepare_native_kernel_resource(resource, {0}, Arch::vulkan,
                                                 device, kernel, context);
   ASSERT_EQ(binding->vulkan_stateful_resources().size(), 2);
+  for (const auto &use : binding->vulkan_stateful_resources())
+    EXPECT_FALSE(use.writes);
+  {
+    const auto writes = collect_native_ray_uses(resource, true);
+    ASSERT_EQ(writes.size(), 2);
+    EXPECT_EQ(writes[0].resource, resource);
+    EXPECT_TRUE(writes[0].writes);
+    EXPECT_EQ(writes[1].resource, dependency);
+    EXPECT_FALSE(writes[1].writes);
+  }
   NativeRecordingState state;
   EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, context, state),
                std::invalid_argument);

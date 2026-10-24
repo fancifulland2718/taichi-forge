@@ -149,3 +149,35 @@ def test_private_ray_domain_initialization_refit_and_adjoint(tmp_path, kernel_qu
         assert "[  SKIPPED ]" not in result.stdout
         assert "VUID-" not in result.stdout + result.stderr
         assert "SYNC-HAZARD" not in result.stdout + result.stderr
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_live_native_ray_readers_writers_and_retirement(tmp_path):
+    if not ti.hardware.ray.is_available():
+        pytest.skip("Vulkan ray query unavailable")
+    folder = tmp_path / "module"
+    build_fixture(folder, kernel_query=True)
+    ti.reset()
+    for mode in ("standalone", "borrowed"):
+        command = [sys.executable] + (["-S"] if mode == "standalone" else [])
+        result = subprocess.run(
+            [*command, str(Path(__file__).with_name("aot_shared_ray_probe.py")), str(folder), mode],
+            env=os.environ.copy(), capture_output=True, text=True, timeout=90)
+        (tmp_path / f"shared-{mode}.log").write_text(result.stdout + result.stderr, encoding="utf8")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "VUID-" not in result.stdout + result.stderr
+        assert "SYNC-HAZARD" not in result.stdout + result.stderr
+        assert "shared_native_ray_ok" in result.stdout
+    env = os.environ.copy()
+    executable = env.get("TI_TEST_DOMAIN_EXECUTABLE")
+    if executable:
+        env["TAICHI_VULKAN_RAY_DOMAIN_AOT_DIR"] = str(folder)
+        result = subprocess.run(
+            [executable, "--gtest_filter=VulkanExecutionOwner.SharedRay*"],
+            env=env, capture_output=True, text=True, timeout=60)
+        (tmp_path / "shared-native.log").write_text(result.stdout + result.stderr, encoding="utf8")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "[  PASSED  ] 2 tests." in result.stdout
+        assert "[  SKIPPED ]" not in result.stdout
+        assert "VUID-" not in result.stdout + result.stderr
+        assert "SYNC-HAZARD" not in result.stdout + result.stderr

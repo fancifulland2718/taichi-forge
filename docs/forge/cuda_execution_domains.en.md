@@ -208,11 +208,30 @@ capabilities; build-to-shader barriers follow the selected domain's ordering.
 This does not rely on the ordinary runtime's cross-queue graphics semaphore.
 The existing private attachment, completion and retirement contracts still apply.
 
-All seed inputs and AS dependencies remain valid until instance retirement;
-closing an input early invalidates the instance. Wrapping a public AS in a
-private TLAS does not bypass ownership validation. Live AS loans, micromaps and
-AS operations inside control flow are outside this capability. Ordinary
-synchronous resource creation keeps its contract.
+Flat plans can also borrow public AS resources created by `native_resource()`
+on the same runtime. The capability is `vulkan_execution_domain_native_ray_loans`.
+Native queries, DSL kernels, ray programs and graphics shaders consume the original
+AS and its full BLAS closure, without reconstructing a copy from seed geometry.
+Preparation reserves the complete access set atomically: queries share reads,
+while build/refit/update exclusively borrow the AS they actually write. Updating
+a TLAS only reads its BLAS dependencies, so writers of two different TLAS resources
+may share one BLAS, but cannot concurrently rebuild that BLAS. Existing ordinary
+recordings check their permissions on submission and reject conflicts before
+device effects.
+
+Loans last until every accepted invocation of the instance retires. Closing one
+reader does not release another reader's access. Returning a writer submits a
+device dependency to the ordinary queue for subsequent access visibility. This
+is a cold retirement cost; warm replay stays on the selected domain without
+per-invocation resource-registry lookups. Standalone and borrowed runtimes support
+these native-created AS resources. Importing original Program/JIT AS objects is
+a separate capability.
+
+Seed inputs retained for private reconstruction and AS dependencies remain valid
+until instance retirement; closing them early invalidates the instance. Wrapping a public BLAS in a
+private TLAS does not make it private: its loan still needs complete admission.
+Micromaps and AS operations inside control flow remain outside this capability.
+Ordinary synchronous resource creation keeps its contract.
 Cold `initial_data` uploads still use the default queue and `initialize()` waits
 for bootstrap; cold preparation is not fully independent of that queue. Warm
 native queries and updates do not return to it.

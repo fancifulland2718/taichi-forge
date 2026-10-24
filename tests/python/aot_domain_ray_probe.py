@@ -136,7 +136,8 @@ def main(folder, mode, query_kind="native"):
                     ticket.wait()
                     check(frames[1], 3, instanced, kernel_query)
                 calls[1].close()
-                # Shared public BLAS must not become private through a new TLAS.
+                # A public BLAS keeps its own identity when a private TLAS uses
+                # it. The full read/write closure now takes an explicit loan.
                 public = group.enter_context(closing(runtime.native_resource(
                     "vulkan_ray", "triangle_blas" if instanced else "triangle_scene",
                     parameters=dict(vertex_count=6, triangle_count=2),
@@ -147,12 +148,13 @@ def main(folder, mode, query_kind="native"):
                 public_plan = ExecutionPlan.from_json(json.dumps(description))
                 public_arguments = dict(frames[0], **{name: public})
                 public_arguments = {key: public_arguments[key] for key in public_plan.argument_names}
-                try:
-                    public_plan.prepare(module, public_arguments, execution_domain=domains[0])
-                except RuntimeError as error:
-                    assert "must belong to this prepared instance" in str(error), str(error)
-                else:
-                    raise AssertionError("Public AS accepted as a private resource")
+                with public_plan.prepare(module, public_arguments, execution_domain=domains[0],
+                                         mutable_parameters=("phase",)) as shared:
+                    shared.initialize()
+                    for shift in (2, 0):
+                        with shared.submit(values=dict(phase=(1 << 48) | shift)) as ticket:
+                            ticket.wait()
+                            check(frames[0], shift, instanced, kernel_query)
                 if kernel_query:
                     # An ordinary public TLAS can serve the same compiled kernel,
                     # but no preceding native operation may mask its domain check.
@@ -172,12 +174,11 @@ def main(folder, mode, query_kind="native"):
                         call.initialize()
                         call.run()
                         check(frames[0], 0, True, True)
-                    try:
-                        direct_plan.prepare(module, values, execution_domain=domains[0])
-                    except RuntimeError as error:
-                        assert "must belong to this prepared instance" in str(error), str(error)
-                    else:
-                        raise AssertionError("Kernel-only public TLAS accepted as private")
+                    with direct_plan.prepare(module, values, execution_domain=domains[0]) as shared:
+                        shared.initialize()
+                        with shared.submit() as ticket:
+                            ticket.wait()
+                            check(frames[0], 0, True, True)
                 with plan.prepare(module, frames[1], execution_domain=domains[0], mutable_parameters=("phase",)) as rebound:
                     rebound.initialize()
                     with rebound.submit(values=dict(phase=(1 << 49) | 1)) as ticket:

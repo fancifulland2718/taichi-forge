@@ -159,10 +159,22 @@ graphics 域（`queue="graphics"`）还可在平直 AOT 计划的 vertex/fragmen
 不依赖普通 runtime 的跨队列 graphics semaphore。私有 attachment、完成票据及
 退休仍遵循已有合同。
 
-所有 seed 输入和 AS 依赖保持有效直至实例退休；提前关闭输入会使该实例失效。
-已有 public AS 不能通过包装成私有 TLAS 绕过所有权检查。此能力暂不包含 live AS
-借用、micromap 或控制流内的 AS 操作。普通同步资源创建合同
-保持不变。冷 `initial_data` 上传仍走默认队列，`initialize()` 仍等待 bootstrap；
+平直计划还可借用同一 runtime 中通过 `native_resource()` 创建的 public AS；能力项为
+`vulkan_execution_domain_native_ray_loans`。native query、DSL kernel、ray program 和
+graphics shader 共用原 AS 及完整 BLAS 依赖，不从初始几何重建副本。准备时一次性保留
+全部访问权限：查询共享读，build/refit/update 独占实际写入的 AS，TLAS 更新只读取其
+BLAS 依赖。因此两个不同 TLAS 的 writer 可以共享同一 BLAS，但不能同时重建该 BLAS。
+此前已准备的普通 recording 也会在提交时检查这些权限；冲突在产生设备效果前报错。
+
+借用持续到实例的全部已接纳工作退休，关闭一个 reader 不释放另一个 reader 的权限。
+writer 归还时向普通队列提交设备依赖，恢复后续普通访问的可见性；这是冷退休成本，
+暖态仍沿所选域提交，不逐次查询资源注册表。独立 runtime 和借用 runtime 均适用，
+但这里的 public AS 必须由 native 工厂创建，普通 Program/JIT 原有 AS 的导入另行支持。
+
+私有重建所保留的 seed 输入和 AS 依赖须保持有效直至实例退休；提前关闭会使实例失效。
+包装成私有 TLAS 不会把 public BLAS 变为私有资源，其借用仍需完整准入。micromap
+和控制流内的 AS 操作尚不包含在此能力中。普通同步资源创建合同保持不变。
+冷 `initial_data` 上传仍走默认队列，`initialize()` 仍等待 bootstrap；
 这不表示冷准备能完全脱离默认队列，暖态 native 查询与更新无需回到该队列。
 
 独立 Vulkan 路线还不接纳 host selection、公共并行 recipe，以及共享

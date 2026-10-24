@@ -76,10 +76,10 @@ struct NativeVulkanRecordingRequirements {
   // cannot borrow live images by claiming a shader-read entry/exit layout.
   std::optional<std::vector<ImageUse>> image_uses;
   // Stateful provider resources referenced by these commands, including their
-  // transitive mutable dependencies. Independent execution currently requires
-  // this closure to be private to its prepared owner. A shared_ptr alone is
-  // lifetime protection, not permission to mutate another instance's AS.
-  std::vector<std::shared_ptr<NativeResource>> stateful_resources;
+  // transitive dependencies and each resource's actual access. Independent
+  // execution requires private ownership or a qualified shared/exclusive loan
+  // for the complete closure. A shared_ptr alone grants no access permission.
+  std::vector<NativeResourceUse> stateful_resources;
 };
 
 // Prepared backend commands own their scratch and recording state. The
@@ -158,6 +158,12 @@ class NativeOperation : public NativeResource {
   }
   virtual void record_vulkan(Device *device, CommandList *commands) {
     throw std::invalid_argument("Native operation has no Vulkan recording");
+  }
+  // The selected consumer, rather than a shared resource's construction mode,
+  // determines queue ordering. Qualified operations with shader reads can
+  // record the independent queue barrier without changing their live owner.
+  virtual void record_vulkan_independent(Device *device, CommandList *commands) {
+    record_vulkan(device, commands);
   }
   // Independent recordings need an explicit closure for graphics providers.
   // Ordinary compute providers keep their existing inline contract; the GFX

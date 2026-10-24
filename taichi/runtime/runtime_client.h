@@ -9,6 +9,7 @@
 #include "taichi/program/runtime_resource_registry.h"
 
 namespace taichi::lang {
+class RuntimeCompletion;
 
 // An opt-in native client of an existing backend owner. Each client serializes
 // retirement against its own submissions, then releases recordings/code/data
@@ -17,6 +18,10 @@ class RuntimeClient {
  public:
   virtual ~RuntimeClient() = default;
   virtual void retire() = 0;
+  // Domain retirement already proves this exact prefix. Borrowing clients
+  // may use it for a device-side return dependency before releasing access.
+  // Ordinary clients preserve the existing teardown path.
+  virtual void retire_after(const RuntimeCompletion &) { retire(); }
 };
 
 // Cold lifecycle registration only: no device, submission mutex, global state

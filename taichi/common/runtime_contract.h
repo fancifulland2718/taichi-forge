@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Backend adapters share owner-qualified read/write admission machinery.
-inline constexpr int kForgeNativeAbiRevision = 189;
+// Native Vulkan AS access facts and retirement carry the selected queue contract.
+inline constexpr int kForgeNativeAbiRevision = 190;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
@@ -57,6 +57,8 @@ inline constexpr std::uint64_t kForgeVulkanExecutionDomainPrivateRayResources = 
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainPrivateRayKernels = 1ull << 34;
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainRayPrograms = 1ull << 35;
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainPrivateGraphicsAs = 1ull << 36;
+// Flat native public AS loans; original Program/JIT AS imports are separate.
+inline constexpr std::uint64_t kForgeVulkanExecutionDomainNativeRayLoans = 1ull << 37;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

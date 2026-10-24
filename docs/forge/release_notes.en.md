@@ -59,8 +59,11 @@ combination. Consult the linked API contracts and capability queries for exact s
   includes every BLAS and seed input. DSL kernels in the same plan can query a private TLAS,
   sharing native initialization and ownership checks. Flat-plan ray programs can also use
   private TLAS resources and images. SBT uploads join selected-domain initialization, with
-  retained upload storage counted in instance costs. Public live AS, micromaps and
-  AS operations inside control flow remain outside this capability. Graphics domains can
+  retained upload storage counted in instance costs. Same-runtime native public AS resources
+  support shared-read/exclusive-write loans over the full dependency closure, also enforced
+  on existing recordings. Different TLAS writers can share read-only BLAS dependencies.
+  Original Program/JIT AS imports, micromaps and AS operations inside control flow remain
+  outside this capability. Graphics domains can
   bind private TLAS resources in vertex/fragment shaders, sharing one submission with
   preceding device refit and subsequent computation. Preparation checks actual queue
   capabilities and the full AS closure. Cold data uploads and bootstrap

@@ -55,7 +55,9 @@
   和图像，SBT 上传进入所选域初始化，保留的上传存储计入实例成本。
   graphics 域的 vertex/fragment shader 也可绑定私有 TLAS，与前置设备 refit 和后续
   计算共享一次提交，准备时检查实际队列能力和完整 AS 闭包。
-  公共 live AS、micromap 及控制流内 AS 操作尚不属于该能力。
+  同 runtime 的 native public AS 支持完整依赖的共享读/排他写借用，旧 recording
+  也遵守权限；不同 TLAS writer 可共享只读 BLAS。原 Program/JIT AS 导入、micromap
+  及控制流内 AS 操作尚不属于该能力。
   冷数据上传和 bootstrap 仍依赖普通队列，详见执行域合同。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、
   `advanced_optimization=False`。显式选择 `balanced/full` 且未覆盖高级 IR 优化时默认开启

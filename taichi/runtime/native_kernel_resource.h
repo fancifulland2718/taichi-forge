@@ -3,6 +3,7 @@
 #include <vector>
 #include <memory>
 #include "taichi/rhi/device.h"
+#include "taichi/runtime/native_resource.h"
 
 namespace taichi::lang {
 class CallableBase;
@@ -24,9 +25,9 @@ class NativeKernelResourceBinding {
                         const NativeRecordingState &state) const = 0;
   // Mutable non-buffer dependencies need the same per-instance ownership proof
   // as native operations. Ordinary image/array binding contracts stay separate.
-  virtual const std::vector<std::shared_ptr<NativeResource>> &
+  virtual const std::vector<NativeResourceUse> &
   vulkan_stateful_resources() const {
-    static const std::vector<std::shared_ptr<NativeResource>> empty;
+    static const std::vector<NativeResourceUse> empty;
     return empty;
   }
 };

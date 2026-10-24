@@ -121,8 +121,8 @@ def main(mode, artifact):
             check(frames[1], 0)
         calls[1].close()
 
-        # The graphics operation must reject a shared live TLAS on its own,
-        # without an earlier refit operation concealing a missing closure check.
+        # The graphics operation borrows a live TLAS on its own, without an
+        # earlier native refit supplying the AS closure or its queue barrier.
         blas = scope.enter_context(
             closing(
                 runtime.native_resource(
@@ -152,10 +152,23 @@ def main(mode, artifact):
             ordinary.initialize()
             ordinary.run()
             check(frames[0], 0)
-        raises(
-            lambda: shared.prepare(module, arguments, execution_domain=domains[0]),
-            "must belong to this prepared instance",
-        )
+        # Instance admission runs after the live AS closure was reserved. Fill
+        # that slot to force a late failure, then prove no read loan remains.
+        occupied_plan = ExecutionPlan([dict(kind="fill32", destination="output", value=0)])
+        occupied = scope.enter_context(occupied_plan.prepare(
+            module, dict(output=frames[0]["output"]), execution_domain=domains[0]))
+        raises(lambda: shared.prepare(module, arguments, execution_domain=domains[0]))
+        full = module.execution_plan("public")
+        with full.prepare(module, {name: available[name] for name in full.argument_names}) as writer:
+            writer.initialize()
+            writer.run()
+            check(frames[0], 0)
+        occupied.close()
+        with shared.prepare(module, arguments, execution_domain=domains[0]) as reader:
+            reader.initialize()
+            with reader.submit() as ticket:
+                ticket.wait()
+                check(frames[0], 0)
         with plan.prepare(module, frames[0], execution_domain=domains[0], mutable_parameters=("phase",)) as rebound:
             rebound.initialize()
             ticket = rebound.submit(values=dict(phase=1 << 48), sample_gpu=True)

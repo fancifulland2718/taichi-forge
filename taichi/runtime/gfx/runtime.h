@@ -2,6 +2,8 @@
 #include "taichi/runtime/snode_tree_id_registry.h"
 #include "taichi/runtime/gfx/snode_tree_resources.h"
 #include "taichi/runtime/gfx/shared_image_admission.h"
+#include "taichi/runtime/native_ray_admission.h"
+#include "taichi/runtime/native_resource.h"
 #include "taichi/runtime/gfx/range_dispatch.h"
 #include "taichi/program/runtime_completion.h"
 #include "taichi/util/lang_util.h"
@@ -336,6 +338,7 @@ class TI_DLL_EXPORT GfxRuntime {
     std::uint32_t source_dispatch_count{1};
     // Explicit physical task selection; distinct from a call-wide packet.
     std::vector<uint32_t> device_range_tasks;
+    std::vector<NativeResourceUse> stateful_resources;
   };
 
   struct GraphRecordingOperation {
@@ -352,6 +355,7 @@ class TI_DLL_EXPORT GfxRuntime {
     // Actual accesses certified by a described native operation. true denotes
     // sampled-only access; absent metadata cannot authorize a borrowed image.
     std::optional<std::vector<std::pair<DeviceAllocation, bool>>> image_uses;
+    std::vector<NativeResourceUse> stateful_resources;
   };
 
   using GraphStructuredStrategy = VulkanControlStrategy;
@@ -594,10 +598,11 @@ class TI_DLL_EXPORT GfxRuntime {
    public:
     void record_initialization(CommandList &commands);
     std::size_t bytes() const;
-    std::vector<RuntimeCompletion> shared_image_dependencies() const;
+    std::vector<RuntimeCompletion> shared_resource_dependencies() const;
     // Called only after the owning instance's exact prefix and recordings
     // retire. Resource storage may remain referenced by released C API handles.
     void retire_shared_image_loans();
+    void retire_shared_ray_loans(const RuntimeCompletion &prefix);
 
    private:
     friend class GfxRuntime;
@@ -612,11 +617,16 @@ class TI_DLL_EXPORT GfxRuntime {
     };
     std::unordered_map<DeviceAllocationId, PrivateImage> private_images_;
     std::unordered_map<const NativeAccelerationStructure *,
-                       std::shared_ptr<NativeAccelerationStructure>> private_as_;
+                       std::shared_ptr<NativeAccelerationStructure>> qualified_as_;
     // Command payloads retain this workspace until their exact final prefix
     // retires. Entries in the admission index only have weak reverse edges.
     std::shared_ptr<SharedImageAdmission<RuntimeCompletion>::Loan> shared_images_;
     std::unordered_map<DeviceAllocationId, SharedImageUse> shared_image_uses_;
+    std::shared_ptr<NativeRayAdmission::Loan> shared_rays_;
+    std::unordered_map<const NativeRayResourceRegistration *, SharedResourceUse>
+        shared_ray_uses_;
+    std::shared_ptr<GraphReplayRegistry> shared_resource_bridge_;
+    std::shared_ptr<RuntimeFaultDomain> shared_resource_fault_;
     bool initialization_recorded_{false};
   };
   std::shared_ptr<FixedGraphWorkspace> create_fixed_graph_workspace();
@@ -635,6 +645,19 @@ class TI_DLL_EXPORT GfxRuntime {
       const std::shared_ptr<FixedGraphWorkspace> &workspace,
       const std::vector<SharedImage> &images,
       const std::shared_ptr<RuntimeFaultDomain> &owner);
+  std::shared_ptr<NativeRayResourceRegistration> register_ray_resource(
+      const std::shared_ptr<RuntimeFaultDomain> &owner);
+  NativeRayAdmission::OrdinaryScope ordinary_ray_scope() {
+    return shared_ray_admission_->ordinary_scope();
+  }
+  void require_ray_uses(const std::vector<NativeResourceUse> &uses);
+  void prepare_fixed_shared_ray_resources(
+      const std::shared_ptr<FixedGraphWorkspace> &workspace,
+      const std::vector<NativeResourceUse> &uses,
+      const std::shared_ptr<RuntimeFaultDomain> &owner);
+  bool has_fixed_shared_ray_access(
+      const std::shared_ptr<FixedGraphWorkspace> &workspace,
+      const NativeResourceUse &use) const;
 
   // Cold-only admission of an allocation owned exclusively by this instance.
   // The caller proves privacy; external/borrowed image objects are not eligible.
@@ -644,9 +667,9 @@ class TI_DLL_EXPORT GfxRuntime {
       DeviceAllocation image,
       ImageLayout boundary,
       std::shared_ptr<void> owner);
-  // Caller proves the full TLAS/BLAS closure belongs to this instance and has
-  // its initialization phase. The workspace retains exactly that cold identity.
-  void prepare_fixed_private_acceleration_structure(
+  // Caller proves the full TLAS/BLAS closure is private or has qualified live
+  // admission. The workspace retains exactly that cold binding identity.
+  void prepare_fixed_acceleration_structure(
       const std::shared_ptr<FixedGraphWorkspace> &workspace,
       std::shared_ptr<NativeAccelerationStructure> resource);
   // Produce immutable commands for a caller-owned compute queue. Images must
@@ -800,6 +823,15 @@ class TI_DLL_EXPORT GfxRuntime {
       std::make_shared<std::recursive_mutex>()};
   std::recursive_mutex &host_api_mutex_{*host_api_mutex_owner_};
   SharedImageAdmission<RuntimeCompletion> shared_image_admission_{host_api_mutex_owner_};
+  std::shared_ptr<NativeRayAdmission> shared_ray_admission_{
+      std::make_shared<NativeRayAdmission>(host_api_mutex_owner_)};
+  std::shared_ptr<NativeRayResourceRegistration::Registry> ray_identities_;
+  void restore_shared_ray_access(const RuntimeCompletion &prefix,
+                                const std::shared_ptr<RuntimeFaultDomain> &owner);
+  std::vector<NativeRayAdmission::PinnedUse> bind_ray_uses(
+      const std::vector<NativeResourceUse> &uses) const;
+  void preflight_kernel_ray_resources(const CompiledTaichiKernel &kernel,
+                                       const LaunchContextBuilder &context);
   // No lifetime owners here. Texture destruction removes its immutable
   // registry identity, after the last ordinary/domain payload releases it.
   std::unordered_map<DeviceAllocationId, RuntimeResourceHandle> managed_images_;

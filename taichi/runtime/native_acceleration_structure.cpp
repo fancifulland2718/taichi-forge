@@ -27,6 +27,16 @@ std::vector<std::shared_ptr<NativeResource>> collect_native_ray_resources(
   return resources;
 }
 
+std::vector<NativeResourceUse> collect_native_ray_uses(
+    const std::shared_ptr<NativeResource> &root, bool writes_root) {
+  std::vector<NativeResourceUse> uses;
+  for (auto &resource : collect_native_ray_resources(root)) {
+    const bool writes = writes_root && resource == root;
+    uses.push_back({std::move(resource), writes});
+  }
+  return uses;
+}
+
 void NativeAccelerationStructureKernelBinding::validate_parameter(
     Arch arch,
     Device &device,
@@ -53,7 +63,7 @@ NativeAccelerationStructureKernelBinding::
         const CallableBase &kernel,
         LaunchContextBuilder &context)
     : resource_(std::move(resource)),
-      resources_(collect_native_ray_resources(resource_)),
+      resources_(collect_native_ray_uses(resource_)),
       argument_(std::move(argument)),
       kernel_(&kernel),
       context_(&context) {
@@ -82,7 +92,7 @@ void NativeAccelerationStructureKernelBinding::validate(
       found->handle || found->native_resource != resource_.get())
     throw std::invalid_argument(
         "Kernel acceleration-structure binding changed after qualification");
-  for (const auto &resource : resources_)
-    dynamic_cast<const NativeRayResourceAccess &>(*resource).require_initialized(state);
+  for (const auto &use : resources_)
+    dynamic_cast<const NativeRayResourceAccess &>(*use.resource).require_initialized(state);
 }
 }  // namespace taichi::lang

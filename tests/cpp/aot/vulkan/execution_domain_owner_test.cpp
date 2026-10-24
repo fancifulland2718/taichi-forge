@@ -30,6 +30,7 @@ struct PublicDomainSession {
   std::vector<TiMemory> memories;
   std::vector<TiPreparedExecution> executions;
   std::vector<TiCompletion> completions;
+  std::vector<TiNativeResource> resources;
   ~PublicDomainSession() {
     for (auto domain : domains)
       ti_close_vulkan_execution_domain_ext(domain);
@@ -42,6 +43,9 @@ struct PublicDomainSession {
       ti_release_vulkan_execution_domain_ext(domain);
     if (module)
       ti_destroy_aot_module(module);
+    for (auto resource : resources)
+      if (resource)
+        ti_destroy_native_resource_ext(runtime, resource);
     for (auto memory : memories)
       ti_free_memory(runtime, memory);
     if (runtime)
@@ -683,6 +687,170 @@ TEST(VulkanExecutionOwner, PrivateRayInitializationAndIndependentRefit) {
 
 TEST(VulkanExecutionOwner, PrivateRayProgramInitializationAndReplay) {
   run_private_ray_domain(true);
+}
+
+void run_shared_ray_pending(bool writes) {
+  const auto *path = std::getenv("TAICHI_VULKAN_RAY_DOMAIN_AOT_DIR");
+  if (!vulkan::is_vulkan_api_available() || !path)
+    GTEST_SKIP() << "Requires the compiled ray fixture";
+  PublicDomainSession session;
+  const auto *selected = std::getenv("TI_TEST_VULKAN_DEVICE_INDEX");
+  session.runtime = ti_create_runtime(TI_ARCH_VULKAN, selected ? std::stoul(selected) : 0);
+  ASSERT_NE(session.runtime, nullptr);
+  auto &runtime = *reinterpret_cast<VulkanRuntime *>(session.runtime);
+  auto &device = runtime.get_vk();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  session.module = ti_load_aot_module(session.runtime, path);
+  ASSERT_NE(session.module, nullptr);
+  const auto array = [&](const char *name, const std::vector<uint32_t> &shape,
+                         TiDataType type, const void *initial = nullptr) {
+    TiNamedArgument result{};
+    result.name = name;
+    result.argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+    auto &value = result.argument.value.ndarray;
+    value.elem_type = type;
+    value.shape.dim_count = shape.size();
+    std::copy(shape.begin(), shape.end(), value.shape.dims);
+    size_t bytes = 4;
+    for (auto extent : shape)
+      bytes *= extent;
+    const TiMemoryAllocateInfo allocation{bytes, TI_TRUE, TI_TRUE, TI_FALSE,
+                                          TI_MEMORY_USAGE_STORAGE_BIT};
+    value.memory = ti_allocate_memory(session.runtime, &allocation);
+    if (!value.memory)
+      throw std::runtime_error("test array allocation failed");
+    session.memories.push_back(value.memory);
+    void *mapped = ti_map_memory(session.runtime, value.memory);
+    if (!mapped)
+      throw std::runtime_error("test array mapping failed");
+    if (initial)
+      std::memcpy(mapped, initial, bytes);
+    else
+      std::memset(mapped, 0, bytes);
+    ti_unmap_memory(session.runtime, value.memory);
+    return result;
+  };
+  const float vertices[]{-1, -1, 1, 1, -1, 1, 0, 1, 1};
+  const int indices[]{0, 1, 2};
+  const float ray[]{0, 0, 0, .01f, 0, 0, 1, 10};
+  std::array<TiNamedArgument, 2> seed{
+      array("vertices", {3, 3}, TI_DATA_TYPE_F32, vertices),
+      array("indices", {1, 3}, TI_DATA_TYPE_I32, indices)};
+  const std::string resource = R"({"kind":"native","provider":"vulkan_ray","operation":"triangle_scene","version":1,
+    "parameters":{"vertex_count":3,"triangle_count":1},"bindings":{"vertices":"vertices","indices":"indices"}})";
+  for (int i = 0; i < (writes ? 2 : 1); ++i) {
+    session.resources.push_back(ti_create_native_resource_ext(session.runtime, resource.size(), resource.data(),
+                                                              seed.size(), seed.data(), nullptr));
+    check_domain_error();
+    ASSERT_NE(session.resources.back(), nullptr);
+  }
+  const std::string writer_plan = R"({"version":26,"operations":[{"kind":"native","provider":"vulkan_ray",
+    "operation":"refit","version":1,"parameters":{},"bindings":{"scene":"scene","vertices":"vertices"}}]})";
+  std::array<TiNamedArgument, 2> writer_args{};
+  writer_args[0].name = "scene";
+  writer_args[0].argument.type = TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT;
+  writer_args[0].argument.value.native_resource = session.resources[0];
+  writer_args[1] = seed[0];
+  auto ordinary = ti_prepare_execution_plan_ext(session.runtime, session.module, writer_plan.size(), writer_plan.data(),
+                                                writer_args.size(), writer_args.data(), 0, nullptr);
+  ASSERT_NE(ordinary, nullptr);
+  session.executions.push_back(ordinary);
+  ti_initialize_prepared_ext(session.runtime, ordinary);
+  check_domain_error();
+  const std::string plan = std::string(R"({"version":26,"operations":[)") +
+      (writes ? R"({"kind":"native","provider":"vulkan_ray","operation":"refit","version":1,
+      "parameters":{},"bindings":{"scene":"scene","vertices":"vertices"}},)" : "") +
+      R"({"kind":"native","provider":"vulkan_ray","operation":"query","version":1,
+      "parameters":{"ray_count":1},"bindings":{"scene":"scene","rays":"rays","hits":"hits"}}]})";
+  const TiVulkanExecutionDomainCreateInfo options{1, 1, TI_FALSE};
+  std::array<TiVulkanExecutionDomainInfo, 2> info{};
+  std::array<TiMemory, 2> outputs{};
+  for (int lane = 0; lane < 2; ++lane) {
+    session.domains.push_back(ti_create_vulkan_execution_domain_ext(session.runtime, &options));
+    ASSERT_NE(session.domains.back(), nullptr);
+    ti_get_vulkan_execution_domain_info_ext(session.domains.back(), &info[lane]);
+    std::vector<TiNamedArgument> arguments{writer_args[0], array("rays", {1, 8}, TI_DATA_TYPE_F32, ray),
+                                          array("hits", {1, 4}, TI_DATA_TYPE_F32)};
+    arguments[0].argument.value.native_resource = session.resources[writes ? lane : 0];
+    outputs[lane] = arguments[2].argument.value.ndarray.memory;
+    if (writes)
+      arguments.push_back(seed[0]);
+    auto call = ti_prepare_execution_plan_on_vulkan_domain_ext(
+        session.runtime, session.module, session.domains.back(), plan.size(), plan.data(),
+        arguments.size(), arguments.data(), 0, nullptr, 0, nullptr);
+    check_domain_error();
+    ASSERT_NE(call, nullptr);
+    session.executions.push_back(call);
+    ti_initialize_prepared_ext(session.runtime, call);
+    check_domain_error();
+  }
+  const auto rejected_writer = [&] {
+    ti_launch_prepared_ext(session.runtime, ordinary);
+    EXPECT_NE(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+    ti_set_last_error(TI_ERROR_SUCCESS, "");
+  };
+  rejected_writer();
+  {
+    test_detail::TimelineGate ordinary_gate(device, 0);
+    test_detail::TimelineGate left_gate(device, info[0].queue_index);
+    test_detail::TimelineGate right_gate(device, info[1].queue_index);
+    const auto before = device.queue_submission_snapshot().queue_submit_calls;
+    for (int lane = 0; lane < 2; ++lane) {
+      TiCompletion ticket = nullptr;
+      ASSERT_TRUE(ti_try_submit_prepared_ext(session.runtime, session.executions[lane + 1], 0, nullptr, &ticket));
+      session.completions.push_back(ticket);
+      EXPECT_EQ(ti_query_completion_ext(ticket), TI_FALSE);
+    }
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before + 2);
+    auto instance = ti_get_prepared_vulkan_instance_ext(session.runtime, session.executions[1]);
+    ASSERT_NE(instance, nullptr);
+    auto retire = std::async(std::launch::async, [&] {
+      ti_retire_vulkan_execution_instance_ext(instance);
+      return ti_get_last_error(nullptr, nullptr);
+    });
+    EXPECT_EQ(retire.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    rejected_writer();
+    left_gate.release();
+    const auto status = retire.wait_for(std::chrono::seconds(3));
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+      right_gate.release();
+      ordinary_gate.release();
+    }
+    EXPECT_EQ(retire.get(), TI_ERROR_SUCCESS);
+    ti_finish_prepared_instance_retirement_ext(session.runtime, session.executions[1]);
+    session.executions[1] = nullptr;
+    ti_release_vulkan_execution_instance_ext(instance);
+    check_domain_error();
+    EXPECT_EQ(ti_query_completion_ext(session.completions[0]), TI_TRUE);
+    EXPECT_EQ(ti_query_completion_ext(session.completions[1]), TI_FALSE);
+    if (!writes)
+      rejected_writer();  // The peer still reads the same physical AS.
+    right_gate.release();
+    ti_wait_completion_ext(session.completions[1]);
+    check_domain_error();
+    for (auto output : outputs) {
+      void *mapped = nullptr;
+      ASSERT_EQ(device.map(runtime.get_memory(output).allocation, &mapped), RhiResult::success);
+      EXPECT_FLOAT_EQ(static_cast<const float *>(mapped)[0], 1.0f);
+      EXPECT_FLOAT_EQ(static_cast<const float *>(mapped)[3], 1.0f);
+      device.unmap(runtime.get_memory(output).allocation);
+    }
+  }
+  ti_close_vulkan_execution_domain_ext(session.domains[1]);
+  ti_launch_prepared_ext(session.runtime, ordinary);
+  check_domain_error();
+  ti_wait(session.runtime);
+  check_domain_error();
+}
+
+TEST(VulkanExecutionOwner, SharedRayReadersRetireOnlyTheirPendingPrefix) {
+  run_shared_ray_pending(false);
+}
+
+TEST(VulkanExecutionOwner, SharedRayWriterReturnsVisibilityWithoutWaitingForPeer) {
+  run_shared_ray_pending(true);
 }
 
 TEST(VulkanExecutionOwner, BorrowedViewsShareProgramRegistryAndRetireBeforeDevice) {

@@ -266,6 +266,8 @@ class OwnedRayResource : public Owner, public virtual NativeRayResourceAccess {
       : device_(ray_device(context)),
         runtime_(*context.gfx_runtime),
         fault_(context.fault_domain),
+        registration_(context.defer_vulkan_initialization
+                          ? nullptr : runtime_.register_ray_resource(fault_)),
         core_(std::move(core)),
         deferred_(bool(context.defer_vulkan_initialization)) {
   }
@@ -313,11 +315,15 @@ class OwnedRayResource : public Owner, public virtual NativeRayResourceAccess {
   const std::vector<std::shared_ptr<NativeResource>> &dependencies() const override {
     return dependencies_;
   }
+  std::shared_ptr<NativeRayResourceRegistration> ray_registration() const override {
+    return registration_;
+  }
 
  protected:
   Device &device_;
   gfx::GfxRuntime &runtime_;
   std::shared_ptr<RuntimeFaultDomain> fault_;
+  std::shared_ptr<NativeRayResourceRegistration> registration_;
   std::unique_ptr<Core> core_;
   bool initialization_pending_{false};
   const bool deferred_;
@@ -527,7 +533,8 @@ class PreparedTlas final
   }
   void record_shader_read(CommandList *commands,
                           NativeShaderStages shader_stages,
-                          bool graphics_queue) override {
+                          bool graphics_queue,
+                          bool independent) override {
     VkPipelineStageFlags stages = 0;
     for (const auto &[source, target] :
          {std::make_pair(PipelineStageType::compute,
@@ -547,7 +554,7 @@ class PreparedTlas final
     if (!stages || shader_stages)
       throw std::invalid_argument(
           "Unqualified acceleration structure shader stages");
-    const auto order = deferred_
+    const auto order = independent
                            ? VulkanRayShaderReadOrder::execution_domain
                            : graphics_queue
                                  ? VulkanRayShaderReadOrder::runtime_graphics
@@ -574,10 +581,10 @@ class PreparedTlas final
 class RayOperation : public NativeOperation {
  public:
   explicit RayOperation(std::shared_ptr<NativeResource> resource,
-                        bool initializing = false)
+                        bool writes_root = false, bool initializing = false)
       : resource_(std::move(resource)),
         initializing_(initializing),
-        resources_(collect_native_ray_resources(resource_)) {
+        resources_(collect_native_ray_uses(resource_, writes_root)) {
   }
   Arch arch() const override {
     return Arch::vulkan;
@@ -589,9 +596,9 @@ class RayOperation : public NativeOperation {
     return 0;
   }
   void validate_recording(NativeRecordingState &state) const override {
-    for (const auto &resource : resources_)
-      if (!initializing_ || resource != resource_)
-        dynamic_cast<const NativeRayResourceAccess &>(*resource).require_initialized(state);
+    for (const auto &use : resources_)
+      if (!initializing_ || use.resource != resource_)
+        dynamic_cast<const NativeRayResourceAccess &>(*use.resource).require_initialized(state);
     if (initializing_)
       state.initialized.insert(resource_.get());
   }
@@ -609,7 +616,7 @@ class RayOperation : public NativeOperation {
  private:
   std::shared_ptr<NativeResource> resource_;
   bool initializing_;
-  std::vector<std::shared_ptr<NativeResource>> resources_;
+  std::vector<NativeResourceUse> resources_;
 };
 
 class RayInitialization final : public RayOperation {
@@ -617,7 +624,7 @@ class RayInitialization final : public RayOperation {
   RayInitialization(std::shared_ptr<NativeResource> owner,
                     std::function<void(CommandList *)> record,
                     std::vector<DeviceAllocation> buffers)
-      : RayOperation(std::move(owner), true), record_(std::move(record)) {
+      : RayOperation(std::move(owner), true, true), record_(std::move(record)) {
     buffers_ = std::move(buffers);
   }
   void record_vulkan(Device *, CommandList *commands) override {
@@ -636,8 +643,11 @@ void initialize_ray_resource(NativePreparationContext &context,
   if (context.defer_vulkan_initialization)
     context.defer_vulkan_initialization(std::make_shared<RayInitialization>(
         resource, std::move(record), std::move(buffers)));
-  else
+  else {
+    auto access = context.gfx_runtime->ordinary_ray_scope();
+    context.gfx_runtime->require_ray_uses(collect_native_ray_uses(resource, true));
     resource->initialize(std::move(record));
+  }
 }
 
 class PreparedQuery final : public RayOperation {
@@ -695,7 +705,7 @@ class PreparedQuery final : public RayOperation {
 class PreparedRefit final : public RayOperation {
  public:
   explicit PreparedRefit(const RefitDescription &d)
-      : RayOperation(std::dynamic_pointer_cast<NativeResource>(d.scene)),
+      : RayOperation(std::dynamic_pointer_cast<NativeResource>(d.scene), true),
         scene_(d.scene), vertices_(d.vertices.pointer) {
     buffers_ = {vertices_};
     const auto bytes =
@@ -723,7 +733,7 @@ class PreparedRefit final : public RayOperation {
 class PreparedInstanceRefit final : public RayOperation {
  public:
   explicit PreparedInstanceRefit(const InstanceRefitDescription &d)
-      : RayOperation(std::dynamic_pointer_cast<NativeResource>(d.scene)),
+      : RayOperation(std::dynamic_pointer_cast<NativeResource>(d.scene), true),
         scene_(d.scene),
         packet_(transform_packet(device(),
                                  d.transforms,
@@ -752,7 +762,7 @@ class PreparedInstanceRefit final : public RayOperation {
 class PreparedBlasBuild final : public RayOperation {
  public:
   explicit PreparedBlasBuild(const BlasBuildDescription &d)
-      : RayOperation(std::dynamic_pointer_cast<NativeResource>(d.blas)),
+      : RayOperation(std::dynamic_pointer_cast<NativeResource>(d.blas), true),
         blas_(d.blas),
         vertices_(d.vertices.pointer),
         indices_(d.indices.pointer) {
@@ -785,7 +795,7 @@ class PreparedBlasBuild final : public RayOperation {
 class PreparedInstanceUpdate final : public RayOperation {
  public:
   explicit PreparedInstanceUpdate(const InstanceUpdateDescription &d)
-      : RayOperation(std::dynamic_pointer_cast<NativeResource>(d.scene)),
+      : RayOperation(std::dynamic_pointer_cast<NativeResource>(d.scene), true),
         description_(d) {
   }
   Arch arch() const override {

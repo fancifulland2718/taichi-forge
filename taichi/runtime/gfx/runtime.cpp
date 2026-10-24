@@ -13,6 +13,7 @@
 #include "taichi/system/profiler_annotation.h"
 #include "taichi/runtime/control_encoding_cost.h"
 #include "taichi/runtime/native_acceleration_structure.h"
+#include "taichi/rhi/reusable_stream_dependency.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_kernel_result.h"
 #ifdef TI_WITH_VULKAN
@@ -985,6 +986,13 @@ class GraphReplayRegistry {
     runtime_->launch_prepared_graph(replay_key);
   }
 
+  void return_ray_access(const RuntimeCompletion &prefix,
+                         const std::shared_ptr<RuntimeFaultDomain> &owner) {
+    std::lock_guard<std::recursive_mutex> lock(*mutex_);
+    TI_ERROR_IF(!runtime_, "AS loan belongs to a closed runtime");
+    runtime_->restore_shared_ray_access(prefix, owner);
+  }
+
  private:
   std::shared_ptr<std::recursive_mutex> mutex_;
   GfxRuntime *runtime_{nullptr};
@@ -1315,6 +1323,7 @@ GfxRuntime::~GfxRuntime() {
   // into this runtime after close() returns.
   graph_replay_registry_->close();
   shared_image_admission_.close();
+  shared_ray_admission_->close();
   if (device_->backend_calls_safe()) {
     try {
       synchronize_impl(/*check_hash_overflow=*/false);
@@ -1988,9 +1997,11 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
   TI_ASSERT(handle.get_launch_id() >= 0 && kernel_iter != ti_kernels_.end());
   auto *ti_kernel = kernel_iter->second.get();
   auto image_submission = shared_image_admission_.ordinary_scope();
+  auto ray_submission = ordinary_ray_scope();
   // Check the complete task closure before recording any dispatch. A late
   // storage use must not leave earlier mathematical tasks in the current list.
   preflight_kernel_images(*ti_kernel, host_ctx);
+  preflight_kernel_ray_resources(*ti_kernel, host_ctx);
 
 #if defined(__APPLE__)
   if (profiler_) {
@@ -3169,17 +3180,17 @@ void GfxRuntime::prepare_fixed_private_image(
               "Private Graph image boundary differs between phases");
 }
 
-void GfxRuntime::prepare_fixed_private_acceleration_structure(
+void GfxRuntime::prepare_fixed_acceleration_structure(
     const std::shared_ptr<FixedGraphWorkspace> &workspace,
     std::shared_ptr<NativeAccelerationStructure> resource) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   TI_ERROR_IF(!workspace || workspace->device_ != device_ || !resource ||
                   &resource->device() != device_ ||
                   (workspace->initialization_recorded_ &&
-                   !workspace->private_as_.count(resource.get())),
-              "Private Graph acceleration structure must be qualified before workspace sealing");
+                   !workspace->qualified_as_.count(resource.get())),
+              "Graph acceleration structure must be qualified before workspace sealing");
   const auto *identity = resource.get();
-  workspace->private_as_.emplace(identity, std::move(resource));
+  workspace->qualified_as_.emplace(identity, std::move(resource));
 }
 
 std::size_t GfxRuntime::FixedGraphWorkspace::bytes() const {
@@ -3301,8 +3312,8 @@ void GfxRuntime::prepare_detached_kernel_workspace(
           [offset](const auto &ref) { return ref.arg_offset == offset; });
       TI_ERROR_IF(found == context.acceleration_structure_ptrs.end() ||
                       found->owner || found->handle || !found->native_resource ||
-                      !workspace->private_as_.count(found->native_resource),
-                  "Detached Graph acceleration structure requires its qualified private owner");
+                      !workspace->qualified_as_.count(found->native_resource),
+                  "Detached Graph acceleration structure requires its qualified owner");
     }
     for (const auto &bind : kernel.buffer_binding_plan(i)) {
       using BufferType = spirv::TaskAttributes::BufferType;
@@ -3397,6 +3408,15 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
     state.fixed_ray_resources.insert(state.fixed_ray_resources.end(),
                                      operation.ray_resources.begin(),
                                      operation.ray_resources.end());
+  }
+  std::vector<NativeRayAdmission::PinnedUse> ray_uses;
+  for (const auto &operation : operations) {
+    const auto &uses = operation.external ? operation.stateful_resources
+                                         : operation.dispatch.stateful_resources;
+    if (!detached) {
+      auto bound = bind_ray_uses(uses);
+      ray_uses.insert(ray_uses.end(), bound.begin(), bound.end());
+    }
   }
   std::vector<GraphReplayExecutable::PreparedDispatch> prepared;
   FixedSparseReplayResources sparse;
@@ -3868,6 +3888,12 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
   }
   if (!image_uses.empty()) {
     auto permit = shared_image_admission_.prepare(image_uses);
+    state.fixed_submit = [permit = std::move(permit), launch = std::move(state.fixed_submit)] {
+      permit->submit(launch);
+    };
+  }
+  if (!ray_uses.empty()) {
+    auto permit = shared_ray_admission_->prepare(ray_uses);
     state.fixed_submit = [permit = std::move(permit), launch = std::move(state.fixed_submit)] {
       permit->submit(launch);
     };
@@ -6971,13 +6997,159 @@ void GfxRuntime::prepare_fixed_shared_images(
 }
 
 std::vector<RuntimeCompletion>
-GfxRuntime::FixedGraphWorkspace::shared_image_dependencies() const {
+GfxRuntime::FixedGraphWorkspace::shared_resource_dependencies() const {
   std::vector<RuntimeCompletion> result;
   const auto readers = std::atomic_load(&shared_images_);
   if (readers)
     for (const auto &dependency : readers->dependencies())
       result.push_back(*dependency);
+  const auto rays = std::atomic_load(&shared_rays_);
+  if (rays)
+    for (const auto &dependency : rays->dependencies())
+      result.push_back(*dependency);
   return result;
+}
+
+std::shared_ptr<NativeRayResourceRegistration> GfxRuntime::register_ray_resource(
+    const std::shared_ptr<RuntimeFaultDomain> &owner) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ERROR_IF(!owner || owner->backend() != Arch::vulkan ||
+                  device_->backend_fault_reporter() != owner,
+              "AS registration requires its Vulkan device owner");
+  if (!ray_identities_)
+    ray_identities_ = std::make_shared<NativeRayResourceRegistration::Registry>(
+        owner->program_domain());
+  return NativeRayResourceRegistration::create(ray_identities_, shared_ray_admission_);
+}
+
+std::vector<NativeRayAdmission::PinnedUse> GfxRuntime::bind_ray_uses(
+    const std::vector<NativeResourceUse> &uses) const {
+  std::vector<NativeRayAdmission::PinnedUse> result;
+  result.reserve(uses.size());
+  for (const auto &use : uses) {
+    const auto *ray = dynamic_cast<const NativeRayResourceAccess *>(use.resource.get());
+    const auto registration = ray ? ray->ray_registration() : nullptr;
+    TI_ERROR_IF(!use.resource || &use.resource->device() != device_ ||
+                    !registration || !registration->belongs_to(*shared_ray_admission_),
+                "Shared AS requires its original same-runtime registration");
+    result.push_back({{registration->handle(), use.writes ? SharedResourceUse::exclusive
+                                                       : SharedResourceUse::read}, use.resource});
+  }
+  return result;
+}
+
+void GfxRuntime::require_ray_uses(const std::vector<NativeResourceUse> &uses) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  // Validate all identities before checking any access. This routine records
+  // nothing; the enclosing OrdinaryScope protects check through append.
+  for (const auto &use : bind_ray_uses(uses))
+    shared_ray_admission_->require_use(use.use);
+}
+
+void GfxRuntime::preflight_kernel_ray_resources(
+    const CompiledTaichiKernel &kernel, const LaunchContextBuilder &context) {
+  for (const auto &task : kernel.ti_kernel_attribs().tasks_attribs)
+    for (const auto &binding : task.acceleration_structure_binds) {
+      const auto offset = context.args_type->get_element_offset(binding.arg_id);
+      const auto ref = std::find_if(context.acceleration_structure_ptrs.begin(),
+          context.acceleration_structure_ptrs.end(),
+          [offset](const auto &entry) { return entry.arg_offset == offset; });
+      if (ref == context.acceleration_structure_ptrs.end() || !ref->native_resource)
+        continue;  // Program resources retain their existing binding contract.
+      // A no-op alias is only a cold traversal view. The launch context's
+      // qualified argument owner, not this alias, retains the actual resource.
+      auto root = std::shared_ptr<NativeResource>(ref->native_resource, [](auto *) {});
+      require_ray_uses(collect_native_ray_uses(root));
+    }
+}
+
+void GfxRuntime::prepare_fixed_shared_ray_resources(
+    const std::shared_ptr<FixedGraphWorkspace> &workspace,
+    const std::vector<NativeResourceUse> &uses,
+    const std::shared_ptr<RuntimeFaultDomain> &owner) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ERROR_IF(!workspace || workspace->device_ != device_ ||
+                  std::atomic_load(&workspace->shared_rays_) ||
+                  workspace->initialization_recorded_ || !owner,
+              "Shared AS requires a new same-device workspace");
+  if (uses.empty())
+    return;
+  auto pinned = bind_ray_uses(uses);
+  std::unordered_map<const NativeRayResourceRegistration *, SharedResourceUse> accesses;
+  for (const auto &use : uses) {
+    const auto registration = dynamic_cast<const NativeRayResourceAccess &>(
+        *use.resource).ray_registration();
+    const auto access = use.writes ? SharedResourceUse::exclusive : SharedResourceUse::read;
+    auto [entry, inserted] = accesses.emplace(registration.get(), access);
+    if (!inserted && use.writes)
+      entry->second = access;
+  }
+  auto loan = shared_ray_admission_->reserve(pinned);
+  if (!loan->needs_boundary().empty()) {
+    // Ordinary AS work is ordered through the runtime's compute/graphics
+    // handoff. Publish its exact reusable tail while holding the same gate.
+    auto prefix = std::make_shared<RuntimeCompletion>(RuntimeCompletion::from_stream_semaphore(
+        Arch::vulkan, owner->program_domain(), owner->allocate_submission_sequence(),
+        record_completion_semaphore(), owner));
+    device_->get_compute_stream()->flush_submission_batch();
+    TI_ERROR_IF(!prefix->reusable_stream_dependency(Arch::vulkan, owner->program_domain(), owner),
+                "Shared AS requires a reusable producer prefix");
+    loan->publish_boundary(std::move(prefix));
+  }
+  workspace->shared_ray_uses_ = std::move(accesses);
+  workspace->shared_resource_bridge_ = graph_replay_registry_;
+  workspace->shared_resource_fault_ = owner;
+  std::atomic_store(&workspace->shared_rays_, std::move(loan));
+}
+
+bool GfxRuntime::has_fixed_shared_ray_access(
+    const std::shared_ptr<FixedGraphWorkspace> &workspace,
+    const NativeResourceUse &use) const {
+  if (!workspace || workspace->device_ != device_ || !use.resource ||
+      &use.resource->device() != device_)
+    return false;
+  const auto *ray = dynamic_cast<const NativeRayResourceAccess *>(use.resource.get());
+  const auto registration = ray ? ray->ray_registration() : nullptr;
+  if (!registration || !registration->belongs_to(*shared_ray_admission_))
+    return false;
+  const auto loan = std::atomic_load(&workspace->shared_rays_);
+  const auto found = workspace->shared_ray_uses_.find(registration.get());
+  return loan && loan->ready() && found != workspace->shared_ray_uses_.end() &&
+         (!use.writes || found->second == SharedResourceUse::exclusive);
+}
+
+void GfxRuntime::restore_shared_ray_access(
+    const RuntimeCompletion &prefix,
+    const std::shared_ptr<RuntimeFaultDomain> &owner) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  // Owner shutdown admits no future ordinary work. Normal instance/domain
+  // close establishes memory visibility for that next ordinary consumer.
+  if (!prefix.valid() || owner->state() != RuntimeLifecycleState::kHealthy)
+    return;
+  auto dependency = prefix.reusable_stream_dependency(
+      Arch::vulkan, owner->program_domain(), owner);
+  TI_ERROR_IF(!dependency, "AS return requires its reusable domain prefix");
+  flush_if_pending();
+  std::vector<StreamSemaphore> waits{dependency};
+  if (pending_graphics_completion_)
+    waits.push_back(pending_graphics_completion_);
+  auto returned = device_->get_compute_stream()->submit_dependency(waits);
+  TI_ERROR_IF(!returned, "AS return dependency could not be submitted");
+  pending_graphics_completion_.reset();
+  latest_compute_completion_ = std::move(returned);
+}
+
+void GfxRuntime::FixedGraphWorkspace::retire_shared_ray_loans(
+    const RuntimeCompletion &prefix) {
+  const auto loan = std::atomic_load(&shared_rays_);
+  if (!loan)
+    return;
+  if (std::any_of(shared_ray_uses_.begin(), shared_ray_uses_.end(),
+                  [](const auto &use) { return use.second == SharedResourceUse::exclusive; }))
+    shared_resource_bridge_->return_ray_access(prefix, shared_resource_fault_);
+  // The exact producer prefix has retired before this callback. If the return
+  // dependency fails, keep the complete loan instead of granting stale access.
+  auto retired = std::atomic_exchange(&shared_rays_, std::shared_ptr<NativeRayAdmission::Loan>{});
 }
 
 void GfxRuntime::FixedGraphWorkspace::retire_shared_image_loans() {

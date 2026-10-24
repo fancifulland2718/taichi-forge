@@ -591,7 +591,10 @@ class PreparedPass final : public NativeOperation {
   }
   NativeVulkanRecordingRequirements vulkan_recording_requirements()
       const override {
-    return {images_, true, buffers_, image_uses_, scenes_};
+    NativeVulkanRecordingRequirements result{images_, true, buffers_, image_uses_};
+    for (const auto &scene : scenes_)
+      result.stateful_resources.push_back({scene, false});
+    return result;
   }
   void validate_vulkan_execution_domain() const override {
     // This concrete pass supplies complete image, buffer and AS requirements.
@@ -599,8 +602,14 @@ class PreparedPass final : public NativeOperation {
     // the default NativeOperation implementation rejects unknown graphics.
   }
   void record_vulkan(Device *, CommandList *commands) override {
+    record(commands, false);
+  }
+  void record_vulkan_independent(Device *, CommandList *commands) override {
+    record(commands, true);
+  }
+  void record(CommandList *commands, bool independent) {
     for (const auto &[scene, stages] : payload_->scene_reads)
-      scene->record_shader_read(commands, stages, true);
+      scene->record_shader_read(commands, stages, true, independent);
     for (const auto index : payload_->indirect_draws) {
       const auto &draw = payload_->draws[index];
       record_vulkan_graphics_indirect_barriers(commands, draw.info.indexed,

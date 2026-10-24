@@ -18,6 +18,7 @@
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
+#include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/runtime/native_kernel_result.h"
 #include "taichi/program/runtime_fault.h"
 #ifdef TI_WITH_CUDA
@@ -49,6 +50,9 @@ struct PreparedDomainInstance final : RuntimeClient {
     return parts.empty() && !retirement_error;
   }
   void retire() override {
+    retire_after({});
+  }
+  void retire_after(const RuntimeCompletion &prefix) override {
     std::lock_guard<std::mutex> lock(mutex);
     if (retirement_error)
       std::rethrow_exception(retirement_error);
@@ -65,6 +69,7 @@ struct PreparedDomainInstance final : RuntimeClient {
     parts.clear();
 #ifdef TI_WITH_VULKAN
     if (shared_workspace) {
+      shared_workspace->retire_shared_ray_loans(prefix);
       shared_workspace->retire_shared_image_loans();
       shared_workspace.reset();
     }
@@ -323,6 +328,12 @@ struct PreparedExecution {
         for (const auto &resource : native_resources)
           selected_vulkan.private_resources.insert(resource.get());
         std::vector<gfx::GfxRuntime::SharedImage> shared_images;
+        std::vector<NativeResourceUse> shared_rays;
+        const auto ray_uses = [&](const std::vector<NativeResourceUse> &uses) {
+          for (const auto &use : uses)
+            if (use.resource && !selected_vulkan.private_resources.count(use.resource.get()))
+              shared_rays.push_back(use);
+        };
         const auto image_use = [&](const std::shared_ptr<NativeSampledImage> &image,
                                     bool sampled_only) {
           if (!image)
@@ -344,6 +355,7 @@ struct PreparedExecution {
             if (!dispatch) {
               if (const auto *native = std::get_if<std::shared_ptr<NativeOperation>>(&step)) {
                 const auto requirements = (*native)->vulkan_recording_requirements();
+                ray_uses(requirements.stateful_resources);
                 if (requirements.image_uses)
                   for (const auto &use : *requirements.image_uses)
                     image_use(use.image, use.sampled_only);
@@ -354,6 +366,7 @@ struct PreparedExecution {
               continue;
             }
             for (const auto &binding : dispatch->resources) {
+              ray_uses(binding->vulkan_stateful_resources());
               const auto image_binding = std::dynamic_pointer_cast<NativeImageKernelBinding>(binding);
               if (!image_binding)
                 continue;
@@ -363,13 +376,15 @@ struct PreparedExecution {
         };
         collect(initializers);
         collect(operations);
-        if (nonflat && !shared_images.empty())
-          throw MemoryBindingError("Shared Vulkan images currently require flat dispatches");
+        if (nonflat && (!shared_images.empty() || !shared_rays.empty()))
+          throw MemoryBindingError("Shared Vulkan resources currently require flat dispatches");
         // Reserve after collecting every phase and before recording commands.
         // The Program submission guard is held by the borrowed runtime entry;
         // GFX uses its existing host gate for the reservation/prefix transaction.
         gfx_runtime->prepare_fixed_shared_images(
             vulkan_workspace, shared_images, runtime.runtime_fault_domain());
+        gfx_runtime->prepare_fixed_shared_ray_resources(
+            vulkan_workspace, shared_rays, runtime.runtime_fault_domain());
         // Only factories invoked for this prepared instance populate this
         // private owner list. Public/borrowed native resources remain outside
         // it and need a separate cross-instance layout lease contract.
@@ -614,7 +629,7 @@ struct PreparedExecution {
         // wrapper must not free a still-resident graph's argument storage.
 #ifdef TI_WITH_VULKAN
         if (domain->vulkan) {
-          auto dependencies = vulkan_workspace->shared_image_dependencies();
+          auto dependencies = vulkan_workspace->shared_resource_dependencies();
           dependencies.push_back(bootstrap);
           domain->vulkan->submit_instance(domain_registration.vulkan,
               vulkan_workspace_initialization, dependencies).wait();
