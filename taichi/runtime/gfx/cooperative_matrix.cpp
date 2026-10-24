@@ -33,8 +33,8 @@ void validate_cooperative_matrix_metadata(
         !requirement.subgroup_size ||
         task.task_type != OffloadedTaskType::range_for ||
         !task.range_for_attribs || !task.range_for_attribs->const_range() ||
-        task.range_for_attribs->begin != 0 ||
-        task.range_for_attribs->end % requirement.subgroup_size ||
+        task.range_for_attribs->begin.value != 0 ||
+        task.range_for_attribs->end.value % requirement.subgroup_size ||
         task.advisory_num_threads_per_group <= 0 ||
         task.advisory_num_threads_per_group % requirement.subgroup_size)
       throw std::invalid_argument(

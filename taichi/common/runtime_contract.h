@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Gui draw-slot ownership and Renderer frame transactions change private layout.
-inline constexpr int kForgeNativeAbiRevision = 172;
+// Compiled task metadata carries shared typed range-bound sources.
+inline constexpr int kForgeNativeAbiRevision = 173;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

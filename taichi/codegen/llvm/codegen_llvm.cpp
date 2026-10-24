@@ -7,6 +7,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Linker/Linker.h"
 #include "taichi/analysis/offline_cache_util.h"
+#include "taichi/analysis/range_for_bounds.h"
 #include "taichi/ir/snode_hash_utils.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
@@ -2486,11 +2487,7 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
     current_task->requested_cuda_max_registers = spec.cuda_max_registers;
     current_task->requested_memory_strategy = spec.memory_strategy;
   }
-  if (stmt->task_type == OffloadedStmt::TaskType::range_for &&
-      stmt->const_begin && stmt->const_end) {
-    current_task->constant_range_size = std::max<std::int64_t>(
-        0, static_cast<std::int64_t>(stmt->end_value) - stmt->begin_value);
-  }
+  current_task->range_bounds = describe_range_for_bounds(*stmt);
   current_task->static_shared_array_bytes = stmt->bls_size;
   current_task->thread_local_bytes =
       stmt->tls_size > 1 ? static_cast<std::uint64_t>(stmt->tls_size) : 0;

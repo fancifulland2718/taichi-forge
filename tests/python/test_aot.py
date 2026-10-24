@@ -32,7 +32,8 @@ def test_aot_field_range_hint():
             for kernel in res["kernels"]:
                 if kernel["name"] == "init":
                     range_hint2 = kernel["tasks_attribs"][0]["range_for_attribs"]
-                    assert range_hint2["end"] - range_hint2["begin"] == 64
+                    assert range_hint2["begin"]["kind"] == range_hint2["end"]["kind"] == 1
+                    assert range_hint2["end"]["value"] - range_hint2["begin"]["value"] == 64
 
 
 @test_utils.test(arch=[ti.opengl, ti.vulkan])
@@ -808,7 +809,7 @@ def test_llvm_aot_declares_bitcode_payload(tmp_path):
     module.add_kernel(fill)
     module.save(tmp_path)
     metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 8
+    assert metadata["schema_version"] == 10
     assert metadata["kernel_launch_abis"] == [{"key": "fill", "value": "runtime_context_v2"}]
     assert metadata["kernel_format"] == "bc"
     assert (tmp_path / "fill.bc").read_bytes().startswith(b"BC\xc0\xde")
@@ -832,7 +833,7 @@ def test_llvm_aot_dense_resource_contract(tmp_path):
     module.add_kernel(fill)
     module.save(tmp_path)
     metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 8
+    assert metadata["schema_version"] == 10
     assert metadata["resource_binding"] == "dense_v1"
     assert metadata["abi_sha256"] == hashlib.sha256((tmp_path / "metadata.tcb").read_bytes()).hexdigest()
     # The AOT-only code contract must not leak into normal JIT compilation.
@@ -934,7 +935,7 @@ def test_llvm_aot_list_resources_declare_relocatable_contract(tmp_path):
     module.add_kernel(fill)
     module.save(tmp_path)
     metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 8
+    assert metadata["schema_version"] == 10
     assert metadata["resource_binding"] == "list_v1"
     assert metadata["kernel_launch_abis"] == [{"key": "fill", "value": "runtime_context_v2"}]
     fill()
@@ -1020,7 +1021,7 @@ def test_gfx_aot_multitree_metadata():
         ) as metadata_file:
             metadata = json.load(metadata_file)
 
-    assert metadata["metadata_version"] == 2
+    assert metadata["metadata_version"] == 9
     # The two explicit FieldsBuilder trees already provide valid layouts.
     # First kernel materialization must not append an unused default empty root
     # after the AOT builder has captured its artifact-local id space.
@@ -1167,7 +1168,7 @@ def test_aot_cubin_contract(tmp_path, monkeypatch):
     module.add_kernel(fill)
     module.save(tmp_path)
     metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 8
+    assert metadata["schema_version"] == 10
     assert metadata["kernel_format"] == "cubin"
     assert not list(tmp_path.glob("*.ptx"))
     assert not list(tmp_path.glob("*.bc"))
@@ -1217,7 +1218,7 @@ def test_aot_ptx_contract(tmp_path):
     assert not list(tmp_path.glob("*.bc"))
     assert not list(tmp_path.glob("*.ll"))
     metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 8
+    assert metadata["schema_version"] == 10
     assert metadata["kernel_format"] == "ptx"
     assert metadata["abi_sha256"] == hashlib.sha256((tmp_path / "metadata.tcb").read_bytes()).hexdigest()
     artifact = metadata["cuda_artifacts"][0]["value"]

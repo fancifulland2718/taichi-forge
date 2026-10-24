@@ -95,8 +95,9 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
                           : (cpu_execution ? "cpu_scheduler"
                                            : "grid_stride")))
             : "not_applicable";
-    if (task.constant_range_size >= 0) {
-      item.constant_range_size = task.constant_range_size;
+    item.range_bounds = task.range_bounds;
+    if (task.range_bounds) {
+      item.constant_range_size = task.range_bounds->constant_size();
     }
     item.requested_grid_size = positive_geometry(task.requested_grid_dim);
     item.requested_block_size = positive_geometry(task.requested_block_dim);
@@ -199,6 +200,9 @@ CompiledKernelData::Err CompiledKernelData::check() const {
     return Err::kCompiledKernelDataBroken;
   }
   for (const auto &t : tasks) {
+    if (t.range_bounds && !t.range_bounds->valid()) {
+      return Err::kCompiledKernelDataBroken;
+    }
     if (compiled_data.module->getFunction(t.name) == nullptr) {
       return Err::kCompiledKernelDataBroken;
     }
@@ -216,6 +220,11 @@ CompiledKernelData::Err CompiledKernelData::load_impl(
     liong::json::deserialize(liong::json::parse(file.metadata()), data_, true);
   } catch (const liong::json::JsonException &) {
     return Err::kParseMetadataFailed;
+  }
+  for (const auto &task : data_.compiled_data.tasks) {
+    if (task.range_bounds && !task.range_bounds->valid()) {
+      return Err::kCompiledKernelDataBroken;
+    }
   }
   const llvm::MemoryBufferRef buffer(file.src_code(), "<string>");
   auto context = std::make_shared<llvm::LLVMContext>();

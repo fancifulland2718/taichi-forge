@@ -238,6 +238,7 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
                 "AOT task launch policy requires the current CUDA launch ABI");
     metadata.schema_version = LLVM::kTaskLaunchPolicyAotSchemaVersion;
   }
+  metadata.schema_version = LLVM::kTypedRangeBoundsAotSchemaVersion;
   const std::string json =
       liong::json::print(liong::json::serialize(metadata));
   std::fstream f(taichi::join_path(output_dir,

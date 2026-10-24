@@ -6,6 +6,7 @@
 
 #include "llvm/IR/Module.h"
 #include "taichi/common/serialization.h"
+#include "taichi/codegen/range_for_bounds.h"
 #include "taichi/ir/offloaded_task_type.h"
 
 namespace taichi::lang {
@@ -40,7 +41,10 @@ class OffloadedTask {
   std::string requested_memory_strategy{"direct"};
   int block_dim{0};
   int grid_dim{0};
-  std::int64_t constant_range_size{-1};
+  std::optional<RangeForBounds> range_bounds;
+  std::int64_t constant_range_size() const {
+    return range_bounds ? range_bounds->constant_size().value_or(-1) : -1;
+  }
   int static_shared_array_bytes{0};
   int dynamic_shared_array_bytes{0};
   std::uint64_t thread_local_bytes{0};
@@ -95,7 +99,7 @@ class OffloadedTask {
             requested_memory_strategy,
             block_dim,
             grid_dim,
-            constant_range_size,
+            range_bounds,
             static_shared_array_bytes,
             dynamic_shared_array_bytes,
             thread_local_bytes,

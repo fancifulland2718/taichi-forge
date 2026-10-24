@@ -15,6 +15,7 @@
 #include <mutex>
 
 #include "taichi/codegen/codegen_utils.h"
+#include "taichi/analysis/range_for_bounds.h"
 #include "taichi/program/program.h"
 #include "taichi/program/kernel.h"
 #include "taichi/program/extension.h"
@@ -5477,21 +5478,15 @@ class TaskCodegen : public IRVisitor {
     task_attribs_.task_type = OffloadedTaskType::range_for;
     task_attribs_.one_to_one = stmt->one_to_one;
 
-    task_attribs_.range_for_attribs = TaskAttributes::RangeForAttributes();
-    auto &range_for_attribs = task_attribs_.range_for_attribs.value();
-    range_for_attribs.const_begin = stmt->const_begin;
-    range_for_attribs.const_end = stmt->const_end;
-    range_for_attribs.begin =
-        (stmt->const_begin ? stmt->begin_value : stmt->begin_offset);
-    range_for_attribs.end =
-        (stmt->const_end ? stmt->end_value : stmt->end_offset);
+    task_attribs_.range_for_attribs = describe_range_for_bounds(*stmt);
 
     ir_->start_function(kernel_function_);
     const std::string total_elems_name("total_elems");
     spirv::Value total_elems;
     spirv::Value begin_expr_value;
-    if (range_for_attribs.const_range()) {
-      const int num_elems = range_for_attribs.end - range_for_attribs.begin;
+    if (stmt->const_begin && stmt->const_end) {
+      const int num_elems = static_cast<std::size_t>(stmt->end_value) -
+                            static_cast<std::size_t>(stmt->begin_value);
       begin_expr_value = ir_->int_immediate_number(
           ir_->i32_type(), stmt->begin_value, false);  // Named Constant
       total_elems = ir_->int_immediate_number(ir_->i32_type(), num_elems,

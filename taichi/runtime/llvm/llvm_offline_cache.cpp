@@ -163,7 +163,8 @@ bool LlvmOfflineCacheFileReader::take_kernel_cache(
   if (valid) {
     for (const auto &task : compiled.tasks) {
       auto *function = compiled.module->getFunction(task.name);
-      if (!function || function->isDeclaration()) {
+      if (!function || function->isDeclaration() ||
+          (task.range_bounds && !task.range_bounds->valid())) {
         valid = false;
         break;
       }
@@ -191,6 +192,12 @@ bool LlvmOfflineCacheFileReader::take_kernel_metadata(
     const std::string &key) {
   auto it = data_.kernels.find(key);
   if (it == data_.kernels.end() || failed_kernels_.count(key)) return false;
+  for (const auto &task : it->second.compiled_data.tasks) {
+    if (task.range_bounds && !task.range_bounds->valid()) {
+      failed_kernels_.insert(key);
+      return false;
+    }
+  }
   for (int tree_id : it->second.used_snode_tree_ids) {
     if (data_.fields.find(tree_id) == data_.fields.end()) {
       failed_kernels_.insert(key);
@@ -230,6 +237,9 @@ bool LlvmOfflineCacheFileReader::get_kernel_cache(
   const auto &tasks = compiled_data.tasks;
   bool verified = true;
   for (const auto &t : tasks) {
+    if (t.range_bounds && !t.range_bounds->valid()) {
+      verified = false;
+    }
     if (compiled_data.module->getFunction(t.name) == nullptr) {
       verified = false;
     }

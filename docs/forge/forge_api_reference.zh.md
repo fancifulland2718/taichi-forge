@@ -2055,6 +2055,14 @@ device packet 决定且不做 host readback。静态与动态 shared-memory byte
 同时保留 saturation-capped grid-stride worker envelope。其中 `one_to_one` 是编译器保证：缩小 indirect grid 会同时减少该 task
 实际访问的逻辑 range index；普通 GPU range kernel 仍采用 grid-stride。
 
+`range_bounds` 来自最终物理 task，非 range task 为 `None`。其 `begin/end`
+分别报告 `constant_i32`（有符号常量）、`global_tmp_i32`（读取 i32 的字节偏移）或
+`unknown`（`value=None`，例如尚未描述的参数/shape 表达式）。它不表示该 task 可以
+安全缩小 grid；CPU 调度器降级后的范围也不一定等于用户源码范围。两端为常量时，
+`constant_range_size` 用 64 位差值计算，反向或空区间为零。描述不增加设备读回或运行时同步。
+本次布局采用 LLVM AOT schema 10、GFX metadata 9 和 JIT cache schema 72；
+原生 ABI 为 173，旧候选产物需要重新导出并使用配对的前端/runtime 包。
+
 `task_id` 在相同 specialization cache identity、task ordinal/kind、compile config、device
 capabilities 与 backend 下稳定；不承诺跨 backend、跨配置或跨版本稳定。manifest 只读：冷查询
 可能触发编译，但不会 launch、分配 device telemetry、复制内存、同步或覆盖 launch geometry。

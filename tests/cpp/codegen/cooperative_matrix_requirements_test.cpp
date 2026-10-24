@@ -17,7 +17,8 @@ spirv::TaskAttributes matrix_task() {
   task.task_type = OffloadedTaskType::range_for;
   task.advisory_num_threads_per_group = 32;
   task.range_for_attribs = spirv::TaskAttributes::RangeForAttributes{};
-  task.range_for_attribs->end = 64;
+  task.range_for_attribs->begin = RangeBound::constant(0);
+  task.range_for_attribs->end = RangeBound::constant(64);
   task.cooperative_matrix_requirements.push_back({16, 16, 16, 32});
   return task;
 }
@@ -57,7 +58,7 @@ TEST(CooperativeMatrixRequirements, MetadataRequiresExactLaunchAndVersion) {
                    task, kCooperativeHeader, 8),
                std::invalid_argument);
   task = original;
-  task.range_for_attribs->end = 63;
+  task.range_for_attribs->end = RangeBound::constant(63);
   EXPECT_THROW(gfx::validate_cooperative_matrix_metadata(
                    task, kCooperativeHeader, 8),
                std::invalid_argument);

@@ -5,6 +5,22 @@ from typing import Mapping, Optional
 
 
 @dataclass(frozen=True)
+class RangeBound:
+    """Final task bound: signed i32, global-tmp byte offset, or unknown."""
+
+    kind: str
+    value: Optional[int]
+
+
+@dataclass(frozen=True)
+class RangeForBounds:
+    """Read-only bound sources; these do not certify a grid change is safe."""
+
+    begin: RangeBound
+    end: RangeBound
+
+
+@dataclass(frozen=True)
 class OffloadedTaskManifest:
     """One backend task emitted for a specialized Taichi kernel.
 
@@ -42,6 +58,7 @@ class OffloadedTaskManifest:
     actual_geometry_reason: str
     range_mapping: str
     constant_range_size: Optional[int]
+    range_bounds: Optional[RangeForBounds]
     staged_external_arg_index: Optional[int]
     staged_halo_low: Optional[int]
     staged_halo_high: Optional[int]
@@ -72,6 +89,12 @@ class OffloadedTaskManifest:
     def _from_core(cls, value: Mapping[str, object]):
         fields = cls.__dataclass_fields__
         payload = {name: value[name] for name in fields if name in value}
+        bounds = value.get("range_bounds")
+        payload["range_bounds"] = (
+            None
+            if bounds is None
+            else RangeForBounds(RangeBound(**bounds["begin"]), RangeBound(**bounds["end"]))
+        )
         for name in (
             "staged_external_arg_indices",
             "staged_halo_lows",
@@ -112,4 +135,4 @@ class GraphTaskManifest(OffloadedTaskManifest):
     source_dispatch_count: int
 
 
-__all__ = ["GraphTaskManifest", "OffloadedTaskManifest"]
+__all__ = ["GraphTaskManifest", "OffloadedTaskManifest", "RangeBound", "RangeForBounds"]

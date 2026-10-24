@@ -155,12 +155,14 @@ class Task:
         buffer_binds: List[BufferBinding],
         texture_binds: List[TextureBinding],
         launch_grid: LaunchGrid,
+        range_bounds: Optional[dr.RangeForAttributes] = None,
     ):
         self.name: str = name
         self.task_ty: TaskType = task_ty
         self.buffer_binds: List[BufferBinding] = buffer_binds
         self.texture_binds: List[TextureBinding] = texture_binds
         self.launch_grid: LaunchGrid = launch_grid
+        self.range_bounds = range_bounds
 
 
 class Field:
@@ -266,6 +268,7 @@ def from_dr_kernel(d: dr.KernelAttributes) -> Kernel:
                 buffer_binds,
                 texture_binds,
                 launch_grid,
+                task.range_for_attribs,
             )
         ]
 
@@ -370,12 +373,13 @@ def to_dr_kernel(s: Kernel) -> Dict[str, Any]:
             texture_binds += [j]
 
         if task.task_ty == TaskType.RangeFor:
-            range_for_attribs = {
-                "begin": 0,
-                "const_begin": True,
-                "const_end": True,
-                "end": task.launch_grid.grid_size,
-            }
+            # A physical grid is not the logical range. Preserve the compiler
+            # facts, or explicitly leave constructed tasks' bounds unknown.
+            range_for_attribs = (
+                dr.dump_json_data_model(task.range_bounds)
+                if task.range_bounds is not None
+                else {"begin": {"kind": 0, "value": 0}, "end": {"kind": 0, "value": 0}}
+            )
         else:
             range_for_attribs = None
 

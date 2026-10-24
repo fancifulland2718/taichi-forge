@@ -260,6 +260,32 @@ py::dict offloaded_task_manifest_to_python(
   } else {
     item["constant_range_size"] = py::none();
   }
+  if (task.range_bounds) {
+    const auto bound = [](const lang::RangeBound &value) {
+      py::dict result;
+      switch (value.kind) {
+        case lang::RangeBoundKind::constant_i32:
+          result["kind"] = "constant_i32";
+          break;
+        case lang::RangeBoundKind::global_tmp_i32:
+          result["kind"] = "global_tmp_i32";
+          break;
+        default:
+          result["kind"] = "unknown";
+          break;
+      }
+      result["value"] = value.kind == lang::RangeBoundKind::unknown
+                            ? py::object(py::none())
+                            : py::object(py::int_(value.value));
+      return result;
+    };
+    py::dict bounds;
+    bounds["begin"] = bound(task.range_bounds->begin);
+    bounds["end"] = bound(task.range_bounds->end);
+    item["range_bounds"] = bounds;
+  } else {
+    item["range_bounds"] = py::none();
+  }
   item["static_shared_bytes"] = task.static_shared_bytes;
   item["dynamic_shared_bytes"] = task.dynamic_shared_bytes;
   item["thread_local_bytes"] = task.thread_local_bytes;

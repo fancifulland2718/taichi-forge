@@ -195,7 +195,7 @@ class Kernel;
 //  69 - Select private SPIR-V branch assignments without optional optimizer passes.
 //  70 - Skip empty CUDA range blocks before TLS reduction epilogues.
 //  71 - Sink proven read-only integer preludes before offload promotion.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 71;
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 72;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

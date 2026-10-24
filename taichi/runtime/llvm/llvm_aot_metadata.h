@@ -24,6 +24,9 @@ inline constexpr std::uint32_t kKernelLaunchAbiAotSchemaVersion = 8;
 // Existing task wire fields acquire deployment-default launch semantics.
 // Older readers know those fields but ignore them, so they must reject 9.
 inline constexpr std::uint32_t kTaskLaunchPolicyAotSchemaVersion = 9;
+// Tagged range bounds change the binary task layout. Gate it in JSON before
+// either runtime attempts to decode metadata.tcb.
+inline constexpr std::uint32_t kTypedRangeBoundsAotSchemaVersion = 10;
 
 inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";
@@ -105,11 +108,13 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                         metadata.abi_sha256.size() != 64,
               "AOT runtime-state inventory requires its metadata checksum");
   auto base_schema = metadata.schema_version;
+  const bool typed_ranges = base_schema == kTypedRangeBoundsAotSchemaVersion;
   const bool launch_abi = base_schema == kKernelLaunchAbiAotSchemaVersion ||
-                          base_schema == kTaskLaunchPolicyAotSchemaVersion;
+                          base_schema == kTaskLaunchPolicyAotSchemaVersion ||
+                          (typed_ranges && !metadata.kernel_launch_abis.empty());
   TI_ERROR_IF(launch_abi != !metadata.kernel_launch_abis.empty() ||
                   (!launch_abi && !metadata.launch_abi_sha256.empty()),
-              "AOT kernel launch ABI declarations require schema 8 or 9");
+              "AOT kernel launch ABI declarations require schema 8, 9 or 10");
   if (launch_abi) {
     TI_ERROR_IF(metadata.abi_sha256.size() != 64 ||
                     metadata.launch_abi_sha256.size() != 64 ||
@@ -121,6 +126,8 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                       !cuda::is_declared_launch_abi(abi),
                   "Unsupported AOT kernel launch ABI declaration: {}", name);
     }
+  }
+  if (launch_abi || typed_ranges) {
     // The launch declaration extends each existing representation/resource
     // contract; it does not replace those checks or duplicate their payloads.
     base_schema = !metadata.initial_root_data.empty()

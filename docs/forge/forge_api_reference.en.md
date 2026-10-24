@@ -2500,6 +2500,18 @@ saturation-capped grid-stride worker envelope. In particular, `one_to_one` is a 
 an indirect grid also reduces the logical range indices visited by the task;
 ordinary GPU range kernels remain grid-strided.
 
+`range_bounds` describes the final physical task and is `None` for non-range
+tasks. Each `begin/end` reports `constant_i32` (a signed constant),
+`global_tmp_i32` (a byte offset loading an i32), or `unknown` (`value=None`,
+including argument/shape expressions without a modeled source). These facts
+do not certify that reducing the grid is safe. CPU scheduler demotion can also
+change the physical range relative to the source loop. Two constant bounds
+produce `constant_range_size` using a 64-bit difference, with empty or reversed
+intervals reporting zero. Reporting adds no device readback or synchronization.
+This layout uses LLVM AOT schema 10, GFX metadata 9, JIT cache schema 72 and
+native ABI 173. Re-export older candidate artifacts and use a paired frontend
+and runtime package.
+
 `task_id` is stable for the same specialization cache identity, task ordinal,
 task kind, compile configuration, device capabilities, and backend. It is not
 a cross-backend, cross-configuration, or cross-release identifier. Manifest

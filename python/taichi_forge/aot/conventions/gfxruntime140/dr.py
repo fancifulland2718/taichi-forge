@@ -107,17 +107,17 @@ class TextureBinding:
 
 
 @json_data_model
+class RangeBound:
+    def __init__(self, j: Dict[str, Any]) -> None:
+        self.kind: int = int(j["kind"])
+        self.value: int = int(j["value"])
+
+
+@json_data_model
 class RangeForAttributes:
     def __init__(self, j: Dict[str, Any]) -> None:
-        begin = j["begin"]
-        const_begin = j["const_begin"]
-        const_end = j["const_end"]
-        end = j["end"]
-
-        self.begin: int = int(begin)
-        self.const_begin: bool = bool(const_begin)
-        self.const_end: bool = bool(const_end)
-        self.end: int = int(end)
+        self.begin: RangeBound = RangeBound(j["begin"])
+        self.end: RangeBound = RangeBound(j["end"])
 
 
 @json_data_model

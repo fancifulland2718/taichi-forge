@@ -39,8 +39,8 @@ inline std::string kernel_identity(spirv::TaichiKernelAttributes attributes,
 struct TaichiAotData {
   // v6 reconstructs sparse resources; v7 adds descriptor ndarray byte offsets;
   // v8 records exact cooperative-matrix dimensions and fixed subgroup width.
-  // Artifacts without these semantics retain their older minimum version.
-  static constexpr uint32_t kMetadataVersion = 8;
+  // v9 stores signed, typed range bounds shared with LLVM compiled tasks.
+  static constexpr uint32_t kMetadataVersion = 9;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;

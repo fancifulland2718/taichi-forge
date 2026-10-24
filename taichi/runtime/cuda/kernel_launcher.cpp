@@ -325,14 +325,14 @@ KernelLauncher::resolve_grid_policy_tasks(
             "CUDA grid policy requires a dense grid-stride range task");
         if (range_work_per_thread_target != 1) {
           TI_ERROR_IF(
-              task.constant_range_size < 0,
+              task.constant_range_size() < 0,
               "CUDA range work-per-thread control requires a constant range");
           const int baseline_grid = task.grid_dim;
           const std::int64_t workgroup_span =
               static_cast<std::int64_t>(task.block_dim) *
               range_work_per_thread_target;
           const std::int64_t target_grid = std::max<std::int64_t>(
-              1, (task.constant_range_size + workgroup_span - 1) /
+              1, (task.constant_range_size() + workgroup_span - 1) /
                      workgroup_span);
           task.grid_dim = static_cast<int>(std::min<std::int64_t>(
               task.grid_dim, target_grid));
@@ -514,7 +514,7 @@ KernelLauncher::resolve_task_execution_plan(
           "range task at ordinal {}",
           index);
       if (work[index] != 1) {
-        TI_ERROR_IF(task.constant_range_size < 0,
+        TI_ERROR_IF(task.constant_range_size() < 0,
                     "CUDA task execution plan work-per-thread control "
                     "requires a constant range at task {}",
                     index);
@@ -522,7 +522,7 @@ KernelLauncher::resolve_task_execution_plan(
         const std::int64_t workgroup_span =
             static_cast<std::int64_t>(task.block_dim) * work[index];
         const std::int64_t target_grid = std::max<std::int64_t>(
-            1, (task.constant_range_size + workgroup_span - 1) /
+            1, (task.constant_range_size() + workgroup_span - 1) /
                    workgroup_span);
         task.grid_dim = static_cast<int>(std::min<std::int64_t>(
             task.grid_dim, target_grid));

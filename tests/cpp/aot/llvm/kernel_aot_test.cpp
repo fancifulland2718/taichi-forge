@@ -364,6 +364,9 @@ TEST(LlvmAotMetadataTest,
   for (const auto *format : {"bc", "ptx", "cubin"}) {
     metadata.kernel_format = format;
     EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+    auto typed = metadata;
+    typed.schema_version = LLVM::kTypedRangeBoundsAotSchemaVersion;
+    EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(typed));
   }
   metadata.schema_version = LLVM::kCudaCubinAotSchemaVersion;
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
@@ -432,7 +435,7 @@ TEST(LlvmAotMetadataTest, PersistedTaskPolicyRequiresNewReaderAndExistingAbi) {
     EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
   }
   auto malformed = metadata;
-  malformed.schema_version = LLVM::kTaskLaunchPolicyAotSchemaVersion + 1;
+  malformed.schema_version = LLVM::kTypedRangeBoundsAotSchemaVersion + 1;
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(malformed));
   malformed = metadata;
   malformed.kernel_launch_abis.clear();

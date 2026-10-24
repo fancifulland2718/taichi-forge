@@ -29,7 +29,7 @@ inline void validate_persisted_task_launch_policy(const OffloadedTask &task,
                   task.block_dim <= 0 || task.dynamic_shared_array_bytes < 0,
               "Persisted CUDA launch policy requires a dense grid-stride "
               "range at task {}", index);
-  TI_ERROR_IF(work != 1 && task.constant_range_size < 0,
+  TI_ERROR_IF(work != 1 && task.constant_range_size() < 0,
               "Persisted CUDA work-per-thread control requires a constant "
               "range at task {}", index);
 }

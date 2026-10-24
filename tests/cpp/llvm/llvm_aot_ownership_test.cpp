@@ -13,7 +13,8 @@ LLVMCompiledKernel launch_policy_source() {
   compiled.tasks.emplace_back("serial", 1, 1);
   compiled.tasks.emplace_back("range", 64, 128);
   compiled.tasks.back().task_type = OffloadedTaskType::range_for;
-  compiled.tasks.back().constant_range_size = 8193;
+  compiled.tasks.back().range_bounds =
+      RangeForBounds{RangeBound::constant(0), RangeBound::constant(8193)};
   return compiled;
 }
 
@@ -89,7 +90,8 @@ TEST(LLVMAotLaunchPolicy, RejectsUnrepresentableRequestsBeforeProjection) {
   EXPECT_ANY_THROW(LLVM::project_aot_task_launch_policy(compiled, plan, Arch::cuda));
   EXPECT_ANY_THROW(LLVM::project_aot_task_launch_policy(
       compiled, launch_policy(1, 2), Arch::x64));
-  compiled.tasks[1].constant_range_size = -1;
+  compiled.tasks[1].range_bounds =
+      RangeForBounds{RangeBound::constant(0), RangeBound::global_tmp(0)};
   EXPECT_ANY_THROW(LLVM::project_aot_task_launch_policy(
       compiled, launch_policy(1, 2), Arch::cuda));
   // Residency can still cap a dynamic grid-stride range on the consumer.

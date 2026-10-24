@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "taichi/ir/offloaded_task_type.h"
+#include "taichi/codegen/range_for_bounds.h"
 #include "taichi/ir/type.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/rhi/device.h"
@@ -179,23 +180,7 @@ struct TaskAttributes {
 
   OffloadedTaskType task_type;
 
-  struct RangeForAttributes {
-    // |begin| has different meanings depending on |const_begin|:
-    // * true : It is the left boundary of the loop known at compile time.
-    // * false: It is the offset of the begin in the global tmps buffer.
-    //
-    // Same applies to |end|.
-    size_t begin{0};
-    size_t end{0};
-    bool const_begin{true};
-    bool const_end{true};
-
-    inline bool const_range() const {
-      return (const_begin && const_end);
-    }
-
-    TI_IO_DEF(begin, end, const_begin, const_end);
-  };
+  using RangeForAttributes = RangeForBounds;
   std::vector<BufferBind> buffer_binds;
   std::vector<TextureBind> texture_binds;
   std::vector<AccelerationStructureBind> acceleration_structure_binds;

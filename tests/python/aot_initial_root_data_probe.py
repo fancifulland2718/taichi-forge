@@ -97,7 +97,7 @@ def main(mode, arch, artifact):
                         archive.writestr(name, payload)
                 optional_snapshot = (
                     arch == "vulkan" and document[version_key] > 3
-                ) or (arch != "vulkan" and document[version_key] == 8)
+                ) or (arch != "vulkan" and document[version_key] == 10)
                 if failure == "absent" and optional_snapshot:
                     # GFX and LLVM launch-layout versions also describe
                     # artifacts without a snapshot. Its absence selects zero state;

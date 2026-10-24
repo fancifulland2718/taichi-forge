@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "taichi/ir/offloaded_task_type.h"
+#include "taichi/codegen/range_for_bounds.h"
 #include "taichi/rhi/arch.h"
 
 namespace taichi::lang {
@@ -57,6 +58,7 @@ struct OffloadedTaskManifest {
   // grid while loading the logical end from a device extent.
   std::string range_mapping;
   std::optional<std::int64_t> constant_range_size;
+  std::optional<RangeForBounds> range_bounds;
 
   // Present only for the private Graph-owned external shared-stage recipe.
   std::optional<int> staged_external_arg_index;

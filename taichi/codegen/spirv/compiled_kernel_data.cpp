@@ -72,6 +72,10 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     item.arch = arch_;
     item.task_index = static_cast<std::uint32_t>(index);
     item.task_type = task.task_type;
+    item.range_bounds = task.range_for_attribs;
+    if (item.range_bounds) {
+      item.constant_range_size = item.range_bounds->constant_size();
+    }
     item.requested_grid_size = positive_geometry(task.requested_grid_dim);
     item.requested_block_size = positive_geometry(task.requested_block_dim);
     item.selected_block_size =
@@ -110,6 +114,11 @@ CompiledKernelData::Err CompiledKernelData::load_impl(
                              data_.metadata, true);
   } catch (const liong::json::JsonException &) {
     return Err::kParseMetadataFailed;
+  }
+  for (const auto &task : data_.metadata.kernel_attribs.tasks_attribs) {
+    if (task.range_for_attribs && !task.range_for_attribs->valid()) {
+      return Err::kCompiledKernelDataBroken;
+    }
   }
   return str2src(file.src_code(), data_.src);
 }
