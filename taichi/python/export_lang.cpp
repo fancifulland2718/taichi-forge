@@ -668,6 +668,7 @@ void export_lang(py::module &m) {
       .def("import_texture", &AotRuntimeClient::import_texture,
            py::call_guard<py::gil_scoped_release>())
       .def("import_jit_kernels", &AotRuntimeClient::import_jit_kernels,
+           py::arg("kernels"), py::arg("data") = AotRuntimeClient::JitDataPayloads{},
            py::call_guard<py::gil_scoped_release>())
 #ifdef TI_WITH_CUDA
       .def("execution_domain", &AotRuntimeClient::execution_domain,

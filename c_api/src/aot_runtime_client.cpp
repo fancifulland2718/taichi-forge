@@ -323,7 +323,8 @@ RuntimeCompletion borrow_aot_completion(std::uintptr_t handle) {
 }
 
 std::uintptr_t AotRuntimeClient::import_jit_kernels(
-    const std::vector<JitKernelImport> &kernels) {
+    const std::vector<JitKernelImport> &kernels,
+    const JitDataPayloads &data) {
   auto &state = *state_;
   // Hold the borrower alive, then follow the Program's tree-before-resource
   // order. The registered tree callback never reacquires this state mutex.
@@ -339,7 +340,7 @@ std::uintptr_t AotRuntimeClient::import_jit_kernels(
   state.program->ensure_runtime_submission_allowed("borrow selected JIT code");
   std::lock_guard<std::recursive_mutex> runtime_lock(
       state.runtime->submission_mutex());
-  return capi::import_jit_module(*state.program, *state.runtime, kernels);
+  return capi::import_jit_module(*state.program, *state.runtime, kernels, data);
 }
 
 std::uintptr_t AotRuntimeClient::import_texture(const Texture *texture) {

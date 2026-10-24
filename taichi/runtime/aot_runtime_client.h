@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -58,8 +59,12 @@ class AotRuntimeClient final : public RuntimeClient {
   // reload or a new frontend compilation request.
   using JitKernelImport =
       std::tuple<std::string, const aot::CompiledGraph *, std::uint32_t, bool>;
+  // Immutable construction bytes, addressed and checked by SHA-256. These
+  // feed the existing resource initialization path on the selected domain.
+  using JitDataPayloads = std::map<std::string, std::string>;
   std::uintptr_t import_jit_kernels(
-      const std::vector<JitKernelImport> &kernels);
+      const std::vector<JitKernelImport> &kernels,
+      const JitDataPayloads &data = {});
   // Cold GGUI bridge. Hot drawing never resolves an opaque domain handle.
   std::shared_ptr<cuda::ExecutionDomain> execution_domain(
       std::uintptr_t handle);

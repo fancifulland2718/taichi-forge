@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Independent Vulkan domains can select a graphics+compute queue family.
-inline constexpr int kForgeNativeAbiRevision = 183;
+// Selected JIT code loans may retain immutable resource initialization data.
+inline constexpr int kForgeNativeAbiRevision = 184;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

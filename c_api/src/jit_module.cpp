@@ -1,10 +1,13 @@
 #include "jit_module.h"
 
 #include <atomic>
+#include <cstring>
 #include <functional>
 #include <map>
 #include "taichi_core_impl.h"
 #include "taichi/program/program.h"
+#include "taichi/common/virtual_dir.h"
+#include "external/PicoSHA2/picosha2.h"
 #if defined(TI_WITH_CUDA) && defined(TI_WITH_LLVM)
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
@@ -20,6 +23,39 @@ namespace capi {
 using namespace taichi::lang;
 using taichi::Arch;
 namespace {
+// Frozen in-memory data uses the same integrity and initialization consumer as
+// deployed AOT resources. It contains no code, live owner or mutable workspace.
+class JitDataSource final : public taichi::io::VirtualDir {
+ public:
+  explicit JitDataSource(const AotRuntimeClient::JitDataPayloads &data) {
+    for (const auto &[key, bytes] : data) {
+      if (key.size() != 64 ||
+          key.find_first_not_of("0123456789abcdef") != std::string::npos ||
+          picosha2::hash256_hex_string(bytes) != key)
+        throw std::invalid_argument("Invalid immutable JIT data payload");
+      files_.emplace("data/" + key + ".bin", bytes);
+    }
+  }
+
+  bool get_file_size(const std::string &path, size_t &size) const override {
+    const auto found = files_.find(path);
+    if (found == files_.end()) return false;
+    size = found->second.size();
+    return true;
+  }
+
+  size_t load_file(const std::string &path, void *data, size_t size) const override {
+    const auto found = files_.find(path);
+    if (found == files_.end()) return 0;
+    const auto copied = std::min(size, found->second.size());
+    if (copied) std::memcpy(data, found->second.data(), copied);
+    return copied;
+  }
+
+ private:
+  AotRuntimeClient::JitDataPayloads files_;
+};
+
 class JitCodeRetirement final : public RuntimeClient {
  public:
   explicit JitCodeRetirement(::Runtime &runtime) : runtime_(runtime) {
@@ -120,11 +156,13 @@ class JitModule final : public aot::Module {
             Arch arch,
             KernelFactory factory,
             std::map<std::string, BorrowedKernel> kernels,
+            std::unique_ptr<taichi::io::VirtualDir> data,
             std::shared_ptr<JitCodeRetirement> retirement)
       : program_(program),
         arch_(arch),
         factory_(std::move(factory)),
         kernels_(std::move(kernels)),
+        data_(std::move(data)),
         retirement_(std::move(retirement)) {
   }
   ~JitModule() override {
@@ -146,6 +184,10 @@ class JitModule final : public aot::Module {
   }
 
  protected:
+  const taichi::io::VirtualDir *data_source() const override {
+    return data_.get();
+  }
+
   std::unique_ptr<aot::Kernel> make_new_kernel(
       const std::string &name) override {
     const auto found = kernels_.find(name);
@@ -170,6 +212,7 @@ class JitModule final : public aot::Module {
   const Arch arch_;
   KernelFactory factory_;
   std::map<std::string, BorrowedKernel> kernels_;
+  std::unique_ptr<taichi::io::VirtualDir> data_;
   std::shared_ptr<JitCodeRetirement> retirement_;
 };
 }  // namespace
@@ -177,11 +220,13 @@ class JitModule final : public aot::Module {
 std::uintptr_t import_jit_module(
     Program &program,
     ::Runtime &runtime,
-    const std::vector<AotRuntimeClient::JitKernelImport> &kernels) {
+    const std::vector<AotRuntimeClient::JitKernelImport> &kernels,
+    const AotRuntimeClient::JitDataPayloads &data) {
   const auto arch = program.compile_config().arch;
   if (kernels.empty())
     throw std::invalid_argument(
         "Selected JIT code borrowing requires nonempty kernel entries");
+  auto frozen_data = std::make_unique<JitDataSource>(data);
   auto &launcher = program.get_kernel_launcher();
   JitModule::KernelFactory factory;
   std::function<KernelLaunchHandle(const BorrowedKernel &, bool)> register_kernel;
@@ -285,7 +330,8 @@ std::uintptr_t import_jit_module(
   }
   auto retirement = std::make_shared<JitCodeRetirement>(runtime);
   auto module = std::make_unique<JitModule>(program, arch, std::move(factory),
-                                          std::move(selected), retirement);
+                                          std::move(selected),
+                                          std::move(frozen_data), retirement);
   program.retain_runtime_client(retirement, dependencies);
   auto owner = std::make_unique<AotModule>(runtime, std::move(module));
   retirement->module.store(owner.get(), std::memory_order_release);

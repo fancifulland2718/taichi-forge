@@ -17,7 +17,8 @@ std::uintptr_t import_jit_module(
     taichi::lang::Program &program,
     ::Runtime &runtime,
     const std::vector<taichi::lang::AotRuntimeClient::JitKernelImport>
-        &kernels);
+        &kernels,
+    const taichi::lang::AotRuntimeClient::JitDataPayloads &data);
 std::unique_ptr<taichi::lang::LaunchContextBuilder>
 make_borrowed_launch_context(taichi::lang::aot::Kernel *kernel,
                              bool cpu_bounded_range);
