@@ -212,6 +212,7 @@ class PreparedDispatch final : public NativeOperation {
     VulkanShaderResourceSets sets;
     for (const auto &binding : d.buffers) {
       const auto &array = d.arrays.at(binding.array);
+      buffers_.push_back(array.pointer);
       const auto alignment = binding.storage
                                  ? limits.minStorageBufferOffsetAlignment
                                  : limits.minUniformBufferOffsetAlignment;
@@ -253,6 +254,13 @@ class PreparedDispatch final : public NativeOperation {
   size_t workspace_bytes() const override {
     return 0;
   }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements()
+      const override {
+    // The reflected compute schema accepts buffers only. Publish the complete
+    // actual binding set so detached recording can validate its resource owner.
+    return {{}, false, buffers_,
+            std::vector<NativeVulkanRecordingRequirements::ImageUse>{}};
+  }
   void record_vulkan(Device *, CommandList *commands) override {
     commands->memory_barrier();
     commands->bind_pipeline(&payload_->pipeline->pipeline());
@@ -270,6 +278,7 @@ class PreparedDispatch final : public NativeOperation {
   vulkan::VulkanDevice &device_;
   std::shared_ptr<RuntimeFaultDomain> fault_;
   std::array<uint32_t, 3> groups_;
+  std::vector<DeviceAllocation> buffers_;
   std::unique_ptr<Payload> payload_;
 };
 #endif

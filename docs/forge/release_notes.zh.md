@@ -34,13 +34,15 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **183**，持久执行计划为 **26**，
+- frontend 与 native runtime 使用私有 ABI **184**，持久执行计划为 **26**，
   编译缓存 schema 为 **74**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
 - Vulkan 独立域可显式选择 `queue="graphics"`，在同一队列执行实例私有的离屏
   color/depth 绘制与后续计算。平直 storage kernel 和描述完整的低层 graphics pass
-  可排他借用 owned Texture；实例退休前禁止其他读写。高层 RasterPass 生产端及
+  可排他借用 owned Texture；实例退休前禁止其他读写。普通 RasterPass 的设备几何
+  mesh/mesh_instance/particles/lines 也可准备为固定域实例：借用录制时选定的辅助代码，
+  独立分配 scratch，prepare 冻结 camera/light，重新准备才应用后续相机变化。
   含 AS 的 pass 仍需单独接线。
   completion 的 GPU 时间范围名称为 `execution_envelope`，涵盖绘制与计算，排除
   参数上传和外部等待；详见[执行域合同](cuda_execution_domains.zh.md)。

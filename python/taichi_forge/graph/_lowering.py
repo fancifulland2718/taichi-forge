@@ -73,6 +73,12 @@ class GraphLoweringContext:
     def field_state(self, dependencies):
         raise NotImplementedError("The lowering adapter must retain Field dependencies")
 
+    def retained_kernel(self, kernel, arguments, symbols, label, selected):
+        raise NotImplementedError("The lowering adapter must reference retained helper code")
+
+    def require_frozen_host_state(self):
+        raise NotImplementedError("The lowering adapter must define host-state freezing policy")
+
     def region(self, emit, node, **kwargs):
         """Collect a selected region without copying its code/resource owners."""
         outer, self.operations = self.operations, []

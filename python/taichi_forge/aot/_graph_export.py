@@ -45,6 +45,14 @@ class _ExportContext(GraphLoweringContext):
 
         self.retained_arrays = RetainedArrayBindings(module, self)
 
+    def retained_kernel(self, kernel, arguments, symbols, label, selected):
+        specialization = kernel.ensure_compiled(*arguments, _for_aot=True)
+        self.kernel(kernel.compiled_kernels[specialization], symbols, label)
+
+    def require_frozen_host_state(self):
+        if not self.snapshot_state:
+            raise TaichiRuntimeError("AOT raster camera/light state requires explicit snapshot_state=True at export")
+
     def _capture_private_array(self, owner):
         from taichi_forge.lang._ndarray import StructNdarray
         from ._graph_storage_bindings import _SOURCE_NDARRAY_TYPES

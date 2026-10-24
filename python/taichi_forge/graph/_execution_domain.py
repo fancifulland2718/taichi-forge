@@ -1,6 +1,7 @@
 """Cold adoption of a selected JIT recipe into an independent GPU instance."""
 
 import ctypes
+import hashlib
 
 from taichi_forge._lib import core
 from taichi_forge.graph._lowering import GraphLoweringContext, lower_frozen_graph
@@ -56,6 +57,13 @@ class _JitRetainedArrays(RetainedArrayBindings):
         if not isinstance(owner, (Ndarray, DenseNdarrayView, ScalarField, MatrixField)):
             return super().require(owner)
         context = self.context
+        if isinstance(owner, Ndarray):
+            private = self.private_arrays.get(context.source_arrays.identity(owner))
+            if private is not None:
+                return private
+        if isinstance(owner, DenseNdarrayView) and isinstance(owner._source, Ndarray):
+            if context.source_arrays.identity(owner._source) in self.private_arrays:
+                return super().require(owner)
         identity = id(owner)
         previous = context.live_names.get(identity)
         if previous is not None:
@@ -86,12 +94,48 @@ class _JitContext(GraphLoweringContext):
         self.live_names = {id(value): name for name, value in arguments.items() if isinstance(value, (Ndarray, DenseNdarrayView))}
         self.live_blobs = {}
         self.live_images = {}
+        self.data_payloads = {}
+        self._readonly_data_owners = {}
         self.retained_arrays = _JitRetainedArrays(self)
 
-    def data_resource(self, *args, **kwargs):
-        raise TaichiRuntimeError("JIT preparation requires a live storage loan for retained Field views/provider data")
+    def data_resource(
+        self, owner=None, data=None, *, shape=(), dtype=None, element_shape=(), layout=None,
+        name=None, readonly=False, usage=None,
+    ):
+        from ._lowering_array_data import array_resource_fields
+
+        if not readonly or type(data) is not bytes or name is not None:
+            raise TaichiRuntimeError("JIT preparation requires a live storage loan for retained Field views/provider data")
+        fields = array_resource_fields(shape=shape, dtype=dtype, element_shape=element_shape, layout=layout)
+        key = hashlib.sha256(data).hexdigest()
+        if self.data_payloads.setdefault(key, data) != data:
+            raise ValueError("JIT immutable data digest collision")
+        identity = key, dtype, layout, tuple(shape), tuple(element_shape), tuple(sorted(usage or ()))
+        owner = self._readonly_data_owners.setdefault(identity, owner)
+        return self._resource(
+            owner,
+            dict(kind="ndarray", **fields, initial_data=key,
+                 **({"usage": sorted(usage)} if usage is not None else {})),
+        )
 
     provider_data_binding = data_resource
+
+    def require_frozen_host_state(self):
+        # prepare() already freezes this instance. This authorizes only the
+        # producer's explicit immutable bytes, never snapshots of live storage.
+        pass
+
+    def retained_kernel(self, kernel, arguments, symbols, label, selected):
+        if selected is None:
+            raise TaichiRuntimeError("JIT retained helper requires its frozen physical dispatch")
+        sources = selected._physical_jit_dispatch_sources
+        if len(sources) != 1:
+            raise TaichiRuntimeError("JIT retained helper requires one selected dispatch")
+        compiled, original, _ = sources[0]
+        layout = lambda args: tuple((arg.tag, str(arg.dtype()), arg.field_dim, tuple(arg.element_shape)) for arg in args)
+        if layout(original) != layout(symbols):
+            raise TaichiRuntimeError("JIT retained helper bindings differ from its selected dispatch")
+        self.kernel(compiled, symbols, label, jit_source=(selected, 0))
 
     def host_blob_resource(self, data):
         if type(data) is not bytes:
@@ -293,7 +337,7 @@ def prepare_graph(graph, arguments, *, execution_domain, mutable_parameters=()):
                 )
         # Native import takes SNode lifecycle before Program submission locks.
         # It must not run inside a borrowed Runtime scope (the inverse order).
-        module = Module(runtime, runtime._borrower.import_jit_kernels(context.imports))
+        module = Module(runtime, runtime._borrower.import_jit_kernels(context.imports, context.data_payloads))
         imported = {}
         prepared = None
         try:

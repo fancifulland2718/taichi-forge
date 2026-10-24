@@ -117,9 +117,17 @@ graphics 能力，也可以执行已准入的离屏计划。CUDA 不接纳 `queu
 被拒绝，直至该实例退休；纯采样源保留多 reader 共享。冷准备接收普通队列的准确
 准备前缀，暖态在指定域恢复边界 layout；仅调用 `release()` 不会退休租约。
 
-这份资源合同不等于高层 RasterPass 的相机/helper/scratch lowering 已迁移。
-该生产端路线、含 AS 的 pass、显示互操作和 graphics fork/join 仍需分别验证。
-原始图像别名、packed depth/stencil 和借用图像控制流仍不接纳。
+设备几何的 `RasterPass` mesh、mesh_instance、particles 和 lines recording 可通过
+Graph 显式准入及 `queue="graphics"` 使用该路线。record 创建时保留选定的普通辅助
+dispatch；prepare 借用其代码，为每实例重建私有 VBO/normal/index scratch。
+camera/light 和 draw uniform 在 `Graph.prepare()` 时冻结；之后修改相机须关闭并
+重新准备实例，普通 recording 的相机行为保持原样。提交前调用一次 `initialize()`。
+不可变数据沿 AOT 相同的完整性检查及资源初始化在所选域上传，不重新编译前端，
+不执行 host 几何上传。Windows 已验证四种 draw 及采样后计算的梯度；光栅化本身
+并不可微。共享可变几何仍须与写入者建立显式依赖。
+
+含 AS 的 pass、显示互操作和 graphics fork/join 仍需分别验证。原始图像别名、
+packed depth/stencil 和借用图像控制流仍不接纳。
 
 独立 Vulkan 路线还不接纳 host selection、公共并行 recipe，以及共享
 sparse/RNG/runtime-error 状态。

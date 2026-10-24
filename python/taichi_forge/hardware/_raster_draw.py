@@ -90,6 +90,7 @@ class PreparedRasterDraw:
         args.pop("self")
         self.kind = kind
         self._updates = []
+        self._compiled_updates = []
         self._owned_arrays = []
         self._sources = tuple(arguments.values())
         self.has_host_upload = any(isinstance(value, np.ndarray) for value in arguments.values())
@@ -165,12 +166,13 @@ class PreparedRasterDraw:
         self._arguments = self._definition.native_arguments(vbo_info, index_info, get_field_info(transforms))
         self.requested_bytes = sum(array._get_nelement() * array._get_element_size() for array in self._owned_arrays)
         self._updates = tuple(self._updates)
+        self._compiled_updates = tuple(self._compiled_updates)
         self._owned_arrays = tuple(self._owned_arrays)
         self._buffers = MappingProxyType(self._buffers)
 
     def _export_aot_preparation(self, context):
         """Lower device preparation only; the caller must also export the draw."""
-        from taichi_forge.aot._graph_export_calls import export_array_template_call
+        from taichi_forge.graph._lowering_calls import lower_array_template_call
         from taichi_forge.lang.exception import TaichiRuntimeError
 
         if self.has_host_upload:
@@ -189,15 +191,15 @@ class PreparedRasterDraw:
         if buffers["vertices"] not in initialized:
             context.initialization.append(dict(kind="fill32", destination=buffers["vertices"], value=0))
             initialized.add(buffers["vertices"])
-        for kernel, arguments in self._updates:
-            export_array_template_call(context, kernel, arguments, label="raster_prepare")
+        for (kernel, arguments), selected in zip(self._updates, self._compiled_updates, strict=True):
+            lower_array_template_call(context, kernel, arguments, label="raster_prepare", selected=selected)
         return buffers
 
     def _kernel(self, kernel, *args):
+        from taichi_forge.graph._lowering_calls import freeze_array_template_call
+
         # Compilation and allocation must finish before Graph.submit's batch.
-        key = kernel._primal.ensure_compiled(*args)
-        program = ti.lang.impl.get_runtime().prog
-        program.compile_kernel(program.config(), program.get_device_caps(), kernel._primal.compiled_kernels[key])
+        self._compiled_updates.append(freeze_array_template_call(kernel, args))
         self._updates.append((kernel, args))
 
     def _buffer(self, source, *, transforms):
@@ -229,6 +231,7 @@ class PreparedRasterDraw:
             # Host-owned input is explicitly uploaded; there is no device
             # readback, including for dynamic host index/transform contents.
             self._updates.append((target.from_numpy, (source,)))
+            self._compiled_updates.append(None)
         else:
             self._kernel(_copy_transforms if transforms else _copy_indices, source, target)
         return target

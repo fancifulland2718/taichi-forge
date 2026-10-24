@@ -151,10 +151,22 @@ Pure sampled inputs retain shared-reader fanout. Cold preparation imports the
 ordinary queue's exact preparation prefix; warm execution restores the boundary
 layout on the selected domain. `release()` alone does not retire the loan.
 
-This resource contract does not by itself migrate the high-level RasterPass
-camera/helper/scratch lowering. That producer route, passes with AS resources,
-display interop and graphics fork/join need their own qualification. Raw image
-aliases, packed depth/stencil and borrowed-image control flow remain excluded.
+Device-geometry `RasterPass` mesh, mesh_instance, particles and lines recordings
+can use this route through explicit Graph admission and `queue="graphics"`.
+Record creation retains the selected ordinary helper dispatches; preparation
+borrows that code and rebuilds private VBO/normal/index scratch for each instance.
+Camera/light and draw uniforms are frozen at `Graph.prepare()`. Later camera
+changes require closing and preparing the instance again; ordinary recording
+execution keeps its existing camera behavior. Call `initialize()` once before
+submission. Immutable bytes use the same checked resource initialization as AOT,
+on the selected domain, without a frontend recompilation or host geometry upload.
+Windows tests cover all four draw types and downstream sampled-computation
+gradients; rasterization itself is not differentiable. Shared mutable geometry
+still requires explicit ordering against its writers.
+
+Passes with AS resources, display interop and graphics fork/join need their own
+qualification. Raw image aliases, packed depth/stencil and borrowed-image
+control flow remain excluded.
 
 Host selection, public parallel recipes and shared sparse/RNG/runtime-error
 state remain outside this independent Vulkan route. Ordinary Graph execution keeps

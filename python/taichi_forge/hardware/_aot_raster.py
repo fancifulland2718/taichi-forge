@@ -78,8 +78,7 @@ def preflight(recording, context):
     recording.validate_graph_lifetime()
     if any(draw.kind not in ("mesh", "mesh_instance", "particles", "lines") for draw in recording._prepared_draws):
         raise TaichiRuntimeError("AOT RasterPass draw kind is not supported")
-    if not context.snapshot_state:
-        raise TaichiRuntimeError("AOT raster camera/light state requires explicit snapshot_state=True at export")
+    context.require_frozen_host_state()
     if any(draw.has_host_upload for draw in recording._prepared_draws):
         raise TaichiRuntimeError("AOT RasterPass requires device geometry")
     owner = recording._owner
