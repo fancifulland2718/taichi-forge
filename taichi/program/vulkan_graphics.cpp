@@ -11,6 +11,7 @@
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program_impl.h"
 #include "taichi/program/texture.h"
+#include "taichi/program/prepared_vulkan_ray_access.h"
 #include "taichi/runtime/gfx/graph_recording.h"
 #include "taichi/runtime/vulkan_graphics_pipeline.h"
 #include "taichi/runtime/vulkan_graphics_pass.h"
@@ -48,6 +49,7 @@ using PreparedVulkanGraphicsDrawResources = VulkanGraphicsDrawResources;
 struct PreparedVulkanGraphicsResourcePayload {
   std::vector<PreparedVulkanGraphicsDrawResources> draws;
   std::vector<std::function<void(CommandList *)>> acceleration_structure_reads;
+  std::shared_ptr<PreparedVulkanRayAccess> ray_access;
 };
 
 class PreparedVulkanGraphicsResourceLease;
@@ -72,9 +74,31 @@ class PreparedVulkanGraphicsResourceLease : public PreparedResourceLease {
     return payload_;
   }
 
-  void clear() noexcept override {
+  void retain_recording(const std::shared_ptr<PreparedResourceLease> &recording) {
     std::lock_guard<std::mutex> lock(mutex_);
-    payload_.reset();
+    TI_ERROR_IF(!payload_, "Prepared graphics resources were retired");
+    recordings_.erase(std::remove_if(recordings_.begin(), recordings_.end(),
+                                      [](const auto &entry) { return entry.expired(); }),
+                       recordings_.end());
+    recordings_.push_back(recording);
+  }
+
+  void clear() noexcept override {
+    std::shared_ptr<const PreparedVulkanGraphicsResourcePayload> retired;
+    std::vector<std::weak_ptr<PreparedResourceLease>> recordings;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      retired.swap(payload_);
+      recordings.swap(recordings_);
+    }
+    // An AS permit can release its final owner and unregister access metadata.
+    // Do not hold the graphics lease mutex while entering that admission gate.
+    retired.reset();
+    // Recording facades can outlive Program. Release their storage leases at
+    // the same cold boundary, while Texture/Ndarray still have a live device.
+    for (const auto &entry : recordings)
+      if (auto recording = entry.lock())
+        recording->clear();
   }
 
   void append_debug_stats(
@@ -94,6 +118,7 @@ class PreparedVulkanGraphicsResourceLease : public PreparedResourceLease {
  private:
   mutable std::mutex mutex_;
   std::shared_ptr<const PreparedVulkanGraphicsResourcePayload> payload_;
+  std::vector<std::weak_ptr<PreparedResourceLease>> recordings_;
 };
 
 class PreparedVulkanGraphicsResourceDomain {
@@ -1116,6 +1141,12 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
       append_handle(prepared.ray_resources, as.handle);
     }
   }
+  if (!prepared.ray_resources.empty()) {
+    std::vector<std::shared_ptr<NativeResource>> roots;
+    for (const auto handle : prepared.ray_resources)
+      roots.push_back(acquire_vulkan_ray_native_resource(handle));
+    resource_payload->ray_access = prepare_vulkan_ray_access(roots);
+  }
   prepared.replay_key = std::move(replay_key);
   return packet;
 }
@@ -1127,6 +1158,11 @@ std::size_t Program::execute_vulkan_graphics_pass(
                   packet->state->generation != runtime_program_generation(),
               "Prepared graphics pass belongs to another or retired runtime");
   const auto &prepared = *packet->state;
+  std::shared_ptr<const PreparedVulkanGraphicsResourcePayload> payload;
+  if (!prepared.ray_resources.empty()) {
+    payload = prepared.resources->acquire();
+    TI_ERROR_IF(!payload, "Prepared Vulkan graphics resources are stale or closed.");
+  }
   {
     std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
     for (const auto handle : prepared.pipelines) {
@@ -1166,18 +1202,26 @@ std::size_t Program::execute_vulkan_graphics_pass(
   }
   // Lease acquisition is the existing lifetime boundary; layouts, ranges,
   // descriptors and replay identity are not reconstructed on bound execution.
-  pin_ndarray_launch_leases(arrays);
-  pin_texture_launch_leases(textures);
-  // The graphics submission can succeed before its compute bridge fails.
-  // Publish pending work before entering that partially committing operation.
-  mark_runtime_submission_pending();
-  enqueue_graphics_op_lambda(prepared.record, prepared.images,
-                              prepared.replay_key);
+  const auto submit = [&] {
+    pin_ndarray_launch_leases(arrays);
+    pin_texture_launch_leases(textures);
+    // The graphics submission can succeed before its compute bridge fails.
+    // Publish pending work before entering that partially committing operation.
+    mark_runtime_submission_pending();
+    enqueue_graphics_op_lambda(prepared.record, prepared.images,
+                                prepared.replay_key);
+  };
+  // Cached command replay may not call prepared.record again.
+  if (payload)
+    payload->ray_access->submit(submit);
+  else
+    submit();
   return 0;
 }
 
 namespace {
-class PreparedGraphicsGraphCommand final : public gfx::ExternalGraphCommand {
+class PreparedGraphicsGraphCommand final : public gfx::ExternalGraphCommand,
+                                          public PreparedResourceLease {
  public:
   PreparedGraphicsGraphCommand(std::shared_ptr<PreparedVulkanGraphicsPass> packet,
                               std::shared_ptr<void> arrays,
@@ -1185,6 +1229,11 @@ class PreparedGraphicsGraphCommand final : public gfx::ExternalGraphCommand {
       : packet_(std::move(packet)),
         arrays_(std::move(arrays)),
         textures_(std::move(textures)) {
+  }
+
+  void clear() noexcept override {
+    arrays_.reset();
+    textures_.reset();
   }
 
   std::vector<aot::Arg> arguments() const override {
@@ -1201,6 +1250,12 @@ class PreparedGraphicsGraphCommand final : public gfx::ExternalGraphCommand {
   }
   std::vector<std::uint64_t> ray_resource_dependencies() const override {
     return packet_->state->ray_resources;
+  }
+  std::vector<NativeResourceUse> stateful_resources() const override {
+    auto payload = packet_->state->resources->acquire();
+    TI_ERROR_IF(!payload, "Prepared Vulkan graphics resources are stale or closed.");
+    return payload->ray_access ? payload->ray_access->resource_uses()
+                               : std::vector<NativeResourceUse>{};
   }
   void validate(
       Program &program,
@@ -1276,9 +1331,11 @@ std::shared_ptr<gfx::ExternalGraphCommand> Program::vulkan_graphics_graph_comman
                 "Cannot retain prepared graphics texture");
     textures.add(std::move(acquired.second));
   }
-  return std::make_shared<PreparedGraphicsGraphCommand>(
+  auto command = std::make_shared<PreparedGraphicsGraphCommand>(
       packet, std::make_shared<NdarrayLaunchLeases>(std::move(arrays)),
       std::make_shared<TextureLaunchLeases>(std::move(textures)));
+  prepared.resources->retain_recording(command);
+  return command;
 }
 
 std::size_t Program::vulkan_graphics_pass(

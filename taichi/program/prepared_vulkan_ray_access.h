@@ -2,6 +2,7 @@
 
 #include "taichi/program/prepared_resource_lease.h"
 #include "taichi/runtime/native_ray_admission.h"
+#include "taichi/runtime/native_resource.h"
 
 namespace taichi::lang {
 
@@ -12,8 +13,18 @@ namespace taichi::lang {
 class PreparedVulkanRayAccess final : public PreparedResourceLease {
  public:
   explicit PreparedVulkanRayAccess(
-      std::shared_ptr<NativeRayAdmission::Permit> permit)
-      : permit_(std::move(permit)) {
+      std::shared_ptr<NativeRayAdmission::Permit> permit,
+      std::vector<NativeResourceUse> uses)
+      : permit_(std::move(permit)), uses_(std::move(uses)) {
+  }
+
+  // Cold projection for the enclosing fixed recording's aggregated permit.
+  // Keep these owners in the clearable lease, never in the packet facade.
+  std::vector<NativeResourceUse> resource_uses() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!permit_)
+      throw std::runtime_error("Prepared Vulkan AS access is closed or retired");
+    return uses_;
   }
 
   template <class Submit>
@@ -30,9 +41,11 @@ class PreparedVulkanRayAccess final : public PreparedResourceLease {
 
   void clear() noexcept override {
     std::shared_ptr<NativeRayAdmission::Permit> retired;
+    std::vector<NativeResourceUse> uses;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       retired.swap(permit_);
+      uses.swap(uses_);
     }
     // Releasing the final owner can unregister AS identities. Do that outside
     // the lease mutex, consistently with the existing admission gate order.
@@ -41,6 +54,7 @@ class PreparedVulkanRayAccess final : public PreparedResourceLease {
  private:
   mutable std::mutex mutex_;
   std::shared_ptr<NativeRayAdmission::Permit> permit_;
+  std::vector<NativeResourceUse> uses_;
 };
 
 }  // namespace taichi::lang

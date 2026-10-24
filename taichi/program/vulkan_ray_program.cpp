@@ -2,6 +2,7 @@
 #include "taichi/program/vulkan_ray_program.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/program/texture.h"
+#include "taichi/program/prepared_vulkan_ray_access.h"
 #include "taichi/runtime/gfx/graph_recording.h"
 
 #include <algorithm>
@@ -25,6 +26,7 @@ struct RayLaunchPayload {
   std::unique_ptr<VulkanShaderBindingTable> sbt;
   ResourceSets sets;
   std::vector<std::function<void(CommandList *)>> scene_reads;
+  std::shared_ptr<PreparedVulkanRayAccess> ray_access;
 };
 
 class RayLaunchLease final : public PreparedResourceLease {
@@ -34,14 +36,26 @@ class RayLaunchLease final : public PreparedResourceLease {
   }
   void clear() noexcept override {
     payload_.reset();
+    for (const auto &entry : recordings_)
+      if (auto recording = entry.lock())
+        recording->clear();
+    recordings_.clear();
   }
   std::shared_ptr<RayLaunchPayload> acquire() const {
     return payload_;
+  }
+  void retain_recording(const std::shared_ptr<PreparedResourceLease> &recording) {
+    TI_ERROR_IF(!payload_, "Prepared ray launch resources were retired");
+    recordings_.erase(std::remove_if(recordings_.begin(), recordings_.end(),
+                                      [](const auto &entry) { return entry.expired(); }),
+                       recordings_.end());
+    recordings_.push_back(recording);
   }
 
  private:
   // Program's submission guard serializes prepare/close/record publication.
   std::shared_ptr<RayLaunchPayload> payload_;
+  std::vector<std::weak_ptr<PreparedResourceLease>> recordings_;
 };
 
 }  // namespace
@@ -238,6 +252,7 @@ std::shared_ptr<PreparedVulkanRayLaunch> Program::prepare_vulkan_ray_launch(
       state.textures.push_back(image->runtime_resource_handle());
     }
   }
+  std::vector<std::shared_ptr<NativeResource>> ray_roots;
   for (const auto &input : launch.scenes) {
     const auto properties = vulkan_ray_kernel_resource_properties(input.handle);
     TI_ERROR_IF(!launch.hit.empty() &&
@@ -247,10 +262,13 @@ std::shared_ptr<PreparedVulkanRayLaunch> Program::prepare_vulkan_ray_launch(
     payload->scene_reads.push_back(prepare_vulkan_ray_shader_binding(
         input.handle, &set, input.binding, state.resources,
         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, false));
+    ray_roots.push_back(acquire_vulkan_ray_native_resource(input.handle));
     if (std::find(state.dependencies.begin(), state.dependencies.end(),
                   input.handle) == state.dependencies.end())
       state.dependencies.push_back(input.handle);
   }
+  if (!ray_roots.empty())
+    payload->ray_access = prepare_vulkan_ray_access(ray_roots);
   prepare_vulkan_ray_program_bindings(*program->pipeline, payload->sets);
   payload->sbt = prepare_vulkan_ray_program_sbt(
       *device, *program->pipeline, launch.raygen, launch.miss, launch.hit);
@@ -301,7 +319,7 @@ void Program::execute_vulkan_ray_launch(
   const auto state = launch->state;
   TI_ERROR_IF(!state->storage, "Vulkan ray launch is closed");
   with_prepared_native_storage(*state->storage, [&] {
-    state->payload(*this);
+    auto payload = state->payload(*this);
     TextureLaunchLeases textures;
     for (const auto handle : state->textures) {
       TI_ERROR_IF(handle.index >= texture_view_slots_.size(),
@@ -317,11 +335,17 @@ void Program::execute_vulkan_ray_launch(
         textures.add(std::move(acquired.second));
       }
     }
-    pin_texture_launch_leases(textures);
-    mark_runtime_submission_pending();
-    enqueue_compute_op_lambda(
-        [state](Device *, CommandList *commands) { state->record(commands); },
-        state->images);
+    const auto submit = [&] {
+      pin_texture_launch_leases(textures);
+      mark_runtime_submission_pending();
+      enqueue_compute_op_lambda(
+          [state](Device *, CommandList *commands) { state->record(commands); },
+          state->images);
+    };
+    if (payload->ray_access)
+      payload->ray_access->submit(submit);
+    else
+      submit();
   });
 }
 
@@ -394,7 +418,8 @@ std::unordered_map<std::string, std::uint64_t> Program::vulkan_ray_launch_info(
 }
 
 namespace {
-class RayProgramGraphCommand final : public gfx::ExternalGraphCommand {
+class RayProgramGraphCommand final : public gfx::ExternalGraphCommand,
+                                    public PreparedResourceLease {
  public:
   RayProgramGraphCommand(std::shared_ptr<PreparedVulkanRayLaunch::State> state,
                          std::shared_ptr<void> arrays,
@@ -402,6 +427,10 @@ class RayProgramGraphCommand final : public gfx::ExternalGraphCommand {
       : state_(std::move(state)),
         arrays_(std::move(arrays)),
         textures_(std::move(textures)) {
+  }
+  void clear() noexcept override {
+    arrays_.reset();
+    textures_.reset();
   }
   std::vector<aot::Arg> arguments() const override {
     return {};
@@ -432,6 +461,12 @@ class RayProgramGraphCommand final : public gfx::ExternalGraphCommand {
   }
   std::vector<std::uint64_t> ray_resource_dependencies() const override {
     return state_->dependencies;
+  }
+  std::vector<NativeResourceUse> stateful_resources() const override {
+    auto payload = state_->resources->acquire();
+    TI_ERROR_IF(!payload, "Vulkan ray launch is closed or its resources were retired");
+    return payload->ray_access ? payload->ray_access->resource_uses()
+                               : std::vector<NativeResourceUse>{};
   }
 
  private:
@@ -467,9 +502,11 @@ Program::vulkan_ray_program_graph_command(
                 "Cannot retain ray Graph Texture");
     textures.add(std::move(acquired.second));
   }
-  return std::make_shared<RayProgramGraphCommand>(
+  auto command = std::make_shared<RayProgramGraphCommand>(
       state, std::make_shared<NdarrayLaunchLeases>(std::move(arrays)),
       std::make_shared<TextureLaunchLeases>(std::move(textures)));
+  state->resources->retain_recording(command);
+  return command;
 }
 }  // namespace taichi::lang
 

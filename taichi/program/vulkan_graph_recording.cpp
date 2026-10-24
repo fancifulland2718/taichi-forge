@@ -343,6 +343,7 @@ Program::create_vulkan_graph_recording(
                             command->graphics_pipeline_dependencies(),
                             command->buffer_uses(),
                             command->ray_resource_dependencies()});
+      operations.back().stateful_resources = command->stateful_resources();
     }
     if (!timing_paths.empty()) {
       for (std::size_t i = first_operation; i < operations.size(); ++i) {

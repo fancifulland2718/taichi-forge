@@ -1073,8 +1073,9 @@ std::shared_ptr<PreparedVulkanRayAccess> Program::prepare_vulkan_ray_access(
     auto closure = collect_native_ray_uses(root, writes);
     uses.insert(uses.end(), closure.begin(), closure.end());
   }
+  auto permit = get_gfx_runtime_for_borrowing()->prepare_ray_uses(uses);
   auto access = std::make_shared<PreparedVulkanRayAccess>(
-      get_gfx_runtime_for_borrowing()->prepare_ray_uses(uses));
+      std::move(permit), std::move(uses));
   // Dependencies participate in admission, but closing a public BLAS handle
   // does not invalidate a TLAS that still owns that BLAS. Only the packet's
   // original public roots invalidate its permit at close/reset.

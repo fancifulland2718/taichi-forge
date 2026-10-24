@@ -7,6 +7,7 @@
 
 #include "taichi/aot/graph_data.h"
 #include "taichi/rhi/device.h"
+#include "taichi/runtime/native_resource.h"
 
 namespace taichi::lang::gfx {
 
@@ -36,6 +37,12 @@ class TI_DLL_EXPORT ExternalGraphCommand {
     return {};
   }
   virtual std::vector<std::uint64_t> ray_resource_dependencies() const {
+    return {};
+  }
+  // Complete cold access closure, distinct from owner invalidation IDs (which
+  // can also name pipelines and launch packets). Replay uses one aggregate
+  // permit; it does not inspect this command or resolve resources again.
+  virtual std::vector<NativeResourceUse> stateful_resources() const {
     return {};
   }
   virtual std::optional<std::vector<DeviceAllocation>> buffer_uses() const {
