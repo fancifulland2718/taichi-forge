@@ -1132,10 +1132,19 @@ establishing the same initialization fact for later sampling.
 
 Existing SPD2.0 formats, half-size output, shorter-axis stopping and odd-edge crop
 semantics remain. Each new plan owns a four-byte counter, cleared and retired once
-during cold creation. Replay remains one dispatch without per-frame clearing,
+during ordinary cold creation. Replay remains one dispatch without per-frame clearing,
 CPU readback or extra staging. AOT records inline without an unused secondary
 replay. Content-addressed code, GPU image/counter payload and opaque driver storage
 remain separate accounting categories.
+
+For a private SPD plan reconstructed by a fixed, flat AOT `ExecutionPlan` on an independent
+Vulkan compute/graphics domain, that domain's `initialize()` performs the first
+counter clear. Preparation no longer submits that clear to the default queue.
+Public inputs still require their actual producer dependencies and existing image
+preparation/initialization contracts. Each instance owns its mutable counter;
+a public SPD plan cannot be directly borrowed into an independent domain. Windows
+seven-level checks cover distinct inputs on two domains, replay, downstream gradients,
+closing one instance, and instance-slot reuse after failed admission.
 
 Small Windows Vulkan tests cover single-group and 129x131 seven-level multi-group
 paths, every mip, positive/zero/negative inputs, standalone/borrowed owners,

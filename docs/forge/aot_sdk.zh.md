@@ -876,9 +876,15 @@ plan 替换。它不是任意 shader 的语义证明。图像须具备 storage u
 一次 SPD 写完全部已分配输出 mip，后续采样沿用同一初始化事实。
 
 保持既有 SPD2.0 格式、半尺寸输出、短轴停止与奇数边缘裁剪合同。每个新 plan 自有
-4 字节 counter，冷创建只清零一次并等待完成；每次回放仍为单 dispatch，无每帧清零、
+4 字节 counter，普通冷创建只清零一次并等待完成；每次回放仍为单 dispatch，无每帧清零、
 CPU 读回或额外 staging。AOT 直接 inline 录制，不创建未使用的 secondary replay。
 代码按内容保存，GPU 图像、counter 与 driver 私有占用分别计量。
+
+当固定平坦 AOT `ExecutionPlan` 在独立 Vulkan compute/graphics 执行域内重建私有 SPD plan
+时，首次 counter 清零由该域的 `initialize()` 完成，不在准备期提交到默认队列。
+公开输入仍遵守真实生产依赖；这不允许跳过图像输入的准备或初始化合同。每个实例
+持有自己的可变 counter，公共 SPD plan 不能直接借给独立域。Windows 七层用例已验证
+两个域的不同输入、重复执行、下游梯度、单实例关闭及失败准入后的槽位复用。
 
 Windows Vulkan 小型测试覆盖单组及129×131七级多组路径、全部 mip、正/零/负输入、
 独立/借用 owner、公共/私有资源、错误合同/别名及关闭。真实梯度针对下游数值 kernel，
