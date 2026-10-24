@@ -22,6 +22,13 @@ class NativeKernelResourceBinding {
                         const CallableBase &kernel,
                         const LaunchContextBuilder &context,
                         const NativeRecordingState &state) const = 0;
+  // Mutable non-buffer dependencies need the same per-instance ownership proof
+  // as native operations. Ordinary image/array binding contracts stay separate.
+  virtual const std::vector<std::shared_ptr<NativeResource>> &
+  vulkan_stateful_resources() const {
+    static const std::vector<std::shared_ptr<NativeResource>> empty;
+    return empty;
+  }
 };
 
 std::shared_ptr<NativeKernelResourceBinding> prepare_native_kernel_resource(

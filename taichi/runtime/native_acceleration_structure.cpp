@@ -1,9 +1,32 @@
 #include "taichi/runtime/native_acceleration_structure.h"
 
 #include <algorithm>
+#include <unordered_set>
 #include "taichi/program/launch_context_builder.h"
 
 namespace taichi::lang {
+std::vector<std::shared_ptr<NativeResource>> collect_native_ray_resources(
+    const std::shared_ptr<NativeResource> &root) {
+  std::vector<std::shared_ptr<NativeResource>> resources;
+  std::vector<std::shared_ptr<NativeResource>> pending{root};
+  std::unordered_set<const NativeResource *> seen;
+  while (!pending.empty()) {
+    auto current = std::move(pending.back());
+    pending.pop_back();
+    if (!current)
+      throw std::invalid_argument("Vulkan ray dependency has no owner");
+    if (!seen.insert(current.get()).second)
+      continue;
+    const auto *ray = dynamic_cast<const NativeRayResourceAccess *>(current.get());
+    if (!ray)
+      throw std::invalid_argument("Vulkan ray dependency has no recording contract");
+    pending.insert(pending.end(), ray->dependencies().begin(),
+                   ray->dependencies().end());
+    resources.push_back(std::move(current));
+  }
+  return resources;
+}
+
 void NativeAccelerationStructureKernelBinding::validate_parameter(
     Arch arch,
     Device &device,
@@ -30,6 +53,7 @@ NativeAccelerationStructureKernelBinding::
         const CallableBase &kernel,
         LaunchContextBuilder &context)
     : resource_(std::move(resource)),
+      resources_(collect_native_ray_resources(resource_)),
       argument_(std::move(argument)),
       kernel_(&kernel),
       context_(&context) {
@@ -42,7 +66,7 @@ void NativeAccelerationStructureKernelBinding::validate(
     Device &device,
     const CallableBase &kernel,
     const LaunchContextBuilder &context,
-    const NativeRecordingState &) const {
+    const NativeRecordingState &state) const {
   validate_parameter(arch, device, kernel);
   const auto kind = context.device_allocation_type.find(argument_);
   const auto offset = context.args_type->get_element_offset(argument_);
@@ -58,5 +82,7 @@ void NativeAccelerationStructureKernelBinding::validate(
       found->handle || found->native_resource != resource_.get())
     throw std::invalid_argument(
         "Kernel acceleration-structure binding changed after qualification");
+  for (const auto &resource : resources_)
+    dynamic_cast<const NativeRayResourceAccess &>(*resource).require_initialized(state);
 }
 }  // namespace taichi::lang

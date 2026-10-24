@@ -18,6 +18,7 @@
 #include "taichi/runtime/native_kernel_resource.h"
 #include "taichi/runtime/native_kernel_result.h"
 #include "taichi/runtime/native_image.h"
+#include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/program/launch_context_builder.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/llvm/aot_graph_data.h"
@@ -435,6 +436,24 @@ FixedExecution::FixedExecution(
       sequence_state ? *sequence_state : NativeRecordingState{};
   std::unordered_set<const void *> active_controls;
   bool has_host_selection = false;
+  const auto validate_private_resources = [&](const auto &resources,
+                                               bool inside_control) {
+#ifdef TI_WITH_VULKAN
+    if (vulkan_binding) {
+      for (const auto &resource : resources) {
+        if (!resource || resource->arch() != arch ||
+            &resource->device() != &device ||
+            !vulkan_binding->private_resources.count(resource.get()))
+          throw std::invalid_argument(
+              "Independent Vulkan stateful resource must belong to this "
+              "prepared instance");
+        if (inside_control)
+          throw std::invalid_argument(
+              "Independent Vulkan stateful resources require a flat region");
+      }
+    }
+#endif
+  };
   std::function<void(const std::vector<Operation> &, NativeRecordingState &,
                      bool)>
       validate;
@@ -697,6 +716,8 @@ FixedExecution::FixedExecution(
                 "Duplicate or null kernel resource owner");
           resource->validate(arch, device, *dispatch->kernel,
                              *dispatch->context, recording_state);
+          validate_private_resources(resource->vulkan_stateful_resources(),
+                                     inside_control);
           state_->kernel_resources.push_back(resource);
         }
         for (const auto &[index, param] : dispatch->kernel->nested_parameters) {
@@ -735,20 +756,9 @@ FixedExecution::FixedExecution(
           native->validate_cuda_execution_domain();
         if (vulkan_binding) {
           native->validate_vulkan_execution_domain();
-#ifdef TI_WITH_VULKAN
-          for (const auto &resource :
-               native->vulkan_recording_requirements().stateful_resources) {
-            if (!resource || resource->arch() != arch ||
-                &resource->device() != &device ||
-                !vulkan_binding->private_resources.count(resource.get()))
-              throw std::invalid_argument(
-                  "Independent Vulkan stateful resource must belong to this "
-                  "prepared instance");
-            if (inside_control)
-              throw std::invalid_argument(
-                  "Independent Vulkan stateful resources require a flat region");
-          }
-#endif
+          validate_private_resources(
+              native->vulkan_recording_requirements().stateful_resources,
+              inside_control);
         }
         if (vulkan_binding && inside_control &&
             native->vulkan_recording_requirements().graphics_queue)
@@ -1336,6 +1346,14 @@ FixedExecution::FixedExecution(
         if (!instance->payload->workspace)
           instance->payload->workspace = vulkan_binding->workspace
               ? vulkan_binding->workspace : gfx_runtime->create_fixed_graph_workspace();
+        // The complete owner closure was validated above. Register only these
+        // qualified kernel resources with the detached command workspace.
+        for (const auto &binding : dispatch.resources)
+          for (const auto &resource : binding->vulkan_stateful_resources())
+            if (auto scene =
+                    std::dynamic_pointer_cast<NativeAccelerationStructure>(resource))
+              gfx_runtime->prepare_fixed_private_acceleration_structure(
+                  instance->payload->workspace, std::move(scene));
       }
       const auto &live = dispatch.context->device_range_tasks();
       const auto &persisted = loaded->device_range_tasks();

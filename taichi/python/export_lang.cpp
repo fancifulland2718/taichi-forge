@@ -8307,6 +8307,8 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeVulkanExecutionDomainLiveImageWrites);
     features["vulkan_execution_domain_private_ray_resources"] =
         bool(bitmap & kForgeVulkanExecutionDomainPrivateRayResources);
+    features["vulkan_execution_domain_private_ray_kernels"] =
+        bool(bitmap & kForgeVulkanExecutionDomainPrivateRayKernels);
     result["features"] = std::move(features);
     result["legacy_runtime"] = false;
     return result;

@@ -3169,6 +3169,19 @@ void GfxRuntime::prepare_fixed_private_image(
               "Private Graph image boundary differs between phases");
 }
 
+void GfxRuntime::prepare_fixed_private_acceleration_structure(
+    const std::shared_ptr<FixedGraphWorkspace> &workspace,
+    std::shared_ptr<NativeAccelerationStructure> resource) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ERROR_IF(!workspace || workspace->device_ != device_ || !resource ||
+                  &resource->device() != device_ ||
+                  (workspace->initialization_recorded_ &&
+                   !workspace->private_as_.count(resource.get())),
+              "Private Graph acceleration structure must be qualified before workspace sealing");
+  const auto *identity = resource.get();
+  workspace->private_as_.emplace(identity, std::move(resource));
+}
+
 std::size_t GfxRuntime::FixedGraphWorkspace::bytes() const {
   return global_tmps_ ? kGtmpBufferSize : 0;
 }
@@ -3271,15 +3284,26 @@ void GfxRuntime::bind_graph_task_images(
 
 void GfxRuntime::prepare_detached_kernel_workspace(
     const CompiledTaichiKernel &kernel,
+    const LaunchContextBuilder &context,
     const std::shared_ptr<FixedGraphWorkspace> &workspace) {
   TI_ERROR_IF(!workspace || workspace->device_ != device_,
               "Detached Graph requires same-device workspace");
   bool uses_global_tmps = false;
   const auto &tasks = kernel.ti_kernel_attribs().tasks_attribs;
   for (std::size_t i = 0; i < tasks.size(); ++i) {
-    TI_ERROR_IF(!tasks[i].acceleration_structure_binds.empty() ||
-                    tasks[i].may_mutate_sparse_topology,
-                "Detached Graph cannot borrow acceleration structures or sparse mutation");
+    TI_ERROR_IF(tasks[i].may_mutate_sparse_topology,
+                "Detached Graph cannot borrow sparse mutation");
+    for (const auto &bind : tasks[i].acceleration_structure_binds) {
+      const int offset = context.args_type->get_element_offset(bind.arg_id);
+      const auto found = std::find_if(
+          context.acceleration_structure_ptrs.begin(),
+          context.acceleration_structure_ptrs.end(),
+          [offset](const auto &ref) { return ref.arg_offset == offset; });
+      TI_ERROR_IF(found == context.acceleration_structure_ptrs.end() ||
+                      found->owner || found->handle || !found->native_resource ||
+                      !workspace->private_as_.count(found->native_resource),
+                  "Detached Graph acceleration structure requires its qualified private owner");
+    }
     for (const auto &bind : kernel.buffer_binding_plan(i)) {
       using BufferType = spirv::TaskAttributes::BufferType;
       uses_global_tmps |= bind.buffer.type == BufferType::GlobalTmps;
@@ -3391,7 +3415,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                 "Prepared Vulkan Graph requires fixed kernel dispatches");
     auto *kernel = found->second.get();
     if (detached)
-      prepare_detached_kernel_workspace(*kernel, workspace);
+      prepare_detached_kernel_workspace(*kernel, *dispatch.host_ctx, workspace);
     if (kernel->get_ret_buffer_size()) {
       const auto &result = dispatch.host_ctx->prepared_result;
       TI_ERROR_IF(!result || &result->device() != device_ ||
@@ -3949,9 +3973,9 @@ GfxRuntime::prepare_fixed_control_commands(
   std::unordered_set<const NativeKernelResultStorage *> results;
   for (const auto &dispatch : dispatches) {
     const auto found = ti_kernels_.find(dispatch.handle.get_launch_id());
-    TI_ERROR_IF(found == ti_kernels_.end(),
+    TI_ERROR_IF(found == ti_kernels_.end() || !dispatch.host_ctx,
                 "Detached control requires registered kernels");
-    prepare_detached_kernel_workspace(*found->second, workspace);
+    prepare_detached_kernel_workspace(*found->second, *dispatch.host_ctx, workspace);
     if (dispatch.host_ctx && dispatch.host_ctx->prepared_result &&
         results.insert(dispatch.host_ctx->prepared_result.get()).second)
       owners.push_back(dispatch.host_ctx->prepared_result);

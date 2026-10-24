@@ -2,6 +2,7 @@
 
 import array
 import json
+import os
 
 import numpy as np
 import pytest
@@ -109,7 +110,7 @@ def test_argpack_acceleration_structure_export_and_downstream_adjoint(tmp_path):
     scene.close()
     blas.close()
     ti.reset()
-    with aot.Runtime("vulkan") as runtime:
+    with aot.Runtime("vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", "0"))) as runtime:
         loaded = runtime.load_module(artifact)
         v, i, transforms = (
             runtime.ndarray("f32", (3, 3)),
@@ -134,10 +135,14 @@ def test_argpack_acceleration_structure_export_and_downstream_adjoint(tmp_path):
         arrays = {
             name: runtime.ndarray("f32", size) for name, size in (("out", 6), ("dout", 6), ("loss", 1), ("dloss", 1))
         }
-        for name in ("private", "scene", "pack", "cgraph"):
-            plan = loaded.graph(name) if name == "cgraph" else loaded.execution_plan(name)
+        domain = runtime.execution_domain(capacity=1, instance_capacity=1)
+        for name in ("private", "private_domain", "scene", "pack", "cgraph"):
+            selected_domain = domain if name == "private_domain" else None
+            plan = loaded.graph(name) if name == "cgraph" else loaded.execution_plan(
+                "private" if selected_domain else name)
             resources = (
-                dict(vertices=v, indices=i, transforms=transforms) if name == "private" else dict(scene=scene_owner)
+                dict(vertices=v, indices=i, transforms=transforms)
+                if name in ("private", "private_domain") else dict(scene=scene_owner)
             )
             if name == "pack":
                 resources = dict(pack=plan.argpack(loaded, "pack", dict(child=dict(scene=scene_owner), scale=2)))
@@ -152,13 +157,20 @@ def test_argpack_acceleration_structure_export_and_downstream_adjoint(tmp_path):
                         gradients=dict(out=arrays["dout"], loss=arrays["dloss"]),
                     )
                 else:
-                    owner = plan.prepare(loaded, dict(arrays, **resources, offset=aot.Scalar("f32", ray_offset)))
-                owner.run()
-                runtime.wait()
+                    owner = plan.prepare(loaded, dict(arrays, **resources, offset=aot.Scalar("f32", ray_offset)),
+                                         execution_domain=selected_domain)
+                if selected_domain:
+                    owner.initialize()
+                    with owner.submit() as completion:
+                        completion.wait()
+                else:
+                    owner.run()
+                    runtime.wait()
                 assert read(arrays["out"]) == ([1, 2, 0, 37, 0.25, 0.5] if ray_offset == 0 else [0, -1, -1, -1, 0, 0])
                 assert read(arrays["loss"]) == ([2] if ray_offset == 0 else [0])
                 assert read(arrays["dout"])[1] == (2 if ray_offset == 0 else 0)
                 owner.close()
+        domain.close()
         scene_owner.close()
         with pytest.raises(RuntimeError, match="closed|retired|owned|valid"):
             plan.prepare(

@@ -5,9 +5,24 @@
 
 namespace taichi::lang {
 
+// Cold recording facts shared by native traversal and kernel/shader bindings.
+// The closure owns every mutable dependency; retaining it does not grant access
+// from another execution instance. Submission never traverses this interface.
+class NativeRayResourceAccess {
+ public:
+  virtual ~NativeRayResourceAccess() = default;
+  virtual void require_initialized(const NativeRecordingState &) const = 0;
+  virtual const std::vector<std::shared_ptr<NativeResource>> &
+  dependencies() const = 0;
+};
+
+std::vector<std::shared_ptr<NativeResource>> collect_native_ray_resources(
+    const std::shared_ptr<NativeResource> &root);
+
 // Owner-local AS service. Native handles stay behind this interface; callers
 // retain the resource through submitted work and never serialize a Program.
-class NativeAccelerationStructure : public NativeResource {
+class NativeAccelerationStructure : public NativeResource,
+                                    public virtual NativeRayResourceAccess {
  public:
   virtual void bind_for_kernel(ShaderResourceSet *bindings,
                                int binding,
@@ -47,12 +62,17 @@ class NativeAccelerationStructureKernelBinding final
                 const CallableBase &kernel,
                 const LaunchContextBuilder &context,
                 const NativeRecordingState &state) const override;
+  const std::vector<std::shared_ptr<NativeResource>> &
+  vulkan_stateful_resources() const override {
+    return resources_;
+  }
 
  private:
   void validate_parameter(Arch arch,
                           Device &device,
                           const CallableBase &kernel) const;
   const std::shared_ptr<NativeAccelerationStructure> resource_;
+  const std::vector<std::shared_ptr<NativeResource>> resources_;
   const std::vector<int> argument_;
   const CallableBase *kernel_;
   const LaunchContextBuilder *context_;

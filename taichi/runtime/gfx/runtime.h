@@ -35,6 +35,7 @@
 
 namespace taichi::lang {
 class RuntimeStatistics;
+class NativeAccelerationStructure;
 namespace gfx {
 
 inline constexpr size_t kGtmpBufferSize = 1024 * 1024;
@@ -610,6 +611,8 @@ class TI_DLL_EXPORT GfxRuntime {
       std::shared_ptr<void> owner;
     };
     std::unordered_map<DeviceAllocationId, PrivateImage> private_images_;
+    std::unordered_map<const NativeAccelerationStructure *,
+                       std::shared_ptr<NativeAccelerationStructure>> private_as_;
     // Command payloads retain this workspace until their exact final prefix
     // retires. Entries in the admission index only have weak reverse edges.
     std::shared_ptr<SharedImageAdmission<RuntimeCompletion>::Loan> shared_images_;
@@ -641,6 +644,11 @@ class TI_DLL_EXPORT GfxRuntime {
       DeviceAllocation image,
       ImageLayout boundary,
       std::shared_ptr<void> owner);
+  // Caller proves the full TLAS/BLAS closure belongs to this instance and has
+  // its initialization phase. The workspace retains exactly that cold identity.
+  void prepare_fixed_private_acceleration_structure(
+      const std::shared_ptr<FixedGraphWorkspace> &workspace,
+      std::shared_ptr<NativeAccelerationStructure> resource);
   // Produce immutable commands for a caller-owned compute queue. Images must
   // be registered as private resources with this workspace before recording.
   // No default-queue submit, registration or replay closure is created. The
@@ -896,6 +904,7 @@ class TI_DLL_EXPORT GfxRuntime {
       std::vector<std::shared_ptr<void>> &owners);
   void prepare_detached_kernel_workspace(
       const CompiledTaichiKernel &kernel,
+      const LaunchContextBuilder &context,
       const std::shared_ptr<FixedGraphWorkspace> &workspace);
   void bind_graph_task_images(
       const GraphReplayExecutable::PreparedDispatch &dispatch,

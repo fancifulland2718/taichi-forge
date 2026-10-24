@@ -518,6 +518,14 @@ TEST(NativeOperationRegistry,
     }
     void bind_for_kernel(ShaderResourceSet *, int, CommandList *) override {
     }
+    void require_initialized(const NativeRecordingState &state) const override {
+      if (!state.initialized.count(this))
+        throw std::invalid_argument("Test AS is not initialized");
+    }
+    const std::vector<std::shared_ptr<NativeResource>> &dependencies() const override {
+      return children;
+    }
+    std::vector<std::shared_ptr<NativeResource>> children;
 
    private:
     Device &device_;
@@ -529,6 +537,8 @@ TEST(NativeOperationRegistry,
   auto context = kernel.make_launch_context();
   cpu::CpuDevice device, other_device;
   auto resource = std::make_shared<Scene>(device);
+  auto dependency = std::make_shared<Scene>(device);
+  resource->children = {dependency, dependency};
   std::weak_ptr<Scene> weak = resource;
   EXPECT_THROW((NativeAccelerationStructureKernelBinding(
                    resource, {0}, Arch::x64, device, kernel, context)),
@@ -544,12 +554,20 @@ TEST(NativeOperationRegistry,
                std::invalid_argument);
   auto binding = prepare_native_kernel_resource(resource, {0}, Arch::vulkan,
                                                 device, kernel, context);
-  EXPECT_NO_THROW(binding->validate(Arch::vulkan, device, kernel, context, {}));
+  ASSERT_EQ(binding->vulkan_stateful_resources().size(), 2);
+  NativeRecordingState state;
+  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, context, state),
+               std::invalid_argument);
+  state.initialized.insert(resource.get());
+  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, context, state),
+               std::invalid_argument);
+  state.initialized.insert(dependency.get());
+  EXPECT_NO_THROW(binding->validate(Arch::vulkan, device, kernel, context, state));
   auto other = kernel.make_launch_context();
-  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, other, {}),
+  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, other, state),
                std::invalid_argument);
   context.set_arg_acceleration_structure({0}, &program, 1);
-  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, context, {}),
+  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, context, state),
                std::invalid_argument);
   resource.reset();
   EXPECT_FALSE(weak.expired());

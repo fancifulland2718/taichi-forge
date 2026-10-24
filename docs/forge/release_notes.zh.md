@@ -50,8 +50,9 @@
   正确覆盖 transfer 上传和设备变换后的构建输入；AS storage/scratch 的依赖保持不变。
 - Vulkan 独立域的平直 AOT 计划可重建私有 triangle scene 或共享 BLAS 的 TLAS：
   工厂只准备资源，`initialize()` 在所选域构建，暖态 native refit/query 在同域执行。
-  资源闭包包含全部 BLAS 和初始输入；公共 live AS、micromap 及 kernel/shader AS
-  绑定尚不属于该能力。冷数据上传和 bootstrap 仍依赖普通队列，详见执行域合同。
+  资源闭包包含全部 BLAS 和初始输入；私有 TLAS 可供同一计划的 DSL kernel 查询，
+  与 native 操作共用初始化和所有权检查。公共 live AS、micromap 及 ray program/
+  graphics shader 绑定尚不属于该能力。冷数据上传和 bootstrap 仍依赖普通队列，详见执行域合同。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、
   `advanced_optimization=False`。显式选择 `balanced/full` 且未覆盖高级 IR 优化时默认开启
   后者；kernel/export 的显式设置经共同编译请求解析。JIT 可面向当前设备，AOT 可声明

@@ -20,14 +20,7 @@ namespace {
 // Typed views share the NativeResource owner's control block. A TLAS is
 // queryable but is not geometry; a BLAS is geometry but cannot be queried
 // alone.
-class RayAccess {
- public:
-  virtual ~RayAccess() = default;
-  virtual void require_initialized(const NativeRecordingState &) const = 0;
-  virtual const std::vector<std::shared_ptr<NativeResource>> &
-  dependencies() const = 0;
-};
-class QueryAccess : public virtual RayAccess {
+class QueryAccess : public virtual NativeRayResourceAccess {
  public:
   virtual ~QueryAccess() = default;
   virtual Device &device() const = 0;
@@ -36,7 +29,7 @@ class QueryAccess : public virtual RayAccess {
   virtual void record_query(CommandList *, const VulkanRayQueryPacket &) = 0;
 #endif
 };
-class GeometryAccess : public virtual RayAccess {
+class GeometryAccess : public virtual NativeRayResourceAccess {
  public:
   virtual ~GeometryAccess() = default;
   virtual Device &device() const = 0;
@@ -55,7 +48,7 @@ class BlasAccess : public GeometryAccess {
                             DevicePtr indices) = 0;
 #endif
 };
-class InstanceAccess : public virtual RayAccess {
+class InstanceAccess : public virtual NativeRayResourceAccess {
  public:
   virtual ~InstanceAccess() = default;
   virtual Device &device() const = 0;
@@ -266,7 +259,7 @@ vulkan::VulkanDevice &ray_device(NativePreparationContext &context) {
 // All cores have the same ordered initialization and fault-safe retirement.
 // Native registry leases retain public input resources through dependent work.
 template <typename Core, typename Owner = NativeResource>
-class OwnedRayResource : public Owner, public virtual RayAccess {
+class OwnedRayResource : public Owner, public virtual NativeRayResourceAccess {
  public:
   OwnedRayResource(NativePreparationContext &context,
                    std::unique_ptr<Core> core)
@@ -577,22 +570,9 @@ class RayOperation : public NativeOperation {
  public:
   explicit RayOperation(std::shared_ptr<NativeResource> resource,
                         bool initializing = false)
-      : resource_(std::move(resource)), initializing_(initializing) {
-    std::vector<std::shared_ptr<NativeResource>> pending{resource_};
-    std::unordered_set<const NativeResource *> seen;
-    while (!pending.empty()) {
-      auto current = std::move(pending.back());
-      pending.pop_back();
-      if (!current)
-        throw std::invalid_argument("Vulkan ray dependency has no owner");
-      if (!seen.insert(current.get()).second)
-        continue;
-      const auto *ray = dynamic_cast<const RayAccess *>(current.get());
-      if (!ray)
-        throw std::invalid_argument("Vulkan ray dependency has no recording contract");
-      pending.insert(pending.end(), ray->dependencies().begin(), ray->dependencies().end());
-      resources_.push_back(std::move(current));
-    }
+      : resource_(std::move(resource)),
+        initializing_(initializing),
+        resources_(collect_native_ray_resources(resource_)) {
   }
   Arch arch() const override {
     return Arch::vulkan;
@@ -606,7 +586,7 @@ class RayOperation : public NativeOperation {
   void validate_recording(NativeRecordingState &state) const override {
     for (const auto &resource : resources_)
       if (!initializing_ || resource != resource_)
-        dynamic_cast<const RayAccess &>(*resource).require_initialized(state);
+        dynamic_cast<const NativeRayResourceAccess &>(*resource).require_initialized(state);
     if (initializing_)
       state.initialized.insert(resource_.get());
   }

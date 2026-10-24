@@ -35,7 +35,7 @@ def frame_arrays(runtime, scope, instanced):
     return frame
 
 
-def check(frame, shift, instanced):
+def check(frame, shift, instanced, kernel_query=False):
     hits, ids, gradient, loss = [], [], [], 0.0
     for ray in RAYS:
         candidates = []
@@ -49,7 +49,7 @@ def check(frame, shift, instanced):
         if candidates:
             t, primitive, instance = min(candidates)
             u, v = (.25, .5) if primitive == 0 else (.5, .25)
-            hits += [t, u, v, 0]
+            hits += [t, u, v, int(kernel_query)]
             ids += [primitive, instance, (19 + 4 * instance) if instanced else 0, 1]
             gradient += [t, 0, 0, 0]
             loss += t * t * .5
@@ -63,8 +63,11 @@ def check(frame, shift, instanced):
     assert read(frame["ids"], "i") == ids
 
 
-def main(folder, mode):
+def main(folder, mode, query_kind="native"):
+    kernel_query = query_kind == "kernel"
     assert runtime_contract_manifest()["features"]["vulkan_execution_domain_private_ray_resources"]
+    if kernel_query:
+        assert runtime_contract_manifest()["features"]["vulkan_execution_domain_private_ray_kernels"]
     evidence = []
     kept = []
     if mode == "borrowed":
@@ -78,15 +81,19 @@ def main(folder, mode):
         runtime = scope.enter_context(owner)
         module = scope.enter_context(runtime.load_module(folder))
         domains = [scope.enter_context(runtime.execution_domain(capacity=1, instance_capacity=1, gpu_timing=True)) for _ in range(2)]
-        for instanced in (False, True):
+        for instanced in ((True,) if kernel_query else (False, True)):
             plan = module.execution_plan("instances" if instanced else "scene")
             with ExitStack() as group:
                 frames = [frame_arrays(runtime, group, instanced) for _ in domains]
                 calls = []
                 # A late typed-query failure rolls back already allocated AS owners.
                 bad = json.loads(plan.to_json())
-                query = next(op for op in bad["operations"] if op.get("operation") == "query")
-                query["bindings"]["hits"] = "rays"
+                if kernel_query:
+                    query = next(op for op in bad["operations"] if op.get("entry") == "query_kernel")
+                    query["arguments"][0] = "blas"  # BLAS is not a kernel TLAS.
+                else:
+                    query = next(op for op in bad["operations"] if op.get("operation") == "query")
+                    query["bindings"]["hits"] = "rays"
                 raises(lambda: ExecutionPlan.from_json(json.dumps(bad)).prepare(module, frames[0], execution_domain=domains[0]))
                 assert domains[0].info["pending"] == 0 and domains[0].info["accepting"]
                 for domain, frame in zip(domains, frames):
@@ -111,7 +118,7 @@ def main(folder, mode):
                         tickets.append(ticket)
                     for lane, ticket in enumerate(tickets):
                         ticket.wait()
-                        check(frames[lane], (step + lane) & 7, instanced)
+                        check(frames[lane], (step + lane) & 7, instanced, kernel_query)
                         timing = ticket.gpu_timing
                         assert timing["status"] == ("ready" if step == 1 else "not_sampled")
                         assert timing["sequence"] == ticket.info["sequence"]
@@ -123,11 +130,11 @@ def main(folder, mode):
                 pending = calls[0].submit(values=dict(phase=(1 << 48) | 2))
                 calls[0].close()
                 pending.wait()
-                check(frames[0], 2, instanced)
+                check(frames[0], 2, instanced, kernel_query)
                 pending.close()
                 with calls[1].submit(values=dict(phase=(1 << 49) | 3)) as ticket:
                     ticket.wait()
-                    check(frames[1], 3, instanced)
+                    check(frames[1], 3, instanced, kernel_query)
                 calls[1].close()
                 # Shared public BLAS must not become private through a new TLAS.
                 public = group.enter_context(closing(runtime.native_resource(
@@ -146,11 +153,36 @@ def main(folder, mode):
                     assert "must belong to this prepared instance" in str(error), str(error)
                 else:
                     raise AssertionError("Public AS accepted as a private resource")
+                if kernel_query:
+                    # An ordinary public TLAS can serve the same compiled kernel,
+                    # but no preceding native operation may mask its domain check.
+                    scene = group.enter_context(closing(runtime.native_resource(
+                        "vulkan_ray", "instance_tlas",
+                        parameters=dict(instance_count=2, custom_indices=[19, 23]),
+                        bindings=dict(blas_0=public, blas_1=public,
+                                      transforms=frames[0]["initial_transforms"]))))
+                    direct = json.loads(plan.to_json())
+                    direct["resources"] = [r for r in direct["resources"] if r["name"] not in ("scene", "blas")]
+                    direct["operations"] = [op for op in direct["operations"]
+                                            if op.get("kind") != "native" and op.get("entry") != "move"]
+                    direct_plan = ExecutionPlan.from_json(json.dumps(direct))
+                    values = dict(frames[0], scene=scene)
+                    values = {key: values[key] for key in direct_plan.argument_names}
+                    with direct_plan.prepare(module, values) as call:
+                        call.initialize()
+                        call.run()
+                        check(frames[0], 0, True, True)
+                    try:
+                        direct_plan.prepare(module, values, execution_domain=domains[0])
+                    except RuntimeError as error:
+                        assert "must belong to this prepared instance" in str(error), str(error)
+                    else:
+                        raise AssertionError("Kernel-only public TLAS accepted as private")
                 with plan.prepare(module, frames[1], execution_domain=domains[0], mutable_parameters=("phase",)) as rebound:
                     rebound.initialize()
                     with rebound.submit(values=dict(phase=(1 << 49) | 1)) as ticket:
                         ticket.wait()
-                        check(frames[1], 1, instanced)
+                        check(frames[1], 1, instanced, kernel_query)
                 # Deferred builds retain their seed binding through preparation.
                 seed_call = group.enter_context(plan.prepare(module, frames[0], execution_domain=domains[0], mutable_parameters=("phase",)))
                 frames[0]["indices"].close()

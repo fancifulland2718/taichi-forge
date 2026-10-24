@@ -182,10 +182,17 @@ drive preceding geometry kernels, and query outputs can feed computation and
 its explicit adjoint; AS traversal itself is not differentiable. The build
 capability is `vulkan_execution_domain_private_ray_resources`.
 
+Private TLAS resources can also bind DSL `acceleration_structure` parameters in
+the same flat plan, using compiled closest-hit or candidate-filtered/occlusion
+queries. The capability is `vulkan_execution_domain_private_ray_kernels`.
+Kernels and native operations share initialization and full BLAS dependency
+checks, with no warm resource lookup or extra submission. Standalone and borrowed
+runtimes consume this plan; ordinary JIT live AS loans remain a separate capability.
+
 All seed inputs and AS dependencies remain valid until instance retirement;
 closing an input early invalidates the instance. Wrapping a public AS in a
 private TLAS does not bypass ownership validation. Live AS loans, micromaps,
-kernel/shader AS parameters and AS operations inside control flow are outside
+ray-program/graphics-shader AS parameters and AS operations inside control flow are outside
 this capability. Ordinary synchronous resource creation keeps its contract.
 Cold `initial_data` uploads still use the default queue and `initialize()` waits
 for bootstrap; cold preparation is not fully independent of that queue. Warm
