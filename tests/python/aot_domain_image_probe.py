@@ -39,7 +39,7 @@ def main(artifact):
                         borrowed.prepare(module, {key: supplied[key] for key in borrowed.argument_names},
                                          execution_domain=queue)
                     except RuntimeError as error:
-                        assert "private managed image" in str(error), str(error)
+                        assert "Shared Vulkan image requires a sampled shader-read use" in str(error), str(error)
                     else:
                         raise AssertionError("Borrowed image accepted without a layout contract")
                 call = plan.prepare(module, {key: frame[key] for key in plan.argument_names},
