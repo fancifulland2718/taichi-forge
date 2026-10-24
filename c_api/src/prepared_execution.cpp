@@ -320,6 +320,8 @@ struct PreparedExecution {
         selected_vulkan.domain = domain->vulkan;
         vulkan_workspace = gfx_runtime->create_fixed_graph_workspace();
         selected_vulkan.workspace = vulkan_workspace;
+        for (const auto &resource : native_resources)
+          selected_vulkan.private_resources.insert(resource.get());
         std::vector<gfx::GfxRuntime::SharedImage> shared_images;
         const auto image_use = [&](const std::shared_ptr<NativeSampledImage> &image,
                                     bool sampled_only) {
@@ -1238,6 +1240,24 @@ static TiPreparedExecution prepare_execution_plan_impl(
       family ? nullptr : capi::make_native_preparation_context(rt);
   auto &preparation = family ? *family->preparation : *local_preparation;
   preparation.fault_domain->throw_if_submission_disallowed("prepare AOT plan");
+  std::vector<std::shared_ptr<NativeOperation>> resource_initializers;
+  struct RestoreVulkanInitialization {
+    NativePreparationContext &context;
+    decltype(context.defer_vulkan_initialization) previous;
+    ~RestoreVulkanInitialization() {
+      context.defer_vulkan_initialization = std::move(previous);
+    }
+  } restore_vulkan_initialization{
+      preparation, std::move(preparation.defer_vulkan_initialization)};
+  if (domain && rt.arch == taichi::Arch::vulkan) {
+    // Domain plans have no shared binding-family context. The local sink and
+    // its captured descriptors disappear after cold binding; submitted work
+    // retains the resulting operations through the existing prepared owner.
+    preparation.defer_vulkan_initialization =
+        [&](std::shared_ptr<NativeOperation> operation) {
+          resource_initializers.push_back(std::move(operation));
+        };
+  }
   struct RestoreArgPackResolver {
     NativePreparationContext &context;
     decltype(context.resolve_argpack_layout) previous;
@@ -1717,6 +1737,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
         FixedExecution::BufferFill{allocation.allocation.get_ptr(0),
                                    static_cast<std::size_t>(zero.bytes), 0});
   }
+  for (auto &operation : resource_initializers)
+    operations.emplace_back(std::move(operation));
   const auto initialization_count =
       operations.size() + (rebinding ? 0 : plan.initialization.size());
   const auto control_pointer = [&](const std::string &name) {

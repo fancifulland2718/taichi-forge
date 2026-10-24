@@ -130,6 +130,20 @@ camera/light 和 draw uniform 在 `Graph.prepare()` 时冻结；之后修改相�
 含 AS 的 pass、显示互操作和 graphics fork/join 仍需分别验证。原始图像别名、
 packed depth/stencil 和借用图像控制流仍不接纳。
 
+平直 AOT `ExecutionPlan` 可在 compute 域重建实例私有的 native `vulkan_ray`
+`triangle_scene`，或 `triangle_blas` 与 `instance_tlas`。同一实例内多个 TLAS instance
+可引用同一 BLAS；不同 prepared 实例分别拥有可变 AS 和 scratch。工厂只分配并准备
+构建命令，显式 `initialize()` 在所选域按 BLAS→TLAS 顺序执行；此后 native `refit`、
+`blas_build`、`instance_refit`、`instance_update` 和 `query` 可在同域重放。
+逐提交参数可供前置 kernel 更新几何，查询结果可传给后续计算及其显式梯度；AS 遍历
+本身并不可微。对应构建能力为 `vulkan_execution_domain_private_ray_resources`。
+
+所有 seed 输入和 AS 依赖保持有效直至实例退休；提前关闭输入会使该实例失效。
+已有 public AS 不能通过包装成私有 TLAS 绕过所有权检查。此能力暂不包含 live AS
+借用、micromap、kernel/shader AS 参数或控制流内的 AS 操作。普通同步资源创建合同
+保持不变。冷 `initial_data` 上传仍走默认队列，`initialize()` 仍等待 bootstrap；
+这不表示冷准备能完全脱离默认队列，暖态 native 查询与更新无需回到该队列。
+
 独立 Vulkan 路线还不接纳 host selection、公共并行 recipe，以及共享
 sparse/RNG/runtime-error 状态。
 普通 Graph 保持既有能力；CUDA Canvas 和外部内存协议不会因此自动适用于 Vulkan 域。

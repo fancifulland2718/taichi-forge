@@ -8,8 +8,11 @@
 #include "taichi/runtime/vulkan_execution_domain.h"
 #include "tests/cpp/aot/vulkan/timeline_gate.h"
 #include <array>
+#include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <future>
 #include <iterator>
 
 namespace taichi::lang {
@@ -335,6 +338,163 @@ TEST(VulkanExecutionOwner, PrivateOffscreenIgnoresDefaultQueue) {
     ASSERT_NE(tail, nullptr);
     ti_wait_completion_ext(tail);
     check(1, 4);
+  }
+}
+
+TEST(VulkanExecutionOwner, PrivateRayInitializationAndIndependentRefit) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  const char *path = std::getenv("TAICHI_VULKAN_RAY_DOMAIN_AOT_DIR");
+  if (!path)
+    GTEST_SKIP() << "Requires the compiled private ray fixture";
+  PublicDomainSession session;
+  const char *selected = std::getenv("TI_TEST_VULKAN_DEVICE_INDEX");
+  session.runtime = ti_create_runtime(TI_ARCH_VULKAN, selected ? std::stoul(selected) : 0);
+  ASSERT_NE(session.runtime, nullptr);
+  auto &runtime = *reinterpret_cast<VulkanRuntime *>(session.runtime);
+  auto &device = runtime.get_vk();
+  if (device.created_compute_queue_count() < 3 || !device.vk_caps().timeline_semaphore)
+    GTEST_SKIP() << "Requires two independent compute queues";
+  session.module = ti_load_aot_module(session.runtime, path);
+  ASSERT_NE(session.module, nullptr);
+  std::ifstream input(std::string(path) + "/instances.json");
+  ASSERT_TRUE(input.good());
+  const std::string plan((std::istreambuf_iterator<char>(input)), {});
+  const char *names[]{"seed", "indices", "rays", "hits", "ids", "dhits", "loss", "initial_transforms"};
+  const std::vector<std::vector<uint32_t>> shapes{
+      {6, 3}, {2, 3}, {6, 8}, {6, 4}, {6, 4}, {6, 4}, {1}, {2, 3, 4}};
+  const std::vector<float> vertices{-1, -1, 1, 1, -1, 1, 0, 1, 1,
+                                   -1, -1, 2, 0, 1, 2, 1, -1, 2};
+  const std::vector<int32_t> indices{0, 1, 2, 3, 4, 5};
+  const std::vector<float> rays{0, 0, 0, .01f, 0, 0, 1, 10,
+                               4, 0, 0, .01f, 0, 0, 1, 10,
+                               0, 0, 0, .01f, 0, 0, 1, 1.5f,
+                               0, 0, 1.5f, .01f, 0, 0, 1, 3,
+                               8, 0, 0, .01f, 0, 0, 1, 10,
+                               0, 0, 4, .01f, 0, 0, -1, 10};
+  const std::vector<float> transforms{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+                                    1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 2};
+  const char *parameter = "phase";
+  const TiVulkanExecutionDomainCreateInfo options{1, 1, TI_TRUE, TI_VULKAN_EXECUTION_QUEUE_COMPUTE};
+  std::array<TiVulkanExecutionDomainInfo, 2> domains{};
+  std::array<std::array<TiNamedArgument, 9>, 2> arguments{};
+  for (int lane = 0; lane < 2; ++lane) {
+    auto domain = ti_create_vulkan_execution_domain_ext(session.runtime, &options);
+    ASSERT_NE(domain, nullptr);
+    session.domains.push_back(domain);
+    ti_get_vulkan_execution_domain_info_ext(domain, &domains[lane]);
+    for (size_t i = 0; i < shapes.size(); ++i) {
+      uint32_t size = 1;
+      for (auto extent : shapes[i])
+        size *= extent;
+      TiMemoryAllocateInfo allocation{size * sizeof(float), TI_TRUE, TI_TRUE, TI_FALSE,
+                                     TI_MEMORY_USAGE_STORAGE_BIT};
+      auto memory = ti_allocate_memory(session.runtime, &allocation);
+      ASSERT_NE(memory, nullptr);
+      session.memories.push_back(memory);
+      auto &argument = arguments[lane][i];
+      argument.name = names[i];
+      argument.argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+      auto &array = argument.argument.value.ndarray;
+      array.memory = memory;
+      array.shape.dim_count = shapes[i].size();
+      std::copy(shapes[i].begin(), shapes[i].end(), array.shape.dims);
+      array.elem_type = (i == 1 || i == 4) ? TI_DATA_TYPE_I32 : TI_DATA_TYPE_F32;
+      auto *mapped = ti_map_memory(session.runtime, memory);
+      ASSERT_NE(mapped, nullptr);
+      std::memset(mapped, 0, size * sizeof(float));
+      if (i == 0) std::memcpy(mapped, vertices.data(), size * sizeof(float));
+      if (i == 1) std::memcpy(mapped, indices.data(), size * sizeof(float));
+      if (i == 2) std::memcpy(mapped, rays.data(), size * sizeof(float));
+      if (i == 7) std::memcpy(mapped, transforms.data(), size * sizeof(float));
+      ti_unmap_memory(session.runtime, memory);
+    }
+    arguments[lane][8].name = parameter;
+    arguments[lane][8].argument.type = TI_ARGUMENT_TYPE_SCALAR;
+    arguments[lane][8].argument.value.scalar.type = TI_DATA_TYPE_U64;
+  }
+  const auto prepare = [&](int lane) {
+    return ti_prepare_execution_plan_on_vulkan_domain_ext(
+        session.runtime, session.module, session.domains[lane], plan.size(), plan.data(),
+        arguments[lane].size(), arguments[lane].data(), 0, nullptr, 1, &parameter);
+  };
+  session.executions.push_back(prepare(0));
+  check_domain_error();
+  ASSERT_NE(session.executions[0], nullptr);
+  ti_initialize_prepared_ext(session.runtime, session.executions[0]);
+  check_domain_error();
+  {
+    // Kernels are already registered. Reconstructing the peer's private AS
+    // must not synchronously build on queue zero. Bootstrap can enqueue there;
+    // initialize still waits for that cold prefix after the gate is released.
+    test_detail::TimelineGate gate(device, 0);
+    auto future = std::async(std::launch::async, [&] { return prepare(1); });
+    const auto status = future.wait_for(std::chrono::seconds(5));
+    gate.release();  // Always unblock before joining a failed implementation.
+    session.executions.push_back(future.get());
+    EXPECT_EQ(status, std::future_status::ready);
+    ASSERT_NE(session.executions[1], nullptr);
+  }
+  ti_initialize_prepared_ext(session.runtime, session.executions[1]);
+  check_domain_error();
+  const auto submit = [&](int lane, uint64_t value) {
+    TiCompletion ticket = nullptr;
+    const bool accepted = ti_try_submit_prepared_sampled_ext(
+        session.runtime, session.executions[lane], 0, nullptr, &ticket,
+        TI_FALSE, TI_TRUE, 1, &value);
+    check_domain_error();
+    if (accepted)
+      session.completions.push_back(ticket);
+    else
+      EXPECT_EQ(ticket, nullptr);
+    return ticket;
+  };
+  const auto check = [&](int lane, float shift) {
+    for (int column : {3, 5}) {
+      void *mapped = nullptr;
+      const auto allocation = runtime.get_memory(session.memories[lane * 8 + column]).allocation;
+      ASSERT_EQ(device.map(allocation, &mapped), RhiResult::success);
+      EXPECT_EQ(static_cast<const float *>(mapped)[0], 1 + shift);
+      EXPECT_EQ(static_cast<const float *>(mapped)[4], 3 + shift);
+      device.unmap(allocation);
+    }
+  };
+  {
+    test_detail::TimelineGate default_gate(device, 0);
+    test_detail::TimelineGate left_gate(device, domains[0].queue_index);
+    const auto before = device.queue_submission_snapshot().queue_submit_calls;
+    auto left = submit(0, (uint64_t(1) << 48) | 1);
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before + 1);
+    EXPECT_EQ(ti_query_completion_ext(left), TI_FALSE);
+    EXPECT_EQ(submit(0, 7), nullptr);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before + 1);
+    auto right = submit(1, (uint64_t(1) << 49) | 2);
+    ASSERT_NE(right, nullptr);
+    ti_wait_completion_ext(right);
+    check(1, 2);
+    EXPECT_EQ(ti_query_completion_ext(left), TI_FALSE);
+    left_gate.release();
+    ti_wait_completion_ext(left);
+    check(0, 1);
+    auto retired = ti_get_prepared_vulkan_instance_ext(session.runtime, session.executions[0]);
+    ASSERT_NE(retired, nullptr);
+    ti_retire_vulkan_execution_instance_ext(retired);
+    ti_finish_prepared_instance_retirement_ext(session.runtime, session.executions[0]);
+    check_domain_error();
+    session.executions[0] = nullptr;
+    ti_release_vulkan_execution_instance_ext(retired);
+    auto tail = submit(1, (uint64_t(1) << 49) | 3);
+    ASSERT_NE(tail, nullptr);
+    ti_wait_completion_ext(tail);
+    check(1, 3);
+    for (auto ticket : {left, right, tail}) {
+      TiCompletionGpuTiming timing{};
+      ti_get_completion_gpu_timing_ext(ticket, &timing);
+      EXPECT_EQ(timing.status, TI_COMPLETION_GPU_TIMING_READY);
+      EXPECT_GT(timing.duration_ns, 0u);
+    }
+    check_domain_error();
   }
 }
 

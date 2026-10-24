@@ -171,6 +171,26 @@ Passes with AS resources, display interop and graphics fork/join need their own
 qualification. Raw image aliases, packed depth/stencil and borrowed-image
 control flow remain excluded.
 
+Flat AOT `ExecutionPlan` instances can reconstruct private native `vulkan_ray`
+`triangle_scene` resources, or `triangle_blas` and `instance_tlas`, on compute
+domains. Multiple TLAS instances within one preparation can reference a BLAS;
+separate preparations own separate mutable AS and scratch. Factories allocate
+and prepare build commands. Explicit `initialize()` executes BLAS then TLAS
+builds on the selected domain. Native `refit`, `blas_build`, `instance_refit`,
+`instance_update` and `query` can then replay there. Submission parameters can
+drive preceding geometry kernels, and query outputs can feed computation and
+its explicit adjoint; AS traversal itself is not differentiable. The build
+capability is `vulkan_execution_domain_private_ray_resources`.
+
+All seed inputs and AS dependencies remain valid until instance retirement;
+closing an input early invalidates the instance. Wrapping a public AS in a
+private TLAS does not bypass ownership validation. Live AS loans, micromaps,
+kernel/shader AS parameters and AS operations inside control flow are outside
+this capability. Ordinary synchronous resource creation keeps its contract.
+Cold `initial_data` uploads still use the default queue and `initialize()` waits
+for bootstrap; cold preparation is not fully independent of that queue. Warm
+native queries and updates do not return to it.
+
 Host selection, public parallel recipes and shared sparse/RNG/runtime-error
 state remain outside this independent Vulkan route. Ordinary Graph execution keeps
 its existing capabilities; CUDA Canvas and external-memory protocols are not

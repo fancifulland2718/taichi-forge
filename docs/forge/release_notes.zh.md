@@ -34,7 +34,7 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **184**，持久执行计划为 **26**，
+- frontend 与 native runtime 使用私有 ABI **185**，持久执行计划为 **26**，
   编译缓存 schema 为 **74**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
@@ -48,6 +48,10 @@
   参数上传和外部等待；详见[执行域合同](cuda_execution_domains.zh.md)。
 - Vulkan AS build/refit 的几何与实例输入屏障使用对应的 shader-read 访问类型，
   正确覆盖 transfer 上传和设备变换后的构建输入；AS storage/scratch 的依赖保持不变。
+- Vulkan 独立域的平直 AOT 计划可重建私有 triangle scene 或共享 BLAS 的 TLAS：
+  工厂只准备资源，`initialize()` 在所选域构建，暖态 native refit/query 在同域执行。
+  资源闭包包含全部 BLAS 和初始输入；公共 live AS、micromap 及 kernel/shader AS
+  绑定尚不属于该能力。冷数据上传和 bootstrap 仍依赖普通队列，详见执行域合同。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、
   `advanced_optimization=False`。显式选择 `balanced/full` 且未覆盖高级 IR 优化时默认开启
   后者；kernel/export 的显式设置经共同编译请求解析。JIT 可面向当前设备，AOT 可声明

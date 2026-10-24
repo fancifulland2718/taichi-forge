@@ -1,11 +1,13 @@
 #pragma once
 
 #ifdef TI_WITH_VULKAN
+#include <unordered_set>
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/runtime/vulkan_execution_domain.h"
 
 namespace taichi::lang {
+class NativeResource;
 
 // Cold Vulkan bindings keep queue ownership out of persistent execution plans.
 // As with CUDA, one enclosing owner may reserve initialization and replay as one
@@ -21,6 +23,9 @@ struct FixedExecution::VulkanExecutionBinding {
   // FixedExecution initializes its own workspace on its first accepted submit.
   std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> workspace;
   std::size_t parameter_count{0};
+  // Cold identity proof supplied by the enclosing factory transaction. Public
+  // native-resource arguments are deliberately excluded. Never read on replay.
+  std::unordered_set<const NativeResource *> private_resources;
 };
 
 }  // namespace taichi::lang

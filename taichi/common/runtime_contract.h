@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Selected JIT code loans may retain immutable resource initialization data.
-inline constexpr int kForgeNativeAbiRevision = 184;
+// Private Vulkan resources contribute owner-qualified initialization commands.
+inline constexpr int kForgeNativeAbiRevision = 185;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
@@ -53,6 +53,7 @@ inline constexpr std::uint64_t kForgeVulkanExecutionDomainSharedSampledImages = 
 // Per-instance reconstructed color/depth attachments with compute consumers.
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainPrivateGraphics = 1ull << 31;
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainLiveImageWrites = 1ull << 32;
+inline constexpr std::uint64_t kForgeVulkanExecutionDomainPrivateRayResources = 1ull << 33;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

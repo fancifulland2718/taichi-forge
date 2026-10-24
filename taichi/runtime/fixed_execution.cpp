@@ -733,8 +733,23 @@ FixedExecution::FixedExecution(
         const auto mode = native->execution_mode();
         if (execution_binding)
           native->validate_cuda_execution_domain();
-        if (vulkan_binding)
+        if (vulkan_binding) {
           native->validate_vulkan_execution_domain();
+#ifdef TI_WITH_VULKAN
+          for (const auto &resource :
+               native->vulkan_recording_requirements().stateful_resources) {
+            if (!resource || resource->arch() != arch ||
+                &resource->device() != &device ||
+                !vulkan_binding->private_resources.count(resource.get()))
+              throw std::invalid_argument(
+                  "Independent Vulkan stateful resource must belong to this "
+                  "prepared instance");
+            if (inside_control)
+              throw std::invalid_argument(
+                  "Independent Vulkan stateful resources require a flat region");
+          }
+#endif
+        }
         if (vulkan_binding && inside_control &&
             native->vulkan_recording_requirements().graphics_queue)
           throw std::invalid_argument(

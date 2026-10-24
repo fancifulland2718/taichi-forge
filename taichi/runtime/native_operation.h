@@ -75,6 +75,11 @@ struct NativeVulkanRecordingRequirements {
   // layouts. Owners are resolved only during preparation. Unknown providers
   // cannot borrow live images by claiming a shader-read entry/exit layout.
   std::optional<std::vector<ImageUse>> image_uses;
+  // Stateful provider resources referenced by these commands, including their
+  // transitive mutable dependencies. Independent execution currently requires
+  // this closure to be private to its prepared owner. A shared_ptr alone is
+  // lifetime protection, not permission to mutate another instance's AS.
+  std::vector<std::shared_ptr<NativeResource>> stateful_resources;
 };
 
 // Prepared backend commands own their scratch and recording state. The

@@ -64,6 +64,12 @@ struct NativePreparationContext {
   // retain this callback or a module/kernel pointer in their storage owners.
   std::function<std::shared_ptr<const aot::ArgPackLayout>(
       const std::string &, std::uint32_t)> resolve_argpack_layout;
+  // Optional cold sink for a prepared Vulkan owner's initialization sequence.
+  // Participating factories allocate only, then append commands retaining their
+  // resource/dependencies. No queue work is submitted by this callback. An
+  // absent sink preserves ordinary synchronous resource creation semantics.
+  std::function<void(std::shared_ptr<NativeOperation>)>
+      defer_vulkan_initialization;
 };
 
 // Build privately, then publish as const. No static registration side effects,
