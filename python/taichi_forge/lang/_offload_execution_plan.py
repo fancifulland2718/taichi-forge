@@ -526,9 +526,9 @@ class _OffloadExecutionPlan:
             raise ValueError("materialized task count does not match the plan")
         compilation_identity = self.compilation_identity
         if self.range_dispatch_only and all(
-            getattr(manifest, "backend", None) == "vulkan" for manifest in manifests
+            getattr(manifest, "backend", None) in ("cuda", "vulkan") for manifest in manifests
         ):
-            # Native Vulkan admission allows only these launch-time controls.
+            # These baseline/range-only controls do not change generated code.
             # The ordinary payload is authoritative; the physical plan keeps
             # its own identity and all topology/proof checks below still apply.
             compilation_identity = ""

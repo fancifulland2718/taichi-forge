@@ -100,6 +100,8 @@ class TI_DLL_EXPORT Kernel : public Callable {
   struct OffloadExecutionPlan {
     std::string compilation_identity;
     std::string execution_identity;
+    // Frozen cold admission fact: no source/code-shaping policy is changed.
+    bool range_dispatch_only{true};
     // The source topology is checked immediately after offloading. ``tasks``
     // describes the physical topology after the optional compiler-owned
     // pointwise fusion transform and is the only topology seen by codegen and

@@ -4098,8 +4098,6 @@ class _OffloadExecutionPlanBinding:
             raise TaichiRuntimeError("offload execution plans require native CUDA or Vulkan")
         if backend == "vulkan" and not self.plan.range_dispatch_only:
             raise TaichiRuntimeError("Vulkan task plans only support range dispatch selection")
-        if backend != "vulkan" and self.plan.device_range_tasks:
-            raise TaichiRuntimeError("Device range dispatch recording currently requires Vulkan")
         if self._kernel.autodiff_mode != AutodiffMode.NONE:
             raise TaichiRuntimeError(
                 "offload execution plans support primal direct JIT kernels only"

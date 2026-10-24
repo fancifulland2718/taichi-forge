@@ -2061,7 +2061,15 @@ device packet 决定且不做 host readback。静态与动态 shared-memory byte
 安全缩小 grid；CPU 调度器降级后的范围也不一定等于用户源码范围。两端为常量时，
 `constant_range_size` 用 64 位差值计算，反向或空区间为零。描述不增加设备读回或运行时同步。
 当前 task 布局采用 LLVM AOT schema 11、GFX metadata 10（选中范围策略时为 11）和
-JIT cache schema 74；原生 ABI 为 177，旧候选产物需要重新导出并使用配对的前端/runtime 包。
+JIT cache schema 74；原生 ABI 为 178，旧候选产物需要重新导出并使用配对的前端/runtime 包。
+
+CUDA 选中的设备范围 task 策略现可进入普通平直 `Graph.run()` 录制与借用域的
+`Graph.prepare()`。它复用编译产物，每个选中 task 增加一个设备控制器和 48 B 控制
+存储。控制器读取该 task 已冻结的范围快照，保留逻辑循环边界，物理 grid 不超过
+原编译值和设备限制。普通录制借用 runtime 临时区，独立实例保持私有临时区。
+这仍是内部 task-plan 的显式策略，默认不变；结构化、parallel、frame 组合及此策略
+的 CUDA AOT 持久化尚未接纳。无法录制时明确报错，不静默改用其他范围策略；
+此支持声明不代表一般应用必然提速。
 
 `task_id` 在相同 specialization cache identity、task ordinal/kind、compile config、device
 capabilities 与 backend 下稳定；不承诺跨 backend、跨配置或跨版本稳定。manifest 只读：冷查询

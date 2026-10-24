@@ -1174,7 +1174,9 @@ FixedExecution::FixedExecution(
               dispatch->adaptive_block_dim,
               dispatch->grouped_update,
               dispatch->bounded_binding_identity,
-              dispatch->parameters});
+              dispatch->parameters,
+              std::vector<std::size_t>(dispatch->context->device_range_tasks().begin(),
+                                       dispatch->context->device_range_tasks().end())});
         } else if (const auto *external =
                        std::get_if<std::shared_ptr<NativeOperation>>(
                            &operation)) {

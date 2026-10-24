@@ -281,6 +281,9 @@ void LlvmAotModuleBuilder::add_with_launch_abi_per_backend(
 void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
                                          Kernel *kernel,
                                          const std::string &launch_abi) {
+  TI_ERROR_IF(kernel->get_offload_execution_plan() &&
+                  !kernel->get_offload_execution_plan()->device_range_tasks.empty(),
+              "CUDA device range AOT entry policy is not yet supported");
   auto compiled = compile_kernel(kernel);
   if (launch_abi == cuda::kGraphGateLaunchABI) {
     TI_ERROR_IF(!compiled.rets.empty() ||

@@ -35,6 +35,7 @@
 #include "taichi/rhi/cuda/primitives/graph_ptx.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/bounded_graph.h"
+#include "taichi/runtime/cuda/range_graph.h"
 #include "taichi/runtime/cuda/parallel_graph.h"
 #include "taichi/runtime/cuda/predicate_graph.h"
 #endif
@@ -992,6 +993,8 @@ bool CompiledGraph::cuda_capture_commands_require_exact_bindings() const {
 }
 
 bool CompiledGraph::cuda_conditional_body_eligible() const {
+  TI_ERROR_IF(has_device_range_dispatches(),
+              "CUDA device range requires a flat ordinary Graph");
   return std::all_of(
       dispatches.begin(), dispatches.end(), [](const auto &dispatch) {
         if (dispatch.cuda_bounded_dispatch)
@@ -1003,6 +1006,8 @@ bool CompiledGraph::cuda_conditional_body_eligible() const {
 }
 
 bool CompiledGraph::cuda_expanded_control_eligible() const {
+  TI_ERROR_IF(has_device_range_dispatches(),
+              "CUDA device range requires a flat ordinary Graph");
   return std::all_of(
       dispatches.begin(), dispatches.end(), [](const auto &dispatch) {
         return dispatch.ti_kernel && !dispatch.cuda_capture_command &&
@@ -1402,6 +1407,7 @@ struct CompiledGraphCudaState {
   std::vector<std::shared_ptr<CudaGraphCaptureResources>>
       provider_capture_resources;
   cuda::BoundedGraphControls bounded_dispatch;
+  cuda::RangeGraphControls range_dispatch;
   // Host-only immutable recipes for opt-in physical launch observation.
   // They are materialized with the Graph and never touched by replay.
   std::vector<CudaGraphBoundedDispatchObservation>
@@ -1526,6 +1532,7 @@ struct CompiledGraphCudaState {
     nested_inner_gates.clear();
     nested_update.release(true);
     bounded_dispatch.release(true);
+    range_dispatch.release(true);
     conditional_handle = 0;
     conditional_mode = false;
     conditional_predicate_allocation = kDeviceNullAllocation;
@@ -1582,6 +1589,7 @@ struct CompiledGraphCudaState {
 
   uint64_t known_bounded_control_bytes() const {
     uint64_t bytes = bounded_dispatch.device_bytes();
+    bytes += range_dispatch.device_bytes();
     bytes += nested_update.device_bytes();
     if (nested_conditional && nested_conditional->controls != nullptr) {
       bytes += nested_conditional->budgets.size() *
@@ -2256,6 +2264,10 @@ std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
       record_cuda_provider_with_resources(dispatch, args, program, stream, state);
       return CUDA_SUCCESS;
     }
+    if (state.range_dispatch.device_bytes()) {
+      return state.range_dispatch.capture(i, *packet.launcher, packet.packet,
+                                          stream);
+    }
     return state.bounded_dispatch.capture(i, *packet.launcher, packet.packet,
                                           stream);
   };
@@ -2426,6 +2438,16 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
                         Program &program,
                         RuntimeStatistics *statistics,
                         bool cuda_concurrent_batch_lane = false) {
+  const bool range_selected = graph.has_device_range_dispatches();
+  TI_ERROR_IF(range_selected &&
+                  (cuda_concurrent_batch_lane ||
+                   graph.has_cuda_parallel_dispatch_groups() ||
+                   std::any_of(graph.dispatches.begin(), graph.dispatches.end(),
+                               [](const auto &dispatch) {
+                                 return dispatch.cuda_bounded_dispatch.has_value() ||
+                                        dispatch.indirect_dispatch_arg.has_value();
+                               })),
+              "CUDA device range requires a flat ordinary Graph");
   const bool stable_replay = cache.stable_replay_optimization_enabled.load(
       std::memory_order_relaxed);
   bool exact_slot = false;
@@ -2665,6 +2687,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   auto &driver = CUDADriver::get_instance();
   void *capture_stream = state->ensure_capture_stream();
 
+  std::vector<std::vector<std::size_t>> range_selections(graph.dispatches.size());
   for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
     const auto &dispatch = graph.dispatches[i];
     if (dispatch.cuda_capture_command) {
@@ -2716,6 +2739,11 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       prepared = launcher->prepare_cuda_graph_launch(
           handle, launch_ctx, capture_packet.packet, capture_stream);
     }
+    if (prepared && !launch_ctx.device_range_tasks().empty()) {
+      launcher->bind_runtime_temporaries(capture_packet.packet);
+      range_selections[i].assign(launch_ctx.device_range_tasks().begin(),
+                                 launch_ctx.device_range_tasks().end());
+    }
     if (!prepared) {
       driver.stream_synchronize(capture_stream);
       state->retry.record_structural_failure();
@@ -2740,6 +2768,17 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
           &bounded_setup_error)) {
     return handle_cuda_graph_driver_failure(*state, bounded_setup_error,
                                             "bounded control setup");
+  }
+  if (range_selected) {
+    std::vector<cuda::KernelLauncher::GraphLaunchPacket> packets;
+    packets.reserve(state->packets.size());
+    for (const auto &packet : state->packets)
+      packets.push_back(packet.packet);
+    if (!state->range_dispatch.initialize(packets, range_selections,
+                                          taichi_global_tmp_buffer_size,
+                                          &bounded_setup_error))
+      return handle_cuda_graph_driver_failure(*state, bounded_setup_error,
+                                              "range control setup");
   }
 
   state->stats.zero_arg_eligible =
@@ -2793,7 +2832,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     return handle_cuda_graph_driver_failure(*state, instantiate_err,
                                             "instantiate");
   }
-  if (!state->bounded_dispatch.groups.empty() ||
+  if (range_selected || !state->bounded_dispatch.groups.empty() ||
       std::any_of(state->bounded_dispatch.controls.begin(),
                   state->bounded_dispatch.controls.end(),
                   [](const auto &control) {
@@ -2813,6 +2852,15 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   if (control_upload_error != CUDA_SUCCESS) {
     return handle_cuda_graph_driver_failure(
         *state, control_upload_error, "bounded control upload");
+  }
+  if (range_selected) {
+    // Device node addresses become usable only after executable upload.
+    driver.stream_synchronize(nullptr);
+    const auto error = state->range_dispatch.upload();
+    if (error != CUDA_SUCCESS) {
+      return handle_cuda_graph_driver_failure(*state, error,
+                                              "range control upload");
+    }
   }
   state->retry.record_success();
   state->has_captured_once = true;
@@ -6083,8 +6131,10 @@ void CompiledGraph::jit_run_cached(
     const std::unordered_map<std::string, IValue> &args,
     CompiledGraphJITCache &cache,
     bool cuda_concurrent_batch_lane) const try {
-  const bool has_indirect_dispatch = has_indirect_dispatches() || has_device_range_dispatches();
-  TI_ERROR_IF(has_indirect_dispatch &&
+  const bool has_device_range_dispatch = has_device_range_dispatches();
+  const bool has_indirect_dispatch =
+      has_indirect_dispatches() || has_device_range_dispatch;
+  TI_ERROR_IF(has_indirect_dispatches() &&
                   compile_config.arch != Arch::vulkan,
               "Graph indirect dispatch is currently supported only by the "
               "Vulkan backend");
@@ -6278,6 +6328,8 @@ void CompiledGraph::jit_run_cached(
       finish_attribution();
       return;
     }
+    TI_ERROR_IF(has_device_range_dispatch,
+                "Device range dispatch requires native CUDA Graph recording");
     TI_ERROR_IF(cuda_concurrent_batch_lane,
                 "Concurrent CUDA Graph batch requires native unlabeled "
                 "Graph replay");
@@ -6413,6 +6465,8 @@ bool CompiledGraph::jit_run_bounded_cuda_cached(
     std::size_t prefix_dispatch_count,
     std::size_t suffix_dispatch_count) const try {
 #if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(has_device_range_dispatches(),
+              "CUDA device range requires a flat ordinary Graph");
   if (compile_config.arch != Arch::cuda || predicate == nullptr) {
     return false;
   }
@@ -6497,6 +6551,8 @@ bool CompiledGraph::jit_run_bounded_cuda_masked_cached(
     int max_iterations,
     bool continue_while_nonzero) const try {
 #if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(has_device_range_dispatches(),
+              "CUDA device range requires a flat ordinary Graph");
   if (compile_config.arch != Arch::cuda || predicate == nullptr) {
     return false;
   }
@@ -6586,6 +6642,8 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_sequence_cached(
     std::int64_t outer_max_iterations,
     CompiledGraphNestedCudaRoute route) const try {
 #if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(has_device_range_dispatches(),
+              "CUDA device range requires a flat ordinary Graph");
   if (compile_config.arch != Arch::cuda || outer_predicate == nullptr ||
       outer_counter == nullptr || inner_controls.empty()) {
     return false;
@@ -7340,6 +7398,8 @@ bool CompiledGraph::jit_run_conditional_cuda_cached(
     int conditional_type,
     int default_branch) const try {
 #if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(has_device_range_dispatches(),
+              "CUDA device range requires a flat ordinary Graph");
   if (compile_config.arch != Arch::cuda || selector == nullptr) {
     return false;
   }
@@ -7425,6 +7485,8 @@ bool CompiledGraph::jit_run_conditional_cuda_masked_cached(
     int conditional_type,
     int default_branch) const try {
 #if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(has_device_range_dispatches(),
+              "CUDA device range requires a flat ordinary Graph");
   if (compile_config.arch != Arch::cuda || selector == nullptr) {
     return false;
   }

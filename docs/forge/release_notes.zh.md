@@ -34,8 +34,8 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **172**，持久执行计划为 **26**，
-  编译缓存 schema 为 **71**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
+- frontend 与 native runtime 使用私有 ABI **178**，持久执行计划为 **26**，
+  编译缓存 schema 为 **74**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、

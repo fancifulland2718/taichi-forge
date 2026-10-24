@@ -1450,6 +1450,8 @@ bool KernelLauncher::capture_cuda_graph_updatable_launch(
 
 void KernelLauncher::launch_llvm_kernel(Handle handle,
                                         LaunchContextBuilder &ctx) {
+  TI_ERROR_IF(!ctx.device_range_tasks().empty(),
+              "CUDA device range requires its Graph recording recipe");
   // Keep argument-buffer preparation, every offloaded task, and stream-ordered
   // cleanup contiguous with respect to CUDA graph replay and other host
   // launchers. The default ndarray/field path only enqueues work while holding

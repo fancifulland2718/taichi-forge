@@ -2509,8 +2509,20 @@ change the physical range relative to the source loop. Two constant bounds
 produce `constant_range_size` using a 64-bit difference, with empty or reversed
 intervals reporting zero. Reporting adds no device readback or synchronization.
 The current task layout uses LLVM AOT schema 11, GFX metadata 10 (11 for
-selected range policies), JIT cache schema 74 and native ABI 177. Re-export older candidate artifacts and use a paired frontend
+selected range policies), JIT cache schema 74 and native ABI 178. Re-export older candidate artifacts and use a paired frontend
 and runtime package.
+
+CUDA's selected device-range task policy can now be consumed by an ordinary
+flat `Graph.run()` recording and by a borrowed-domain `Graph.prepare()`.
+It reuses the compiled payload and inserts one device controller and 48 bytes
+of control storage per selected task. The controller reads that task's frozen
+range snapshot, preserves the logical loop bounds, and caps the physical grid
+at the existing compiled/device limit. Ordinary recordings borrow the runtime
+temporary workspace; independent instances keep their private workspace.
+This remains an explicit internal task-plan policy, with no default change.
+Structured/parallel/frame combinations and CUDA AOT persistence of this policy
+are not yet admitted; an unavailable recording cannot silently run with a
+different range strategy. This is not a general application speedup claim.
 
 `task_id` is stable for the same specialization cache identity, task ordinal,
 task kind, compile configuration, device capabilities, and backend. It is not

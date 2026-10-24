@@ -374,11 +374,11 @@ Kernel::get_kernel_optimization_spec() const {
 
 std::string Kernel::optimization_spec_cache_key() const {
   if (offload_execution_plan_.has_value()) {
-    // Vulkan admission permits only launch-time range selection. Its exact
+    // Range-only plans select a launch policy without changing code. Their exact
     // topology and proof are validated against the compiled artifact, while
     // the selected indices belong to the invocation/Graph entry. Reuse the
     // ordinary payload instead of compiling it again under an all-default plan.
-    if (program->compile_config().arch == Arch::vulkan)
+    if (offload_execution_plan_->range_dispatch_only)
       return {};
     return fmt::format("oep:{}",
                        offload_execution_plan_->compilation_identity);
@@ -407,7 +407,7 @@ std::string Kernel::optimization_spec_cache_key() const {
 const std::string &Kernel::optimization_spec_identity() const {
   static const std::string kEmptyIdentity;
   if (offload_execution_plan_.has_value()) {
-    if (program->compile_config().arch == Arch::vulkan)
+    if (offload_execution_plan_->range_dispatch_only)
       return kEmptyIdentity;
     return offload_execution_plan_->compilation_identity;
   }
@@ -599,13 +599,15 @@ void Kernel::set_offload_execution_plan(
         task.range_work_per_thread_target != 1 ||
         task.memory_strategy != "direct" ||
         task.sparse_list_policy != "saturating";
+    plan.range_dispatch_only &= !nonbaseline;
     TI_ERROR_IF(task.device_range_dispatch && (nonbaseline || task.task_kind != "range_for"),
                 "Device range dispatch requires a baseline range_for task");
     // Admission must also hold on a compiled-cache hit, when IR passes do not run.
     TI_ERROR_IF(plan_arch == Arch::vulkan && nonbaseline,
                 "Vulkan task plans only support range dispatch selection");
-    TI_ERROR_IF(task.device_range_dispatch && plan_arch != Arch::vulkan,
-                "Device range dispatch recording currently requires Vulkan");
+    TI_ERROR_IF(task.device_range_dispatch && plan_arch != Arch::vulkan &&
+                    plan_arch != Arch::cuda,
+                "Device range dispatch recording requires CUDA or Vulkan");
     const bool sparse_listgen_policy =
         task.task_kind == "listgen" &&
         task.sparse_list_policy == "parent_capacity_bound" &&
@@ -625,6 +627,7 @@ void Kernel::set_offload_execution_plan(
   }
 
   std::vector<int> fusion_group_at(task_count, -1);
+  plan.range_dispatch_only &= fusion_groups.empty();
   int previous_end = -1;
   plan.fusion_groups.reserve(fusion_groups.size());
   for (std::size_t group_index = 0; group_index < fusion_groups.size();
