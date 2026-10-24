@@ -144,9 +144,17 @@ packed depth/stencil 和借用图像控制流仍不接纳。
 完整 BLAS 依赖检查，不增加暖态资源查询或额外提交。独立和借用 runtime 均消费
 该计划；这不表示普通 JIT 的 live AS 已能借入独立域。
 
+同一平直 AOT 计划也可包含 `vulkan_ray_program.launch`，使用完整描述的 buffer、
+私有 sampled/storage image 及私有 TLAS。能力项为
+`vulkan_execution_domain_ray_programs`。SBT 在冷阶段打包，上传放入所选域的显式
+初始化阶段；初始化与重放中创建的操作都纳入这一顺序。普通和计时录制变体共用
+一份保留的 SBT 上传存储，其字节数计入实例 workspace，暖态不重新打包或上传。
+AS、图像和 buffer 依赖在准备时验证；ray program 的结果可供后续计算和显式梯度使用，
+不表示 ray tracing 本身可微。
+
 所有 seed 输入和 AS 依赖保持有效直至实例退休；提前关闭输入会使该实例失效。
 已有 public AS 不能通过包装成私有 TLAS 绕过所有权检查。此能力暂不包含 live AS
-借用、micromap、ray program/graphics shader AS 参数或控制流内的 AS 操作。普通同步资源创建合同
+借用、micromap、graphics shader AS 参数或控制流内的 AS 操作。普通同步资源创建合同
 保持不变。冷 `initial_data` 上传仍走默认队列，`initialize()` 仍等待 bootstrap；
 这不表示冷准备能完全脱离默认队列，暖态 native 查询与更新无需回到该队列。
 

@@ -142,8 +142,17 @@ TEST(VulkanRayPipeline, ExecutesPreparedSbtAndRetainsRecordedResources) {
   ASSERT_EQ(command_result, RhiResult::success);
   auto *vk_commands = static_cast<VulkanCommandList *>(commands.get());
   EXPECT_FALSE(sbt->initialization_recorded());
+  EXPECT_EQ(sbt->initialization_storage_bytes(), sbt->allocated_bytes());
+  // Fixed owners record alternative cold variants without repacking/uploading
+  // on the host or allocating a second SBT. Only the selected list executes.
+  auto [alternate, alternate_result] = stream->new_command_list_unique();
+  ASSERT_EQ(alternate_result, RhiResult::success);
+  sbt->record_initialization(*static_cast<VulkanCommandList *>(alternate.get()), true);
+  EXPECT_TRUE(sbt->initialization_recorded());
+  EXPECT_EQ(sbt->initialization_storage_bytes(), sbt->allocated_bytes());
   sbt->record_initialization(*vk_commands);
   EXPECT_TRUE(sbt->initialization_recorded());
+  EXPECT_EQ(sbt->initialization_storage_bytes(), 0);
   EXPECT_THROW(sbt->record_initialization(*vk_commands), std::logic_error);
   const std::array<uint32_t, 3> dimensions{uint32_t(values.size()), 1, 1};
   validate_vulkan_ray_program_launch(*device, *pipeline, dimensions, {});

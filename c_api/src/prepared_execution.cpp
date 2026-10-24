@@ -1730,17 +1730,15 @@ static TiPreparedExecution prepare_execution_plan_impl(
       }
     }
   }
-  std::vector<FixedExecution::Operation> operations;
+  std::vector<FixedExecution::Operation> initializers;
   for (const auto &zero : resource_bindings.zero_initializations) {
     const auto allocation = rt.get_memory(zero.memory);
-    operations.emplace_back(
+    initializers.emplace_back(
         FixedExecution::BufferFill{allocation.allocation.get_ptr(0),
                                    static_cast<std::size_t>(zero.bytes), 0});
   }
-  for (auto &operation : resource_initializers)
-    operations.emplace_back(std::move(operation));
-  const auto initialization_count =
-      operations.size() + (rebinding ? 0 : plan.initialization.size());
+  std::vector<FixedExecution::Operation> explicit_initializers;
+  std::vector<FixedExecution::Operation> operations;
   const auto control_pointer = [&](const std::string &name) {
     const auto &array = array_binding(name);
     if (array.scalar_type != PrimitiveType::i32 || array.bytes != 4 ||
@@ -2036,7 +2034,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
     }
     return true;
   };
-  if (!rebinding && !bind_steps(plan.initialization, operations))
+  if (!rebinding && !bind_steps(plan.initialization, explicit_initializers))
     return TI_NULL_HANDLE;
   if (family && !rebinding) {
     family->objects = native_objects;
@@ -2160,10 +2158,13 @@ static TiPreparedExecution prepare_execution_plan_impl(
   }
   if (prepared->resources)
     prepared->resources->remove_owned_dependencies(prepared->memories);
-  const auto split = operations.begin() + initialization_count;
-  const std::vector<FixedExecution::Operation> initializers(operations.begin(),
-                                                            split);
-  operations.erase(operations.begin(), split);
+  // Operation factories can defer initialization too (for example an SBT).
+  // Collect after binding both regions, before any user initializer consumes
+  // those owners. No factory initialization is part of steady replay.
+  for (auto &operation : resource_initializers)
+    initializers.emplace_back(std::move(operation));
+  for (auto &operation : explicit_initializers)
+    initializers.emplace_back(std::move(operation));
   if (plan.vulkan_submission && operations.size() != plan.operations.size())
     throw MemoryBindingError("Selected Vulkan submission changed replay boundaries");
   if (plan.storage_ring && operations.size() != plan.operations.size())

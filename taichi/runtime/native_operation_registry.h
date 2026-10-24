@@ -66,7 +66,9 @@ struct NativePreparationContext {
       const std::string &, std::uint32_t)> resolve_argpack_layout;
   // Optional cold sink for a prepared Vulkan owner's initialization sequence.
   // Participating factories allocate only, then append commands retaining their
-  // resource/dependencies. No queue work is submitted by this callback. An
+  // resource/dependencies. Resource and operation factories may both append;
+  // consumers collect the sink after binding all operations, before explicit
+  // user initialization. No queue work is submitted by this callback. An
   // absent sink preserves ordinary synchronous resource creation semantics.
   std::function<void(std::shared_ptr<NativeOperation>)>
       defer_vulkan_initialization;

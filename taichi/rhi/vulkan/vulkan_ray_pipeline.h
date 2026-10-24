@@ -28,7 +28,7 @@ struct VulkanShaderBindingRecord {
 };
 
 // Cold construction packs staging data but submits no GPU work. Initialization
-// is recorded explicitly on the runtime's ordered compute queue. Command
+// is recorded explicitly on the owner's ordered compute queue. Command
 // buffers retain both allocations, including after the prepared owner is
 // released.
 class VulkanShaderBindingTable {
@@ -39,16 +39,20 @@ class VulkanShaderBindingTable {
                            const std::vector<VulkanShaderBindingRecord> &miss,
                            const std::vector<VulkanShaderBindingRecord> &hit);
 
-  // One-shot initialization, outside steady trace/replay. The owner publishes
-  // readiness only after accepting this command into its ordered execution
-  // flow.
-  void record_initialization(VulkanCommandList &commands);
+  // Outside steady trace/replay. Fixed owners retain staging while recording
+  // their alternative initialization variants; only one variant is executed.
+  // Ordinary owners keep the default one-shot policy.
+  void record_initialization(VulkanCommandList &commands,
+                             bool retain_staging = false);
   bool initialization_recorded() const {
-    return !staging_;
+    return initialization_recorded_;
   }
 
   std::size_t allocated_bytes() const {
     return allocated_bytes_;
+  }
+  std::size_t initialization_storage_bytes() const {
+    return staging_ ? allocated_bytes_ : 0;
   }
   const VkStridedDeviceAddressRegionKHR &raygen() const {
     return regions_[0];
@@ -69,6 +73,7 @@ class VulkanShaderBindingTable {
   vkapi::IVkBuffer buffer_;
   std::array<VkStridedDeviceAddressRegionKHR, 3> regions_{};
   std::size_t allocated_bytes_{0};
+  bool initialization_recorded_{false};
 };
 
 // Called when preparing fixed dimensions, never from ordinary dispatch/replay.

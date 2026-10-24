@@ -15,7 +15,7 @@ from tests.python.aot_vulkan_ray_program_probe import native, pipeline_spec, lau
 from tests.python.test_hardware_vulkan_ray_program import _shader
 
 
-@pytest.mark.parametrize("recipe", ["explicit", "graph", "selected"])
+@pytest.mark.parametrize("recipe", ["explicit", "graph", "selected", "domain"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_aot_vulkan_ray_program_resources_and_gradients(tmp_path, recipe, monkeypatch):
     if not ti.hardware.ray.is_program_available():
@@ -64,12 +64,31 @@ def test_aot_vulkan_ray_program_resources_and_gradients(tmp_path, recipe, monkey
             features[i] = 0
         loss[0], dloss[0] = 0.0, 1.0
 
+    @ti.kernel
+    def ray_state(vertices: ti.types.ndarray(ti.f32, 2), poses: ti.types.ndarray(ti.f32, 2), phase: ti.u64):
+        state = ti.cast(phase & 3, ti.i32)
+        for i in range(6):
+            vertices[i, 0] = ti.cast(i % 3 == 1, ti.f32)
+            vertices[i, 1] = ti.cast(i % 3 == 2, ti.f32)
+            vertices[i, 2] = ti.cast(i >= 3, ti.f32) + ti.select(state == 1, 0.25, 0.0)
+        for i, j in poses:
+            poses[i, j] = ti.cast(j == 0 or j == 5 or j == 10, ti.f32)
+            if j == 3:
+                poses[i, j] = 2.0 * i + ti.select(state == 2, 30.0, 0.0)
+
+    @ti.kernel
+    def image_state(gain: ti.types.ndarray(ti.f32, 1), phase: ti.u64):
+        gain[0] = ti.cast(phase & 3, ti.f32) + 1
+
     start = time.perf_counter()
-    module = ti.aot.Module()
+    module = ti.aot.Module(caps=["spirv_has_int64"] if recipe == "domain" else [])
     module.add_kernel(decode)
     module.add_kernel(sample)
     module.add_kernel(energy)
     module.add_kernel(energy.grad, name="backward")
+    if recipe == "domain":
+        module.add_kernel(ray_state)
+        module.add_kernel(image_state)
     for images in (False, True):
         spec = pipeline_spec(images)
         code_resources = []
@@ -87,7 +106,7 @@ def test_aot_vulkan_ray_program_resources_and_gradients(tmp_path, recipe, monkey
             code_resources.append(
                 dict(kind="host_blob", name=f"code_{i}", data=module.add_data(code), byte_size=len(code))
             )
-        if recipe != "explicit":
+        if recipe not in ("explicit", "domain"):
             _export_graph(module, images, shaders, decode, sample, energy, seed, recipe == "selected")
             continue
         _, payload = launch_spec(images)
@@ -102,19 +121,41 @@ def test_aot_vulkan_ray_program_resources_and_gradients(tmp_path, recipe, monkey
             name="pipeline",
         )
         for private in (False, True):
+            if recipe == "domain" and not private:
+                continue
             resources = [blob, dict(kind="ndarray", name="dloss", dtype="f32", shape=[1])]
             if private:
                 resources += code_resources + [pipeline] + private_resources(images)
-            module.add_execution_plan(
-                ("images" if images else "rays") + ("_private" if private else "_public"),
-                ti.aot.ExecutionPlan(
-                    operations(images), resources=resources, gradients=dict(features="dfeatures", loss="dloss")
-                ),
+            replay = operations(images)
+            initialization = None
+            if recipe == "domain":
+                # Both cold initialization and replay create a distinct SBT.
+                # The replay factory runs after explicit initialization binds.
+                initialization = operations(images)
+                replay.insert(
+                    0,
+                    dict(
+                        kind="kernel",
+                        entry="image_state" if images else "ray_state",
+                        arguments=["gain", "phase"] if images else ["vertices", "poses", "phase"],
+                    ),
+                )
+            plan = ti.aot.ExecutionPlan(
+                replay,
+                initialization=initialization,
+                resources=resources,
+                gradients=dict(features="dfeatures", loss="dloss"),
             )
+            name = ("images" if images else "rays") + ("_private" if private else "_public")
+            module.add_execution_plan(name, plan)
+            if recipe == "domain":
+                (tmp_path / (name + ".json")).write_text(plan.to_json())
     costs = dict(compile_ms=(time.perf_counter() - start) * 1000)
-    assert recipe == "explicit" or lowered
+    assert recipe in ("explicit", "domain") or lowered
     artifact = tmp_path / "ray_program.tcm"
     module.archive(str(artifact))
+    if recipe == "domain":
+        module.save(str(tmp_path))
     costs["artifact_bytes"] = artifact.stat().st_size
     (tmp_path / "producer.json").write_text(json.dumps(costs, indent=2))
     ti.reset()
@@ -123,7 +164,11 @@ def test_aot_vulkan_ray_program_resources_and_gradients(tmp_path, recipe, monkey
             [
                 sys.executable,
                 *(["-S"] if mode == "standalone" else []),
-                str(Path(__file__).with_name("aot_vulkan_ray_program_probe.py")),
+                str(
+                    Path(__file__).with_name(
+                        "aot_domain_ray_program_probe.py" if recipe == "domain" else "aot_vulkan_ray_program_probe.py"
+                    )
+                ),
                 mode,
                 str(artifact),
                 str(tmp_path / f"{mode}.json"),
@@ -137,6 +182,23 @@ def test_aot_vulkan_ray_program_resources_and_gradients(tmp_path, recipe, monkey
         assert result.returncode == 0, result.stdout + result.stderr
         assert "Validation Error" not in result.stdout + result.stderr
         assert "cleanup failed" not in result.stdout + result.stderr
+        assert "SYNC-HAZARD" not in result.stdout + result.stderr
+    if recipe == "domain":
+        executable = os.environ.get("TI_TEST_DOMAIN_EXECUTABLE")
+        assert executable and Path(executable).is_file(), "Require the native queue-gate consumer"
+        result = subprocess.run(
+            [executable, "--gtest_filter=VulkanExecutionOwner.PrivateRayProgramInitializationAndReplay"],
+            env=dict(os.environ, TAICHI_VULKAN_RAY_PROGRAM_DOMAIN_AOT_DIR=str(tmp_path)),
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        (tmp_path / "native-gate.log").write_text(result.stdout + result.stderr)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "[  PASSED  ] 1 test." in result.stdout and "[  SKIPPED ]" not in result.stdout
+        assert not any(
+            marker in result.stdout + result.stderr for marker in ("VUID-", "SYNC-HAZARD", "Validation Error")
+        )
 
 
 def _export_graph(module, images, shaders, decode, sample, energy, seed, selected):

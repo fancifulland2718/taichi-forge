@@ -50,6 +50,7 @@ _FEATURE_BITS = {
     "vulkan_execution_domain_live_image_writes": 32,
     "vulkan_execution_domain_private_ray_resources": 33,
     "vulkan_execution_domain_private_ray_kernels": 34,
+    "vulkan_execution_domain_ray_programs": 35,
 }
 
 

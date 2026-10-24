@@ -286,6 +286,7 @@ class PreparedLaunch final : public NativeOperation {
         fault_(c.fault_domain),
         dimensions_(d.dimensions),
         push_(d.push),
+        deferred_(bool(c.defer_vulkan_initialization)),
         payload_(std::make_unique<Payload>()) {
     validate_pipeline(d.expected_pipeline, d.program->contract());
     payload_->program = d.program;
@@ -321,6 +322,9 @@ class PreparedLaunch final : public NativeOperation {
         set.buffer(input.point.binding, a.pointer, a.bytes);
       else
         set.rw_buffer(input.point.binding, a.pointer, a.bytes);
+      const DeviceAllocation allocation{a.pointer.device, a.pointer.alloc_id};
+      if (std::find(buffers_.begin(), buffers_.end(), allocation) == buffers_.end())
+        buffers_.push_back(allocation);
     }
     for (const auto &input : d.images) {
       const auto &p = input.image->parameters();
@@ -360,10 +364,14 @@ class PreparedLaunch final : public NativeOperation {
       if (prior == images_.end())
         images_.emplace_back(image, layout);
       payload_->image_owners.push_back(input.image);
+      image_uses_.push_back({input.image, !input.storage});
       if (input.read)
         payload_->read_images.push_back(input.image);
     }
     for (const auto &input : d.scenes) {
+      for (auto &resource : collect_native_ray_resources(input.scene))
+        if (std::find(scenes_.begin(), scenes_.end(), resource) == scenes_.end())
+          scenes_.push_back(std::move(resource));
       if (!d.hit.empty() &&
           input.scene->max_sbt_record_offset() >= d.hit.size())
         throw std::invalid_argument(
@@ -378,6 +386,10 @@ class PreparedLaunch final : public NativeOperation {
     prepare_vulkan_ray_program_bindings(pipeline, payload_->sets);
     payload_->sbt = prepare_vulkan_ray_program_sbt(device_, pipeline, d.raygen,
                                                    d.miss, d.hit);
+  }
+  void record_initialization(CommandList *commands) {
+    payload_->sbt->record_initialization(
+        *static_cast<vulkan::VulkanCommandList *>(commands), true);
   }
   void initialize() {
     initialization_pending_ = true;
@@ -409,18 +421,23 @@ class PreparedLaunch final : public NativeOperation {
     return device_;
   }
   size_t workspace_bytes() const override {
-    return payload_->sbt->allocated_bytes();
+    return payload_->sbt->allocated_bytes() +
+           payload_->sbt->initialization_storage_bytes();
   }
   bool retains_input(const std::string &port) const override {
     return port != "payload";
   }
   void validate_recording(NativeRecordingState &state) const override {
+    if (deferred_ && !state.initialized.count(this))
+      throw std::invalid_argument("Ray program requires SBT initialization");
     for (const auto &image : payload_->read_images)
       image->validate_sampling(state);
+    for (const auto &scene : scenes_)
+      dynamic_cast<const NativeRayResourceAccess &>(*scene).require_initialized(state);
   }
   NativeVulkanRecordingRequirements vulkan_recording_requirements()
       const override {
-    return {images_, false};
+    return {images_, false, buffers_, image_uses_, scenes_};
   }
   void record_vulkan(Device *, CommandList *commands) override {
     record_vulkan_ray_program(commands, payload_->program->pipeline(),
@@ -434,9 +451,46 @@ class PreparedLaunch final : public NativeOperation {
   std::shared_ptr<RuntimeFaultDomain> fault_;
   std::array<uint32_t, 3> dimensions_;
   std::vector<uint8_t> push_;
+  const bool deferred_;
   std::vector<std::pair<DeviceAllocation, ImageLayout>> images_;
+  std::vector<DeviceAllocation> buffers_;
+  std::vector<NativeVulkanRecordingRequirements::ImageUse> image_uses_;
+  std::vector<std::shared_ptr<NativeResource>> scenes_;
   std::unique_ptr<Payload> payload_;
   bool initialization_pending_{false};
+};
+
+// The launch owns the SBT and accounts for its upload storage once. Keeping it
+// here also retains initialization-only launches through command retirement.
+class LaunchInitialization final : public NativeOperation {
+ public:
+  explicit LaunchInitialization(std::shared_ptr<PreparedLaunch> launch)
+      : launch_(std::move(launch)) {
+  }
+  Arch arch() const override {
+    return launch_->arch();
+  }
+  Device &device() const override {
+    return launch_->device();
+  }
+  size_t workspace_bytes() const override {
+    return 0;
+  }
+  void validate_recording(NativeRecordingState &state) const override {
+    state.initialized.insert(launch_.get());
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers.emplace();
+    result.image_uses.emplace();
+    return result;
+  }
+  void record_vulkan(Device *, CommandList *commands) override {
+    launch_->record_initialization(commands);
+  }
+
+ private:
+  std::shared_ptr<PreparedLaunch> launch_;
 };
 #endif
 }  // namespace
@@ -596,7 +650,11 @@ void register_vulkan_ray_program_operations(NativeOperationRegistry &registry) {
       Arch::vulkan, NativeOperationMode::vulkan_inline,
       [](NativePreparationContext &c, const LaunchDescription &d) {
         auto result = std::make_shared<PreparedLaunch>(c, d);
-        result->initialize();
+        if (c.defer_vulkan_initialization)
+          c.defer_vulkan_initialization(
+              std::make_shared<LaunchInitialization>(result));
+        else
+          result->initialize();
         return result;
       });
 #endif

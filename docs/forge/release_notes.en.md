@@ -57,8 +57,10 @@ combination. Consult the linked API contracts and capability queries for exact s
   with shared BLAS dependencies. Factories prepare resources; `initialize()` builds them on
   the selected domain, which also executes warm native refit/query commands. The owner closure
   includes every BLAS and seed input. DSL kernels in the same plan can query a private TLAS,
-  sharing native initialization and ownership checks. Public live AS, micromaps and ray-program/
-  graphics-shader bindings remain outside this capability. Cold data uploads and bootstrap
+  sharing native initialization and ownership checks. Flat-plan ray programs can also use
+  private TLAS resources and images. SBT uploads join selected-domain initialization, with
+  retained upload storage counted in instance costs. Public live AS, micromaps and
+  graphics-shader AS bindings remain outside this capability. Cold data uploads and bootstrap
   still depend on the ordinary queue.
 - Python `ti.init()`, including wheel installations, keeps `compile_tier="fast"` and
   `advanced_optimization=False` as defaults. Explicit `balanced/full` enables advanced IR

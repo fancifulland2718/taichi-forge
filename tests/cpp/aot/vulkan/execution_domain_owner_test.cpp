@@ -341,10 +341,11 @@ TEST(VulkanExecutionOwner, PrivateOffscreenIgnoresDefaultQueue) {
   }
 }
 
-TEST(VulkanExecutionOwner, PrivateRayInitializationAndIndependentRefit) {
+void run_private_ray_domain(bool ray_program) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();
-  const char *path = std::getenv("TAICHI_VULKAN_RAY_DOMAIN_AOT_DIR");
+  const char *path = std::getenv(ray_program ? "TAICHI_VULKAN_RAY_PROGRAM_DOMAIN_AOT_DIR"
+                                           : "TAICHI_VULKAN_RAY_DOMAIN_AOT_DIR");
   if (!path)
     GTEST_SKIP() << "Requires the compiled private ray fixture";
   PublicDomainSession session;
@@ -357,14 +358,19 @@ TEST(VulkanExecutionOwner, PrivateRayInitializationAndIndependentRefit) {
     GTEST_SKIP() << "Requires two independent compute queues";
   session.module = ti_load_aot_module(session.runtime, path);
   ASSERT_NE(session.module, nullptr);
-  std::ifstream input(std::string(path) + "/instances.json");
+  std::ifstream input(std::string(path) + (ray_program ? "/rays_private.json" : "/instances.json"));
   ASSERT_TRUE(input.good());
   const std::string plan((std::istreambuf_iterator<char>(input)), {});
-  const char *names[]{"seed", "indices", "rays", "hits", "ids", "dhits", "loss", "initial_transforms"};
-  const std::vector<std::vector<uint32_t>> shapes{
-      {6, 3}, {2, 3}, {6, 8}, {6, 4}, {6, 4}, {6, 4}, {1}, {2, 3, 4}};
-  const std::vector<float> vertices{-1, -1, 1, 1, -1, 1, 0, 1, 1,
-                                   -1, -1, 2, 0, 1, 2, 1, -1, 2};
+  const std::vector<const char *> names = ray_program
+      ? std::vector<const char *>{"vertices", "indices", "poses", "output", "features", "dfeatures", "loss"}
+      : std::vector<const char *>{"seed", "indices", "rays", "hits", "ids", "dhits", "loss", "initial_transforms"};
+  const std::vector<std::vector<uint32_t>> shapes = ray_program
+      ? std::vector<std::vector<uint32_t>>{{6, 3}, {2, 3}, {2, 12}, {5, 8}, {5}, {5}, {1}}
+      : std::vector<std::vector<uint32_t>>{{6, 3}, {2, 3}, {6, 8}, {6, 4}, {6, 4}, {6, 4}, {1}, {2, 3, 4}};
+  const std::vector<float> vertices = ray_program
+      ? std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1}
+      : std::vector<float>{-1, -1, 1, 1, -1, 1, 0, 1, 1,
+                           -1, -1, 2, 0, 1, 2, 1, -1, 2};
   const std::vector<int32_t> indices{0, 1, 2, 3, 4, 5};
   const std::vector<float> rays{0, 0, 0, .01f, 0, 0, 1, 10,
                                4, 0, 0, .01f, 0, 0, 1, 10,
@@ -373,11 +379,12 @@ TEST(VulkanExecutionOwner, PrivateRayInitializationAndIndependentRefit) {
                                8, 0, 0, .01f, 0, 0, 1, 10,
                                0, 0, 4, .01f, 0, 0, -1, 10};
   const std::vector<float> transforms{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
-                                    1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 2};
+                                    1, 0, 0, ray_program ? 2.f : 4.f, 0, 1, 0, 0, 0, 0, 1, ray_program ? 0.f : 2.f};
   const char *parameter = "phase";
   const TiVulkanExecutionDomainCreateInfo options{1, 1, TI_TRUE, TI_VULKAN_EXECUTION_QUEUE_COMPUTE};
   std::array<TiVulkanExecutionDomainInfo, 2> domains{};
-  std::array<std::array<TiNamedArgument, 9>, 2> arguments{};
+  std::array<std::vector<TiNamedArgument>, 2> arguments{
+      std::vector<TiNamedArgument>(names.size() + 1), std::vector<TiNamedArgument>(names.size() + 1)};
   for (int lane = 0; lane < 2; ++lane) {
     auto domain = ti_create_vulkan_execution_domain_ext(session.runtime, &options);
     ASSERT_NE(domain, nullptr);
@@ -399,19 +406,21 @@ TEST(VulkanExecutionOwner, PrivateRayInitializationAndIndependentRefit) {
       array.memory = memory;
       array.shape.dim_count = shapes[i].size();
       std::copy(shapes[i].begin(), shapes[i].end(), array.shape.dims);
-      array.elem_type = (i == 1 || i == 4) ? TI_DATA_TYPE_I32 : TI_DATA_TYPE_F32;
+      array.elem_type = ray_program
+          ? (i == 1 ? TI_DATA_TYPE_I32 : i == 3 ? TI_DATA_TYPE_U32 : TI_DATA_TYPE_F32)
+          : ((i == 1 || i == 4) ? TI_DATA_TYPE_I32 : TI_DATA_TYPE_F32);
       auto *mapped = ti_map_memory(session.runtime, memory);
       ASSERT_NE(mapped, nullptr);
       std::memset(mapped, 0, size * sizeof(float));
       if (i == 0) std::memcpy(mapped, vertices.data(), size * sizeof(float));
       if (i == 1) std::memcpy(mapped, indices.data(), size * sizeof(float));
-      if (i == 2) std::memcpy(mapped, rays.data(), size * sizeof(float));
-      if (i == 7) std::memcpy(mapped, transforms.data(), size * sizeof(float));
+      if (i == 2 && !ray_program) std::memcpy(mapped, rays.data(), size * sizeof(float));
+      if (i == (ray_program ? 2 : 7)) std::memcpy(mapped, transforms.data(), size * sizeof(float));
       ti_unmap_memory(session.runtime, memory);
     }
-    arguments[lane][8].name = parameter;
-    arguments[lane][8].argument.type = TI_ARGUMENT_TYPE_SCALAR;
-    arguments[lane][8].argument.value.scalar.type = TI_DATA_TYPE_U64;
+    arguments[lane].back().name = parameter;
+    arguments[lane].back().argument.type = TI_ARGUMENT_TYPE_SCALAR;
+    arguments[lane].back().argument.value.scalar.type = TI_DATA_TYPE_U64;
   }
   const auto prepare = [&](int lane) {
     return ti_prepare_execution_plan_on_vulkan_domain_ext(
@@ -424,8 +433,8 @@ TEST(VulkanExecutionOwner, PrivateRayInitializationAndIndependentRefit) {
   ti_initialize_prepared_ext(session.runtime, session.executions[0]);
   check_domain_error();
   {
-    // Kernels are already registered. Reconstructing the peer's private AS
-    // must not synchronously build on queue zero. Bootstrap can enqueue there;
+    // Kernels are already registered. Reconstructing the peer's private AS/SBT
+    // must not synchronously build/upload on queue zero. Bootstrap can enqueue there;
     // initialize still waits for that cold prefix after the gate is released.
     test_detail::TimelineGate gate(device, 0);
     auto future = std::async(std::launch::async, [&] { return prepare(1); });
@@ -450,12 +459,18 @@ TEST(VulkanExecutionOwner, PrivateRayInitializationAndIndependentRefit) {
     return ticket;
   };
   const auto check = [&](int lane, float shift) {
-    for (int column : {3, 5}) {
+    for (int column : {ray_program ? 4 : 3, 5}) {
       void *mapped = nullptr;
-      const auto allocation = runtime.get_memory(session.memories[lane * 8 + column]).allocation;
+      const auto allocation = runtime.get_memory(session.memories[lane * names.size() + column]).allocation;
       ASSERT_EQ(device.map(allocation, &mapped), RhiResult::success);
-      EXPECT_EQ(static_cast<const float *>(mapped)[0], 1 + shift);
-      EXPECT_EQ(static_cast<const float *>(mapped)[4], 3 + shift);
+      if (ray_program) {
+        const float expected = shift == 2 ? -1 : shift == 1 ? 2.25f : 2;
+        EXPECT_EQ(static_cast<const float *>(mapped)[0], column == 5 ? std::max(expected, 0.f) : expected);
+        EXPECT_EQ(static_cast<const float *>(mapped)[4], column == 5 ? 0 : -1);
+      } else {
+        EXPECT_EQ(static_cast<const float *>(mapped)[0], 1 + shift);
+        EXPECT_EQ(static_cast<const float *>(mapped)[4], 3 + shift);
+      }
       device.unmap(allocation);
     }
   };
@@ -496,6 +511,14 @@ TEST(VulkanExecutionOwner, PrivateRayInitializationAndIndependentRefit) {
     }
     check_domain_error();
   }
+}
+
+TEST(VulkanExecutionOwner, PrivateRayInitializationAndIndependentRefit) {
+  run_private_ray_domain(false);
+}
+
+TEST(VulkanExecutionOwner, PrivateRayProgramInitializationAndReplay) {
+  run_private_ray_domain(true);
 }
 
 TEST(VulkanExecutionOwner, BorrowedViewsShareProgramRegistryAndRetireBeforeDevice) {

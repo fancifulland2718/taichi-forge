@@ -189,10 +189,20 @@ Kernels and native operations share initialization and full BLAS dependency
 checks, with no warm resource lookup or extra submission. Standalone and borrowed
 runtimes consume this plan; ordinary JIT live AS loans remain a separate capability.
 
+The same flat AOT plan can include `vulkan_ray_program.launch` with fully described
+buffers, private sampled/storage images and private TLAS resources. The capability
+is `vulkan_execution_domain_ray_programs`. Cold preparation packs the SBT; explicit
+initialization uploads it on the selected domain. Operations created while binding
+either initialization or replay participate in this ordering. Ordinary and sampled
+recording variants share one retained SBT upload allocation, counted in instance
+workspace bytes. Warm replay neither repacks nor uploads the SBT. Preparation checks
+AS, image and buffer dependencies. Program outputs may feed later computation and
+its explicit adjoint; ray tracing itself is not differentiable.
+
 All seed inputs and AS dependencies remain valid until instance retirement;
 closing an input early invalidates the instance. Wrapping a public AS in a
 private TLAS does not bypass ownership validation. Live AS loans, micromaps,
-ray-program/graphics-shader AS parameters and AS operations inside control flow are outside
+graphics-shader AS parameters and AS operations inside control flow are outside
 this capability. Ordinary synchronous resource creation keeps its contract.
 Cold `initial_data` uploads still use the default queue and `initialize()` waits
 for bootstrap; cold preparation is not fully independent of that queue. Warm

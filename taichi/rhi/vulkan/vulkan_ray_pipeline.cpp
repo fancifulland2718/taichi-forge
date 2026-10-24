@@ -272,7 +272,8 @@ VulkanShaderBindingTable::VulkanShaderBindingTable(
 }
 
 void VulkanShaderBindingTable::record_initialization(
-    VulkanCommandList &commands) {
+    VulkanCommandList &commands,
+    bool retain_staging) {
   if (!staging_) {
     throw std::logic_error("Vulkan SBT initialization was already recorded");
   }
@@ -295,8 +296,11 @@ void VulkanShaderBindingTable::record_initialization(
       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 0, nullptr, 1, &barrier,
       0, nullptr);
   // buffer_copy retains the staging Vk allocation until command retirement.
-  // No persistent upload buffer and no completion wait are required here.
-  staging_.reset();
+  // Fixed execution retains a single upload allocation across cold variants.
+  // Recording is not a readiness/completion signal for the execution owner.
+  initialization_recorded_ = true;
+  if (!retain_staging)
+    staging_.reset();
 }
 
 void validate_ray_dispatch(const VulkanDevice &device,
