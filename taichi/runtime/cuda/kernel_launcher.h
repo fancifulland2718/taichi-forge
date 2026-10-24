@@ -185,6 +185,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
   void bind_execution_temporaries(GraphLaunchPacket &packet,
                                   void *buffer,
                                   std::size_t bytes);
+  // Ordinary recordings explicitly bind the executor's existing fallback;
+  // this does not allocate, query the device, or transfer workspace ownership.
+  void bind_runtime_temporaries(GraphLaunchPacket &packet);
   void validate_execution_domain(Handle handle);
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;

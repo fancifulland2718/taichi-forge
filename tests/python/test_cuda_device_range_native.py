@@ -48,5 +48,5 @@ def test_native_range_recording_instances_and_explicit_adjoint(tmp_path):
     print(result.stdout)
     print(result.stderr)
     assert result.returncode == 0
-    assert "[  PASSED  ] 4 tests." in result.stdout
+    assert "[  PASSED  ] 5 tests." in result.stdout
     assert "[  SKIPPED ]" not in result.stdout

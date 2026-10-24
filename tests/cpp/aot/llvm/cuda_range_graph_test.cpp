@@ -207,29 +207,106 @@ TEST_F(CudaRangeGraph, PrimalAndExplicitAdjointKeepIndependentProofs) {
     ASSERT_EQ(selected.device_range_tasks.size(), 1);
     operations.push_back(selected);
   }
-  auto graph = cuda::FixedGraph::prepare_execution_instance(
-      operations, owner, domains[0], std::make_shared<RangeOperands>());
-  std::array<float, 65> input;
-  for (int j = 0; j < 65; ++j)
-    input[j] = j + 1;
-  write(x, input);
-  for (int n : {0, 5, 65, 0}) {
-    write(bounds, std::array<int, 1>{n});
-    std::array<float, 65> initial;
-    initial.fill(-1);
-    write(y, initial);
-    initial.fill(0);
-    write(dx, initial);
-    initial.fill(1);
-    write(dy, initial);
-    graph->submit().wait();
-    const auto result = read<float, 65>(y);
-    const auto gradient = read<float, 65>(dx);
-    for (int j = 0; j < 65; ++j) {
-      EXPECT_EQ(result[j], j < n ? input[j] * input[j] : -1);
-      EXPECT_EQ(gradient[j], j < n ? 2 * input[j] : 0);
+  for (bool independent : {true, false}) {
+    auto graph = independent
+        ? cuda::FixedGraph::prepare_execution_instance(
+              operations, owner, domains[0], std::make_shared<RangeOperands>())
+        : std::make_unique<cuda::FixedGraph>(operations, owner);
+    std::array<float, 65> input;
+    for (int j = 0; j < 65; ++j)
+      input[j] = j + 1;
+    write(x, input);
+    for (int n : {0, 5, 65, 0}) {
+      write(bounds, std::array<int, 1>{n});
+      std::array<float, 65> initial;
+      initial.fill(-1);
+      write(y, initial);
+      initial.fill(0);
+      write(dx, initial);
+      initial.fill(1);
+      write(dy, initial);
+      if (independent)
+        graph->submit().wait();
+      else {
+        graph->run();
+        executor->synchronize();
+      }
+      const auto result = read<float, 65>(y);
+      const auto gradient = read<float, 65>(dx);
+      for (int j = 0; j < 65; ++j) {
+        EXPECT_EQ(result[j], j < n ? input[j] * input[j] : -1);
+        EXPECT_EQ(gradient[j], j < n ? 2 * input[j] : 0);
+      }
     }
   }
+}
+
+TEST_F(CudaRangeGraph, OrdinaryGraphsBorrowTheActualRuntimeWorkspace) {
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto *entry = kernel("stage");
+  ASSERT_NE(entry, nullptr);
+  auto *bounds = allocate(8);
+  auto *output = allocate(66 * 4);
+  LaunchContextBuilder arguments(entry);
+  arguments.set_arg_external_array_with_shape(
+      {0}, reinterpret_cast<std::uintptr_t>(bounds), 8, {2});
+  arguments.set_arg_external_array_with_shape(
+      {1}, reinterpret_cast<std::uintptr_t>(output), 66 * 4, {66});
+  auto selected = dispatch(entry, arguments);
+  ASSERT_EQ(selected.device_range_tasks.size(), 2);
+  auto *runtime_workspace = executor->get_runtime_temporary_ptr();
+  cuda::KernelLauncher::GraphLaunchPacket packet;
+  ASSERT_TRUE(selected.launcher->prepare_cuda_graph_launch_packet(
+      entry->handle(), arguments, packet, true));
+  EXPECT_EQ(packet.context.global_tmp_buffer, nullptr);
+  selected.launcher->bind_runtime_temporaries(packet);
+  EXPECT_EQ(packet.context.global_tmp_buffer, runtime_workspace);
+  // A second or foreign binding cannot silently replace an explicit owner.
+  EXPECT_THROW(selected.launcher->bind_runtime_temporaries(packet),
+               std::invalid_argument);
+  packet.context.global_tmp_buffer = nullptr;
+  packet.context.runtime = nullptr;
+  EXPECT_THROW(selected.launcher->bind_runtime_temporaries(packet),
+               std::invalid_argument);
+
+  auto first = std::make_unique<cuda::FixedGraph>(
+      std::vector<cuda::FixedGraph::Dispatch>{selected}, owner);
+  auto second = std::make_unique<cuda::FixedGraph>(
+      std::vector<cuda::FixedGraph::Dispatch>{selected}, owner);
+  auto isolated = cuda::FixedGraph::prepare_execution_instance(
+      {selected}, owner, domains[0], std::make_shared<RangeOperands>());
+  EXPECT_EQ(first->control_bytes(), 96);
+  EXPECT_EQ(second->control_bytes(), 96);
+  EXPECT_NE(isolated->instance_snapshot().temporary_storage,
+            reinterpret_cast<std::uintptr_t>(runtime_workspace));
+  const auto run = [&](int n, int route) {
+    write(bounds, std::array<int, 2>{n, -99});
+    std::array<int, 66> initial;
+    initial.fill(-1);
+    write(output, initial);
+    if (route == 0)
+      first->run();
+    else if (route == 1)
+      second->run();
+    else if (route == 2)
+      entry->launch(arguments);  // The ordinary null-override fallback remains.
+    else
+      isolated->submit().wait();
+    executor->synchronize();
+    const auto result = read<int, 66>(output);
+    for (int j = 0; j < 65; ++j)
+      EXPECT_EQ(result[j], j < n ? j + 1 + (j < n / 2 ? 100 : 0) : -1);
+    EXPECT_EQ(result[65], 1000 + n / 2);
+    EXPECT_EQ(executor->get_runtime_temporary_ptr(), runtime_workspace);
+  };
+  for (int n : {0, 3, 65, 0})
+    for (int route = 0; route < 4; ++route)
+      run(n, route);
+  first.reset();
+  isolated->retire_execution_instance();
+  run(5, 1);
+  second.reset();
+  run(3, 2);
 }
 
 TEST_F(CudaRangeGraph, RejectsInvalidBoundsAndUnqualifiedStrategiesBeforeCapture) {
@@ -267,7 +344,9 @@ TEST_F(CudaRangeGraph, RejectsInvalidBoundsAndUnqualifiedStrategiesBeforeCapture
                  std::invalid_argument);
     EXPECT_EQ(controls.device_bytes(), 0);
   }
-  EXPECT_THROW(cuda::FixedGraph(std::vector<cuda::FixedGraph::Dispatch>{selected}),
+  // Sharing an executable across binding frames is still not qualified.
+  EXPECT_THROW(cuda::FixedGraph::capture_binding_frame(
+                   {selected}, std::make_shared<int>(0), owner),
                std::invalid_argument);
 }
 

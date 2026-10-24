@@ -6,7 +6,7 @@
 namespace taichi::lang::cuda {
 
 // Cold lowering of selected ordinary tasks. The enclosing FixedGraph owns the
-// private temporary binding, executable and completion. Release only after
+// temporary binding, executable and completion. Release only after
 // executable retirement; release(false) abandons unsafe backend allocations.
 class RangeGraphControls {
  public:

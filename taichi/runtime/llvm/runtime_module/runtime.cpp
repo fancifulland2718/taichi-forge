@@ -29,6 +29,7 @@
 #include "taichi/runtime/llvm/list_manager_constants.h"
 #include "taichi/runtime/llvm/snode_runtime_state.h"
 #include "taichi/runtime/llvm/sparse_tree_statistics.h"
+#include "taichi/runtime/llvm/runtime_initialization.h"
 
 struct RuntimeContext;
 using assert_failed_type = void (*)(const char *);
@@ -1635,7 +1636,6 @@ void runtime_initialize(
   runtime->runtime_objects_chunk = std::move(runtime_objects_chunk);
 
   runtime->result_buffer = result_buffer;
-  runtime->set_result(taichi_result_buffer_ret_value_id, runtime);
   runtime->host_allocator = host_allocator;
   runtime->host_printf = host_printf;
   runtime->host_vsnprintf = host_vsnprintf;
@@ -1671,6 +1671,10 @@ void runtime_initialize(
   runtime->rand_states = (RandState *)runtime->allocate_aligned(
       runtime->runtime_objects_chunk,
       sizeof(RandState) * runtime->num_rand_states, taichi_page_size);
+  static_assert(taichi_result_buffer_ret_value_id == 0);
+  *reinterpret_cast<taichi::lang::LlvmRuntimeInitialization *>(result_buffer) = {
+      reinterpret_cast<uint64>(runtime),
+      reinterpret_cast<uint64>(runtime->temporaries)};
 }
 
 void runtime_initialize_memory(LLVMRuntime *runtime,

@@ -2061,7 +2061,7 @@ device packet 决定且不做 host readback。静态与动态 shared-memory byte
 安全缩小 grid；CPU 调度器降级后的范围也不一定等于用户源码范围。两端为常量时，
 `constant_range_size` 用 64 位差值计算，反向或空区间为零。描述不增加设备读回或运行时同步。
 当前 task 布局采用 LLVM AOT schema 11、GFX metadata 10（选中范围策略时为 11）和
-JIT cache schema 74；原生 ABI 为 176，旧候选产物需要重新导出并使用配对的前端/runtime 包。
+JIT cache schema 74；原生 ABI 为 177，旧候选产物需要重新导出并使用配对的前端/runtime 包。
 
 `task_id` 在相同 specialization cache identity、task ordinal/kind、compile config、device
 capabilities 与 backend 下稳定；不承诺跨 backend、跨配置或跨版本稳定。manifest 只读：冷查询

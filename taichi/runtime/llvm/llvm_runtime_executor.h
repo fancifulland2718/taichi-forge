@@ -117,6 +117,11 @@ class LlvmRuntimeExecutor {
 
   LLVMRuntime *get_llvm_runtime();
 
+  // Cold, borrowed view of this runtime's ordinary temporary workspace.
+  // Valid only while the executor is materialized and not retired. Independent
+  // executions must continue to bind their own storage instead.
+  void *get_runtime_temporary_ptr() const;
+
   Device *get_compute_device();
 
   HostMemoryPoolStats get_host_memory_pool_stats() const;
@@ -195,6 +200,8 @@ class LlvmRuntimeExecutor {
   /* -------------------------- */
 
   uint64 fetch_result_uint64(int i, uint64 *result_buffer);
+  void fetch_result_bytes(void *destination, const void *source,
+                          std::size_t bytes);
   void destroy_snode_tree(SNodeTree *snode_tree);
   std::size_t get_snode_num_dynamically_allocated(SNode *snode,
                                                   uint64 *result_buffer);
@@ -219,6 +226,7 @@ class LlvmRuntimeExecutor {
   std::unique_ptr<JITSession> jit_session_{nullptr};
   JITModule *runtime_jit_module_{nullptr};
   void *llvm_runtime_{nullptr};
+  void *runtime_temporaries_{nullptr};
 
   std::unique_ptr<ThreadPool> thread_pool_{nullptr};
   std::shared_ptr<Device> device_{nullptr};

@@ -686,7 +686,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
       dispatches.begin(), dispatches.end(),
       [](const auto *d) { return !d->device_range_tasks.empty(); });
   if (range_selected &&
-      (!state.independent || state.binding_frame ||
+      (state.binding_frame ||
        !std::all_of(operations.begin(), operations.end(),
                     [](const auto &op) { return std::holds_alternative<Dispatch>(op); }) ||
        std::any_of(dispatches.begin(), dispatches.end(), [](const auto *d) {
@@ -694,7 +694,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
                 (d->external && !d->device_range_tasks.empty());
        })))
     throw std::invalid_argument(
-        "CUDA device range requires an independent flat ordinary graph");
+        "CUDA device range requires a flat ordinary graph");
   const auto gated_begin = dispatches.size();
   struct GateBinding {
     void *pointer;
@@ -861,6 +861,8 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
           static_cast<char *>(state.temporaries) +
               index * taichi_global_tmp_buffer_size,
           taichi_global_tmp_buffer_size);
+    } else if (!dispatch.device_range_tasks.empty()) {
+      dispatch.launcher->bind_runtime_temporaries(packet);
     }
     if (packet.sparse_replay_lease) {
       TI_ERROR_IF(parallel_dispatches.count(&dispatch),
@@ -1247,7 +1249,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
   }
   if (!state.binding_frame)
     driver.graph_instantiate_with_flags(&state.executable, state.graph, 0);
-  if (grid_limit || has_device_update || state.independent) {
+  if (grid_limit || has_device_update || state.independent || range_selected) {
     driver.graph_upload(state.executable, state.stream);
     driver.stream_synchronize(state.stream);
     if (grid_limit) {

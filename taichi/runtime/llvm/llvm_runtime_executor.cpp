@@ -4,6 +4,7 @@
 #include "taichi/runtime/llvm/list_manager_constants.h"
 #include "taichi/runtime/llvm/snode_runtime_state.h"
 #include "taichi/runtime/llvm/sparse_tree_statistics.h"
+#include "taichi/runtime/llvm/runtime_initialization.h"
 
 #include <algorithm>
 #include <limits>
@@ -292,32 +293,44 @@ void LlvmRuntimeExecutor::synchronize() {
 }
 
 uint64 LlvmRuntimeExecutor::fetch_result_uint64(int i, uint64 *result_buffer) {
+  uint64 result;
+  fetch_result_bytes(&result, result_buffer + i, sizeof(result));
+  return result;
+}
+
+void LlvmRuntimeExecutor::fetch_result_bytes(void *destination,
+                                            const void *source,
+                                            std::size_t bytes) {
   // Runtime JIT calls share this device result buffer and the legacy default
   // stream. Waiting that stream is therefore part of the buffer-reuse contract;
   // a freshly recorded event would serialize the same work with extra event
   // overhead. Ordinary kernel return values use their per-launch result buffer
   // and asynchronous copy path instead.
   synchronize();
-  uint64 ret;
   if (config_.arch == Arch::cuda) {
 #if defined(TI_WITH_CUDA)
     auto context_guard = CUDAContext::get_instance().get_guard();
-    CUDADriver::get_instance().memcpy_device_to_host(&ret, result_buffer + i,
-                                                     sizeof(uint64));
+    CUDADriver::get_instance().memcpy_device_to_host(
+        destination, const_cast<void *>(source), bytes);
 #else
     TI_NOT_IMPLEMENTED;
 #endif
   } else if (config_.arch == Arch::amdgpu) {
 #if defined(TI_WITH_AMDGPU)
-    AMDGPUDriver::get_instance().memcpy_device_to_host(&ret, result_buffer + i,
-                                                       sizeof(uint64));
+    AMDGPUDriver::get_instance().memcpy_device_to_host(
+        destination, const_cast<void *>(source), bytes);
 #else
     TI_NOT_IMPLEMENTED;
 #endif
   } else {
-    ret = result_buffer[i];
+    std::memcpy(destination, source, bytes);
   }
-  return ret;
+}
+
+void *LlvmRuntimeExecutor::get_runtime_temporary_ptr() const {
+  if (!llvm_runtime_ || !runtime_temporaries_ || finalized_)
+    throw std::invalid_argument("LLVM runtime temporaries are not live");
+  return runtime_temporaries_;
 }
 
 std::size_t LlvmRuntimeExecutor::get_snode_num_dynamically_allocated(
@@ -1495,6 +1508,7 @@ HostMemoryPoolStats LlvmRuntimeExecutor::get_host_memory_pool_stats() const {
 }
 
 void LlvmRuntimeExecutor::finalize() {
+  runtime_temporaries_ = nullptr;
   profiler_ = nullptr;
   active_snode_tree_runtime_states_.clear();
   snode_tree_allocs_.clear();
@@ -1774,8 +1788,11 @@ void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler,
           (void *)std::vsnprintf);
 
   TI_TRACE("LLVMRuntime initialized (excluding `root`)");
-  llvm_runtime_ = fetch_result<void *>(taichi_result_buffer_ret_value_id,
-                                       *result_buffer_ptr);
+  static_assert(taichi_result_buffer_ret_value_id == 0);
+  LlvmRuntimeInitialization initialized{};
+  fetch_result_bytes(&initialized, *result_buffer_ptr, sizeof(initialized));
+  llvm_runtime_ = reinterpret_cast<void *>(initialized.runtime);
+  runtime_temporaries_ = reinterpret_cast<void *>(initialized.temporaries);
   TI_TRACE("LLVMRuntime pointer fetched");
 
   // Preallocate for runtime memory and update to LLVMRuntime

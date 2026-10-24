@@ -33,7 +33,7 @@ bool RangeGraphControls::initialize(
     if (packet.launch_abi != KernelLaunchABI::ordinary || packet.bounded_range ||
         !base || base % alignof(std::int32_t) || hardware_grid <= 0 ||
         temporary_bytes > std::numeric_limits<std::uintptr_t>::max() - base)
-      throw std::invalid_argument("CUDA range task requires its private workspace");
+      throw std::invalid_argument("CUDA range task requires its bound workspace");
     auto selected = selections[i];
     std::sort(selected.begin(), selected.end());
     if (std::adjacent_find(selected.begin(), selected.end()) != selected.end())

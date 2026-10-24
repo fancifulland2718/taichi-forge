@@ -1024,6 +1024,15 @@ void KernelLauncher::validate_execution_domain(Handle handle) {
     throw std::invalid_argument(blocker);
 }
 
+void KernelLauncher::bind_runtime_temporaries(GraphLaunchPacket &packet) {
+  auto *executor = get_runtime_executor();
+  if (packet.context.runtime != executor->get_llvm_runtime() ||
+      packet.context.global_tmp_buffer)
+    throw std::invalid_argument("CUDA ordinary workspace binding mismatch");
+  bind_execution_temporaries(packet, executor->get_runtime_temporary_ptr(),
+                              taichi_global_tmp_buffer_size);
+}
+
 void KernelLauncher::bind_execution_temporaries(GraphLaunchPacket &packet,
                                                 void *buffer,
                                                 std::size_t bytes) {

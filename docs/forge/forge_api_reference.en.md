@@ -2509,7 +2509,7 @@ change the physical range relative to the source loop. Two constant bounds
 produce `constant_range_size` using a 64-bit difference, with empty or reversed
 intervals reporting zero. Reporting adds no device readback or synchronization.
 The current task layout uses LLVM AOT schema 11, GFX metadata 10 (11 for
-selected range policies), JIT cache schema 74 and native ABI 176. Re-export older candidate artifacts and use a paired frontend
+selected range policies), JIT cache schema 74 and native ABI 177. Re-export older candidate artifacts and use a paired frontend
 and runtime package.
 
 `task_id` is stable for the same specialization cache identity, task ordinal,
