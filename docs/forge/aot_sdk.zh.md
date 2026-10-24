@@ -2725,6 +2725,12 @@ prepare 对选中数据各读取、校验一次，核对精确字节数并在录
 这是共用资源基础，并不等于任意 live operator/provider 状态均已自动序列化。
 小型 CPU/CUDA/Vulkan 测试覆盖独立消费者、显式梯度、尾部字节、空数据及在途退休。
 
+指定独立 CUDA/Vulkan 执行域时，私有初始数据和冻结 ArgPack 的冷上传使用该域，
+完成后才交给资源 factory。CUDA 上传还等待目标 allocation 创建时的分配/清零事件，
+防止默认流稍后清零覆盖已上传内容。该事件不包含创建后追加的默认流任务，也不能替代
+公开输入后续写入的依赖；整个计划的启动依赖仍按原合同保留。需要异步初始化的 CUDA
+allocation 多持有一个无计时事件，随其存储代次退休；重放不重新上传或查询此事件。
+
 在主机上消费的不可变 provider 输入可声明为
 `dict(kind="host_blob", name="code", data=key, byte_size=len(code_bytes))`，
 复用同一个 `add_data()` 键。它不分配设备存储，也不能绑定为 ndarray；已实现对应

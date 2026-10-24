@@ -3602,6 +3602,16 @@ This is shared resource infrastructure, not automatic serialization of arbitrary
 live operator/provider state. Small CPU/CUDA/Vulkan tests cover separate consumers,
 explicit gradients, byte tails, empty data and in-flight retirement.
 
+With an independent CUDA/Vulkan execution domain, private initial data and frozen
+ArgPacks upload on that domain and complete before resource factories consume
+them. CUDA uploads also wait for the destination allocation's creation-time
+allocation/zero-fill event, preventing later default-stream initialization from
+overwriting uploaded contents. That event excludes default-stream work appended
+after creation and does not replace dependencies on subsequent public-input
+writes. The plan retains its existing bootstrap dependencies. CUDA allocations
+with asynchronous initialization retain one untimed event until their storage
+generation retires; replay neither uploads again nor queries this event.
+
 Immutable provider inputs that are consumed on the host can use
 `dict(kind="host_blob", name="code", data=key, byte_size=len(code_bytes))`, with
 the same `add_data()` key. This resource has no device allocation and cannot be
