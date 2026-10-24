@@ -1586,7 +1586,8 @@ construction copies use that domain if their inputs come from private
 inside an uploaded range. The copy still completes before `prepare()` returns.
 Public inputs and inputs without a readiness proof keep their existing producer
 waits; owning a view handle is not such proof. This does not promise asynchronous
-driver allocation or remove the whole plan's bootstrap dependencies. Copy count,
+driver allocation. Plan initialization separately checks the complete preparation
+dependency closure before omitting an ordinary-queue prefix. Copy count,
 replay behavior and the time at which image contents are consumed are unchanged.
 
 For these qualified sampled Textures, export can instead name a public resource:
@@ -3608,7 +3609,16 @@ them. CUDA uploads also wait for the destination allocation's creation-time
 allocation/zero-fill event, preventing later default-stream initialization from
 overwriting uploaded contents. That event excludes default-stream work appended
 after creation and does not replace dependencies on subsequent public-input
-writes. The plan retains its existing bootstrap dependencies. CUDA allocations
+writes. Plan initialization checks physical array ownership, actual kernel Field
+dependencies, and native construction dependencies. Fully described private plans
+can omit an unrelated ordinary-queue prefix; public arrays (including their views),
+Field roots and undescribed providers retain it. Existing Vulkan image/AS loans
+retain their exact producer dependencies. Private initial data, frozen ArgPacks,
+images and SPD use this contract; it is not a blanket independent-prepare guarantee
+for every external provider. CUDA may add one cold selected-domain submission to
+join allocation initialization, completing and reclaiming it before explicit
+initialization so capacity one remains usable. Replay adds no dependency discovery.
+CUDA allocations
 with asynchronous initialization retain one untimed event until their storage
 generation retires; replay neither uploads again nor queries this event.
 
