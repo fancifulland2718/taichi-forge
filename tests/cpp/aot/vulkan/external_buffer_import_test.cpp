@@ -62,23 +62,21 @@ struct NativeHandle {
   }
 };
 
-struct HostGate {
-  explicit HostGate(vkapi::DeviceHandle device) : device(device) {
-    VkEventCreateInfo info{VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
-    checked(device.functions().vkCreateEvent(device, &info, nullptr, &event));
+struct ProducerGate {
+  explicit ProducerGate(VulkanDevice &source)
+      : gate(source, 0), device(source.vk_device()) {
   }
-  ~HostGate() {
-    device.functions().vkSetEvent(device, event);
+  ~ProducerGate() {
+    gate.release();
     if (pending_fence)
       device.functions().vkWaitForFences(device, 1, &pending_fence, VK_TRUE,
                                          UINT64_MAX);
-    device.functions().vkDestroyEvent(device, event, nullptr);
   }
   void release() {
-    checked(device.functions().vkSetEvent(device, event));
+    gate.release();
   }
+  taichi::lang::test_detail::TimelineGate gate;
   vkapi::DeviceHandle device;
-  VkEvent event{};
   VkFence pending_fence{};
 };
 
@@ -454,6 +452,8 @@ void qualify_submission(bool independent, bool compose = false,
       consumer_creator(parameters());
   auto &pd = *producer_creator.device();
   auto &cd = *consumer_creator.device();
+  if (!pd.vk_caps().timeline_semaphore)
+    GTEST_SKIP() << "Pending producer qualification requires timeline semaphores";
   if (independent && cd.created_compute_queue_count() < 2)
     GTEST_SKIP() << "Selected device has no independent compute queue";
   // Preserve producer flags, including optional device address.
@@ -559,12 +559,10 @@ void qualify_submission(bool independent, bool compose = false,
     if (!compose)
       imported->record_release(vk);
     // Binary waits require the signal to have been submitted already. The
-    // producer's host event holds that enqueued signal pending without a spin.
-    HostGate gate(pd.vk_device());
+    // A host-signaled timeline gate holds that enqueued signal pending without
+    // illegally setting a VkEvent already waited on by a pending command.
+    ProducerGate gate(pd);
     producer.begin();
-    pd.vk_device().functions().vkCmdWaitEvents(
-        producer.commands, 1, &gate.event, VK_PIPELINE_STAGE_HOST_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, nullptr, 0, nullptr, 0, nullptr);
     if (epoch)
       producer.barrier(*exported.source, VK_ACCESS_TRANSFER_READ_BIT,
                        VK_ACCESS_TRANSFER_WRITE_BIT);
