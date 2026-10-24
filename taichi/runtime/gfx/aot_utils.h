@@ -5,6 +5,7 @@
 
 #include "taichi/codegen/spirv/kernel_utils.h"
 #include "taichi/aot/module_loader.h"
+#include "taichi/aot/device_range_dispatch.h"
 #include "taichi/runtime/gfx/aot_snode_resources.h"
 
 namespace taichi::lang {
@@ -25,12 +26,7 @@ struct AotKernelAlias {
 };
 
 // Entry-specific execution policy is separate from shared shader identity.
-struct AotDeviceRangeDispatch {
-  std::string name;
-  uint32_t version{0};
-  std::vector<uint32_t> tasks;
-  TI_IO_DEF(name, version, tasks);
-};
+using AotDeviceRangeDispatch = aot::DeviceRangeDispatch;
 
 // Export names do not affect execution. Everything else, including task names,
 // ABI, launch attributes and tree dependencies, must agree before sharing.

@@ -59,7 +59,8 @@ with Runtime("vulkan", device_index=int(os.environ.get("TI_VISIBLE_DEVICE", "0")
         with zipfile.ZipFile(sys.argv[1]) as archive:
             files = {name: archive.read(name) for name in archive.namelist()}
         original = json.loads(files["metadata.json"])
-        for defect in ("version", "missing_version", "task", "duplicate", "unknown", "legacy"):
+        for defect in ("version", "missing_version", "task", "duplicate", "unknown", "legacy",
+                       "version_wrap", "index_wrap", "float_index", "negative_index"):
             metadata = json.loads(json.dumps(original))
             entry = metadata["device_range_dispatch"][0]
             if defect == "version":
@@ -72,6 +73,14 @@ with Runtime("vulkan", device_index=int(os.environ.get("TI_VISIBLE_DEVICE", "0")
                 entry["tasks"] *= 2
             elif defect == "unknown":
                 entry["name"] = "unknown"
+            elif defect == "version_wrap":
+                entry["version"] += 1 << 32
+            elif defect == "index_wrap":
+                entry["tasks"][0] += 1 << 32
+            elif defect == "float_index":
+                entry["tasks"][0] += 0.5
+            elif defect == "negative_index":
+                entry["tasks"][0] = -1
             else:
                 metadata["metadata_version"] = 10
             with tempfile.TemporaryDirectory() as directory:

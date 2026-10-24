@@ -55,7 +55,7 @@ class AotModuleImpl : public aot::Module {
         // explicit versioned contract and must never inherit a missing field.
         for (const auto &[name, value] : json.fields()) {
           if (name == "device_range_dispatch")
-            liong::json::deserialize(value, ti_aot_data_.device_range_dispatch, true);
+            aot::decode_device_range_dispatch(value, ti_aot_data_.device_range_dispatch);
         }
         for (const auto &kernel : ti_aot_data_.kernels) {
           for (const auto &task : kernel.tasks_attribs) {
