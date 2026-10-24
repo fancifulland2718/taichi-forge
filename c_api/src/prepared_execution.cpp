@@ -333,7 +333,7 @@ struct PreparedExecution {
           const auto format = image->parameters().format;
           gfx::GfxRuntime::SharedImage use{handle, image->gfx_sampled_allocation(), image};
           use.depth_aspect = format == BufferFormat::depth16 || format == BufferFormat::depth32f;
-          use.access = sampled_only ? gfx::SharedImageUse::sampled_at_boundary
+          use.access = sampled_only ? gfx::SharedImageUse::read
                                     : gfx::SharedImageUse::exclusive;
           shared_images.push_back(std::move(use));
         };

@@ -628,7 +628,7 @@ class TI_DLL_EXPORT GfxRuntime {
     bool depth_aspect{false};
     std::uint32_t base_mip{0}, mip_count{1};
     std::uint32_t base_layer{0}, layer_count{1};
-    SharedImageUse access{SharedImageUse::sampled_at_boundary};
+    SharedImageUse access{SharedImageUse::read};
   };
   void register_managed_image(DeviceAllocation image, RuntimeResourceHandle handle);
   void prepare_fixed_shared_images(

@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Native and kernel AS consumers share a cold resource/initialization closure.
-inline constexpr int kForgeNativeAbiRevision = 188;
+// Backend adapters share owner-qualified read/write admission machinery.
+inline constexpr int kForgeNativeAbiRevision = 189;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

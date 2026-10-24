@@ -4,15 +4,17 @@
 #include <atomic>
 #include <thread>
 
-namespace taichi::lang::gfx {
-struct SharedImageAdmissionTestAccess {
-  template <class Boundary>
-  static auto index_size(const SharedImageAdmission<Boundary> &admission,
+namespace taichi::lang {
+struct SharedResourceAdmissionTestAccess {
+  template <class Boundary, class Name>
+  static auto index_size(const SharedResourceAdmission<Boundary, Name> &admission,
                          RuntimeResourceHandle image) {
-    const auto &edges = admission.control_->images.at(image)->recordings;
+    const auto &edges = admission.control_->resources.at(image)->recordings;
     return std::make_pair(edges.size(), edges.capacity());
   }
 };
+}  // namespace taichi::lang
+namespace taichi::lang::gfx {
 namespace {
 
 using Access = SharedImageUse;
@@ -51,7 +53,7 @@ class SharedImageAdmissionTest : public ::testing::Test {
     auto [acquired, lease] = registry.acquire(handle);
     if (acquired != Registry::Result::kSuccess)
       throw std::runtime_error("test image acquire failed");
-    admission.register_image(handle);
+    admission.register_resource(handle);
     return {handle, std::move(lease)};
   }
   Admission::PinnedUse pin(const Image &image, Access access) {
@@ -73,7 +75,7 @@ TEST_F(SharedImageAdmissionTest, OrdinaryChurnPrunesExpiredReverseEdges) {
   for (int i = 0; i < 257; ++i) {
     auto permit = admission.prepare({pin(image, Access::exclusive)});
     const auto [size, capacity] =
-        SharedImageAdmissionTestAccess::index_size(admission, image.handle);
+        SharedResourceAdmissionTestAccess::index_size(admission, image.handle);
     EXPECT_EQ(size, 1);
     EXPECT_EQ(capacity, 1);
   }
@@ -83,7 +85,7 @@ TEST_F(SharedImageAdmissionTest, OrdinaryChurnPrunesExpiredReverseEdges) {
   for (int i = 0; i < 257; ++i) {
     live.push_back(admission.prepare({pin(image, Access::exclusive)}));
     const auto [size, capacity] =
-        SharedImageAdmissionTestAccess::index_size(admission, image.handle);
+        SharedResourceAdmissionTestAccess::index_size(admission, image.handle);
     EXPECT_EQ(size, live.size());
     if (capacity != old_capacity) {
       ++capacity_changes;
@@ -92,7 +94,7 @@ TEST_F(SharedImageAdmissionTest, OrdinaryChurnPrunesExpiredReverseEdges) {
   }
   EXPECT_LE(capacity_changes,
             10);  // geometric growth, not one allocation per edge
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto loan = admission.reserve({pin(image, Access::read)});
   loan->publish_boundary(std::make_shared<Boundary>());
   for (const auto &permit : live)
     EXPECT_THROW(permit->submit([] {}), std::invalid_argument);
@@ -105,14 +107,14 @@ TEST_F(SharedImageAdmissionTest,
        PreparedWriterRestoringReadBoundaryIsBlocked) {
   auto image = create();
   // Entry and final sampled layouts do not erase the middle storage write.
-  auto writer = admission.prepare({pin(image, Access::sampled_at_boundary),
+  auto writer = admission.prepare({pin(image, Access::read),
                                    pin(image, Access::exclusive),
-                                   pin(image, Access::sampled_at_boundary)});
-  auto sampler = admission.prepare({pin(image, Access::sampled_at_boundary)});
+                                   pin(image, Access::read)});
+  auto sampler = admission.prepare({pin(image, Access::read)});
   int writes = 0;
   int reads = 0;
   writer->submit([&] { ++writes; });
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto loan = admission.reserve({pin(image, Access::read)});
   ASSERT_EQ(loan->needs_boundary().size(), 1);
   EXPECT_FALSE(loan->ready());
   EXPECT_THROW(writer->submit([&] { ++writes; }), std::invalid_argument);
@@ -130,9 +132,9 @@ TEST_F(SharedImageAdmissionTest,
        MultipleDomainsHoldIndependentReaderOwners) {
   auto image = create();
   auto writer = admission.prepare({pin(image, Access::exclusive)});
-  auto first = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto first = admission.reserve({pin(image, Access::read)});
   first->publish_boundary(std::make_shared<Boundary>());
-  auto second = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto second = admission.reserve({pin(image, Access::read)});
   EXPECT_TRUE(second->ready());
   EXPECT_TRUE(second->needs_boundary().empty());
   first.reset();
@@ -143,13 +145,13 @@ TEST_F(SharedImageAdmissionTest,
 
 TEST_F(SharedImageAdmissionTest, FanoutReusesExactlyThePublishedPrefix) {
   auto image = create();
-  auto first = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto first = admission.reserve({pin(image, Access::read)});
   EXPECT_THROW(first->dependencies(), std::invalid_argument);
   EXPECT_THROW(first->publish_boundary({}), std::invalid_argument);
   auto prefix = std::make_shared<Boundary>();
   prefix->sequence = 71;
   first->publish_boundary(prefix);
-  auto second = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto second = admission.reserve({pin(image, Access::read)});
   ASSERT_EQ(first->dependencies().size(), 1);
   ASSERT_EQ(second->dependencies().size(), 1);
   EXPECT_EQ(first->dependencies()[0], prefix);
@@ -163,11 +165,11 @@ TEST_F(SharedImageAdmissionTest,
        MixedExistingAndNewImagesPreserveBothPrefixes) {
   auto a = create();
   auto b = create();
-  auto first = admission.reserve({pin(a, Access::sampled_at_boundary)});
+  auto first = admission.reserve({pin(a, Access::read)});
   auto a_prefix = std::make_shared<Boundary>();
   first->publish_boundary(a_prefix);
-  auto combined = admission.reserve({pin(a, Access::sampled_at_boundary),
-                                     pin(b, Access::sampled_at_boundary)});
+  auto combined = admission.reserve({pin(a, Access::read),
+                                     pin(b, Access::read)});
   ASSERT_EQ(combined->needs_boundary().size(), 1);
   EXPECT_EQ(combined->needs_boundary()[0], b.handle);
   auto b_prefix = std::make_shared<Boundary>();
@@ -185,7 +187,7 @@ TEST_F(SharedImageAdmissionTest,
 TEST_F(SharedImageAdmissionTest,
        WriterPreparedDuringLoanCannotSubmitEarly) {
   auto image = create();
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto loan = admission.reserve({pin(image, Access::read)});
   loan->publish_boundary(std::make_shared<Boundary>());
   auto writer = admission.prepare({pin(image, Access::exclusive)});
   EXPECT_THROW(writer->submit([] {}), std::invalid_argument);
@@ -196,7 +198,7 @@ TEST_F(SharedImageAdmissionTest,
 TEST_F(SharedImageAdmissionTest,
        UploadAndCanvasLayoutChangesShareOneGuard) {
   auto image = create();
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto loan = admission.reserve({pin(image, Access::read)});
   loan->publish_boundary(std::make_shared<Boundary>());
   int calls = 0;
   // Upload: transfer_dst; Canvas copy-source: transfer_src; offscreen target:
@@ -205,7 +207,7 @@ TEST_F(SharedImageAdmissionTest,
     EXPECT_THROW(ordinary(image, Access::exclusive, calls),
                  std::invalid_argument);
   EXPECT_EQ(calls, 0);
-  ordinary(image, Access::sampled_at_boundary, calls);
+  ordinary(image, Access::read, calls);
   EXPECT_EQ(calls, 1);
   loan.reset();
   ordinary(image, Access::exclusive, calls);
@@ -216,7 +218,7 @@ TEST_F(SharedImageAdmissionTest,
        MultiImagePreflightDoesNotPartiallyRecord) {
   auto destination = create();
   auto source = create();
-  auto loan = admission.reserve({pin(source, Access::sampled_at_boundary)});
+  auto loan = admission.reserve({pin(source, Access::read)});
   loan->publish_boundary(std::make_shared<Boundary>());
   int transitions = 0;
   EXPECT_THROW(admission.ordinary({{destination.handle, Access::exclusive},
@@ -236,10 +238,10 @@ TEST_F(SharedImageAdmissionTest,
   auto writer =
       admission.prepare({pin(a, Access::exclusive), pin(a, Access::exclusive),
                          pin(b, Access::exclusive)});
-  auto a_loan = admission.reserve({pin(a, Access::sampled_at_boundary),
-                                   pin(a, Access::sampled_at_boundary)});
+  auto a_loan = admission.reserve({pin(a, Access::read),
+                                   pin(a, Access::read)});
   a_loan->publish_boundary(std::make_shared<Boundary>());
-  auto b_loan = admission.reserve({pin(b, Access::sampled_at_boundary)});
+  auto b_loan = admission.reserve({pin(b, Access::read)});
   b_loan->publish_boundary(std::make_shared<Boundary>());
   a_loan.reset();
   EXPECT_THROW(writer->submit([] {}), std::invalid_argument);
@@ -250,11 +252,11 @@ TEST_F(SharedImageAdmissionTest,
 TEST_F(SharedImageAdmissionTest,
        PendingReservationCannotBeJoinedOrSampled) {
   auto image = create();
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
-  EXPECT_THROW(admission.reserve({pin(image, Access::sampled_at_boundary)}),
+  auto loan = admission.reserve({pin(image, Access::read)});
+  EXPECT_THROW(admission.reserve({pin(image, Access::read)}),
                std::invalid_argument);
   int calls = 0;
-  EXPECT_THROW(ordinary(image, Access::sampled_at_boundary, calls),
+  EXPECT_THROW(ordinary(image, Access::read, calls),
                std::invalid_argument);
   loan.reset();
   ordinary(image, Access::exclusive, calls);
@@ -264,13 +266,13 @@ TEST_F(SharedImageAdmissionTest,
 TEST_F(SharedImageAdmissionTest, ReservationFailureIsAtomicAcrossImages) {
   auto a = create();
   auto b = create();
-  auto bad = pin(b, Access::sampled_at_boundary);
-  ++bad.use.image.generation;
-  EXPECT_THROW(admission.reserve({pin(a, Access::sampled_at_boundary), bad}),
+  auto bad = pin(b, Access::read);
+  ++bad.use.resource.generation;
+  EXPECT_THROW(admission.reserve({pin(a, Access::read), bad}),
                std::invalid_argument);
-  auto b_reader = admission.reserve({pin(b, Access::sampled_at_boundary)});
+  auto b_reader = admission.reserve({pin(b, Access::read)});
   b_reader->publish_boundary(std::make_shared<Boundary>());
-  EXPECT_THROW(admission.reserve({pin(a, Access::sampled_at_boundary),
+  EXPECT_THROW(admission.reserve({pin(a, Access::read),
                                   pin(b, Access::exclusive)}),
                std::invalid_argument);
   b_reader.reset();
@@ -284,26 +286,26 @@ TEST_F(SharedImageAdmissionTest,
        IdentityIncludesRegistryDomainKindAndGeneration) {
   auto image = create();
   for (int part = 0; part < 4; ++part) {
-    auto wrong = pin(image, Access::sampled_at_boundary);
+    auto wrong = pin(image, Access::read);
     if (part == 0)
-      ++wrong.use.image.domain;
+      ++wrong.use.resource.domain;
     if (part == 1)
-      ++wrong.use.image.kind;
+      ++wrong.use.resource.kind;
     if (part == 2)
-      ++wrong.use.image.index;
+      ++wrong.use.resource.index;
     if (part == 3)
-      ++wrong.use.image.generation;
+      ++wrong.use.resource.generation;
     EXPECT_THROW(admission.reserve({wrong}), std::invalid_argument);
   }
-  auto no_owner = pin(image, Access::sampled_at_boundary);
+  auto no_owner = pin(image, Access::read);
   no_owner.owner.reset();
   EXPECT_THROW(admission.reserve({no_owner}), std::invalid_argument);
 }
 
 TEST_F(SharedImageAdmissionTest, PublicViewRetireKeepsExistingLeaseUsable) {
   auto image = create();
-  auto sampler = admission.prepare({pin(image, Access::sampled_at_boundary)});
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto sampler = admission.prepare({pin(image, Access::read)});
+  auto loan = admission.reserve({pin(image, Access::read)});
   loan->publish_boundary(std::make_shared<Boundary>());
   EXPECT_EQ(registry.retire(image.handle), Registry::Result::kSuccess);
   image.view.reset();
@@ -321,7 +323,7 @@ TEST_F(SharedImageAdmissionTest,
        LastSubmittedPrefixOwnsLoanAfterFacadeClose) {
   auto image = create();
   auto writer = admission.prepare({pin(image, Access::exclusive)});
-  auto facade = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto facade = admission.reserve({pin(image, Access::read)});
   facade->publish_boundary(std::make_shared<Boundary>());
   // The existing Vulkan instance payload / last-prefix retirement owns these
   // references in production. This model only tests the host lifetime rule.
@@ -339,7 +341,7 @@ TEST_F(SharedImageAdmissionTest,
   auto image = create();
   enum class Layout { attachment, shader_read, transfer_dst };
   Layout tracked = Layout::attachment;
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto loan = admission.reserve({pin(image, Access::read)});
   // Simulate a successfully completed ordinary transition followed by a later
   // preparation failure. Only the reservation rolls back; tracker does not.
   tracked = Layout::shader_read;
@@ -357,7 +359,7 @@ TEST_F(SharedImageAdmissionTest,
   auto image = create();
   auto old_handle = image.handle;
   auto old = admission.prepare({pin(image, Access::exclusive)});
-  admission.remove_image(image.handle);
+  admission.remove_resource(image.handle);
   EXPECT_THROW(old->submit([] {}), std::invalid_argument);
   registry.retire(image.handle);
   image.view.reset();
@@ -373,19 +375,19 @@ TEST_F(SharedImageAdmissionTest,
 
 TEST_F(SharedImageAdmissionTest, UntrackCannotBypassReaderReservation) {
   auto image = create();
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto loan = admission.reserve({pin(image, Access::read)});
   loan->publish_boundary(std::make_shared<Boundary>());
-  EXPECT_THROW(admission.remove_image(image.handle), std::invalid_argument);
+  EXPECT_THROW(admission.remove_resource(image.handle), std::invalid_argument);
   EXPECT_TRUE(loan->ready());
   loan.reset();
-  EXPECT_NO_THROW(admission.remove_image(image.handle));
+  EXPECT_NO_THROW(admission.remove_resource(image.handle));
 }
 
 TEST_F(SharedImageAdmissionTest,
        ClosedRuntimeRejectsAdmissionsButKeepsOwners) {
   auto image = create();
-  auto permit = admission.prepare({pin(image, Access::sampled_at_boundary)});
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto permit = admission.prepare({pin(image, Access::read)});
+  auto loan = admission.reserve({pin(image, Access::read)});
   loan->publish_boundary(std::make_shared<Boundary>());
   registry.retire(image.handle);
   image.view.reset();
@@ -420,7 +422,7 @@ TEST_F(SharedImageAdmissionTest, ReentrantLoanCannotSplitCheckAndSubmit) {
   auto image = create();
   auto permit = admission.prepare({pin(image, Access::exclusive)});
   permit->submit([&] {
-    EXPECT_THROW(admission.reserve({pin(image, Access::sampled_at_boundary)}),
+    EXPECT_THROW(admission.reserve({pin(image, Access::read)}),
                  std::invalid_argument);
     EXPECT_THROW(admission.reserve({pin(image, Access::exclusive)}),
                  std::invalid_argument);
@@ -429,7 +431,7 @@ TEST_F(SharedImageAdmissionTest, ReentrantLoanCannotSplitCheckAndSubmit) {
       permit->submit([] { throw std::runtime_error("record failed"); }),
       std::runtime_error);
   // Exception unwinds the submission depth as well as the gate.
-  EXPECT_NO_THROW(admission.reserve({pin(image, Access::sampled_at_boundary)}));
+  EXPECT_NO_THROW(admission.reserve({pin(image, Access::read)}));
 }
 
 TEST_F(SharedImageAdmissionTest,
@@ -443,7 +445,7 @@ TEST_F(SharedImageAdmissionTest,
     });
     other.join();
   });
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto loan = admission.reserve({pin(image, Access::read)});
   registry.retire(image.handle);
   image.view.reset();
   loan.reset();
@@ -454,7 +456,7 @@ TEST_F(SharedImageAdmissionTest, DeadRecordingEdgesDoNotOwnResourceLeases) {
   auto image = create();
   for (int i = 0; i < 64; ++i)
     admission.prepare({pin(image, Access::exclusive)});
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto loan = admission.reserve({pin(image, Access::read)});
   loan->publish_boundary(std::make_shared<Boundary>());
   loan.reset();
   registry.retire(image.handle);
@@ -471,9 +473,9 @@ TEST(SharedImageAdmissionStandalone, LoanOutlivesRuntimeFacade) {
   auto [acquired, view] = registry.acquire(handle);
   ASSERT_EQ(acquired, Registry::Result::kSuccess);
   auto admission = std::make_unique<Admission>(gate);
-  admission->register_image(handle);
+  admission->register_resource(handle);
   auto loan =
-      admission->reserve({{{handle, Access::sampled_at_boundary},
+      admission->reserve({{{handle, Access::read},
                            std::make_shared<Registry::Lease>(view.clone())}});
   loan->publish_boundary(std::make_shared<Boundary>());
   registry.retire(handle);
@@ -488,13 +490,13 @@ TEST(SharedImageAdmissionStandalone, LoanOutlivesRuntimeFacade) {
 TEST_F(SharedImageAdmissionTest, SingleUsePreflightDoesNotBypassLoan) {
   auto image = create();
   EXPECT_NO_THROW(admission.require_use({image.handle, Access::exclusive}));
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto loan = admission.reserve({pin(image, Access::read)});
   EXPECT_THROW(
-      admission.require_use({image.handle, Access::sampled_at_boundary}),
+      admission.require_use({image.handle, Access::read}),
       std::invalid_argument);
   loan->publish_boundary(std::make_shared<Boundary>());
   EXPECT_NO_THROW(
-      admission.require_use({image.handle, Access::sampled_at_boundary}));
+      admission.require_use({image.handle, Access::read}));
   EXPECT_THROW(admission.require_use({image.handle, Access::exclusive}),
                std::invalid_argument);
   loan.reset();
@@ -506,7 +508,7 @@ TEST_F(SharedImageAdmissionTest,
   auto image = create();
   auto permit = admission.prepare({pin(image, Access::exclusive)});
   admission.close();
-  EXPECT_NO_THROW(admission.remove_image(image.handle));
+  EXPECT_NO_THROW(admission.remove_resource(image.handle));
   EXPECT_THROW(permit->submit([] {}), std::invalid_argument);
   registry.retire(image.handle);
   image.view.reset();
@@ -521,21 +523,21 @@ TEST_F(SharedImageAdmissionTest,
   {
     auto scope = admission.ordinary_scope();
     EXPECT_NO_THROW(admission.require_use({image.handle, Access::exclusive}));
-    EXPECT_THROW(admission.reserve({pin(image, Access::sampled_at_boundary)}),
+    EXPECT_THROW(admission.reserve({pin(image, Access::read)}),
                  std::invalid_argument);
   }
-  EXPECT_NO_THROW(admission.reserve({pin(image, Access::sampled_at_boundary)}));
+  EXPECT_NO_THROW(admission.reserve({pin(image, Access::read)}));
 }
 
 TEST_F(SharedImageAdmissionTest,
        PostPrefixFailureRestoresSamePreparedWriter) {
   auto image = create();
   auto writer = admission.prepare(
-      {pin(image, Access::sampled_at_boundary), pin(image, Access::exclusive)});
+      {pin(image, Access::read), pin(image, Access::exclusive)});
   int calls = 0;
   writer->submit([&] { ++calls; });
   {
-    auto failed = admission.reserve({pin(image, Access::sampled_at_boundary)});
+    auto failed = admission.reserve({pin(image, Access::read)});
     failed->publish_boundary(std::make_shared<Boundary>());
     EXPECT_THROW(writer->submit([&] { ++calls; }), std::invalid_argument);
     // A downstream command/instance preparation failure drops only the loan.
@@ -547,14 +549,14 @@ TEST_F(SharedImageAdmissionTest,
 
 TEST_F(SharedImageAdmissionTest, ExclusiveLoanBlocksAllAccessUntilRetirement) {
   auto image = create();
-  auto sampler = admission.prepare({pin(image, Access::sampled_at_boundary)});
+  auto sampler = admission.prepare({pin(image, Access::read)});
   auto writer = admission.prepare({pin(image, Access::exclusive)});
   // The same image may occur in several dispatches. Strongest access wins.
-  auto loan = admission.reserve({pin(image, Access::sampled_at_boundary),
+  auto loan = admission.reserve({pin(image, Access::read),
                                  pin(image, Access::exclusive),
-                                 pin(image, Access::sampled_at_boundary)});
+                                 pin(image, Access::read)});
   ASSERT_EQ(loan->needs_boundary().size(), 1);
-  auto late_sampler = admission.prepare({pin(image, Access::sampled_at_boundary)});
+  auto late_sampler = admission.prepare({pin(image, Access::read)});
   auto prefix = std::make_shared<Boundary>();
   for (bool published : {false, true}) {
     if (published)
@@ -563,7 +565,7 @@ TEST_F(SharedImageAdmissionTest, ExclusiveLoanBlocksAllAccessUntilRetirement) {
     EXPECT_THROW(sampler->submit([] {}), std::invalid_argument);
     EXPECT_THROW(late_sampler->submit([] {}), std::invalid_argument);
     EXPECT_THROW(writer->submit([] {}), std::invalid_argument);
-    for (auto access : {Access::sampled_at_boundary, Access::exclusive}) {
+    for (auto access : {Access::read, Access::exclusive}) {
       int calls = 0;
       EXPECT_THROW(ordinary(image, access, calls), std::invalid_argument);
       EXPECT_EQ(calls, 0);
@@ -572,7 +574,7 @@ TEST_F(SharedImageAdmissionTest, ExclusiveLoanBlocksAllAccessUntilRetirement) {
       EXPECT_THROW(admission.reserve({pin(image, access)}),
                    std::invalid_argument);
     }
-    EXPECT_THROW(admission.remove_image(image.handle), std::invalid_argument);
+    EXPECT_THROW(admission.remove_resource(image.handle), std::invalid_argument);
   }
   ASSERT_EQ(loan->dependencies().size(), 1);
   EXPECT_EQ(loan->dependencies()[0], prefix);
@@ -580,7 +582,7 @@ TEST_F(SharedImageAdmissionTest, ExclusiveLoanBlocksAllAccessUntilRetirement) {
   EXPECT_NO_THROW(sampler->submit([] {}));
   EXPECT_NO_THROW(late_sampler->submit([] {}));
   EXPECT_NO_THROW(writer->submit([] {}));
-  auto reader = admission.reserve({pin(image, Access::sampled_at_boundary)});
+  auto reader = admission.reserve({pin(image, Access::read)});
   EXPECT_FALSE(reader->ready());
   EXPECT_EQ(reader->needs_boundary().size(), 1);  // Acquire a fresh prefix.
 }
@@ -588,10 +590,10 @@ TEST_F(SharedImageAdmissionTest, ExclusiveLoanBlocksAllAccessUntilRetirement) {
 TEST_F(SharedImageAdmissionTest, MixedLoanPreservesReadFanoutAndPrefixes) {
   auto source = create();
   auto target = create();
-  auto reader = admission.reserve({pin(source, Access::sampled_at_boundary)});
+  auto reader = admission.reserve({pin(source, Access::read)});
   auto source_prefix = std::make_shared<Boundary>();
   reader->publish_boundary(source_prefix);
-  auto mixed = admission.reserve({pin(source, Access::sampled_at_boundary),
+  auto mixed = admission.reserve({pin(source, Access::read),
                                   pin(target, Access::exclusive)});
   ASSERT_EQ(mixed->needs_boundary().size(), 1);
   EXPECT_EQ(mixed->needs_boundary()[0], target.handle);
@@ -603,9 +605,9 @@ TEST_F(SharedImageAdmissionTest, MixedLoanPreservesReadFanoutAndPrefixes) {
   EXPECT_EQ(dependencies[1], target_prefix);
   reader.reset();
   int calls = 0;
-  EXPECT_NO_THROW(ordinary(source, Access::sampled_at_boundary, calls));
+  EXPECT_NO_THROW(ordinary(source, Access::read, calls));
   EXPECT_THROW(ordinary(source, Access::exclusive, calls), std::invalid_argument);
-  EXPECT_THROW(ordinary(target, Access::sampled_at_boundary, calls),
+  EXPECT_THROW(ordinary(target, Access::read, calls),
                std::invalid_argument);
   mixed.reset();
   EXPECT_NO_THROW(ordinary(source, Access::exclusive, calls));
@@ -618,9 +620,9 @@ TEST_F(SharedImageAdmissionTest, ConflictingWriterRollsBackWholeReservation) {
   auto b = create();
   auto b_writer = admission.reserve({pin(b, Access::exclusive)});
   b_writer->publish_boundary(std::make_shared<Boundary>());
-  auto a_sampler = admission.prepare({pin(a, Access::sampled_at_boundary)});
+  auto a_sampler = admission.prepare({pin(a, Access::read)});
   auto a_writer = admission.prepare({pin(a, Access::exclusive)});
-  for (auto access : {Access::sampled_at_boundary, Access::exclusive}) {
+  for (auto access : {Access::read, Access::exclusive}) {
     EXPECT_THROW(admission.reserve({pin(a, Access::exclusive), pin(b, access)}),
                  std::invalid_argument);
     EXPECT_NO_THROW(a_sampler->submit([] {}));
@@ -633,7 +635,7 @@ TEST_F(SharedImageAdmissionTest, ConflictingWriterRollsBackWholeReservation) {
 
 TEST_F(SharedImageAdmissionTest, ExclusiveFailureRestoresPreparedAccess) {
   auto image = create();
-  auto sampler = admission.prepare({pin(image, Access::sampled_at_boundary)});
+  auto sampler = admission.prepare({pin(image, Access::read)});
   for (bool published : {false, true}) {
     {
       auto failed = admission.reserve({pin(image, Access::exclusive)});

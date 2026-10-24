@@ -3583,7 +3583,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
       } else {
         const auto use = workspace->shared_image_uses_.find(image.alloc_id);
         TI_ERROR_IF(use == workspace->shared_image_uses_.end() ||
-                        (use->second == SharedImageUse::sampled_at_boundary &&
+                        (use->second == SharedImageUse::read &&
                          layout != ImageLayout::shader_read),
                     "Shared Vulkan image use is outside its reserved access");
         entry = ImageLayout::shader_read;
@@ -3594,7 +3594,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
       if (managed != managed_images_.end())
         image_uses.push_back({{managed->second,
             layout == ImageLayout::shader_read && entry == ImageLayout::shader_read
-                ? SharedImageUse::sampled_at_boundary : SharedImageUse::exclusive},
+                ? SharedImageUse::read : SharedImageUse::exclusive},
             image_owners});
     }
     const auto [previous, first_use] =
@@ -6812,7 +6812,7 @@ void GfxRuntime::untrack_image(DeviceAllocation image) {
   // checks the reader count directly and revokes every surviving permit.
   const auto managed = managed_images_.find(image.alloc_id);
   if (managed != managed_images_.end()) {
-    shared_image_admission_.remove_image(managed->second);
+    shared_image_admission_.remove_resource(managed->second);
     managed_images_.erase(managed);
   }
   image_storage_keys_.erase(image.alloc_id);
@@ -6826,7 +6826,7 @@ void GfxRuntime::transition_image(DeviceAllocation image, ImageLayout layout) {
   ImageLayout &last_layout = last_image_layouts_.at(image.alloc_id);
   require_image_access(image, layout == ImageLayout::shader_read &&
                                  last_layout == ImageLayout::shader_read
-                             ? SharedImageUse::sampled_at_boundary
+                             ? SharedImageUse::read
                              : SharedImageUse::exclusive);
   ensure_current_cmdlist();
   insert_pending_dispatch_barriers();
@@ -6859,7 +6859,7 @@ void GfxRuntime::register_managed_image(DeviceAllocation image,
   const auto [it, inserted] = managed_images_.emplace(image.alloc_id, handle);
   TI_ERROR_IF(!inserted, "Managed image already has a registry identity");
   try {
-    shared_image_admission_.register_image(handle);
+    shared_image_admission_.register_resource(handle);
   } catch (...) {
     managed_images_.erase(it);
     throw;
@@ -6880,7 +6880,7 @@ void GfxRuntime::preflight_kernel_images(const CompiledTaichiKernel &kernel,
   for (const auto &task : kernel.ti_kernel_attribs().tasks_attribs)
     for (const auto &bind : task.texture_binds) {
       const auto use = bind.is_storage ? SharedImageUse::exclusive
-                                       : SharedImageUse::sampled_at_boundary;
+                                       : SharedImageUse::read;
       const auto collection = context.texture_collections.find(bind.arg_id);
       if (collection != context.texture_collections.end()) {
         for (const auto image : collection->second)
