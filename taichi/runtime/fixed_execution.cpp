@@ -1161,6 +1161,11 @@ FixedExecution::FixedExecution(
                      : nullptr;
           if (!launcher)
             throw std::invalid_argument("Fixed CUDA entry is not registered");
+          const auto &live = dispatch->context->device_range_tasks();
+          const auto &persisted = loaded->device_range_tasks();
+          TI_ERROR_IF(!live.empty() && !persisted.empty() && live != persisted,
+                      "Borrowed and persisted range dispatch policies differ");
+          const auto &selection = live.empty() ? persisted : live;
           native.emplace_back(cuda::FixedGraph::Dispatch{
               launcher,
               loaded->handle(),
@@ -1175,8 +1180,7 @@ FixedExecution::FixedExecution(
               dispatch->grouped_update,
               dispatch->bounded_binding_identity,
               dispatch->parameters,
-              std::vector<std::size_t>(dispatch->context->device_range_tasks().begin(),
-                                       dispatch->context->device_range_tasks().end())});
+              std::vector<std::size_t>(selection.begin(), selection.end())});
         } else if (const auto *external =
                        std::get_if<std::shared_ptr<NativeOperation>>(
                            &operation)) {

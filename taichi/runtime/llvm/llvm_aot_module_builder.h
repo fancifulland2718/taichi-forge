@@ -39,13 +39,16 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
                              int column_num) override;
 
  private:
-  LLVM::CompiledKernelData::InternalData compile_kernel(Kernel *kernel);
+  const LLVM::CompiledKernelData &compile_kernel(Kernel *kernel);
   void add_kernel_impl(const std::string &identifier,
                         Kernel *kernel,
                         const std::string &launch_abi);
 
   LlvmOfflineCache cache_;
   std::map<std::string, std::string> kernel_launch_abis_;
+  std::map<std::string, std::string> kernel_names_;
+  std::map<std::string, std::string> kernel_identities_;
+  std::map<std::string, std::vector<std::uint32_t>> range_selections_;
   KernelCompilationManager &compilation_manager_;
   const CompileConfig &compile_config_;
   LlvmProgramImpl *prog_ = nullptr;

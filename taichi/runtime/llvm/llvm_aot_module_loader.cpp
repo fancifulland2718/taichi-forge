@@ -10,6 +10,7 @@
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
+#include "taichi/codegen/llvm/range_dispatch.h"
 #include "taichi/runtime/llvm/runtime_context_abi.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
@@ -55,10 +56,30 @@ LlvmAotModule::LlvmAotModule(
   auto json = liong::json::parse(contents.data(),
                                  contents.data() + contents.size());
   liong::json::deserialize(json, metadata);
-  TI_ERROR_IF(metadata.schema_version != kDeviceRangeProofAotSchemaVersion,
-              "LLVM AOT task layout requires schema 11. Rebuild the artifact "
+  TI_ERROR_IF(metadata.schema_version != kDeviceRangeProofAotSchemaVersion &&
+                  metadata.schema_version != kKernelEntryPolicyAotSchemaVersion,
+              "LLVM AOT task layout requires schema 11 or 12. Rebuild the artifact "
               "with the current Forge AOT compiler.");
+  if (metadata.schema_version == kKernelEntryPolicyAotSchemaVersion) {
+    bool aliases = false, ranges = false, checksum = false;
+    for (const auto &[name, value] : json.fields()) {
+      if (name == "kernel_aliases") {
+        liong::json::deserialize(value, metadata.kernel_aliases, true);
+        aliases = true;
+      } else if (name == "device_range_dispatch") {
+        aot::decode_device_range_dispatch(value, metadata.device_range_dispatch);
+        ranges = true;
+      } else if (name == "kernel_entry_sha256") {
+        checksum = true;
+      }
+    }
+    TI_ERROR_IF(!aliases || !ranges || !checksum,
+                "AOT kernel entry policy fields are incomplete");
+  }
   validate_llvm_aot_metadata(metadata);
+  if (metadata.schema_version == kKernelEntryPolicyAotSchemaVersion)
+    TI_ERROR_IF(metadata.kernel_entry_sha256 != aot_kernel_entry_sha256(metadata),
+                "AOT kernel entry policy checksum mismatch");
   if (!metadata.kernel_runtime_state.empty())
     TI_ERROR_IF(
         metadata.runtime_state_sha256 != aot_runtime_state_sha256(metadata),
@@ -81,7 +102,8 @@ LlvmAotModule::LlvmAotModule(
   if (is_cuda_aot_artifact_format(metadata.kernel_format) ||
       !metadata.resource_binding.empty() ||
       !metadata.kernel_launch_abis.empty() ||
-      !metadata.kernel_runtime_state.empty()) {
+      !metadata.kernel_runtime_state.empty() ||
+      metadata.schema_version == kKernelEntryPolicyAotSchemaVersion) {
     TI_ERROR_IF(aot_artifact_sha256(read_artifact(
                     *directory_, "metadata.tcb")) != metadata.abi_sha256,
                 "LLVM AOT launch ABI checksum mismatch");
@@ -107,6 +129,31 @@ LlvmAotModule::LlvmAotModule(
     TI_ERROR_IF(!cache_reader_->has_kernel(name),
                 "AOT runtime-state inventory references an absent kernel: {}",
                 name);
+
+  // Validate the entire entry inventory while the reader still owns all task
+  // metadata. take_kernel_* later transfers each physical payload exactly once.
+  for (const auto &[name, code] : metadata.kernel_aliases) {
+    TI_ERROR_IF(name.empty() || name.find('\0') != std::string::npos ||
+                    cache_reader_->has_kernel(name) ||
+                    metadata.kernel_aliases.count(code) ||
+                    !cache_reader_->has_kernel(code),
+                "Invalid LLVM AOT kernel alias: {} -> {}", name, code);
+  }
+  for (const auto &entry : metadata.device_range_dispatch) {
+    const auto alias = metadata.kernel_aliases.find(entry.name);
+    const auto &code = alias == metadata.kernel_aliases.end() ? entry.name : alias->second;
+    const auto *contract = cache_reader_->kernel_metadata(code);
+    const auto abi = metadata.kernel_launch_abis.find(code);
+    TI_ERROR_IF(arch() != Arch::cuda || entry.name.empty() ||
+                    entry.name.find('\0') != std::string::npos || entry.version != 1 ||
+                    entry.tasks.empty() || !contract ||
+                    abi == metadata.kernel_launch_abis.end() ||
+                    abi->second != cuda::kContextLaunchABI ||
+                    !range_selections_.emplace(entry.name, entry.tasks).second,
+                "Invalid LLVM AOT range dispatch entry: {}", entry.name);
+    validate_device_range_selection(contract->compiled_data.tasks, entry.tasks,
+                                     taichi_global_tmp_buffer_size);
+  }
 
   if (executor_->get_config().arch == Arch::cuda) {
     for (const auto &[key, value] : metadata.required_caps) {
@@ -251,8 +298,9 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
     TI_ERROR_IF((task.requested_grid_residency_waves != 0 ||
                  task.requested_range_work_per_thread_target != 1) &&
                     (arch() != Arch::cuda ||
-                     metadata_.schema_version != kDeviceRangeProofAotSchemaVersion),
-                "Persisted CUDA task launch policy requires AOT schema 11: {}",
+                     (metadata_.schema_version != kDeviceRangeProofAotSchemaVersion &&
+                      metadata_.schema_version != kKernelEntryPolicyAotSchemaVersion)),
+                "Persisted CUDA task launch policy requires AOT schema 11 or 12: {}",
                 name);
   }
   for (int tree_id : loaded.used_snode_tree_ids) {
@@ -314,6 +362,36 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel(
 }
 
 std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
+    const std::string &name) {
+  const auto alias = metadata_.kernel_aliases.find(name);
+  const auto &code = alias == metadata_.kernel_aliases.end() ? name : alias->second;
+  const auto failed = payload_failures_.find(code);
+  if (failed != payload_failures_.end())
+    throw aot::ArtifactLoadError(failed->second);
+  auto payload = payload_kernels_.find(code);
+  if (payload == payload_kernels_.end()) {
+    if (!cache_reader_->has_kernel(code))
+      return nullptr;
+    try {
+      payload = payload_kernels_.emplace(code, load_kernel_payload(code)).first;
+    } catch (const std::exception &error) {
+      const auto message = fmt::format("Failed to load LLVM AOT code {}: {}", code, error.what());
+      payload_failures_.emplace(code, message);
+      throw aot::ArtifactLoadError(message);
+    } catch (const std::string &error) {
+      const auto message = fmt::format("Failed to load LLVM AOT code {}: {}", code, error);
+      payload_failures_.emplace(code, message);
+      throw aot::ArtifactLoadError(message);
+    }
+  }
+  const auto selected = range_selections_.find(name);
+  return std::make_unique<llvm_aot::KernelImpl>(
+      *payload->second, name,
+      selected == range_selections_.end() ? std::vector<std::uint32_t>{}
+                                         : selected->second);
+}
+
+std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
     const std::string &name) {
   if (!cache_reader_->has_kernel(name)) return nullptr;
   auto kernel_cache = load_kernel_from_cache(name);

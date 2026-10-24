@@ -143,6 +143,12 @@ bool LlvmOfflineCacheFileReader::has_kernel(const std::string &key) const {
   return data_.kernels.find(key) != data_.kernels.end();
 }
 
+const LlvmOfflineCache::KernelCacheData *
+LlvmOfflineCacheFileReader::kernel_metadata(const std::string &key) const {
+  const auto found = data_.kernels.find(key);
+  return found == data_.kernels.end() ? nullptr : &found->second;
+}
+
 bool LlvmOfflineCacheFileReader::take_kernel_cache(
     LlvmOfflineCache::KernelCacheData &res,
     const std::string &key,

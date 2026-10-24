@@ -36,7 +36,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **178**, persistent execution-plan version **26**, and
+- The frontend/native private ABI is **179**, persistent execution-plan version **26**, and
   compiled-cache schema **74**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
@@ -89,8 +89,14 @@ combination. Consult the linked API contracts and capability queries for exact s
 - CUDA AOT preserves each entry's selected occupancy waves/work-per-thread launch policy.
   Ordinary execution and Graph recording share cold resolution on the consumer device
   instead of silently using the baseline grid. Different policies on shared code remain
-  independent; artifacts with nonbaseline policies require LLVM AOT metadata schema 9
-  and are rejected by older readers.
+  independent. Current ordinary LLVM artifacts use schema 11; aliases or selected
+  device-range entries require schema 12 and are rejected by older readers.
+- CUDA AOT can preserve explicitly selected device-range tasks in flat Graph recordings,
+  including independent execution domains and explicit gradients. Ordinary and selected
+  entries with identical effective code share one LLVM payload and one runtime registration;
+  each prepared instance retains its own range controls and workspace policy. Direct kernel
+  launch cannot bypass the selected recording policy. This remains an explicit choice;
+  it adds a controller per selected task and does not imply a runtime speedup.
 
 - Empty ordinary CUDA dynamic-range blocks exit before reduction setup and teardown, avoiding neutral
   global atomics without useful iterations. Partially active blocks still participate fully in

@@ -34,7 +34,24 @@ class KernelImpl : public aot::Kernel {
   }
 
   void launch(LaunchContextBuilder &ctx) override {
+    TI_ERROR_IF(!device_range_tasks_.empty(),
+                "AOT device range requires its Graph recording recipe");
     launcher_->launch_llvm_kernel(handle_, ctx);
+  }
+
+  // The source is an internal physical callable, before any public entry's
+  // value/argument-origin annotations. Only code registration is shared.
+  KernelImpl(const KernelImpl &source,
+             const std::string &entry_name,
+             std::vector<std::uint32_t> range_tasks)
+      : launcher_(source.launcher_), handle_(source.handle_),
+        device_range_tasks_(std::move(range_tasks)) {
+    static_cast<CallableBase &>(*this) = static_cast<const CallableBase &>(source);
+    name = entry_name;
+  }
+
+  const std::vector<std::uint32_t> &device_range_tasks() const {
+    return device_range_tasks_;
   }
 
   LLVM::KernelLauncher &launcher() const {
@@ -52,6 +69,7 @@ class KernelImpl : public aot::Kernel {
   // registering a second copy when preparing backend replay.
   LLVM::KernelLauncher *const launcher_;
   const KernelLaunchHandle handle_;
+  const std::vector<std::uint32_t> device_range_tasks_;
 };
 
 class FieldImpl : public aot::Field {

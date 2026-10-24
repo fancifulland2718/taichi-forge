@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include "taichi/codegen/llvm/range_dispatch.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/retired_allocation.h"
 
@@ -36,15 +37,12 @@ bool RangeGraphControls::initialize(
       throw std::invalid_argument("CUDA range task requires its bound workspace");
     auto selected = selections[i];
     std::sort(selected.begin(), selected.end());
-    if (std::adjacent_find(selected.begin(), selected.end()) != selected.end())
-      throw std::invalid_argument("Duplicate CUDA range task selection");
+    LLVM::validate_device_range_selection(packet.offloaded_tasks, selected,
+                                          temporary_bytes);
     for (auto index : selected) {
-      if (index >= packet.offloaded_tasks.size())
-        throw std::invalid_argument("CUDA range task index is outside its kernel");
       const auto &task = packet.offloaded_tasks[index];
-      if (task.device_range_dispatch_version != 1 ||
-          !task.valid_device_range_dispatch_contract() || !task.native_function)
-        throw std::invalid_argument("CUDA range task has no final IR qualification");
+      if (!task.native_function)
+        throw std::invalid_argument("CUDA range task has no registered function");
       CudaGraphRangeControl control;
       const auto bind = [&](const RangeBound &bound, std::uintptr_t &pointer,
                             std::int32_t &constant) {

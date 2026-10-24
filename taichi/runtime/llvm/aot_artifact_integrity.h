@@ -44,4 +44,11 @@ inline std::string aot_runtime_state_sha256(const LlvmAotMetadata &metadata) {
                                  metadata.kernel_runtime_state)));
 }
 
+inline std::string aot_kernel_entry_sha256(const LlvmAotMetadata &metadata) {
+  return aot_artifact_sha256(
+      metadata.abi_sha256 + "\n" +
+      liong::json::print(liong::json::serialize(metadata.kernel_aliases)) + "\n" +
+      liong::json::print(liong::json::serialize(metadata.device_range_dispatch)));
+}
+
 }  // namespace taichi::lang::LLVM

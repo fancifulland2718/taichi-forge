@@ -103,6 +103,9 @@ class LlvmOfflineCacheFileReader {
                          const std::string &key,
                          llvm::LLVMContext &llvm_ctx);
   bool has_kernel(const std::string &key) const;
+  // Cold entry validation before take_kernel_* consumes the physical payload.
+  const LlvmOfflineCache::KernelCacheData *kernel_metadata(
+      const std::string &key) const;
 
   // PTX carries executable code separately; retain the same task and ABI data
   // without parsing or manufacturing an LLVM module.

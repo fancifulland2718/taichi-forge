@@ -7,6 +7,9 @@
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
 
 namespace taichi::lang {
+namespace llvm_aot {
+class KernelImpl;
+}
 namespace LLVM {
 
 /* TODO(zhanlue) refactor this interface once SNodeTreeType is available
@@ -80,6 +83,8 @@ class LlvmAotModule final : public aot::Module {
   std::unique_ptr<aot::Kernel> make_new_kernel(
       const std::string &name) override;
   std::unique_ptr<aot::Kernel> make_new_kernel_impl(const std::string &name);
+  std::unique_ptr<llvm_aot::KernelImpl> load_kernel_payload(
+      const std::string &name);
 
   std::unique_ptr<aot::KernelTemplate> make_new_kernel_template(
       const std::string &name) override {
@@ -103,6 +108,9 @@ class LlvmAotModule final : public aot::Module {
   std::shared_ptr<const io::VirtualDir> directory_;
   LlvmAotMetadata metadata_;
   std::unordered_map<std::string, std::string> artifact_failures_;
+  std::unordered_map<std::string, std::string> payload_failures_;
+  std::unordered_map<std::string, std::unique_ptr<llvm_aot::KernelImpl>> payload_kernels_;
+  std::map<std::string, std::vector<std::uint32_t>> range_selections_;
   std::vector<int> snode_tree_ids_;
   std::vector<std::size_t> root_storage_sizes_;
   bool dense_root_storage_{false};

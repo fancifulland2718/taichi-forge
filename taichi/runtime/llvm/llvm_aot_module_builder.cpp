@@ -8,6 +8,7 @@
 #include "taichi/runtime/llvm/llvm_aot_metadata.h"
 #include "taichi/runtime/llvm/aot_kernel_contract.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
+#include "taichi/codegen/llvm/range_dispatch.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
 #include "taichi/program/kernel_compile_request.h"
 #include "taichi/runtime/llvm/runtime_context_abi.h"
@@ -239,6 +240,19 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     metadata.schema_version = LLVM::kTaskLaunchPolicyAotSchemaVersion;
   }
   metadata.schema_version = LLVM::kDeviceRangeProofAotSchemaVersion;
+  for (const auto &[name, code] : kernel_names_) {
+    if (name != code)
+      metadata.kernel_aliases.emplace(name, code);
+  }
+  for (const auto &[name, tasks] : range_selections_)
+    metadata.device_range_dispatch.push_back({name, 1, tasks});
+  if (!metadata.kernel_aliases.empty() || !metadata.device_range_dispatch.empty()) {
+    metadata.schema_version = LLVM::kKernelEntryPolicyAotSchemaVersion;
+    if (metadata.abi_sha256.empty())
+      metadata.abi_sha256 = LLVM::aot_artifact_sha256(LLVM::read_aot_artifact(
+          taichi::join_path(output_dir, "metadata.tcb")));
+    metadata.kernel_entry_sha256 = LLVM::aot_kernel_entry_sha256(metadata);
+  }
   const std::string json =
       liong::json::print(liong::json::serialize(metadata));
   std::fstream f(taichi::join_path(output_dir,
@@ -256,10 +270,10 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
 
 const std::vector<int> &LlvmAotModuleBuilder::kernel_snode_tree_ids(
     const std::string &identifier) const {
-  const auto found = cache_.kernels.find(identifier);
-  TI_ERROR_IF(found == cache_.kernels.end(), "Unknown AOT kernel export '{}'.",
+  const auto found = kernel_names_.find(identifier);
+  TI_ERROR_IF(found == kernel_names_.end(), "Unknown AOT kernel export '{}'.",
               identifier);
-  return found->second.used_snode_tree_ids;
+  return cache_.kernels.at(found->second).used_snode_tree_ids;
 }
 
 void LlvmAotModuleBuilder::add_per_backend(const std::string &identifier,
@@ -281,10 +295,50 @@ void LlvmAotModuleBuilder::add_with_launch_abi_per_backend(
 void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
                                          Kernel *kernel,
                                          const std::string &launch_abi) {
-  TI_ERROR_IF(kernel->get_offload_execution_plan() &&
-                  !kernel->get_offload_execution_plan()->device_range_tasks.empty(),
-              "CUDA device range AOT entry policy is not yet supported");
-  auto compiled = compile_kernel(kernel);
+  const auto &artifact = compile_kernel(kernel);
+  const auto &source = artifact.get_internal_data();
+  LLVMCompiledKernel projected;
+  projected.tasks = source.compiled_data.tasks;
+  projected.cuda_max_registers = source.compiled_data.cuda_max_registers;
+  std::vector<std::uint32_t> range_tasks;
+  if (const auto &plan = kernel->get_offload_execution_plan(); plan) {
+    LLVM::project_aot_task_launch_policy(projected, *plan, compile_config_.arch);
+    range_tasks = plan->device_range_tasks;
+  }
+  if (!range_tasks.empty()) {
+    TI_ERROR_IF(compile_config_.arch != Arch::cuda || launch_abi != "ordinary" ||
+                    LLVM::runtime_context_abi(*source.compiled_data.module) !=
+                        LLVM::kRuntimeContextABI,
+                "AOT device range requires an ordinary CUDA context kernel");
+    LLVM::validate_device_range_selection(projected.tasks, range_tasks,
+                                          taichi_global_tmp_buffer_size);
+  }
+  // Compiled identity includes target/options/relocation. The projection adds
+  // entry launch facts; range selection intentionally remains outside code.
+  TI_ASSERT(!artifact.kernel_identity().empty());
+  const auto identity = artifact.kernel_identity() + "\n" + launch_abi + "\n" +
+      liong::json::print(liong::json::serialize(projected));
+  const auto existing = kernel_identities_.find(identity);
+  const auto named = kernel_names_.find(identifier);
+  if (named != kernel_names_.end()) {
+    const auto selected = range_selections_.find(identifier);
+    const std::vector<std::uint32_t> empty;
+    TI_ERROR_IF(existing == kernel_identities_.end() ||
+                    existing->second != named->second ||
+                    (selected == range_selections_.end() ? empty : selected->second) != range_tasks,
+                "LLVM AOT export '{}' refers to a different kernel or policy", identifier);
+    return;
+  }
+  if (existing != kernel_identities_.end()) {
+    kernel_names_.emplace(identifier, existing->second);
+    if (!range_tasks.empty())
+      range_selections_.emplace(identifier, std::move(range_tasks));
+    return;
+  }
+  // Clone IR only for a new physical payload; aliases never retain another
+  // module. dump() retains its separate relocation/mangling transaction.
+  auto compiled = source;
+  compiled.compiled_data.tasks = std::move(projected.tasks);
   if (launch_abi == cuda::kGraphGateLaunchABI) {
     TI_ERROR_IF(!compiled.rets.empty() ||
                     std::any_of(compiled.compiled_data.tasks.begin(),
@@ -309,6 +363,10 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
   kcache.last_used_at = std::time(nullptr);
   kcache.created_at = std::time(nullptr);
   cache_.kernels[identifier] = std::move(kcache);
+  kernel_names_.emplace(identifier, identifier);
+  kernel_identities_.emplace(identity, identifier);
+  if (!range_tasks.empty())
+    range_selections_.emplace(identifier, std::move(range_tasks));
   if (compiled_launch_abi == "ordinary")
     kernel_launch_abis_.erase(identifier);
   else
@@ -352,7 +410,7 @@ void LlvmAotModuleBuilder::add_field_per_backend(const std::string &identifier,
   cache_.fields[snode_tree_id] = std::move(field_cache);
 }
 
-LLVM::CompiledKernelData::InternalData LlvmAotModuleBuilder::compile_kernel(
+const LLVM::CompiledKernelData &LlvmAotModuleBuilder::compile_kernel(
     Kernel *kernel) {
   auto config = compile_config_;
   config.llvm_aot_relocatable_roots =
@@ -363,13 +421,7 @@ LLVM::CompiledKernelData::InternalData LlvmAotModuleBuilder::compile_kernel(
   const auto &ckd = compilation_manager_.load_or_compile(
       request, *kernel);
   TI_ASSERT(arch_uses_llvm(ckd.arch()));
-  auto exported = dynamic_cast<const LLVM::CompiledKernelData &>(ckd)
-                      .get_internal_data();
-  if (const auto &plan = kernel->get_offload_execution_plan(); plan.has_value()) {
-    LLVM::project_aot_task_launch_policy(exported.compiled_data, *plan,
-                                         compile_config_.arch);
-  }
-  return exported;
+  return dynamic_cast<const LLVM::CompiledKernelData &>(ckd);
 }
 
 }  // namespace taichi::lang

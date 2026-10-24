@@ -34,7 +34,7 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **178**，持久执行计划为 **26**，
+- frontend 与 native runtime 使用私有 ABI **179**，持久执行计划为 **26**，
   编译缓存 schema 为 **74**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
@@ -72,13 +72,18 @@
 
 ### Graph 与运行时
 
+- CUDA AOT 可保留显式选择的逐 task 设备范围策略，用于平直 Graph 录制、独立执行域及
+  显式梯度。有效代码相同的普通入口与选中入口共用一份 LLVM 产物及一次 runtime 注册，
+  各 prepared 实例保留自己的范围控制存储和工作区策略；直接调用 kernel 不能绕过所选
+  录制策略。它仍是显式选择，每个选中 task 增加一个控制器，不据此宣称运行提速。
+  普通 LLVM 产物沿用 schema 11，含入口别名或范围策略的产物使用 schema 12。
 - 普通 CUDA 动态 range 的空 block 在归约准备与收尾前退出，减少没有有效迭代时的中性值
   全局原子操作；部分有效的 block 仍完整参与归约同步，原 grid-stride 范围保持。
 - 已冻结 Graph 的共同 lowering 保留选中的物理 dispatch、launch policy 和绑定约束；
   JIT code loan 借用已编译代码，AOT adapter 处理部署闭包。普通调用的执行与提交路径保持。
 - CUDA AOT 保留每个入口选定的 occupancy waves/work-per-thread 启动策略，普通执行与
   Graph 录制共用消费端的冷阶段解析，不再静默回到基线网格。同一代码的不同策略保持
-  独立；带非基线策略的产物要求 LLVM AOT metadata schema 9，旧 reader 明确拒绝。
+  独立；当前 task 合同使用 LLVM AOT metadata schema 11，旧 reader 明确拒绝。
 - CPU/CUDA/Vulkan 的执行注册状态归执行 owner，编译代码可共享；在途租约、独立实例、
   reset/close 和进程退出按资源依赖退休，修复借用 runtime 及 Vulkan 退出访问异常。
 - CUDA 独立域按完整 prepared 实例计数，初始化和 replay 共享一个容量名额；部分构造

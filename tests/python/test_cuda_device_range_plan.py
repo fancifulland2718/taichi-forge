@@ -152,7 +152,7 @@ def test_cuda_range_primal_adjoint_and_independent_instances():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cuda_range_rejects_unproven_task_and_unpersisted_policy():
+def test_cuda_range_rejects_unproven_task_and_structured_policy():
     @ti.kernel
     def constant(out: ti.types.ndarray(ti.i32, 1)):
         for i in range(5):
@@ -176,10 +176,7 @@ def test_cuda_range_rejects_unproven_task_and_unpersisted_policy():
     device = graph(dynamic, selected, [output, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)])
     with pytest.raises(RuntimeError, match="flat ordinary Graph"):
         device._spec.nodes[0].compiled_graph._cuda_conditional_body_eligible()
-    module = ti.aot.Module()
-    with pytest.raises((RuntimeError, ti.TaichiRuntimeError), match="AOT entry policy"):
-        module.add_execution_plan("selected", device)
-    # A failed export must not damage the JIT producer.
+    # Rejected structured admission must not damage the ordinary producer.
     out.fill(-1)
     device.run(dict(out=out, count=5))
     np.testing.assert_array_equal(out.to_numpy()[:6], [0, 1, 2, 3, 4, -1])

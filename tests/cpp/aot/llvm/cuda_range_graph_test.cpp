@@ -435,6 +435,35 @@ TEST_F(CudaRangeGraph, ControllerHandlesSignedExtremesWithoutClampingBounds) {
     }
   }
 }
+// A separate Python producer exports ordinary and selected names for one
+// physical payload. Both load orders must register exactly one executable.
+class CudaRangeAotEntry : public CudaRangeGraph {};
+
+TEST_F(CudaRangeAotEntry, OrdinaryFirst) {
+  auto *ordinary = kernel(std::getenv("TAICHI_RANGE_ORDINARY_ENTRY"));
+  auto *selected = kernel(std::getenv("TAICHI_RANGE_SELECTED_ENTRY"));
+  ASSERT_NE(ordinary, nullptr);
+  ASSERT_NE(selected, nullptr);
+  EXPECT_NE(ordinary, selected);
+  EXPECT_EQ(&ordinary->launcher(), &selected->launcher());
+  EXPECT_EQ(ordinary->handle().get_launch_id(), selected->handle().get_launch_id());
+  EXPECT_TRUE(ordinary->device_range_tasks().empty());
+  EXPECT_EQ(selected->device_range_tasks().size(), 2);
+  EXPECT_EQ(ordinary->launcher().debug_registered_kernel_count(), 1);
+  LaunchContextBuilder arguments(selected);
+  EXPECT_ANY_THROW(selected->launch(arguments));
+}
+
+TEST_F(CudaRangeAotEntry, SelectedFirst) {
+  auto *selected = kernel(std::getenv("TAICHI_RANGE_SELECTED_ENTRY"));
+  auto *ordinary = kernel(std::getenv("TAICHI_RANGE_ORDINARY_ENTRY"));
+  ASSERT_NE(ordinary, nullptr);
+  ASSERT_NE(selected, nullptr);
+  EXPECT_EQ(ordinary->handle().get_launch_id(), selected->handle().get_launch_id());
+  EXPECT_TRUE(ordinary->device_range_tasks().empty());
+  EXPECT_EQ(selected->device_range_tasks().size(), 2);
+  EXPECT_EQ(selected->launcher().debug_registered_kernel_count(), 1);
+}
 }  // namespace
 }  // namespace taichi::lang
 #endif
