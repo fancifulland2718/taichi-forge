@@ -1635,8 +1635,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
           if (found == arguments.end() ||
               found->second->type != TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT)
             throw MemoryBindingError("Resource alias requires public native resources: " + name);
-          return rt.native_resource_registry().resolve(
-              found->second->value.native_resource, path);
+          auto &registry = rt.native_resource_registry();
+          return registry.get(registry.resolve(
+              found->second->value.native_resource, path));
         };
         if (resolve(pair->left, pair->left_path) !=
             resolve(pair->right, pair->right_path))

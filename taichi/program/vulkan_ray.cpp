@@ -229,6 +229,7 @@ class VulkanInstanceTlasResource final
     std::unordered_set<VulkanTriangleBlasResource *> seen;
     for (const auto &blas : blases) {
       cores.push_back(blas->core());
+      instance_blases_.push_back(blas);
       if (seen.insert(blas.get()).second) {
         dependencies_.push_back(blas);
       }
@@ -246,6 +247,10 @@ class VulkanInstanceTlasResource final
   }
   std::size_t instance_count() const {
     return core_->instance_count();
+  }
+  const std::vector<std::shared_ptr<NativeResource>> &instance_blases()
+      const override {
+    return instance_blases_;
   }
   std::uint32_t max_sbt_record_offset() const {
     return core_->max_sbt_record_offset();
@@ -301,6 +306,7 @@ class VulkanInstanceTlasResource final
 
  private:
   // dependencies_ retains each original Program BLAS owner exactly once.
+  std::vector<std::shared_ptr<NativeResource>> instance_blases_;
   std::shared_ptr<VulkanInstanceTlas> core_;
 };
 

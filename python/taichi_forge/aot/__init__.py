@@ -34,6 +34,7 @@ def borrow_runtime():
         client, utils._loaded_native_runtime_path,
         ndarray_importer=_import_ndarray, texture_importer=_import_texture,
         dense_view_importer=_import_dense_view,
+        acceleration_structure_importer=_import_acceleration_structure,
     )
     runtime.register_runtime_object(result)
     return result
@@ -70,6 +71,17 @@ def _import_texture(client, texture):
     if texture.tex is None:
         raise RuntimeError("Cannot import a Texture after its runtime was reset")
     return client.import_texture(texture.tex)
+
+
+def _import_acceleration_structure(client, resource):
+    from taichi_forge.hardware._ray import TriangleScene, TriangleBLAS, InstanceTLAS
+
+    if type(resource) not in (TriangleScene, TriangleBLAS, InstanceTLAS):
+        raise TypeError("AOT AS import requires a qualified Vulkan triangle resource")
+    resource._validate_lifetime()
+    return client.import_acceleration_structure(
+        resource._runtime_prog, resource._handle, type(resource) is TriangleScene
+    )
 
 
 def __getattr__(name):

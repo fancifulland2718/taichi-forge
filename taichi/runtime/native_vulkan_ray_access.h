@@ -55,6 +55,10 @@ class InstanceAccess : public virtual NativeRayResourceAccess {
   virtual ~InstanceAccess() = default;
   virtual Device &device() const = 0;
   virtual size_t instance_count() const = 0;
+  // Cold symbolic input projection. Preserve instance ordinals, including
+  // repeated BLAS owners; dependencies() is an access closure and may dedup.
+  virtual const std::vector<std::shared_ptr<NativeResource>> &
+  instance_blases() const = 0;
 #ifdef TI_WITH_VULKAN
   virtual void prepare_transforms() = 0;
   virtual void record_transforms(CommandList *,

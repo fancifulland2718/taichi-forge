@@ -667,6 +667,9 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("import_texture", &AotRuntimeClient::import_texture,
            py::call_guard<py::gil_scoped_release>())
+      .def("import_acceleration_structure",
+           &AotRuntimeClient::import_acceleration_structure,
+           py::call_guard<py::gil_scoped_release>())
       .def("import_jit_kernels", &AotRuntimeClient::import_jit_kernels,
            py::arg("kernels"), py::arg("data") = AotRuntimeClient::JitDataPayloads{},
            py::call_guard<py::gil_scoped_release>())

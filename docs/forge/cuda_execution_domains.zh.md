@@ -169,7 +169,22 @@ BLAS 依赖。因此两个不同 TLAS 的 writer 可以共享同一 BLAS，但�
 借用持续到实例的全部已接纳工作退休，关闭一个 reader 不释放另一个 reader 的权限。
 writer 归还时向普通队列提交设备依赖，恢复后续普通访问的可见性；这是冷退休成本，
 暖态仍沿所选域提交，不逐次查询资源注册表。独立 runtime 和借用 runtime 均适用，
-但这里的 public AS 必须由 native 工厂创建，普通 Program/JIT 原有 AS 的导入另行支持。
+原 Program 的 Vulkan AS 也可显式导入借用 runtime：
+
+```python
+runtime = ti.aot.borrow_runtime()
+scene = runtime.import_acceleration_structure(jit_scene)
+```
+
+入口接受同一 Program 的 `TriangleScene`、`TriangleBLAS` 和 `InstanceTLAS`，返回
+`NativeResource`，可绑定上述 AOT 计划。导入保留原对象，不上传几何或重建 AS；TLAS
+保留逐实例 BLAS 关系，包括重复引用。重复导入同一对象可以满足资源别名约束，
+不同对象不能仅因几何相同而通过。导入本身不取得并发访问许可，许可仍在 prepare 时取得。
+关闭源包装不会撤销已经保留的导入。若导入仍被执行实例使用，关闭它会沿既有 native
+资源退休路径关闭相关执行域；其他域仅使用另一份导入时不受影响。先关闭实例再关闭
+导入，可保留域供重新准备。内部关系随导入释放；Program reset 统一退休所有 borrower。
+这里是显式 AOT 绑定入口，
+不代表 `Graph.prepare()` 的原 AS 自动借用已接通，也不扩大并行或控制流组合的支持范围。
 
 私有重建所保留的 seed 输入和 AS 依赖须保持有效直至实例退休；提前关闭会使实例失效。
 包装成私有 TLAS 不会把 public BLAS 变为私有资源，其借用仍需完整准入。micromap

@@ -54,6 +54,11 @@ class AotRuntimeClient final : public RuntimeClient {
       const storage::DenseStorageDescriptor &descriptor);
   // Opaque native-resource token; retains the Program's texture storage lease.
   std::uintptr_t import_texture(const Texture *texture);
+  // Share the original Vulkan AS owner and its ordered symbolic inputs.
+  // A Program identity is mandatory: numeric handles are only owner-local.
+  std::uintptr_t import_acceleration_structure(Program *source,
+                                               std::uint64_t handle,
+                                               bool triangle_scene);
   // Name, selected physical Graph, dispatch index, graph-gated launch ABI.
   // This borrows existing compiled code and Field roots, never an artifact
   // reload or a new frontend compilation request.

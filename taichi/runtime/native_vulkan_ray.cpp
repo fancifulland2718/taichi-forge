@@ -496,6 +496,10 @@ class PreparedTlas final
   size_t instance_count() const override {
     return core_->instance_count();
   }
+  const std::vector<std::shared_ptr<NativeResource>> &instance_blases()
+      const override {
+    return dependencies_;
+  }
   bool retains_input(const std::string &port) const override {
     return deferred_ || port != "transforms";
   }

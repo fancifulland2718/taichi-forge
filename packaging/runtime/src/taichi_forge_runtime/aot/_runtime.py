@@ -134,6 +134,7 @@ class Runtime:
         self._ndarray_importer = None
         self._dense_view_importer = None
         self._texture_importer = None
+        self._acceleration_structure_importer = None
         self._handle = None
         # Keep native registrations independently of Python wrapper lifetimes.
         # Cyclic GC can finalize a runtime and its pending argument owners in
@@ -160,12 +161,13 @@ class Runtime:
 
     @classmethod
     def _from_borrowed(cls, client, library_path, *, ndarray_importer=None, texture_importer=None,
-                       dense_view_importer=None):
+                       dense_view_importer=None, acceleration_structure_importer=None):
         result = cls.__new__(cls)
         result._lock = result._borrower = client
         result._ndarray_importer = ndarray_importer
         result._dense_view_importer = dense_view_importer
         result._texture_importer = texture_importer
+        result._acceleration_structure_importer = acceleration_structure_importer
         result._handle = None
         result._resources, result._pending = set(), set()
         result._domain_owners = {}
@@ -611,6 +613,28 @@ class Runtime:
             if self._texture_importer is None:
                 raise RuntimeError("JIT Texture import requires ti.aot.borrow_runtime()")
             handle = self._texture_importer(self._borrower, texture)
+            try:
+                return NativeResource(self, handle, ())
+            except BaseException:
+                self._api.call(self._api.ti_destroy_native_resource_ext, self._handle, handle)
+                raise
+
+    def import_acceleration_structure(self, resource):
+        """Borrow an original Vulkan TriangleScene, TriangleBLAS or InstanceTLAS.
+
+        This cold operation preserves storage, topology and access identity.
+        It does not rebuild or initialize the AS. Prepare acquires the required
+        access loan; importing alone does not authorize concurrent mutation.
+        Source close leaves retained imports alive. Closing an import still used
+        by an instance closes that domain through native-resource retirement.
+        Close instances first to preserve their domains. Private input handles
+        retire with the import; Program reset retires all borrowers.
+        """
+        with self._lock:
+            self._check()
+            if self._acceleration_structure_importer is None:
+                raise RuntimeError("JIT AS import requires ti.aot.borrow_runtime()")
+            handle = self._acceleration_structure_importer(self._borrower, resource)
             try:
                 return NativeResource(self, handle, ())
             except BaseException:

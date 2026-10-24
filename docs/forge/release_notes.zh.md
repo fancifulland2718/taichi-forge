@@ -56,8 +56,10 @@
   graphics 域的 vertex/fragment shader 也可绑定私有 TLAS，与前置设备 refit 和后续
   计算共享一次提交，准备时检查实际队列能力和完整 AS 闭包。
   同 runtime 的 native public AS 支持完整依赖的共享读/排他写借用，旧 recording
-  也遵守权限；不同 TLAS writer 可共享只读 BLAS。原 Program/JIT AS 导入、micromap
-  及控制流内 AS 操作尚不属于该能力。
+  也遵守权限；不同 TLAS writer 可共享只读 BLAS。借用 runtime 的
+  `import_acceleration_structure()` 可将原 Program 的 triangle scene/BLAS/TLAS
+  显式绑定到 AOT 计划，保留原资源、逐实例关系及独立导入的关闭边界。
+  Graph 自动借用、micromap 及控制流内 AS 组合仍需分别验证。
   冷数据上传和 bootstrap 仍依赖普通队列，详见执行域合同。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、
   `advanced_optimization=False`。显式选择 `balanced/full` 且未覆盖高级 IR 优化时默认开启

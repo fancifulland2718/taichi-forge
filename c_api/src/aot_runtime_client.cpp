@@ -6,6 +6,7 @@
 #include "taichi/program/program.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/runtime/native_image.h"
+#include "taichi/runtime/native_vulkan_ray_access.h"
 #include "taichi/runtime/texture_storage.h"
 #include "native_resource_registry.h"
 #include "jit_module.h"
@@ -405,6 +406,42 @@ std::uintptr_t AotRuntimeClient::import_texture(const Texture *texture) {
     }
     leave();
     return reinterpret_cast<std::uintptr_t>(handle);
+  } catch (...) {
+    leave();
+    throw;
+  }
+}
+
+std::uintptr_t AotRuntimeClient::import_acceleration_structure(
+    Program *source,
+    std::uint64_t handle,
+    bool triangle_scene) {
+  enter();
+  try {
+    auto &state = *state_;
+    if (state.closed || !state.runtime || !state.scopes.back().owns_lock())
+      throw std::runtime_error("AOT runtime is closed");
+    if (state.arch != Arch::vulkan)
+      throw std::invalid_argument("Program AS import requires Vulkan");
+    if (!source || source != state.program)
+      throw std::invalid_argument("AS source belongs to another Program");
+    auto object =
+        source->acquire_vulkan_ray_native_resource(handle, triangle_scene);
+    std::vector<std::pair<std::string, std::shared_ptr<NativeResource>>> inputs;
+    if (auto instances =
+            std::dynamic_pointer_cast<native_vulkan_ray::InstanceAccess>(object)) {
+      const auto &blases = instances->instance_blases();
+      for (std::size_t i = 0; i < blases.size(); ++i)
+        inputs.emplace_back("blas_" + std::to_string(i), blases[i]);
+    }
+    TiNativeResource imported;
+    {
+      std::lock_guard<std::recursive_mutex> lock(state.runtime->submission_mutex());
+      imported = state.runtime->native_resource_registry().publish_borrowed(
+          std::move(object), inputs);
+    }
+    leave();
+    return reinterpret_cast<std::uintptr_t>(imported);
   } catch (...) {
     leave();
     throw;

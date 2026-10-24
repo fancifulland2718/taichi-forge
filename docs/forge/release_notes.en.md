@@ -62,8 +62,11 @@ combination. Consult the linked API contracts and capability queries for exact s
   retained upload storage counted in instance costs. Same-runtime native public AS resources
   support shared-read/exclusive-write loans over the full dependency closure, also enforced
   on existing recordings. Different TLAS writers can share read-only BLAS dependencies.
-  Original Program/JIT AS imports, micromaps and AS operations inside control flow remain
-  outside this capability. Graphics domains can
+  A borrowed runtime's `import_acceleration_structure()` explicitly binds original
+  Program triangle scenes/BLAS/TLAS to AOT plans, retaining resource identity,
+  ordered instance inputs and independent import retirement. Automatic Graph
+  adoption, micromaps and control-flow combinations still require separate qualification.
+  Graphics domains can
   bind private TLAS resources in vertex/fragment shaders, sharing one submission with
   preceding device refit and subsequent computation. Preparation checks actual queue
   capabilities and the full AS closure. Cold data uploads and bootstrap

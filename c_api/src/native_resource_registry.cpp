@@ -86,6 +86,51 @@ std::shared_ptr<NativeResource> NativeResourceRegistry::get(
   return found->second.object;
 }
 
+TiNativeResource NativeResourceRegistry::publish_borrowed(
+    std::shared_ptr<NativeResource> object,
+    const std::vector<std::pair<std::string,
+        std::shared_ptr<NativeResource>>> &inputs) {
+  std::unordered_set<std::string> ports;
+  for (const auto &[port, input] : inputs) {
+    if (port.empty() || port.find('\0') != std::string::npos ||
+        !ports.insert(port).second || !input || input == object)
+      throw MemoryBindingError("Invalid borrowed native resource input");
+  }
+  std::vector<TiNativeResource> created;
+  // Reserve before publishing anything, including room for the root. No GPU
+  // work can use these handles until the complete transaction returns.
+  created.reserve(inputs.size() + 1);
+  try {
+    std::unordered_map<NativeResource *, TiNativeResource> aliases;
+    ParentLinks links;
+    for (const auto &[port, input] : inputs) {
+      auto found = aliases.find(input.get());
+      TiNativeResource handle;
+      if (found == aliases.end()) {
+        handle = publish(input, {}, {});
+        created.push_back(handle);
+        aliases.emplace(input.get(), handle);
+      } else {
+        handle = found->second;
+      }
+      links.emplace_back(port, handle);
+    }
+    const auto root = publish(std::move(object), {}, {}, std::move(links));
+    created.push_back(root);
+    entries_.at(root).owned_parents.assign(created.begin(), created.end() - 1);
+    return root;
+  } catch (...) {
+    // Unpublished cold handles have no recorded consumers. Roll back without
+    // synchronizing or retiring unrelated work on the borrowed runtime.
+    for (auto it = created.rbegin(); it != created.rend(); ++it) {
+      const auto found = entries_.find(*it);
+      remove_edges(*it, found->second);
+      entries_.erase(found);
+    }
+    throw;
+  }
+}
+
 TiNativeResource NativeResourceRegistry::resolve(
     TiNativeResource handle, const std::vector<std::string> &path) const {
   get(handle);
@@ -120,12 +165,18 @@ void NativeResourceRegistry::remove_edges(TiNativeResource handle,
 
 void NativeResourceRegistry::retire(std::vector<TiNativeResource> roots) {
   std::unordered_set<TiNativeResource> seen(roots.begin(), roots.end());
+  std::unordered_set<TiNativeResource> owned;
   for (std::size_t i = 0; i < roots.size(); ++i) {
     const auto children = children_.find(roots[i]);
     if (children != children_.end())
       for (auto child : children->second)
         if (seen.insert(child).second)
           roots.push_back(child);
+    for (auto parent : entries_.at(roots[i]).owned_parents) {
+      owned.insert(parent);
+      if (seen.insert(parent).second)
+        roots.push_back(parent);
+    }
   }
   if (roots.empty())
     return;
@@ -146,7 +197,12 @@ void NativeResourceRegistry::retire(std::vector<TiNativeResource> roots) {
     entry.memories.clear();
     entry.parents.clear();
     entry.parent_links.clear();
+    entry.owned_parents.clear();
   }
+  // These handles never escaped the import transaction. Public roots keep
+  // their usual tombstones, while private input handles do not accumulate.
+  for (auto handle : owned)
+    entries_.erase(handle);
 }
 
 void NativeResourceRegistry::retire_memory(TiMemory memory) {

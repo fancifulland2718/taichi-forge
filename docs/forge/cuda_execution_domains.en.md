@@ -224,8 +224,28 @@ reader does not release another reader's access. Returning a writer submits a
 device dependency to the ordinary queue for subsequent access visibility. This
 is a cold retirement cost; warm replay stays on the selected domain without
 per-invocation resource-registry lookups. Standalone and borrowed runtimes support
-these native-created AS resources. Importing original Program/JIT AS objects is
-a separate capability.
+these native-created AS resources. A borrowed runtime can also explicitly import
+an original Vulkan AS from its Program:
+
+```python
+runtime = ti.aot.borrow_runtime()
+scene = runtime.import_acceleration_structure(jit_scene)
+```
+
+The method accepts same-Program `TriangleScene`, `TriangleBLAS` and `InstanceTLAS`
+objects and returns a `NativeResource` for the AOT bindings above. It retains the
+original object without geometry uploads or AS reconstruction. TLAS imports keep
+ordered BLAS inputs, including repeated references. Separate imports of the same
+object satisfy resource alias constraints; identical geometry in different objects
+does not. Importing alone grants no concurrent access: preparation acquires the loan.
+Closing a source wrapper leaves retained imports alive. Closing an import still
+used by an execution instance closes the affected domain through the existing
+native-resource retirement path. A different domain using only another import
+remains usable. Close instances before their imports to keep a domain available
+for new preparations. Private input handles retire with their import; Program
+reset retires every borrower. This is the explicit AOT binding entry;
+automatic original-AS adoption by `Graph.prepare()` remains separate, as do
+parallel and control-flow combinations.
 
 Seed inputs retained for private reconstruction and AS dependencies remain valid
 until instance retirement; closing them early invalidates the instance. Wrapping a public BLAS in a

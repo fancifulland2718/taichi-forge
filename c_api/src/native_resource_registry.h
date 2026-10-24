@@ -20,6 +20,12 @@ class NativeResourceRegistry {
                            std::vector<TiMemory> memories,
                            std::vector<TiNativeResource> parents,
                            ParentLinks parent_links = {});
+  // Cold import transaction. Inputs are original objects, not reconstruction
+  // recipes. Private input handles preserve named edges and retire with root.
+  TiNativeResource publish_borrowed(
+      std::shared_ptr<taichi::lang::NativeResource> object,
+      const std::vector<std::pair<std::string,
+          std::shared_ptr<taichi::lang::NativeResource>>> &inputs);
   std::shared_ptr<taichi::lang::NativeResource> get(
       TiNativeResource handle) const;
   TiNativeResource resolve(TiNativeResource handle,
@@ -34,6 +40,7 @@ class NativeResourceRegistry {
     std::vector<TiMemory> memories;
     std::vector<TiNativeResource> parents;
     ParentLinks parent_links;
+    std::vector<TiNativeResource> owned_parents;
   };
   void retire(std::vector<TiNativeResource> roots);
   void remove_edges(TiNativeResource handle, const Entry &entry);
