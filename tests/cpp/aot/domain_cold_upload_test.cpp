@@ -8,6 +8,7 @@
 #include "c_api/src/execution_domain_binding.h"
 #include "taichi/program/program.h"
 #include "taichi/runtime/native_data_upload.h"
+#include "taichi/runtime/native_operation_registry.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi/runtime/vulkan_execution_domain.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
@@ -115,6 +116,79 @@ TEST(DomainColdUpload, VulkanBatchIgnoresDefaultAndPeerButHonorsCapacity) {
 #endif
 
 #if defined(TI_WITH_CUDA) && defined(TI_WITH_VULKAN)
+TEST(DomainColdUpload, CudaImageConstructionCopyIgnoresDefaultAndPeer) {
+  if (!cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  Program program(Arch::cuda);
+  program.materialize_runtime();
+  auto context = CUDAContext::get_instance().get_guard();
+  auto &device = *program.get_compute_device();
+  auto domain = std::make_shared<cuda::ExecutionDomain>(
+      program.runtime_fault_domain(), cuda::ExecutionDomain::Options{1, 0, 1});
+  auto peer = std::make_shared<cuda::ExecutionDomain>(
+      program.runtime_fault_domain(), cuda::ExecutionDomain::Options{1, 0, 1});
+  capi::PreparedExecutionDomain selected(domain);
+  UploadArrays data(device);
+  selected.upload_owned_data(device, data.uploads());
+  NativeArrayBinding pixels{
+      data.arrays[0]->get_ptr(), sizeof(data.words), PrimitiveType::f32, {4}};
+  auto &registry = native_operation_registry();
+  const auto request = registry.decode(
+      NativeOperationDescription::parse(liong::json::parse_complete(
+          R"({"kind":"native","provider":"image","operation":"sampled","version":1,
+        "parameters":{"shape":[4],"format":"r32f"},"bindings":{"pixels":"pixels"}})")),
+      NativeObjectKind::resource);
+  NativePreparationContext preparation(Arch::cuda, device, {},
+                                       program.runtime_fault_domain());
+  testing::CudaExternalGate default_gate, peer_gate, capacity_gate;
+  RuntimeCompletion pending_peer;
+  bool called = false;
+  preparation.complete_owned_initialization = [&](auto operation,
+                                                  const auto &inputs) {
+    called = true;
+    // Allocation precedes these gates: this checks the construction copy and
+    // retirement boundary, without promising asynchronous driver allocation.
+    default_gate.enqueue_wait(nullptr);
+    pending_peer = peer->submit(
+        {}, nullptr, [&](void *stream) { peer_gate.enqueue_wait(stream); });
+    auto full = domain->submit(
+        {}, nullptr, [&](void *stream) { capacity_gate.enqueue_wait(stream); });
+    const auto admitted = domain->latest_completion().sequence();
+    EXPECT_THROW(selected.complete_owned_initialization(device, nullptr,
+                                                        operation, inputs),
+                 cuda::ExecutionDomainBusy);
+    EXPECT_EQ(domain->latest_completion().sequence(), admitted);
+    capacity_gate.release();
+    full.wait();
+    domain->collect_ready(1);
+    return selected.complete_owned_initialization(device, nullptr, operation,
+                                                  inputs);
+  };
+  program.synchronize();
+  auto construction = std::async(std::launch::async, [&] {
+    return registry.prepare_resource(preparation, request,
+                                     {{"pixels", pixels}});
+  });
+  const auto done = construction.wait_for(2s);
+  EXPECT_EQ(done, std::future_status::ready);
+  if (done != std::future_status::ready) {
+    default_gate.release();
+    peer_gate.release();
+    capacity_gate.release();
+  }
+  auto image = construction.get();
+  EXPECT_TRUE(called);
+  EXPECT_NE(image, nullptr);
+  EXPECT_FALSE(pending_peer.done());
+  EXPECT_FALSE(default_gate.timed_out());
+  default_gate.release();
+  peer_gate.release();
+  pending_peer.wait();
+  image.reset();
+  peer->close();
+  domain->close();
+}
+
 TEST(DomainColdUpload, CudaBatchIgnoresDefaultAndPeerButHonorsCapacity) {
   if (!cuda::ExecutionDomain::available())
     GTEST_SKIP();

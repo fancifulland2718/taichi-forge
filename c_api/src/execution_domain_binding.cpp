@@ -3,7 +3,10 @@
 #include <stdexcept>
 #include <cstring>
 #include <limits>
+#include <algorithm>
+#include <map>
 #include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/native_image.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -11,9 +14,123 @@
 #endif
 #ifdef TI_WITH_VULKAN
 #include "taichi/runtime/vulkan_execution_domain.h"
+#include "taichi/runtime/gfx/runtime.h"
 #endif
 
 namespace capi {
+
+bool PreparedExecutionDomain::complete_owned_initialization(
+    taichi::lang::Device &device,
+    taichi::lang::gfx::GfxRuntime *gfx_runtime,
+    std::shared_ptr<taichi::lang::NativeOperation> operation,
+    const std::vector<taichi::lang::NativeArrayBinding> &inputs) {
+  using namespace taichi::lang;
+  if (!operation || operation->arch() != backend() ||
+      &operation->device() != &device)
+    throw std::invalid_argument(
+        "Cold initialization requires a local operation");
+  for (const auto &input : inputs) {
+    if (input.pointer.device != &device || input.strides)
+      throw std::invalid_argument(
+          "Cold initialization requires packed local inputs");
+    resolve_native_storage_range(backend(), input.pointer, input.bytes);
+  }
+#ifdef TI_WITH_VULKAN
+  if (vulkan) {
+    const auto requirements = operation->vulkan_recording_requirements();
+    auto &vk_device =
+        dynamic_cast<taichi::lang::vulkan::VulkanDevice &>(device);
+    if (!requirements.buffers || !requirements.image_uses ||
+        !requirements.stateful_resources.empty() ||
+        (requirements.graphics_queue &&
+         vulkan->snapshot().queue_family_index !=
+             vk_device.graphics_queue_family_index()))
+      return false;
+    if (!gfx_runtime || gfx_runtime->get_ti_device() != &device)
+      throw std::invalid_argument(
+          "Cold image initialization requires its GFX owner");
+    for (const auto &buffer : *requirements.buffers)
+      if (std::none_of(inputs.begin(), inputs.end(), [&](const auto &input) {
+            return input.pointer.device == buffer.device &&
+                   input.pointer.alloc_id == buffer.alloc_id;
+          }))
+        throw std::invalid_argument(
+            "Cold initialization has an undescribed input");
+    std::map<DeviceAllocationId, std::shared_ptr<NativeSampledImage>> images;
+    for (const auto &use : *requirements.image_uses) {
+      if (!use.image || &use.image->device() != &device ||
+          use.image->gfx_managed_owner())
+        throw std::invalid_argument(
+            "Cold initialization requires newly owned images");
+      images.emplace(use.image->gfx_sampled_allocation().alloc_id, use.image);
+    }
+    for (const auto &[allocation, layout] : requirements.images)
+      if (allocation.device != &device || !images.count(allocation.alloc_id))
+        throw std::invalid_argument(
+            "Cold initialization image has no retained owner");
+    auto commands = vulkan->new_command_list();
+    for (const auto &[allocation, layout] : requirements.images)
+      commands->image_transition(
+          allocation,
+          images.at(allocation.alloc_id)->parameters().initial_layout, layout);
+    operation->record_vulkan_independent(&device, commands.get());
+    for (const auto &[allocation, layout] : requirements.images) {
+      const auto &params = images.at(allocation.alloc_id)->parameters();
+      const auto boundary = bool(params.usage & ImageAllocUsage::Sampled)
+                                ? ImageLayout::shader_read
+                                : ImageLayout::shader_read_write;
+      commands->image_transition(allocation, layout, boundary);
+    }
+    // Commands retain native buffers; their operand owner retains images even
+    // if submission or waiting fails and the factory cannot publish a result.
+    vulkan->submit(vulkan->prepare_commands({commands.get()}, operation))
+        .wait();
+    vulkan->collect_ready(1);
+    for (const auto &[id, image] : images) {
+      const auto boundary =
+          bool(image->parameters().usage & ImageAllocUsage::Sampled)
+              ? ImageLayout::shader_read
+              : ImageLayout::shader_read_write;
+      gfx_runtime->track_image(image->gfx_sampled_allocation(), boundary);
+    }
+    return true;
+  }
+#endif
+#ifdef TI_WITH_CUDA
+  if (cuda) {
+    if (operation->execution_mode() != NativeOperationMode::cuda_capture)
+      return false;
+    operation->validate_cuda_execution_domain();
+    struct Resources final : RuntimeCompletionResources {
+      std::shared_ptr<NativeOperation> operation;
+      std::vector<
+          std::unique_ptr<taichi::lang::cuda::CudaDevice::AllocationLease>>
+          inputs;
+      std::size_t retained_resource_count(
+          std::uint32_t) const noexcept override {
+        return 0;
+      }
+    };
+    auto resources = std::make_shared<Resources>();
+    resources->operation = std::move(operation);
+    auto &cuda_device = dynamic_cast<taichi::lang::cuda::CudaDevice &>(device);
+    for (const auto &input : inputs) {
+      auto lease = cuda_device.acquire_allocation_lease(input.pointer);
+      if (!lease)
+        throw std::invalid_argument("Cold initialization input is retired");
+      resources->inputs.push_back(std::move(lease));
+    }
+    cuda->submit({}, resources,
+                 [resources](void *stream) {
+                   resources->operation->record_cuda(stream);
+                 })
+        .wait();
+    cuda->collect_ready(1);
+    return true;
+  }
+#endif
+  throw std::runtime_error("Cold initialization domain backend is unavailable");
+}
 
 void PreparedExecutionDomain::upload_owned_data(
     taichi::lang::Device &device,

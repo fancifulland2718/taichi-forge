@@ -64,6 +64,14 @@ struct NativePreparationContext {
   // Optional cold transport for newly allocated immutable data. Completion
   // precedes factory consumption; ordinary creation keeps the RHI transport.
   NativeDataUploader upload_owned_data;
+  // Optional completed construction work on a selected domain. The adapter
+  // must prove that every input is ready and retain all operands until done.
+  // Only newly created, unpublished outputs may be written. False means no
+  // work was submitted and the factory must use its ordinary ordered path.
+  // This preserves prepare-time consumption, unlike deferred initialization.
+  std::function<bool(std::shared_ptr<NativeOperation>,
+                     const std::vector<NativeArrayBinding> &)>
+      complete_owned_initialization;
   // Scoped to cold module preparation. Factories copy resolved layouts, never
   // retain this callback or a module/kernel pointer in their storage owners.
   std::function<std::shared_ptr<const aot::ArgPackLayout>(

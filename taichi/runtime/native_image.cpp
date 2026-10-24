@@ -348,8 +348,10 @@ class CudaSampledImage final : public NativeSampledImage {
         device_(context.device),
         fault_(context.fault_domain) {
   }
-  void initialize(const SampledImageDescription &d) {
+  void allocate(const SampledImageDescription &d) {
     storage_ = std::make_unique<CudaTextureStorage>(d.parameters);
+  }
+  void initialize_pixels(const SampledImageDescription &d) {
     if (d.pixels) {
       CUDADriver::get_instance().context_synchronize();
       storage_->upload_device(resolve_native_storage_range(Arch::cuda,
@@ -471,7 +473,7 @@ class VulkanSampledImage final : public NativeSampledImage {
         fault_(context.fault_domain) {
     bytes_ = image_logical_bytes(d.parameters);
   }
-  void initialize(const SampledImageDescription &d) {
+  void allocate(const SampledImageDescription &d) {
     auto params = d.parameters;
     if (bool(params.usage & ImageAllocUsage::Storage)) {
       auto &device = static_cast<vulkan::VulkanDevice &>(device_);
@@ -490,7 +492,10 @@ class VulkanSampledImage final : public NativeSampledImage {
             "Vulkan device does not support this storage image format");
     }
     image_ = runtime_.create_image(params);
+  }
+  void initialize_pixels(const SampledImageDescription &d) {
     if (d.pixels) {
+      const auto &params = d.parameters;
       const auto image = image_;
       const auto source = d.pixels->pointer;
       const auto copy = packed_image_copy(params);
@@ -596,7 +601,8 @@ class VulkanImageUpload final : public NativeOperation {
     return {
         {{image_->gfx_sampled_allocation(), ImageLayout::transfer_dst}},
         transfers_.front().copy.image_aspect_flag == VK_IMAGE_ASPECT_DEPTH_BIT,
-        std::move(buffers)};
+        std::move(buffers),
+        {{{image_, false}}}};
   }
   void record_vulkan(Device *, CommandList *commands) override {
     for (const auto &transfer : transfers_) {
@@ -724,7 +730,13 @@ void register_image_operations(NativeOperationRegistry &registry) {
         auto guard = cuda.get_guard();
         auto owner = std::make_shared<CudaSampledImage>(c, d);
         try {
-          owner->initialize(d);
+          owner->allocate(d);
+          if (d.pixels &&
+              (!c.complete_owned_initialization ||
+               !c.complete_owned_initialization(
+                   std::make_shared<CudaImageUpload>(
+                       ImageUploadOperation{owner, *d.pixels}), {*d.pixels})))
+            owner->initialize_pixels(d);
         } catch (const BackendRuntimeError &error) {
           c.fault_domain->report_backend_error(error, 0);
           throw;
@@ -748,7 +760,13 @@ void register_image_operations(NativeOperationRegistry &registry) {
           "Sampled image requires its owner's Vulkan GFX runtime");
     auto owner = std::make_shared<VulkanSampledImage>(c, d);
     try {
-      owner->initialize(d);
+      owner->allocate(d);
+      if (d.pixels &&
+          (!c.complete_owned_initialization ||
+           !c.complete_owned_initialization(
+               std::make_shared<VulkanImageUpload>(
+                   ImageUploadOperation{owner, *d.pixels}), {*d.pixels})))
+        owner->initialize_pixels(d);
     } catch (const BackendRuntimeError &error) {
       c.fault_domain->report_backend_error(error, 0);
       throw;

@@ -678,5 +678,81 @@ TEST(VulkanColdPreparation, SpdCounterClearDoesNotWaitForDefaultQueue) {
   ti_wait_completion_ext(session.completions[0]);
   require_success();
 }
+void check_image_preparation_prefix(bool private_pixels) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  PendingProgramAs session;
+  if (session.device().created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  session.borrowers[0] = AotRuntimeClient::create(session.program);
+  session.runtimes[0] =
+      reinterpret_cast<TiRuntime>(session.borrowers[0]->handle());
+  const std::array<float, 6> values{99, 3, -2, 7, 11, -99};
+  const std::string bytes(reinterpret_cast<const char *>(values.data()),
+                          sizeof(values));
+  const auto key = picosha2::hash256_hex_string(bytes);
+  session.modules[0] = reinterpret_cast<TiAotModule>(
+      session.borrowers[0]->import_jit_kernels({}, {{key, bytes}}));
+  TiNamedArgument pixels{};
+  {
+    BorrowScope scope(*session.borrowers[0]);
+    const TiVulkanExecutionDomainCreateInfo options{1, 1, TI_FALSE};
+    session.domains[0] =
+        ti_create_vulkan_execution_domain_ext(session.runtimes[0], &options);
+    require_success();
+    if (!private_pixels)
+      pixels =
+          session.array(0, "pixels", {4}, TI_DATA_TYPE_F32, values.data() + 1);
+  }
+  std::string plan = R"({"version":26,"resources":[)";
+  if (private_pixels)
+    plan +=
+        R"({"kind":"ndarray","name":"seed","dtype":"f32","shape":[6],"initial_data":")" +
+        key +
+        R"("},{"kind":"ndarray_view","name":"pixels","array":"seed","offset":1,"shape":[4]},)";
+  plan +=
+      R"({"kind":"native","name":"image","provider":"image","operation":"sampled","version":1,
+    "parameters":{"shape":[4],"format":"r32f"},"bindings":{"pixels":"pixels"}}],
+    "operations":[{"kind":"native","provider":"image","operation":"upload","version":1,
+    "parameters":{},"bindings":{"image":"image","pixels":"pixels"}}]})";
+  session.program.synchronize();
+  session.program.retain_runtime_client(session.gates);
+  session.gates->gates[0] =
+      std::make_unique<test_detail::TimelineGate>(session.device(), 0);
+  session.gates->gates[1] =
+      std::make_unique<test_detail::TimelineGate>(session.device(), 2);
+  test_detail::PendingAction prepare(session.gates, [&] {
+    BorrowScope scope(*session.borrowers[0]);
+    session.executions[0] = ti_prepare_execution_plan_on_vulkan_domain_ext(
+        session.runtimes[0], session.modules[0], session.domains[0],
+        plan.size(), plan.data(), private_pixels ? 0 : 1,
+        private_pixels ? nullptr : &pixels, 0, nullptr, 0, nullptr);
+    require_success();
+    if (!session.executions[0])
+      throw std::runtime_error("Image preparation failed");
+  });
+  const auto status = prepare.status(private_pixels ? 2s : 100ms);
+  EXPECT_EQ(status, private_pixels ? std::future_status::ready
+                                   : std::future_status::timeout);
+  // Public pixels still need their producer; the unrelated peer stays pending.
+  session.gates->release(0);
+  if (prepare.status(2s) != std::future_status::ready)
+    session.gates->release(1);
+  EXPECT_EQ(prepare.status(2s), std::future_status::ready);
+  prepare.finish();
+  session.gates->release(1);
+  {
+    BorrowScope scope(*session.borrowers[0]);
+    ti_initialize_prepared_ext(session.runtimes[0], session.executions[0]);
+    require_success();
+  }
+}
+
+TEST(VulkanColdPreparation, PrivateImagePixelsIgnoreDefaultAndPeer) {
+  check_image_preparation_prefix(true);
+}
+TEST(VulkanColdPreparation, PublicImagePixelsStillWaitForProducer) {
+  check_image_preparation_prefix(false);
+}
 }  // namespace taichi::lang
 #endif

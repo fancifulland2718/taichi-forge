@@ -1258,10 +1258,45 @@ static TiPreparedExecution prepare_execution_plan_impl(
   // Independent plans have a local context, so this callback cannot escape to
   // a binding family or ordinary provider. Both owned arrays and ArgPacks use
   // the same cold transport; factories still see completed construction data.
-  if (domain)
-    preparation.upload_owned_data = [domain, &rt](const auto &uploads) {
+  // Exact ranges of completed construction uploads, not a list of owned
+  // handles: module aliases and uninitialized private arrays prove nothing.
+  // This proof is scoped to this prepare. Factories cannot modify inputs.
+  std::unordered_map<DeviceAllocationId,
+                     std::vector<std::pair<std::uint64_t, std::size_t>>>
+      completed_uploads;
+  if (domain) {
+    preparation.upload_owned_data = [domain, &rt,
+                                     &completed_uploads](const auto &uploads) {
       domain->upload_owned_data(rt.get(), uploads);
+      for (const auto &upload : uploads)
+        completed_uploads[upload.destination.alloc_id].emplace_back(
+            upload.destination.offset, upload.bytes);
     };
+    preparation.complete_owned_initialization =
+        [&, domain](std::shared_ptr<NativeOperation> operation,
+                    const std::vector<NativeArrayBinding> &inputs) {
+          for (const auto &input : inputs) {
+            if (input.pointer.device != &rt.get())
+              return false;
+            const auto ranges = completed_uploads.find(input.pointer.alloc_id);
+            if (ranges == completed_uploads.end())
+              return false;
+            const bool ready = std::any_of(
+                ranges->second.begin(), ranges->second.end(),
+                [&](const auto &upload) {
+                  const auto start = upload.first;
+                  return input.pointer.offset >= start &&
+                         input.pointer.offset - start <= upload.second &&
+                         input.bytes <=
+                             upload.second - (input.pointer.offset - start);
+                });
+            if (!ready)
+              return false;
+          }
+          return domain->complete_owned_initialization(
+              rt.get(), preparation.gfx_runtime, std::move(operation), inputs);
+        };
+  }
   std::vector<std::shared_ptr<NativeOperation>> resource_initializers;
   struct RestoreVulkanInitialization {
     NativePreparationContext &context;
