@@ -256,6 +256,9 @@ def _sparse_module(
                 text=True,
                 timeout=60,
             )
+            (tmp_path / (mode + "-" + consumer + ".log")).write_text(
+                result.stdout + result.stderr, encoding="utf-8"
+            )
             assert result.returncode == 0, result.stdout + result.stderr
             assert "Failed to retire" not in result.stdout + result.stderr
             assert not any(marker in result.stdout + result.stderr for marker in (
@@ -276,6 +279,9 @@ def _sparse_module(
             text=True,
             timeout=90,
         )
+        (tmp_path / (mode + "-retirement.log")).write_text(
+            result.stdout + result.stderr, encoding="utf-8"
+        )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "Failed to retire" not in result.stdout + result.stderr
         fixed = subprocess.run(
@@ -291,6 +297,9 @@ def _sparse_module(
             capture_output=True,
             text=True,
             timeout=60,
+        )
+        (tmp_path / (mode + "-fixed.log")).write_text(
+            fixed.stdout + fixed.stderr, encoding="utf-8"
         )
         assert fixed.returncode == 0, fixed.stdout + fixed.stderr
         if legacy is not None:

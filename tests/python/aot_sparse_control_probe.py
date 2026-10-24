@@ -73,7 +73,7 @@ def main(arch, mode, artifact):
             growth = runtime.load_module(str(Path(artifact).with_name("list-growth.tcm")))
             growth.kernel("touch")(out)
             assert read(out)[0] == 91
-            # Every retained loop still binds its previous shared list version.
+            # Retained loops keep their private lists across ordinary growth.
             for call, frame in zip(calls[1:], frames[1:]):
                 expected_frame = {name: value.read() for name, value in frame.items()}
                 call()

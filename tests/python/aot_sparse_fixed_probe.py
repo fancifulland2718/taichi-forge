@@ -119,6 +119,10 @@ def main(arch, mode, artifact, legacy=""):
             start = time.perf_counter()
             prepared = module.kernel("gather").prepare(out)
             prepare_ms = (time.perf_counter() - start) * 1000
+            prepared_info = dict(prepared.info)
+            if arch == "vulkan":
+                assert prepared_info["argument_bytes"] == 32, prepared_info
+                assert prepared_info["workspace_bytes"] == 36, prepared_info
             assert (
                 prepared.info["execution_kind"]
                 == {"cpu": "cpu_batch", "cuda": "cuda_graph", "vulkan": "vulkan_commands"}[arch]
@@ -210,7 +214,7 @@ def main(arch, mode, artifact, legacy=""):
             other.close()
             if mode == "borrowed":
                 assert survivor[0] == 91
-            timings.append(dict(prepare_ms=prepare_ms))
+            timings.append(dict(prepare_ms=prepare_ms, info=prepared_info))
         if mode == "borrowed":
             ti.reset()
     if mode == "standalone":

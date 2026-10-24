@@ -3064,13 +3064,16 @@ void prepare_range_dispatches(
 struct GfxRuntime::FixedSparseReplayResources {
   bool uses_listgen{false};
   bool writes_listgen{false};
+  bool self_contained_lists{true};
   bool unknown_mutation{false};
   size_t listgen_entries{0};
+  size_t private_list_bytes{0};
   std::vector<int> mutated_trees;
   std::shared_ptr<DeviceAllocationGuard> listgen;
 
   void include(const CompiledTaichiKernel &kernel) {
     const auto &tasks = kernel.ti_kernel_attribs().tasks_attribs;
+    bool generated = false;
     for (std::size_t i = 0; i < tasks.size(); ++i) {
       const bool writer = tasks[i].task_type == OffloadedTaskType::listgen;
       const bool binding = kernel.task_uses_listgen_buffer(i);
@@ -3078,6 +3081,13 @@ struct GfxRuntime::FixedSparseReplayResources {
                   "Prepared Vulkan list generation requires a list buffer");
       uses_listgen |= binding;
       writes_listgen |= writer;
+      generated |= writer;
+      // A complete compiled traversal produces its own list before reading
+      // it. An incomplete/imported task sequence may instead consume the
+      // ordinary resident list; preserve that binding rather than replacing
+      // it with uninitialized private storage. Check each kernel separately,
+      // including kernels that appear inside conditional/loop recordings.
+      self_contained_lists &= !binding || generated;
       if (tasks[i].may_mutate_sparse_topology) {
         const auto mutation = kernel.sparse_task_resources(i).mutation;
         if (mutation.valid())
@@ -3095,10 +3105,27 @@ void GfxRuntime::prepare_fixed_sparse_resources(
     FixedSparseReplayResources &resources,
     std::vector<std::shared_ptr<void>> &owners) {
   if (resources.uses_listgen) {
-    ensure_listgen_capacity_entries(resources.listgen_entries,
-                                    "fixed Graph preparation");
-    TI_ERROR_IF(!listgen_buffer_, "Prepared Vulkan list buffer is unavailable");
-    resources.listgen = listgen_buffer_;
+    if (resources.self_contained_lists) {
+      TI_ERROR_IF(resources.listgen_entries >
+                      std::numeric_limits<size_t>::max() / sizeof(uint32_t) - 1,
+                  "Prepared Vulkan list storage size overflows");
+      resources.private_list_bytes =
+          (resources.listgen_entries + 1) * sizeof(uint32_t);
+      auto [buffer, status] =
+          device_->allocate_memory_unique({resources.private_list_bytes, false,
+                                           false, false, AllocUsage::Storage});
+      TI_ERROR_IF(status != RhiResult::success,
+                  "Prepared Vulkan private list allocation failed");
+      resources.listgen = std::move(buffer);
+      // Each recorded listgen clears the count and writes all reachable
+      // entries. No cold upload or default-queue initialization is required.
+    } else {
+      ensure_listgen_capacity_entries(resources.listgen_entries,
+                                      "fixed Graph preparation");
+      TI_ERROR_IF(!listgen_buffer_,
+                  "Prepared Vulkan list buffer is unavailable");
+      resources.listgen = listgen_buffer_;
+    }
     owners.push_back(resources.listgen);
   }
   auto &trees = resources.mutated_trees;
@@ -3109,8 +3136,18 @@ void GfxRuntime::prepare_fixed_sparse_resources(
 void GfxRuntime::attach_fixed_sparse_resources(
     GraphReplayState &state,
     FixedSparseReplayResources resources) {
-  if (!resources.uses_listgen && !resources.unknown_mutation &&
-      resources.mutated_trees.empty())
+  TI_ERROR_IF(
+      resources.private_list_bytes > std::numeric_limits<uint64_t>::max() -
+                                         state.fixed_control_bytes ||
+          resources.private_list_bytes >
+              std::numeric_limits<uint64_t>::max() - state.fixed_argument_bytes,
+      "Prepared Vulkan workspace size overflows");
+  // The existing Graph statistics report a total plus its control/workspace
+  // subset. FixedExecution subtracts that subset to expose argument bytes.
+  state.fixed_argument_bytes += resources.private_list_bytes;
+  state.fixed_control_bytes += resources.private_list_bytes;
+  if ((!resources.uses_listgen || resources.private_list_bytes) &&
+      !resources.unknown_mutation && resources.mutated_trees.empty())
     return;
   state.fixed_submit = [this, launch = std::move(state.fixed_submit),
                         resources = std::move(resources)] {
@@ -3118,8 +3155,9 @@ void GfxRuntime::attach_fixed_sparse_resources(
         resources.listgen && resources.listgen == listgen_buffer_;
     if (uses_current_list)
       listgen_buffer_used_ = true;
-    // There is exactly one reusable ordinary list. Fixed commands either
-    // overwrite that allocation or may change its tree's active set.
+    // Complete fixed traversals use private lists. Incomplete task sequences
+    // may still overwrite the ordinary list; topology changes must invalidate
+    // its active set regardless of which list allocation the recording uses.
     // Other cached entries cannot be reused without first becoming
     // resident, so no map walk or descendant discovery is needed here.
     if ((uses_current_list && resources.writes_listgen) ||

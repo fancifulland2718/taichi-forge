@@ -282,8 +282,7 @@ TEST(GfxSNodeResources, RepeatedLocalIdsHaveIndependentListsAndRetirement) {
   }
 }
 
-TEST(GfxSNodeResources,
-     FixedListsRetainVersionsAndInvalidateOnlyAffectedResident) {
+TEST(GfxSNodeResources, FixedListsArePrivateAndInvalidateOnlyAffectedTopology) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();
   vulkan::VulkanDeviceCreator::Params device_params;
@@ -300,7 +299,7 @@ TEST(GfxSNodeResources,
   resources.listgen_capacity_entries = 1;
   runtime.materialize_snode_tree_resources(0, resources);
   runtime.materialize_snode_tree_resources(1, resources);
-  auto make_kernel = [&](int root, bool mutation) {
+  auto make_kernel = [&](int root, bool mutation, bool reader_only = false) {
     DeviceCapabilityConfig caps;
     caps.set(DeviceCapability::spirv_version, 0x10300);
     spirv::IRBuilder builder(Arch::vulkan, &caps);
@@ -326,8 +325,9 @@ TEST(GfxSNodeResources,
           builder.struct_array_access(builder.u32_type(), counter,
                                       builder.const_i32_one_),
           builder.load_variable(count, builder.u32_type()));
-      builder.store_variable(
-          count, builder.uint_immediate_number(builder.u32_type(), 17));
+      if (!reader_only)
+        builder.store_variable(
+            count, builder.uint_immediate_number(builder.u32_type(), 17));
     }
     builder.make_inst(spv::OpReturn);
     builder.make_inst(spv::OpFunctionEnd);
@@ -338,8 +338,8 @@ TEST(GfxSNodeResources,
     params.snode_tree_ids = {root};
     spirv::TaskAttributes task;
     task.name = "fixed_list_version_counter";
-    task.task_type =
-        mutation ? OffloadedTaskType::serial : OffloadedTaskType::listgen;
+    task.task_type = mutation || reader_only ? OffloadedTaskType::serial
+                                             : OffloadedTaskType::listgen;
     task.advisory_total_num_threads = task.advisory_num_threads_per_group = 1;
     using BufferType = spirv::TaskAttributes::BufferType;
     task.buffer_binds.push_back({{BufferType::Root, 0}, 0});
@@ -348,9 +348,11 @@ TEST(GfxSNodeResources,
       task.sparse_mutation_snode_id = 10;
     } else {
       task.buffer_binds.push_back({{BufferType::ListGen}, 1});
-      task.sparse_list_op = spirv::TaskAttributes::kSparseListOpListgen;
-      task.sparse_list_snode_id = 11;
-      task.sparse_list_parent_snode_id = 10;
+      if (!reader_only) {
+        task.sparse_list_op = spirv::TaskAttributes::kSparseListOpListgen;
+        task.sparse_list_snode_id = 11;
+        task.sparse_list_parent_snode_id = 10;
+      }
     }
     params.kernel_attribs.tasks_attribs.push_back(task);
     params.task_spirv_source_codes = {builder.finalize()};
@@ -367,7 +369,8 @@ TEST(GfxSNodeResources,
   auto fixed = prepare(list, 0);
   auto changed = prepare(mutation, 0);
   auto unrelated = prepare(other_mutation, 1);
-  const auto check = [&](int root, uint32_t expected) {
+  const auto check = [&](int root, uint32_t expected,
+                         uint32_t input_count = 0) {
     runtime.synchronize();
     auto ptr = runtime.get_root_buffer(root)->get_ptr();
     uint32_t values[2] = {};
@@ -376,8 +379,7 @@ TEST(GfxSNodeResources,
     ASSERT_EQ(device->readback_data(&ptr, &host, &bytes, 1),
               RhiResult::success);
     EXPECT_EQ(values[0], expected);
-    EXPECT_EQ(values[1],
-              0);  // Every generated list starts from a cleared count.
+    EXPECT_EQ(values[1], input_count);
   };
   runtime.launch_kernel(list, context);
   runtime.launch_kernel(list, context);  // Reuse the ordinary list.
@@ -390,25 +392,37 @@ TEST(GfxSNodeResources,
   runtime.launch_kernel(list, context);
   check(0, 3);
   fixed->launch_prepared();
-  runtime.launch_kernel(list, context);  // Fixed list writing must evict it.
-  check(0, 5);
+  runtime.launch_kernel(list, context);  // Private list writing preserves it.
+  check(0, 4);
+  EXPECT_EQ(fixed->snapshot_stats().known_persistent_control_bytes,
+            2 * sizeof(uint32_t));
+  EXPECT_EQ(fixed->snapshot_stats().known_persistent_argument_bytes,
+            2 * sizeof(uint32_t));  // Legacy total includes the workspace.
 
   // Only a few KiB are allocated; the one-invocation kernels stay unchanged.
   resources.listgen_capacity_entries = 4096;
   runtime.materialize_snode_tree_resources(2, resources);
   runtime.launch_kernel(list, context);
-  fixed->launch_prepared();  // The old recording still owns its buffer version.
+  fixed->launch_prepared();  // Its own list is independent of runtime growth.
   runtime.launch_kernel(list,
                         context);  // Its write cannot evict the new buffer.
-  check(0, 7);
+  check(0, 6);
   auto current = prepare(list, 0);
   current->launch_prepared();
   runtime.launch_kernel(list, context);
-  check(0, 9);
+  check(0, 7);
+  // Imported/partial traversals without a preceding listgen keep their
+  // ordinary binding. Replacing it with a fresh private list would lose input.
+  const auto reader = make_kernel(0, false, true);
+  auto consuming = prepare(reader, 0);
+  EXPECT_EQ(consuming->snapshot_stats().known_persistent_control_bytes, 0);
+  consuming->launch_prepared();
+  check(0, 8, 17);
   fixed.reset();
   changed->launch_prepared();
-  runtime.release_aot_resources({list, mutation}, {0});
+  runtime.release_aot_resources({list, mutation, reader}, {0});
   EXPECT_ANY_THROW(current->launch_prepared());
+  EXPECT_ANY_THROW(consuming->launch_prepared());
   unrelated->launch_prepared();
   check(1, 2);
   runtime.release_aot_resources({other_mutation}, {1, 2});
