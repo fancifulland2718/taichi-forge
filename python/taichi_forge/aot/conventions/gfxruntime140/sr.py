@@ -156,6 +156,7 @@ class Task:
         texture_binds: List[TextureBinding],
         launch_grid: LaunchGrid,
         range_bounds: Optional[dr.RangeForAttributes] = None,
+        device_range_dispatch_version: int = 0,
     ):
         self.name: str = name
         self.task_ty: TaskType = task_ty
@@ -163,6 +164,7 @@ class Task:
         self.texture_binds: List[TextureBinding] = texture_binds
         self.launch_grid: LaunchGrid = launch_grid
         self.range_bounds = range_bounds
+        self.device_range_dispatch_version = device_range_dispatch_version
 
 
 class Field:
@@ -269,6 +271,7 @@ def from_dr_kernel(d: dr.KernelAttributes) -> Kernel:
                 texture_binds,
                 launch_grid,
                 task.range_for_attribs,
+                task.device_range_dispatch_version,
             )
         ]
 
@@ -389,6 +392,7 @@ def to_dr_kernel(s: Kernel) -> Dict[str, Any]:
             "buffer_binds": buffer_binds,
             "name": task.name,
             "range_for_attribs": range_for_attribs,
+            "device_range_dispatch_version": task.device_range_dispatch_version,
             "task_type": task.task_ty.value,
             "texture_binds": texture_binds,
         }

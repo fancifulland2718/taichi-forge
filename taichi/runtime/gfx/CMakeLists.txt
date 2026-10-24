@@ -10,6 +10,7 @@ ti_add_native_library(gfx_runtime)
 target_sources(gfx_runtime
   PRIVATE
     runtime.cpp
+    range_dispatch.cpp
     snode_tree_manager.cpp
     snode_tree_resources.cpp
     aot_snode_resources.cpp

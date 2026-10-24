@@ -1021,7 +1021,7 @@ def test_gfx_aot_multitree_metadata():
         ) as metadata_file:
             metadata = json.load(metadata_file)
 
-    assert metadata["metadata_version"] == 9
+    assert metadata["metadata_version"] == 10
     # The two explicit FieldsBuilder trees already provide valid layouts.
     # First kernel materialization must not append an unused default empty root
     # after the AOT builder has captured its artifact-local id space.

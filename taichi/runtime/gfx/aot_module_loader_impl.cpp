@@ -50,12 +50,16 @@ class AotModuleImpl : public aot::Module {
             (const char *)metadata_json.data(),
             (const char *)(metadata_json.data() + metadata_json.size()));
         liong::json::deserialize(json, ti_aot_data_);
-        if (ti_aot_data_.metadata_version >= 9) {
-          for (const auto &kernel : ti_aot_data_.kernels) {
-            for (const auto &task : kernel.tasks_attribs) {
-              if (task.range_for_attribs && !task.range_for_attribs->valid()) {
-                throw std::invalid_argument("Invalid typed task range bounds");
-              }
+        for (const auto &kernel : ti_aot_data_.kernels) {
+          for (const auto &task : kernel.tasks_attribs) {
+            if (!task.valid_device_range_dispatch_contract() ||
+                (ti_aot_data_.metadata_version < 10 &&
+                 task.device_range_dispatch_version != 0)) {
+              throw std::invalid_argument("Unsupported device range dispatch proof");
+            }
+            if (ti_aot_data_.metadata_version >= 9 && task.range_for_attribs &&
+                !task.range_for_attribs->valid()) {
+              throw std::invalid_argument("Invalid typed task range bounds");
             }
           }
         }

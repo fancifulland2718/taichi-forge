@@ -2695,6 +2695,7 @@ void GfxRuntime::GraphReplayState::reset() {
   fixed_graphics_pipelines.clear();
   fixed_ray_resources.clear();
   fixed_argument_bytes = 0;
+  fixed_control_bytes = 0;
   fixed_secondary = false;
   executable.reset();
   attempts = 0;
@@ -2722,7 +2723,11 @@ uint64_t GfxRuntime::GraphReplayExecutable::known_persistent_control_bytes()
     const {
   uint64_t bytes = 0;
   for (const auto &slot : slots)
-    bytes += slot.structured_control_bytes + slot.structured_observation_bytes;
+    bytes += slot.structured_control_bytes + slot.structured_observation_bytes +
+             std::count_if(slot.range_dispatches.begin(),
+                           slot.range_dispatches.end(),
+                           [](const auto &item) { return bool(item); }) *
+                 RangeDispatch::kPacketBytes;
   return bytes;
 }
 
@@ -2837,7 +2842,8 @@ GraphReplayStats GfxRuntime::debug_graph_replay_stats(
       state.last_path,
       state.last_fallback_reason,
       state.fixed_secondary,
-      state.executable.known_persistent_control_bytes(),
+      state.fixed_submit ? state.fixed_control_bytes
+                         : state.executable.known_persistent_control_bytes(),
   };
   state.diagnostics_enabled = true;
   return result;
@@ -2871,7 +2877,8 @@ GraphReplayStats GfxRuntime::snapshot_graph_replay_stats(
       state.last_path,
       state.last_fallback_reason,
       state.fixed_secondary,
-      state.executable.known_persistent_control_bytes(),
+      state.fixed_submit ? state.fixed_control_bytes
+                         : state.executable.known_persistent_control_bytes(),
   };
 }
 
@@ -2991,6 +2998,58 @@ RhiResult record_graph_dispatch(CommandList *commands,
        BufferBarrierAccess::IndirectCommandRead, BufferBarrierStage::Compute,
        BufferBarrierAccess::ShaderRead | BufferBarrierAccess::ShaderWrite});
   return status;
+}
+
+void validate_range_dispatch_selection(
+    Device *device,
+    CompiledTaichiKernel &kernel,
+    const std::vector<uint32_t> &indices,
+    DevicePtr call_packet) {
+  if (indices.empty())
+    return;
+  TI_ERROR_IF(device->arch() != Arch::vulkan,
+              "Device range recording currently requires Vulkan");
+  TI_ERROR_IF(call_packet != kDeviceNullPtr,
+              "Per-task range selection cannot share a call-wide packet");
+  const auto &tasks = kernel.ti_kernel_attribs().tasks_attribs;
+  for (std::size_t i = 0; i < indices.size(); ++i) {
+    const auto index = indices[i];
+    TI_ERROR_IF(index >= tasks.size() || (i && index <= indices[i - 1]),
+                "Device range task indices must be in topology order and unique");
+    RangeDispatch::validate(tasks[index], kGtmpBufferSize);
+    TI_ERROR_IF(kernel.task_uses_listgen_buffer(index),
+                "Device range dispatch cannot borrow sparse traversal state");
+  }
+}
+
+void prepare_range_dispatches(
+    Device &device,
+    const std::vector<GfxRuntime::GraphReplayExecutable::PreparedDispatch> &prepared,
+    GfxRuntime::GraphReplayExecutable::Slot &slot,
+    DeviceAllocation *private_tmps) {
+  // Called only while constructing or recapturing a retired slot. Preserve
+  // global task indexing without adding a per-replay registry or lookup.
+  std::vector<std::unique_ptr<RangeDispatch>> result;
+  if (std::none_of(prepared.begin(), prepared.end(), [](const auto &pd) {
+        return !pd.device_range_tasks.empty();
+      })) {
+    slot.range_dispatches.clear();
+    return;
+  }
+  for (const auto &pd : prepared) {
+    const auto &tasks = pd.kernel->ti_kernel_attribs().tasks_attribs;
+    const auto base = result.size();
+    result.resize(base + tasks.size());
+    if (pd.device_range_tasks.empty())
+      continue;
+    auto *temporary = private_tmps ? private_tmps : pd.kernel->get_buffer_bind(
+        spirv::TaskAttributes::BufferInfo(spirv::TaskAttributes::BufferType::GlobalTmps));
+    TI_ERROR_IF(!temporary, "Device range dispatch has no task workspace");
+    for (auto index : pd.device_range_tasks)
+      result[base + index] = std::make_unique<RangeDispatch>(
+          device, tasks[index], *temporary, kGtmpBufferSize);
+  }
+  slot.range_dispatches = std::move(result);
 }
 }  // namespace
 
@@ -3315,6 +3374,8 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
       continue;
     }
     const auto &dispatch = operation.dispatch;
+    TI_ERROR_IF(independent_graphics && !dispatch.device_range_tasks.empty(),
+                "Device range recording has not qualified graphics fork/join");
     auto found = ti_kernels_.find(dispatch.handle.get_launch_id());
     TI_ERROR_IF(!dispatch.host_ctx || found == ti_kernels_.end(),
                 "Prepared Vulkan Graph requires fixed kernel dispatches");
@@ -3348,6 +3409,8 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
     }
     const auto &tasks = kernel->ti_kernel_attribs().tasks_attribs;
     const auto packet = dispatch.indirect_dispatch;
+    validate_range_dispatch_selection(device_, *kernel,
+                                       dispatch.device_range_tasks, packet);
     TI_ERROR_IF(packet != kDeviceNullPtr &&
                     (packet.device != device_ || packet.alloc_id == 0 ||
                      packet.offset % alignof(std::uint32_t) || tasks.size() != 1),
@@ -3362,7 +3425,8 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
     }
     sparse.include(*kernel);
     prepared.push_back(
-        {kernel, dispatch.host_ctx, nullptr, nullptr, packet});
+        {kernel, dispatch.host_ctx, nullptr, nullptr, packet,
+         dispatch.device_range_tasks});
   }
   if (detached) {
     TI_ERROR_IF(sparse.uses_listgen || sparse.unknown_mutation ||
@@ -3373,6 +3437,8 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
   prepare_fixed_sparse_resources(sparse, slot.retained_owners);
   const auto &listgen = sparse.listgen;
   executable.refresh_prepared_cache({1}, prepared);
+  prepare_range_dispatches(*device_, prepared, slot,
+                            workspace ? workspace->global_tmps_.get() : nullptr);
   if (independent_graphics) {
     // One bounded fork/join: buffer-only compute prefix, one independent
     // graphics pass, then a compute consumer. No general scheduler or replay
@@ -3618,6 +3684,11 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
         commands->buffer_fill(listgen->get_ptr(0), sizeof(uint32_t), 0);
         commands->buffer_barrier(listgen->get_ptr(0), sizeof(uint32_t));
       }
+      auto *range = slot.range_dispatches.empty()
+                        ? nullptr
+                        : slot.range_dispatches[slot.resource_sets.size()].get();
+      if (range)
+        range->record_controller(*commands);
       commands->bind_pipeline(pd.kernel->get_pipeline(i));
       TI_ERROR_IF(commands->bind_shader_resources(resources.get()) !=
                       RhiResult::success,
@@ -3626,7 +3697,8 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
       const int groups = (task.advisory_total_num_threads +
                           task.advisory_num_threads_per_group - 1) /
                          task.advisory_num_threads_per_group;
-      TI_ERROR_IF(record_graph_dispatch(commands.get(), pd.indirect_dispatch,
+      TI_ERROR_IF(record_graph_dispatch(commands.get(),
+                                        range ? range->packet() : pd.indirect_dispatch,
                                         groups) != RhiResult::success,
                   "Prepared Vulkan Graph dispatch recording failed");
       commands->memory_barrier();
@@ -3652,6 +3724,10 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
   for (auto bytes : slot.args_buffer_sizes) {
     state.fixed_argument_bytes += bytes;
   }
+  state.fixed_control_bytes =
+      std::count_if(slot.range_dispatches.begin(), slot.range_dispatches.end(),
+                    [](const auto &item) { return bool(item); }) *
+      RangeDispatch::kPacketBytes;
   if (detached) {
     slot.cmdlist = std::move(commands);
     slot.recorded = true;
@@ -3819,6 +3895,7 @@ GfxRuntime::prepare_fixed_control_graph(
   found->retained_owners = std::move(owners);
   state.fixed_snode_tree_ids = std::move(snode_tree_ids);
   state.fixed_argument_bytes = executable.known_persistent_argument_bytes();
+  state.fixed_control_bytes = executable.known_persistent_control_bytes();
   // No replay-slot acquisition, key construction, argument upload, descriptor
   // patch or predicate observation is performed after this cold preparation.
   auto *slot = &*found;
@@ -3953,6 +4030,13 @@ bool GfxRuntime::launch_graph_impl(
              !structured_result && !nested_result));
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   const bool detached = detached_state != nullptr;
+  const bool has_device_range = std::any_of(
+      dispatches.begin(), dispatches.end(),
+      [](const auto &dispatch) { return !dispatch.device_range_tasks.empty(); });
+  TI_ERROR_IF(has_device_range &&
+                  (structured_control || nested_control || structured_result ||
+                   nested_result || profiler_ || dispatch_cache_),
+              "Device range selection requires a flat uninstrumented recording");
   TI_ASSERT(!detached || (prepare_only && commands && workspace));
   if (!detached)
     collect_ready_graph_replays(kGraphReplayRetirementPollBudget);
@@ -4032,6 +4116,10 @@ bool GfxRuntime::launch_graph_impl(
 
   auto reject = [&](GraphReplayFallbackReason reason =
                         GraphReplayFallbackReason::structural_unsupported) {
+    TI_ERROR_IF(has_device_range,
+                "Selected device range recording was rejected (reason {}); "
+                "direct dispatch is not a substitute for the selected plan",
+                static_cast<int>(reason));
     if (state.diagnostics_enabled) {
       ++state.fallbacks;
       if (reason == GraphReplayFallbackReason::structural_unsupported) {
@@ -4244,6 +4332,26 @@ bool GfxRuntime::launch_graph_impl(
     prepared_dispatch.kernel = ti_kernel;
     prepared_dispatch.host_ctx = dispatch.host_ctx;
     prepared_dispatch.indirect_dispatch = dispatch.indirect_dispatch;
+    prepared_dispatch.device_range_tasks = dispatch.device_range_tasks;
+    validate_range_dispatch_selection(device_, *ti_kernel,
+                                       dispatch.device_range_tasks,
+                                       dispatch.indirect_dispatch);
+    if (!dispatch.device_range_tasks.empty()) {
+      has_indirect_dispatch = true;
+      key.insert(key.end(), {0xD101u, dispatch.device_range_tasks.size()});
+      structure_key.insert(structure_key.end(),
+                           {0xD101u, dispatch.device_range_tasks.size()});
+      for (const auto index : dispatch.device_range_tasks) {
+        key.push_back(index);
+        structure_key.push_back(index);
+      }
+      auto *temporary = workspace && workspace->global_tmps_
+                            ? workspace->global_tmps_.get()
+                            : ti_kernel->get_buffer_bind(BufferType::GlobalTmps);
+      TI_ERROR_IF(!temporary, "Selected range task has no resolved workspace");
+      push_graph_allocation_key(key, *temporary);
+      push_graph_allocation_key(structure_key, *temporary);
+    }
     const bool is_indirect =
         dispatch.indirect_dispatch != kDeviceNullPtr;
     if (is_indirect) {
@@ -5539,6 +5647,12 @@ bool GfxRuntime::launch_graph_impl(
   }
 
   auto recorded_cmdlist = std::move(commands);
+  if (has_device_range || !slot->range_dispatches.empty()) {
+    slot->cmdlist.reset();
+    slot->recorded = false;
+    prepare_range_dispatches(*device_, prepared, *slot,
+                              workspace ? workspace->global_tmps_.get() : nullptr);
+  }
   if (!recorded_cmdlist) {
     auto [created, cmd_res] =
         device_->get_compute_stream()->new_command_list_unique();
@@ -6512,6 +6626,13 @@ bool GfxRuntime::launch_graph_impl(
       insert_task_dependencies(current_accesses, current_global_read,
                                current_global_write);
 
+      auto *range = slot->range_dispatches.empty()
+                        ? nullptr
+                        : slot->range_dispatches[resource_set_index].get();
+      if (range) {
+        insert_all_pending(/*exit_boundary=*/false);
+        range->record_controller(*cmdlist);
+      }
       ShaderResourceSet *bindings =
           slot->resource_sets[resource_set_index++].get();
       TI_ERROR_IF(
@@ -6531,7 +6652,8 @@ bool GfxRuntime::launch_graph_impl(
       if (pd.indirect_dispatch != kDeviceNullPtr) {
         insert_all_pending(/*exit_boundary=*/false);
       }
-      status = record_graph_dispatch(cmdlist, pd.indirect_dispatch, group_x);
+      status = record_graph_dispatch(
+          cmdlist, range ? range->packet() : pd.indirect_dispatch, group_x);
       TI_ERROR_IF(status != RhiResult::success,
                   "Vulkan graph dispatch error: RhiResult({})", status);
 

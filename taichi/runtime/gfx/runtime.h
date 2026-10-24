@@ -2,6 +2,7 @@
 #include "taichi/runtime/snode_tree_id_registry.h"
 #include "taichi/runtime/gfx/snode_tree_resources.h"
 #include "taichi/runtime/gfx/shared_image_read_admission.h"
+#include "taichi/runtime/gfx/range_dispatch.h"
 #include "taichi/program/runtime_completion.h"
 #include "taichi/util/lang_util.h"
 
@@ -330,6 +331,8 @@ class TI_DLL_EXPORT GfxRuntime {
     LaunchContextBuilder *host_ctx{nullptr};
     DevicePtr indirect_dispatch{kDeviceNullPtr};
     std::uint32_t source_dispatch_count{1};
+    // Explicit physical task selection; distinct from a call-wide packet.
+    std::vector<uint32_t> device_range_tasks;
   };
 
   struct GraphRecordingOperation {
@@ -447,6 +450,7 @@ class TI_DLL_EXPORT GfxRuntime {
       DeviceAllocation *args_buffer{nullptr};
       const AllocationMap *any_arrays{nullptr};
       DevicePtr indirect_dispatch{kDeviceNullPtr};
+      std::vector<uint32_t> device_range_tasks;
     };
 
     struct CachedPreparedDispatch {
@@ -458,6 +462,7 @@ class TI_DLL_EXPORT GfxRuntime {
       std::vector<size_t> args_buffer_sizes;
       std::vector<std::unique_ptr<ShaderResourceSet>> resource_sets;
       std::vector<std::shared_ptr<void>> retained_owners;
+      std::vector<std::unique_ptr<RangeDispatch>> range_dispatches;
       std::unique_ptr<DeviceAllocationGuard> structured_control_buffer;
       std::unique_ptr<DeviceAllocationGuard> structured_observation_buffer;
       std::size_t structured_control_bytes{0};
@@ -531,6 +536,7 @@ class TI_DLL_EXPORT GfxRuntime {
     std::vector<std::uint64_t> fixed_graphics_pipelines;
     std::vector<std::uint64_t> fixed_ray_resources;
     std::uint64_t fixed_argument_bytes{0};
+    std::uint64_t fixed_control_bytes{0};
     bool fixed_secondary{false};
     uint64_t attempts{0};
     uint64_t recorded{0};

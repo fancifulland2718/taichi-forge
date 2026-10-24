@@ -116,6 +116,8 @@ CompiledKernelData::Err CompiledKernelData::load_impl(
     return Err::kParseMetadataFailed;
   }
   for (const auto &task : data_.metadata.kernel_attribs.tasks_attribs) {
+    if (!task.valid_device_range_dispatch_contract())
+      return Err::kCompiledKernelDataBroken;
     if (task.range_for_attribs && !task.range_for_attribs->valid()) {
       return Err::kCompiledKernelDataBroken;
     }

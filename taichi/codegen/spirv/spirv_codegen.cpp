@@ -16,6 +16,7 @@
 
 #include "taichi/codegen/codegen_utils.h"
 #include "taichi/analysis/range_for_bounds.h"
+#include "taichi/analysis/range_dispatch.h"
 #include "taichi/program/program.h"
 #include "taichi/program/kernel.h"
 #include "taichi/program/extension.h"
@@ -5479,6 +5480,8 @@ class TaskCodegen : public IRVisitor {
     task_attribs_.one_to_one = stmt->one_to_one;
 
     task_attribs_.range_for_attribs = describe_range_for_bounds(*stmt);
+    task_attribs_.device_range_dispatch_version =
+        supports_device_range_dispatch(*stmt) ? 1 : 0;
 
     ir_->start_function(kernel_function_);
     const std::string total_elems_name("total_elems");

@@ -177,6 +177,9 @@ struct TaskAttributes {
   // A range task normally grid-strides over its full logical domain. Exact
   // indirect dispatch specializes it to at most one logical index per lane.
   bool one_to_one{false};
+  // Final-IR proof for an unchanged ordinary grid-stride payload. Zero means
+  // unqualified, not an invitation for the loader to infer eligibility.
+  uint32_t device_range_dispatch_version{0};
 
   OffloadedTaskType task_type;
 
@@ -200,6 +203,20 @@ struct TaskAttributes {
   bool may_mutate_sparse_topology{false};
   int sparse_mutation_snode_id{kSparseMutationNone};
 
+  bool valid_device_range_dispatch_contract() const {
+    if (device_range_dispatch_version == 0)
+      return true;
+    return device_range_dispatch_version == 1 &&
+           task_type == OffloadedTaskType::range_for && range_for_attribs &&
+           range_for_attribs->valid() && !range_for_attribs->const_range() &&
+           range_for_attribs->begin.kind != RangeBoundKind::unknown &&
+           range_for_attribs->end.kind != RangeBoundKind::unknown &&
+           !one_to_one && !may_mutate_sparse_topology &&
+           !static_shared_array_bytes && cooperative_matrix_requirements.empty() &&
+           sparse_list_op == kSparseListOpNone &&
+           advisory_total_num_threads > 0 && advisory_num_threads_per_group > 0;
+  }
+
   static std::string buffers_name(BufferInfo b);
 
   std::string debug_string() const;
@@ -211,6 +228,7 @@ struct TaskAttributes {
             advisory_total_num_threads,
             advisory_num_threads_per_group,
             one_to_one,
+            device_range_dispatch_version,
             task_type,
             buffer_binds,
             texture_binds,

@@ -40,7 +40,8 @@ struct TaichiAotData {
   // v6 reconstructs sparse resources; v7 adds descriptor ndarray byte offsets;
   // v8 records exact cooperative-matrix dimensions and fixed subgroup width.
   // v9 stores signed, typed range bounds shared with LLVM compiled tasks.
-  static constexpr uint32_t kMetadataVersion = 9;
+  // v10 preserves the final-IR device-range dispatch qualification.
+  static constexpr uint32_t kMetadataVersion = 10;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;

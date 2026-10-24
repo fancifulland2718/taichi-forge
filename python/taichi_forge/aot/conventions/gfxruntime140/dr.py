@@ -135,6 +135,7 @@ class TaskAttributes:
         self.advisory_total_num_threads: int = int(advisory_total_num_threads)
         self.buffer_binds: List[BufferBinding] = [BufferBinding(x) for x in buffer_binds]
         self.name: str = str(name)
+        self.device_range_dispatch_version: int = int(j.get("device_range_dispatch_version", 0))
         self.range_for_attribs: Optional[RangeForAttributes] = (
             RangeForAttributes(range_for_attribs) if range_for_attribs is not None else None
         )
