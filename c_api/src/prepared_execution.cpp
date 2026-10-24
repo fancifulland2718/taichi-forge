@@ -362,10 +362,6 @@ struct PreparedExecution {
           if (!image)
             continue;
           const auto &params = image->parameters();
-          if (params.format == BufferFormat::depth16 ||
-              params.format == BufferFormat::depth24stencil8 ||
-              params.format == BufferFormat::depth32f)
-            throw MemoryBindingError("Independent Vulkan image recording requires color images");
           gfx_runtime->prepare_fixed_private_image(
               vulkan_workspace, image->gfx_sampled_allocation(),
               bool(params.usage & ImageAllocUsage::Sampled)

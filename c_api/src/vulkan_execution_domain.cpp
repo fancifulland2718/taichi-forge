@@ -107,7 +107,9 @@ TiVulkanExecutionDomain ti_create_vulkan_execution_domain_ext(
   TI_CAPI_ARGUMENT_NULL_RV(info);
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   TI_CAPI_NOT_SUPPORTED_IF_RV(rt.arch != taichi::Arch::vulkan);
-  if (!info->capacity || !info->instance_capacity || info->gpu_timing > TI_TRUE)
+  if (!info->capacity || !info->instance_capacity || info->gpu_timing > TI_TRUE ||
+      (info->queue_kind != TI_VULKAN_EXECUTION_QUEUE_COMPUTE &&
+       info->queue_kind != TI_VULKAN_EXECUTION_QUEUE_GRAPHICS))
     throw MemoryBindingError("Invalid Vulkan execution-domain options");
   const auto handle = reinterpret_cast<TiVulkanExecutionDomain>(Runtime::new_handle_token());
   auto &registry = capi::vulkan_handles();
@@ -117,7 +119,10 @@ TiVulkanExecutionDomain ti_create_vulkan_execution_domain_ext(
   }
   try {
     auto domain = rt.vulkan_execution_domains()->create(
-        {info->capacity, info->instance_capacity, info->gpu_timing != TI_FALSE});
+        {info->capacity, info->instance_capacity, info->gpu_timing != TI_FALSE,
+         info->queue_kind == TI_VULKAN_EXECUTION_QUEUE_GRAPHICS
+             ? taichi::lang::vulkan::VulkanExecutionQueueKind::graphics
+             : taichi::lang::vulkan::VulkanExecutionQueueKind::compute});
     std::lock_guard<std::mutex> lock(registry.mutex);
     registry.domains.at(handle) = std::move(domain);
   } catch (...) {
@@ -137,7 +142,8 @@ void ti_get_vulkan_execution_domain_info_ext(
   *info = {};
   const auto value = capi::get_execution_domain(domain)->snapshot();
   *info = {value.identity, value.owner, value.queue_index, value.capacity,
-           value.pending, static_cast<TiBool>(value.accepting), static_cast<TiBool>(value.closed)};
+           value.pending, static_cast<TiBool>(value.accepting), static_cast<TiBool>(value.closed),
+           value.queue_family_index};
   TI_CAPI_TRY_CATCH_END();
 }
 

@@ -266,7 +266,7 @@ FixedExecution::FixedExecution(
     if (arch != Arch::vulkan || execution_binding || !state_->fault_domain ||
         storage_ring || binding_replay || binding_operands || submission_recipe)
       throw std::invalid_argument(
-          "Independent Vulkan execution requires a fixed compute recipe");
+          "Independent Vulkan execution requires a qualified fixed recipe");
 #ifdef TI_WITH_VULKAN
     if (!vulkan_binding->domain || !vulkan_binding->operands ||
         !vulkan_binding->domain->belongs_to(state_->fault_domain))
@@ -732,6 +732,12 @@ FixedExecution::FixedExecution(
         const auto mode = native->execution_mode();
         if (execution_binding)
           native->validate_cuda_execution_domain();
+        if (vulkan_binding)
+          native->validate_vulkan_execution_domain();
+        if (vulkan_binding && inside_control &&
+            native->vulkan_recording_requirements().graphics_queue)
+          throw std::invalid_argument(
+              "Independent Vulkan graphics requires a flat execution region");
         if (!((arch_is_cpu(arch) && mode == NativeOperationMode::cpu) ||
               (arch == Arch::cuda &&
                (mode == NativeOperationMode::cuda_capture ||

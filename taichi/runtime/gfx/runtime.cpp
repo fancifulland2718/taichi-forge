@@ -3341,14 +3341,26 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
       graphics_queue ? dynamic_cast<GraphicsDevice *>(device_) : nullptr;
   TI_ERROR_IF(graphics_queue && !graphics_device,
               "Prepared mixed Graph requires a graphics device");
+  if (detached && graphics_queue) {
+#ifdef TI_WITH_VULKAN
+    auto *vk_device = dynamic_cast<vulkan::VulkanDevice *>(device_);
+    auto *vk_commands = dynamic_cast<vulkan::VulkanCommandList *>(commands.get());
+    TI_ERROR_IF(!vk_device || !vk_commands ||
+                    !(vk_device->queue_family_flags(
+                          vk_commands->vk_command_buffer()->ref_pool->queue_family_index) &
+                      VK_QUEUE_GRAPHICS_BIT),
+                "Independent Vulkan graphics requires a graphics-capable command queue family");
+#else
+    TI_ERROR("Independent graphics requires Vulkan");
+#endif
+  }
   for (const auto &operation : operations) {
     TI_ERROR_IF(detached &&
-                    (operation.graphics_queue ||
-                     !operation.graphics_pipelines.empty() ||
+                    (!operation.graphics_pipelines.empty() ||
                      !operation.ray_resources.empty() ||
                      (operation.external &&
                       (!operation.inline_recording || !operation.buffers))),
-                "Detached Graph requires described compute inline commands");
+                "Detached Graph requires described inline commands without live graphics or ray handles");
     if (detached && operation.buffers) {
       for (const auto &buffer : *operation.buffers)
         TI_ERROR_IF(buffer.device != device_ || !buffer.alloc_id,

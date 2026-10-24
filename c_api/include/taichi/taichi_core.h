@@ -338,13 +338,13 @@ typedef enum TiCompletionGpuTimingStatus {
 
 typedef struct TiCompletionGpuTiming {
   TiCompletionGpuTimingStatus status;
-  uint32_t scope;  // 1: complete compute envelope.
+  uint32_t scope;  // 1: complete execution envelope (compute and graphics).
   uint64_t owner;
   uint64_t sequence;
   uint64_t duration_ns;  // Meaningful only when status is READY.
 } TiCompletionGpuTiming;
 
-// Nonblocking. The compute envelope excludes predecessor waits, external
+// Nonblocking. The execution envelope excludes predecessor waits, external
 // acquire, parameter uploads and external release. It includes gaps and any
 // waits inside the selected Graph/provider execution, not a sum of kernels.
 // The immutable result survives event reuse and owner retirement.

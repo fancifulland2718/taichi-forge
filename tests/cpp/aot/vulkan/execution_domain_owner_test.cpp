@@ -9,6 +9,8 @@
 #include "tests/cpp/aot/vulkan/timeline_gate.h"
 #include <array>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 
 namespace taichi::lang {
 namespace {
@@ -204,6 +206,136 @@ TEST(VulkanExecutionOwner, PublicFixedPlanParametersAndIndependentRetirement) {
   ti_initialize_prepared_ext(session.runtime, session.executions[0]);
   EXPECT_EQ(ti_query_completion_ext(old), TI_TRUE);
   check_domain_error();
+}
+
+TEST(VulkanExecutionOwner, PrivateOffscreenIgnoresDefaultQueue) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  const char *path = std::getenv("TAICHI_VULKAN_OFFSCREEN_AOT_DIR");
+  if (!path)
+    GTEST_SKIP() << "Requires the compiled offscreen fixture";
+  PublicDomainSession session;
+  const char *selected = std::getenv("TI_TEST_VULKAN_DEVICE_INDEX");
+  session.runtime = ti_create_runtime(TI_ARCH_VULKAN, selected ? std::stoul(selected) : 0);
+  ASSERT_NE(session.runtime, nullptr);
+  auto &runtime = *reinterpret_cast<VulkanRuntime *>(session.runtime);
+  auto &device = runtime.get_vk();
+  using Kind = vulkan::VulkanExecutionQueueKind;
+  if (device.created_execution_queue_count(Kind::graphics) < 3 ||
+      !device.vk_caps().timeline_semaphore)
+    GTEST_SKIP() << "Requires two additional graphics+compute queues";
+  session.module = ti_load_aot_module(session.runtime, path);
+  ASSERT_NE(session.module, nullptr);
+  std::ifstream input(std::string(path) + "/offscreen.json");
+  ASSERT_TRUE(input.good());
+  const std::string plan((std::istreambuf_iterator<char>(input)), {});
+  const char *names[]{"output", "doutput", "loss", "dloss"};
+  const char *parameter = "scale";
+  const TiVulkanExecutionDomainCreateInfo options{
+      1, 1, TI_TRUE, TI_VULKAN_EXECUTION_QUEUE_GRAPHICS};
+  std::array<TiVulkanExecutionDomainInfo, 2> domain_info{};
+  for (int lane = 0; lane < 2; ++lane) {
+    auto domain = ti_create_vulkan_execution_domain_ext(session.runtime, &options);
+    ASSERT_NE(domain, nullptr);
+    session.domains.push_back(domain);
+    ti_get_vulkan_execution_domain_info_ext(domain, &domain_info[lane]);
+    EXPECT_EQ(domain_info[lane].queue_family_index, device.graphics_queue_family_index());
+    std::array<TiNamedArgument, 5> args{};
+    for (int i = 0; i < 4; ++i) {
+      const uint32_t size = i < 2 ? 128 : 1;
+      TiMemoryAllocateInfo allocation{size * sizeof(float), TI_FALSE, TI_TRUE, TI_FALSE,
+                                     TI_MEMORY_USAGE_STORAGE_BIT};
+      auto memory = ti_allocate_memory(session.runtime, &allocation);
+      ASSERT_NE(memory, nullptr);
+      session.memories.push_back(memory);
+      args[i].name = names[i];
+      args[i].argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+      auto &array = args[i].argument.value.ndarray;
+      array.memory = memory;
+      array.shape.dim_count = 1;
+      array.shape.dims[0] = size;
+      array.elem_type = TI_DATA_TYPE_F32;
+    }
+    args[4].name = parameter;
+    args[4].argument.type = TI_ARGUMENT_TYPE_SCALAR;
+    args[4].argument.value.scalar.type = TI_DATA_TYPE_U64;
+    auto call = ti_prepare_execution_plan_on_vulkan_domain_ext(
+        session.runtime, session.module, domain, plan.size(), plan.data(),
+        args.size(), args.data(), 0, nullptr, 1, &parameter);
+    check_domain_error();
+    ASSERT_NE(call, nullptr);
+    session.executions.push_back(call);
+    ti_initialize_prepared_ext(session.runtime, call);
+    check_domain_error();
+  }
+  const auto submit = [&](int lane, uint64_t value, bool sampled = false) {
+    TiCompletion completion = nullptr;
+    const bool accepted = ti_try_submit_prepared_sampled_ext(
+        session.runtime, session.executions[lane], 0, nullptr, &completion,
+        TI_FALSE, sampled, 1, &value);
+    check_domain_error();
+    if (accepted) {
+      session.completions.push_back(completion);
+    } else {
+      EXPECT_EQ(completion, nullptr);
+    }
+    return completion;
+  };
+  const auto check = [&](int lane, float scale) {
+    for (int derivative = 0; derivative < 2; ++derivative) {
+      const auto memory = runtime.get_memory(session.memories[4 * lane + derivative]).allocation;
+      void *mapped = nullptr;
+      ASSERT_EQ(device.map(memory, &mapped), RhiResult::success);
+      const auto *values = static_cast<const float *>(mapped);
+      for (int i = 0; i < 128; ++i) {
+        const float expected = i < 64 ? (i % 8 < 4 ? 0.5f * scale : 0)
+                                       : (i % 8 < 4 ? 0 : scale);
+        EXPECT_EQ(values[i], expected) << i;
+      }
+      device.unmap(memory);
+    }
+  };
+  {
+    test_detail::TimelineGate default_gate(device, 0);
+    test_detail::TimelineGate left_gate(device, domain_info[0].queue_index, Kind::graphics);
+    const auto before = device.queue_submission_snapshot().queue_submit_calls;
+    auto left = submit(0, 2, true);
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before + 1);
+    EXPECT_EQ(ti_query_completion_ext(left), TI_FALSE);
+    EXPECT_EQ(submit(0, 99), nullptr);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before + 1);
+    auto right = submit(1, 3, true);
+    ASSERT_NE(right, nullptr);
+    ti_wait_completion_ext(right);
+    check_domain_error();
+    check(1, 3);
+    EXPECT_EQ(ti_query_completion_ext(left), TI_FALSE);
+    left_gate.release();
+    ti_wait_completion_ext(left);
+    check(0, 2);  // The rejected parameter update did not alter the accepted work.
+    for (auto ticket : {left, right}) {
+      TiCompletionGpuTiming timing{};
+      ti_get_completion_gpu_timing_ext(ticket, &timing);
+      check_domain_error();
+      EXPECT_EQ(timing.status, TI_COMPLETION_GPU_TIMING_READY);
+      EXPECT_EQ(timing.scope, 1u);
+      EXPECT_GT(timing.duration_ns, 0u);
+    }
+    // Attachment/pipeline destruction waits only for this instance's prefix,
+    // even while an unrelated default queue remains deliberately blocked.
+    auto retired = ti_get_prepared_vulkan_instance_ext(session.runtime, session.executions[0]);
+    ASSERT_NE(retired, nullptr);
+    ti_retire_vulkan_execution_instance_ext(retired);
+    ti_finish_prepared_instance_retirement_ext(session.runtime, session.executions[0]);
+    check_domain_error();
+    session.executions[0] = nullptr;
+    ti_release_vulkan_execution_instance_ext(retired);
+    auto tail = submit(1, 4);
+    ASSERT_NE(tail, nullptr);
+    ti_wait_completion_ext(tail);
+    check(1, 4);
+  }
 }
 
 TEST(VulkanExecutionOwner, BorrowedViewsShareProgramRegistryAndRetireBeforeDevice) {

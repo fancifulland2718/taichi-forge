@@ -43,12 +43,12 @@ class Completion:
 
     @property
     def gpu_timing(self):
-        """Nonblocking compute-envelope timing; unavailable durations are None."""
+        """Nonblocking execution-envelope timing; unavailable durations are None."""
         self._api.load_completion_timing()
         value = abi.CompletionGpuTiming()
         self._api.call(self._api.ti_get_completion_gpu_timing_ext, self._native_handle(), C.byref(value))
         statuses = ("not_sampled", "pending", "ready", "unsupported", "failed")
-        return dict(status=statuses[value.status], scope="compute_envelope",
+        return dict(status=statuses[value.status], scope="execution_envelope",
                     owner=value.owner, sequence=value.sequence,
                     duration_ns=value.duration_ns if value.status == 2 else None)
 
@@ -179,19 +179,22 @@ class CudaExecutionDomain(ExecutionDomain):
 
 
 class VulkanExecutionDomain(ExecutionDomain):
-    """One leased, additional Vulkan compute queue with immutable recordings.
+    """One leased, additional Vulkan queue with immutable recordings.
 
     Requires enabled timeline semaphores and available device-created queues.
     Fixed buffer recipes share the common parameter/completion/retirement API.
     Selected device while recipes retain prefix, chunks and suffix in one submit.
-    Graphics, sparse runtime state, host selection and parallel remain separate routes.
+    Private flat offscreen plans require a graphics-capable family. Shared
+    writable images, AS, sparse state, host selection and parallel are separate.
     """
 
     backend = "vulkan"
     _info_type = abi.VulkanExecutionDomainInfo
 
 
-def create_domain(runtime, capacity, instance_capacity, priority, gpu_timing=False):
+def create_domain(runtime, capacity, instance_capacity, priority, gpu_timing=False, queue="compute"):
+    if queue not in ("compute", "graphics"):
+        raise ValueError("queue must be 'compute' or 'graphics'")
     if type(gpu_timing) is not bool:
         raise TypeError("gpu_timing must be bool")
     capacity = _unsigned(capacity, "capacity", positive=True)
@@ -203,6 +206,8 @@ def create_domain(runtime, capacity, instance_capacity, priority, gpu_timing=Fal
         runtime._check()
         if runtime.arch not in ("cuda", "vulkan"):
             raise NotImplementedError("Execution domains require a CUDA or Vulkan runtime")
+        if runtime.arch != "vulkan" and queue != "compute":
+            raise NotImplementedError("queue='graphics' requires Vulkan")
         if runtime.arch == "vulkan" and priority:
             raise NotImplementedError("Vulkan queue priorities are fixed at device creation; use priority=0")
         runtime._api.load_execution_domains(runtime.arch)
@@ -214,7 +219,7 @@ def create_domain(runtime, capacity, instance_capacity, priority, gpu_timing=Fal
                         else runtime._api.ti_create_cuda_execution_domain_ext)
             domain_type = CudaExecutionDomain
         else:
-            options = abi.VulkanExecutionDomainCreateInfo(capacity, instance_capacity, gpu_timing)
+            options = abi.VulkanExecutionDomainCreateInfo(capacity, instance_capacity, gpu_timing, queue == "graphics")
             function = runtime._api.ti_create_vulkan_execution_domain_ext
             domain_type = VulkanExecutionDomain
         handle = runtime._api.call(function, runtime._handle, C.byref(options))

@@ -292,7 +292,7 @@ class CudaExecutionDomainInfo(C.Structure):
 
 
 class VulkanExecutionDomainCreateInfo(C.Structure):
-    _fields_ = [("capacity", UInt), ("instance_capacity", UInt), ("gpu_timing", UInt)]
+    _fields_ = [("capacity", UInt), ("instance_capacity", UInt), ("gpu_timing", UInt), ("queue_kind", UInt)]
 
 
 class VulkanExecutionDomainInfo(C.Structure):
@@ -300,6 +300,7 @@ class VulkanExecutionDomainInfo(C.Structure):
         ("identity", C.c_uint64), ("owner", C.c_uint64), ("queue_index", UInt),
         ("capacity", C.c_uint64), ("pending", C.c_uint64),
         ("accepting", UInt), ("closed", UInt),
+        ("queue_family_index", UInt),
     ]
 
 

@@ -22,14 +22,16 @@ from taichi_forge_runtime.aot._domain import ExecutionDomain
 from taichi_forge_runtime.aot._runtime import Module, NativeResource, NdArray as AotNdArray
 
 
-def execution_domain(*, capacity=2, instance_capacity=64, priority=0, gpu_timing=False):
-    """Create an independent CUDA stream or Vulkan compute queue on this Program.
+def execution_domain(*, capacity=2, instance_capacity=64, priority=0, gpu_timing=False, queue="compute"):
+    """Create an independent CUDA stream or Vulkan queue on this Program.
 
     Prepare immutable instances with ``graph.prepare(..., execution_domain=...)``.
     Explicit close/reset drains accepted work. Dropping a domain handle only
     releases that handle; the Program retains its resources until retirement.
-    Vulkan requires an unused device-created compute queue and timeline support;
-    its current independent route accepts fixed buffer-only recipes.
+    Vulkan requires an unused device-created queue and timeline support.
+    queue="graphics" requests a graphics+compute family. Private AOT offscreen
+    attachments are supported; borrowed writable Texture targets require a
+    separate ownership contract and remain rejected.
     """
     from taichi_forge.aot import borrow_runtime
 
@@ -42,7 +44,7 @@ def execution_domain(*, capacity=2, instance_capacity=64, priority=0, gpu_timing
             runtime = borrow_runtime()
             owner._graph_execution_runtime = runtime
         return runtime.execution_domain(
-            capacity=capacity, instance_capacity=instance_capacity, priority=priority, gpu_timing=gpu_timing
+            capacity=capacity, instance_capacity=instance_capacity, priority=priority, gpu_timing=gpu_timing, queue=queue
         )
 
 

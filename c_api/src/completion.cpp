@@ -104,7 +104,7 @@ void ti_get_completion_gpu_timing_ext(TiCompletion completion,
   const auto ticket = capi::get_completion(completion);
   info->owner = ticket.program_domain();
   info->sequence = ticket.sequence();
-  info->scope = 1;  // Complete compute envelope, see the public contract.
+  info->scope = 1;  // Complete execution envelope, see the public contract.
   try {
     ticket.done();  // Nonblocking poll; freezes events before their reuse.
   } catch (...) {

@@ -74,7 +74,7 @@ with Runtime("vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_IN
             timing = ticket.gpu_timing
             assert timing["owner"] == ticket.info["owner"]
             assert timing["sequence"] == ticket.info["sequence"]
-            assert timing["scope"] == "compute_envelope"
+            assert timing["scope"] == "execution_envelope"
             if index in (0, 999):
                 assert timing["status"] == "ready" and timing["duration_ns"] > 0
                 kept.append((ticket, timing))

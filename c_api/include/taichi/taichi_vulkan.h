@@ -227,10 +227,16 @@ ti_export_vulkan_image(TiRuntime runtime,
 // from the ordinary compute family. There is no default-queue fallback.
 typedef struct TiVulkanExecutionDomain_t *TiVulkanExecutionDomain;
 typedef struct TiVulkanExecutionInstance_t *TiVulkanExecutionInstance;
+typedef enum TiVulkanExecutionQueueKind {
+  TI_VULKAN_EXECUTION_QUEUE_COMPUTE = 0,
+  TI_VULKAN_EXECUTION_QUEUE_GRAPHICS = 1
+} TiVulkanExecutionQueueKind;
+
 typedef struct TiVulkanExecutionDomainCreateInfo {
   uint32_t capacity;
   uint32_t instance_capacity;
   TiBool gpu_timing;
+  TiVulkanExecutionQueueKind queue_kind;
 } TiVulkanExecutionDomainCreateInfo;
 typedef struct TiVulkanExecutionDomainInfo {
   uint64_t identity;
@@ -240,6 +246,7 @@ typedef struct TiVulkanExecutionDomainInfo {
   uint64_t pending;
   TiBool accepting;
   TiBool closed;
+  uint32_t queue_family_index;
 } TiVulkanExecutionDomainInfo;
 
 TI_DLL_EXPORT TiVulkanExecutionDomain TI_API_CALL
@@ -265,10 +272,11 @@ ti_retire_vulkan_execution_instance_ext(TiVulkanExecutionInstance instance);
 TI_DLL_EXPORT void TI_API_CALL
 ti_release_vulkan_execution_instance_ext(TiVulkanExecutionInstance instance);
 
-// Cold preparation of a fixed buffer-only plan. Call ti_initialize_prepared_ext
+// Cold preparation of a qualified fixed plan. Call ti_initialize_prepared_ext
 // before submission. Mutable parameters are replay-only u64 scalars; count=0
 // freezes every scalar. Commands, parameter pools and sampled timestamps stay
-// on the chosen queue. Unsupported control/image/sparse routes are rejected.
+// on the chosen queue. Private offscreen graphics requires a graphics-capable
+// queue family; live writable image, AS and shared sparse contracts remain separate.
 TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
 ti_prepare_execution_plan_on_vulkan_domain_ext(
     TiRuntime runtime, TiAotModule module, TiVulkanExecutionDomain domain,

@@ -22,7 +22,7 @@ def samples(call):
         result = ticket.gpu_timing
         assert result["owner"] == ticket.info["owner"]
         assert result["sequence"] == ticket.info["sequence"]
-        assert result["scope"] == "compute_envelope"
+        assert result["scope"] == "execution_envelope"
         if sampled:
             assert result["status"] == "ready" and result["duration_ns"] > 0
         else:

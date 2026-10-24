@@ -209,6 +209,20 @@ TEST(VulkanExecutionQueueFamilies, DistinctImportedFamiliesRejectForeignCommands
   EXPECT_FALSE(compute.latest());
   EXPECT_TRUE(graphics.submit(recorded)->wait());
   EXPECT_TRUE(compute.submit(compute.prepare({}))->wait());
+  // A compute-only family must reject a graphics operation before invoking
+  // provider recording, even when its buffers/images have a complete closure.
+  gfx::GfxRuntime::Params runtime_params;
+  runtime_params.device = &device;
+  gfx::GfxRuntime runtime(runtime_params);
+  gfx::GfxRuntime::GraphRecordingOperation operation;
+  bool invoked = false;
+  operation.external = [&](Device *, CommandList *) { invoked = true; };
+  operation.inline_recording = true;
+  operation.graphics_queue = true;
+  operation.buffers = std::vector<DeviceAllocation>{};
+  EXPECT_ANY_THROW(runtime.prepare_fixed_commands(
+      {operation}, compute.new_command_list(), runtime.create_fixed_graph_workspace(), {}));
+  EXPECT_FALSE(invoked);
 }
 
 TEST(VulkanExecutionQueues, UsesCreatedSameFamilyCapacityAndIndependentTails) {

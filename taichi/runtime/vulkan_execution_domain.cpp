@@ -61,7 +61,7 @@ struct ExecutionDomain::State {
         Options options)
       : owner(std::move(owner)),
         identity(next_domain_identity.fetch_add(1, std::memory_order_relaxed)),
-        options(options), queue(device, options.capacity),
+        options(options), queue(device, options.capacity, options.queue_kind),
         pending(options.capacity),
         latest(RuntimeCompletion::completed(Arch::vulkan,
                    this->owner->program_domain(), 0, this->owner)) {
@@ -307,7 +307,8 @@ ExecutionDomain::Snapshot ExecutionDomain::snapshot() const {
           state.options.capacity, state.count,
           state.accepting && !state.closing && !state.closed && !state.first_error &&
               state.owner->submission_allowed(),
-          state.closed && !state.retirement_error};
+          state.closed && !state.retirement_error,
+          state.queue.queue_family_index()};
 }
 
 RuntimeCompletion ExecutionDomain::latest_completion() const {

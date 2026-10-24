@@ -3546,17 +3546,21 @@ std::unique_ptr<VulkanStream> VulkanDevice::create_execution_stream(
     VulkanExecutionQueueKind kind, uint32_t index) {
   throw_if_backend_submission_disallowed("create Vulkan execution stream");
   const auto family = execution_queue_family_index(kind);
+  const VkQueueFlags required = VK_QUEUE_COMPUTE_BIT |
+      (kind == VulkanExecutionQueueKind::graphics ? VK_QUEUE_GRAPHICS_BIT : 0);
+  if ((queue_family_flags(family) & required) != required)
+    throw std::invalid_argument("Vulkan execution queue family lacks requested capabilities");
+  return std::make_unique<VulkanStream>(*this, execution_queue_at(kind, index), family);
+}
+
+VkQueueFlags VulkanDevice::queue_family_flags(uint32_t family) const {
   uint32_t count = 0;
   device_.instance_functions().vkGetPhysicalDeviceQueueFamilyProperties(
       physical_device_, &count, nullptr);
   std::vector<VkQueueFamilyProperties> properties(count);
   device_.instance_functions().vkGetPhysicalDeviceQueueFamilyProperties(
       physical_device_, &count, properties.data());
-  const VkQueueFlags required = VK_QUEUE_COMPUTE_BIT |
-      (kind == VulkanExecutionQueueKind::graphics ? VK_QUEUE_GRAPHICS_BIT : 0);
-  if (family >= count || (properties[family].queueFlags & required) != required)
-    throw std::invalid_argument("Vulkan execution queue family lacks requested capabilities");
-  return std::make_unique<VulkanStream>(*this, execution_queue_at(kind, index), family);
+  return family < count ? properties[family].queueFlags : 0;
 }
 
 VkQueue VulkanDevice::compute_queue_at(uint32_t index) const {

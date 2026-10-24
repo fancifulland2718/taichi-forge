@@ -121,7 +121,7 @@ the selected domain, regardless of kernel or alias count. Import each physical
 buffer/semaphore pair once; derive aliases with execution-plan views or the JIT
 allocation's typed views. Completion
 covers upload and execution, while timestamps keep the existing
-`compute_envelope` scope.
+`execution_envelope` scope.
 
 Separate initialization cannot access this external storage and is rejected
 during preparation. Ordinary kernel/Graph.run, default prepared execution and

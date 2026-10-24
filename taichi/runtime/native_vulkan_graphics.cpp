@@ -584,6 +584,11 @@ class PreparedPass final : public NativeOperation {
       const override {
     return {images_, true, buffers_};
   }
+  void validate_vulkan_execution_domain() const override {
+    if (!payload_->scene_reads.empty())
+      throw std::invalid_argument(
+          "Independent Vulkan graphics has no acceleration-structure lease contract");
+  }
   void record_vulkan(Device *, CommandList *commands) override {
     for (const auto &[scene, stages] : payload_->scene_reads)
       scene->record_shader_read(commands, stages, true);

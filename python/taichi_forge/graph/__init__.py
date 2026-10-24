@@ -2,11 +2,12 @@ from ._graph import *
 from taichi_forge_runtime.aot._wait_set import CompletionSet, CompletionWaitResult
 
 
-def execution_domain(*, capacity=2, instance_capacity=64, priority=0, gpu_timing=False):
-    """Create a runtime-owned independent CUDA queue for prepared Graphs."""
+def execution_domain(*, capacity=2, instance_capacity=64, priority=0, gpu_timing=False, queue="compute"):
+    """Create a runtime-owned independent CUDA stream or Vulkan queue."""
     from ._execution_domain import execution_domain as create
 
-    return create(capacity=capacity, instance_capacity=instance_capacity, priority=priority, gpu_timing=gpu_timing)
+    return create(capacity=capacity, instance_capacity=instance_capacity, priority=priority,
+                  gpu_timing=gpu_timing, queue=queue)
 
 
 from ._recipes.families import default_graph_recipe_providers as default_recipe_providers

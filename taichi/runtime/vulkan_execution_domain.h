@@ -25,6 +25,7 @@ class ExecutionDomain {
     std::size_t capacity{2};
     std::size_t instance_capacity{64};
     bool gpu_timing{false};
+    VulkanExecutionQueueKind queue_kind{VulkanExecutionQueueKind::compute};
   };
   struct Snapshot {
     std::uint64_t identity{0};
@@ -34,6 +35,7 @@ class ExecutionDomain {
     std::size_t pending{0};
     bool accepting{false};
     bool closed{false};
+    std::uint32_t queue_family_index{0};
   };
   using ForkJoin = VulkanExecutionQueue::ForkJoin;
   using Commands = VulkanExecutionQueue::Commands;

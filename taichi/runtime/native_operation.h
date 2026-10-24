@@ -145,6 +145,14 @@ class NativeOperation : public NativeResource {
   virtual void record_vulkan(Device *device, CommandList *commands) {
     throw std::invalid_argument("Native operation has no Vulkan recording");
   }
+  // Independent recordings need an explicit closure for graphics providers.
+  // Ordinary compute providers keep their existing inline contract; the GFX
+  // recorder separately validates all image and external-buffer ownership.
+  virtual void validate_vulkan_execution_domain() const {
+    if (vulkan_recording_requirements().graphics_queue)
+      throw std::invalid_argument(
+          "Native graphics operation has no independent Vulkan execution contract");
+  }
   // Required layouts while recording this command. The enclosing GFX recorder
   // owns entry/exit transitions and restores its replay layout invariant.
   virtual NativeVulkanRecordingRequirements vulkan_recording_requirements() const {

@@ -1227,6 +1227,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
                             bool linear_filter) const;
 
   uint32_t queue_timestamp_valid_bits(uint32_t queue_family_index) const;
+  VkQueueFlags queue_family_flags(uint32_t queue_family_index) const;
 
   VkQueue graphics_queue() const {
     return graphics_queue_;

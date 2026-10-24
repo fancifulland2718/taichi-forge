@@ -4,7 +4,7 @@
 
 The independent AOT consumer can bind a supported saved execution plan to a
 bounded CUDA or Vulkan execution domain. CUDA owns a nonblocking stream; Vulkan
-leases an additional device-created compute queue. Each prepared instance owns
+leases an additional device-created queue, selecting compute by default. Each prepared instance owns
 its recordings, argument storage and compiler temporaries.
 This API preserves the complete selected plan. Stream handles, priorities and
 completion tickets are runtime choices; they are never serialized into AOT.
@@ -42,9 +42,10 @@ the DSL or creating a device. These are native implementation declarations:
 | `vulkan_aot_execution_domains` | Saved fixed buffer-only plan preparation and replay |
 | `vulkan_jit_graph_execution_domains` | Selected JIT buffer-only dispatch/code loans |
 | `vulkan_submission_parameters_u64` | Declared replay-only u64 updates on the selected Vulkan queue |
-| `vulkan_completion_gpu_timing` | Preallocated timestamp queries and sparse compute-envelope samples |
+| `vulkan_completion_gpu_timing` | Preallocated timestamp queries and sparse execution-envelope samples |
 | `vulkan_execution_instance_retirement` | Per-instance retirement and resident-budget reuse |
 | `vulkan_execution_domain_shared_sampled_images` | Read-only sampling of same-Program managed color Textures across domains |
+| `vulkan_execution_domain_private_graphics` | Instance-private color/depth attachments, offscreen drawing and compute consumers |
 
 Use `features.get(name, False)` for older packages. Missing declarations do not
 become support because a version or commit looks newer. Device/driver support,
@@ -127,7 +128,24 @@ layers remain outside its scope. Windows tests cover pending readers on two
 queues, retiring one reader, failed preparation, source-view deletion and Program
 shutdown. This does not qualify full rendering-scene throughput.
 
-Graphics, host selection, parallel recipes and shared sparse/RNG/runtime-error
+`runtime.execution_domain(queue="graphics")` explicitly selects a graphics+compute
+queue family. Identify a queue by both `info["queue_family_index"]` and
+`info["queue_index"]`. When compute and graphics share a family, they share the
+lease pool and cannot lease one queue twice. The default compute selection is
+unchanged; it can also record admitted graphics if its actual family supports
+graphics. CUDA rejects `queue="graphics"`.
+
+Fixed flat offscreen plans reconstruct pipelines and color/depth attachments through
+the existing native `vulkan_graphics` descriptions. Drawing, compute sampling and
+explicit downstream gradients use the same domain. Recordings restore the
+instance's image boundary layouts; attachments, pipelines and workspace remain
+owned until instance retirement. Warm replay neither rebuilds them nor submits
+to the default queue. Initial image data uploads remain cold preparation work.
+This does not admit borrowed writable Textures from live RasterPass objects,
+passes with AS resources, display interop or graphics fork/join; those need their
+own resource contracts.
+
+Host selection, public parallel recipes and shared sparse/RNG/runtime-error
 state remain outside this independent Vulkan route. Ordinary Graph execution keeps
 its existing capabilities; CUDA Canvas and external-memory protocols are not
 implicitly enabled on Vulkan domains.
@@ -273,7 +291,7 @@ Only `ready` has a duration; `not_sampled`, `pending`, `unsupported` and `failed
 return `None`. Reading performs a nonblocking poll without a submission lock.
 The result belongs to that exact ticket and survives event reuse and domain close.
 
-`compute_envelope` spans the complete execution, excluding predecessor waits,
+`execution_envelope` spans the complete execution, excluding predecessor waits,
 external acquire, parameter uploads and external release. It includes gaps and
 waits inside the selected Graph/providers, so it is not a sum of kernel times.
 Sampling does not split the Graph or change its domain. AOT uses the same API.

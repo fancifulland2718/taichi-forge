@@ -8300,6 +8300,8 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeVulkanExecutionDomainImageControl);
     features["vulkan_execution_domain_shared_sampled_images"] =
         bool(bitmap & kForgeVulkanExecutionDomainSharedSampledImages);
+    features["vulkan_execution_domain_private_graphics"] =
+        bool(bitmap & kForgeVulkanExecutionDomainPrivateGraphics);
     result["features"] = std::move(features);
     result["legacy_runtime"] = false;
     return result;

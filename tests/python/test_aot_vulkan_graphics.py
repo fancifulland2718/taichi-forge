@@ -8,6 +8,7 @@ import struct
 import sys
 import time
 
+import pytest
 import taichi_forge as ti
 from tests import test_utils
 from tests.python.aot_vulkan_graphics_probe import native, pipeline_spec, image_resources, operations
@@ -19,6 +20,8 @@ def test_aot_graphics_backend_isolation():
     with ti.aot.borrow_runtime() as runtime:
         assert not runtime.native_operation_capabilities("vulkan_graphics_pass_direct")
         assert not runtime.native_operation_capabilities("vulkan_graphics_pipeline")
+        with pytest.raises(NotImplementedError):
+            runtime.execution_domain(queue="graphics")
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

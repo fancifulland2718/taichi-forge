@@ -205,16 +205,19 @@ class Runtime:
                 for entry in entries[: count.value]
             }
 
-    def execution_domain(self, *, capacity=2, instance_capacity=64, priority=0, gpu_timing=False):
-        """Create an independent CUDA stream or additional Vulkan compute queue.
+    def execution_domain(self, *, capacity=2, instance_capacity=64, priority=0, gpu_timing=False, queue="compute"):
+        """Create an independent CUDA stream or additional Vulkan queue.
 
         Capacity bounds in-flight storage; instance_capacity budgets resident
         preparations. Vulkan requires enabled timelines and an unused physical
         queue; its priority is fixed at device creation and must be zero here.
+        Vulkan queue="graphics" selects a graphics+compute family for private
+        offscreen recipes. The default retains the existing compute selection.
+        Queue indices are local to info["queue_family_index"].
         """
         from ._domain import create_domain
 
-        return create_domain(self, capacity, instance_capacity, priority, gpu_timing)
+        return create_domain(self, capacity, instance_capacity, priority, gpu_timing, queue)
 
     def native_operation_capabilities(self, kind, *, version=1):
         """Registered composition modes for this backend and operation version.

@@ -3,7 +3,7 @@
 [English](cuda_execution_domains.en.md)
 
 独立 AOT consumer 可以将受支持的已保存执行计划绑定到有界 CUDA 或 Vulkan 执行域。
-CUDA 域拥有 nonblocking stream；Vulkan 域租用设备创建时准备的额外 compute queue。
+CUDA 域拥有 nonblocking stream；Vulkan 域租用设备创建时准备的额外队列，默认选择 compute。
 每个准备好的实例拥有自己的 recording、参数存储和编译临时区。
 该接口保留已经选择的完整计划。stream、优先级和完成票据只属于运行时，不写入 AOT 产物。
 
@@ -38,6 +38,7 @@ JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和�
 | `vulkan_completion_gpu_timing` | 预分配 timestamp query 与稀疏完整计算区间采样 |
 | `vulkan_execution_instance_retirement` | 单实例退休及驻留预算复用 |
 | `vulkan_execution_domain_shared_sampled_images` | 同 Program 托管 color Texture 的跨域只读采样 |
+| `vulkan_execution_domain_private_graphics` | 实例私有 color/depth attachment、离屏绘制及后续 compute |
 
 对旧包使用 `features.get(name, False)`；不能从版本号或较新的提交推定能力。具体设备/
 驱动、同 GPU 共享及 recipe 的编译/provider 条件在冷创建和准备时检查。声明为真不代表
@@ -99,7 +100,18 @@ transfer-src 布局的 Canvas 复制；提前录制的写者同样被拒绝，�
 Windows 验证覆盖双队列在途读取、关闭其中一个实例、准备失败清理、源视图删除及
 Program 退出；这不是完整渲染场景的吞吐结论。
 
-独立 Vulkan 路线还不接纳 graphics、host selection、并行 recipe，以及共享
+`runtime.execution_domain(queue="graphics")` 显式选择支持 graphics+compute 的队列族。
+`info["queue_family_index"]` 与 `info["queue_index"]` 一起标识队列；同族 compute/graphics
+共用租约池，不会重复租用同一条队列。默认 compute 选择不变；若其实际队列族具备
+graphics 能力，也可以执行已准入的离屏计划。CUDA 不接纳 `queue="graphics"`。
+
+固定平坦的私有离屏计划沿现有 native `vulkan_graphics` 描述重建 pipeline、color/depth attachment，
+并在同一域内连接绘制、采样计算和下游显式梯度。每段录制恢复实例的图像边界布局；
+附件、pipeline 与 workspace 保留到实例退休。暖态不逐次重建，不回默认队列提交。
+图像的初始数据上传仍属于冷准备。该能力不包括 live RasterPass 的借用可写 Texture、
+含 AS 的 pass、显示互操作或 graphics fork/join；它们需要各自的资源合同。
+
+独立 Vulkan 路线还不接纳 host selection、公共并行 recipe，以及共享
 sparse/RNG/runtime-error 状态。
 普通 Graph 保持既有能力；CUDA Canvas 和外部内存协议不会因此自动适用于 Vulkan 域。
 
@@ -219,7 +231,7 @@ if ticket is not None:
 的时长均为 `None`。读取仅进行非阻塞查询，不等待 GPU、不持有提交锁。
 结果与具体票据关联，事件复用或域关闭后仍保持不变。
 
-范围 `compute_envelope` 是完整执行区间，排除前驱依赖等待、外部 acquire、参数上传和
+范围 `execution_envelope` 是完整执行区间，排除前驱依赖等待、外部 acquire、参数上传和
 外部 release；包括 Graph 内部间隙以及 provider/Graph 内部声明的等待，因此不是逐
 kernel 耗时之和。不会拆开原 Graph，也不切换到默认域。AOT 使用相同接口。
 CUDA 与 Vulkan 独立域均提供上述计时。Vulkan 要求所选 queue family 支持 timestamp，

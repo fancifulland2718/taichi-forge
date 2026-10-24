@@ -30,6 +30,7 @@ VULKAN_NAMES = (
     "vulkan_execution_domain_private_images",
     "vulkan_execution_domain_image_control",
     "vulkan_execution_domain_shared_sampled_images",
+    "vulkan_execution_domain_private_graphics",
 )
 
 

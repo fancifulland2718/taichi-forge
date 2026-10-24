@@ -111,7 +111,7 @@ producer 必须先把整个 buffer release 给 `VK_QUEUE_FAMILY_EXTERNAL` 再 si
 重放在所选域中只 wait/acquire 和 release/signal 一次，多 kernel 或别名不重复消费。
 每个物理 buffer/semaphore pair 只导入一次；别名使用执行计划的 view 描述或 JIT allocation
 的类型视图。
-完整 recipe 的 completion 覆盖上传和执行；GPU 时间戳保持已有 `compute_envelope` 范围。
+完整 recipe 的 completion 覆盖上传和执行；GPU 时间戳保持已有 `execution_envelope` 范围。
 
 独立初始化阶段尚不能使用该外部存储，会在冷准备时拒绝。普通 kernel/Graph.run、
 默认 prepared 路径以及 host copy/map/export 同样拒绝，不能绕过 ownership 协议。

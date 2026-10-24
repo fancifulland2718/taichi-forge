@@ -138,5 +138,5 @@ def test_vulkan_domain_control_parameters_and_adjoint(tmp_path, route, budget):
                     [value, rounds + 1, value, rounds, value], dtype=np.uint64))
                 timing = ticket.gpu_timing
                 assert timing["status"] == "ready" and timing["duration_ns"] > 0
-                assert timing["scope"] == "compute_envelope"
+                assert timing["scope"] == "execution_envelope"
                 ticket.close()
