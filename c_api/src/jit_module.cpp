@@ -223,9 +223,8 @@ std::uintptr_t import_jit_module(
     const std::vector<AotRuntimeClient::JitKernelImport> &kernels,
     const AotRuntimeClient::JitDataPayloads &data) {
   const auto arch = program.compile_config().arch;
-  if (kernels.empty())
-    throw std::invalid_argument(
-        "Selected JIT code borrowing requires nonempty kernel entries");
+  // A selected native-only Graph needs this module's data and retirement
+  // owner without inventing a kernel. Its plan validates the actual operations.
   auto frozen_data = std::make_unique<JitDataSource>(data);
   auto &launcher = program.get_kernel_launcher();
   JitModule::KernelFactory factory;

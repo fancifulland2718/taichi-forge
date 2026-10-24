@@ -243,9 +243,23 @@ used by an execution instance closes the affected domain through the existing
 native-resource retirement path. A different domain using only another import
 remains usable. Close instances before their imports to keep a domain available
 for new preparations. Private input handles retire with their import; Program
-reset retires every borrower. This is the explicit AOT binding entry;
-automatic original-AS adoption by `Graph.prepare()` remains separate, as do
-parallel and control-flow combinations.
+reset retires every borrower.
+
+For qualified flat selected Graphs, `Graph.prepare(..., execution_domain=domain)`
+also borrows original AS resources referenced by native query/refit recordings
+and DSL TLAS parameters. Native and kernel references to the same object share
+one import per instance. Preparation borrows the selected compiled dispatches;
+it does not recompile kernels or reconstruct geometry. Source Graph/AS wrappers
+may close after preparation; the prepared instance retains its dependencies.
+Closing the instance releases its loans before its imports, so ordinary queries
+can observe refits made to the original AS. Program reset retires the instances.
+Graphics/ray-program combinations with these JIT AS loans, parallel regions and
+control-flow combinations still require separate qualification.
+
+A selected recipe may contain only native operations: it needs no placeholder
+kernel. Fixed ndarray bindings retained by a recording are live storage loans.
+For example, persistent prepared sort recordings work on CUDA and Vulkan without
+recompiling a kernel; per-instance execution workspace retains its existing policy.
 
 Seed inputs retained for private reconstruction and AS dependencies remain valid
 until instance retirement; closing them early invalidates the instance. Wrapping a public BLAS in a

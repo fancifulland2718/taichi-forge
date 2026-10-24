@@ -59,7 +59,10 @@
   也遵守权限；不同 TLAS writer 可共享只读 BLAS。借用 runtime 的
   `import_acceleration_structure()` 可将原 Program 的 triangle scene/BLAS/TLAS
   显式绑定到 AOT 计划，保留原资源、逐实例关系及独立导入的关闭边界。
-  Graph 自动借用、micromap 及控制流内 AS 组合仍需分别验证。
+  平直选中 JIT Graph 可为 native query/refit 和 DSL TLAS 参数借用原 AS，保留已选
+  代码和源资源寿命。纯 native 方案无需占位 kernel；固定 recording ndarray 借用
+  live storage，已覆盖 CUDA/Vulkan persistent sort。JIT AS 与 graphics/ray-program、
+  micromap 及控制流的组合仍需分别验证。
   冷数据上传和 bootstrap 仍依赖普通队列，详见执行域合同。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、
   `advanced_optimization=False`。显式选择 `balanced/full` 且未覆盖高级 IR 优化时默认开启
