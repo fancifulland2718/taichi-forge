@@ -9,7 +9,8 @@
 namespace taichi::lang {
 NativeArgPackStorage::NativeArgPackStorage(
     Arch arch, Device &device,
-    std::shared_ptr<const aot::ArgPackLayout> layout, const Values &values)
+    std::shared_ptr<const aot::ArgPackLayout> layout, const Values &values,
+    const NativeDataUploader &upload)
     : arch_(arch), device_(device), layout_(std::move(layout)) {
   const bool host = arch_is_cpu(arch) || arch == Arch::cuda;
   if ((!host && arch != Arch::vulkan) || !layout_ ||
@@ -69,25 +70,11 @@ NativeArgPackStorage::NativeArgPackStorage(
         std::memcpy(buffer.data() + child.pointer_offset, &address, sizeof(address));
       }
   }
-  std::vector<DevicePtr> destinations;
-  std::vector<const void *> sources;
-  std::vector<std::size_t> sizes;
+  std::vector<NativeDataUpload> uploads;
   for (std::size_t i = 0; i < buffers.size(); ++i) {
-    destinations.push_back(allocations_[i]->get_ptr());
-    sources.push_back(buffers[i].data());
-    sizes.push_back(buffers[i].size());
+    uploads.push_back({allocations_[i]->get_ptr(), buffers[i].data(),
+                       buffers[i].size()});
   }
-  // The device API has an int count; partition calls instead of imposing a
-  // library member-count limit. Upload completion also makes failure cleanup
-  // safe before the partially built owner is discarded.
-  for (std::size_t begin = 0; begin < sizes.size();) {
-    const auto count = std::min<std::size_t>(sizes.size() - begin,
-                                           std::numeric_limits<int>::max());
-    if (device.upload_data(destinations.data() + begin, sources.data() + begin,
-                           sizes.data() + begin, static_cast<int>(count)) !=
-        RhiResult::success)
-      throw std::runtime_error("Unable to upload ArgPack storage");
-    begin += count;
-  }
+  upload_native_data(device, uploads, upload);
 }
 }  // namespace taichi::lang

@@ -1,4 +1,5 @@
 #include "gtest/gtest.h"
+#include "external/PicoSHA2/picosha2.h"
 
 #if defined(TI_WITH_VULKAN) && defined(TI_TEST_RUNTIME_C_API)
 #include "c_api/src/taichi_vulkan_impl.h"
@@ -525,5 +526,78 @@ TEST(VulkanProgramASImport, OrderedAliasesRollbackAndOwnerRetirement) {
   EXPECT_NO_THROW(second->close());
 }
 
+TEST(VulkanColdPreparation, PayloadUploadPreservesLiveOutputBootstrap) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  PendingProgramAs session;
+  if (session.device().created_compute_queue_count() < 2)
+    GTEST_SKIP();
+  session.borrowers[0] = AotRuntimeClient::create(session.program);
+  session.runtimes[0] =
+      reinterpret_cast<TiRuntime>(session.borrowers[0]->handle());
+  const uint32_t value = 42;
+  const std::string bytes(reinterpret_cast<const char *>(&value),
+                          sizeof(value));
+  const auto key = picosha2::hash256_hex_string(bytes);
+  session.modules[0] = reinterpret_cast<TiAotModule>(
+      session.borrowers[0]->import_jit_kernels({}, {{key, bytes}}));
+  TiNamedArgument output{};
+  {
+    BorrowScope scope(*session.borrowers[0]);
+    const TiVulkanExecutionDomainCreateInfo options{1, 1, TI_FALSE};
+    session.domains[0] =
+        ti_create_vulkan_execution_domain_ext(session.runtimes[0], &options);
+    require_success();
+    output = session.array(0, "output", {1}, TI_DATA_TYPE_U32);
+  }
+  const std::string plan = R"({"version":26,"operations":[
+    {"kind":"copy","source":"seed","destination":"output"}],"resources":[
+    {"kind":"ndarray","name":"seed","dtype":"u32","shape":[1],"initial_data":")" +
+                           key + "\"}]}";
+  session.program.synchronize();
+  session.program.retain_runtime_client(session.gates);
+  session.gates->gates[0] =
+      std::make_unique<test_detail::TimelineGate>(session.device(), 0);
+  test_detail::PendingAction prepare(session.gates, [&] {
+    BorrowScope scope(*session.borrowers[0]);
+    session.executions[0] = ti_prepare_execution_plan_on_vulkan_domain_ext(
+        session.runtimes[0], session.modules[0], session.domains[0],
+        plan.size(), plan.data(), 1, &output, 0, nullptr, 0, nullptr);
+    require_success();
+    if (!session.executions[0])
+      throw std::runtime_error("Cold payload preparation failed");
+  });
+  const auto status = prepare.status(2s);
+  EXPECT_EQ(status, std::future_status::ready);
+  if (status != std::future_status::ready)
+    session.gates->release(0);
+  prepare.finish();
+  // The private seed no longer needs the producer queue, but the public output
+  // may have prior reads/writes. Its actual producer prefix must still apply.
+  test_detail::PendingAction initialize(session.gates, [&] {
+    BorrowScope scope(*session.borrowers[0]);
+    ti_initialize_prepared_ext(session.runtimes[0], session.executions[0]);
+    require_success();
+  });
+  EXPECT_EQ(initialize.status(100ms), std::future_status::timeout);
+  session.gates->release(0);
+  initialize.finish();
+  {
+    BorrowScope scope(*session.borrowers[0]);
+    ASSERT_TRUE(ti_try_submit_prepared_ext(session.runtimes[0],
+                                           session.executions[0], 0, nullptr,
+                                           &session.completions[0]));
+    require_success();
+  }
+  ti_wait_completion_ext(session.completions[0]);
+  require_success();
+  auto &runtime = *reinterpret_cast<::Runtime *>(session.runtimes[0]);
+  const auto allocation =
+      runtime.get_memory(output.argument.value.ndarray.memory).allocation;
+  void *mapped = nullptr;
+  ASSERT_EQ(session.device().map(allocation, &mapped), RhiResult::success);
+  EXPECT_EQ(*static_cast<uint32_t *>(mapped), value);
+  session.device().unmap(allocation);
+}
 }  // namespace taichi::lang
 #endif

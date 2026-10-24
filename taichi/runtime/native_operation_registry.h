@@ -9,6 +9,7 @@
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_operation_description.h"
 #include "taichi/runtime/native_provider.h"
+#include "taichi/runtime/native_data_upload.h"
 
 namespace taichi {
 class ThreadPool;
@@ -60,6 +61,9 @@ struct NativePreparationContext {
   // consults these fields; frozen partitions need not equal worker count.
   ThreadPool *cpu_thread_pool{nullptr};
   int cpu_max_threads{1};
+  // Optional cold transport for newly allocated immutable data. Completion
+  // precedes factory consumption; ordinary creation keeps the RHI transport.
+  NativeDataUploader upload_owned_data;
   // Scoped to cold module preparation. Factories copy resolved layouts, never
   // retain this callback or a module/kernel pointer in their storage owners.
   std::function<std::shared_ptr<const aot::ArgPackLayout>(

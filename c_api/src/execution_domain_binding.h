@@ -6,6 +6,7 @@
 
 #include "taichi/rhi/arch.h"
 #include "taichi/runtime/runtime_client.h"
+#include "taichi/runtime/native_data_upload.h"
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
@@ -45,6 +46,11 @@ class PreparedExecutionDomain {
   Snapshot snapshot() const;
   bool belongs_to(const std::shared_ptr<taichi::lang::RuntimeFaultDomain> &owner) const;
   void close();
+  // Cold, synchronous construction transfer on this selected domain. No
+  // ordinary stream, extra queue lease, or public/live allocation mutation.
+  void upload_owned_data(
+      taichi::lang::Device &device,
+      const std::vector<taichi::lang::NativeDataUpload> &uploads);
   void retire_instance(const PreparedExecutionInstance &instance);
   bool instance_retired(const PreparedExecutionInstance &instance) const;
   PreparedExecutionInstance prepare_owned_instance(

@@ -144,7 +144,8 @@ ExecutionResourceBindings bind_execution_resources(
     const std::function<std::shared_ptr<taichi::lang::NativeMemoryAllocator>(
         const std::string &)> &allocator,
     bool prepared_external_access,
-    const std::function<void()> &validate_metadata) {
+    const std::function<void()> &validate_metadata,
+    const taichi::lang::NativeDataUploader &upload) {
   using Recipes = taichi::lang::aot::ExecutionResources;
   ExecutionResourceBindings result;
   result.arguments.resize(resources.order.size());
@@ -412,9 +413,7 @@ ExecutionResourceBindings bind_execution_resources(
       throw MemoryBindingError("Execution initial data size overflow");
     bytes.resize((bytes.size() + 3) & ~std::size_t(3), 0);
   }
-  std::vector<taichi::lang::DevicePtr> destinations;
-  std::vector<const void *> sources;
-  std::vector<std::size_t> upload_sizes;
+  std::vector<taichi::lang::NativeDataUpload> uploads;
   auto shared_array = [&](const std::string &name, TiNdArray &next) {
     if (!shared)
       return false;
@@ -537,26 +536,16 @@ ExecutionResourceBindings bind_execution_resources(
                             resources.declarations[resources.order[pos]].value)
                             .initial_data;
       if (!key.empty() && sizes[pos]) {
-        destinations.push_back(runtime.get_memory(argument.value.ndarray.memory)
-                                   .allocation.get_ptr());
-        sources.push_back(payloads.at(key).data());
-        upload_sizes.push_back(static_cast<std::size_t>(sizes[pos]));
+        uploads.push_back({runtime.get_memory(argument.value.ndarray.memory)
+                               .allocation.get_ptr(),
+                           payloads.at(key).data(),
+                           static_cast<std::size_t>(sizes[pos])});
       }
     }
   }
   // Upload only owned initial state, before any provider can inspect it. The
-  // RHI transfer owns/synchronizes staging, so host payloads retire here. Batch
-  // Vulkan copies in one submission; chunk only at the RHI count ABI limit.
-  for (std::size_t offset = 0; offset < destinations.size();) {
-    const auto count = static_cast<int>(std::min<std::size_t>(
-        destinations.size() - offset, std::numeric_limits<int>::max()));
-    if (runtime.get().upload_data(destinations.data() + offset,
-                                  sources.data() + offset,
-                                  upload_sizes.data() + offset,
-                                  count) != taichi::lang::RhiResult::success)
-      throw MemoryBindingError("Unable to upload execution initial data");
-    offset += count;
-  }
+  // Selected-domain and ordinary transports share this completion boundary.
+  taichi::lang::upload_native_data(runtime.get(), uploads, upload);
   // Shape-only users have already resolved their dimensions. Only qualified
   // native consumers may obtain these physical views from here onward.
   for (const auto &[name, binding] : result.native_arrays)

@@ -443,6 +443,7 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
       tests/cpp/aot/vulkan/image_import_layout_test.cpp
       tests/cpp/aot/vulkan/shared_image_alias_import_test.cpp
       tests/cpp/aot/vulkan/program_as_import_test.cpp
+      tests/cpp/aot/domain_cold_upload_test.cpp
       tests/cpp/aot/argpack_aot_binding_test.cpp)
     target_compile_definitions(taichi_cuda_execution_domain_tests PRIVATE TI_TEST_RUNTIME_C_API)
     target_link_libraries(taichi_cuda_execution_domain_tests PRIVATE taichi_runtime_c_api)

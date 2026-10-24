@@ -400,6 +400,14 @@ TEST(ArgPackStorage, ColdFailuresReleasePartialStorageAndAllowRetry) {
                std::runtime_error);
   EXPECT_EQ(device.live, 0);
   device.fail_upload = false;
+  EXPECT_THROW(
+      NativeArgPackStorage(host_arch(), device, layout, values,
+                           [](const std::vector<NativeDataUpload> &) {
+                             throw std::runtime_error(
+                                 "selected transport rejected before enqueue");
+                           }),
+      std::runtime_error);
+  EXPECT_EQ(device.live, 0);
   {
     NativeArgPackStorage valid(host_arch(), device, layout, values);
     EXPECT_EQ(device.live, 3);

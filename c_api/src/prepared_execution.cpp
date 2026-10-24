@@ -1255,6 +1255,13 @@ static TiPreparedExecution prepare_execution_plan_impl(
       family ? nullptr : capi::make_native_preparation_context(rt);
   auto &preparation = family ? *family->preparation : *local_preparation;
   preparation.fault_domain->throw_if_submission_disallowed("prepare AOT plan");
+  // Independent plans have a local context, so this callback cannot escape to
+  // a binding family or ordinary provider. Both owned arrays and ArgPacks use
+  // the same cold transport; factories still see completed construction data.
+  if (domain)
+    preparation.upload_owned_data = [domain, &rt](const auto &uploads) {
+      domain->upload_owned_data(rt.get(), uploads);
+    };
   std::vector<std::shared_ptr<NativeOperation>> resource_initializers;
   struct RestoreVulkanInitialization {
     NativePreparationContext &context;
@@ -1496,7 +1503,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
       resolve_allocator, bool(domain), [&] {
         for (const auto *required : private_structures)
           validate_structure(*required, true);
-      });
+      }, preparation.upload_owned_data);
   prepared->resources = std::move(resource_bindings.storage);
   prepared->memories.insert(prepared->memories.end(),
                              resource_bindings.native_memories.begin(),

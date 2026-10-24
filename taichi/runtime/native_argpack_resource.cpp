@@ -37,7 +37,7 @@ std::shared_ptr<NativeResource> prepare_argpack(
   // Storage validates the complete value inventory before allocating anything.
   // Lifted resources remain ordinary plan arguments with existing ownership.
   return std::make_shared<NativeArgPackStorage>(context.arch, context.device,
-                                                layout, values);
+                                                layout, values, context.upload_owned_data);
 }
 }  // namespace
 

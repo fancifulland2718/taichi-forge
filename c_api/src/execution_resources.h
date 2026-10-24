@@ -6,6 +6,7 @@
 #include "argument_binding.h"
 #include "taichi/aot/execution_resources.h"
 #include "taichi/runtime/native_memory_allocator.h"
+#include "taichi/runtime/native_data_upload.h"
 
 namespace capi {
 // Private allocations retire after the owning execution's backend recordings.
@@ -77,5 +78,6 @@ ExecutionResourceBindings bind_execution_resources(
         const std::string &)> &allocator = {},
     bool prepared_external_access = false,
     // Called after the metadata closure, before allocators, uploads or aliases.
-    const std::function<void()> &validate_metadata = {});
+    const std::function<void()> &validate_metadata = {},
+    const taichi::lang::NativeDataUploader &upload = {});
 }  // namespace capi

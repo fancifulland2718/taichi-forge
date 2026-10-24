@@ -80,7 +80,7 @@ def test_argpack_automatic_export_preserves_device_values(tmp_path):
         two.close()
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_argpack_domain_uses_private_values_and_selected_code():
     graph, pack, values, output, record = _fixture()
     other = ti.ndarray(ti.f32, 2)

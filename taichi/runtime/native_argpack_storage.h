@@ -4,6 +4,7 @@
 #include <memory>
 #include "taichi/aot/argpack_layout.h"
 #include "taichi/runtime/native_resource.h"
+#include "taichi/runtime/native_data_upload.h"
 
 namespace taichi::lang {
 
@@ -17,7 +18,8 @@ class NativeArgPackStorage final : public NativeResource {
   NativeArgPackStorage(Arch arch,
                       Device &device,
                       std::shared_ptr<const aot::ArgPackLayout> layout,
-                      const Values &values);
+                      const Values &values,
+                      const NativeDataUploader &upload = {});
   Arch arch() const override {
     return arch_;
   }
