@@ -993,6 +993,14 @@ class GraphReplayRegistry {
     runtime_->restore_shared_ray_access(prefix, owner);
   }
 
+  void return_sparse_access(const RuntimeCompletion &prefix,
+                            const std::shared_ptr<RuntimeFaultDomain> &owner,
+                            const std::vector<int> &trees) {
+    std::lock_guard<std::recursive_mutex> lock(*mutex_);
+    TI_ERROR_IF(!runtime_, "SNode loan belongs to a closed runtime");
+    runtime_->restore_shared_sparse_access(prefix, owner, trees);
+  }
+
  private:
   std::shared_ptr<std::recursive_mutex> mutex_;
   GfxRuntime *runtime_{nullptr};
@@ -1046,7 +1054,9 @@ size_t align_up_to(size_t value, size_t alignment) {
 CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
     : ti_kernel_attribs_(*ti_params.ti_kernel_attribs),
       device_(ti_params.device),
-      sparse_task_resources_(ti_params.sparse_task_resources) {
+      sparse_task_resources_(ti_params.sparse_task_resources),
+      sparse_tree_uses_(ti_params.sparse_tree_uses),
+      sparse_tree_permit_(ti_params.sparse_tree_permit) {
   TI_ASSERT(sparse_task_resources_.empty() || sparse_task_resources_.size() ==
             ti_kernel_attribs_.tasks_attribs.size());
   input_buffers_[BufferType::GlobalTmps] = ti_params.global_tmps_buffer;
@@ -1324,6 +1334,7 @@ GfxRuntime::~GfxRuntime() {
   graph_replay_registry_->close();
   shared_image_admission_.close();
   shared_ray_admission_->close();
+  shared_sparse_admission_->close();
   if (device_->backend_calls_safe()) {
     try {
       synchronize_impl(/*check_hash_overflow=*/false);
@@ -1824,6 +1835,11 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
       if (!bound_roots.insert(local).second) continue;
       const int physical = reg_params.root_buffer_bindings.empty()
                                ? local : reg_params.root_buffer_bindings[local];
+      TI_ERROR_IF(!recover_dependencies &&
+                      std::find(reg_params.snode_tree_ids.begin(),
+                                reg_params.snode_tree_ids.end(),
+                                physical) == reg_params.snode_tree_ids.end(),
+                  "GFX root binding is absent from the declared tree closure");
       params.root_buffers.emplace_back(local, get_root_buffer(physical));
       if (recover_dependencies) reg_params.snode_tree_ids.push_back(physical);
     }
@@ -1832,6 +1848,10 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
   std::sort(used_trees.begin(), used_trees.end());
   used_trees.erase(std::unique(used_trees.begin(), used_trees.end()),
                    used_trees.end());
+  params.sparse_tree_uses = bind_sparse_trees(used_trees);
+  if (!params.sparse_tree_uses.empty())
+    params.sparse_tree_permit =
+        shared_sparse_admission_->prepare(params.sparse_tree_uses);
   SNodeResourceResolver resources(snode_resource_trees_, used_trees);
   const auto &tasks = reg_params.kernel_attribs.tasks_attribs;
   for (std::size_t index = 0; index < tasks.size(); ++index) {
@@ -1870,12 +1890,13 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
   }
   for (const auto &[local_id, needs_chunks] : used_pools) {
     const auto id = resources.resolve(local_id);
-    const auto tree = node_allocators_.find(id.tree_id);
-    TI_ERROR_IF(tree == node_allocators_.end() ||
-                    tree->second.find(id.snode_id) == tree->second.end(),
+    const auto tree = sparse_tree_storage_.find(id.tree_id);
+    TI_ERROR_IF(tree == sparse_tree_storage_.end() ||
+                    tree->second->allocators.find(id.snode_id) ==
+                        tree->second->allocators.end(),
                 "GFX pointer allocator is missing for tree {} SNode {}",
                 id.tree_id, id.snode_id);
-    const auto &allocator = tree->second.at(id.snode_id);
+    const auto &allocator = tree->second->allocators.at(id.snode_id);
     TI_ASSERT(allocator != nullptr);
     if (auto *pool = allocator->independent_pool_alloc()) {
       params.node_allocator_pool_buffers.emplace_back(local_id, pool);
@@ -1918,6 +1939,7 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
 
 void GfxRuntime::retire_snode_tree_kernels(int tree_id) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  require_sparse_tree_access(tree_id);
   // Ordinary replay caches contain raw CompiledTaichiKernel pointers and can
   // rebuild after this synchronized retirement. Immutable frames instead own
   // their commands and exact static roots; keep unrelated frames executable
@@ -1998,10 +2020,12 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
   auto *ti_kernel = kernel_iter->second.get();
   auto image_submission = shared_image_admission_.ordinary_scope();
   auto ray_submission = ordinary_ray_scope();
+  auto sparse_submission = shared_sparse_admission_->ordinary_scope();
   // Check the complete task closure before recording any dispatch. A late
   // storage use must not leave earlier mathematical tasks in the current list.
   preflight_kernel_images(*ti_kernel, host_ctx);
   preflight_kernel_ray_resources(*ti_kernel, host_ctx);
+  ti_kernel->require_sparse_tree_access();
 
 #if defined(__APPLE__)
   if (profiler_) {
@@ -3070,8 +3094,11 @@ struct GfxRuntime::FixedSparseReplayResources {
   size_t private_list_bytes{0};
   std::vector<int> mutated_trees;
   std::shared_ptr<DeviceAllocationGuard> listgen;
+  std::vector<SparseTreeAdmission::PinnedUse> tree_uses;
 
   void include(const CompiledTaichiKernel &kernel) {
+    tree_uses.insert(tree_uses.end(), kernel.sparse_tree_uses().begin(),
+                     kernel.sparse_tree_uses().end());
     const auto &tasks = kernel.ti_kernel_attribs().tasks_attribs;
     bool generated = false;
     for (std::size_t i = 0; i < tasks.size(); ++i) {
@@ -3146,29 +3173,39 @@ void GfxRuntime::attach_fixed_sparse_resources(
   // subset. FixedExecution subtracts that subset to expose argument bytes.
   state.fixed_argument_bytes += resources.private_list_bytes;
   state.fixed_control_bytes += resources.private_list_bytes;
-  if ((!resources.uses_listgen || resources.private_list_bytes) &&
-      !resources.unknown_mutation && resources.mutated_trees.empty())
-    return;
-  state.fixed_submit = [this, launch = std::move(state.fixed_submit),
-                        resources = std::move(resources)] {
-    const bool uses_current_list =
-        resources.listgen && resources.listgen == listgen_buffer_;
-    if (uses_current_list)
-      listgen_buffer_used_ = true;
-    // Complete fixed traversals use private lists. Incomplete task sequences
-    // may still overwrite the ordinary list; topology changes must invalidate
-    // its active set regardless of which list allocation the recording uses.
-    // Other cached entries cannot be reused without first becoming
-    // resident, so no map walk or descendant discovery is needed here.
-    if ((uses_current_list && resources.writes_listgen) ||
-        resources.unknown_mutation ||
-        (resident_sparse_list_snode_id_.valid() &&
-         std::binary_search(resources.mutated_trees.begin(),
-                            resources.mutated_trees.end(),
-                            resident_sparse_list_snode_id_.tree_id)))
-      resident_sparse_list_snode_id_ = {};
-    launch();
-  };
+  // Aggregate once at preparation. Replay checks one permit, independent of
+  // the number of dispatches, roots, allocator pools and chunks in the graph.
+  auto permit = resources.tree_uses.empty()
+                    ? nullptr
+                    : shared_sparse_admission_->prepare(resources.tree_uses);
+  if ((resources.uses_listgen && !resources.private_list_bytes) ||
+      resources.unknown_mutation || !resources.mutated_trees.empty()) {
+    state.fixed_submit = [this, launch = std::move(state.fixed_submit),
+                          resources = std::move(resources)] {
+      const bool uses_current_list =
+          resources.listgen && resources.listgen == listgen_buffer_;
+      if (uses_current_list)
+        listgen_buffer_used_ = true;
+      // Complete fixed traversals use private lists. Incomplete task sequences
+      // may still overwrite the ordinary list; topology changes must invalidate
+      // its active set regardless of which list allocation the recording uses.
+      // Other cached entries cannot be reused without first becoming
+      // resident, so no map walk or descendant discovery is needed here.
+      if ((uses_current_list && resources.writes_listgen) ||
+          resources.unknown_mutation ||
+          (resident_sparse_list_snode_id_.valid() &&
+           std::binary_search(resources.mutated_trees.begin(),
+                              resources.mutated_trees.end(),
+                              resident_sparse_list_snode_id_.tree_id)))
+        resident_sparse_list_snode_id_ = {};
+      launch();
+    };
+  }
+  if (permit) {
+    state.fixed_submit = [permit, launch = std::move(state.fixed_submit)] {
+      permit->submit(launch);
+    };
+  }
 }
 
 std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
@@ -4162,6 +4199,15 @@ bool GfxRuntime::launch_graph_impl(
              !structured_result && !nested_result));
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   const bool detached = detached_state != nullptr;
+  auto sparse_submission = shared_sparse_admission_->ordinary_scope();
+  if (!detached) {
+    // Reject the complete closure before appending any earlier dispatch.
+    for (const auto &dispatch : dispatches) {
+      const auto found = ti_kernels_.find(dispatch.handle.get_launch_id());
+      if (found != ti_kernels_.end())
+        found->second->require_sparse_tree_access();
+    }
+  }
   const bool has_device_range = std::any_of(
       dispatches.begin(), dispatches.end(),
       [](const auto &dispatch) { return !dispatch.device_range_tasks.empty(); });
@@ -7082,7 +7128,103 @@ GfxRuntime::FixedGraphWorkspace::shared_resource_dependencies() const {
   if (rays)
     for (const auto &dependency : rays->dependencies())
       result.push_back(*dependency);
+  const auto sparse = std::atomic_load(&shared_sparse_);
+  if (sparse)
+    for (const auto &dependency : sparse->dependencies())
+      result.push_back(*dependency);
   return result;
+}
+
+std::vector<SparseTreeAdmission::PinnedUse> GfxRuntime::bind_sparse_trees(
+    const std::vector<int> &trees) const {
+  std::vector<SparseTreeAdmission::PinnedUse> result;
+  for (int tree : trees) {
+    const auto found = sparse_tree_storage_.find(tree);
+    if (found != sparse_tree_storage_.end()) {
+      const auto &storage = found->second;
+      result.push_back(
+          {{storage->registration->handle(), SharedResourceUse::exclusive},
+           storage});
+    }
+  }
+  return result;
+}
+
+void GfxRuntime::require_sparse_tree_access(int tree) const {
+  const auto found = sparse_tree_storage_.find(tree);
+  if (found != sparse_tree_storage_.end())
+    found->second->registration->require_use(SharedResourceUse::exclusive);
+}
+
+void GfxRuntime::prepare_fixed_shared_sparse_resources(
+    const std::shared_ptr<FixedGraphWorkspace> &workspace,
+    const std::vector<KernelHandle> &kernels,
+    const std::shared_ptr<RuntimeFaultDomain> &owner) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ERROR_IF(!workspace || workspace->device_ != device_ ||
+                  std::atomic_load(&workspace->shared_sparse_) ||
+                  workspace->initialization_recorded_ || !owner ||
+                  owner->backend() != Arch::vulkan ||
+                  device_->backend_fault_reporter() != owner,
+              "Shared SNode storage requires a new same-device workspace");
+  std::vector<SparseTreeAdmission::PinnedUse> uses;
+  std::vector<int> trees;
+  for (const auto kernel : kernels) {
+    const auto found = ti_kernels_.find(kernel.get_launch_id());
+    TI_ERROR_IF(found == ti_kernels_.end(),
+                "Shared SNode storage requires registered kernels");
+    const auto &bound = found->second->sparse_tree_uses();
+    uses.insert(uses.end(), bound.begin(), bound.end());
+    for (int tree : ti_kernel_snode_tree_ids_.at(kernel.get_launch_id()))
+      if (sparse_tree_storage_.count(tree))
+        trees.push_back(tree);
+  }
+  if (uses.empty())
+    return;
+  std::sort(trees.begin(), trees.end());
+  trees.erase(std::unique(trees.begin(), trees.end()), trees.end());
+  auto loan = shared_sparse_admission_->reserve(uses);
+  auto prefix = std::make_shared<RuntimeCompletion>(
+      RuntimeCompletion::from_stream_semaphore(
+          Arch::vulkan, owner->program_domain(),
+          owner->allocate_submission_sequence(), record_completion_semaphore(),
+          owner));
+  device_->get_compute_stream()->flush_submission_batch();
+  TI_ERROR_IF(!prefix->reusable_stream_dependency(
+                  Arch::vulkan, owner->program_domain(), owner),
+              "Shared SNode storage requires a reusable producer prefix");
+  loan->publish_boundary(std::move(prefix));
+  workspace->shared_sparse_tree_ids_ = std::move(trees);
+  workspace->shared_resource_bridge_ = graph_replay_registry_;
+  workspace->shared_resource_fault_ = owner;
+  std::atomic_store(&workspace->shared_sparse_, std::move(loan));
+}
+
+void GfxRuntime::restore_shared_sparse_access(
+    const RuntimeCompletion &prefix,
+    const std::shared_ptr<RuntimeFaultDomain> &owner,
+    const std::vector<int> &trees) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  restore_shared_ray_access(prefix, owner);
+  // A domain may have changed either payload or active set. Invalidate the
+  // ordinary resident list only when it belongs to one of the borrowed trees.
+  if (resident_sparse_list_snode_id_.valid() &&
+      std::binary_search(trees.begin(), trees.end(),
+                         resident_sparse_list_snode_id_.tree_id))
+    resident_sparse_list_snode_id_ = {};
+}
+
+void GfxRuntime::FixedGraphWorkspace::retire_shared_sparse_loans(
+    const RuntimeCompletion &prefix) {
+  const auto loan = std::atomic_load(&shared_sparse_);
+  if (!loan)
+    return;
+  shared_resource_bridge_->return_sparse_access(prefix, shared_resource_fault_,
+                                                shared_sparse_tree_ids_);
+  // The instance calls this after exact retirement. A failed return keeps the
+  // complete root/pool closure reserved, just like shared AS retirement.
+  auto retired = std::atomic_exchange(
+      &shared_sparse_, std::shared_ptr<SparseTreeAdmission::Loan>{});
 }
 
 std::shared_ptr<NativeRayResourceRegistration> GfxRuntime::register_ray_resource(
@@ -7747,6 +7889,8 @@ void GfxRuntime::materialize_snode_tree_resources(
   }
   add_root_buffer(root_id, resources.root_size);
   try {
+    auto storage = std::make_shared<SparseTreeStorage>();
+    storage->root = root_buffers_[root_id];
     TI_ASSERT(snode_resource_trees_.emplace(root_id, resources.snode_ids).second);
     for (const auto &watch : resources.hash_watches) {
       hash_overflow_watches_.push_back(
@@ -7754,7 +7898,6 @@ void GfxRuntime::materialize_snode_tree_resources(
            watch.active_count_offset, watch.tombstone_offset});
     }
 #if defined(TI_WITH_VULKAN_POINTER)
-    std::unordered_map<int, std::unique_ptr<DeviceNodeAllocator>> allocators;
     for (const auto &pool : resources.pointer_pools) {
       const auto &contract = pool.contract;
       BumpOnlyDeviceNodeAllocator::Params p;
@@ -7779,11 +7922,17 @@ void GfxRuntime::materialize_snode_tree_resources(
       p.root_buffer_alloc = *get_root_buffer(root_id);
       p.use_independent_pool = contract.pool_buffer_binding_id >= 0;
       p.independent_pool_size = pool.independent_size;
-      allocators.emplace(contract.snode_id, create_device_node_allocator(p));
+      storage->allocators.emplace(contract.snode_id,
+                                  create_device_node_allocator(p));
     }
-    TI_ASSERT(node_allocators_.find(root_id) == node_allocators_.end());
-    node_allocators_.emplace(root_id, std::move(allocators));
 #endif
+    if (resources.listgen_capacity_entries ||
+        !resources.pointer_pools.empty() || !resources.hash_watches.empty()) {
+      storage->registration = SparseTreeRegistration::create(
+          sparse_identities_, shared_sparse_admission_);
+      TI_ASSERT(
+          sparse_tree_storage_.emplace(root_id, std::move(storage)).second);
+    }
   } catch (...) {
     // No caller can observe a partially installed tree. Allocator guards
     // unwind first; the root and its diagnostic watches retire together.
@@ -7914,6 +8063,10 @@ void GfxRuntime::release_aot_resources(
   if (kernels.empty() && roots.empty()) {
     return;
   }
+  // A failed module close cannot erase some kernels before discovering a loan
+  // on a later root. Validate all roots before synchronizing or retiring any.
+  for (int root : roots)
+    require_sparse_tree_access(root);
   synchronize();
   for (const auto handle : kernels) {
     const int id = handle.get_launch_id();
@@ -7962,6 +8115,7 @@ void GfxRuntime::add_root_buffer(int root_id, size_t root_buffer_size) {
 
 void GfxRuntime::remove_root_buffer(int root_id) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  require_sparse_tree_access(root_id);
   TI_ERROR_IF(root_id < 0 ||
                   static_cast<std::size_t>(root_id) >= root_buffers_.size() ||
                   !root_buffers_[root_id],
@@ -7985,9 +8139,11 @@ void GfxRuntime::remove_root_buffer(int root_id) {
   sparse_diagnostic_domains_.erase(root_id);
   root_buffers_size_map_.erase(root_buffers_[root_id].get());
   root_buffers_[root_id].reset();
-#if defined(TI_WITH_VULKAN_POINTER)
-  node_allocators_.erase(root_id);
-#endif
+  const auto storage = sparse_tree_storage_.find(root_id);
+  if (storage != sparse_tree_storage_.end()) {
+    storage->second->registration->retire();
+    sparse_tree_storage_.erase(storage);
+  }
   hash_overflow_watches_.erase(
       std::remove_if(hash_overflow_watches_.begin(),
                      hash_overflow_watches_.end(),
@@ -7999,6 +8155,7 @@ void GfxRuntime::remove_root_buffer(int root_id) {
 
 DeviceAllocation *GfxRuntime::get_root_buffer(int id) const {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  require_sparse_tree_access(id);
   if (id < 0 || static_cast<size_t>(id) >= root_buffers_.size() ||
       !root_buffers_[id]) {
     TI_ERROR("root buffer id {} not found", id);

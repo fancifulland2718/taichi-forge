@@ -54,6 +54,8 @@ size_t SNodeTreeManager::get_field_in_tree_offset(int tree_id,
 }
 
 DevicePtr SNodeTreeManager::get_snode_tree_device_ptr(int tree_id) {
+  std::lock_guard<std::recursive_mutex> lock(runtime_->host_api_mutex_);
+  runtime_->require_sparse_tree_access(tree_id);
   TI_ERROR_IF(tree_id < 0 ||
                   static_cast<std::size_t>(tree_id) >=
                       compiled_snode_structs_.size() ||

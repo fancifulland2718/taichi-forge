@@ -2,9 +2,9 @@
 
 #include "taichi/runtime/native_resource.h"
 #include "taichi/runtime/native_kernel_resource.h"
+#include "taichi/runtime/native_ray_admission.h"
 
 namespace taichi::lang {
-class NativeRayResourceRegistration;
 
 // Cold recording facts shared by native traversal and kernel/shader bindings.
 // The closure owns every mutable dependency; retaining it does not grant access

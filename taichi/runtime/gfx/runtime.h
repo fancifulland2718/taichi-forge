@@ -61,6 +61,13 @@ class GfxRuntime;
 class GraphReplayRegistry;
 class KernelLauncher;
 
+struct SparseTreeAdmissionName {
+  static constexpr const char *value = "SNode tree";
+};
+using SparseTreeAdmission =
+    SharedResourceAdmission<RuntimeCompletion, SparseTreeAdmissionName>;
+using SparseTreeRegistration = SharedResourceRegistration<SparseTreeAdmission>;
+
 TI_DLL_EXPORT uint64_t get_graph_replay_slot_saturation_fallbacks();
 
 enum class GraphReplayLastPath : uint8_t {
@@ -169,6 +176,8 @@ class CompiledTaichiKernel {
     DeviceAllocation *hash_overflow_buffer{nullptr};
     DeviceAllocation *listgen_buffer{nullptr};
     std::vector<SparseTaskResources> sparse_task_resources;
+    std::vector<SparseTreeAdmission::PinnedUse> sparse_tree_uses;
+    std::shared_ptr<SparseTreeAdmission::Permit> sparse_tree_permit;
 #if defined(TI_WITH_VULKAN_POINTER)
     // B-3.b (2026-05): 路线 B 阶段开启 vulkan_pointer_independent_pool 后，
     // 每个走独立池的 pointer SNode 对应一块独立 DeviceAllocation；在这里打
@@ -221,6 +230,14 @@ class CompiledTaichiKernel {
     return sparse_task_resources_.empty() ? empty : sparse_task_resources_[i];
   }
 
+  const auto &sparse_tree_uses() const {
+    return sparse_tree_uses_;
+  }
+  void require_sparse_tree_access() const {
+    if (sparse_tree_permit_)
+      sparse_tree_permit_->submit([] {});
+  }
+
   void set_listgen_buffer(DeviceAllocation *listgen_buffer) {
     input_buffers_[BufferInfo(BufferType::ListGen)] = listgen_buffer;
   }
@@ -261,6 +278,8 @@ class CompiledTaichiKernel {
   size_t required_listgen_capacity_entries_{0};
   std::vector<bool> task_uses_listgen_buffer_;
   std::vector<SparseTaskResources> sparse_task_resources_;
+  std::vector<SparseTreeAdmission::PinnedUse> sparse_tree_uses_;
+  std::shared_ptr<SparseTreeAdmission::Permit> sparse_tree_permit_;
   std::vector<std::unique_ptr<Pipeline>> pipelines_;
   std::vector<std::unique_ptr<ShaderResourceSet>> cached_resource_sets_;
 };
@@ -606,6 +625,7 @@ class TI_DLL_EXPORT GfxRuntime {
     // retire. Resource storage may remain referenced by released C API handles.
     void retire_shared_image_loans();
     void retire_shared_ray_loans(const RuntimeCompletion &prefix);
+    void retire_shared_sparse_loans(const RuntimeCompletion &prefix);
 
    private:
     friend class GfxRuntime;
@@ -626,6 +646,8 @@ class TI_DLL_EXPORT GfxRuntime {
     std::shared_ptr<SharedImageAdmission<RuntimeCompletion>::Loan> shared_images_;
     std::unordered_map<DeviceAllocationId, SharedImageUse> shared_image_uses_;
     std::shared_ptr<NativeRayAdmission::Loan> shared_rays_;
+    std::shared_ptr<SparseTreeAdmission::Loan> shared_sparse_;
+    std::vector<int> shared_sparse_tree_ids_;
     std::unordered_map<const NativeRayResourceRegistration *, SharedResourceUse>
         shared_ray_uses_;
     std::shared_ptr<GraphReplayRegistry> shared_resource_bridge_;
@@ -634,6 +656,12 @@ class TI_DLL_EXPORT GfxRuntime {
     bool has_field_dependencies_{false};
   };
   std::shared_ptr<FixedGraphWorkspace> create_fixed_graph_workspace();
+  // Cold reservation of the complete selected kernel storage closure. Sparse
+  // payload effects are not inferred from listgen: every tree is exclusive.
+  void prepare_fixed_shared_sparse_resources(
+      const std::shared_ptr<FixedGraphWorkspace> &workspace,
+      const std::vector<KernelHandle> &kernels,
+      const std::shared_ptr<RuntimeFaultDomain> &owner);
   struct SharedImage {
     RuntimeResourceHandle handle;
     DeviceAllocation allocation;
@@ -832,6 +860,28 @@ class TI_DLL_EXPORT GfxRuntime {
   std::shared_ptr<NativeRayAdmission> shared_ray_admission_{
       std::make_shared<NativeRayAdmission>(host_api_mutex_owner_)};
   std::shared_ptr<NativeRayResourceRegistration::Registry> ray_identities_;
+  std::shared_ptr<SparseTreeAdmission> shared_sparse_admission_{
+      std::make_shared<SparseTreeAdmission>(host_api_mutex_owner_)};
+  // These IDs never leave this runtime's admission table. Public imports
+  // resolve actual kernel owners rather than accepting a caller-supplied ID.
+  std::shared_ptr<SparseTreeRegistration::Registry> sparse_identities_{
+      std::make_shared<SparseTreeRegistration::Registry>(1)};
+  struct SparseTreeStorage {
+    std::shared_ptr<SparseTreeRegistration> registration;
+    std::shared_ptr<DeviceAllocationGuard> root;
+#if defined(TI_WITH_VULKAN_POINTER)
+    std::unordered_map<int, std::unique_ptr<DeviceNodeAllocator>> allocators;
+#endif
+  };
+  std::unordered_map<int, std::shared_ptr<SparseTreeStorage>>
+      sparse_tree_storage_;
+  std::vector<SparseTreeAdmission::PinnedUse> bind_sparse_trees(
+      const std::vector<int> &trees) const;
+  void require_sparse_tree_access(int tree) const;
+  void restore_shared_sparse_access(
+      const RuntimeCompletion &prefix,
+      const std::shared_ptr<RuntimeFaultDomain> &owner,
+      const std::vector<int> &trees);
   void restore_shared_ray_access(const RuntimeCompletion &prefix,
                                 const std::shared_ptr<RuntimeFaultDomain> &owner);
   std::vector<NativeRayAdmission::PinnedUse> bind_ray_uses(
@@ -991,17 +1041,6 @@ class TI_DLL_EXPORT GfxRuntime {
   // parent command retires, independently of the active tree table.
   std::vector<std::shared_ptr<DeviceAllocationGuard>> root_buffers_;
   SNodeTreeIdRegistry snode_tree_id_registry_;
-#if defined(TI_WITH_VULKAN_POINTER)
-  // 路线 B B-1（2026-04-30）：每棵 SNode tree 上每个 pointer SNode 对应
-  // 一个 DeviceNodeAllocator。outer key = root_id（与 root_buffers_ 同步），
-  // 内层 map key = SNode id。当前阶段池仍寄居 root_buffer 子区间，allocator
-  // 只是「字节等价的间接层」；B-3 阶段池将迁出 root_buffer。
-  // 注：用 unordered_map 作外层是为了规避 MSVC 上 vector 增长时对不含
-  // noexcept move 的 map 的硬性 copy 需求。
-  std::unordered_map<int,
-                     std::unordered_map<int, std::unique_ptr<DeviceNodeAllocator>>>
-      node_allocators_;
-#endif
   std::unique_ptr<DeviceAllocationGuard> global_tmps_buffer_;
   std::unique_ptr<DeviceAllocationGuard> hash_overflow_buffer_;
   struct SparseDiagnosticDomain {

@@ -11,6 +11,7 @@
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/codegen/spirv/spirv_ir_builder.h"
 #include "taichi/program/launch_context_builder.h"
+#include "taichi/program/runtime_fault.h"
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
@@ -426,6 +427,133 @@ TEST(GfxSNodeResources, FixedListsArePrivateAndInvalidateOnlyAffectedTopology) {
   unrelated->launch_prepared();
   check(1, 2);
   runtime.release_aot_resources({other_mutation}, {1, 2});
+}
+
+TEST(GfxSNodeResources, SparseLoansPreflightWholeGraphsAndRetireGenerations) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator::Params device_params;
+  vulkan::VulkanDeviceCreator creator(device_params);
+  auto *device = creator.device();
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 551);
+  device->set_backend_fault_reporter(owner);
+  gfx::GfxRuntime::Params runtime_params;
+  runtime_params.device = device;
+  gfx::GfxRuntime runtime(runtime_params);
+  gfx::SNodeTreeResources resources;
+  resources.root_size = 4;
+  resources.snode_ids = {10, 11};
+  resources.listgen_capacity_entries = 1;
+  spirv::SpirvAllocatorContract pool;
+  pool.snode_id = pool.pool_buffer_binding_id = 11;
+  pool.pool_capacity = 1;
+  pool.cell_stride_bytes = pool.pool_data_offset = 4;
+  resources.pointer_pools.push_back({pool, 8});
+  runtime.materialize_snode_tree_resources(0, resources);
+  runtime.materialize_snode_tree_resources(1, resources);
+
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::spirv_version, 0x10300);
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto counter =
+      builder.buffer_argument(builder.u32_type(), 0, 0, "pool");
+  const auto mirror = builder.buffer_argument(builder.u32_type(), 0, 1, "root");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+  const auto ptr = builder.struct_array_access(builder.u32_type(), counter,
+                                               builder.const_i32_one_);
+  const auto incremented =
+      builder.make_value(spv::OpIAdd, builder.u32_type(),
+                         builder.load_variable(ptr, builder.u32_type()),
+                         builder.uint_immediate_number(builder.u32_type(), 1));
+  builder.store_variable(ptr, incremented);
+  builder.store_variable(builder.struct_array_access(builder.u32_type(), mirror,
+                                                     builder.const_i32_zero_),
+                         incremented);
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+  builder.commit_kernel_function(function, "main", {}, {1, 1, 1});
+  const auto code = builder.finalize();
+  auto make_kernel = [&](int root) {
+    gfx::GfxRuntime::RegisterParams params;
+    params.num_snode_trees = 1;
+    params.root_buffer_bindings = {root};
+    params.snode_tree_ids = {root};
+    spirv::TaskAttributes task;
+    task.name = "sparse_pool_payload_writer";
+    task.task_type = OffloadedTaskType::serial;
+    task.advisory_total_num_threads = task.advisory_num_threads_per_group = 1;
+    task.buffer_binds = {
+        {{spirv::TaskAttributes::BufferType::NodeAllocatorPool, 11}, 0},
+        {{spirv::TaskAttributes::BufferType::Root, 0}, 1}};
+    // No listgen and no topology mutation: ordinary payload writes still
+    // conflict with a domain borrowing the same tree and allocator pool.
+    params.kernel_attribs.tasks_attribs.push_back(task);
+    params.task_spirv_source_codes = {code};
+    return runtime.register_taichi_kernel(std::move(params));
+  };
+  CallableBase callable;
+  LaunchContextBuilder context(&callable);
+  const auto first = make_kernel(0), second = make_kernel(1);
+  auto fixed = runtime.prepare_fixed_graph({{{first, &context}, {}}}, {}, {0});
+  auto mixed = runtime.prepare_fixed_graph(
+      {{{second, &context}, {}}, {{first, &context}, {}}}, {}, {0, 1});
+  runtime.launch_kernel(first, context);
+  auto workspace = runtime.create_fixed_graph_workspace();
+  runtime.prepare_fixed_shared_sparse_resources(workspace, {first}, owner);
+  const auto dependencies = workspace->shared_resource_dependencies();
+  ASSERT_EQ(dependencies.size(), 1);
+  dependencies.front().wait();
+  const auto sequence = owner->next_submission_sequence();
+  auto conflict = runtime.create_fixed_graph_workspace();
+  EXPECT_ANY_THROW(runtime.prepare_fixed_shared_sparse_resources(
+      conflict, {second, first}, owner));
+  EXPECT_EQ(owner->next_submission_sequence(), sequence);
+  EXPECT_TRUE(conflict->shared_resource_dependencies().empty());
+  EXPECT_ANY_THROW(runtime.launch_kernel(first, context));
+  EXPECT_ANY_THROW(fixed->launch_prepared());
+  EXPECT_ANY_THROW(mixed->launch_prepared());
+  auto replay = runtime.register_graph_replay(1);
+  EXPECT_ANY_THROW(runtime.try_launch_graph(
+      {{second, &context}, {first, &context}}, replay->replay_key(), nullptr));
+  EXPECT_ANY_THROW(runtime.get_root_buffer(0));
+  EXPECT_ANY_THROW(runtime.remove_root_buffer(0));
+  EXPECT_ANY_THROW(runtime.retire_snode_tree_kernels(0));
+  EXPECT_ANY_THROW(runtime.release_aot_resources({first, second}, {1, 0}));
+  runtime.launch_kernel(second,
+                        context);  // Failed multi-tree admission rolled back.
+  auto other = runtime.create_fixed_graph_workspace();
+  runtime.prepare_fixed_shared_sparse_resources(other, {second}, owner);
+  auto other_dependencies = other->shared_resource_dependencies();
+  ASSERT_EQ(other_dependencies.size(), 1);
+  other_dependencies.front().wait();
+  other->retire_shared_sparse_loans(other_dependencies.front());
+  workspace->retire_shared_sparse_loans(dependencies.front());
+  workspace->retire_shared_sparse_loans(dependencies.front());
+  const auto check = [&](int root, uint32_t expected) {
+    runtime.synchronize();
+    auto address = runtime.get_root_buffer(root)->get_ptr();
+    uint32_t value = 0;
+    void *host = &value;
+    size_t bytes = sizeof(value);
+    ASSERT_EQ(device->readback_data(&address, &host, &bytes, 1),
+              RhiResult::success);
+    EXPECT_EQ(value, expected);
+  };
+  check(0, 1);
+  check(1, 1);  // No earlier dispatch leaked from either rejected mixed graph.
+  fixed->launch_prepared();
+  check(0, 2);
+  runtime.remove_root_buffer(0);
+  runtime.materialize_snode_tree_resources(0, resources);
+  const auto replacement = make_kernel(0);
+  EXPECT_ANY_THROW(runtime.launch_kernel(first, context));
+  EXPECT_ANY_THROW(fixed->launch_prepared());
+  EXPECT_ANY_THROW(mixed->launch_prepared());
+  runtime.launch_kernel(replacement, context);
+  check(0, 1);
+  runtime.release_aot_resources({first, second, replacement}, {0, 1});
 }
 
 TEST(GfxSNodeResources, DenseLayoutHasNoSparseResources) {

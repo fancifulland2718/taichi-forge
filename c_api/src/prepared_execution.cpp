@@ -70,6 +70,7 @@ struct PreparedDomainInstance final : RuntimeClient {
 #ifdef TI_WITH_VULKAN
     if (shared_workspace) {
       shared_workspace->retire_shared_ray_loans(prefix);
+      shared_workspace->retire_shared_sparse_loans(prefix);
       shared_workspace->retire_shared_image_loans();
       shared_workspace.reset();
     }

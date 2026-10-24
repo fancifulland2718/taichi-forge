@@ -59,6 +59,28 @@ TEST(NativeOperationRegistry, RayRegistrationRetainsAndRecyclesCanonicalIdentity
   EXPECT_EQ(registry->stats().live, 0);
 }
 
+TEST(NativeOperationRegistry, SharedRegistrationRetiresBeforeStorageRelease) {
+  auto gate = std::make_shared<std::recursive_mutex>();
+  auto admission = std::make_shared<NativeRayAdmission>(gate);
+  auto registry = std::make_shared<NativeRayResourceRegistration::Registry>(58);
+  auto owner = NativeRayResourceRegistration::create(registry, admission);
+  const auto first = owner->handle();
+  auto permit = admission->prepare({{{first, SharedResourceUse::read}, owner}});
+  auto loan =
+      admission->reserve({{{first, SharedResourceUse::exclusive}, owner}});
+  EXPECT_THROW(owner->retire(), std::invalid_argument);
+  EXPECT_EQ(registry->stats().live, 1);
+  loan.reset();
+  owner->retire();
+  EXPECT_THROW(permit->submit([] {}), std::invalid_argument);
+  EXPECT_EQ(registry->stats().live, 0);
+  auto replacement = NativeRayResourceRegistration::create(registry, admission);
+  EXPECT_EQ(replacement->handle().index, first.index);
+  EXPECT_NE(replacement->handle().generation, first.generation);
+  owner->retire();  // An old owner cannot remove the new generation.
+  EXPECT_NO_THROW(replacement->require_use(SharedResourceUse::exclusive));
+}
+
 TEST(NativeOperationRegistry, PrimitiveSchemasPreserveLayoutAndPolicyContracts) {
   const auto &registry = native_operation_registry();
   auto sort = NativeOperationDescription::parse(liong::json::parse_complete(R"(
