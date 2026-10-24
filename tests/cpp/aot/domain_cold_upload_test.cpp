@@ -17,6 +17,8 @@
 #if defined(TI_WITH_CUDA) && defined(TI_WITH_VULKAN)
 #include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "tests/cpp/rhi/common/cuda_external_gate.h"
 #endif
 
@@ -116,6 +118,63 @@ TEST(DomainColdUpload, VulkanBatchIgnoresDefaultAndPeerButHonorsCapacity) {
 #endif
 
 #if defined(TI_WITH_CUDA) && defined(TI_WITH_VULKAN)
+TEST(DomainColdUpload, CudaUploadWaitsForAllocationInitialization) {
+  if (!cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  Program program(Arch::cuda);
+  program.materialize_runtime();
+  auto &device = static_cast<cuda::CudaDevice &>(*program.get_compute_device());
+  auto *executor = static_cast<LlvmProgramImpl *>(program.get_program_impl())
+                       ->get_runtime_executor();
+  auto domain = std::make_shared<cuda::ExecutionDomain>(
+      program.runtime_fault_domain(), cuda::ExecutionDomain::Options{1, 0, 1});
+  capi::PreparedExecutionDomain selected(domain);
+  LlvmDevice::LlvmRuntimeAllocParams params;
+  params.size = 8192;
+  params.runtime_jit = executor->get_runtime_jit_module();
+  params.runtime = executor->get_llvm_runtime();
+  params.result_buffer = program.result_buffer;
+  params.use_memory_pool = executor->use_device_memory_pool();
+  // Exercise the runtime's actual allocation policy and warm its pool. Its
+  // zero-fill still precedes the selected-domain upload on the default stream.
+  auto warm = device.allocate_memory_runtime(params);
+  program.synchronize();
+  std::array<uint64_t, 2> expected{0x12345678deadbeefULL,
+                                   0xfedcba9876543210ULL};
+  selected.upload_owned_data(
+      device, {{warm.get_ptr(), expected.data(), sizeof(expected)}});
+  program.synchronize();
+  device.dealloc_memory(warm);
+  program.synchronize();
+  testing::CudaExternalGate gate;
+  gate.enqueue_wait(nullptr);
+  auto allocation = std::async(std::launch::async, [&] {
+    return device.allocate_memory_runtime(params);
+  });
+  const auto allocation_status = allocation.wait_for(500ms);
+  if (allocation_status != std::future_status::ready)
+    gate.release();
+  auto target = allocation.get();
+  EXPECT_EQ(allocation_status, std::future_status::ready);
+  auto upload = std::async(std::launch::async, [&] {
+    selected.upload_owned_data(
+        device, {{target.get_ptr(), expected.data(), sizeof(expected)}});
+  });
+  EXPECT_EQ(upload.wait_for(200ms), std::future_status::timeout);
+  gate.release();
+  EXPECT_NO_THROW(upload.get());
+  program.synchronize();
+  std::array<uint64_t, 2> observed{};
+  auto ptr = target.get_ptr();
+  void *out = observed.data();
+  size_t bytes = sizeof(observed);
+  EXPECT_EQ(device.readback_data(&ptr, &out, &bytes), RhiResult::success);
+  EXPECT_EQ(observed, expected);
+  EXPECT_FALSE(gate.timed_out());
+  device.dealloc_memory(target);
+  domain->close();
+}
+
 TEST(DomainColdUpload, CudaImageConstructionCopyIgnoresDefaultAndPeer) {
   if (!cuda::ExecutionDomain::available())
     GTEST_SKIP();

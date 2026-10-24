@@ -672,6 +672,7 @@ TEST(CUDAGraphMemoryPool, DeviceOwnedPoolsPreserveAllocationLeases) {
     GTEST_SKIP();
   }
   // No Program, LLVM runtime, ndarray wrapper or Python owner is needed.
+  auto context = CUDAContext::get_instance().get_guard();
   cuda::CudaDevice device;
   cuda::GraphMemoryPool first(device, 0), second(device, 4096);
   const auto a = first.allocate_memory(17 * sizeof(std::uint32_t));
@@ -897,6 +898,7 @@ TEST(CUDADevice, RuntimeAsyncAllocationUsesItsAllocationStream) {
     GTEST_SKIP();
   }
 
+  auto context = CUDAContext::get_instance().get_guard();
   auto &driver = CUDADriver::get_instance();
   const auto before = driver.get_telemetry_snapshot();
   cuda::CudaDevice device;

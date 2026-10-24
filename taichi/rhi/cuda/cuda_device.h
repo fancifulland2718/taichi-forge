@@ -251,6 +251,7 @@ class CudaDevice : public LlvmDevice {
     }
 
     void release();
+    void record_initialization();
 
     CudaDevice *owner{nullptr};
     void *ptr{nullptr};
@@ -260,6 +261,9 @@ class CudaDevice : public LlvmDevice {
     bool use_cached{false};
     bool use_memory_pool{false};
     CUstream stream{nullptr};
+    // Immutable creation prefix, not a snapshot of later default-stream work.
+    // Owned by this allocation generation and retained by AllocationLease.
+    void *initialization_done{nullptr};
     std::unique_ptr<MappingState> mapping;
     // Cold allocation lifetime only: destroy an owned pool after its final
     // allocation has submitted free, not when the factory closes.
@@ -282,6 +286,10 @@ class CudaDevice::AllocationLease {
   ~AllocationLease();
   AllocationLease(const AllocationLease &) = delete;
   AllocationLease &operator=(const AllocationLease &) = delete;
+
+  // Cold cross-stream preparation: order use after allocation/zero-fill.
+  // This is not a dependency on subsequent writes by a public producer.
+  void wait_for_initialization(void *stream) const;
 
  private:
   friend class CudaDevice;

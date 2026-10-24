@@ -122,6 +122,8 @@ bool PreparedExecutionDomain::complete_owned_initialization(
     }
     cuda->submit({}, resources,
                  [resources](void *stream) {
+                   for (const auto &input : resources->inputs)
+                     input->wait_for_initialization(stream);
                    resources->operation->record_cuda(stream);
                  })
         .wait();
@@ -207,17 +209,20 @@ void PreparedExecutionDomain::upload_owned_data(
         std::memcpy(data + offset, upload.source, upload.bytes);
       offset += upload.bytes;
     }
-    cuda->submit({}, resources,
-                 [&](void *stream) {
-                   std::size_t offset = 0;
-                   for (std::size_t i = 0; i < uploads.size(); ++i) {
-                     if (uploads[i].bytes)
-                       CUDADriver::get_instance().memcpy_host_to_device_async(
-                           reinterpret_cast<void *>(ranges[i].memory_offset),
-                           data + offset, uploads[i].bytes, stream);
-                     offset += uploads[i].bytes;
-                   }
-                 })
+    cuda->submit(
+            {}, resources,
+            [&](void *stream) {
+              std::size_t offset = 0;
+              for (std::size_t i = 0; i < uploads.size(); ++i) {
+                if (uploads[i].bytes) {
+                  resources->destinations[i]->wait_for_initialization(stream);
+                  CUDADriver::get_instance().memcpy_host_to_device_async(
+                      reinterpret_cast<void *>(ranges[i].memory_offset),
+                      data + offset, uploads[i].bytes, stream);
+                }
+                offset += uploads[i].bytes;
+              }
+            })
         .wait();
     cuda->collect_ready(1);
     return;

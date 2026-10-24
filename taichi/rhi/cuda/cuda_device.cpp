@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <utility>
 
 #include "taichi/jit/jit_module.h"
 
@@ -23,6 +24,7 @@ CudaDevice::AllocationRecord::AllocationRecord(
       use_cached(other.use_cached),
       use_memory_pool(other.use_memory_pool),
       stream(other.stream),
+      initialization_done(std::exchange(other.initialization_done, nullptr)),
       mapping(std::move(other.mapping)),
       pool_owner(std::move(other.pool_owner)),
       retained_pool(std::move(other.retained_pool)) {
@@ -42,6 +44,7 @@ CudaDevice::AllocationRecord &CudaDevice::AllocationRecord::operator=(
     use_cached = other.use_cached;
     use_memory_pool = other.use_memory_pool;
     stream = other.stream;
+    initialization_done = std::exchange(other.initialization_done, nullptr);
     mapping = std::move(other.mapping);
     pool_owner = std::move(other.pool_owner);
     retained_pool = std::move(other.retained_pool);
@@ -53,6 +56,16 @@ CudaDevice::AllocationRecord &CudaDevice::AllocationRecord::operator=(
 
 void CudaDevice::AllocationRecord::release() {
   mapping.reset();
+  if (auto event = std::exchange(initialization_done, nullptr)) {
+    try {
+      if (owner == nullptr || owner->backend_calls_safe()) {
+        auto context = CUDAContext::get_instance().get_guard();
+        CUDADriver::get_instance().event_destroy.call_with_warning(event);
+      }
+    } catch (...) {
+      // Preserve the existing noexcept allocation retirement/fault contract.
+    }
+  }
   if (ptr == nullptr || is_imported) {
     return;
   }
@@ -88,6 +101,22 @@ void CudaDevice::AllocationRecord::release() {
   ptr = nullptr;
   retained_pool.reset();
   pool_owner.reset();
+}
+
+void CudaDevice::AllocationRecord::record_initialization() {
+  if (!ptr || !size)
+    return;
+  auto &driver = CUDADriver::get_instance();
+  driver.event_create(&initialization_done, CU_EVENT_DISABLE_TIMING);
+  driver.event_record(initialization_done, stream);
+}
+
+void CudaDevice::AllocationLease::wait_for_initialization(void *stream) const {
+  if (registry_lease_->initialization_done && stream != registry_lease_->stream) {
+    auto context = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().stream_wait_event(
+        stream, registry_lease_->initialization_done, 0);
+  }
 }
 
 CudaDevice::AllocationLease::~AllocationLease() {
@@ -185,6 +214,7 @@ RhiResult CudaDevice::allocate_memory(const AllocParams &params,
 
   AllocationRecord record(this, ptr, params.size, false, false, false, false,
                           nullptr, std::move(mapping));
+  record.record_initialization();
   auto [result, alloc_id] = allocations_.emplace(std::move(record));
   if (result != RhiResult::success) {
     return result;
@@ -219,6 +249,8 @@ DeviceAllocation CudaDevice::allocate_memory_runtime(
 
   AllocationRecord record(this, ptr, size, false, true, true,
                           params.use_memory_pool, stream, std::move(mapping));
+  if (params.zero_fill || params.use_memory_pool)
+    record.record_initialization();
   auto [result, alloc_id] = allocations_.emplace(std::move(record));
   TI_ERROR_IF(result != RhiResult::success,
               "Failed to track CUDA runtime allocation: {}", result);
@@ -239,6 +271,7 @@ DeviceAllocation CudaDevice::allocate_memory_from_pool(
   AllocationRecord record(this, ptr, bytes, false, true, false, true, nullptr,
                           std::move(mapping));
   record.pool_owner = std::move(pool_owner);
+  record.record_initialization();
   auto [result, handle] = allocations_.emplace(std::move(record));
   TI_ERROR_IF(result != RhiResult::success,
               "Unable to register Graph pool allocation");
