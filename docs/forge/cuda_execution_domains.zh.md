@@ -185,11 +185,15 @@ scene = runtime.import_acceleration_structure(jit_scene)
 导入，可保留域供重新准备。内部关系随导入释放；Program reset 统一退休所有 borrower。
 
 符合条件的平直选中 Graph 也可通过 `Graph.prepare(..., execution_domain=domain)`
-借用 native query/refit recording 和 DSL TLAS 参数引用的原 AS。同一实例的 native
-和 kernel 引用共用一次导入；准备借用已选编译 dispatch，不重新编译或重建几何。
+借用 native query/refit recording、DSL TLAS 参数、graphics shader 和已初始化的
+ray-program recording 引用的原 AS。同一实例的 native/shader/kernel 引用共用一次
+导入；准备借用已选编译 dispatch，不重新编译或重建几何。
 准备后可关闭源 Graph/AS 包装，实例继续持有依赖。关闭实例时先释放访问许可，再关闭
 导入，因此普通查询可观察独立域对原 AS 的 refit；Program reset 统一退休实例。
-JIT AS 借用与 graphics/ray-program、并行及控制流的组合仍需分别验证。
+graphics 使用具备图形能力的域。ray-program buffer 必须逐 Graph 端口匹配录制时的
+对象，不同端口可以合法别名同一数组。冻结 shader 资产进入普通创建和 AOT 导出共用
+的 pipeline 定义；每实例仍需准备 pipeline/SBT，并保留 shader 字节，JIT 借用无需
+额外声明 AOT 资产绑定。AOT 导出继续要求显式部署输入；并行及控制流组合仍需分别验证。
 
 选中方案可以只包含 native 操作，无需占位 kernel。recording 持有的固定 ndarray
 绑定作为 live storage 借用；例如 CUDA/Vulkan 的 persistent prepared sort recording

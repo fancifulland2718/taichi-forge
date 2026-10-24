@@ -141,12 +141,8 @@ class VulkanRayTracingPipeline:
                 raise TypeError(f"{stage} group requires a matching SpirvShader")
             key = shader.artifact_id
             if key not in shader_indices:
-                item = core._VulkanRayProgramShader()
-                item.stage = getattr(core._VulkanRayShaderStage, stage)
-                item.words = struct.unpack(f"<{len(shader.code) // 4}I", shader.code)
-                item.entry = shader.entry_point
                 shader_indices[key] = len(shaders)
-                shaders.append(item)
+                shaders.append(shader)
             return shader_indices[key]
 
         for kind, members in (("raygen", raygen), ("miss", miss or {}), ("triangles", hit_groups or {})):
@@ -170,8 +166,15 @@ class VulkanRayTracingPipeline:
         if not any(kind == "raygen" for _, kind in indices.values()):
             raise ValueError("program requires at least one raygen group")
         facts = dict(groups=facts, max_trace_depth=max_trace_depth, opacity_micromaps=allow_opacity_micromaps)
-        self._definition = vulkan_program_definition(facts)
+        self._definition = vulkan_program_definition(facts, shaders)
         parameters_spec = self._definition.native.parameters
+        native_shaders = []
+        for shader in self._definition.shaders:
+            item = core._VulkanRayProgramShader()
+            item.stage = getattr(core._VulkanRayShaderStage, shader.stage)
+            item.words = struct.unpack(f"<{len(shader.code) // 4}I", shader.code)
+            item.entry = shader.entry_point
+            native_shaders.append(item)
         groups = []
         for spec in parameters_spec["groups"]:
             group = core._VulkanRayProgramGroup()
@@ -185,7 +188,7 @@ class VulkanRayTracingPipeline:
         self._runtime_prog = impl.get_runtime().prog
         self._runtime_generation = int(impl.runtime_generation())
         self._handle = self._runtime_prog._create_vulkan_ray_program(
-            shaders, groups, parameters_spec["max_trace_depth"], parameters_spec["allow_opacity_micromaps"]
+            native_shaders, groups, parameters_spec["max_trace_depth"], parameters_spec["allow_opacity_micromaps"]
         )
 
     @property

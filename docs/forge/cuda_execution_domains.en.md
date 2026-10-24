@@ -246,15 +246,21 @@ for new preparations. Private input handles retire with their import; Program
 reset retires every borrower.
 
 For qualified flat selected Graphs, `Graph.prepare(..., execution_domain=domain)`
-also borrows original AS resources referenced by native query/refit recordings
-and DSL TLAS parameters. Native and kernel references to the same object share
+also borrows original AS resources referenced by native query/refit recordings,
+DSL TLAS parameters, graphics shaders and initialized ray-program recordings.
+Native and shader/kernel references to the same object share
 one import per instance. Preparation borrows the selected compiled dispatches;
 it does not recompile kernels or reconstruct geometry. Source Graph/AS wrappers
 may close after preparation; the prepared instance retains its dependencies.
 Closing the instance releases its loans before its imports, so ordinary queries
 can observe refits made to the original AS. Program reset retires the instances.
-Graphics/ray-program combinations with these JIT AS loans, parallel regions and
-control-flow combinations still require separate qualification.
+Graphics use a graphics-capable domain. Ray-program buffers must match the
+recorded objects at each Graph port; distinct ports may alias the same array.
+Frozen shader artifacts feed the same pipeline definition used by ordinary
+creation and AOT export. Each instance still prepares its pipeline and SBT;
+retaining the shader bytes avoids requiring AOT asset bindings for a JIT loan.
+AOT export continues to require explicit deployable resource inputs. Parallel
+regions and control-flow combinations still require separate qualification.
 
 A selected recipe may contain only native operations: it needs no placeholder
 kernel. Fixed ndarray bindings retained by a recording are live storage loans.

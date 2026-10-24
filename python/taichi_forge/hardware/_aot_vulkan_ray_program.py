@@ -17,8 +17,8 @@ def _pipeline(context, program):
 
     def build():
         ports = tuple(f"shader_{i}" for i in range(len(facts)))
-        inputs = context.resource_inputs.require(program, ports, asset_ports=ports)
-        for port, fact in zip(ports, facts):
+        inputs = context.immutable_resource_inputs(program, dict(zip(ports, definition.shaders, strict=True)))
+        for port, fact in zip(ports, facts, strict=True):
             asset = inputs[port]
             if not isinstance(asset, str):
                 if type(asset) is not SpirvShader or _digest(asset.to_dict()) != _digest(fact):
@@ -71,9 +71,7 @@ def export_launch(recording, context):
             group, resource = "image", context.source_images.resource(context, name)
             point.update(kind=binding.kind, access=binding.access, mip_level=binding.mip_level)
         else:
-            resource = context.source_arrays.require(owner)
-            if resource != name:
-                raise TaichiRuntimeError("AOT fixed ray buffer requires its Graph name in source_bindings")
+            resource = context.fixed_array_binding(name, owner)
             group = "buffer"
             point.update(kind=binding.kind, access=binding.access)
         items = parameters[group + "s"]

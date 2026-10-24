@@ -12,10 +12,12 @@ class RayProgramDefinition:
     native: NativeDefinition
     manifest: object
     assets: tuple
+    shaders: tuple = ()
 
     def __post_init__(self):
         object.__setattr__(self, "manifest", _freeze(self.manifest))
         object.__setattr__(self, "assets", tuple(_freeze(item) for item in self.assets))
+        object.__setattr__(self, "shaders", tuple(self.shaders))
 
     def to_dict(self):
         return _parameters(self.manifest)
@@ -103,7 +105,7 @@ def _contract(spec, facts):
     return digest.hexdigest()
 
 
-def vulkan_program_definition(manifest):
+def vulkan_program_definition(manifest, shaders):
     facts, indices, groups = [], {}, []
 
     def shader_index(fact):
@@ -131,4 +133,9 @@ def vulkan_program_definition(manifest):
         allow_opacity_micromaps=manifest["opacity_micromaps"],
     )
     spec["expected_pipeline"] = _contract(spec, facts)
-    return RayProgramDefinition(NativeDefinition("vulkan_ray_program", "pipeline", spec), manifest, facts)
+    shaders = tuple(shaders)
+    if len(shaders) != len(facts) or any(
+        _digest(shader.to_dict()) != _digest(fact) for shader, fact in zip(shaders, facts, strict=True)
+    ):
+        raise ValueError("Vulkan ray shader artifacts differ from the frozen pipeline contract")
+    return RayProgramDefinition(NativeDefinition("vulkan_ray_program", "pipeline", spec), manifest, facts, shaders)

@@ -91,6 +91,7 @@ class _JitContext(GraphLoweringContext):
             resource_inputs=ResourceInputBindings(None, spec.fixed_runtime_args),
         )
         self.imports = []
+        self._source_arguments = dict(arguments)
         self.scalar_types = {}
         self.live_arrays = {}
         self.live_names = {id(value): name for name, value in arguments.items() if isinstance(value, (Ndarray, DenseNdarrayView))}
@@ -156,6 +157,13 @@ class _JitContext(GraphLoweringContext):
         # Qualified producers supply the immutable artifacts in their frozen
         # definition. This borrows code bytes, never snapshots mutable storage.
         return dict(assets)
+
+    def fixed_array_binding(self, name, owner):
+        # Different public ports may alias one allocation. Check each named
+        # owner without constructing AOT's one-name-per-allocation catalog.
+        if self._source_arguments.get(name, self.private_bindings.get(name)) is not owner:
+            raise TaichiRuntimeError("Fixed native Graph buffer differs from its recorded binding")
+        return self.binding(name)
 
     def public_resource(self, owner):
         is_image = type(owner) is Texture

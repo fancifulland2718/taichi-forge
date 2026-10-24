@@ -133,6 +133,13 @@ class GraphLoweringContext:
         """AOT requires explicit deployable assets; a JIT adapter may retain them."""
         return self.resource_inputs.require(owner, tuple(assets), asset_ports=tuple(assets))
 
+    def fixed_array_binding(self, name, owner):
+        """Keep a native recording's fixed storage tied to its Graph port."""
+        resource = self.source_arrays.require(owner)
+        if resource != name:
+            raise TaichiRuntimeError("AOT fixed native buffer requires its Graph name in source_bindings")
+        return resource
+
     def resource_links(self, owner, links):
         """Record qualified source relationships; never serialize source handles."""
         links = tuple(sorted(links.items()))
