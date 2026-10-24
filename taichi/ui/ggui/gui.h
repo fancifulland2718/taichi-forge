@@ -1,6 +1,7 @@
 #pragma once
 
 #include "taichi/ui/utils/utils.h"
+#include <optional>
 
 #ifndef IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 #define IMGUI_IMPL_VULKAN_NO_PROTOTYPES
@@ -29,7 +30,27 @@ class TI_DLL_EXPORT Gui final : public GuiBase {
       WindowLayoutState *window_layout);
   ~Gui() override;
 
-  void init_render_resources(VkRenderPass render_pass);
+  struct DrawReservation {
+    uint64_t generation;
+    uint64_t serial;
+    uint32_t slot;
+  };
+
+  // Cold preparation is separate from pure command recording.
+  void prepare_render_resources(VkRenderPass render_pass, uint32_t image_count);
+  void validate_draw_resources(VkRenderPass render_pass, uint32_t image_count);
+  std::optional<DrawReservation> reserve_draw_slot(bool blocking);
+  bool draw(taichi::lang::CommandList *commands, DrawReservation reservation);
+  void validate_recorded_draw(DrawReservation reservation);
+  void mark_draw_submitting(DrawReservation reservation) noexcept;
+  void seal_draw(DrawReservation reservation,
+                 const taichi::lang::StreamSemaphore &complete) noexcept;
+  void cancel_recorded_draw(DrawReservation reservation) noexcept;
+  void quarantine_draw() noexcept;
+  bool retirement_failed() const noexcept;
+  void validate_retirement();
+  void retire_draw_readers();
+  void init_render_resources(VkRenderPass render_pass, uint32_t image_count);
   void cleanup_render_resources();
 
   void begin(const std::string &name,
@@ -62,7 +83,6 @@ class TI_DLL_EXPORT Gui final : public GuiBase {
   glm::vec3 color_edit_3(const std::string &name, glm::vec3 old_value) override;
   bool button(const std::string &text) override;
 
-  void draw(taichi::lang::CommandList *cmd_list);
 
   void prepare_for_next_frame() override;
   bool has_widgets() const override;
@@ -88,7 +108,19 @@ class TI_DLL_EXPORT Gui final : public GuiBase {
 
   VkRenderPass render_pass_{VK_NULL_HANDLE};
 
-  VkDescriptorPool descriptor_pool_;
+  VkDescriptorPool descriptor_pool_{VK_NULL_HANDLE};
+  enum class DrawPhase { idle, reserved, recorded, unsealed, in_flight };
+  struct DrawSlot {
+    taichi::lang::StreamSemaphore complete;
+    DrawPhase phase{DrawPhase::idle};
+  };
+  std::vector<DrawSlot> draw_slots_;
+  uint32_t next_frame_slot_{0};
+  uint64_t generation_{0};
+  uint64_t next_serial_{0};
+  std::optional<DrawReservation> active_reservation_;
+  bool matches(DrawReservation reservation, DrawPhase phase) const noexcept;
+  bool backend_resources_failed_{false};
 
   void create_descriptor_pool();
 

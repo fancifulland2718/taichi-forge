@@ -71,7 +71,9 @@ class TI_DLL_EXPORT Renderer {
   void retire_shared_display_resources();
   // Cold teardown only. True proves this window's selected packed-copy
   // resources, not WSI present retirement or shared Program work.
-  bool retire_selected_vulkan_graphics();
+  bool retire_selected_vulkan_graphics(Gui *gui = nullptr);
+  void prepare_gui(Gui &gui);
+  void validate_frame_retirement();
 
   void set_background_color(const glm::vec3 &color);
 
@@ -146,7 +148,9 @@ class TI_DLL_EXPORT Renderer {
   using SharedTextureResourceLease =
       std::shared_ptr<taichi::lang::Program::TextureResourceLease>;
 
+  enum class FramePhase { preparing, unsealed, submitted };
   struct InFlightFrame {
+    FramePhase phase{FramePhase::submitted};
     taichi::lang::StreamSemaphore complete;
     // Selected Vulkan keeps the complete host closure before enqueue.
     std::unique_ptr<taichi::lang::CommandList> commands;
@@ -185,8 +189,12 @@ class TI_DLL_EXPORT Renderer {
   void record_renderpass(taichi::lang::CommandList *commands,
                          taichi::lang::DeviceAllocation color,
                          taichi::lang::DeviceAllocation depth,
-                         GuiBase *gui);
+                         GuiBase *gui,
+                         std::optional<Gui::DrawReservation> *gui_draw);
   bool draw_offscreen_targets(GuiBase *gui);
+  std::pair<VkRenderPass, uint32_t> gui_renderpass(bool prepare = false);
+  std::optional<taichi::lang::vulkan::VulkanRenderPassDesc> gui_renderpass_desc_;
+  VkRenderPass gui_renderpass_{VK_NULL_HANDLE};
 
   glm::vec3 background_color_ = glm::vec3(0.f, 0.f, 0.f);
 

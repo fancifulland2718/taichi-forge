@@ -36,7 +36,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **171**, persistent execution-plan version **26**, and
+- The frontend/native private ABI is **172**, persistent execution-plan version **26**, and
   compiled-cache schema **71**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
@@ -210,7 +210,8 @@ combination. Consult the linked API contracts and capability queries for exact s
 - Vulkan Canvas supports selected output domains with cold-prepared packed copies or local writable
   display slots. Graph/AOT writers and graphics readers share exact completion/retirement contracts.
   Writable slots avoid the extra display copy with caller-configured cold capacity; mixed geometry,
-  GUI overlays and runtime offscreen paths remain separately restricted. Vulkan submission also retains
+  GUI widgets use cold font preparation and exact reader tracking; runtime offscreen paths
+  remain separately restricted. Vulkan submission also retains
   in-flight resources safely when host allocation fails around native enqueue.
 - Python/native `Window.get_scroll_delta()` returns horizontal/vertical floating increments and clears
   them on read, without extra event polling or GPU waits. Vulkan resize/close no longer frees signal

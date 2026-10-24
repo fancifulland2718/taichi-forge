@@ -34,8 +34,10 @@ if(TI_WITH_GGUI)
   # Dear ImGui
   add_definitions(-DIMGUI_IMPL_VULKAN_NO_PROTOTYPES)
   set(IMGUI_DIR ${PROJECT_SOURCE_DIR}/external/imgui)
-  file(GLOB TAICHI_IMGUI_SOURCE
-    ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
+  include(${PROJECT_SOURCE_DIR}/cmake/ImGuiVulkan.cmake)
+  ti_prepare_imgui_vulkan(TI_IMGUI_VULKAN_SOURCE)
+  set(TAICHI_IMGUI_SOURCE
+    ${TI_IMGUI_VULKAN_SOURCE}
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
@@ -54,6 +56,7 @@ if(TI_WITH_GGUI)
     target_include_directories(imgui PRIVATE ${PROJECT_SOURCE_DIR}/external/glfw/include)
   endif()
 
+  target_include_directories(imgui PRIVATE ${PROJECT_SOURCE_DIR})
   target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends ..)
   target_include_directories(imgui PUBLIC ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include)
 

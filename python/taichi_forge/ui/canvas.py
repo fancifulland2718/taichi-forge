@@ -51,8 +51,9 @@ class Canvas:
 
         CUDA supports acquire_frame() writers or packed DisplayFrame copies.
         Vulkan supports retained packed copies with prepare_frame_sources and
-        prepared writable views with prepare_frame_pool. Mixed geometry, GUI
-        overlays and runtime render targets are not supported on that path.
+        prepared writable views with prepare_frame_pool. GUI widgets use cold
+        font preparation and exact graphics readers. Mixed geometry and runtime
+        render targets are not supported on that path.
         Prepare all physical image bindings before starting the steady pipeline.
         Close the old domain and bind its replacement before changing
         prepared storage. Destroying a Vulkan window retires its storage consumers;

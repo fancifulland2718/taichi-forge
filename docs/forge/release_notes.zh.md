@@ -34,7 +34,7 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **171**，持久执行计划为 **26**，
+- frontend 与 native runtime 使用私有 ABI **172**，持久执行计划为 **26**，
   编译缓存 schema 为 **71**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
@@ -168,7 +168,8 @@
   详见[执行域合同](cuda_execution_domains.zh.md)。
 - Vulkan Canvas 可选择独立输出域，使用冷准备的 packed-copy 或本地可写显示槽；
   Graph/AOT writer 与图形 reader 共用精确完成和退休合同。可写路线省去额外显示复制，
-  容量由调用方冷配置；混合几何、GUI overlay 和 runtime offscreen 路线仍分别受限。
+  容量由调用方冷配置；GUI widgets 使用冷字体准备与精确 reader 管理，混合几何和
+  runtime offscreen 路线仍分别受限。
   同时修复 Vulkan 原生提交成功后 host 分配失败导致的在途资源保活缺口。
 - Python/native `Window.get_scroll_delta()` 返回水平/垂直浮点增量，读后清零，不额外
   轮询事件或等待 GPU；修复 Vulkan resize/关闭时呈现队列仍引用已释放信号量的问题。

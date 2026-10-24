@@ -1235,6 +1235,13 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     return lock;
   }
 
+  // Cold ImGui font uploads use the same queue/tail discipline as providers.
+  std::unique_lock<std::mutex> acquire_external_graphics_queue_lock() {
+    auto lock = acquire_queue_lock(graphics_queue_);
+    queue_tail_fence_locked(graphics_queue_).reset();
+    return lock;
+  }
+
   std::tuple<VkDeviceMemory, size_t, size_t> get_vkmemory_offset_size(
       const DeviceAllocation &alloc) const;
 

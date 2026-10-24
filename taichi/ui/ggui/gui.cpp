@@ -1,4 +1,6 @@
 #include "gui.h"
+#include <cassert>
+#include "taichi/ui/ggui/imgui_vulkan_forge.h"
 #include "taichi/ui/ggui/swap_chain.h"
 #include "taichi/ui/ggui/app_context.h"
 #include "taichi/ui/ggui/edge_layout_imgui.h"
@@ -14,6 +16,38 @@ namespace taichi::ui {
 namespace vulkan {
 
 namespace {
+
+thread_local VulkanDevice *gui_vulkan_device = nullptr;
+
+// ImGui's result callback has no user data. Bind it only while invoking the
+// backend, restoring both callback owner and ImGui context on exception.
+class GuiVulkanCall final {
+ public:
+  GuiVulkanCall(ImGuiContext *context, VulkanDevice &device)
+      : previous_context_(ImGui::GetCurrentContext()),
+        previous_device_(gui_vulkan_device) {
+    ImGui::SetCurrentContext(context);
+    gui_vulkan_device = &device;
+  }
+  ~GuiVulkanCall() {
+    gui_vulkan_device = previous_device_;
+    ImGui::SetCurrentContext(previous_context_);
+  }
+
+ private:
+  ImGuiContext *previous_context_;
+  VulkanDevice *previous_device_;
+};
+
+void check_gui_vulkan_result(VkResult result) {
+  if (result == VK_SUCCESS)
+    return;
+  TI_ERROR_IF(gui_vulkan_device == nullptr,
+              "ImGui Vulkan error has no bound device");
+  // Report after the caller's queue lock unwinds, matching VulkanStream.
+  throw BackendRuntimeError(Arch::vulkan, static_cast<std::int64_t>(result),
+                            "ImGui Vulkan", "ImGui Vulkan resource operation failed");
+}
 
 float default_font_size(const ImGuiIO &io) {
   if (io.FontDefault != nullptr) {
@@ -87,14 +121,16 @@ Gui::Gui(AppContext *app_context,
   }
 }
 
-void Gui::init_render_resources(VkRenderPass render_pass) {
-  auto &device =
-      static_cast<taichi::lang::vulkan::VulkanDevice &>(app_context_->device());
-
-  // imgui 1.91+: ImGui_ImplVulkan_LoadFunctions takes api_version as first arg.
-  ImGui_ImplVulkan_LoadFunctions(device.vk_caps().vk_api_version,
-                                 load_vk_function_for_gui,
-                                 &device);  // this is because we're using volk.
+void Gui::init_render_resources(VkRenderPass render_pass, uint32_t image_count) {
+  auto &device = static_cast<VulkanDevice &>(app_context_->device());
+  GuiVulkanCall call(imgui_context_, device);
+  TI_ERROR_IF(backend_resources_failed_ ||
+                  ImGui::GetIO().BackendRendererUserData != nullptr,
+              "ImGui Vulkan resources require proven cleanup before initialization");
+  device.throw_if_backend_submission_disallowed("initialize ImGui Vulkan");
+  TI_ERROR_IF(!ImGui_ImplVulkan_LoadFunctions(device.vk_caps().vk_api_version,
+                                              load_vk_function_for_gui, &device),
+              "Unable to load ImGui Vulkan functions");
 
   ImGui_ImplVulkan_InitInfo init_info = {};
   init_info.ApiVersion = device.vk_caps().vk_api_version;
@@ -103,19 +139,174 @@ void Gui::init_render_resources(VkRenderPass render_pass) {
   init_info.Device = device.vk_device();
   init_info.QueueFamily = device.graphics_queue_family_index();
   init_info.Queue = device.graphics_queue();
-  init_info.PipelineCache = VK_NULL_HANDLE;
   init_info.DescriptorPool = descriptor_pool_;
-  init_info.Allocator = VK_NULL_HANDLE;
-  init_info.MinImageCount = swap_chain_->surface().get_image_count();
-  init_info.ImageCount = swap_chain_->surface().get_image_count();
-  // imgui 1.90+: RenderPass moved from Init() arg into InitInfo;
-  // CreateFontsTexture is now self-managing (called automatically in NewFrame),
-  // and ImGui_ImplVulkan_DestroyFontUploadObjects has been removed.
+  init_info.MinImageCount = image_count;
+  init_info.ImageCount = init_info.MinImageCount;
   init_info.RenderPass = render_pass;
-  ImGui_ImplVulkan_Init(&init_info);
-  render_pass_ = render_pass;
+  init_info.CheckVkResultFn = check_gui_vulkan_result;
+  try {
+    TI_ERROR_IF(!ImGui_ImplVulkan_Init(&init_info),
+                "Unable to initialize ImGui Vulkan backend");
+    // This remains a cold queue-wide font upload. Its owner and checked proof
+    // are explicit; NewFrame must never submit a hidden upload afterward.
+    {
+      auto queue_lock = device.acquire_external_graphics_queue_lock();
+      TI_ERROR_IF(!ImGui_ImplVulkan_CreateFontsTexture() ||
+                      ImGui_ImplVulkan_ForgeGetFontState() !=
+                          ImGui_ImplVulkan_ForgeFontState::ready,
+                  "ImGui font upload has no completion proof");
+    }
+    next_frame_slot_ = 0;
+    render_pass_ = render_pass;
+    prepare_for_next_frame();
+  } catch (const BackendRuntimeError &error) {
+    backend_resources_failed_ = true;
+    device.report_backend_error(error);
+    throw;
+  } catch (...) {
+    backend_resources_failed_ = true;
+    throw;
+  }
+}
 
-  prepare_for_next_frame();
+
+void Gui::prepare_render_resources(VkRenderPass pass, uint32_t image_count) {
+  validate_retirement();
+  TI_ERROR_IF(pass == VK_NULL_HANDLE || image_count < 2,
+              "ImGui Vulkan requires a renderpass and at least two draw slots");
+  if (render_pass_ == pass && draw_slots_.size() == image_count) {
+    validate_draw_resources(pass, image_count);
+    ImGui::SetCurrentContext(imgui_context_);
+    return;  // Do not end or restart an already populated CPU frame.
+  }
+  std::vector<DrawSlot> prepared(image_count);
+  if (render_pass_ != VK_NULL_HANDLE)
+    cleanup_render_resources();
+  TI_ERROR_IF(generation_ == UINT64_MAX, "ImGui draw generation exhausted");
+  draw_slots_ = std::move(prepared);
+  ++generation_;
+  init_render_resources(pass, image_count);
+  ImGui::SetCurrentContext(imgui_context_);
+}
+
+void Gui::validate_draw_resources(VkRenderPass pass, uint32_t image_count) {
+  auto &device = static_cast<VulkanDevice &>(app_context_->device());
+  GuiVulkanCall call(imgui_context_, device);
+  TI_ERROR_IF(backend_resources_failed_ || !device.backend_calls_safe() ||
+                  render_pass_ != pass || draw_slots_.size() != image_count ||
+                  pass == VK_NULL_HANDLE ||
+                  ImGui_ImplVulkan_ForgeGetFontState() !=
+                      ImGui_ImplVulkan_ForgeFontState::ready,
+              "ImGui Vulkan requires compatible cold-prepared resources");
+}
+
+bool Gui::matches(DrawReservation r, DrawPhase phase) const noexcept {
+  return active_reservation_ && r.generation == generation_ &&
+         active_reservation_->generation == r.generation &&
+         active_reservation_->serial == r.serial &&
+         active_reservation_->slot == r.slot && r.slot < draw_slots_.size() &&
+         draw_slots_[r.slot].phase == phase;
+}
+
+std::optional<Gui::DrawReservation> Gui::reserve_draw_slot(bool blocking) {
+  validate_draw_resources(render_pass_, static_cast<uint32_t>(draw_slots_.size()));
+  TI_ERROR_IF(active_reservation_, "ImGui already has an active draw reservation");
+  if (!has_widgets())
+    return std::nullopt;
+  TI_ERROR_IF(next_serial_ == UINT64_MAX, "ImGui draw serial exhausted");
+  try {
+    for (;;) {
+      for (uint32_t offset = 0; offset < draw_slots_.size(); ++offset) {
+        const auto index = (next_frame_slot_ + offset) % draw_slots_.size();
+        auto &slot = draw_slots_[index];
+        if (slot.phase == DrawPhase::in_flight) {
+          TI_ERROR_IF(!slot.complete, "ImGui reader is missing its completion");
+          if (!slot.complete->is_ready())
+            continue;
+          slot.complete.reset();
+          slot.phase = DrawPhase::idle;
+        }
+        TI_ERROR_IF(slot.phase != DrawPhase::idle, "ImGui slot is not reusable");
+        active_reservation_ = DrawReservation{generation_, ++next_serial_,
+                                               static_cast<uint32_t>(index)};
+        slot.phase = DrawPhase::reserved;
+        return active_reservation_;
+      }
+      if (!blocking)
+        return std::nullopt;
+      const auto &reader = draw_slots_[next_frame_slot_].complete;
+      TI_ERROR_IF(!reader || !reader->wait(), "ImGui reader wait has no proof");
+    }
+  } catch (...) {
+    quarantine_draw();
+    throw;
+  }
+}
+
+void Gui::validate_recorded_draw(DrawReservation r) {
+  TI_ERROR_IF(backend_resources_failed_ || !matches(r, DrawPhase::recorded),
+              "ImGui submission requires the recorded reservation");
+}
+
+void Gui::mark_draw_submitting(DrawReservation r) noexcept {
+  assert(matches(r, DrawPhase::recorded));
+  draw_slots_[r.slot].phase = DrawPhase::unsealed;
+}
+
+void Gui::seal_draw(DrawReservation r, const StreamSemaphore &complete) noexcept {
+  assert(complete && matches(r, DrawPhase::unsealed));
+  draw_slots_[r.slot].complete = complete;
+  draw_slots_[r.slot].phase = DrawPhase::in_flight;
+  active_reservation_.reset();
+  next_frame_slot_ = (r.slot + 1) % draw_slots_.size();
+}
+
+void Gui::cancel_recorded_draw(DrawReservation r) noexcept {
+  // Cancellation is never a substitute for a missing submission proof.
+  if (!backend_resources_failed_ &&
+      (matches(r, DrawPhase::reserved) || matches(r, DrawPhase::recorded))) {
+    draw_slots_[r.slot].phase = DrawPhase::idle;
+    active_reservation_.reset();
+  }
+}
+
+void Gui::quarantine_draw() noexcept {
+  backend_resources_failed_ = true;
+}
+
+bool Gui::retirement_failed() const noexcept {
+  return backend_resources_failed_;
+}
+
+void Gui::validate_retirement() {
+  auto &device = static_cast<VulkanDevice &>(app_context_->device());
+  GuiVulkanCall call(imgui_context_, device);
+  TI_ERROR_IF(backend_resources_failed_ || !device.backend_calls_safe() ||
+                  active_reservation_ ||
+                  ImGui_ImplVulkan_ForgeGetFontState() ==
+                      ImGui_ImplVulkan_ForgeFontState::unsealed,
+              "Cannot release unproven ImGui Vulkan resources");
+  for (const auto &slot : draw_slots_)
+    TI_ERROR_IF(slot.phase != DrawPhase::idle &&
+                    (slot.phase != DrawPhase::in_flight || !slot.complete),
+                "ImGui slot has no exact retirement proof");
+}
+
+void Gui::retire_draw_readers() {
+  validate_retirement();
+  // Do not clear any owner until every exact reader wait succeeds.
+  try {
+    for (const auto &slot : draw_slots_)
+      if (slot.complete)
+        TI_ERROR_IF(!slot.complete->wait(), "ImGui reader retirement failed");
+  } catch (...) {
+    quarantine_draw();
+    throw;
+  }
+  for (auto &slot : draw_slots_) {
+    slot.complete.reset();
+    slot.phase = DrawPhase::idle;
+  }
 }
 
 void Gui::create_descriptor_pool() {
@@ -137,19 +328,29 @@ void Gui::create_descriptor_pool() {
   pool_info.maxSets = 1000 * IM_ARRAYSIZE(pool_sizes);
   pool_info.poolSizeCount = (uint32_t)IM_ARRAYSIZE(pool_sizes);
   pool_info.pPoolSizes = pool_sizes;
-  const auto &device =
-      static_cast<taichi::lang::vulkan::VulkanDevice &>(app_context_->device())
-          .vk_device();
-  [[maybe_unused]] VkResult err = device.functions().vkCreateDescriptorPool(
-      device, &pool_info, VK_NULL_HANDLE, &descriptor_pool_);
+  auto &device = static_cast<VulkanDevice &>(app_context_->device());
+  const auto &vk_device = device.vk_device();
+  const VkResult result = vk_device.functions().vkCreateDescriptorPool(
+      vk_device, &pool_info, VK_NULL_HANDLE, &descriptor_pool_);
+  if (result != VK_SUCCESS)
+    device.raise_backend_error(static_cast<std::int64_t>(result),
+                               "vkCreateDescriptorPool", "ImGui descriptor pool creation failed");
 }
 
 void Gui::prepare_for_next_frame() {
   ImGui::SetCurrentContext(imgui_context_);
+  TI_ERROR_IF(backend_resources_failed_ || active_reservation_,
+              "Cannot start an ImGui frame with unretired draw state");
   end_frame();
   if (render_pass_ == VK_NULL_HANDLE) {
     return;
   }
+  auto &device = static_cast<VulkanDevice &>(app_context_->device());
+  GuiVulkanCall call(imgui_context_, device);
+  TI_ERROR_IF(backend_resources_failed_ ||
+                  ImGui_ImplVulkan_ForgeGetFontState() !=
+                      ImGui_ImplVulkan_ForgeFontState::ready,
+              "ImGui font resources require cold preparation");
   ImGui_ImplVulkan_NewFrame();
   if (app_context_->config.show_window) {
 #ifdef ANDROID
@@ -207,10 +408,12 @@ void Gui::prepare_for_next_frame() {
 }
 
 bool Gui::initialized() {
-  return render_pass_ != VK_NULL_HANDLE;
+  return render_pass_ != VK_NULL_HANDLE && !backend_resources_failed_;
 }
 
 void Gui::mark_used() {
+  ImGui::SetCurrentContext(imgui_context_);
+  TI_ERROR_IF(backend_resources_failed_, "ImGui Vulkan resources are quarantined");
   is_empty_ = false;
 }
 
@@ -261,6 +464,7 @@ bool Gui::begin_collapsible_section(const std::string &name,
   return expanded;
 }
 void Gui::end_collapsible_section() {
+  ImGui::SetCurrentContext(imgui_context_);
   if (!initialized()) {
     return;
   }
@@ -277,12 +481,14 @@ bool Gui::begin_edge_region(const std::string &name, WindowEdge edge) {
   return taichi::ui::vulkan::begin_edge_region(window_layout_, name, edge);
 }
 void Gui::end_edge_region(WindowEdge edge) {
+  ImGui::SetCurrentContext(imgui_context_);
   if (!initialized()) {
     return;
   }
   taichi::ui::vulkan::end_edge_region(window_layout_, edge);
 }
 void Gui::end() {
+  ImGui::SetCurrentContext(imgui_context_);
   if (!initialized()) {
     return;
   }
@@ -349,34 +555,64 @@ bool Gui::button(const std::string &text) {
   return ImGui::Button(text.c_str());
 }
 
-void Gui::draw(taichi::lang::CommandList *cmd_list) {
-  if (!frame_started_) {
-    return;
+bool Gui::draw(CommandList *cmd_list, DrawReservation reservation) {
+  TI_ERROR_IF(!frame_started_ || !matches(reservation, DrawPhase::reserved),
+              "ImGui draw requires its current reservation");
+  auto &device = static_cast<VulkanDevice &>(app_context_->device());
+  GuiVulkanCall call(imgui_context_, device);
+  device.throw_if_backend_submission_disallowed("record ImGui Vulkan");
+  try {
+    ImGui::Render();
+    frame_started_ = false;
+    ImDrawData *draw_data = ImGui::GetDrawData();
+    const int width = int(draw_data->DisplaySize.x * draw_data->FramebufferScale.x);
+    const int height = int(draw_data->DisplaySize.y * draw_data->FramebufferScale.y);
+    if (width <= 0 || height <= 0) {
+      cancel_recorded_draw(reservation);
+      return false;
+    }
+    auto buffer = static_cast<VulkanCommandList *>(cmd_list)
+                      ->vk_command_buffer()->buffer;
+    // The ledger selected this exact retired slot before backend map/growth.
+    ImGui_ImplVulkan_ForgeRenderDrawData(draw_data, buffer, reservation.slot);
+    draw_slots_[reservation.slot].phase = DrawPhase::recorded;
+    return true;
+  } catch (const BackendRuntimeError &error) {
+    quarantine_draw();
+    device.report_backend_error(error);
+    throw;
+  } catch (...) {
+    quarantine_draw();
+    throw;
   }
-
-  // Rendering
-  ImGui::Render();
-  frame_started_ = false;
-  ImDrawData *draw_data = ImGui::GetDrawData();
-
-  VkCommandBuffer buffer =
-      static_cast<VulkanCommandList *>(cmd_list)->vk_command_buffer()->buffer;
-
-  ImGui_ImplVulkan_RenderDrawData(draw_data, buffer);
 }
 
 void Gui::cleanup_render_resources() {
+  retire_draw_readers();
+  auto &device = static_cast<VulkanDevice &>(app_context_->device());
+  GuiVulkanCall call(imgui_context_, device);
   end_frame();
-  if (initialized()) {
+  if (ImGui::GetIO().BackendRendererUserData != nullptr)
     ImGui_ImplVulkan_Shutdown();
-  }
   render_pass_ = VK_NULL_HANDLE;
+  draw_slots_.clear();
+  next_frame_slot_ = 0;
 }
 
 Gui::~Gui() {
   auto *previous_context = ImGui::GetCurrentContext();
   ImGuiContext *remaining_context = nullptr;
-  cleanup_render_resources();
+  try {
+    cleanup_render_resources();
+  } catch (...) {
+    // Keep the backend owner, upload allocations, descriptor pool and context.
+    // Window preflight also retains the enclosing renderer/device closure.
+    TI_WARN("ImGui Vulkan cleanup lacks proof; retaining backend resources");
+    ImGui::SetCurrentContext(previous_context == imgui_context_
+                                 ? nullptr : previous_context);
+    return;
+  }
+  ImGui::SetCurrentContext(imgui_context_);
 #ifndef ANDROID
   remaining_context = detach_glfw_imgui_context(imgui_context_);
 #endif

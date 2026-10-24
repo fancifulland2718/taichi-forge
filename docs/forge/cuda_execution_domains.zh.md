@@ -303,7 +303,7 @@ timeline 点。`copied.done()/wait()` 覆盖源读取完成，调用方须在复
 取消已接受的复制，其槽和源租约保持到复制完成。
 
 当前选定 Vulkan 域支持 prepared packed copy 和下述 prepared writable 路线。
-混合几何、GUI widgets、texture/host 输入和 runtime offscreen attachments 尚未接通，
+混合几何、texture/host 输入和 runtime offscreen attachments 尚未接通，
 在对应入口拒绝。窗口销毁退休自己的复制实例，不关闭整个输出域。始终只使用该选定
 Vulkan 图像路线的窗口，等待自己的复制与 graphics readers，不排空无关的默认计算或
 输出域尾部。曾使用普通显示路线的窗口仍保留保守设备排空。可见窗口仍需完成
@@ -332,6 +332,20 @@ shader 索引约束。没有额外槽数上限，也不在热路径扩容。
 绑定新域并重新准备。reset 后遗留 view/ticket 只保留已退休的安全对象，不能继续写。
 packed-copy 和 writable 是两种冷准备模式；不能在活域中切换模式或替换存储。此能力
 不等于完整 下游应用 GUI 路由或应用帧率资格。
+
+### 图像与 GUI widgets
+
+选定 Vulkan 显示域可叠加当前窗口的 GUI widgets。首次 `window.get_gui()` 在冷阶段
+准备字体及兼容的绘制资源，可能等待 graphics queue；应在稳态循环和受控队列等待前
+调用。后续相同资源的 `get_gui()` 不清除本帧已添加的 widgets。resize 或 renderpass
+变化会重新进入冷准备。`repeat_frame()` 复用图像，widgets 仍由应用逐帧描述。
+可见窗口先调用 `submit_frame()` 或 `repeat_frame()` 接纳图像，再添加本帧 widgets，
+最后调用 `show()`。
+
+每份 GUI vertex/index 存储都保留该次 graphics 提交的精确 reader。槽未完成时不覆盖
+或扩容；非阻塞 `show()` 没有可用槽会返回 `False` 并丢弃本次待显示帧。阻塞读回只
+等待需要的 reader。普通窗口与既有普通 offscreen GUI 共用这一规则；这不改变选定域
+对 geometry/runtime offscreen 的限制，也不自动开放 下游应用 完整应用路线。
 
 ## 准备、初始化与提交
 

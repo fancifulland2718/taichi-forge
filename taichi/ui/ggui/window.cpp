@@ -155,6 +155,11 @@ void Window::set_offscreen_targets(taichi::lang::Texture *color,
   TI_ERROR_IF(config_.show_window || drawn_frame_,
               "Runtime render targets require a new hidden window");
   renderer_->set_offscreen_targets(color, depth);
+  if (config_.ggui_arch == Arch::vulkan) {
+    auto *gui = static_cast<Gui *>(gui_.get());
+    if (gui->render_pass() != VK_NULL_HANDLE)
+      renderer_->prepare_gui(*gui);
+  }
 }
 
 CanvasBase *Window::get_canvas() {
@@ -169,6 +174,8 @@ SceneBase *Window::get_scene() {
 }
 
 GuiBase *Window::gui() {
+  if (config_.ggui_arch == Arch::vulkan)
+    renderer_->prepare_gui(*static_cast<Gui *>(gui_.get()));
   return gui_.get();
 }
 
@@ -189,6 +196,14 @@ void Window::resize() {
     // or teardown. A later nonzero resize performs the normal retirement.
     return;
   }
+  auto *vulkan_gui = config_.ggui_arch == Arch::vulkan
+                         ? static_cast<Gui *>(gui_.get()) : nullptr;
+  const bool rebuild_gui = vulkan_gui && vulkan_gui->render_pass() != VK_NULL_HANDLE;
+  if (vulkan_gui) {
+    vulkan_gui->validate_retirement();
+    vulkan_gui->retire_draw_readers();
+    vulkan_gui->end_frame();
+  }
   renderer_->wait_for_in_flight_frames();
   renderer_->app_context().config.width = width;
   renderer_->app_context().config.height = height;
@@ -206,6 +221,10 @@ void Window::resize() {
   // positions, so they need to be updated once the window is resized.
   config_.width = width;
   config_.height = height;
+  if (rebuild_gui) {
+    renderer_->prepare_gui(*vulkan_gui);
+    vulkan_gui->prepare_for_next_frame();
+  }
 }
 
 bool Window::draw_frame(bool blocking_acquire) {
@@ -246,36 +265,33 @@ void Window::present_frame() {
 
 Window::~Window() {
   if (renderer_) {
-    bool selected_graphics_retired = false;
+    auto *vulkan_gui = config_.ggui_arch == Arch::vulkan
+                           ? static_cast<Gui *>(gui_.get()) : nullptr;
     try {
-      selected_graphics_retired =
-          renderer_->retire_selected_vulkan_graphics();
+      // Unknown font/draw state must fail before owner close or wide fallback.
+      if (vulkan_gui)
+        vulkan_gui->validate_retirement();
+      renderer_->validate_frame_retirement();
+      const bool selected_graphics_retired =
+          renderer_->retire_selected_vulkan_graphics(vulkan_gui);
       if (!selected_graphics_retired) {
+        if (vulkan_gui)
+          vulkan_gui->retire_draw_readers();
         renderer_->retire_shared_display_resources();
       }
+      renderer_->discard_pending_frame();
+      auto &device = renderer_->app_context().device();
+      if (!selected_graphics_retired && device.backend_calls_safe()) {
+        renderer_->wait_for_in_flight_frames();
+        device.wait_idle();
+      }
     } catch (...) {
-      // A failed CUDA/external drain cannot authorize destruction of the
-      // borrowed Vulkan device. Retain this bounded window closure as a unit;
-      // its registry clients may still hold allocations and pending waits.
-      TI_WARN(
-          "GGUI display retirement failed; retaining its graphics resources");
+      // Preserve Gui, renderer, attachments and all known/unknown reader
+      // owners together. Borrowed Program lifetime is still an outer contract.
+      TI_WARN("GGUI retirement failed; retaining its graphics resources");
       (void)gui_.release();
       (void)renderer_.release();
       return;
-    }
-    renderer_->discard_pending_frame();
-    auto &device = renderer_->app_context().device();
-    if (!selected_graphics_retired && device.backend_calls_safe()) {
-      try {
-        renderer_->wait_for_in_flight_frames();
-        device.wait_idle();
-      } catch (const taichi::lang::BackendRuntimeError &error) {
-        device.report_backend_error(error);
-      } catch (const std::exception &error) {
-        TI_WARN("GGUI window teardown wait failed: {}", error.what());
-      } catch (...) {
-        TI_WARN("GGUI window teardown wait failed");
-      }
     }
   }
   gui_.reset();
@@ -365,7 +381,8 @@ std::vector<uint32_t> &Window::get_image_buffer(uint32_t &w, uint32_t &h) {
     submission_guard = program->acquire_runtime_resource_submission_guard();
   }
   if (!drawn_frame_) {
-    draw_frame(/*blocking_acquire=*/true);
+    TI_ERROR_IF(!draw_frame(/*blocking_acquire=*/true),
+                "No current frame is available for readback");
   }
   w = renderer_->swap_chain().width();
   h = renderer_->swap_chain().height();

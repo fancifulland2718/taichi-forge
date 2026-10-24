@@ -384,7 +384,7 @@ and leaves `frame.source_completion` unchanged. Cancelling a pending display doe
 not cancel an accepted copy; its slot and source leases remain until completion.
 
 The selected Vulkan domain supports prepared packed copies and the prepared
-writable path below. Mixed geometry, GUI widgets, texture/host input
+writable path below. Mixed geometry, texture/host input
 and runtime offscreen attachments reject at their respective entry points.
 Window destruction retires its copy instance without closing the entire output
 domain. A window that has used only this selected Vulkan image path waits for its
@@ -427,6 +427,24 @@ and prepare again. Views/tickets surviving reset retain retired safe objects,
 not permission to write. Packed-copy and writable pools are separate cold modes;
 storage and mode cannot change on a live bound domain. This capability does not
 qualify the full downstream application GUI route or establish application frame-rate gains.
+
+### Images with GUI widgets
+
+A selected Vulkan display domain can include its window's GUI widgets. The first
+`window.get_gui()` cold-prepares fonts and compatible draw resources and may wait
+for the graphics queue; call it before the steady loop or controlled queue waits.
+Repeated calls with the same resources preserve widgets already added this frame.
+Resize or renderpass changes return to cold preparation. `repeat_frame()` reuses
+the image; the application still describes widgets for each frame.
+For a visible window, enqueue the image with `submit_frame()` or `repeat_frame()`
+before adding that frame's widgets, then call `show()`.
+
+Each GUI vertex/index slot retains the exact graphics reader from its submission.
+Pending slots are neither overwritten nor grown. If no slot is available,
+nonblocking `show()` returns `False` and drops the pending display frame. Blocking
+readback waits for a required reader. Ordinary windows and existing ordinary
+offscreen GUI share this rule. Geometry and runtime offscreen targets remain
+restricted on selected domains; this does not qualify the full downstream application route.
 
 ## Prepare, initialize and submit
 

@@ -720,7 +720,10 @@ void Renderer::retire_shared_display_resources() {
     last_shared_display_image_->close();
 }
 
-bool Renderer::retire_selected_vulkan_graphics() {
+bool Renderer::retire_selected_vulkan_graphics(Gui *gui) {
+  validate_frame_retirement();
+  if (gui)
+    gui->validate_retirement();
   if (!display_vulkan_execution_domain_ || general_display_path_used_ ||
       has_offscreen_targets()) {
     return false;
@@ -742,8 +745,60 @@ bool Renderer::retire_selected_vulkan_graphics() {
     recycle_renderables(frame);
     in_flight_frames_.pop_front();
   }
+  if (gui)
+    gui->retire_draw_readers();
   selected_vulkan_graphics_retired_ = true;
   return true;
+}
+
+
+void Renderer::validate_frame_retirement() {
+  for (const auto &frame : in_flight_frames_)
+    TI_ERROR_IF(frame.phase != FramePhase::submitted ||
+                    (display_vulkan_execution_domain_ && !frame.complete),
+                "GGUI frame lacks a sealed graphics retirement proof");
+}
+
+std::pair<VkRenderPass, uint32_t> Renderer::gui_renderpass(bool prepare) {
+  auto &device = static_cast<VulkanDevice &>(app_context_.device());
+  VulkanRenderPassDesc desc;
+  uint32_t count = 2;
+  if (has_offscreen_targets()) {
+    desc.color_attachments.emplace_back(
+        std::get<2>(device.get_vk_image(
+            offscreen_color_->get()->get_device_allocation())), true);
+    desc.depth_attachment = std::get<2>(device.get_vk_image(
+        offscreen_depth_->get()->get_device_allocation()));
+    desc.color_final_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  } else {
+    const auto [result, format] =
+        buffer_format_ti_to_vk(swap_chain_.surface().image_format());
+    TI_ERROR_IF(result != RhiResult::success, "ImGui surface format is unsupported");
+    desc.color_attachments.emplace_back(format, true);
+    desc.depth_attachment =
+        std::get<2>(device.get_vk_image(swap_chain_.depth_allocation()));
+    count = swap_chain_.surface().get_image_count();
+  }
+  desc.clear_depth = true;
+  if (prepare) {
+    const auto pass = device.get_renderpass(desc)->renderpass;
+    gui_renderpass_desc_ = std::move(desc);
+    gui_renderpass_ = pass;
+  } else {
+    TI_ERROR_IF(!gui_renderpass_desc_ || !(*gui_renderpass_desc_ == desc),
+                "ImGui renderpass changed; cold preparation is required");
+  }
+  return {gui_renderpass_, count};
+}
+
+void Renderer::prepare_gui(Gui &gui) {
+  validate_frame_retirement();
+  Program::RuntimeResourceSubmissionGuard submission_guard;
+  if (auto *program = app_context_.prog();
+      program && program->get_graphics_device() == &app_context_.device())
+    submission_guard = program->acquire_runtime_resource_submission_guard();
+  const auto [pass, count] = gui_renderpass(/*prepare=*/true);
+  gui.prepare_render_resources(pass, count);
 }
 
 void Renderer::prepare_for_next_frame() {
@@ -770,6 +825,7 @@ bool Renderer::last_frame_used_shared_cuda_vulkan() const noexcept {
 }
 
 void Renderer::discard_pending_frame() {
+  validate_frame_retirement();
   for (const auto &item : renderables_) {
     if (auto *image = dynamic_cast<SetImage *>(item.get()))
       image->discard_display_write();
@@ -983,6 +1039,7 @@ void Renderer::recycle_renderables(InFlightFrame &frame) {
 }
 
 void Renderer::retire_completed_frames() {
+  validate_frame_retirement();
   while (!in_flight_frames_.empty()) {
     auto &frame = in_flight_frames_.front();
     TI_ERROR_IF(display_vulkan_execution_domain_ && !frame.complete,
@@ -996,6 +1053,7 @@ void Renderer::retire_completed_frames() {
 }
 
 void Renderer::wait_oldest_frame() {
+  validate_frame_retirement();
   if (in_flight_frames_.empty()) {
     return;
   }
@@ -1025,7 +1083,8 @@ void Renderer::wait_for_in_flight_frames() {
 void Renderer::record_renderpass(CommandList *commands,
                                 DeviceAllocation image,
                                 DeviceAllocation depth_image,
-                                GuiBase *gui_base) {
+                                GuiBase *gui_base,
+                                std::optional<Gui::DrawReservation> *gui_draw) {
   bool color_clear = true;
   std::vector<float> clear_colors = {background_color_[0], background_color_[1],
                                      background_color_[2], 1};
@@ -1069,13 +1128,13 @@ void Renderer::record_renderpass(CommandList *commands,
                               ->current_renderpass()
                               ->renderpass;
 
-      if (gui->render_pass() == VK_NULL_HANDLE) {
-        gui->init_render_resources(pass);
-      } else if (gui->render_pass() != pass) {
-        gui->cleanup_render_resources();
-        gui->init_render_resources(pass);
-      }
-      gui->draw(commands);
+      // No upload, cleanup, wait or ring advance is allowed in recording.
+      const uint32_t count = has_offscreen_targets()
+                                 ? 2 : swap_chain_.surface().get_image_count();
+      gui->validate_draw_resources(pass, count);
+      TI_ERROR_IF(!gui_draw || !*gui_draw, "ImGui recording lacks its reserved slot");
+      if (!gui->draw(commands, **gui_draw))
+        gui_draw->reset();
     } else if (gui != nullptr) {
       gui->end_frame();
     }
@@ -1147,45 +1206,79 @@ void Renderer::set_offscreen_targets(Texture *color, Texture *depth) {
 bool Renderer::draw_offscreen_targets(GuiBase *gui_base) {
   auto submission_guard =
       app_context_.prog()->acquire_runtime_resource_submission_guard();
-  // Targets were qualified and retained once at the cold binding boundary.
-  // Draw/vertex preparation remains the existing GGUI path.
+  auto *gui = static_cast<Gui *>(gui_base);
+  std::optional<Gui::DrawReservation> gui_draw;
+  if (gui) {
+    gui->validate_retirement();
+    if (gui->has_widgets()) {
+      const auto [pass, count] = gui_renderpass();
+      gui->validate_draw_resources(pass, count);
+      gui_draw = gui->reserve_draw_slot(/*blocking=*/true);
+    }
+  }
+  const bool had_gui_draw = bool(gui_draw);
   const auto color = offscreen_color_->get()->get_device_allocation();
   const auto depth = offscreen_depth_->get()->get_device_allocation();
   auto *program = app_context_.prog();
-  // Allocate the owner container before submitting. A later host allocation
-  // failure must not drop resources already referenced by the GPU.
-  pending_texture_resource_leases_.reserve(
-      pending_texture_resource_leases_.size() + 2);
-  in_flight_frames_.emplace_back();
-  auto &frame = in_flight_frames_.back();
-  frame.renderables = std::move(renderables_);
-  frame.ndarray_resource_leases = std::move(pending_ndarray_resource_leases_);
-  frame.texture_resource_leases = std::move(pending_texture_resource_leases_);
-  frame.texture_resource_leases.push_back(offscreen_color_);
-  frame.texture_resource_leases.push_back(offscreen_depth_);
-  // Scene descriptors contain these allocation identities. Unlike the old
-  // host-staged draw path, consecutive frames no longer imply a device wait.
-  frame.scene_uniform = std::move(scene_ubo_);
-  frame.scene_lights = std::move(lights_ssbo_);
+  InFlightFrame *retained = nullptr;
   try {
-    render_complete_semaphore_ = program->enqueue_graphics_op_lambda(
-        [this, color, depth, gui_base](GraphicsDevice *, CommandList *commands) {
-          record_renderpass(commands, color, depth, gui_base);
+    pending_texture_resource_leases_.reserve(
+        pending_texture_resource_leases_.size() + 2);
+    in_flight_frames_.emplace_back();
+    auto &frame = in_flight_frames_.back();
+    retained = &frame;
+    frame.phase = FramePhase::preparing;
+    frame.renderables = std::move(renderables_);
+    frame.ndarray_resource_leases = std::move(pending_ndarray_resource_leases_);
+    frame.texture_resource_leases = std::move(pending_texture_resource_leases_);
+    frame.texture_resource_leases.push_back(offscreen_color_);
+    frame.texture_resource_leases.push_back(offscreen_depth_);
+    frame.scene_uniform = std::move(scene_ubo_);
+    frame.scene_lights = std::move(lights_ssbo_);
+    frame.complete = program->enqueue_graphics_op_lambda(
+        [this, color, depth, gui_base, gui, &gui_draw, &frame]
+        (GraphicsDevice *, CommandList *commands) {
+          record_renderpass(commands, color, depth, gui_base, &gui_draw);
+          if (gui_draw) {
+            gui->validate_recorded_draw(*gui_draw);
+            gui->mark_draw_submitting(*gui_draw);
+          }
+          // The callback returns into code that can enqueue graphics before
+          // a later compute bridge fails; retain unknown work on that path.
+          frame.phase = FramePhase::unsealed;
         },
         {{color, ImageLayout::color_attachment, ImageLayout::shader_read},
          {depth, ImageLayout::depth_attachment, ImageLayout::shader_read}});
-    frame.complete = render_complete_semaphore_;
-  } catch (...) {
-    // A graphics submission may have succeeded before its compute bridge
-    // failed. Only this exceptional cleanup waits before buffers can recycle.
-    if (app_context_.device().backend_calls_safe()) {
-      app_context_.device().wait_idle();
+    TI_ERROR_IF(!frame.complete, "Runtime graphics submit returned no completion");
+    frame.phase = FramePhase::submitted;
+    if (gui_draw) {
+      gui->seal_draw(*gui_draw, frame.complete);
+      gui_draw.reset();
     }
-    render_queue_.clear();
-    pending_set_image_ = nullptr;
-    pending_runtime_resource_handles_.clear();
-    recycle_renderables(frame);
-    in_flight_frames_.pop_back();
+    render_complete_semaphore_ = frame.complete;
+  } catch (...) {
+    if (gui_draw) {
+      if (retained && retained->phase == FramePhase::unsealed)
+        gui->quarantine_draw();
+      else
+        gui->cancel_recorded_draw(*gui_draw);
+    }
+    // GUI may have partially mutated backend buffers or have an unknown
+    // graphics reader. Preserve the complete Window closure, without a drain.
+    if (gui && (gui->retirement_failed() ||
+                (had_gui_draw && retained && retained->phase != FramePhase::submitted)))
+      throw;
+    if (retained) {
+      // Preserve the previous ordinary offscreen recovery contract when no
+      // GUI resource was touched. Selected targets remain forbidden.
+      if (app_context_.device().backend_calls_safe())
+        app_context_.device().wait_idle();
+      render_queue_.clear();
+      pending_set_image_ = nullptr;
+      pending_runtime_resource_handles_.clear();
+      recycle_renderables(*retained);
+      in_flight_frames_.pop_back();
+    }
     throw;
   }
   render_queue_.clear();
@@ -1195,143 +1288,187 @@ bool Renderer::draw_offscreen_targets(GuiBase *gui_base) {
 }
 
 bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
-  if (!display_vulkan_execution_domain_) {
+  validate_frame_retirement();
+  auto *gui = app_context_.config.ggui_arch == Arch::vulkan
+                  ? static_cast<Gui *>(gui_base) : nullptr;
+  if (gui)
+    gui->validate_retirement();
+  if (!display_vulkan_execution_domain_)
     general_display_path_used_ = true;
-  }
   if (display_vulkan_execution_domain_) {
     TI_ERROR_IF(has_offscreen_targets() || render_queue_.size() != 1 ||
                     !pending_set_image_ ||
-                    !pending_set_image_->has_pending_shared_cuda_vulkan_image() ||
-                    (gui_base && static_cast<Gui *>(gui_base)->has_widgets()),
-                "Selected Vulkan display requires one prepared image without GUI or geometry");
+                    !pending_set_image_->has_pending_shared_cuda_vulkan_image(),
+                "Selected Vulkan display requires one prepared image without geometry");
   }
   TI_ERROR_IF(pending_set_image_ && pending_set_image_->display_write_open(),
               "Submit or cancel the current display write before rendering");
   last_frame_used_shared_cuda_vulkan_ = false;
-  if (has_offscreen_targets()) {
+  if (has_offscreen_targets())
     return draw_offscreen_targets(gui_base);
+
+  std::optional<Gui::DrawReservation> gui_draw;
+  if (gui && gui->has_widgets()) {
+    const auto [pass, count] = gui_renderpass();
+    gui->validate_draw_resources(pass, count);
+    gui_draw = gui->reserve_draw_slot(blocking_acquire);
+    if (!gui_draw)
+      return false;  // No acquire, map, growth, or image consume on GUI busy.
   }
-  SurfaceImage surface_image;
-  if (blocking_acquire) {
-    surface_image = swap_chain_.surface().acquire_surface_image();
-  } else if (!swap_chain_.surface().try_acquire_surface_image(&surface_image)) {
-    return false;
-  }
-  if (surface_image.image.device == nullptr) {
-    return false;
-  }
-  // A shared runtime stream must not fold graphics work into another thread's
-  // still-open Graph batch. Surface acquisition stays outside this host gate;
-  // the gate orders recording/submission, not GPU completion or presentation.
-  Program::RuntimeResourceSubmissionGuard submission_guard;
-  if (auto *program = app_context_.prog();
-      program && program->get_graphics_device() == &app_context_.device()) {
-    submission_guard = program->acquire_runtime_resource_submission_guard();
-  }
-  StreamSemaphore semaphore = surface_image.image_available;
-  auto image = surface_image.image;
-  std::vector<StreamSemaphore> present_waits_after_acquire;
-  if (app_context_.config.ggui_arch == Arch::vulkan) {
-    auto *surface = dynamic_cast<VulkanSurface *>(&swap_chain_.surface());
-    if (surface) {
-      present_waits_after_acquire =
-          surface->take_present_waits_after_acquire(surface_image.image_index);
+  const bool retain_transaction = display_vulkan_execution_domain_ || gui_draw;
+  InFlightFrame *retained = nullptr;
+  bool acquired = false;
+  try {
+    // Preallocate the C4b owner node before surface acquisition. Gui ordinary
+    // frames use the same closure; this does not erase general-path history.
+    if (retain_transaction) {
+      in_flight_frames_.emplace_back();
+      retained = &in_flight_frames_.back();
+      retained->phase = FramePhase::preparing;
+      retained->submit_waits.reserve(1);
     }
-  }
-  auto stream = app_context_.device().get_graphics_stream();
-  auto [cmd_list, res] = stream->new_command_list_unique();
-  assert(res == RhiResult::success && "Failed to allocate command list");
-  cmd_list->image_transition(image, ImageLayout::undefined,
-                             ImageLayout::color_attachment);
-  record_renderpass(cmd_list.get(), image, swap_chain_.depth_allocation(),
-                    gui_base);
-
-  std::vector<StreamSemaphore> wait_semaphores;
-
-  const bool use_shared_cuda_vulkan =
-      pending_set_image_ &&
-      pending_set_image_->has_pending_shared_cuda_vulkan_image();
-  // An image-only shared submission already carries the CUDA producer's
-  // external semaphore. LLVM flush() would add a redundant host stream wait.
-  // Mixed geometry retains the general flush contract for its other resources.
-  const bool shared_image_only =
-      use_shared_cuda_vulkan && render_queue_.size() == 1;
-  if (app_context_.prog() && !shared_image_only) {
-    auto sema = app_context_.prog()->flush();
-    if (sema) {
-      wait_semaphores.push_back(sema);
+    SurfaceImage surface_image;
+    if (blocking_acquire) {
+      surface_image = swap_chain_.surface().acquire_surface_image();
+    } else if (!swap_chain_.surface().try_acquire_surface_image(&surface_image)) {
+      if (retained)
+        in_flight_frames_.pop_back();
+      if (gui_draw)
+        gui->cancel_recorded_draw(*gui_draw);
+      return false;
     }
-  }
+    if (surface_image.image.device == nullptr) {
+      if (retained)
+        in_flight_frames_.pop_back();
+      if (gui_draw)
+        gui->cancel_recorded_draw(*gui_draw);
+      return false;
+    }
+    acquired = true;
+    if (retained) {
+      retained->renderables = std::move(renderables_);
+      retained->ndarray_resource_leases = std::move(pending_ndarray_resource_leases_);
+      retained->texture_resource_leases = std::move(pending_texture_resource_leases_);
+      // Save the returned acquisition owner even if a later host step fails.
+      if (surface_image.image_available)
+        retained->submit_waits.push_back(surface_image.image_available);
+    }
+    Program::RuntimeResourceSubmissionGuard submission_guard;
+    if (auto *program = app_context_.prog();
+        program && program->get_graphics_device() == &app_context_.device())
+      submission_guard = program->acquire_runtime_resource_submission_guard();
+    auto image = surface_image.image;
+    std::vector<StreamSemaphore> present_waits_after_acquire;
+    if (app_context_.config.ggui_arch == Arch::vulkan) {
+      if (auto *surface = dynamic_cast<VulkanSurface *>(&swap_chain_.surface()))
+        present_waits_after_acquire =
+            surface->take_present_waits_after_acquire(surface_image.image_index);
+    }
+    if (retained)
+      retained->present_waits_after_acquire = std::move(present_waits_after_acquire);
+    auto stream = app_context_.device().get_graphics_stream();
+    auto [cmd_list, res] = stream->new_command_list_unique();
+    TI_ERROR_IF(res != RhiResult::success || !cmd_list, "Failed to allocate command list");
+    auto *commands = cmd_list.get();
+    if (retained)
+      retained->commands = std::move(cmd_list);
+    commands->image_transition(image, ImageLayout::undefined,
+                               ImageLayout::color_attachment);
+    record_renderpass(commands, image, swap_chain_.depth_allocation(),
+                      gui_base, &gui_draw);
+    std::vector<StreamSemaphore> wait_semaphores;
+    const bool use_shared_cuda_vulkan =
+        pending_set_image_ && pending_set_image_->has_pending_shared_cuda_vulkan_image();
+    const bool shared_image_only = use_shared_cuda_vulkan && render_queue_.size() == 1;
+    // Cold fonts and CPU-written GUI buffers require no Program flush. Other
+    // geometry retains the original producer flush contract.
+    if (app_context_.prog() && !shared_image_only) {
+      auto sema = app_context_.prog()->flush();
+      if (sema)
+        wait_semaphores.push_back(sema);
+    }
+    if (surface_image.image_available)
+      wait_semaphores.push_back(surface_image.image_available);
+    if (retained) {
+      retained->submit_waits = std::move(wait_semaphores);
+      auto *submitted_image = pending_set_image_;
+      auto *vulkan_stream = dynamic_cast<VulkanStream *>(stream);
+      TI_ERROR_IF(!vulkan_stream, "GUI/selected display requires its Vulkan stream");
+      if (gui_draw)
+        gui->validate_recorded_draw(*gui_draw);
+      render_queue_.clear();
+      pending_set_image_ = nullptr;
+      pending_runtime_resource_handles_.clear();
+      retained->phase = FramePhase::unsealed;
+      if (gui_draw)
+        gui->mark_draw_submitting(*gui_draw);
+      retained->complete = use_shared_cuda_vulkan
+          ? submitted_image->submit_shared_cuda_vulkan_frame(
+                *vulkan_stream, commands, retained->submit_waits)
+          : stream->submit(commands, retained->submit_waits);
+      TI_ERROR_IF(!retained->complete, "Graphics submit returned no completion");
+      retained->phase = FramePhase::submitted;
+      if (gui_draw) {
+        gui->seal_draw(*gui_draw, retained->complete);
+        gui_draw.reset();
+      }
+      // Both proofs are durable before publishing the preallocated ticket.
+      render_complete_semaphore_ = retained->complete;
+      last_frame_used_shared_cuda_vulkan_ =
+          use_shared_cuda_vulkan && !display_vulkan_execution_domain_;
+      if (submitted_image) {
+        submitted_image->attach_display_completion(retained->complete);
+        last_shared_display_image_ = use_shared_cuda_vulkan &&
+            (submitted_image->tracks_display() || display_vulkan_execution_domain_)
+                ? submitted_image->shared_image() : nullptr;
+      }
+      render_surface_image_ = surface_image;
+      return true;
+    }
 
-  if (semaphore) {
-    wait_semaphores.push_back(semaphore);
-  }
-
-  if (display_vulkan_execution_domain_) {
-    auto *vulkan_stream = dynamic_cast<VulkanStream *>(stream);
-    TI_ERROR_IF(!vulkan_stream, "Selected display requires its Vulkan graphics stream");
-    // The deque allocation precedes moving any owner or enqueuing work. Once
-    // submit begins, even a missing proof must retain commands, descriptors,
-    // buffers and acquire/presentation semaphores as one window closure.
-    in_flight_frames_.emplace_back();
-    auto &frame = in_flight_frames_.back();
-    frame.commands = std::move(cmd_list);
-    frame.submit_waits = std::move(wait_semaphores);
+    // Preserve the existing non-GUI ordinary route, including Metal.
+    if (use_shared_cuda_vulkan) {
+      auto *vulkan_stream = dynamic_cast<VulkanStream *>(stream);
+      TI_ERROR_IF(!vulkan_stream, "Shared CUDA-Vulkan frame requires a Vulkan stream");
+      render_complete_semaphore_ = pending_set_image_->submit_shared_cuda_vulkan_frame(
+          *vulkan_stream, commands, wait_semaphores);
+    } else {
+      render_complete_semaphore_ = stream->submit(commands, wait_semaphores);
+    }
+    last_frame_used_shared_cuda_vulkan_ = use_shared_cuda_vulkan;
+    if (pending_set_image_) {
+      pending_set_image_->attach_display_completion(render_complete_semaphore_);
+      last_shared_display_image_ = use_shared_cuda_vulkan && pending_set_image_->tracks_display()
+          ? pending_set_image_->shared_image() : nullptr;
+    }
+    render_surface_image_ = surface_image;
+    render_queue_.clear();
+    pending_set_image_ = nullptr;
+    InFlightFrame frame;
+    frame.complete = render_complete_semaphore_;
     frame.present_waits_after_acquire = std::move(present_waits_after_acquire);
     frame.renderables = std::move(renderables_);
     frame.ndarray_resource_leases = std::move(pending_ndarray_resource_leases_);
     frame.texture_resource_leases = std::move(pending_texture_resource_leases_);
-    auto *submitted_image = pending_set_image_;
-    render_queue_.clear();
-    pending_set_image_ = nullptr;
     pending_runtime_resource_handles_.clear();
-    // Store the exact proof first. All later host failures remain drainable;
-    // a submit exception leaves this record unsealed and cannot be recycled.
-    frame.complete = submitted_image->submit_shared_cuda_vulkan_frame(
-        *vulkan_stream, frame.commands.get(), frame.submit_waits);
-    render_complete_semaphore_ = frame.complete;
-    submitted_image->attach_display_completion(frame.complete);
-    last_shared_display_image_ = submitted_image->shared_image();
-    render_surface_image_ = surface_image;
+    in_flight_frames_.push_back(std::move(frame));
     return true;
+  } catch (...) {
+    if (gui_draw) {
+      if (retained && retained->phase == FramePhase::unsealed) {
+        gui->quarantine_draw();
+      } else {
+        if (retained)
+          retained->commands.reset();  // Discard recording before known cancel.
+        gui->cancel_recorded_draw(*gui_draw);
+      }
+    }
+    if (retained && !acquired)
+      in_flight_frames_.pop_back();
+    // An acquired WSI image is not returned by cancelling a Gui reservation.
+    // Keep preparing/unsealed closure for Window's fail-closed retirement.
+    throw;
   }
-
-  if (use_shared_cuda_vulkan) {
-    auto *vulkan_stream = dynamic_cast<VulkanStream *>(stream);
-    TI_ERROR_IF(vulkan_stream == nullptr,
-                "Shared CUDA-Vulkan frame requires a Vulkan stream");
-    render_complete_semaphore_ =
-        pending_set_image_->submit_shared_cuda_vulkan_frame(
-            *vulkan_stream, cmd_list.get(), wait_semaphores);
-  } else {
-    render_complete_semaphore_ =
-        stream->submit(cmd_list.get(), wait_semaphores);
-  }
-  last_frame_used_shared_cuda_vulkan_ =
-      use_shared_cuda_vulkan && !display_vulkan_execution_domain_;
-  if (pending_set_image_) {
-    pending_set_image_->attach_display_completion(render_complete_semaphore_);
-    last_shared_display_image_ =
-        use_shared_cuda_vulkan &&
-                (pending_set_image_->tracks_display() || display_vulkan_execution_domain_)
-            ? pending_set_image_->shared_image()
-            : nullptr;
-  }
-  render_surface_image_ = surface_image;
-
-  render_queue_.clear();
-  pending_set_image_ = nullptr;
-  InFlightFrame frame;
-  frame.complete = render_complete_semaphore_;
-  frame.present_waits_after_acquire = std::move(present_waits_after_acquire);
-  frame.renderables = std::move(renderables_);
-  frame.ndarray_resource_leases =
-      std::move(pending_ndarray_resource_leases_);
-  frame.texture_resource_leases =
-      std::move(pending_texture_resource_leases_);
-  pending_runtime_resource_handles_.clear();
-  in_flight_frames_.push_back(std::move(frame));
-  return true;
 }
 
 const AppContext &Renderer::app_context() const {

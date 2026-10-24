@@ -462,6 +462,30 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
       COMMAND taichi_vulkan_submit_safety_tests)
     set_tests_properties(taichi_vulkan_submit_safety_tests PROPERTIES TIMEOUT 30)
   endif()
+  if(WIN32 AND TI_WITH_GGUI)
+    add_executable(taichi_gui_reader_lifecycle_tests
+      tests/cpp/ui/gui_reader_lifecycle_test.cpp)
+    target_link_libraries(taichi_gui_reader_lifecycle_tests PRIVATE
+      taichi_core gtest_main ${_ti_backend_native_targets}
+      taichi_ui taichi_ui_ggui imgui glfw)
+    target_include_directories(taichi_gui_reader_lifecycle_tests PRIVATE
+      ${_ti_backend_test_includes}
+      ${PROJECT_SOURCE_DIR}/external/glm
+      ${PROJECT_SOURCE_DIR}/external/imgui
+      ${PROJECT_SOURCE_DIR}/external/imgui/backends)
+    set_target_properties(taichi_gui_reader_lifecycle_tests PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${TESTS_OUTPUT_DIR}")
+    # Unknown state retains one complete owner. Isolate each normal process.
+    foreach(_gui_case
+        KnownUnsubmittedRecordingCancelsAndReusesSlot
+        ReturnedProofRetainsExactReadersUntilRetirement
+        GuiWithoutProofRejectsReuseAndCleanup)
+      add_test(NAME "taichi_gui_reader_${_gui_case}"
+        COMMAND taichi_gui_reader_lifecycle_tests
+          "--gtest_filter=GuiReaderLifecycle.${_gui_case}")
+      set_tests_properties("taichi_gui_reader_${_gui_case}" PROPERTIES TIMEOUT 30)
+    endforeach()
+  endif()
   target_include_directories(taichi_cuda_execution_domain_tests PRIVATE
     ${_ti_backend_test_includes})
   set_target_properties(taichi_cuda_execution_domain_tests PROPERTIES
