@@ -128,6 +128,29 @@ std::shared_ptr<const ExecutionDomain::Commands> ExecutionDomain::prepare_comman
   return state.queue.prepare(commands, operands);
 }
 
+std::shared_ptr<ExecutionDomain::ForkJoin> ExecutionDomain::prepare_fork_join(
+    std::size_t branch_count) {
+  auto &state = *state_;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.check_accepting("prepare Vulkan execution fork/join");
+  return state.queue.prepare_fork_join(branch_count);
+}
+
+std::shared_ptr<const ExecutionDomain::Commands>
+ExecutionDomain::prepare_fork_join_commands(
+    std::shared_ptr<ForkJoin> topology,
+    std::shared_ptr<const Commands> prefix,
+    const std::vector<std::shared_ptr<const Commands>> &branches,
+    std::shared_ptr<const Commands> suffix,
+    std::shared_ptr<void> operands) {
+  auto &state = *state_;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.check_accepting("prepare Vulkan execution fork/join commands");
+  // Parameters retain every caller closure until the domain lock unwinds.
+  return state.queue.prepare_fork_join_commands(
+      topology, prefix, branches, suffix, operands);
+}
+
 RuntimeCompletion ExecutionDomain::submit(
     std::shared_ptr<const Commands> commands,
     const std::vector<RuntimeCompletion> &dependencies,

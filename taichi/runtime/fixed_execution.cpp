@@ -170,6 +170,10 @@ struct FixedExecution::State {
     struct Payload {
       Device *device{nullptr};
       std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> workspace;
+      // Branch-local mutable GlobalTmps survive every command variant.
+      std::vector<std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace>>
+          branch_workspaces;
+      std::shared_ptr<vulkan::ExecutionDomain::ForkJoin> fork_join;
       std::vector<std::shared_ptr<NativeOperation>> operations;
       std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
       std::vector<std::shared_ptr<NativeKernelResultStorage>> results;
@@ -391,6 +395,39 @@ FixedExecution::FixedExecution(
         "prepare fixed execution");
   if (operations.empty())
     throw std::invalid_argument("Fixed execution requires a nonempty batch");
+  // Selected Vulkan admits one explicit flat fork/join region. Other Vulkan
+  // routes retain their existing rejection; no persistent plan format changes.
+  const Parallel *vulkan_parallel = nullptr;
+  std::size_t vulkan_parallel_index = 0;
+  if (vulkan_binding) {
+    for (std::size_t i = 0; i < operations.size(); ++i) {
+      if (const auto *parallel =
+              std::get_if<std::shared_ptr<const Parallel>>(&operations[i])) {
+        if (!*parallel || vulkan_parallel)
+          throw std::invalid_argument(
+              "Selected Vulkan parallel requires one nonnull flat fork/join region");
+        vulkan_parallel = parallel->get();
+        vulkan_parallel_index = i;
+      }
+    }
+    if (vulkan_parallel) {
+      for (const auto &operation : operations) {
+        if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+          if (dispatch->indirect_dispatch != kDeviceNullPtr ||
+              dispatch->bounded_extent != kDeviceNullPtr ||
+              dispatch->adaptive_block_dim)
+            throw std::invalid_argument(
+                "Selected Vulkan parallel requires ordinary dispatch boundaries");
+        } else if (!std::holds_alternative<BufferCopy>(operation) &&
+                   !std::holds_alternative<BufferFill>(operation) &&
+                   !std::holds_alternative<std::shared_ptr<const Parallel>>(
+                       operation)) {
+          throw std::invalid_argument(
+              "Selected Vulkan parallel cannot combine control or native operations");
+        }
+      }
+    }
+  }
   // Validate every descriptor before preparing backend state or commands.
   std::unordered_set<const NativeOperation *> owners;
   NativeRecordingState recording_state =
@@ -404,8 +441,7 @@ FixedExecution::FixedExecution(
                  NativeRecordingState &recording_state, bool inside_control) {
     for (const auto &operation : operations) {
       if (vulkan_binding) {
-        if (std::holds_alternative<std::shared_ptr<const Branch>>(operation) ||
-            std::holds_alternative<std::shared_ptr<const Parallel>>(operation))
+        if (std::holds_alternative<std::shared_ptr<const Branch>>(operation))
           throw std::invalid_argument(
               "Independent Vulkan execution requires fixed device while control");
         if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
@@ -494,21 +530,21 @@ FixedExecution::FixedExecution(
       if (const auto *value =
               std::get_if<std::shared_ptr<const Parallel>>(&operation)) {
         const auto &parallel = *value;
-        if (arch != Arch::cuda || inside_control || !parallel ||
-            parallel->branches.size() < 2)
+        if ((arch != Arch::cuda && !(arch == Arch::vulkan && vulkan_binding)) ||
+            inside_control || !parallel || parallel->branches.size() < 2)
           throw std::invalid_argument(
-              "Fixed CUDA parallel requires a flat CUDA region and at least "
-              "two branches");
+              "Fixed parallel requires CUDA or selected Vulkan, a flat region "
+              "and at least two branches");
         for (const auto &branch : parallel->branches) {
           if (branch.empty())
             throw std::invalid_argument(
-                "Fixed CUDA parallel requires nonempty branches");
+                "Fixed parallel requires nonempty branches");
           for (const auto &item : branch) {
             const auto *dispatch = std::get_if<Dispatch>(&item);
             if (!dispatch || dispatch->bounded_extent != kDeviceNullPtr ||
                 dispatch->indirect_dispatch != kDeviceNullPtr)
               throw std::invalid_argument(
-                  "Fixed CUDA parallel requires ordinary kernel branches");
+                  "Fixed parallel requires ordinary kernel branches");
           }
           auto branch_state = recording_state.control_branch();
           validate(branch, branch_state, true);
@@ -1260,6 +1296,7 @@ FixedExecution::FixedExecution(
             VulkanSubmissionRecipe::Kind::independent_graphics;
     std::shared_ptr<State::VulkanInstance> instance;
     std::vector<const Dispatch *> dispatch_sources;
+    std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> recording_workspace;
     const auto bind_dispatch = [&](const Dispatch &dispatch) {
       auto *loaded = dynamic_cast<gfx::KernelImpl *>(dispatch.kernel);
       if (!loaded || (gfx_runtime && gfx_runtime != &loaded->runtime()))
@@ -1317,7 +1354,8 @@ FixedExecution::FixedExecution(
         auto &payload = *instance->payload;
         retain_detached(gfx_runtime->prepare_fixed_commands(
             native, state_->vulkan_domain->new_command_list(),
-            payload.workspace, {}, roots()));
+            recording_workspace ? recording_workspace : payload.workspace, {},
+            roots()));
         dispatch_sources.clear();
         native.clear();
         return;
@@ -1325,9 +1363,9 @@ FixedExecution::FixedExecution(
       retain(gfx_runtime->prepare_fixed_graph(native, {}, {}, independent));
       native.clear();
     };
-    const auto record_sequence = [&] {
+    const auto record_sequence = [&](const std::vector<Operation> &region) {
       std::size_t operation_index = 0, segment_index = 0;
-      for (const auto &operation : operations) {
+      for (const auto &operation : region) {
         // The descriptor is consumed at prepare time only. Existing registrations
         // retain the actual commands, dependencies and completion protocol.
         if (submission_recipe && !independent && operation_index &&
@@ -1472,19 +1510,69 @@ FixedExecution::FixedExecution(
           payload.workspace = vulkan_binding->workspace
                                   ? vulkan_binding->workspace
                                   : gfx_runtime->create_fixed_graph_workspace();
-        record_sequence();
-        std::vector<CommandList *> compute;
-        for (const auto &recording : payload.recordings)
-          compute.push_back(recording->cmdlist.get());
-        instance->commands = state_->vulkan_domain->prepare_commands(
-            compute, instance->payload);
+        std::vector<CommandList *> compute, suffix;
+        std::vector<std::shared_ptr<const vulkan::ExecutionDomain::Commands>>
+            branches;
+        const auto recorded_since = [&](std::size_t begin) {
+          std::vector<CommandList *> commands;
+          for (std::size_t i = begin; i < payload.recordings.size(); ++i)
+            commands.push_back(payload.recordings[i]->cmdlist.get());
+          return commands;
+        };
+        if (vulkan_parallel) {
+          payload.fork_join = state_->vulkan_domain->prepare_fork_join(
+              vulkan_parallel->branches.size());
+          record_sequence(std::vector<Operation>(
+              operations.begin(), operations.begin() + vulkan_parallel_index));
+          compute = recorded_since(0);
+          for (const auto &branch : vulkan_parallel->branches) {
+            // Binding a first branch may discover the runtime when the prefix
+            // is empty. Validation already requires every entry to share it.
+            if (!gfx_runtime) {
+              auto *kernel = dynamic_cast<gfx::KernelImpl *>(
+                  std::get<Dispatch>(branch.front()).kernel);
+              if (!kernel)
+                throw std::invalid_argument(
+                    "Fixed Vulkan entries must share a runtime");
+              gfx_runtime = &kernel->runtime();
+            }
+            recording_workspace = gfx_runtime->create_fixed_graph_workspace();
+            payload.branch_workspaces.push_back(recording_workspace);
+            const auto begin = payload.recordings.size();
+            record_sequence(branch);
+            branches.push_back(state_->vulkan_domain->prepare_commands(
+                recorded_since(begin)));
+          }
+          recording_workspace.reset();
+          const auto begin = payload.recordings.size();
+          record_sequence(std::vector<Operation>(
+              operations.begin() + vulkan_parallel_index + 1, operations.end()));
+          suffix = recorded_since(begin);
+        } else {
+          record_sequence(operations);
+          compute = recorded_since(0);
+        }
+        const auto compose = [&](const std::vector<CommandList *> &prefix,
+                                 const std::vector<CommandList *> &tail) {
+          if (payload.fork_join)
+            return state_->vulkan_domain->prepare_fork_join_commands(
+                payload.fork_join,
+                state_->vulkan_domain->prepare_commands(prefix), branches,
+                state_->vulkan_domain->prepare_commands(tail), instance->payload);
+          return state_->vulkan_domain->prepare_commands(prefix,
+                                                         instance->payload);
+        };
+        instance->commands = compose(compute, suffix);
         std::unique_ptr<CommandList> initialize;
-        if (!vulkan_binding->workspace) {
+        if (!vulkan_binding->workspace || !payload.branch_workspaces.empty()) {
           initialize = state_->vulkan_domain->new_command_list();
-          payload.workspace->record_initialization(*initialize);
+          if (!vulkan_binding->workspace)
+            payload.workspace->record_initialization(*initialize);
+          for (const auto &workspace : payload.branch_workspaces)
+            workspace->record_initialization(*initialize);
           auto first = compute;
           first.insert(first.begin(), initialize.get());
-          instance->first_commands = state_->vulkan_domain->prepare_commands(first, instance->payload);
+          instance->first_commands = compose(first, suffix);
         }
         if (instance->parameter_count || instance->gpu_timing) {
           const auto capacity = state_->vulkan_domain->snapshot().capacity;
@@ -1523,23 +1611,31 @@ FixedExecution::FixedExecution(
               sequence.push_back(upload.get());
             sequence.insert(sequence.end(), compute.begin(), compute.end());
             auto &variants = instance->variants[slot];
-            const auto record = [&](const std::vector<CommandList *> &steps, bool first) {
+            const auto record = [&](const std::vector<CommandList *> &steps,
+                                    const std::vector<CommandList *> &tail, bool first) {
               auto commands = steps;
               if (first && initialize)
                 commands.insert(commands.begin(), initialize.get());
-              return state_->vulkan_domain->prepare_commands(commands, instance->payload);
+              return compose(commands, tail);
             };
-            variants.ordinary = record(sequence, false);
-            variants.first = initialize ? record(sequence, true) : variants.ordinary;
+            variants.ordinary = record(sequence, suffix, false);
+            variants.first = initialize ? record(sequence, suffix, true)
+                                        : variants.ordinary;
             if (instance->gpu_timing) {
               auto begin = state_->vulkan_domain->new_command_list();
               auto end = state_->vulkan_domain->new_command_list();
               auto timing = state_->vulkan_domain->prepare_timing(*begin, *end);
               if (timing) {
                 sequence.insert(sequence.begin() + (upload ? 1 : 0), begin.get());
-                sequence.push_back(end.get());
-                variants.sampled = record(sequence, false);
-                variants.sampled_first = initialize ? record(sequence, true) : variants.sampled;
+                auto tail = suffix;
+                if (payload.fork_join)
+                  tail.push_back(end.get());
+                else
+                  sequence.push_back(end.get());
+                variants.sampled = record(sequence, tail, false);
+                variants.sampled_first = initialize
+                                             ? record(sequence, tail, true)
+                                             : variants.sampled;
               } else {
                 timing = std::make_shared<State::VulkanInstance::UnsupportedTiming>();
                 variants.sampled = variants.ordinary;
@@ -1557,6 +1653,8 @@ FixedExecution::FixedExecution(
         }
         if (!vulkan_binding->workspace)
           state_->workspace_bytes += payload.workspace->bytes();
+        for (const auto &workspace : payload.branch_workspaces)
+          state_->workspace_bytes += workspace->bytes();
       };
       if (vulkan_binding->retirement_parts) {
         vulkan_binding->retirement_parts->push_back(instance);
@@ -1566,7 +1664,7 @@ FixedExecution::FixedExecution(
             instance, [&](const auto &) { prepare(); });
       }
     } else {
-      record_sequence();
+      record_sequence(operations);
     }
     state_->vulkan_runtime = gfx_runtime;
     state_->kind = 2;

@@ -35,6 +35,7 @@ class ExecutionDomain {
     bool accepting{false};
     bool closed{false};
   };
+  using ForkJoin = VulkanExecutionQueue::ForkJoin;
   using Commands = VulkanExecutionQueue::Commands;
   using CommandSelector = VulkanExecutionQueue::CommandSelector;
   using TimingSelector = std::function<StreamGpuTiming(std::size_t)>;
@@ -57,6 +58,15 @@ class ExecutionDomain {
   std::shared_ptr<const Commands> prepare_commands(
       const std::vector<CommandList *> &commands,
       std::shared_ptr<void> operands = {});
+  // Cold topology belongs to the existing domain queue. All command variants
+  // of one prepared instance share it; only the final join is a completion.
+  std::shared_ptr<ForkJoin> prepare_fork_join(std::size_t branch_count);
+  std::shared_ptr<const Commands> prepare_fork_join_commands(
+      std::shared_ptr<ForkJoin> topology,
+      std::shared_ptr<const Commands> prefix,
+      const std::vector<std::shared_ptr<const Commands>> &branches,
+      std::shared_ptr<const Commands> suffix,
+      std::shared_ptr<void> operands = {});
   std::shared_ptr<const Commands> prepare_external_access(
       std::shared_ptr<const Commands> body,
       std::shared_ptr<const VulkanExternalAccess> access);
@@ -65,7 +75,7 @@ class ExecutionDomain {
   // It may fill its preallocated slot and reserve completion publication, but
   // cannot enqueue/wait/reenter or publish the still-unsubmitted ticket.
   // A rejected callback leaves the queue and instance usable. All fallible
-  // completion construction precedes the single native queue submission.
+  // completion construction precedes the first native queue submission.
   RuntimeCompletion submit(
       std::shared_ptr<const Commands> commands,
       const std::vector<RuntimeCompletion> &dependencies = {},
