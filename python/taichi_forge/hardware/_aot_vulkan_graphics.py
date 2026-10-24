@@ -25,7 +25,7 @@ def _pipeline(context, pipeline):
     def build():
         facts = pipeline.shader_artifacts()
         ports = tuple(f"shader_{i}" for i in range(len(facts)))
-        inputs = context.resource_inputs.require(pipeline, ports, asset_ports=ports)
+        inputs = context.immutable_resource_inputs(pipeline, dict(zip(ports, definition.shaders, strict=True)))
         for port, fact in zip(ports, facts, strict=True):
             asset = inputs[port]
             if not isinstance(asset, str):

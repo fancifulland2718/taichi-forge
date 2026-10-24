@@ -47,6 +47,7 @@ _FEATURE_BITS = {
     "vulkan_execution_domain_image_control": 29,
     "vulkan_execution_domain_shared_sampled_images": 30,
     "vulkan_execution_domain_private_graphics": 31,
+    "vulkan_execution_domain_live_image_writes": 32,
 }
 
 

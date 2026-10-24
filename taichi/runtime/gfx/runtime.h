@@ -348,6 +348,9 @@ class TI_DLL_EXPORT GfxRuntime {
     std::optional<std::vector<DeviceAllocation>> buffers;
     std::vector<std::uint64_t> ray_resources;
     std::string timing_path;
+    // Actual accesses certified by a described native operation. true denotes
+    // sampled-only access; absent metadata cannot authorize a borrowed image.
+    std::optional<std::vector<std::pair<DeviceAllocation, bool>>> image_uses;
   };
 
   using GraphStructuredStrategy = VulkanControlStrategy;
@@ -593,7 +596,7 @@ class TI_DLL_EXPORT GfxRuntime {
     std::vector<RuntimeCompletion> shared_image_dependencies() const;
     // Called only after the owning instance's exact prefix and recordings
     // retire. Resource storage may remain referenced by released C API handles.
-    void retire_shared_image_reads();
+    void retire_shared_image_loans();
 
    private:
     friend class GfxRuntime;
@@ -610,23 +613,24 @@ class TI_DLL_EXPORT GfxRuntime {
     // Command payloads retain this workspace until their exact final prefix
     // retires. Entries in the admission index only have weak reverse edges.
     std::shared_ptr<SharedImageAdmission<RuntimeCompletion>::Loan> shared_images_;
-    std::unordered_set<DeviceAllocationId> shared_sampled_images_;
+    std::unordered_map<DeviceAllocationId, SharedImageUse> shared_image_uses_;
     bool initialization_recorded_{false};
   };
   std::shared_ptr<FixedGraphWorkspace> create_fixed_graph_workspace();
-  struct SharedSampledImage {
+  struct SharedImage {
     RuntimeResourceHandle handle;
     DeviceAllocation allocation;
     std::shared_ptr<void> owner;  // Existing Texture registry lease facade.
     // Explicit whole-image subresource contract for the first consumer.
-    bool color_aspect{true};
+    bool depth_aspect{false};
     std::uint32_t base_mip{0}, mip_count{1};
     std::uint32_t base_layer{0}, layer_count{1};
+    SharedImageUse access{SharedImageUse::sampled_at_boundary};
   };
   void register_managed_image(DeviceAllocation image, RuntimeResourceHandle handle);
-  void prepare_fixed_shared_sampled_images(
+  void prepare_fixed_shared_images(
       const std::shared_ptr<FixedGraphWorkspace> &workspace,
-      const std::vector<SharedSampledImage> &images,
+      const std::vector<SharedImage> &images,
       const std::shared_ptr<RuntimeFaultDomain> &owner);
 
   // Cold-only admission of an allocation owned exclusively by this instance.

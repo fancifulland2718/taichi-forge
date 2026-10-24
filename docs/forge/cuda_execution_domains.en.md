@@ -46,6 +46,7 @@ the DSL or creating a device. These are native implementation declarations:
 | `vulkan_execution_instance_retirement` | Per-instance retirement and resident-budget reuse |
 | `vulkan_execution_domain_shared_sampled_images` | Read-only sampling of same-Program managed color Textures across domains |
 | `vulkan_execution_domain_private_graphics` | Instance-private color/depth attachments, offscreen drawing and compute consumers |
+| `vulkan_execution_domain_live_image_writes` | Exclusive owned Texture loans for flat storage-kernel or described graphics plans |
 
 Use `features.get(name, False)` for older packages. Missing declarations do not
 become support because a version or commit looks newer. Device/driver support,
@@ -123,7 +124,7 @@ instance: pending work and the domain retain permission.
 
 Images with existing raw VkImage aliases cannot enter this route, and new aliases
 of the same VkImage cannot be imported during a loan. External-memory aliasing,
-cross-family ownership, graphics, shared-image control flow and multiple mips or
+external queue-family ownership transfers, shared-image control flow and multiple mips or
 layers remain outside its scope. Windows tests cover pending readers on two
 queues, retiring one reader, failed preparation, source-view deletion and Program
 shutdown. This does not qualify full rendering-scene throughput.
@@ -141,9 +142,19 @@ explicit downstream gradients use the same domain. Recordings restore the
 instance's image boundary layouts; attachments, pipelines and workspace remain
 owned until instance retirement. Warm replay neither rebuilds them nor submits
 to the default queue. Initial image data uploads remain cold preparation work.
-This does not admit borrowed writable Textures from live RasterPass objects,
-passes with AS resources, display interop or graphics fork/join; those need their
-own resource contracts.
+Flat typed storage-kernel and described `VulkanGraphicsPipeline.record_pass()`
+plans can also borrow existing owned 2D color/depth Textures with one mip/layer.
+The same allocation remains visible after retirement; no target copy is made.
+An instance that writes an image holds an exclusive loan for its entire lifetime:
+ordinary reads/writes and other domain loans are rejected until it retires.
+Pure sampled inputs retain shared-reader fanout. Cold preparation imports the
+ordinary queue's exact preparation prefix; warm execution restores the boundary
+layout on the selected domain. `release()` alone does not retire the loan.
+
+This resource contract does not by itself migrate the high-level RasterPass
+camera/helper/scratch lowering. That producer route, passes with AS resources,
+display interop and graphics fork/join need their own qualification. Raw image
+aliases, packed depth/stencil and borrowed-image control flow remain excluded.
 
 Host selection, public parallel recipes and shared sparse/RNG/runtime-error
 state remain outside this independent Vulkan route. Ordinary Graph execution keeps

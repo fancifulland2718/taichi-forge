@@ -39,6 +39,7 @@ JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和�
 | `vulkan_execution_instance_retirement` | 单实例退休及驻留预算复用 |
 | `vulkan_execution_domain_shared_sampled_images` | 同 Program 托管 color Texture 的跨域只读采样 |
 | `vulkan_execution_domain_private_graphics` | 实例私有 color/depth attachment、离屏绘制及后续 compute |
+| `vulkan_execution_domain_live_image_writes` | 平直 storage kernel 或描述完整的 graphics 计划排他借用 owned Texture |
 
 对旧包使用 `features.get(name, False)`；不能从版本号或较新的提交推定能力。具体设备/
 驱动、同 GPU 共享及 recipe 的编译/provider 条件在冷创建和准备时检查。声明为真不代表
@@ -96,7 +97,7 @@ transfer-src 布局的 Canvas 复制；提前录制的写者同样被拒绝，�
 仅释放底层 prepared handle 不等于退休，在途工作和域仍持有许可。
 
 已有 raw VkImage 别名的图像不能进入该路线，借用期间也不能导入同一 VkImage 的新别名。
-外部内存别名、跨 queue family、graphics、共享图像控制流及多 mip/layer 不在此能力范围。
+外部内存别名、外部 queue family ownership 转移、共享图像控制流及多 mip/layer 不在此能力范围。
 Windows 验证覆盖双队列在途读取、关闭其中一个实例、准备失败清理、源视图删除及
 Program 退出；这不是完整渲染场景的吞吐结论。
 
@@ -108,8 +109,17 @@ graphics 能力，也可以执行已准入的离屏计划。CUDA 不接纳 `queu
 固定平坦的私有离屏计划沿现有 native `vulkan_graphics` 描述重建 pipeline、color/depth attachment，
 并在同一域内连接绘制、采样计算和下游显式梯度。每段录制恢复实例的图像边界布局；
 附件、pipeline 与 workspace 保留到实例退休。暖态不逐次重建，不回默认队列提交。
-图像的初始数据上传仍属于冷准备。该能力不包括 live RasterPass 的借用可写 Texture、
-含 AS 的 pass、显示互操作或 graphics fork/join；它们需要各自的资源合同。
+图像的初始数据上传仍属于冷准备。
+
+平直的 typed storage kernel 和 `VulkanGraphicsPipeline.record_pass()` 计划也可借用
+已有的 owned 2D color/depth Texture（单 mip/layer）。目标不复制，退休后仍可从原
+分配观察内容。包含写入的实例在整个存活期排他借用图像：普通读写和其他域借用均
+被拒绝，直至该实例退休；纯采样源保留多 reader 共享。冷准备接收普通队列的准确
+准备前缀，暖态在指定域恢复边界 layout；仅调用 `release()` 不会退休租约。
+
+这份资源合同不等于高层 RasterPass 的相机/helper/scratch lowering 已迁移。
+该生产端路线、含 AS 的 pass、显示互操作和 graphics fork/join 仍需分别验证。
+原始图像别名、packed depth/stencil 和借用图像控制流仍不接纳。
 
 独立 Vulkan 路线还不接纳 host selection、公共并行 recipe，以及共享
 sparse/RNG/runtime-error 状态。

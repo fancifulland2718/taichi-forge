@@ -36,14 +36,16 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **182**, persistent execution-plan version **26**, and
+- The frontend/native private ABI is **183**, persistent execution-plan version **26**, and
   compiled-cache schema **74**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
   Old compiled caches are invalidated; distinguish the resulting cold start from warm replay.
 - Vulkan domains can explicitly select `queue="graphics"` for instance-private offscreen
-  color/depth drawing and compute consumers on one queue. Borrowed writable Textures and
-  passes with AS resources remain outside this route. Completion GPU timing uses the
+  color/depth drawing and compute consumers on one queue. Flat storage kernels and described
+  low-level graphics passes can borrow owned Textures exclusively until instance retirement.
+  High-level RasterPass production and passes with AS resources need separate integration.
+  Completion GPU timing uses the
   `execution_envelope` scope, covering drawing and computation but excluding parameter uploads
   and external waits; see the [execution-domain contract](cuda_execution_domains.en.md).
 - Python `ti.init()`, including wheel installations, keeps `compile_tier="fast"` and

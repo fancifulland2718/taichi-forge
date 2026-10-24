@@ -17,6 +17,7 @@
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_kernel_resource.h"
 #include "taichi/runtime/native_kernel_result.h"
+#include "taichi/runtime/native_image.h"
 #include "taichi/program/launch_context_builder.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/llvm/aot_graph_data.h"
@@ -1471,6 +1472,15 @@ FixedExecution::FixedExecution(
           op.images = std::move(requirements.images);
           op.graphics_queue = requirements.graphics_queue;
           op.buffers = std::move(requirements.buffers);
+          if (requirements.image_uses) {
+            op.image_uses.emplace();
+            for (const auto &use : *requirements.image_uses) {
+              if (!use.image)
+                throw std::invalid_argument("Native image access has no owner");
+              op.image_uses->emplace_back(use.image->gfx_sampled_allocation(),
+                                           use.sampled_only);
+            }
+          }
           op.external = [external = *external](Device *device,
                                                CommandList *commands) {
             commands->memory_barrier();

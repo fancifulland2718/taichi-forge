@@ -3155,6 +3155,7 @@ void GfxRuntime::prepare_fixed_private_image(
   TI_ERROR_IF(!workspace || workspace->device_ != device_ ||
                   workspace->initialization_recorded_ || !owner ||
                   image.device != device_ || !image.alloc_id ||
+                  workspace->shared_image_uses_.count(image.alloc_id) ||
                   (boundary != ImageLayout::shader_read &&
                    boundary != ImageLayout::shader_read_write),
               "Private Graph images require an owned allocation and shader boundary");
@@ -3556,9 +3557,11 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
       if (owned != workspace->private_images_.end()) {
         entry = owned->second.boundary;
       } else {
-        TI_ERROR_IF(!workspace->shared_sampled_images_.count(image.alloc_id) ||
-                        layout != ImageLayout::shader_read,
-                    "Shared Vulkan image requires a sampled shader-read use");
+        const auto use = workspace->shared_image_uses_.find(image.alloc_id);
+        TI_ERROR_IF(use == workspace->shared_image_uses_.end() ||
+                        (use->second == SharedImageUse::sampled_at_boundary &&
+                         layout != ImageLayout::shader_read),
+                    "Shared Vulkan image use is outside its reserved access");
         entry = ImageLayout::shader_read;
       }
     }
@@ -3616,9 +3619,21 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
           const auto managed = managed_images_.find(image.alloc_id);
           if (managed != managed_images_.end())
             image_uses.push_back({{managed->second, SharedImageUse::exclusive}, image_owners});
-        } else {
-          TI_ERROR_IF(workspace->shared_sampled_images_.count(image.alloc_id),
-                      "Shared Vulkan images require kernel sampled dispatches");
+        } else if (const auto shared = workspace->shared_image_uses_.find(image.alloc_id);
+                   shared != workspace->shared_image_uses_.end()) {
+          TI_ERROR_IF(!operation.image_uses,
+                      "Shared Vulkan native image requires explicit access metadata");
+          bool found = false, sampled_only = true;
+          for (const auto &[allocation, sampled] : *operation.image_uses) {
+            if (allocation == image) {
+              found = true;
+              sampled_only &= sampled;
+            }
+          }
+          TI_ERROR_IF(!found ||
+                          (sampled_only && layout != ImageLayout::shader_read) ||
+                          (!sampled_only && shared->second != SharedImageUse::exclusive),
+                      "Shared Vulkan native image access differs from its loan");
         }
         record_image_use(image, layout,
                          operation.graphics_queue &&
@@ -6855,9 +6870,9 @@ void GfxRuntime::preflight_kernel_images(const CompiledTaichiKernel &kernel,
     }
 }
 
-void GfxRuntime::prepare_fixed_shared_sampled_images(
+void GfxRuntime::prepare_fixed_shared_images(
     const std::shared_ptr<FixedGraphWorkspace> &workspace,
-    const std::vector<SharedSampledImage> &images,
+    const std::vector<SharedImage> &images,
     const std::shared_ptr<RuntimeFaultDomain> &owner) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   TI_ERROR_IF(!workspace || workspace->device_ != device_ ||
@@ -6868,31 +6883,34 @@ void GfxRuntime::prepare_fixed_shared_sampled_images(
     return;
 #ifdef TI_WITH_VULKAN
   auto *device = dynamic_cast<vulkan::VulkanDevice *>(device_);
-  TI_ERROR_IF(!device, "Shared sampled image requires Vulkan");
+  TI_ERROR_IF(!device, "Shared image requires Vulkan");
   std::vector<SharedImageAdmission<RuntimeCompletion>::PinnedUse> pinned;
-  std::unordered_set<DeviceAllocationId> allocations;
+  std::unordered_map<DeviceAllocationId, SharedImageUse> allocations;
   for (const auto &image : images) {
     const auto managed = managed_images_.find(image.allocation.alloc_id);
     TI_ERROR_IF(image.allocation.device != device_ || !image.owner ||
                     managed == managed_images_.end() || managed->second != image.handle ||
                     workspace->private_images_.count(image.allocation.alloc_id) ||
-                    !image.color_aspect || image.base_mip || image.mip_count != 1 ||
+                    image.base_mip || image.mip_count != 1 ||
                     image.base_layer || image.layer_count != 1,
                 "Shared image requires its existing Texture registry lease");
     const auto native = std::get<0>(device->get_vk_image(image.allocation));
+    const bool depth = native->format == VK_FORMAT_D16_UNORM ||
+                       native->format == VK_FORMAT_D32_SFLOAT;
     TI_ERROR_IF(native->mip_levels != 1 || native->array_layers != 1 ||
                     native->type != VK_IMAGE_TYPE_2D || !native->allocation ||
                     !(native->usage & VK_IMAGE_USAGE_SAMPLED_BIT) ||
-                    native->format == VK_FORMAT_D16_UNORM ||
-                    native->format == VK_FORMAT_D24_UNORM_S8_UINT ||
-                    native->format == VK_FORMAT_D32_SFLOAT,
-                "Shared image requires an owned color 2D image with one mip and layer");
+                    image.depth_aspect != depth ||
+                    native->format == VK_FORMAT_D24_UNORM_S8_UINT,
+                "Shared image requires an owned color or depth 2D image with one mip and layer");
     const auto storage_key = image_storage_keys_.at(image.allocation.alloc_id);
     TI_ERROR_IF(std::count_if(image_storage_keys_.begin(), image_storage_keys_.end(),
                     [&](const auto &entry) { return entry.second == storage_key; }) != 1,
                 "Shared image has raw aliases without a common owner contract");
-    pinned.push_back({{image.handle, SharedImageUse::sampled_at_boundary}, image.owner});
-    allocations.insert(image.allocation.alloc_id);
+    pinned.push_back({{image.handle, image.access}, image.owner});
+    const auto [entry, inserted] = allocations.emplace(image.allocation.alloc_id, image.access);
+    if (!inserted && image.access == SharedImageUse::exclusive)
+      entry->second = SharedImageUse::exclusive;
   }
   auto loan = shared_image_admission_.reserve(pinned);
   if (!loan->needs_boundary().empty()) {
@@ -6921,10 +6939,10 @@ void GfxRuntime::prepare_fixed_shared_sampled_images(
                 "Shared image readiness requires a reusable queue prefix");
     loan->publish_boundary(std::move(prefix));
   }
-  workspace->shared_sampled_images_ = std::move(allocations);
+  workspace->shared_image_uses_ = std::move(allocations);
   std::atomic_store(&workspace->shared_images_, std::move(loan));
 #else
-  TI_ERROR("Shared sampled image requires Vulkan");
+  TI_ERROR("Shared image requires Vulkan");
 #endif
 }
 
@@ -6938,7 +6956,7 @@ GfxRuntime::FixedGraphWorkspace::shared_image_dependencies() const {
   return result;
 }
 
-void GfxRuntime::FixedGraphWorkspace::retire_shared_image_reads() {
+void GfxRuntime::FixedGraphWorkspace::retire_shared_image_loans() {
   // Initialization can observe the workspace while a naked domain close
   // retires it. Release permission atomically, then destroy the loan outside
   // shared_ptr's internal synchronization; keep all storage owners unchanged.

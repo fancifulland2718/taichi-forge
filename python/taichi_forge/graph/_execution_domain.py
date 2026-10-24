@@ -29,9 +29,9 @@ def execution_domain(*, capacity=2, instance_capacity=64, priority=0, gpu_timing
     Explicit close/reset drains accepted work. Dropping a domain handle only
     releases that handle; the Program retains its resources until retirement.
     Vulkan requires an unused device-created queue and timeline support.
-    queue="graphics" requests a graphics+compute family. Private AOT offscreen
-    attachments are supported; borrowed writable Texture targets require a
-    separate ownership contract and remain rejected.
+    queue="graphics" requests a graphics+compute family. Qualified flat plans
+    may borrow owned color/depth Textures. A writer holds an exclusive image
+    loan until instance retirement; ordinary access is rejected during it.
     """
     from taichi_forge.aot import borrow_runtime
 
@@ -99,6 +99,11 @@ class _JitContext(GraphLoweringContext):
         name = self._name("blob")
         self.live_blobs[name] = data
         return name
+
+    def immutable_resource_inputs(self, owner, assets):
+        # Qualified producers supply the immutable artifacts in their frozen
+        # definition. This borrows code bytes, never snapshots mutable storage.
+        return dict(assets)
 
     def public_resource(self, owner):
         if type(owner) is not Texture:

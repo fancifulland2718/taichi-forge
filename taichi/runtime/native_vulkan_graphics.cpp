@@ -406,6 +406,7 @@ class PreparedPass final : public NativeOperation {
             "Graphics pass cannot sample an attachment alias");
       if (inserted)
         images_.emplace_back(allocation, layout);
+      image_uses_.push_back({image, layout == ImageLayout::shader_read});
       (clear ? payload_->clears : payload_->reads).push_back(image);
     };
     for (size_t i = 0; i < d.targets.size(); ++i) {
@@ -582,7 +583,7 @@ class PreparedPass final : public NativeOperation {
   }
   NativeVulkanRecordingRequirements vulkan_recording_requirements()
       const override {
-    return {images_, true, buffers_};
+    return {images_, true, buffers_, image_uses_};
   }
   void validate_vulkan_execution_domain() const override {
     if (!payload_->scene_reads.empty())
@@ -611,6 +612,7 @@ class PreparedPass final : public NativeOperation {
   std::unique_ptr<Payload> payload_;
   std::vector<std::pair<DeviceAllocation, ImageLayout>> images_;
   std::vector<DeviceAllocation> buffers_;
+  std::vector<NativeVulkanRecordingRequirements::ImageUse> image_uses_;
 };
 #endif
 

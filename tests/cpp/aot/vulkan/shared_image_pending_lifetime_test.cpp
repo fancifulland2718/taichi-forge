@@ -101,6 +101,7 @@ struct BorrowedImageSession {
   TiRuntime runtime{nullptr};
   TiAotModule module{nullptr};
   Texture *texture{nullptr};
+  Texture *peer_texture{nullptr};
   DeviceAllocation image{kDeviceNullAllocation};
   std::weak_ptr<NativeSampledImage> observed_image;
   std::array<TiVulkanExecutionDomain, 2> domains{};
@@ -130,7 +131,7 @@ struct BorrowedImageSession {
     return *program.get_gfx_runtime_for_borrowing();
   }
 
-  void initialize(const char *fixture) {
+  void initialize(const char *fixture, bool exclusive = false) {
     borrower = AotRuntimeClient::create(program);
     runtime = reinterpret_cast<TiRuntime>(borrower->handle());
     texture = program.create_texture(BufferFormat::r32f, {2, 2});
@@ -157,6 +158,11 @@ struct BorrowedImageSession {
     }
     const auto imported =
         reinterpret_cast<TiNativeResource>(borrower->import_texture(texture));
+    auto peer_imported = imported;
+    if (exclusive) {
+      peer_texture = program.create_texture(BufferFormat::r32f, {2, 2});
+      peer_imported = reinterpret_cast<TiNativeResource>(borrower->import_texture(peer_texture));
+    }
     BorrowScope scope(*borrower);
     auto &impl = *reinterpret_cast<::Runtime *>(runtime);
     observed_image = std::dynamic_pointer_cast<NativeSampledImage>(
@@ -167,8 +173,9 @@ struct BorrowedImageSession {
       throw std::runtime_error("missing texture AOT fixture");
     // Existing texture_aot_test_.py --arch vulkan (without --graph) exports
     // run2, which samples its two inputs and writes their sum to an ndarray.
-    const std::string plan = R"({"version":26,"operations":[
-      {"kind":"kernel","entry":"run2","arguments":["image","image","output"]}]})";
+    const std::string plan = std::string(R"({"version":26,"operations":[)") +
+        (exclusive ? R"({"kind":"kernel","entry":"write2","arguments":["image"]},)" : "") +
+        R"({"kind":"kernel","entry":"run2","arguments":["image","image","output"]}]})";
     const TiVulkanExecutionDomainCreateInfo options{2, 1, TI_FALSE};
     for (std::size_t i = 0; i < domains.size(); ++i) {
       domains[i] = ti_create_vulkan_execution_domain_ext(runtime, &options);
@@ -180,7 +187,7 @@ struct BorrowedImageSession {
       std::array<TiNamedArgument, 2> args{};
       args[0].name = "image";
       args[0].argument.type = TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT;
-      args[0].argument.value.native_resource = imported;
+      args[0].argument.value.native_resource = i ? peer_imported : imported;
       args[1].name = "output";
       args[1].argument.type = TI_ARGUMENT_TYPE_NDARRAY;
       auto &array = args[1].argument.value.ndarray;
@@ -234,20 +241,21 @@ struct BorrowedImageSession {
   }
 };
 
-const char *texture_fixture() {
-  return std::getenv("TAICHI_VULKAN_SHARED_TEXTURE_AOT_DIR");
+const char *texture_fixture(bool exclusive = false) {
+  return std::getenv(exclusive ? "TAICHI_VULKAN_WRITABLE_TEXTURE_AOT_DIR"
+                              : "TAICHI_VULKAN_SHARED_TEXTURE_AOT_DIR");
 }
 }  // namespace
 
-void check_pending_close(bool instance_only) {
-  if (!vulkan::is_vulkan_api_available() || !texture_fixture())
+void check_pending_close(bool instance_only, bool exclusive = false) {
+  if (!vulkan::is_vulkan_api_available() || !texture_fixture(exclusive))
     GTEST_SKIP()
         << "Requires Vulkan and the existing texture_aot_test_ fixture";
   BorrowedImageSession session;
   if (!session.device().vk_caps().timeline_semaphore ||
       session.device().created_compute_queue_count() < 3)
     GTEST_SKIP();
-  session.initialize(texture_fixture());
+  session.initialize(texture_fixture(exclusive), exclusive);
   session.submit_pending(!instance_only);
   TiVulkanExecutionInstance instance = nullptr;
   if (instance_only) {
@@ -290,9 +298,16 @@ void check_pending_close(bool instance_only) {
   EXPECT_EQ(ti_query_completion_ext(session.completions[0]), TI_TRUE);
   EXPECT_EQ(ti_query_completion_ext(session.completions[1]), TI_FALSE);
   session.expect_pixels(0);
-  EXPECT_THROW(
-      session.gfx().transition_image(session.image, ImageLayout::transfer_dst),
-      std::invalid_argument);
+  if (exclusive) {
+    EXPECT_NO_THROW(session.gfx().transition_image(session.image, ImageLayout::shader_read));
+    EXPECT_THROW(session.gfx().transition_image(session.peer_texture->get_device_allocation(),
+                                                ImageLayout::shader_read),
+                 std::invalid_argument);
+  } else {
+    EXPECT_THROW(
+        session.gfx().transition_image(session.image, ImageLayout::transfer_dst),
+        std::invalid_argument);
+  }
   session.gates->release(1);
   ti_wait_completion_ext(session.completions[1]);
   require_success();
@@ -312,21 +327,28 @@ TEST(VulkanSharedImageLifetime, PendingInstanceCloseCollectsItsQueueOperands) {
   check_pending_close(true);
 }
 
-TEST(VulkanSharedImageLifetime,
-     ProgramResetDrainsBothReadersAfterSourceViewDeletion) {
-  if (!vulkan::is_vulkan_api_available() || !texture_fixture())
+TEST(VulkanSharedImageLifetime, PendingWriterCloseRetiresOnlyItsImage) {
+  check_pending_close(true, true);
+}
+
+void check_reset_after_view_deletion(bool exclusive) {
+  if (!vulkan::is_vulkan_api_available() || !texture_fixture(exclusive))
     GTEST_SKIP()
         << "Requires Vulkan and the existing texture_aot_test_ fixture";
   BorrowedImageSession session;
   if (!session.device().vk_caps().timeline_semaphore ||
       session.device().created_compute_queue_count() < 3)
     GTEST_SKIP();
-  session.initialize(texture_fixture());
+  session.initialize(texture_fixture(exclusive), exclusive);
   session.submit_pending();
   EXPECT_EQ(ti_query_completion_ext(session.completions[0]), TI_FALSE);
   EXPECT_EQ(ti_query_completion_ext(session.completions[1]), TI_FALSE);
   session.program.delete_texture(session.texture);
   session.texture = nullptr;
+  if (session.peer_texture) {
+    session.program.delete_texture(session.peer_texture);
+    session.peer_texture = nullptr;
+  }
   EXPECT_FALSE(session.observed_image.expired());
   auto owner = session.program.runtime_fault_domain();
   PendingAction reset(session.gates, [&] { session.program.finalize(); });
@@ -358,6 +380,16 @@ TEST(VulkanSharedImageLifetime,
     ti_wait_completion_ext(completion);
     require_success();
   }
+}
+
+TEST(VulkanSharedImageLifetime,
+     ProgramResetDrainsBothReadersAfterSourceViewDeletion) {
+  check_reset_after_view_deletion(false);
+}
+
+TEST(VulkanSharedImageLifetime,
+     ProgramResetDrainsBothWritersAfterSourceViewDeletion) {
+  check_reset_after_view_deletion(true);
 }
 }  // namespace taichi::lang
 #endif

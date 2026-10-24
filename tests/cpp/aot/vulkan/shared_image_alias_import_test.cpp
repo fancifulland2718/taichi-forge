@@ -44,7 +44,7 @@ TEST(VulkanSharedImageImport, RejectedAliasLeavesReaderAndLaterImportUsable) {
   auto workspace = gfx->create_fixed_graph_workspace();
   {
     auto submission = program.acquire_runtime_resource_submission_guard();
-    gfx->prepare_fixed_shared_sampled_images(
+    gfx->prepare_fixed_shared_images(
         workspace,
         {{image->runtime_resource_handle(), image->get_device_allocation(),
           lease}},
@@ -80,7 +80,7 @@ TEST(VulkanSharedImageImport, RejectedAliasLeavesReaderAndLaterImportUsable) {
   auto rejected = gfx->create_fixed_graph_workspace();
   {
     auto submission = program.acquire_runtime_resource_submission_guard();
-    EXPECT_ANY_THROW(gfx->prepare_fixed_shared_sampled_images(
+    EXPECT_ANY_THROW(gfx->prepare_fixed_shared_images(
         rejected,
         {{image->runtime_resource_handle(), image->get_device_allocation(),
           lease}},
@@ -90,7 +90,7 @@ TEST(VulkanSharedImageImport, RejectedAliasLeavesReaderAndLaterImportUsable) {
   ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
   {
     auto submission = program.acquire_runtime_resource_submission_guard();
-    EXPECT_NO_THROW(gfx->prepare_fixed_shared_sampled_images(
+    EXPECT_NO_THROW(gfx->prepare_fixed_shared_images(
         rejected,
         {{image->runtime_resource_handle(), image->get_device_allocation(),
           lease}},

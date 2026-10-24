@@ -65,7 +65,7 @@ struct PreparedDomainInstance final : RuntimeClient {
     parts.clear();
 #ifdef TI_WITH_VULKAN
     if (shared_workspace) {
-      shared_workspace->retire_shared_image_reads();
+      shared_workspace->retire_shared_image_loans();
       shared_workspace.reset();
     }
 #endif
@@ -320,12 +320,32 @@ struct PreparedExecution {
         selected_vulkan.domain = domain->vulkan;
         vulkan_workspace = gfx_runtime->create_fixed_graph_workspace();
         selected_vulkan.workspace = vulkan_workspace;
-        std::vector<gfx::GfxRuntime::SharedSampledImage> shared_images;
+        std::vector<gfx::GfxRuntime::SharedImage> shared_images;
+        const auto image_use = [&](const std::shared_ptr<NativeSampledImage> &image,
+                                    bool sampled_only) {
+          if (!image)
+            throw MemoryBindingError("Native image access has no owner");
+          const auto handle = image->gfx_managed_owner();
+          if (!handle)
+            return;
+          const auto format = image->parameters().format;
+          gfx::GfxRuntime::SharedImage use{handle, image->gfx_sampled_allocation(), image};
+          use.depth_aspect = format == BufferFormat::depth16 || format == BufferFormat::depth32f;
+          use.access = sampled_only ? gfx::SharedImageUse::sampled_at_boundary
+                                    : gfx::SharedImageUse::exclusive;
+          shared_images.push_back(std::move(use));
+        };
         bool nonflat = false;
         const auto collect = [&](const auto &steps) {
           for (const auto &step : steps) {
             const auto *dispatch = std::get_if<FixedExecution::Dispatch>(&step);
             if (!dispatch) {
+              if (const auto *native = std::get_if<std::shared_ptr<NativeOperation>>(&step)) {
+                const auto requirements = (*native)->vulkan_recording_requirements();
+                if (requirements.image_uses)
+                  for (const auto &use : *requirements.image_uses)
+                    image_use(use.image, use.sampled_only);
+              }
               nonflat |= std::holds_alternative<std::shared_ptr<const FixedExecution::While>>(step) ||
                          std::holds_alternative<std::shared_ptr<const FixedExecution::Branch>>(step) ||
                          std::holds_alternative<std::shared_ptr<const FixedExecution::Parallel>>(step);
@@ -335,13 +355,7 @@ struct PreparedExecution {
               const auto image_binding = std::dynamic_pointer_cast<NativeImageKernelBinding>(binding);
               if (!image_binding)
                 continue;
-              const auto &image = image_binding->image();
-              const auto handle = image->gfx_managed_owner();
-              if (!handle)
-                continue;
-              if (!image_binding->sampled_only())
-                throw MemoryBindingError("Shared Vulkan image requires sampled dispatches");
-              shared_images.push_back({handle, image->gfx_sampled_allocation(), image});
+              image_use(image_binding->image(), image_binding->sampled_only());
             }
           }
         };
@@ -352,7 +366,7 @@ struct PreparedExecution {
         // Reserve after collecting every phase and before recording commands.
         // The Program submission guard is held by the borrowed runtime entry;
         // GFX uses its existing host gate for the reservation/prefix transaction.
-        gfx_runtime->prepare_fixed_shared_sampled_images(
+        gfx_runtime->prepare_fixed_shared_images(
             vulkan_workspace, shared_images, runtime.runtime_fault_domain());
         // Only factories invoked for this prepared instance populate this
         // private owner list. Public/borrowed native resources remain outside

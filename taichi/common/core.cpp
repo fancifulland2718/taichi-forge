@@ -113,7 +113,8 @@ std::uint64_t get_forge_native_feature_bitmap() {
             kForgeVulkanExecutionDomainPrivateImages |
             kForgeVulkanExecutionDomainImageControl |
             kForgeVulkanExecutionDomainSharedSampledImages |
-            kForgeVulkanExecutionDomainPrivateGraphics;
+            kForgeVulkanExecutionDomainPrivateGraphics |
+            kForgeVulkanExecutionDomainLiveImageWrites;
 #endif
 #endif
 #if defined(TI_WITH_CUDA) && defined(TI_WITH_VULKAN) && defined(TI_WITH_GGUI)

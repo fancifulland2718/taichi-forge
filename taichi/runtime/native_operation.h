@@ -17,6 +17,7 @@
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
+class NativeSampledImage;
 
 // The composition contract of an operation, independent of its provider.
 enum class NativeOperationMode : std::uint32_t {
@@ -66,6 +67,14 @@ struct NativeVulkanRecordingRequirements {
   // nullopt means unknown; an empty list certifies no external buffer access.
   // Private provider storage remains owned by the prepared resource itself.
   std::optional<std::vector<DeviceAllocation>> buffers;
+  struct ImageUse {
+    std::shared_ptr<NativeSampledImage> image;
+    bool sampled_only;
+  };
+  // Complete image operands and their actual accesses, not just boundary
+  // layouts. Owners are resolved only during preparation. Unknown providers
+  // cannot borrow live images by claiming a shader-read entry/exit layout.
+  std::optional<std::vector<ImageUse>> image_uses;
 };
 
 // Prepared backend commands own their scratch and recording state. The

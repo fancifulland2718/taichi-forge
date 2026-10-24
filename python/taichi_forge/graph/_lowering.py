@@ -123,6 +123,10 @@ class GraphLoweringContext:
             self._public_resource_owners[id(owner)] = (owner, name)
         return name
 
+    def immutable_resource_inputs(self, owner, assets):
+        """AOT requires explicit deployable assets; a JIT adapter may retain them."""
+        return self.resource_inputs.require(owner, tuple(assets), asset_ports=tuple(assets))
+
     def resource_links(self, owner, links):
         """Record qualified source relationships; never serialize source handles."""
         links = tuple(sorted(links.items()))
