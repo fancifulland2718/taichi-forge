@@ -272,7 +272,8 @@ VulkanExecutionQueue::prepare_external_access(
     const std::vector<vkapi::IVkSemaphore> &binary_signals,
     std::shared_ptr<void> operands) {
   if (!body || body->device != &state_->device ||
-      !body->binary_waits.empty() || !body->binary_signals.empty())
+      body->external_access || !body->binary_waits.empty() ||
+      !body->binary_signals.empty())
     throw std::invalid_argument(
         "External access requires an unbound body from this Vulkan device");
   if (body->handles.size() > UINT32_MAX - 2u)
@@ -315,6 +316,18 @@ VulkanExecutionQueue::prepare_external_access(
     std::shared_ptr<const VulkanExternalAccess> access) {
   if (!access)
     throw std::invalid_argument("Null Vulkan external access plan");
+  if (!body || body->device != &state_->device || body->external_access ||
+      !body->binary_waits.empty() || !body->binary_signals.empty())
+    throw std::invalid_argument(
+        "Managed access requires an unbound body from this Vulkan device");
+  access->validate_queue(state_->device, state_->index);
+  if (!access->requires_import_boundaries()) {
+    // Local storage has no OS ownership transition or binary handshake. Cold
+    // host composition retains the same body and adds only atomic admission.
+    auto result = std::shared_ptr<Commands>(new Commands(*body));
+    result->external_access = std::move(access);
+    return result;
+  }
   auto acquire = new_command_list();
   auto release = new_command_list();
   std::vector<vkapi::IVkSemaphore> waits, signals;
@@ -418,7 +431,7 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
   VulkanExternalAccess::Transaction external(pending.commands->external_access.get());
   // In particular, not-ready rejects before the runtime's admit constructs a
   // completion/sequence or writes its selected parameter slot.
-  external.reserve();
+  external.reserve(state.device, state.index);
   if (admit)
     admit(index, point);
   external.arm(point);

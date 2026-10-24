@@ -5,6 +5,8 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <type_traits>
+#include <variant>
 #include <vector>
 
 #include "taichi/rhi/vulkan/vulkan_external_buffer.h"
@@ -115,6 +117,59 @@ class VulkanExternalBufferOwner final : public ExternalSynchronizationDomain {
   std::unique_ptr<State> state_;
 };
 
+// One local packed display allocation. A cold prepared recipe may borrow it
+// before acquisition, but admission requires one outstanding write lease and
+// consumes that lease's one complete producer submission. This owner stores
+// only native points, never RuntimeCompletion/Commands/instance closures.
+// Canvas graphics readers and last-image pinning are added at the UI boundary;
+// this native contract alone does not enable writable Canvas frames.
+class VulkanDisplayBufferOwner final : public ExternalSynchronizationDomain {
+ public:
+  struct Selection {
+    std::uint64_t program_owner{0}, domain{0};
+    std::uint32_t queue_index{0};
+  };
+  struct Snapshot {
+    std::uint64_t next_epoch, lease;
+    bool accepting, closed, poisoned, acquired, has_writer, sealed;
+  };
+  // Real local storage, not an external-handle round trip. The caller gets a
+  // finite allocation for Program's existing external-managed registry.
+  static std::shared_ptr<VulkanDisplayBufferOwner> create(
+      VulkanDevice &device, std::size_t bytes, Selection selected);
+  ~VulkanDisplayBufferOwner() override;
+  VulkanDisplayBufferOwner(const VulkanDisplayBufferOwner &) = delete;
+  VulkanDisplayBufferOwner &operator=(const VulkanDisplayBufferOwner &) = delete;
+  std::uint64_t identity() const noexcept override;
+  bool retirement_waits_for_consumer() const noexcept override { return true; }
+  bool has_consumer_ready_query() const noexcept override { return true; }
+  bool consumer_ready() const override;
+  void acquire_for_consumer(const ExternalStreamDomain &) override;
+  void release_from_consumer(const ExternalStreamDomain &) override;
+  Snapshot snapshot() const;
+  Selection selection() const noexcept;
+  DeviceAllocation ndarray_allocation() const;
+  void validate_binding(VulkanDevice &device, Selection selected) const;
+  // A fresh lease nonce rejects stale host calls even if an unwritten lease
+  // was cancelled. Cancellation does not consume a producer epoch.
+  std::uint64_t acquire_write();
+  void cancel_write(std::uint64_t lease);
+  // Identity equality, not timeline value equality: only the actual writer
+  // accepted for this lease can seal it. Failure leaves the lease retryable.
+  std::shared_ptr<VulkanTimelinePoint> seal_write(
+      std::uint64_t lease, const std::shared_ptr<VulkanTimelinePoint> &producer);
+  void stop();
+  // Cold retirement only. Stop admission, wait the exact proven writer outside
+  // the lock, and release device storage now, even if ticket/loan shells live.
+  void close();
+
+ private:
+  friend class VulkanExternalAccess;
+  struct State;
+  explicit VulkanDisplayBufferOwner(std::unique_ptr<State> state);
+  std::unique_ptr<State> state_;
+};
+
 // Complete native cold transaction; frontends own their runtime submission
 // guard and register the returned owner's idempotent ndarray wrapper once.
 template <typename Gate>
@@ -133,14 +188,19 @@ std::shared_ptr<VulkanExternalBufferOwner> import_vulkan_external_ndarray(
 // registry or backend callback is queried by the command-body replay itself.
 class VulkanExternalAccess final {
  public:
+  using Owner = std::variant<std::shared_ptr<VulkanExternalBufferOwner>,
+                             std::shared_ptr<VulkanDisplayBufferOwner>>;
   explicit VulkanExternalAccess(
       std::vector<std::shared_ptr<VulkanExternalBufferOwner>> owners);
+  explicit VulkanExternalAccess(std::vector<Owner> owners);
   std::size_t size() const noexcept {
     return owners_.size();
   }
 
  private:
   friend class VulkanExecutionQueue;
+  bool requires_import_boundaries() const;
+  void validate_queue(VulkanDevice &device, std::uint32_t queue_index) const;
   void record(VulkanCommandList &acquire,
               VulkanCommandList &release,
               std::vector<vkapi::IVkSemaphore> &waits,
@@ -154,7 +214,7 @@ class VulkanExternalAccess final {
     ~Transaction();
     Transaction(const Transaction &) = delete;
     Transaction &operator=(const Transaction &) = delete;
-    void reserve();
+    void reserve(VulkanDevice &device, std::uint32_t queue_index);
     void arm(const std::shared_ptr<VulkanTimelinePoint> &point) noexcept;
     void seal() noexcept;
 
@@ -167,7 +227,7 @@ class VulkanExternalAccess final {
   // Only the queue's successful native drain can resolve uncertain enqueue.
   // Owners remain permanently poisoned; this permits safe retirement only.
   void confirm_drained(const std::shared_ptr<VulkanTimelinePoint> &point) const;
-  const std::vector<std::shared_ptr<VulkanExternalBufferOwner>> owners_;
+  const std::vector<Owner> owners_;
 };
 
 }  // namespace taichi::lang::vulkan

@@ -11,17 +11,29 @@ namespace taichi::lang::vulkan {
 namespace {
 std::atomic<std::uint64_t> next_identity{1};
 
-auto normalize(std::vector<std::shared_ptr<VulkanExternalBufferOwner>> owners) {
+auto normalize(std::vector<VulkanExternalAccess::Owner> owners) {
   if (owners.empty())
     throw std::invalid_argument("Vulkan external access requires an owner");
+  const auto identity = [](const auto &owner) {
+    return std::visit([](const auto &value) { return value->identity(); }, owner);
+  };
   for (const auto &owner : owners)
-    if (!owner)
+    if (!std::visit([](const auto &value) { return bool(value); }, owner))
       throw std::invalid_argument("Null Vulkan external buffer owner");
-  std::sort(owners.begin(), owners.end(), [](const auto &a, const auto &b) {
-    return a->identity() < b->identity();
+  std::sort(owners.begin(), owners.end(), [&](const auto &a, const auto &b) {
+    return identity(a) < identity(b);
   });
   owners.erase(std::unique(owners.begin(), owners.end()), owners.end());
   return owners;
+}
+
+auto imported_entries(
+    std::vector<std::shared_ptr<VulkanExternalBufferOwner>> owners) {
+  std::vector<VulkanExternalAccess::Owner> result;
+  result.reserve(owners.size());
+  for (auto &owner : owners)
+    result.emplace_back(std::move(owner));
+  return result;
 }
 }  // namespace
 
@@ -197,9 +209,203 @@ void VulkanExternalBufferOwner::close() {
   // Both native import destruction and producer callbacks run outside locks.
 }
 
+struct VulkanDisplayBufferOwner::State {
+  VulkanDevice &device;
+  const std::uint64_t identity;
+  const Selection selected;
+  mutable std::mutex mutex;
+  DeviceAllocationUnique allocation;
+  std::shared_ptr<VulkanTimelinePoint> latest, uncertain;
+  std::uint64_t next_epoch{1}, next_lease{1}, lease{0}, writer_lease{0};
+  bool accepting{true}, closed{false}, poisoned{false};
+  bool acquired{false}, sealed{false};
+
+  State(VulkanDevice &device, Selection selected)
+      : device(device),
+        identity(next_identity.fetch_add(1, std::memory_order_relaxed)),
+        selected(selected) {
+    if (!identity)
+      throw std::overflow_error("Vulkan display owner identity exhausted");
+  }
+  void check() const {
+    if (!accepting || closed || poisoned)
+      throw std::runtime_error("Vulkan display buffer owner is closed or poisoned");
+  }
+  void check_lease(std::uint64_t value) const {
+    check();
+    if (!acquired || !value || value != lease)
+      throw std::invalid_argument("Vulkan display write lease is not current");
+  }
+};
+
+VulkanDisplayBufferOwner::VulkanDisplayBufferOwner(std::unique_ptr<State> state)
+    : state_(std::move(state)) {
+}
+
+std::shared_ptr<VulkanDisplayBufferOwner> VulkanDisplayBufferOwner::create(
+    VulkanDevice &device, std::size_t bytes, Selection selected) {
+  if (!bytes || bytes % sizeof(std::uint32_t) ||
+      bytes > device.get_storage_buffer_binding_limits().max_range)
+    throw std::invalid_argument("Invalid local Vulkan display storage extent");
+  if (!selected.program_owner || !selected.domain || !selected.queue_index ||
+      selected.queue_index >= device.created_compute_queue_count())
+    throw std::invalid_argument("Vulkan display storage requires a selected independent domain");
+  auto state = std::make_unique<State>(device, selected);
+  auto allocation = device.allocate_memory_unique(
+      {bytes, false, false, false, AllocUsage::Storage});
+  if (allocation.second != RhiResult::success)
+    throw std::runtime_error("Cannot allocate local Vulkan display storage");
+  state->allocation = std::move(allocation.first);
+  return std::shared_ptr<VulkanDisplayBufferOwner>(
+      new VulkanDisplayBufferOwner(std::move(state)));
+}
+
+VulkanDisplayBufferOwner::~VulkanDisplayBufferOwner() {
+  try {
+    close();
+  } catch (...) {
+    // An enqueue without proof keeps its finite device allocation quarantined.
+    (void)state_.release();
+  }
+}
+
+std::uint64_t VulkanDisplayBufferOwner::identity() const noexcept {
+  return state_->identity;
+}
+
+VulkanDisplayBufferOwner::Selection VulkanDisplayBufferOwner::selection()
+    const noexcept {
+  return state_->selected;
+}
+
+VulkanDisplayBufferOwner::Snapshot VulkanDisplayBufferOwner::snapshot() const {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  return {state_->next_epoch, state_->lease, state_->accepting, state_->closed,
+          state_->poisoned, state_->acquired, state_->writer_lease != 0,
+          state_->sealed};
+}
+
+bool VulkanDisplayBufferOwner::consumer_ready() const {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  state_->check();
+  return state_->acquired && !state_->writer_lease;
+}
+
+void VulkanDisplayBufferOwner::acquire_for_consumer(const ExternalStreamDomain &) {
+  throw std::invalid_argument("Vulkan display access requires prepared atomic submission");
+}
+
+void VulkanDisplayBufferOwner::release_from_consumer(const ExternalStreamDomain &) {
+  throw std::invalid_argument("Vulkan display access requires prepared atomic submission");
+}
+
+DeviceAllocation VulkanDisplayBufferOwner::ndarray_allocation() const {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  state_->check();
+  return *state_->allocation;
+}
+
+void VulkanDisplayBufferOwner::validate_binding(VulkanDevice &device,
+                                                Selection selected) const {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  state_->check();
+  const auto &actual = state_->selected;
+  if (&device != &state_->device || selected.program_owner != actual.program_owner ||
+      selected.domain != actual.domain || selected.queue_index != actual.queue_index)
+    throw std::invalid_argument("Vulkan display writer belongs to another device or domain");
+}
+
+std::uint64_t VulkanDisplayBufferOwner::acquire_write() {
+  auto &state = *state_;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.check();
+  if (state.acquired || (state.latest && !state.latest->is_ready()))
+    throw VulkanExecutionQueue::Busy();
+  if (state.next_lease == UINT64_MAX)
+    throw std::overflow_error("Vulkan display lease counter exhausted");
+  state.lease = state.next_lease++;
+  state.writer_lease = 0;
+  state.acquired = true;
+  state.sealed = false;
+  return state.lease;
+}
+
+void VulkanDisplayBufferOwner::cancel_write(std::uint64_t lease) {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  state_->check_lease(lease);
+  // Keep latest after an accepted writer. Its exact prefix, not the number of
+  // facade references, determines when a cancelled slot may be acquired again.
+  state_->acquired = false;
+}
+
+std::shared_ptr<VulkanTimelinePoint> VulkanDisplayBufferOwner::seal_write(
+    std::uint64_t lease, const std::shared_ptr<VulkanTimelinePoint> &producer) {
+  auto &state = *state_;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.check_lease(lease);
+  if (!producer || state.writer_lease != lease || producer != state.latest)
+    throw std::invalid_argument("Vulkan display seal requires this lease's exact producer");
+  state.acquired = false;
+  state.sealed = true;
+  return state.latest;
+}
+
+void VulkanDisplayBufferOwner::stop() {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  state_->accepting = false;
+}
+
+void VulkanDisplayBufferOwner::close() {
+  auto &state = *state_;
+  std::shared_ptr<VulkanTimelinePoint> prefix;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.accepting = false;
+    if (state.closed)
+      return;
+    if (state.uncertain)
+      throw std::runtime_error("Vulkan display enqueue has no retirement proof");
+    prefix = state.latest;
+  }
+  if (prefix)
+    prefix->wait();
+  DeviceAllocationUnique retired;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    retired = std::move(state.allocation);
+    state.latest.reset();
+    state.acquired = false;
+    state.closed = true;
+  }
+  // DeviceAllocationGuard must retire before the Program destroys its device,
+  // irrespective of any surviving borrowed owner or completion-query shell.
+}
+
 VulkanExternalAccess::VulkanExternalAccess(
     std::vector<std::shared_ptr<VulkanExternalBufferOwner>> owners)
+    : VulkanExternalAccess(imported_entries(std::move(owners))) {
+}
+
+VulkanExternalAccess::VulkanExternalAccess(std::vector<Owner> owners)
     : owners_(normalize(std::move(owners))) {
+}
+
+bool VulkanExternalAccess::requires_import_boundaries() const {
+  return std::any_of(owners_.begin(), owners_.end(), [](const auto &owner) {
+    return std::holds_alternative<std::shared_ptr<VulkanExternalBufferOwner>>(owner);
+  });
+}
+
+void VulkanExternalAccess::validate_queue(VulkanDevice &device,
+                                         std::uint32_t queue_index) const {
+  for (const auto &entry : owners_) {
+    if (const auto *local =
+            std::get_if<std::shared_ptr<VulkanDisplayBufferOwner>>(&entry)) {
+      auto selected = (*local)->selection();
+      selected.queue_index = queue_index;
+      (*local)->validate_binding(device, selected);
+    }
+  }
 }
 
 void VulkanExternalAccess::record(
@@ -207,7 +413,12 @@ void VulkanExternalAccess::record(
     VulkanCommandList &release,
     std::vector<vkapi::IVkSemaphore> &waits,
     std::vector<vkapi::IVkSemaphore> &signals) const {
-  for (const auto &owner : owners_) {
+  for (const auto &entry : owners_) {
+    const auto *imported =
+        std::get_if<std::shared_ptr<VulkanExternalBufferOwner>>(&entry);
+    if (!imported)
+      continue;
+    const auto &owner = *imported;
     std::lock_guard<std::mutex> lock(owner->state_->mutex);
     owner->state_->check();
     auto &buffer = *owner->state_->buffer;
@@ -218,19 +429,31 @@ void VulkanExternalAccess::record(
   }
 }
 
-void VulkanExternalAccess::Transaction::reserve() {
+void VulkanExternalAccess::Transaction::reserve(VulkanDevice &device,
+                                                std::uint32_t queue_index) {
   if (!plan_)
     return;
   try {
-    for (const auto &owner : plan_->owners_) {
-      auto &state = *owner->state_;
-      state.mutex.lock();
-      ++locked_;
-      state.check();
-      if (state.next_epoch == UINT64_MAX)
-        throw std::overflow_error("Vulkan external buffer epoch exhausted");
-      if (!(*state.ready)(state.next_epoch))
-        throw VulkanExecutionQueue::Busy();
+    for (const auto &entry : plan_->owners_) {
+      std::visit([&](const auto &owner) {
+        auto &state = *owner->state_;
+        state.mutex.lock();
+        ++locked_;
+        state.check();
+        if (state.next_epoch == UINT64_MAX)
+          throw std::overflow_error("Vulkan managed buffer epoch exhausted");
+        if constexpr (std::is_same_v<std::decay_t<decltype(*owner)>,
+                                     VulkanExternalBufferOwner>) {
+          if (!(*state.ready)(state.next_epoch))
+            throw VulkanExecutionQueue::Busy();
+        } else {
+          if (&state.device != &device || state.selected.queue_index != queue_index)
+            throw std::invalid_argument("Vulkan display access queue mismatch");
+          if (!state.acquired || state.writer_lease)
+            throw std::invalid_argument(
+                "Vulkan display lease requires one complete prepared writer");
+        }
+      }, entry);
     }
   } catch (...) {
     unlock();
@@ -247,10 +470,15 @@ void VulkanExternalAccess::Transaction::arm(
 void VulkanExternalAccess::Transaction::seal() noexcept {
   if (!plan_)
     return;
-  for (const auto &owner : plan_->owners_) {
-    auto &state = *owner->state_;
-    state.latest = point_;
-    ++state.next_epoch;
+  for (const auto &entry : plan_->owners_) {
+    std::visit([&](const auto &owner) {
+      auto &state = *owner->state_;
+      state.latest = point_;
+      ++state.next_epoch;
+      if constexpr (std::is_same_v<std::decay_t<decltype(*owner)>,
+                                   VulkanDisplayBufferOwner>)
+        state.writer_lease = state.lease;
+    }, entry);
   }
   point_.reset();
   unlock();
@@ -258,11 +486,13 @@ void VulkanExternalAccess::Transaction::seal() noexcept {
 
 VulkanExternalAccess::Transaction::~Transaction() {
   if (point_) {
-    for (const auto &owner : plan_->owners_) {
-      auto &state = *owner->state_;
-      state.poisoned = true;
-      state.accepting = false;
-      state.uncertain = point_;
+    for (const auto &entry : plan_->owners_) {
+      std::visit([&](const auto &owner) {
+        auto &state = *owner->state_;
+        state.poisoned = true;
+        state.accepting = false;
+        state.uncertain = point_;
+      }, entry);
     }
   }
   unlock();
@@ -270,15 +500,18 @@ VulkanExternalAccess::Transaction::~Transaction() {
 
 void VulkanExternalAccess::Transaction::unlock() noexcept {
   while (locked_)
-    plan_->owners_[--locked_]->state_->mutex.unlock();
+    std::visit([](const auto &owner) { owner->state_->mutex.unlock(); },
+               plan_->owners_[--locked_]);
 }
 
 void VulkanExternalAccess::confirm_drained(
     const std::shared_ptr<VulkanTimelinePoint> &point) const {
-  for (const auto &owner : owners_) {
-    std::lock_guard<std::mutex> lock(owner->state_->mutex);
-    if (owner->state_->uncertain == point)
-      owner->state_->uncertain.reset();
+  for (const auto &entry : owners_) {
+    std::visit([&](const auto &owner) {
+      std::lock_guard<std::mutex> lock(owner->state_->mutex);
+      if (owner->state_->uncertain == point)
+        owner->state_->uncertain.reset();
+    }, entry);
   }
 }
 

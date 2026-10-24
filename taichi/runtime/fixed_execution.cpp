@@ -1588,18 +1588,30 @@ void FixedExecution::bind_external_access(
     if (instance.retired || instance.initialized || instance.external_bound)
       throw std::invalid_argument(
           "External access requires an unbound unsubmitted instance");
-    std::vector<std::shared_ptr<vulkan::VulkanExternalBufferOwner>> owners;
+    std::vector<vulkan::VulkanExternalAccess::Owner> owners;
     owners.reserve(domains.size());
+    auto &device = *static_cast<vulkan::VulkanDevice *>(instance.payload->device);
+    const auto selected = state_->vulkan_domain->snapshot();
+    if (!selected.accepting)
+      throw std::invalid_argument("External access requires a live Vulkan domain");
     for (const auto &domain : domains) {
-      auto owner =
-          std::dynamic_pointer_cast<vulkan::VulkanExternalBufferOwner>(domain);
-      if (!owner || owner->buffer()->device !=
-                        static_cast<vulkan::VulkanDevice *>(
-                            instance.payload->device)->vk_device())
+      if (auto owner =
+              std::dynamic_pointer_cast<vulkan::VulkanExternalBufferOwner>(domain)) {
+        if (owner->buffer()->device != device.vk_device())
+          throw std::invalid_argument(
+              "External Vulkan binding requires this device's managed owner");
+        (void)owner->ndarray_allocation();
+        owners.emplace_back(std::move(owner));
+      } else if (auto owner =
+                     std::dynamic_pointer_cast<vulkan::VulkanDisplayBufferOwner>(domain)) {
+        owner->validate_binding(device,
+            {selected.owner, selected.identity, selected.queue_index});
+        (void)owner->ndarray_allocation();
+        owners.emplace_back(std::move(owner));
+      } else {
         throw std::invalid_argument(
-            "External Vulkan binding requires this device's managed owner");
-      (void)owner->ndarray_allocation();
-      owners.push_back(std::move(owner));
+            "External Vulkan binding requires a qualified managed owner");
+      }
     }
     auto access =
         std::make_shared<vulkan::VulkanExternalAccess>(std::move(owners));

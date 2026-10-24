@@ -6141,6 +6141,13 @@ Program::DenseStorageBorrow Program::borrow_dense_storage(
       auto imported = std::dynamic_pointer_cast<vulkan::VulkanExternalBufferOwner>(
           lease->synchronization_domain);
       qualified = imported && imported->ndarray_allocation() == binding.allocation;
+      if (auto display =
+              std::dynamic_pointer_cast<vulkan::VulkanDisplayBufferOwner>(
+                  lease->synchronization_domain)) {
+        qualified = display->selection().program_owner ==
+                        runtime_fault_domain_->program_domain() &&
+                    display->ndarray_allocation() == binding.allocation;
+      }
     }
 #endif
     TI_ERROR_IF(!qualified,
