@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -2720,6 +2721,52 @@ namespace {
 constexpr std::size_t kVulkanMaxInFlightCommandBuffersPerStream = 64;
 std::atomic<std::uint64_t> next_vulkan_stream_registry_id{1};
 
+// take_completed_profiler_samplers() transfers the command list's reservation
+// before submission can allocate. Return it on rejection; an accepted pending
+// batch or the device profiler takes ownership only after publication succeeds.
+class ProfilerSamplerReservation {
+ public:
+  ProfilerSamplerReservation(VulkanDevice &device, std::size_t count)
+      : device_(device), count_(count) {
+  }
+  ~ProfilerSamplerReservation() {
+    if (count_ != 0)
+      device_.profiler_discard_reserved_samplers(count_);
+  }
+  ProfilerSamplerReservation(const ProfilerSamplerReservation &) = delete;
+  ProfilerSamplerReservation &operator=(const ProfilerSamplerReservation &) =
+      delete;
+
+  void transfer() noexcept {
+    count_ = 0;
+  }
+  void adopt(std::size_t count) noexcept {
+    count_ = count;
+  }
+
+ private:
+  VulkanDevice &device_;
+  std::size_t count_;
+};
+
+static_assert(std::is_nothrow_move_constructible_v<VulkanProfilerSampler>);
+static_assert(std::is_nothrow_move_assignable_v<VulkanProfilerSampler>);
+
+// Caller holds profiler_mutex_ through publication. Preserve amortized growth
+// rather than reserving exactly one extra sampler on every profiled submit.
+void reserve_profiler_publication(std::vector<VulkanProfilerSampler> &samplers,
+                                  std::size_t count) {
+  if (count > samplers.max_size() - samplers.size())
+    throw std::length_error("Vulkan profiler sampler capacity exhausted");
+  const auto required = samplers.size() + count;
+  if (required > samplers.capacity()) {
+    const auto grown = samplers.capacity() +
+                       std::min(samplers.capacity(),
+                                samplers.max_size() - samplers.capacity());
+    samplers.reserve(std::max(required, grown));
+  }
+}
+
 }  // namespace
 
 struct VulkanDevice::ThreadLocalStreams {
@@ -3856,25 +3903,38 @@ void VulkanStream::retire_completed_cmdbuffers() {
     return;
   }
   std::vector<vkapi::IVkFence> completed_fences;
-  std::vector<TrackedCmdbuf> still_submitted;
-  still_submitted.reserve(submitted_cmdbuffers_.size());
-  for (auto &tracked : submitted_cmdbuffers_) {
+  completed_fences.reserve(submitted_cmdbuffers_.size());
+  std::vector<unsigned char> completed(submitted_cmdbuffers_.size(), 0);
+  // Finish all allocation and fallible fence queries before moving an owner.
+  // A later query failure must not destroy earlier still-pending records.
+  for (std::size_t i = 0; i < submitted_cmdbuffers_.size(); ++i) {
+    const auto &tracked = submitted_cmdbuffers_[i];
     std::lock_guard<std::mutex> lock(tracked.fence->mutex);
     VkResult res = tracked.fence->device.functions().vkGetFenceStatus(
         tracked.fence->device, tracked.fence->fence);
     if (res == VK_SUCCESS) {
       completed_fences.push_back(tracked.fence);
+      completed[i] = 1;
       continue;
     }
     if (res == VK_NOT_READY) {
-      still_submitted.push_back(std::move(tracked));
       continue;
     }
     device_.raise_backend_error(static_cast<std::int64_t>(res),
                                 "vkGetFenceStatus",
                                 "Failed to retire a Vulkan command buffer");
   }
-  submitted_cmdbuffers_ = std::move(still_submitted);
+  static_assert(std::is_nothrow_move_assignable_v<TrackedCmdbuf>);
+  std::size_t retained = 0;
+  for (std::size_t i = 0; i < submitted_cmdbuffers_.size(); ++i) {
+    if (!completed[i]) {
+      if (retained != i)
+        submitted_cmdbuffers_[retained] = std::move(submitted_cmdbuffers_[i]);
+      ++retained;
+    }
+  }
+  submitted_cmdbuffers_.erase(submitted_cmdbuffers_.begin() + retained,
+                            submitted_cmdbuffers_.end());
   // Profiler samplers are tracked separately from command buffers. If an
   // already-complete submission is retired here, command_sync() can no longer
   // discover its fence, so collect its query results before dropping that
@@ -3942,6 +4002,8 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
     }
     buffer = dependency_commands_;
   }
+  ProfilerSamplerReservation profiler_reservation(device_,
+                                                 profiler_samplers.size());
 
   VkSubmitInfo submit_info{};
   submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -4052,6 +4114,7 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
             std::move(wait_values),
             std::move(signal_values),
             std::move(timeline_refs), prefix});
+    profiler_reservation.transfer();
     if (prefix)
       timeline_reserved_ = prefix->value();
     submission_batch_completion_ = completion;
@@ -4067,19 +4130,37 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
   retire_completed_cmdbuffers();
   apply_in_flight_backpressure();
 
+  // No host allocation may follow an accepted queue submit: the completion
+  // has not yet reached its caller, and the queue tail is only a weak pointer.
+  TrackedCmdbuf tracked{fence, {buffer}, std::move(submit_refs),
+                        std::move(timeline_refs)};
+  static_assert(std::is_nothrow_move_constructible_v<TrackedCmdbuf>);
+  submitted_cmdbuffers_.reserve(kVulkanMaxInFlightCommandBuffersPerStream);
+  // Keep the profiler capacity reservation exclusive until publication. Empty
+  // profiling submissions do not acquire the profiler mutex.
+  std::unique_lock<std::mutex> profiler_lock(device_.profiler_mutex_,
+                                            std::defer_lock);
+  if (!profiler_samplers.empty()) {
+    profiler_lock.lock();
+    reserve_profiler_publication(device_.samplers_, profiler_samplers.size());
+  }
+
   VkResult submit_result = VK_SUCCESS;
   {
     auto queue_lock = device_.acquire_queue_lock(queue_);
+    auto &tail_fence = device_.queue_tail_fence_locked(queue_);
     submit_result = device_.vk_device().functions().vkQueueSubmit(
         queue_, /*submitCount=*/1, &submit_info,
         /*fence=*/fence->fence);
     if (submit_result == VK_SUCCESS) {
-      device_.queue_tail_fence_locked(queue_) = fence;
+      tail_fence = fence;
     } else {
-      device_.queue_tail_fence_locked(queue_).reset();
+      tail_fence.reset();
     }
   }
   if (submit_result != VK_SUCCESS) {
+    if (profiler_lock.owns_lock())
+      profiler_lock.unlock();
     device_.raise_backend_error(
         static_cast<std::int64_t>(submit_result), "vkQueueSubmit",
         "Vulkan queue submission failed");
@@ -4091,12 +4172,16 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
   device_.queue_submit_calls_.fetch_add(1, std::memory_order_relaxed);
   device_.submitted_command_buffers_.fetch_add(
       1, std::memory_order_relaxed);
-  submitted_cmdbuffers_.push_back(
-      TrackedCmdbuf{fence, {buffer}, std::move(submit_refs), std::move(timeline_refs)});
+  submitted_cmdbuffers_.push_back(std::move(tracked));
   for (auto &sampler : profiler_samplers) {
     sampler.fence = fence;
   }
-  device_.profiler_add_samplers(std::move(profiler_samplers));
+  if (!profiler_samplers.empty()) {
+    device_.samplers_.insert(device_.samplers_.end(),
+                            std::make_move_iterator(profiler_samplers.begin()),
+                            std::make_move_iterator(profiler_samplers.end()));
+  }
+  profiler_reservation.transfer();
   return completion;
 }
 
@@ -4182,19 +4267,53 @@ StreamSemaphore VulkanStream::flush_submission_batch_locked() {
 
   retire_completed_cmdbuffers();
   apply_in_flight_backpressure();
+  // Copy shared ownership before enqueue; pending submissions remain intact if
+  // preparation throws. No resource object or native allocation is duplicated.
+  TrackedCmdbuf tracked;
+  tracked.fence = submission_batch_fence_;
+  tracked.buffers.reserve(pending_batch_submissions_.size());
+  std::size_t profiler_count = 0;
+  for (const auto &pending : pending_batch_submissions_) {
+    tracked.buffers.push_back(pending.buffer);
+    tracked.submit_refs.insert(tracked.submit_refs.end(),
+                               pending.submit_refs.begin(),
+                               pending.submit_refs.end());
+    tracked.timeline_refs.insert(tracked.timeline_refs.end(),
+                                 pending.timeline_refs.begin(),
+                                 pending.timeline_refs.end());
+    if (pending.profiler_samplers.size() >
+        std::numeric_limits<std::size_t>::max() - profiler_count)
+      throw std::length_error("Vulkan profiler sampler count overflow");
+    profiler_count += pending.profiler_samplers.size();
+  }
+  static_assert(std::is_nothrow_move_constructible_v<TrackedCmdbuf>);
+  submitted_cmdbuffers_.reserve(kVulkanMaxInFlightCommandBuffersPerStream);
+  // On pre-enqueue host failure the pending batch still owns its reservations.
+  // Only native rejection clears it and transfers them to this rollback guard.
+  ProfilerSamplerReservation rejected_profiler_reservation(device_, 0);
+  std::unique_lock<std::mutex> profiler_lock(device_.profiler_mutex_,
+                                            std::defer_lock);
+  if (profiler_count != 0) {
+    profiler_lock.lock();
+    reserve_profiler_publication(device_.samplers_, profiler_count);
+  }
   VkResult submit_result = VK_SUCCESS;
   {
     auto queue_lock = device_.acquire_queue_lock(queue_);
+    auto &tail_fence = device_.queue_tail_fence_locked(queue_);
     submit_result = device_.vk_device().functions().vkQueueSubmit(
         queue_, static_cast<std::uint32_t>(submit_infos.size()),
         submit_infos.data(), submission_batch_fence_->fence);
     if (submit_result == VK_SUCCESS) {
-      device_.queue_tail_fence_locked(queue_) = submission_batch_fence_;
+      tail_fence = submission_batch_fence_;
     } else {
-      device_.queue_tail_fence_locked(queue_).reset();
+      tail_fence.reset();
     }
   }
   if (submit_result != VK_SUCCESS) {
+    if (profiler_lock.owns_lock())
+      profiler_lock.unlock();
+    rejected_profiler_reservation.adopt(profiler_count);
     pending_batch_submissions_.clear();
     submission_batch_fence_.reset();
     submission_batch_completion_.reset();
@@ -4212,26 +4331,18 @@ StreamSemaphore VulkanStream::flush_submission_batch_locked() {
   device_.batched_command_buffers_.fetch_add(
       pending_batch_submissions_.size(), std::memory_order_relaxed);
 
-  TrackedCmdbuf tracked;
-  tracked.fence = submission_batch_fence_;
-  tracked.buffers.reserve(pending_batch_submissions_.size());
+  submitted_cmdbuffers_.push_back(std::move(tracked));
   for (auto &pending : pending_batch_submissions_) {
-    tracked.buffers.push_back(std::move(pending.buffer));
-    tracked.submit_refs.insert(
-        tracked.submit_refs.end(),
-        std::make_move_iterator(pending.submit_refs.begin()),
-        std::make_move_iterator(pending.submit_refs.end()));
-    tracked.timeline_refs.insert(
-        tracked.timeline_refs.end(),
-        std::make_move_iterator(pending.timeline_refs.begin()),
-        std::make_move_iterator(pending.timeline_refs.end()));
     for (auto &sampler : pending.profiler_samplers) {
       sampler.fence = submission_batch_fence_;
     }
-    device_.profiler_add_samplers(
-        std::move(pending.profiler_samplers));
+    if (!pending.profiler_samplers.empty()) {
+      device_.samplers_.insert(
+          device_.samplers_.end(),
+          std::make_move_iterator(pending.profiler_samplers.begin()),
+          std::make_move_iterator(pending.profiler_samplers.end()));
+    }
   }
-  submitted_cmdbuffers_.push_back(std::move(tracked));
   pending_batch_submissions_.clear();
   submission_batch_fence_.reset();
   return std::exchange(submission_batch_completion_, nullptr);

@@ -115,6 +115,9 @@ endif()
 if(TI_WITH_VULKAN)
   # Includes native primitive preparation and fixed-replay ownership checks.
   file(GLOB TAICHI_TESTS_VULKAN_SOURCE "tests/cpp/aot/vulkan/*.cpp")
+  # This dedicated executable replaces operator new for fault injection.
+  list(REMOVE_ITEM TAICHI_TESTS_VULKAN_SOURCE
+    "${PROJECT_SOURCE_DIR}/tests/cpp/aot/vulkan/submit_exception_safety_test.cpp")
   list(APPEND TAICHI_TESTS_SOURCE ${TAICHI_TESTS_VULKAN_SOURCE})
 endif()
 
@@ -444,6 +447,21 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   endif()
   get_target_property(_ti_backend_test_includes
     ${TAICHI_BACKEND_SAFETY_TESTS_NAME} INCLUDE_DIRECTORIES)
+  if(WIN32)
+    # Allocation failure injection must stay in its own executable: it replaces
+    # operator new only on the calling test thread, after real Vulkan enqueue.
+    add_executable(taichi_vulkan_submit_safety_tests
+      tests/cpp/aot/vulkan/submit_exception_safety_test.cpp)
+    target_link_libraries(taichi_vulkan_submit_safety_tests PRIVATE
+      taichi_core gtest_main ${_ti_backend_native_targets})
+    target_include_directories(taichi_vulkan_submit_safety_tests PRIVATE
+      ${_ti_backend_test_includes})
+    set_target_properties(taichi_vulkan_submit_safety_tests PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${TESTS_OUTPUT_DIR}")
+    add_test(NAME taichi_vulkan_submit_safety_tests
+      COMMAND taichi_vulkan_submit_safety_tests)
+    set_tests_properties(taichi_vulkan_submit_safety_tests PROPERTIES TIMEOUT 30)
+  endif()
   target_include_directories(taichi_cuda_execution_domain_tests PRIVATE
     ${_ti_backend_test_includes})
   set_target_properties(taichi_cuda_execution_domain_tests PROPERTIES
