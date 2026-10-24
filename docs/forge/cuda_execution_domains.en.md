@@ -555,9 +555,11 @@ on each instance retirement. This does not change parameter upload or replay.
 
 `step.release()` and garbage collection release only the host handle, keeping
 code, arrays and reverse dependency edges until domain retirement. This path
-does not reclaim the resident instance reservation. Explicit module, memory or
-native-resource destruction closes dependent domains before freeing their
-storage. Runtime close/reset retires its domains. A failed retirement retains
+does not reclaim the resident instance reservation. Explicit memory destruction
+retires the instances that borrow that allocation before freeing its storage;
+the domain and unrelated instances remain available. Explicit module or
+native-resource destruction closes dependent domains. Runtime close/reset retires
+its domains. A failed retirement retains
 the unsafe closure and reports the failure instead of freeing in-flight state.
 
 `domain.release()` releases only the host handle; the runtime still owns its
