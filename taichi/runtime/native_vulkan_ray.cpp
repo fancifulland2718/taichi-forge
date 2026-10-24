@@ -304,6 +304,15 @@ class OwnedRayResource : public Owner, public virtual NativeRayResourceAccess {
   std::shared_ptr<NativeRayResourceRegistration> ray_registration() const override {
     return registration_;
   }
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    if (initialization_pending_)
+      return std::nullopt;
+    NativePreparationDependencies result;
+    for (const auto &dependency : dependencies_)
+      result.resources.push_back(dependency.get());
+    return result;
+  }
 
  protected:
   Device &device_;
@@ -331,16 +340,27 @@ class PreparedMicromap final
     // import. Never synchronize recursively inside an enqueue callback.
     runtime_.synchronize();
     initialization_pending_ = true;
-    auto view = [](const std::shared_ptr<NativeHostBlobResource> &blob) {
-      if (!blob || blob->bytes().empty())
-        return std::string_view{};
-      const auto &bytes = blob->bytes();
-      return std::string_view(reinterpret_cast<const char *>(bytes.data()),
-                              bytes.size());
-    };
     core_->build(view(d.data), view(d.descriptors), view(d.indices),
                  bool(d.indices), d.triangle_count);
     initialization_pending_ = false;
+    ready_ = true;
+  }
+  void record_import(CommandList *commands, const MicromapDescription &d) {
+    core_->record_build(commands, view(d.data), view(d.descriptors),
+                        view(d.indices), bool(d.indices), d.triangle_count);
+  }
+  void finish_import() {
+    core_->release_build_inputs();
+    ready_ = true;
+  }
+  void require_initialized(const NativeRecordingState &) const override {
+    if (!ready_)
+      throw std::invalid_argument("Vulkan micromap construction is incomplete");
+  }
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    return ready_ ? std::optional<NativePreparationDependencies>{{}}
+                  : std::nullopt;
   }
   size_t triangle_count() const override {
     return triangle_count_;
@@ -353,7 +373,49 @@ class PreparedMicromap final
   }
 
  private:
+  static std::string_view view(
+      const std::shared_ptr<NativeHostBlobResource> &blob) {
+    if (!blob || blob->bytes().empty())
+      return {};
+    const auto &bytes = blob->bytes();
+    return {reinterpret_cast<const char *>(bytes.data()), bytes.size()};
+  }
   size_t triangle_count_;
+  bool ready_{false};
+};
+
+// Used only before publication. All inputs are immutable host blobs; the new
+// micromap and scratch are private to this completed cold operation. Published
+// AS users still participate in the normal transitive ray-resource loan.
+class MicromapConstruction final : public NativeOperation {
+ public:
+  MicromapConstruction(std::shared_ptr<PreparedMicromap> owner,
+                       MicromapDescription description)
+      : owner_(std::move(owner)), description_(std::move(description)) {
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return owner_->device();
+  }
+  size_t workspace_bytes() const override {
+    return owner_->workspace_bytes();
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements()
+      const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers.emplace();
+    result.image_uses.emplace();
+    return result;
+  }
+  void record_vulkan(Device *, CommandList *commands) override {
+    owner_->record_import(commands, description_);
+  }
+
+ private:
+  std::shared_ptr<PreparedMicromap> owner_;
+  MicromapDescription description_;
 };
 
 class PreparedScene final : public OwnedRayResource<VulkanTriangleRayScene>,
@@ -575,6 +637,10 @@ class RayOperation : public NativeOperation {
     result.image_uses.emplace();
     result.stateful_resources = resources_;
     return result;
+  }
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    return NativePreparationDependencies{buffers_, {resource_.get()}};
   }
 
  protected:
@@ -1008,11 +1074,18 @@ void register_vulkan_ray_operations(NativeOperationRegistry &registry) {
   registry.register_context_factory<MicromapDescription>(
       Arch::vulkan, NativeOperationMode::vulkan_inline,
       [](NativePreparationContext &context, const MicromapDescription &d) {
-        if (context.defer_vulkan_initialization)
-          throw std::invalid_argument(
-              "Independent Vulkan micromap initialization is not qualified");
         auto result = std::make_shared<PreparedMicromap>(context, d);
-        result->initialize(d);
+        if (context.complete_owned_initialization &&
+            context.complete_owned_initialization(
+                std::make_shared<MicromapConstruction>(result, d), {})) {
+          result->finish_import();
+        } else {
+          if (context.defer_vulkan_initialization)
+            throw std::invalid_argument(
+                "Independent Vulkan micromap requires completed cold "
+                "construction");
+          result->initialize(d);
+        }
         return result;
       });
   registry.register_context_factory<BlasBuildDescription>(

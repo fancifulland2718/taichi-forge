@@ -146,6 +146,16 @@ def test_vulkan_micromap_classification_graph_refit_and_lifetime(format, indexed
         assert components["opacity_micromap_indices"]["requested_bytes"] == (
             4 * triangles if indexed else 0
         )
+        if indexed and format == 2:
+            # The shared JIT lowering borrows the selected kernel and the live
+            # TLAS/BLAS/OMM owner closure, without reconstructing its geometry.
+            with ti.graph.execution_domain(capacity=1, instance_capacity=1) as domain:
+                with graph.prepare(dict(scene=scene, coords=coords, result=result, gate=gate),
+                                   execution_domain=domain) as call:
+                    call.initialize()
+                    with call.submit() as ticket:
+                        ticket.wait()
+                    np.testing.assert_allclose(result.to_numpy(), expected, atol=1e-6)
         front.close()  # TLAS and recorded command references keep native OMM alive.
         graph.run(bound)
         ti.sync()

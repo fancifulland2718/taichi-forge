@@ -13,9 +13,7 @@ from tests import test_utils
 from tests.python.aot_vulkan_micromap_probe import POSES, asset, geometry, resources, plan_operations
 
 
-@pytest.mark.parametrize("recipe", ["explicit", "graph"])
-@test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_aot_vulkan_micromap_factories_and_gradients(tmp_path, recipe):
+def build_fixture(tmp_path, recipe):
     if not ti.hardware.ray.is_opacity_micromap_available():
         pytest.skip("Vulkan opacity micromap unavailable")
 
@@ -97,6 +95,13 @@ def test_aot_vulkan_micromap_factories_and_gradients(tmp_path, recipe):
     costs["artifact_bytes"] = artifact.stat().st_size
     (tmp_path / "producer.json").write_text(json.dumps(costs, indent=2))
     ti.reset()
+    return artifact
+
+
+@pytest.mark.parametrize("recipe", ["explicit", "graph"])
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_aot_vulkan_micromap_factories_and_gradients(tmp_path, recipe):
+    artifact = build_fixture(tmp_path, recipe)
     for mode in ("standalone", "borrowed"):
         result = subprocess.run(
             [
@@ -116,6 +121,23 @@ def test_aot_vulkan_micromap_factories_and_gradients(tmp_path, recipe):
         assert result.returncode == 0, result.stdout + result.stderr
         assert "Validation Error" not in result.stdout + result.stderr
         assert "cleanup failed" not in result.stdout + result.stderr
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_aot_vulkan_micromap_independent_domains(tmp_path):
+    artifact = build_fixture(tmp_path, "graph")
+    for mode in ("standalone", "borrowed"):
+        result = subprocess.run(
+            [sys.executable, *(["-S"] if mode == "standalone" else []),
+             str(Path(__file__).with_name("aot_domain_micromap_probe.py")),
+             str(artifact), mode, str(tmp_path / f"domain-{mode}.json")],
+            env=os.environ.copy(), capture_output=True, text=True, timeout=90,
+        )
+        (tmp_path / f"domain-{mode}.log").write_text(result.stdout + result.stderr, encoding="utf8")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "micromap_domain_ok" in result.stdout
+        assert "VUID-" not in result.stdout + result.stderr
+        assert "SYNC-HAZARD" not in result.stdout + result.stderr
 
 
 def _export_graph(module, case, query, energy, seed):

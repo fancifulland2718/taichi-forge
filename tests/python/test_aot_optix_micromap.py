@@ -131,11 +131,11 @@ def test_optix_micromap_export_refit_queries_and_retirement(tmp_path):
     module.archive(str(artifact))
     (tmp_path / "producer.json").write_text(json.dumps(dict(cases=costs, bytes=artifact.stat().st_size), indent=2))
     ti.reset()
-    for mode in ("standalone", "borrowed"):
+    for mode in ("standalone", "borrowed", "domain-standalone"):
         result = subprocess.run(
             [
                 sys.executable,
-                *(["-S"] if mode == "standalone" else []),
+                *(["-S"] if mode.endswith("standalone") else []),
                 str(Path(__file__).with_name("aot_optix_micromap_probe.py")),
                 mode,
                 str(artifact),
@@ -146,5 +146,6 @@ def test_optix_micromap_export_refit_queries_and_retirement(tmp_path):
             text=True,
             timeout=90,
         )
+        (tmp_path / f"{mode}.log").write_text(result.stdout + result.stderr, encoding="utf8")
         assert result.returncode == 0, result.stdout + result.stderr
         assert "cleanup failed" not in result.stdout + result.stderr

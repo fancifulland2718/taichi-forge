@@ -53,6 +53,7 @@ _FEATURE_BITS = {
     "vulkan_execution_domain_ray_programs": 35,
     "vulkan_execution_domain_private_graphics_as": 36,
     "vulkan_execution_domain_native_ray_loans": 37,
+    "vulkan_execution_domain_opacity_micromaps": 38,
 }
 
 

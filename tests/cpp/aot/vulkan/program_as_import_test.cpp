@@ -886,5 +886,198 @@ TEST(VulkanColdPreparation, RootlessKernelIgnoresDefaultAndPeer) {
 TEST(VulkanColdPreparation, FieldKernelPreservesProducerPrefix) {
   check_kernel_preparation_prefix(true);
 }
+
+void check_micromap_closure(bool shared) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  PendingProgramAs session;
+  if (!session.available() || !session.device().vk_caps().opacity_micromap)
+    GTEST_SKIP() << "Requires OMM and three compute queues";
+  session.borrowers[0] = AotRuntimeClient::create(session.program);
+  session.runtimes[0] =
+      reinterpret_cast<TiRuntime>(session.borrowers[0]->handle());
+  AotRuntimeClient::JitDataPayloads payloads;
+  std::string resources;
+  auto payload = [&](const char *name, const void *data, size_t size,
+                     const char *dtype = nullptr, const char *shape = nullptr) {
+    const std::string bytes(static_cast<const char *>(data), size);
+    const auto key = picosha2::hash256_hex_string(bytes);
+    payloads.emplace(key, bytes);
+    if (!resources.empty())
+      resources += ',';
+    resources += std::string("{\"name\":\"") + name + "\",\"kind\":\"";
+    if (dtype)
+      resources += std::string("ndarray\",\"dtype\":\"") + dtype +
+                   "\",\"shape\":" + shape + ",\"initial_data\":\"" + key +
+                   "\"}";
+    else
+      resources += "host_blob\",\"data\":\"" + key +
+                   "\",\"byte_size\":" + std::to_string(size) + "}";
+  };
+  const uint8_t data = 0xe4;
+  const std::array<uint32_t, 2> descriptors{0, (2u << 16) | 1u};
+  const uint32_t mapping = 0;
+  const std::array<float, 9> vertices{0, 0, 0, 1, 0, 0, 0, 1, 0};
+  const std::array<int32_t, 3> indices{0, 1, 2};
+  const std::array<float, 12> transform{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+  const std::array<float, 8> ray{1.f / 6, 1.f / 6, 3, .01f, 0, 0, -1, 4};
+  payload("data", &data, sizeof(data));
+  payload("descriptors", descriptors.data(), sizeof(descriptors));
+  payload("mapping", &mapping, sizeof(mapping));
+  payload("vertices", vertices.data(), sizeof(vertices), "f32", "[3,3]");
+  payload("indices", indices.data(), sizeof(indices), "i32", "[1,3]");
+  payload("poses", transform.data(), sizeof(transform), "f32", "[1,12]");
+  payload("rays", ray.data(), sizeof(ray), "f32", "[1,8]");
+  std::string plan = R"({"version":26,"resources":[)" + resources + R"(,
+    {"kind":"ndarray","name":"hits","dtype":"f32","shape":[1,4]},
+    {"kind":"native","name":"omm","provider":"vulkan_ray","operation":"opacity_micromap","version":1,
+     "parameters":{"triangle_count":1},"bindings":{"data":"data","descriptors":"descriptors","indices":"mapping"}},
+    {"kind":"native","name":"blas","provider":"vulkan_ray","operation":"triangle_blas","version":1,
+     "parameters":{"vertex_count":3,"triangle_count":1},"bindings":{"vertices":"vertices","indices":"indices","opacity_micromap":"omm"}},
+    {"kind":"native","name":"scene","provider":"vulkan_ray","operation":"instance_tlas","version":1,
+     "parameters":{"instance_count":1},"bindings":{"blas_0":"blas","transforms":"poses"}}],
+    "operations":[{"kind":"native","provider":"vulkan_ray","operation":"query","version":1,
+     "parameters":{"ray_count":1},"bindings":{"scene":"scene","rays":"rays","hits":"hits"}}]})";
+  session.modules[0] = reinterpret_cast<TiAotModule>(
+      session.borrowers[0]->import_jit_kernels({}, payloads));
+  if (shared) {
+    TiNativeResource omm = nullptr;
+    std::weak_ptr<NativeResource> observed;
+    {
+      BorrowScope scope(*session.borrowers[0]);
+      const std::string description =
+          R"({"kind":"native","provider":"vulkan_ray","operation":"opacity_micromap","version":1,
+      "parameters":{"triangle_count":1},"bindings":{"data":"data","descriptors":"descriptors","indices":"mapping"}})";
+      std::array<TiNamedArgument, 3> args{};
+      const char *names[]{"data", "descriptors", "mapping"};
+      const void *values[]{&data, descriptors.data(), &mapping};
+      const size_t sizes[]{sizeof(data), sizeof(descriptors), sizeof(mapping)};
+      for (int i = 0; i < 3; ++i) {
+        args[i].name = names[i];
+        args[i].argument.type = TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT;
+        args[i].argument.value.native_resource =
+            ti_create_host_blob_ext(session.runtimes[0], sizes[i], values[i]);
+        require_success();
+      }
+      omm = ti_create_native_resource_ext(
+          session.runtimes[0], description.size(), description.data(),
+          args.size(), args.data(), nullptr);
+      require_success();
+      ASSERT_NE(omm, nullptr);
+      auto &registry = reinterpret_cast<::Runtime *>(session.runtimes[0])
+                           ->native_resource_registry();
+      observed = registry.get(omm);
+      for (auto &arg : args)
+        ti_destroy_native_resource_ext(session.runtimes[0],
+                                       arg.argument.value.native_resource);
+      require_success();
+      const auto begin = plan.find("{\"kind\":\"native\",\"name\":\"omm\"");
+      const auto end =
+          plan.find(",\n    {\"kind\":\"native\",\"name\":\"blas\"", begin);
+      ASSERT_NE(begin, std::string::npos);
+      ASSERT_NE(end, std::string::npos);
+      plan.erase(begin, end + 1 - begin);
+      TiNamedArgument input{};
+      input.name = "omm";
+      input.argument.type = TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT;
+      input.argument.value.native_resource = omm;
+      std::array<TiVulkanExecutionDomainInfo, 2> domains{};
+      const TiVulkanExecutionDomainCreateInfo options{1, 1, TI_FALSE};
+      for (int lane = 0; lane < 2; ++lane) {
+        session.domains[lane] = ti_create_vulkan_execution_domain_ext(
+            session.runtimes[0], &options);
+        require_success();
+        ti_get_vulkan_execution_domain_info_ext(session.domains[lane],
+                                                &domains[lane]);
+        session.executions[lane] =
+            ti_prepare_execution_plan_on_vulkan_domain_ext(
+                session.runtimes[0], session.modules[0], session.domains[lane],
+                plan.size(), plan.data(), 1, &input, 0, nullptr, 0, nullptr);
+        require_success();
+        ti_initialize_prepared_ext(session.runtimes[0],
+                                   session.executions[lane]);
+        require_success();
+      }
+      session.program.synchronize();
+      session.program.retain_runtime_client(session.gates);
+      // Public resource close keeps its existing ordinary-prefix retirement
+      // contract. Gate the two domain consumers to test the new OMM closure.
+      for (int lane = 0; lane < 2; ++lane) {
+        session.gates->gates[lane + 1] =
+            std::make_unique<test_detail::TimelineGate>(
+                session.device(), domains[lane].queue_index);
+        ASSERT_TRUE(ti_try_submit_prepared_ext(
+            session.runtimes[0], session.executions[lane], 0, nullptr,
+            &session.completions[lane]));
+        EXPECT_EQ(ti_query_completion_ext(session.completions[lane]), TI_FALSE);
+      }
+    }
+    // The OMM parent must retain both transitive consumers until completion.
+    test_detail::PendingAction close(session.gates, [&] {
+      BorrowScope access(*session.borrowers[0]);
+      ti_destroy_native_resource_ext(session.runtimes[0], omm);
+      require_success();
+    });
+    EXPECT_EQ(close.status(100ms), std::future_status::timeout);
+    EXPECT_FALSE(observed.expired());
+    session.gates->release(1);
+    EXPECT_EQ(close.status(100ms), std::future_status::timeout);
+    EXPECT_FALSE(observed.expired());
+    session.gates->release(2);
+    const auto ready = close.status(2s);
+    EXPECT_EQ(ready, std::future_status::ready);
+    if (ready != std::future_status::ready)
+      session.gates->release(0);
+    EXPECT_NO_THROW(close.finish());
+    BorrowScope scope(*session.borrowers[0]);
+    for (int lane = 0; lane < 2; ++lane) {
+      EXPECT_EQ(ti_query_completion_ext(session.completions[lane]), TI_TRUE);
+      ti_close_vulkan_execution_domain_ext(session.domains[lane]);
+      require_success();
+    }
+    EXPECT_TRUE(observed.expired());
+    session.gates->release(0);
+    return;
+  }
+  {
+    BorrowScope scope(*session.borrowers[0]);
+    const TiVulkanExecutionDomainCreateInfo options{1, 1, TI_FALSE};
+    session.domains[0] =
+        ti_create_vulkan_execution_domain_ext(session.runtimes[0], &options);
+    require_success();
+  }
+  session.program.synchronize();
+  session.program.retain_runtime_client(session.gates);
+  session.gates->gates[0] =
+      std::make_unique<test_detail::TimelineGate>(session.device(), 0);
+  session.gates->gates[1] =
+      std::make_unique<test_detail::TimelineGate>(session.device(), 2);
+  test_detail::PendingAction run(session.gates, [&] {
+    BorrowScope scope(*session.borrowers[0]);
+    session.executions[0] = ti_prepare_execution_plan_on_vulkan_domain_ext(
+        session.runtimes[0], session.modules[0], session.domains[0],
+        plan.size(), plan.data(), 0, nullptr, 0, nullptr, 0, nullptr);
+    require_success();
+    if (!session.executions[0])
+      throw std::runtime_error("Private OMM preparation failed");
+    ti_initialize_prepared_ext(session.runtimes[0], session.executions[0]);
+    require_success();
+    if (!ti_try_submit_prepared_ext(session.runtimes[0], session.executions[0],
+                                    0, nullptr, &session.completions[0]))
+      throw std::runtime_error("Private OMM submission was not admitted");
+    ti_wait_completion_ext(session.completions[0]);
+    require_success();
+  });
+  EXPECT_EQ(run.status(2s), std::future_status::ready);
+  session.gates->release_all();
+  EXPECT_NO_THROW(run.finish());
+}
+
+TEST(VulkanColdPreparation, PrivateMicromapClosureIgnoresDefaultAndPeer) {
+  check_micromap_closure(false);
+}
+TEST(VulkanColdPreparation, SharedMicromapRetiresBothPendingConsumers) {
+  check_micromap_closure(true);
+}
 }  // namespace taichi::lang
 #endif

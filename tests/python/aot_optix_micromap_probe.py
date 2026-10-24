@@ -56,6 +56,17 @@ def check(frame, coords, states, alpha, limit, shift, dz):
 
 
 def main(mode, artifact, adapter):
+    report_mode = mode
+    selected_domain = mode.startswith("domain-")
+    mode = mode.removeprefix("domain-")
+
+    def run(call):
+        if selected_domain:
+            with call.submit() as completion:
+                completion.wait()
+        else:
+            call()
+
     if mode == "borrowed":
         import taichi_forge as ti
 
@@ -66,11 +77,17 @@ def main(mode, artifact, adapter):
     records, retained = [], []
     with runtime:
         runtime.configure_provider("optix", adapter_path=adapter)
+        domains = []
         assert runtime.probe_native_resource("optix_triangle_gas", version=2)["available"]
         start = time.perf_counter()
         module = runtime.load_module(artifact)
         load_ms = (time.perf_counter() - start) * 1000
         for case in ("two", "indexed", "predefined"):
+            # Retiring a bound public provider may retire its whole selected
+            # domain. Give independent lifetime cases independent owners.
+            domain = runtime.execution_domain(capacity=1, instance_capacity=1) if selected_domain else None
+            if domain:
+                domains.append(domain)
             vertices, coords, states = geometry(case)
             triangles, count = len(vertices) // 9, len(states)
             shapes = [
@@ -125,7 +142,7 @@ def main(mode, artifact, adapter):
                 frame["public_omm"] = omm
             plan = module.execution_plan(case)
             start = time.perf_counter()
-            call = plan.prepare(module, {name: frame[name] for name in plan.argument_names})
+            call = plan.prepare(module, {name: frame[name] for name in plan.argument_names}, execution_domain=domain)
             prepare_ms = (time.perf_counter() - start) * 1000
             call.initialize()
             if case != "indexed":
@@ -153,12 +170,12 @@ def main(mode, artifact, adapter):
                 write(frame["vertices"], moved)
                 rays = [v for i in range(count) for v in (*coords[2 * i : 2 * i + 2], 3, 0.01, 0, 0, -1, limit)]
                 write(frame["rays"], rays)
-                call()
+                run(call)
                 check(frame, coords, states, alpha, limit, shift, dz)
             submits, completes = [], []
             for _ in range(5):
                 start = time.perf_counter_ns()
-                call()
+                run(call)
                 submits.append((time.perf_counter_ns() - start) / 1000)
                 runtime.wait()
                 completes.append((time.perf_counter_ns() - start) / 1000)
@@ -173,29 +190,31 @@ def main(mode, artifact, adapter):
             )
             retained.append((call, frame, upload, image, pixels))
             if case == "indexed":
-                call()
+                run(call)
                 omm.close()
-                raises(call)
+                raises(lambda: run(call))
                 blobs["data"].close()
-        retained[0][0]()
+        run(retained[0][0])
         retained[0][3].close()
-        raises(retained[0][0])
-        retained[-1][0]()
+        raises(lambda: run(retained[0][0]))
+        run(retained[-1][0])
         if mode == "borrowed":
             ti.reset()
         else:
             module.close()
         for call, frame, upload, image, pixels in retained:
-            raises(call)
+            raises(lambda: run(call))
             call.close()
             upload.close()
             image.close()
             pixels.close()
             for value in frame.values():
                 value.close()
+        for domain in domains:
+            domain.close()
     if mode == "standalone":
         assert "taichi_forge" not in sys.modules
-    Path(artifact).with_name(mode + ".json").write_text(json.dumps(dict(load_ms=load_ms, cases=records), indent=2))
+    Path(artifact).with_name(report_mode + ".json").write_text(json.dumps(dict(load_ms=load_ms, cases=records), indent=2))
 
 
 def negative_contracts(runtime, module, frame, omm, blobs):

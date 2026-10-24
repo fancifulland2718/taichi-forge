@@ -17,6 +17,16 @@ class VulkanOpacityMicromap {
              std::string_view indices,
              bool indexed,
              std::size_t triangle_count);
+  // Cold import into the caller's command stream. The caller must complete
+  // this one-shot construction before publishing the micromap to AS users.
+  // Recorded commands retain every native input and scratch allocation.
+  void record_build(CommandList *commands,
+                    std::string_view data,
+                    std::string_view descriptors,
+                    std::string_view indices,
+                    bool indexed,
+                    std::size_t triangle_count);
+  void release_build_inputs();  // Only after the construction completes.
   void retain(const vkapi::IVkCommandBuffer &commands) const;
   VulkanTriangleRaySceneMemoryStatistics memory_statistics() const;
 

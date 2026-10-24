@@ -68,6 +68,31 @@ void VulkanOpacityMicromap::build(std::string_view data,
                                   std::string_view indices,
                                   bool indexed,
                                   std::size_t triangle_count) {
+  auto *stream = device_->get_compute_stream();
+  auto [commands, status] = stream->new_command_list_unique();
+  TI_ERROR_IF(status != RhiResult::success,
+              "Cannot record Vulkan micromap import.");
+  record_build(commands.get(), data, descriptors, indices, indexed,
+               triangle_count);
+  stream->submit_synced(commands.get());
+  release_build_inputs();
+}
+
+void VulkanOpacityMicromap::record_build(CommandList *commands,
+                                         std::string_view data,
+                                         std::string_view descriptors,
+                                         std::string_view indices,
+                                         bool indexed,
+                                         std::size_t triangle_count) {
+  auto *vk_commands = dynamic_cast<vulkan::VulkanCommandList *>(commands);
+  TI_ERROR_IF(!vk_commands, "Vulkan micromap requires Vulkan commands.");
+  const auto command_buffer = vk_commands->vk_command_buffer();
+  TI_ERROR_IF(!command_buffer || !command_buffer->ref_pool ||
+                  command_buffer->device != device_->vk_device() ||
+                  !(device_->queue_family_flags(
+                        command_buffer->ref_pool->queue_family_index) &
+                    VK_QUEUE_COMPUTE_BIT),
+              "Vulkan micromap requires a local compute-capable command pool.");
   static_assert(sizeof(VkMicromapTriangleEXT) == 8);
   TI_ERROR_IF(
       descriptors.size() % 8 || triangle_count == 0 ||
@@ -142,12 +167,6 @@ void VulkanOpacityMicromap::build(std::string_view data,
   attachment.usageCountsCount = static_cast<std::uint32_t>(usage_.size());
   attachment.pUsageCounts = usage_.data();
 
-  auto *stream = device_->get_compute_stream();
-  auto [commands, command_status] = stream->new_command_list_unique();
-  TI_ERROR_IF(command_status != RhiResult::success,
-              "Cannot record Vulkan micromap import.");
-  auto command_buffer = static_cast<vulkan::VulkanCommandList *>(commands.get())
-                            ->vk_command_buffer();
   const auto &device = device_->vk_device();
   auto barrier2 = reinterpret_cast<PFN_vkCmdPipelineBarrier2>(
       device.instance_functions().vkGetDeviceProcAddr(
@@ -267,7 +286,14 @@ void VulkanOpacityMicromap::build(std::string_view data,
           VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
           VK_ACCESS_2_MICROMAP_READ_BIT_EXT |
               VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
-  stream->submit_synced(commands.get());
+  // Device addresses in a native build do not automatically retain buffers.
+  // Preserve all operands even if submission/waiting throws before publication.
+  retain(command_buffer);
+  for (const auto &input : temporary_)
+    command_buffer->refs.push_back(device_->get_vkbuffer(input->get_ptr()));
+}
+
+void VulkanOpacityMicromap::release_build_inputs() {
   temporary_.clear();
 }
 
