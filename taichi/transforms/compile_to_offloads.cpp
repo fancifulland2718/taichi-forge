@@ -619,9 +619,21 @@ void apply_offload_execution_plan(IRNode *ir,
   }
   TI_ERROR_IF(!start_from_ast,
               "offload execution plans support direct JIT kernels only");
-  TI_ERROR_IF(config.arch != Arch::cuda,
-              "offload execution plans require the CUDA backend, got {}",
-              arch_name(config.arch));
+  TI_ERROR_IF(config.arch != Arch::cuda && config.arch != Arch::vulkan,
+              "offload execution plans require CUDA or Vulkan, got {}", arch_name(config.arch));
+  TI_ERROR_IF(config.arch != Arch::vulkan && !plan->device_range_tasks.empty(),
+              "Device range dispatch recording currently requires Vulkan");
+  if (config.arch == Arch::vulkan) {
+    TI_ERROR_IF(!plan->fusion_groups.empty(), "Vulkan task plans do not support fusion");
+    for (const auto &spec : plan->source_tasks) {
+      TI_ERROR_IF(spec.workgroup_size != 0 ||
+                      spec.thread_local_mode != Kernel::TaskLaunchThreadLocalMode::automatic ||
+                      spec.cuda_min_blocks_per_sm != 2 || spec.cuda_max_registers != -1 ||
+                      spec.grid_residency_waves != 0 || spec.range_work_per_thread_target != 1 ||
+                      spec.sparse_list_policy != "saturating" || spec.memory_strategy != "direct",
+                  "Vulkan task plans only support range dispatch selection");
+    }
+  }
   TI_ERROR_IF(!ir->is<Block>(),
               "offload execution plan expected an offloaded kernel block");
 

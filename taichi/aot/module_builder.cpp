@@ -204,6 +204,8 @@ std::unordered_map<std::string, Kernel *> AotModuleBuilder::add_graph(
                 "AOT Graph {} contains JIT-only TextureCollection argument {}",
                 name, arg_name);
   }
+  TI_ERROR_IF(graph.has_device_range_dispatches(),
+              "Device range selection requires an AOT ExecutionPlan, not a legacy CGraph");
   TI_ERROR_IF(graph.has_indirect_dispatches(),
               "AOT Graph {} contains JIT-only indirect dispatches", name);
   TI_ERROR_IF(graph.has_dispatch_labels(),

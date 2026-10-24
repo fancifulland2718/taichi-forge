@@ -59,6 +59,8 @@ struct OffloadedTaskManifest {
   std::string range_mapping;
   std::optional<std::int64_t> constant_range_size;
   std::optional<RangeForBounds> range_bounds;
+  std::uint32_t device_range_dispatch_version{0};
+  std::string requested_range_dispatch{"fixed"};
 
   // Present only for the private Graph-owned external shared-stage recipe.
   std::optional<int> staged_external_arg_index;

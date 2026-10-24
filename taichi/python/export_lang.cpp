@@ -199,6 +199,8 @@ py::dict offloaded_task_manifest_to_python(
   item["task_id"] = task.task_id;
   item["logical_task_id"] = task.logical_task_id;
   item["optimization_spec_id"] = task.optimization_spec_id;
+  item["device_range_dispatch_version"] = task.device_range_dispatch_version;
+  item["requested_range_dispatch"] = task.requested_range_dispatch;
   item["task_name"] = task.task_name;
   item["backend"] = arch_name(task.arch);
   item["task_index"] = task.task_index;
@@ -309,6 +311,12 @@ lang::OffloadedTaskManifest overlay_execution_plan_launch_requests(
   }
   task.requested_range_work_per_thread_target =
       spec.range_work_per_thread_target;
+  task.requested_range_dispatch = spec.device_range_dispatch ? "device" : "fixed";
+  if (spec.device_range_dispatch) {
+    task.actual_grid_size.reset();
+    task.actual_geometry_kind = "device_range_recording";
+    task.actual_geometry_reason = "recording reads this task's range snapshot on device";
+  }
   task.requested_memory_strategy = spec.memory_strategy;
   task.requested_sparse_list_policy = spec.sparse_list_policy;
   if (spec.sparse_list_policy == "parent_capacity_bound" &&

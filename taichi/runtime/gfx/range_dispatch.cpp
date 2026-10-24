@@ -80,6 +80,17 @@ void RangeDispatch::validate(const spirv::TaskAttributes &task,
   }
 }
 
+void RangeDispatch::validate_selection(const spirv::TaichiKernelAttributes &kernel,
+                                       const std::vector<uint32_t> &indices,
+                                       std::size_t global_tmp_bytes) {
+  for (std::size_t i = 0; i < indices.size(); ++i) {
+    const auto index = indices[i];
+    TI_ERROR_IF(index >= kernel.tasks_attribs.size() || (i && index <= indices[i - 1]),
+                "Device range task indices must be in topology order and unique");
+    validate(kernel.tasks_attribs[index], global_tmp_bytes);
+  }
+}
+
 RangeDispatch::RangeDispatch(Device &device,
                              const spirv::TaskAttributes &task,
                              DeviceAllocation global_tmps,

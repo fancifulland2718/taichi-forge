@@ -891,6 +891,7 @@ struct TI_DLL_EXPORT CompiledGraph {
   CompiledGraph &operator=(CompiledGraph &&) = default;
 
   bool has_indirect_dispatches() const;
+  bool has_device_range_dispatches() const;
   bool has_dispatch_labels() const;
   bool has_cuda_capture_commands() const;
   bool cuda_conditional_body_eligible() const;

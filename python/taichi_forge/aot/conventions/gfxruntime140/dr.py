@@ -186,6 +186,7 @@ class Metadata:
                 raise ValueError("Invalid GFX AOT kernel alias")
             self.kernels.append(KernelAttributes(dict(kernels[index], name=name)))
             names.add(name)
+        self.device_range_dispatch = [dict(x, tasks=list(x["tasks"])) for x in j.get("device_range_dispatch", [])]
         self.required_caps: List[DeviceCapabilityLevel] = [DeviceCapabilityLevel(x) for x in required_caps]
         self.root_buffer_size: int = int(root_buffer_size)
 

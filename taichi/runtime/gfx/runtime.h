@@ -37,6 +37,8 @@ namespace taichi::lang {
 class RuntimeStatistics;
 namespace gfx {
 
+inline constexpr size_t kGtmpBufferSize = 1024 * 1024;
+
 using namespace taichi::lang::spirv;
 
 using BufferType = TaskAttributes::BufferType;

@@ -59,6 +59,7 @@ struct CompiledGraphKernelInvocation {
     std::vector<int> sparse_list_policies;
   };
   std::optional<TaskLaunchPlan> task_launch_plan;
+  std::vector<std::uint32_t> device_range_tasks;
 
   CompiledGraphKernelInvocation(taichi::lang::Kernel &kernel,
                                 std::shared_ptr<KernelExecutionHandle> handle)
@@ -69,6 +70,7 @@ struct CompiledGraphKernelInvocation {
     // copying its immutable values. No frontend IR or SNode pointers survive
     // in this snapshot, even if another variant later retires the definition.
     auto context = kernel.make_launch_context();
+    device_range_tasks = context.device_range_tasks();
     if (context.has_cuda_task_execution_plan()) {
       task_launch_plan.emplace(TaskLaunchPlan{
           context.cuda_task_execution_plan_identity(),
@@ -82,6 +84,7 @@ struct CompiledGraphKernelInvocation {
 
   LaunchContextBuilder make_launch_context(bool cpu_bounded_range) {
     LaunchContextBuilder context(&callable, cpu_bounded_range);
+    context.device_range_tasks_ = &device_range_tasks;
     if (task_launch_plan) {
       const auto &plan = *task_launch_plan;
       context.bind_cuda_task_execution_plan(
@@ -948,6 +951,15 @@ CompiledGraph::CompiledGraph(
       args(std::move(graph_args)),
       snode_tree_dependencies(
           collect_snode_tree_dependencies(dispatches)) {
+}
+
+bool CompiledGraph::has_device_range_dispatches() const {
+  return std::any_of(dispatches.begin(), dispatches.end(), [](const auto &dispatch) {
+    if (dispatch.jit_invocation)
+      return !dispatch.jit_invocation->device_range_tasks.empty();
+    return dispatch.ti_kernel && dispatch.ti_kernel->get_offload_execution_plan() &&
+           !dispatch.ti_kernel->get_offload_execution_plan()->device_range_tasks.empty();
+  });
 }
 
 bool CompiledGraph::has_indirect_dispatches() const {
@@ -5363,7 +5375,8 @@ bool prepare_vulkan_graph_launch(
     prepared.dispatches.push_back(
         {handle, prepared.launch_contexts.back().get(), indirect_dispatch,
          static_cast<std::uint32_t>(
-             std::max<std::size_t>(1, dispatch.source_dispatches.size()))});
+             std::max<std::size_t>(1, dispatch.source_dispatches.size())),
+         prepared.launch_contexts.back()->device_range_tasks()});
   }
 
   if (gfx_launcher == nullptr) {
@@ -5436,7 +5449,8 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
       graph.dispatches.size() == 1 &&
       graph.dispatches.front().source_dispatches.size() > 1;
   if (graph.dispatches.size() <= 1 &&
-      !graph.has_indirect_dispatches() && !composed_single_dispatch) {
+      !graph.has_indirect_dispatches() && !graph.has_device_range_dispatches() &&
+      !composed_single_dispatch) {
     auto &stats = cache.vulkan_inline_stats;
     stats.backend = CompiledGraphBackend::vulkan;
     stats.last_path = CompiledGraphExecutionPath::ordinary_fallback;
@@ -5983,7 +5997,7 @@ void CompiledGraph::run(
 void CompiledGraph::jit_run(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args) const try {
-  TI_ERROR_IF(has_indirect_dispatches(),
+  TI_ERROR_IF(has_indirect_dispatches() || has_device_range_dispatches(),
               "Graph indirect dispatch requires the cached Vulkan JIT "
               "execution path");
   Program *program = jit_graph_program(*this);
@@ -6069,7 +6083,7 @@ void CompiledGraph::jit_run_cached(
     const std::unordered_map<std::string, IValue> &args,
     CompiledGraphJITCache &cache,
     bool cuda_concurrent_batch_lane) const try {
-  const bool has_indirect_dispatch = has_indirect_dispatches();
+  const bool has_indirect_dispatch = has_indirect_dispatches() || has_device_range_dispatches();
   TI_ERROR_IF(has_indirect_dispatch &&
                   compile_config.arch != Arch::vulkan,
               "Graph indirect dispatch is currently supported only by the "
@@ -6996,7 +7010,7 @@ bool CompiledGraph::jit_submit_bounded_vulkan_compound_cached(
     cache.validated_snode_tree_epoch = tree_lifecycle_guard.epoch();
   }
   if (compile_config.debug ||
-      (dispatches.size() <= 1 && !has_indirect_dispatches())) {
+      (dispatches.size() <= 1 && !has_indirect_dispatches() && !has_device_range_dispatches())) {
     return false;
   }
 

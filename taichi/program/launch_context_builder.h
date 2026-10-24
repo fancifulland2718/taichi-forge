@@ -178,6 +178,11 @@ class LaunchContextBuilder {
                : kEmpty;
   }
 
+  const std::vector<std::uint32_t> &device_range_tasks() const noexcept {
+    static const std::vector<std::uint32_t> empty;
+    return device_range_tasks_ ? *device_range_tasks_ : empty;
+  }
+
   LaunchContextBuilder(LaunchContextBuilder &&) = default;
   LaunchContextBuilder &operator=(LaunchContextBuilder &&) = default;
   LaunchContextBuilder(const LaunchContextBuilder &) = delete;
@@ -358,6 +363,7 @@ class LaunchContextBuilder {
   const std::vector<int> *cuda_task_grid_residency_waves_{nullptr};
   const std::vector<int> *cuda_task_range_work_per_thread_targets_{nullptr};
   const std::vector<int> *cuda_task_sparse_list_policies_{nullptr};
+  const std::vector<std::uint32_t> *device_range_tasks_{nullptr};
   std::string dispatch_label_;
 
  public:

@@ -4094,10 +4094,12 @@ class _OffloadExecutionPlanBinding:
 
     def _validate_backend(self):
         backend, kind = self._kernel._task_launch_backend_kind()
-        if backend != "cuda" or kind != "native":
-            raise TaichiRuntimeError(
-                "offload execution plans require the native CUDA backend"
-            )
+        if kind != "native" or backend not in ("cuda", "vulkan"):
+            raise TaichiRuntimeError("offload execution plans require native CUDA or Vulkan")
+        if backend == "vulkan" and not self.plan.range_dispatch_only:
+            raise TaichiRuntimeError("Vulkan task plans only support range dispatch selection")
+        if backend != "vulkan" and self.plan.device_range_tasks:
+            raise TaichiRuntimeError("Device range dispatch recording currently requires Vulkan")
         if self._kernel.autodiff_mode != AutodiffMode.NONE:
             raise TaichiRuntimeError(
                 "offload execution plans support primal direct JIT kernels only"
@@ -4176,6 +4178,8 @@ class _OffloadExecutionPlanBinding:
         self._fast_specialization = fast_specialization
 
     def _prepare_retained_plan(self, processed_args, fast_specialization=None):
+        if self.plan.device_range_tasks:
+            return None
         runtime = self._kernel.runtime
         if fast_specialization is None:
             fast_specialization = self._fast_specialization
@@ -4267,6 +4271,8 @@ class _OffloadExecutionPlanBinding:
         return self._prepare_processed_exact(processed)
 
     def __call__(self, *args, **kwargs):
+        if self.plan.device_range_tasks:
+            raise TaichiRuntimeError("Device range dispatch requires Graph recording")
         try:
             if self.plan.requires_graph_memory:
                 raise TaichiRuntimeError(

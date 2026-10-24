@@ -1022,7 +1022,6 @@ void GraphReplayRegistration::launch_prepared() const {
   registry_->launch_prepared(replay_key_);
 }
 
-constexpr size_t kGtmpBufferSize = 1024 * 1024;
 constexpr size_t kHashOverflowBufferSize = 6 * sizeof(uint32_t);
 constexpr size_t kListGenBufferSize = 32 << 20;
 constexpr size_t kListGenMinBufferSize = sizeof(uint32_t);
@@ -1982,6 +1981,8 @@ GfxRuntime::debug_sparse_listgen_statistics(
 
 void GfxRuntime::launch_kernel(KernelHandle handle,
                                LaunchContextBuilder &host_ctx) {
+  TI_ERROR_IF(!host_ctx.device_range_tasks().empty(),
+              "Device range dispatch requires Graph recording");
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   auto kernel_iter = ti_kernels_.find(handle.get_launch_id());
   TI_ASSERT(handle.get_launch_id() >= 0 && kernel_iter != ti_kernels_.end());
@@ -3011,12 +3012,8 @@ void validate_range_dispatch_selection(
               "Device range recording currently requires Vulkan");
   TI_ERROR_IF(call_packet != kDeviceNullPtr,
               "Per-task range selection cannot share a call-wide packet");
-  const auto &tasks = kernel.ti_kernel_attribs().tasks_attribs;
-  for (std::size_t i = 0; i < indices.size(); ++i) {
-    const auto index = indices[i];
-    TI_ERROR_IF(index >= tasks.size() || (i && index <= indices[i - 1]),
-                "Device range task indices must be in topology order and unique");
-    RangeDispatch::validate(tasks[index], kGtmpBufferSize);
+  RangeDispatch::validate_selection(kernel.ti_kernel_attribs(), indices, kGtmpBufferSize);
+  for (auto index : indices) {
     TI_ERROR_IF(kernel.task_uses_listgen_buffer(index),
                 "Device range dispatch cannot borrow sparse traversal state");
   }

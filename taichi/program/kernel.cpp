@@ -120,6 +120,7 @@ LaunchContextBuilder Kernel::make_launch_context(bool cpu_bounded_range) {
     }
   }
   if (plan != nullptr) {
+    builder.device_range_tasks_ = &plan->device_range_tasks;
     builder.bind_cuda_task_execution_plan(
         plan->execution_identity, plan->launch_content_digest, plan->task_kinds,
         plan->grid_residency_waves, plan->range_work_per_thread_targets,
@@ -424,7 +425,8 @@ void Kernel::set_offload_execution_plan(
     const std::vector<std::vector<int>> &memory_domain_shapes,
     const std::vector<std::vector<int>> &memory_domain_origins,
     const std::vector<std::vector<int>> &memory_tile_shapes,
-    const std::vector<std::vector<int>> &fusion_groups) {
+    const std::vector<std::vector<int>> &fusion_groups,
+    const std::vector<std::string> &range_dispatch_modes) {
   TI_ERROR_IF(
       offload_execution_plan_frozen_.load(std::memory_order_acquire),
       "offload execution plan cannot be replaced after launch-context "
@@ -453,6 +455,11 @@ void Kernel::set_offload_execution_plan(
           memory_tile_shapes.size() != task_count,
       "offload execution plan vectors must have one entry per physical task");
 
+  TI_ERROR_IF(!range_dispatch_modes.empty() && range_dispatch_modes.size() != task_count,
+              "range dispatch modes must cover the complete task topology");
+  const auto plan_arch = program->compile_config().arch;
+  TI_ERROR_IF(plan_arch == Arch::vulkan && !fusion_groups.empty(),
+              "Vulkan task plans do not support fusion");
   OffloadExecutionPlan plan;
   plan.compilation_identity = compilation_identity;
   plan.execution_identity = execution_identity;
@@ -475,6 +482,9 @@ void Kernel::set_offload_execution_plan(
     OffloadTaskOptimizationSpec task;
     task.task_index = static_cast<std::uint32_t>(index);
     task.task_kind = task_kinds[index];
+    const auto mode = range_dispatch_modes.empty() ? "fixed" : range_dispatch_modes[index];
+    TI_ERROR_IF(mode != "fixed" && mode != "device", "Unknown task range dispatch mode");
+    task.device_range_dispatch = mode == "device";
     task.workgroup_size = block_dim;
     if (thread_local_modes[index] == "auto") {
       task.thread_local_mode = TaskLaunchThreadLocalMode::automatic;
@@ -581,6 +591,13 @@ void Kernel::set_offload_execution_plan(
         task.range_work_per_thread_target != 1 ||
         task.memory_strategy != "direct" ||
         task.sparse_list_policy != "saturating";
+    TI_ERROR_IF(task.device_range_dispatch && (nonbaseline || task.task_kind != "range_for"),
+                "Device range dispatch requires a baseline range_for task");
+    // Admission must also hold on a compiled-cache hit, when IR passes do not run.
+    TI_ERROR_IF(plan_arch == Arch::vulkan && nonbaseline,
+                "Vulkan task plans only support range dispatch selection");
+    TI_ERROR_IF(task.device_range_dispatch && plan_arch != Arch::vulkan,
+                "Device range dispatch recording currently requires Vulkan");
     const bool sparse_listgen_policy =
         task.task_kind == "listgen" &&
         task.sparse_list_policy == "parent_capacity_bound" &&
@@ -626,7 +643,7 @@ void Kernel::set_offload_execution_plan(
           !task.memory_domain_shape.empty() ||
           !task.memory_domain_origin.empty() ||
           !task.memory_tile_shape.empty();
-      TI_ERROR_IF(task.task_kind != "range_for" || nonbaseline,
+      TI_ERROR_IF(task.task_kind != "range_for" || nonbaseline || task.device_range_dispatch,
                   "offload fusion requires baseline range_for source tasks");
     }
     fusion_group_at[group.front()] = static_cast<int>(group_index);
@@ -656,6 +673,8 @@ void Kernel::set_offload_execution_plan(
         task.range_work_per_thread_target);
     plan.sparse_list_policies.push_back(
         task.sparse_list_policy == "parent_capacity_bound" ? 1 : 0);
+    if (task.device_range_dispatch)
+      plan.device_range_tasks.push_back(task.task_index);
     plan.tasks.push_back(std::move(task));
   }
   // A content-derived native digest prevents a caller from forging an

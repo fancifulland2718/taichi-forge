@@ -1,6 +1,6 @@
 """Read-only metadata for compiled offloaded tasks."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, Optional
 
 
@@ -84,6 +84,8 @@ class OffloadedTaskManifest:
     sparse_list_parent_grid_bound: Optional[int]
     may_mutate_sparse_topology: bool
     sparse_mutation_snode_id: int
+    device_range_dispatch_version: int = field(default=0, kw_only=True)
+    requested_range_dispatch: str = field(default="fixed", kw_only=True)
 
     @classmethod
     def _from_core(cls, value: Mapping[str, object]):

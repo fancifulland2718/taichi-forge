@@ -350,7 +350,7 @@ def _build_resident_gpu_semantics(raw, *, primal_program_id=""):
         )
         launch_kind = (
             _GpuLaunchKind.INDIRECT
-            if task["actual_geometry_kind"] == "runtime_indirect"
+            if task["actual_geometry_kind"] in ("runtime_indirect", "device_range_recording")
             else _GpuLaunchKind.DIRECT
         )
         launches.append(

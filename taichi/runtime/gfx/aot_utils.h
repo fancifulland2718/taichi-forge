@@ -24,6 +24,14 @@ struct AotKernelAlias {
   TI_IO_DEF(name, kernel_index);
 };
 
+// Entry-specific execution policy is separate from shared shader identity.
+struct AotDeviceRangeDispatch {
+  std::string name;
+  uint32_t version{0};
+  std::vector<uint32_t> tasks;
+  TI_IO_DEF(name, version, tasks);
+};
+
 // Export names do not affect execution. Everything else, including task names,
 // ABI, launch attributes and tree dependencies, must agree before sharing.
 inline std::string kernel_identity(spirv::TaichiKernelAttributes attributes,
@@ -41,7 +49,8 @@ struct TaichiAotData {
   // v8 records exact cooperative-matrix dimensions and fixed subgroup width.
   // v9 stores signed, typed range bounds shared with LLVM compiled tasks.
   // v10 preserves the final-IR device-range dispatch qualification.
-  static constexpr uint32_t kMetadataVersion = 10;
+  // v11 persists per-entry range recording selection without duplicating code.
+  static constexpr uint32_t kMetadataVersion = 11;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;
@@ -49,6 +58,7 @@ struct TaichiAotData {
   std::vector<spirv::TaichiKernelAttributes> kernels;
   std::vector<AotKernelMetadata> kernel_metadata;
   std::vector<AotKernelAlias> kernel_aliases;
+  std::vector<AotDeviceRangeDispatch> device_range_dispatch;
   std::vector<aot::CompiledFieldData> fields;
   std::map<std::string, uint32_t> required_caps;
   // root_buffer_size remains the first-tree compatibility view. New loaders
@@ -63,6 +73,7 @@ struct TaichiAotData {
             kernels,
             kernel_metadata,
             kernel_aliases,
+            device_range_dispatch,
             fields,
             required_caps,
             root_buffer_size,

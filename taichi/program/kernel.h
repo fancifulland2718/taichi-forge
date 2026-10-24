@@ -84,6 +84,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
     int grid_residency_waves{0};  // zero is automatic
     int range_work_per_thread_target{1};
     std::string sparse_list_policy{"saturating"};
+    bool device_range_dispatch{false};
     std::string memory_strategy{"direct"};
     // Empty selects every eligible read-only stencil input. Otherwise this
     // is the canonical top-level external-argument subset staged by the
@@ -115,6 +116,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
     // 0 keeps the hardware-saturating listgen grid; 1 applies the exact
     // compiler-proven parent-list capacity bound.
     std::vector<int> sparse_list_policies;
+    std::vector<std::uint32_t> device_range_tasks;
     LaunchContextBuilder::CudaTaskExecutionPlanDigest launch_content_digest{};
   };
 
@@ -228,7 +230,8 @@ class TI_DLL_EXPORT Kernel : public Callable {
       const std::vector<std::vector<int>> &memory_domain_shapes,
       const std::vector<std::vector<int>> &memory_domain_origins,
       const std::vector<std::vector<int>> &memory_tile_shapes,
-      const std::vector<std::vector<int>> &fusion_groups);
+      const std::vector<std::vector<int>> &fusion_groups,
+      const std::vector<std::string> &range_dispatch_modes = {});
 
   const std::optional<OffloadExecutionPlan> &get_offload_execution_plan()
       const;

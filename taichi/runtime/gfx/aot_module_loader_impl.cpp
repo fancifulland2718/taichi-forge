@@ -5,6 +5,7 @@
 #include <unordered_set>
 
 #include "taichi/runtime/gfx/runtime.h"
+#include "taichi/runtime/gfx/range_dispatch.h"
 #include "taichi/runtime/gfx/cooperative_matrix.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/graph_artifact.h"
@@ -50,6 +51,12 @@ class AotModuleImpl : public aot::Module {
             (const char *)metadata_json.data(),
             (const char *)(metadata_json.data() + metadata_json.size()));
         liong::json::deserialize(json, ti_aot_data_);
+        // Legacy metadata permits omitted fields. A selected strategy is an
+        // explicit versioned contract and must never inherit a missing field.
+        for (const auto &[name, value] : json.fields()) {
+          if (name == "device_range_dispatch")
+            liong::json::deserialize(value, ti_aot_data_.device_range_dispatch, true);
+        }
         for (const auto &kernel : ti_aot_data_.kernels) {
           for (const auto &task : kernel.tasks_attribs) {
             if (!task.valid_device_range_dispatch_contract() ||
@@ -343,6 +350,22 @@ class AotModuleImpl : public aot::Module {
       }
     }
 
+    try {
+      if (ti_aot_data_.metadata_version < 11 && !ti_aot_data_.device_range_dispatch.empty())
+        throw std::invalid_argument("Device range selection requires GFX metadata v11");
+      for (const auto &entry : ti_aot_data_.device_range_dispatch) {
+        const auto found = kernel_indices_.find(entry.name);
+        if (device_api_backend_ != Arch::vulkan || entry.version != 1 || entry.tasks.empty() ||
+            found == kernel_indices_.end() || !range_selections_.emplace(entry.name, entry.tasks).second)
+          throw std::invalid_argument("Invalid GFX AOT range dispatch entry");
+        RangeDispatch::validate_selection(ti_aot_data_.kernels[found->second], entry.tasks, kGtmpBufferSize);
+      }
+    } catch (const std::exception &error) {
+      mark_corrupted();
+      TI_WARN("Invalid GFX AOT range selection: {}", error.what());
+      return;
+    }
+
     {
       try {
         if (aot::load_struct_graph_artifact(*dir, graphs_)) return;
@@ -473,6 +496,8 @@ class AotModuleImpl : public aot::Module {
   }
 
  private:
+  std::map<std::string, std::vector<uint32_t>> range_selections_;
+
   bool get_field_data_by_name(const std::string &name,
                               aot::CompiledFieldData &field) {
     for (int i = 0; i < ti_aot_data_.fields.size(); ++i) {
@@ -523,7 +548,8 @@ class AotModuleImpl : public aot::Module {
     const auto registered = registered_kernels_.find(index);
     auto kernel = std::make_unique<KernelImpl>(
         runtime_, std::move(kparams),
-        registered == registered_kernels_.end() ? nullptr : &registered->second);
+        registered == registered_kernels_.end() ? nullptr : &registered->second,
+        range_selections_.count(name) ? range_selections_.at(name) : std::vector<uint32_t>{});
     registered_kernels_.emplace(index, kernel->handle());
     return kernel;
   }

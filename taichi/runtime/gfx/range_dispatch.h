@@ -14,6 +14,9 @@ class RangeDispatch {
   static constexpr std::size_t kPacketBytes = 3 * sizeof(uint32_t);
   static void validate(const spirv::TaskAttributes &task,
                        std::size_t global_tmp_bytes);
+  static void validate_selection(const spirv::TaichiKernelAttributes &kernel,
+                                 const std::vector<uint32_t> &indices,
+                                 std::size_t global_tmp_bytes);
   RangeDispatch(Device &device,
                 const spirv::TaskAttributes &task,
                 DeviceAllocation global_tmps,

@@ -87,6 +87,7 @@ class _TaskOptimizationSpec:
     grid_residency_waves: Optional[int] = None
     range_work_per_thread_target: int = 1
     sparse_list_policy: str = "saturating"
+    range_dispatch: str = "fixed"
     memory_strategy: str = "direct"
     memory_source_arg_indices: tuple[int, ...] = ()
     memory_domain_shape: tuple[int, ...] = ()
@@ -105,6 +106,13 @@ class _TaskOptimizationSpec:
         if not isinstance(self.task_kind, str) or not self.task_kind:
             raise ValueError("task_kind must be a nonempty string")
         _validate_workgroup_size(self.workgroup_size)
+        if self.range_dispatch not in ("fixed", "device"):
+            raise ValueError("range_dispatch must be 'fixed' or 'device'")
+        if self.range_dispatch == "device" and (
+            self.task_kind != "range_for"
+            or not replace(self, range_dispatch="fixed").is_baseline
+        ):
+            raise ValueError("device range dispatch requires a baseline range_for task")
         if self.thread_local not in _THREAD_LOCAL_MODES:
             raise ValueError("thread_local must be 'auto', 'on', or 'off'")
         if self.cuda_min_blocks_per_sm not in _CUDA_MIN_BLOCKS_PER_SM:
@@ -228,6 +236,7 @@ class _TaskOptimizationSpec:
             and self.grid_residency_waves is None
             and self.range_work_per_thread_target == 1
             and self.sparse_list_policy == "saturating"
+            and self.range_dispatch == "fixed"
             and self.memory_strategy == "direct"
             and not self.memory_source_arg_indices
             and not self.memory_domain_shape
@@ -241,6 +250,7 @@ class _TaskOptimizationSpec:
         payload["grid_residency_waves"] = None
         payload["range_work_per_thread_target"] = 1
         payload["sparse_list_policy"] = "saturating"
+        payload.pop("range_dispatch")
         return payload
 
 
@@ -499,6 +509,16 @@ class _OffloadExecutionPlan:
             raise ValueError("materialized offload topology does not match the plan")
         return True
 
+    @property
+    def device_range_tasks(self):
+        return tuple(task.task_index for task in self.tasks if task.range_dispatch == "device")
+
+    @property
+    def range_dispatch_only(self):
+        return not self.fusion_groups and all(
+            replace(task, range_dispatch="fixed").is_baseline for task in self.tasks
+        )
+
     def validate_materialization(self, manifests):
         manifests = tuple(manifests)
         self.validate_topology(manifests)
@@ -506,6 +526,12 @@ class _OffloadExecutionPlan:
             raise ValueError("materialized task count does not match the plan")
         compilation_identity = self.compilation_identity
         for spec, manifest in zip(self.materialized_tasks, manifests):
+            if spec.range_dispatch == "device" and (
+                getattr(manifest, "device_range_dispatch_version", 0) != 1
+            ):
+                raise ValueError(f"task {spec.task_index} has no device range dispatch proof")
+            if getattr(manifest, "requested_range_dispatch", "fixed") != spec.range_dispatch:
+                raise ValueError(f"task {spec.task_index} materialized different range dispatch")
             if manifest.optimization_spec_id != compilation_identity:
                 raise ValueError(
                     "materialized compilation identity does not match the plan"
@@ -587,6 +613,7 @@ class _OffloadExecutionPlan:
             [list(task.memory_domain_origin) for task in self.tasks],
             [list(task.memory_tile_shape) for task in self.tasks],
             [list(group) for group in self.fusion_groups],
+            [task.range_dispatch for task in self.tasks],
         )
 
 

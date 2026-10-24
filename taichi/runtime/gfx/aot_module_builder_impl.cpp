@@ -1,4 +1,5 @@
 #include "taichi/runtime/gfx/aot_module_builder_impl.h"
+#include "taichi/runtime/gfx/range_dispatch.h"
 #include "taichi/program/kernel_compile_request.h"
 
 #include <fstream>
@@ -77,6 +78,7 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
     // Copy metadata only, never the potentially large SPIR-V payload vectors.
     TaichiAotData artifact;
     artifact.metadata_version = ti_aot_data_.metadata_version;
+    artifact.device_range_dispatch = ti_aot_data_.device_range_dispatch;
     artifact.kernels = ti_aot_data_.kernels;
     artifact.kernel_metadata = ti_aot_data_.kernel_metadata;
     artifact.kernel_aliases = ti_aot_data_.kernel_aliases;
@@ -178,6 +180,8 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
     }
     // Typed range bounds replace the old untagged constant/offset metadata.
     artifact.metadata_version = std::max(artifact.metadata_version, uint32_t(10));
+    if (!artifact.device_range_dispatch.empty())
+      artifact.metadata_version = std::max(artifact.metadata_version, uint32_t(11));
     std::string json = liong::json::print(liong::json::serialize(artifact));
     aot::write_root_storage_views(root_storage_views_, module_ids, output_dir);
     std::fstream f(output_dir + "/metadata.json",
@@ -222,6 +226,19 @@ void AotModuleBuilderImpl::add_compiled_kernel(const std::string &identifier,
   const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);
 
   const auto &compiled = spirv_ckd.get_internal_data();
+  std::vector<uint32_t> range_tasks;
+  if (const auto &plan = kernel->get_offload_execution_plan(); plan) {
+    TI_ERROR_IF(plan->tasks.size() != compiled.metadata.kernel_attribs.tasks_attribs.size(),
+                "AOT range dispatch task topology differs from compiled code");
+    for (std::size_t i = 0; i < plan->tasks.size(); ++i) {
+      const auto &task = compiled.metadata.kernel_attribs.tasks_attribs[i];
+      TI_ERROR_IF(plan->tasks[i].task_index != i ||
+                      plan->tasks[i].task_kind != offloaded_task_type_name(task.task_type),
+                  "AOT range dispatch topology differs at task {}", i);
+    }
+    range_tasks = plan->device_range_tasks;
+    RangeDispatch::validate_selection(compiled.metadata.kernel_attribs, range_tasks, kGtmpBufferSize);
+  }
   // Global tree counts are compilation-time observations, not dependencies.
   // A module may add fields later or reuse kernels compiled before unrelated
   // layouts were created. Validate its actual closure; dump() assigns compact
@@ -249,8 +266,15 @@ void AotModuleBuilderImpl::add_compiled_kernel(const std::string &identifier,
   TI_ERROR_IF(!inserted && named->second != index,
               "GFX AOT export name '{}' refers to different kernels.", identifier);
   if (!inserted) {
+    const auto selected = std::find_if(ti_aot_data_.device_range_dispatch.begin(),
+        ti_aot_data_.device_range_dispatch.end(), [&](const auto &entry) { return entry.name == identifier; });
+    const std::vector<uint32_t> empty;
+    TI_ERROR_IF((selected == ti_aot_data_.device_range_dispatch.end() ? empty : selected->tasks) != range_tasks,
+                "GFX AOT export name '{}' refers to different range dispatch policies", identifier);
     return;
   }
+  if (!range_tasks.empty())
+    ti_aot_data_.device_range_dispatch.push_back({identifier, 1, std::move(range_tasks)});
   if (existing != kernel_identities_.end()) {
     ti_aot_data_.kernel_aliases.push_back({identifier, index});
     return;

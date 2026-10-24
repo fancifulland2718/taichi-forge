@@ -1309,8 +1309,13 @@ FixedExecution::FixedExecution(
           instance->payload->workspace = vulkan_binding->workspace
               ? vulkan_binding->workspace : gfx_runtime->create_fixed_graph_workspace();
       }
+      const auto &live = dispatch.context->device_range_tasks();
+      const auto &persisted = loaded->device_range_tasks();
+      TI_ERROR_IF(!live.empty() && !persisted.empty() && live != persisted,
+                  "Borrowed and persisted range dispatch policies differ");
       return gfx::GfxRuntime::GraphDispatch{
-          loaded->handle(), dispatch.context, dispatch.indirect_dispatch};
+          loaded->handle(), dispatch.context, dispatch.indirect_dispatch, 1,
+          live.empty() ? persisted : live};
     };
     const auto retain =
         [&](std::unique_ptr<gfx::GraphReplayRegistration> graph) {

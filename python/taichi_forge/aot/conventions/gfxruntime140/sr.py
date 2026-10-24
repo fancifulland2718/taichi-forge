@@ -197,11 +197,13 @@ class Metadata:
         kernels: List[Kernel],
         required_caps: List[ti.DeviceCapability],
         root_buffer_size: int,
+        device_range_dispatch=(),
     ):
         self.fields: Dict[str, Field] = {x.name: x for x in fields}
         self.kernels: Dict[str, Kernel] = {x.name: x for x in kernels}
         self.required_caps: List[ti.DeviceCapability] = required_caps
         self.root_buffer_size: int = root_buffer_size
+        self.device_range_dispatch = tuple(dict(x, tasks=list(x["tasks"])) for x in device_range_dispatch)
 
 
 def from_dr_field(d: dr.FieldAttributes) -> Field:
@@ -345,7 +347,7 @@ def from_dr_metadata(d: dr.Metadata) -> Metadata:
             required_caps += [f"{cap.key}={cap.value}"]
     root_buffer_size = d.root_buffer_size
 
-    return Metadata(fields, kernels, required_caps, root_buffer_size)
+    return Metadata(fields, kernels, required_caps, root_buffer_size, d.device_range_dispatch)
 
 
 def to_dr_field(f: Field) -> Dict[str, Any]:
@@ -521,6 +523,7 @@ def to_dr_metadata(s: Metadata) -> dr.Metadata:
         "required_caps": required_caps,
         "root_buffer_size": root_buffer_size,
     }
+    j["device_range_dispatch"] = list(s.device_range_dispatch)
     return dr.Metadata(j)
 
 

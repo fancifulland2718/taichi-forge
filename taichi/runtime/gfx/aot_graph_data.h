@@ -6,8 +6,10 @@ namespace gfx {
 class KernelImpl : public aot::Kernel {
  public:
   explicit KernelImpl(GfxRuntime *runtime, GfxRuntime::RegisterParams &&params,
-                      const GfxRuntime::KernelHandle *shared_handle = nullptr)
-      : runtime_(runtime), params_(std::move(params)) {
+                      const GfxRuntime::KernelHandle *shared_handle = nullptr,
+                      std::vector<uint32_t> device_range_tasks = {})
+      : runtime_(runtime), params_(std::move(params)),
+        device_range_tasks_(std::move(device_range_tasks)) {
     handle_ = shared_handle ? *shared_handle
                             : runtime_->register_taichi_kernel(params_);
     ret_type = params_.kernel_attribs.ctx_attribs.rets_type();
@@ -60,12 +62,15 @@ class KernelImpl : public aot::Kernel {
   }
 
   void launch(LaunchContextBuilder &ctx) override {
+    TI_ERROR_IF(!device_range_tasks_.empty(), "Device range dispatch requires Graph recording");
     runtime_->launch_kernel(handle_, ctx);
   }
 
   const GfxRuntime::RegisterParams &params() {
     return params_;
   }
+
+  const std::vector<uint32_t> &device_range_tasks() const { return device_range_tasks_; }
 
   GfxRuntime::KernelHandle handle() const {
     return handle_;
@@ -79,6 +84,7 @@ class KernelImpl : public aot::Kernel {
   GfxRuntime *const runtime_;
   GfxRuntime::KernelHandle handle_;
   const GfxRuntime::RegisterParams params_;
+  const std::vector<uint32_t> device_range_tasks_;
 };
 }  // namespace gfx
 }  // namespace taichi::lang

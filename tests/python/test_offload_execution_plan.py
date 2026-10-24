@@ -163,6 +163,22 @@ def test_offload_execution_plan_has_complete_deterministic_identity():
     assert len(first.tasks) == len(_manifests())
 
 
+def test_device_range_plan_keeps_payload_identity_and_requires_proof():
+    baseline = _OffloadExecutionPlan.from_task_manifests(_manifests())
+    selected = baseline.replace_task(1, range_dispatch="device")
+    assert selected.compilation_identity == baseline.compilation_identity
+    assert selected.identity != baseline.identity
+    assert selected.device_range_tasks == (1,)
+    assert selected.range_dispatch_only
+    assert selected.native_arguments[-1] == ["fixed", "device", "fixed"]
+    with pytest.raises(ValueError, match="baseline range_for"):
+        baseline.replace_task(0, range_dispatch="device")
+    with pytest.raises(ValueError, match="baseline range_for"):
+        selected.replace_task(1, grid_residency_waves=2)
+    with pytest.raises(ValueError, match="no device range dispatch proof"):
+        selected.validate_materialization(_materialized_manifests(selected))
+
+
 def test_offload_phase_fusion_has_distinct_identity_and_exact_source_lineage():
     baseline = _OffloadExecutionPlan.from_task_manifests(_manifests())
     fused = baseline.with_fused_task_groups((1, 2))
@@ -185,7 +201,7 @@ def test_offload_phase_fusion_has_distinct_identity_and_exact_source_lineage():
             "tfl:kernel:stable:2:range_for",
         ),
     )
-    assert fused.native_arguments[-1] == [[1, 2]]
+    assert fused.native_arguments[-2] == [[1, 2]]
     assert fused.validate_materialization(_materialized_manifests(fused))
 
 

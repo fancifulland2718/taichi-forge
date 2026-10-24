@@ -73,6 +73,7 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     item.task_index = static_cast<std::uint32_t>(index);
     item.task_type = task.task_type;
     item.range_bounds = task.range_for_attribs;
+    item.device_range_dispatch_version = task.device_range_dispatch_version;
     if (item.range_bounds) {
       item.constant_range_size = item.range_bounds->constant_size();
     }
