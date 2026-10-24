@@ -809,7 +809,7 @@ def test_llvm_aot_declares_bitcode_payload(tmp_path):
     module.add_kernel(fill)
     module.save(tmp_path)
     metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 10
+    assert metadata["schema_version"] == 11
     assert metadata["kernel_launch_abis"] == [{"key": "fill", "value": "runtime_context_v2"}]
     assert metadata["kernel_format"] == "bc"
     assert (tmp_path / "fill.bc").read_bytes().startswith(b"BC\xc0\xde")
@@ -833,7 +833,7 @@ def test_llvm_aot_dense_resource_contract(tmp_path):
     module.add_kernel(fill)
     module.save(tmp_path)
     metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 10
+    assert metadata["schema_version"] == 11
     assert metadata["resource_binding"] == "dense_v1"
     assert metadata["abi_sha256"] == hashlib.sha256((tmp_path / "metadata.tcb").read_bytes()).hexdigest()
     # The AOT-only code contract must not leak into normal JIT compilation.
@@ -935,7 +935,7 @@ def test_llvm_aot_list_resources_declare_relocatable_contract(tmp_path):
     module.add_kernel(fill)
     module.save(tmp_path)
     metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 10
+    assert metadata["schema_version"] == 11
     assert metadata["resource_binding"] == "list_v1"
     assert metadata["kernel_launch_abis"] == [{"key": "fill", "value": "runtime_context_v2"}]
     fill()
@@ -1168,7 +1168,7 @@ def test_aot_cubin_contract(tmp_path, monkeypatch):
     module.add_kernel(fill)
     module.save(tmp_path)
     metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 10
+    assert metadata["schema_version"] == 11
     assert metadata["kernel_format"] == "cubin"
     assert not list(tmp_path.glob("*.ptx"))
     assert not list(tmp_path.glob("*.bc"))
@@ -1218,7 +1218,7 @@ def test_aot_ptx_contract(tmp_path):
     assert not list(tmp_path.glob("*.bc"))
     assert not list(tmp_path.glob("*.ll"))
     metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 10
+    assert metadata["schema_version"] == 11
     assert metadata["kernel_format"] == "ptx"
     assert metadata["abi_sha256"] == hashlib.sha256((tmp_path / "metadata.tcb").read_bytes()).hexdigest()
     artifact = metadata["cuda_artifacts"][0]["value"]

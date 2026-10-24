@@ -27,6 +27,8 @@ inline constexpr std::uint32_t kTaskLaunchPolicyAotSchemaVersion = 9;
 // Tagged range bounds change the binary task layout. Gate it in JSON before
 // either runtime attempts to decode metadata.tcb.
 inline constexpr std::uint32_t kTypedRangeBoundsAotSchemaVersion = 10;
+// Adds the final-IR range-dispatch proof to each serialized LLVM task.
+inline constexpr std::uint32_t kDeviceRangeProofAotSchemaVersion = 11;
 
 inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";
@@ -108,13 +110,13 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                         metadata.abi_sha256.size() != 64,
               "AOT runtime-state inventory requires its metadata checksum");
   auto base_schema = metadata.schema_version;
-  const bool typed_ranges = base_schema == kTypedRangeBoundsAotSchemaVersion;
+  const bool typed_ranges = base_schema == kDeviceRangeProofAotSchemaVersion;
   const bool launch_abi = base_schema == kKernelLaunchAbiAotSchemaVersion ||
                           base_schema == kTaskLaunchPolicyAotSchemaVersion ||
                           (typed_ranges && !metadata.kernel_launch_abis.empty());
   TI_ERROR_IF(launch_abi != !metadata.kernel_launch_abis.empty() ||
                   (!launch_abi && !metadata.launch_abi_sha256.empty()),
-              "AOT kernel launch ABI declarations require schema 8, 9 or 10");
+              "AOT kernel launch ABI declarations require schema 8, 9 or 11");
   if (launch_abi) {
     TI_ERROR_IF(metadata.abi_sha256.size() != 64 ||
                     metadata.launch_abi_sha256.size() != 64 ||

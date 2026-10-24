@@ -73,6 +73,9 @@ def test_device_bounds_follow_each_offload_snapshot():
             assert task.range_bounds.end.value >= 0
             assert task.range_bounds.end.value % 4 == 0
             assert task.constant_range_size is None
+            assert task.device_range_dispatch_version == 1
+    else:
+        assert all(task.device_range_dispatch_version == 0 for task in manifest)
     for size in (0, 3, 65, 0):
         values.fill(-1)
         limit[None] = size

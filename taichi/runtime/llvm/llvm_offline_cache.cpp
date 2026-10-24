@@ -164,7 +164,8 @@ bool LlvmOfflineCacheFileReader::take_kernel_cache(
     for (const auto &task : compiled.tasks) {
       auto *function = compiled.module->getFunction(task.name);
       if (!function || function->isDeclaration() ||
-          (task.range_bounds && !task.range_bounds->valid())) {
+          (task.range_bounds && !task.range_bounds->valid()) ||
+          !task.valid_device_range_dispatch_contract()) {
         valid = false;
         break;
       }
@@ -193,7 +194,8 @@ bool LlvmOfflineCacheFileReader::take_kernel_metadata(
   auto it = data_.kernels.find(key);
   if (it == data_.kernels.end() || failed_kernels_.count(key)) return false;
   for (const auto &task : it->second.compiled_data.tasks) {
-    if (task.range_bounds && !task.range_bounds->valid()) {
+    if ((task.range_bounds && !task.range_bounds->valid()) ||
+        !task.valid_device_range_dispatch_contract()) {
       failed_kernels_.insert(key);
       return false;
     }
@@ -237,7 +239,8 @@ bool LlvmOfflineCacheFileReader::get_kernel_cache(
   const auto &tasks = compiled_data.tasks;
   bool verified = true;
   for (const auto &t : tasks) {
-    if (t.range_bounds && !t.range_bounds->valid()) {
+    if ((t.range_bounds && !t.range_bounds->valid()) ||
+        !t.valid_device_range_dispatch_contract()) {
       verified = false;
     }
     if (compiled_data.module->getFunction(t.name) == nullptr) {

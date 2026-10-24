@@ -48,7 +48,7 @@ def test_aot_graph_keeps_distinct_launch_only_entries(tmp_path, artifact_format)
     assert len(entries) == 2 and len(set(entries)) == 2
     assert len(module._exported_kernels) == 2
     module.save(str(tmp_path))
-    assert json.loads((tmp_path / "aot_metadata.json").read_text())["schema_version"] == 10
+    assert json.loads((tmp_path / "aot_metadata.json").read_text())["schema_version"] == 11
     # LLVM metadata.json is a diagnostic TextSerializer dump, not JSON.
     diagnostic = (tmp_path / "metadata.json").read_text()
     requests = re.findall(
@@ -137,7 +137,7 @@ def test_aot_graph_keeps_distinct_launch_only_entries(tmp_path, artifact_format)
         metadata = json.loads(metadata_path.read_text())
         metadata["schema_version"] = 8
         metadata_path.write_text(json.dumps(metadata))
-        with pytest.raises(AotError, match="task layout requires schema 10"):
+        with pytest.raises(AotError, match="task layout requires schema 11"):
             runtime.load_module(tmp_path)
         assert telemetry() == warm
 

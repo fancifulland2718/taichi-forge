@@ -59,7 +59,7 @@ def test_aot_shared_runtime_state_is_not_admitted(artifact_format, dense_lists, 
     directory = tmp_path / "module"
     module.save(directory)
     metadata = json.loads((directory / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 10
+    assert metadata["schema_version"] == 11
     assert {item["key"]: item["value"] for item in metadata["kernel_runtime_state"]} == {
         "random_direct": 3, "random_callee": 3, "print_value": 65, "sparse_value": 9,
         "dense_value": 9 if dense_lists else 1,

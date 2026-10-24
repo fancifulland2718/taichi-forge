@@ -96,6 +96,7 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
                                            : "grid_stride")))
             : "not_applicable";
     item.range_bounds = task.range_bounds;
+    item.device_range_dispatch_version = task.device_range_dispatch_version;
     if (task.range_bounds) {
       item.constant_range_size = task.range_bounds->constant_size();
     }
@@ -200,7 +201,8 @@ CompiledKernelData::Err CompiledKernelData::check() const {
     return Err::kCompiledKernelDataBroken;
   }
   for (const auto &t : tasks) {
-    if (t.range_bounds && !t.range_bounds->valid()) {
+    if ((t.range_bounds && !t.range_bounds->valid()) ||
+        !t.valid_device_range_dispatch_contract()) {
       return Err::kCompiledKernelDataBroken;
     }
     if (compiled_data.module->getFunction(t.name) == nullptr) {
@@ -222,7 +224,8 @@ CompiledKernelData::Err CompiledKernelData::load_impl(
     return Err::kParseMetadataFailed;
   }
   for (const auto &task : data_.compiled_data.tasks) {
-    if (task.range_bounds && !task.range_bounds->valid()) {
+    if ((task.range_bounds && !task.range_bounds->valid()) ||
+        !task.valid_device_range_dispatch_contract()) {
       return Err::kCompiledKernelDataBroken;
     }
   }

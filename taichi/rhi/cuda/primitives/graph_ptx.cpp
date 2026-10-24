@@ -331,6 +331,56 @@ DONE:
     ret;
 }
 
+.visible .entry graph_update_range(
+    .param .u64 control_param
+)
+{
+    .reg .pred %p<6>;
+    .reg .b32 %r<14>;
+    .reg .b64 %rd<5>;
+    .param .b64 call_node;
+    .param .align 4 .b8 call_grid[12];
+    .param .b32 call_result;
+
+    ld.param.u64 %rd1, [control_param];
+    ld.global.u64 %rd2, [%rd1+0];
+    ld.global.u64 %rd3, [%rd1+8];
+    ld.global.u64 %rd4, [%rd1+16];
+    ld.global.s32 %r1, [%rd1+24];
+    ld.global.s32 %r2, [%rd1+28];
+    setp.ne.u64 %p1, %rd3, 0;
+    @%p1 ld.global.s32 %r1, [%rd3];
+    setp.ne.u64 %p2, %rd4, 0;
+    @%p2 ld.global.s32 %r2, [%rd4];
+    ld.global.u32 %r3, [%rd1+32];
+    ld.global.u32 %r4, [%rd1+36];
+
+    // The signed comparison must precede the unsigned distance. This covers
+    // INT_MIN..INT_MAX without signed subtraction or ceil-add overflow.
+    setp.gt.s32 %p3, %r2, %r1;
+    sub.u32 %r5, %r2, %r1;
+    selp.u32 %r5, %r5, 0, %p3;
+    div.u32 %r6, %r5, %r3;
+    rem.u32 %r7, %r5, %r3;
+    setp.ne.u32 %p4, %r7, 0;
+    selp.u32 %r8, 1, 0, %p4;
+    add.u32 %r9, %r6, %r8;
+    min.u32 %r9, %r9, %r4;
+    max.u32 %r9, %r9, 1;
+
+    st.param.b64 [call_node], %rd2;
+    st.param.b32 [call_grid+0], %r9;
+    mov.u32 %r10, 1;
+    st.param.b32 [call_grid+4], %r10;
+    st.param.b32 [call_grid+8], %r10;
+    call.uni (call_result), cudaGraphKernelNodeSetGridDim,
+        (call_node, call_grid);
+    ld.param.b32 %r11, [call_result];
+    st.global.u32 [%rd1+40], %r11;
+    st.global.u32 [%rd1+44], %r9;
+    ret;
+}
+
 .visible .entry graph_update_bounded_extent(
     .param .u64 control_param
 )
@@ -697,6 +747,7 @@ std::once_flag bounded_module_once;
 void *bounded_module{nullptr};
 void *bounded_update_func{nullptr};
 void *bounded_extent_update_func{nullptr};
+void *range_update_func{nullptr};
 void *bounded_group_update_func{nullptr};
 void *predicate_group_update_func{nullptr};
 void *bounded_probe_payload_func{nullptr};
@@ -756,6 +807,11 @@ void load_bounded_module_once() {
     return;
   }
   bounded_module_error = driver.module_get_function.call(
+      &range_update_func, bounded_module, "graph_update_range");
+  if (bounded_module_error != CUDA_SUCCESS) {
+    return;
+  }
+  bounded_module_error = driver.module_get_function.call(
       &bounded_extent_update_func, bounded_module,
       "graph_update_bounded_extent");
   if (bounded_module_error != CUDA_SUCCESS) {
@@ -784,7 +840,7 @@ bool ensure_bounded_module(std::uint32_t *driver_error) {
     *driver_error = bounded_module_error;
   }
   return bounded_module_error == CUDA_SUCCESS && bounded_module != nullptr &&
-         bounded_update_func != nullptr &&
+         bounded_update_func != nullptr && range_update_func != nullptr &&
          bounded_extent_update_func != nullptr &&
          bounded_group_update_func != nullptr &&
          predicate_group_update_func != nullptr &&
@@ -913,6 +969,16 @@ void driver_graph_update_bounded(CudaGraphBoundedControl *control,
   CUDAContext::get_instance().launch(bounded_update_func,
                                      "cuda_graph_update_bounded_node",
                                      {&control_arg}, {}, 1, 1, 0, stream);
+}
+
+void driver_graph_update_range(CudaGraphRangeControl *control, void *stream) {
+  std::uint32_t error = CUDA_SUCCESS;
+  TI_ERROR_IF(!ensure_bounded_module(&error),
+              "CUDA range updater PTX failed to load: {}",
+              get_cuda_error_message(error));
+  void *argument = control;
+  CUDAContext::get_instance().launch(range_update_func, "cuda_graph_update_range",
+                                     {&argument}, {}, 1, 1, 0, stream);
 }
 
 void driver_graph_update_bounded_extent(CudaGraphBoundedExtentControl *control,

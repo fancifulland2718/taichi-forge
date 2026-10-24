@@ -15,6 +15,7 @@
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/runtime/cuda/bounded_graph.h"
+#include "taichi/runtime/cuda/range_graph.h"
 #include "taichi/runtime/cuda/parallel_graph.h"
 #include "taichi/runtime/cuda/predicate_graph.h"
 
@@ -64,6 +65,7 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
   std::vector<ParameterUpload> parameter_uploads;
   CudaGraphConditionalControl64 *controls{nullptr};
   BoundedGraphControls bounded;
+  RangeGraphControls range;
   std::vector<std::unique_ptr<ParallelGraphCapture>> parallel;
   std::vector<std::unique_ptr<SelectedControl>> selected_controls;
   std::size_t control_bytes{0};
@@ -107,6 +109,7 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
       for (const auto &resource : capture_resources)
         resource->release(false);
       bounded.release(false);
+      range.release(false);
       release_selected(false);
       for (const auto &region : parallel)
         region->release(false);
@@ -150,6 +153,7 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
         resource->release(backend_safe);
       capture_resources.clear();
       bounded.release(backend_safe);
+      range.release(backend_safe);
       release_selected(backend_safe);
       for (const auto &region : parallel)
         region->release(backend_safe);
@@ -166,6 +170,7 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
         resource->release(false);
       capture_resources.clear();
       bounded.release(false);
+      range.release(false);
       release_selected(false);
       for (const auto &region : parallel)
         region->release(false);
@@ -175,6 +180,7 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
         resource->release(false);
       capture_resources.clear();
       bounded.release(false);
+      range.release(false);
       release_selected(false);
       for (const auto &region : parallel)
         region->release(false);
@@ -228,6 +234,7 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
         resource->release(true);
       capture_resources.clear();
       bounded.release(true, stream);
+      range.release(true, stream);
       release_selected(true, stream);
       for (const auto &region : parallel)
         region->release(true);
@@ -507,7 +514,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
       operations.begin(), operations.end(), [](const auto &operation) {
         const auto *dispatch = std::get_if<Dispatch>(&operation);
         return dispatch && dispatch->external && !dispatch->bounded_extent &&
-               !dispatch->adaptive_block_dim;
+               !dispatch->adaptive_block_dim && dispatch->device_range_tasks.empty();
       });
   if (state.binding_frame) {
     if (!driver.graph_node_get_type.available() ||
@@ -515,7 +522,8 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
       throw std::invalid_argument("CUDA binding-frame updates are unavailable");
     for (const auto &operation : operations) {
       const auto *dispatch = std::get_if<Dispatch>(&operation);
-      if (!dispatch || dispatch->bounded_extent || dispatch->adaptive_block_dim)
+      if (!dispatch || dispatch->bounded_extent || dispatch->adaptive_block_dim ||
+          !dispatch->device_range_tasks.empty())
         throw std::invalid_argument(
             "CUDA binding frames require a flat fixed dispatch topology");
     }
@@ -548,7 +556,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
     return std::all_of(region.begin(), region.end(), [](const auto &op) {
       const auto *dispatch = std::get_if<Dispatch>(&op);
       return dispatch && !dispatch->external && !dispatch->bounded_extent &&
-             !dispatch->adaptive_block_dim;
+             !dispatch->adaptive_block_dim && dispatch->device_range_tasks.empty();
     });
   };
   std::unordered_set<const void *> active_controls;
@@ -674,6 +682,19 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
     }
   };
   collect(operations);
+  const bool range_selected = std::any_of(
+      dispatches.begin(), dispatches.end(),
+      [](const auto *d) { return !d->device_range_tasks.empty(); });
+  if (range_selected &&
+      (!state.independent || state.binding_frame ||
+       !std::all_of(operations.begin(), operations.end(),
+                    [](const auto &op) { return std::holds_alternative<Dispatch>(op); }) ||
+       std::any_of(dispatches.begin(), dispatches.end(), [](const auto *d) {
+         return d->bounded_extent || d->adaptive_block_dim ||
+                (d->external && !d->device_range_tasks.empty());
+       })))
+    throw std::invalid_argument(
+        "CUDA device range requires an independent flat ordinary graph");
   const auto gated_begin = dispatches.size();
   struct GateBinding {
     void *pointer;
@@ -950,6 +971,17 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
                                 "prepare adaptive CUDA controls",
                                 "Selected adaptive CUDA graph is unavailable");
   }
+  if (range_selected) {
+    std::vector<std::vector<std::size_t>> selections;
+    selections.reserve(dispatches.size());
+    for (const auto *dispatch : dispatches)
+      selections.push_back(dispatch->device_range_tasks);
+    std::uint32_t error = CUDA_SUCCESS;
+    if (!state.range.initialize(packets, selections, taichi_global_tmp_buffer_size,
+                                &error))
+      throw BackendRuntimeError(Arch::cuda, error, "prepare CUDA range controls",
+                                "Selected CUDA range control is unavailable");
+  }
   state.bytes = image.size();
   driver.stream_create(&state.stream, CU_STREAM_NON_BLOCKING);
   if (state.bytes) {
@@ -986,7 +1018,13 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
       }
       retain();
     } else {
-      if (grid_limit) {
+      if (range_selected) {
+        const auto error = state.range.capture(index, *dispatch.launcher,
+                                                packets[index], stream);
+        if (error != CUDA_SUCCESS)
+          throw BackendRuntimeError(Arch::cuda, error, "capture CUDA range task",
+                                    "Selected CUDA range task capture failed");
+      } else if (grid_limit) {
         const auto error = state.bounded.capture(index, *dispatch.launcher,
                                                  packets[index], stream);
         if (error != CUDA_SUCCESS)
@@ -1219,6 +1257,12 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
                                   "upload adaptive CUDA controls",
                                   "Selected adaptive CUDA control upload failed");
     }
+    if (range_selected) {
+      const auto error = state.range.upload();
+      if (error != CUDA_SUCCESS)
+        throw BackendRuntimeError(Arch::cuda, error, "upload CUDA range controls",
+                                  "Selected CUDA range control upload failed");
+    }
     for (const auto &region : state.selected_controls) {
       if (region->masked)
         continue;
@@ -1310,7 +1354,7 @@ std::size_t FixedGraph::argument_bytes() const {
 }
 std::size_t FixedGraph::control_bytes() const {
   return state_->control_bytes + state_->bounded.device_bytes() +
-         state_->temporary_bytes;
+         state_->range.device_bytes() + state_->temporary_bytes;
 }
 std::size_t FixedGraph::capture_bytes() const {
   return state_->capture_bytes;

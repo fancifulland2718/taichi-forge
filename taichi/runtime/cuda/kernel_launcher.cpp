@@ -1374,6 +1374,11 @@ bool KernelLauncher::capture_cuda_graph_updatable_launch(
     return false;
   }
   const auto &launcher_ctx = iter->second;
+  if (launcher_ctx->launch_abi != packet.launch_abi ||
+      (packet.context.global_tmp_buffer &&
+       launcher_ctx->runtime_context_abi < LLVM::kRuntimeContextABI)) {
+    return false;
+  }
   auto *cuda_jit_module =
       dynamic_cast<JITModuleCUDA *>(launcher_ctx->jit_module);
   if (cuda_jit_module == nullptr || packet.offloaded_tasks.empty()) {

@@ -42,6 +42,21 @@ class OffloadedTask {
   int block_dim{0};
   int grid_dim{0};
   std::optional<RangeForBounds> range_bounds;
+  // Final IR qualification, independent of the selected launch policy.
+  std::uint32_t device_range_dispatch_version{0};
+  bool valid_device_range_dispatch_contract() const {
+    if (device_range_dispatch_version == 0)
+      return true;
+    return device_range_dispatch_version == 1 &&
+           task_type == OffloadedTaskType::range_for && range_bounds &&
+           range_bounds->valid() && !range_bounds->const_range() &&
+           range_bounds->begin.kind != RangeBoundKind::unknown &&
+           range_bounds->end.kind != RangeBoundKind::unknown &&
+           !one_to_one && !external_shared_staged &&
+           !static_shared_array_bytes && !dynamic_shared_array_bytes &&
+           !thread_local_bytes && !may_mutate_sparse_topology &&
+           sparse_list_op == kSparseListOpNone && block_dim > 0 && grid_dim > 0;
+  }
   std::int64_t constant_range_size() const {
     return range_bounds ? range_bounds->constant_size().value_or(-1) : -1;
   }
@@ -100,6 +115,7 @@ class OffloadedTask {
             block_dim,
             grid_dim,
             range_bounds,
+            device_range_dispatch_version,
             static_shared_array_bytes,
             dynamic_shared_array_bytes,
             thread_local_bytes,

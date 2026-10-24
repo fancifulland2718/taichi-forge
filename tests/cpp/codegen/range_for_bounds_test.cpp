@@ -156,5 +156,35 @@ TEST(RangeForBounds, CompiledSpirvReaderRejectsInvalidSource) {
   EXPECT_EQ(loaded.load(input), CompiledKernelData::Err::kCompiledKernelDataBroken);
 }
 
+#ifdef TI_WITH_LLVM
+TEST(RangeForBounds, LlvmRangeProofSurvivesCodecAndChecksPhysicalContract) {
+  OffloadedTask task;
+  task.task_type = OffloadedTaskType::range_for;
+  task.range_bounds = RangeForBounds{RangeBound::constant(-3), RangeBound::global_tmp(4)};
+  task.block_dim = 32;
+  task.grid_dim = 64;
+  task.device_range_dispatch_version = 1;
+  ASSERT_TRUE(task.valid_device_range_dispatch_contract());
+  BinaryOutputSerializer output;
+  output.initialize();
+  output(task);
+  output.finalize();
+  BinaryInputSerializer input;
+  input.initialize(output.data.data());
+  OffloadedTask decoded;
+  input(decoded);
+  EXPECT_EQ(decoded.device_range_dispatch_version, 1);
+  EXPECT_TRUE(decoded.valid_device_range_dispatch_contract());
+  decoded.one_to_one = true;
+  EXPECT_FALSE(decoded.valid_device_range_dispatch_contract());
+  decoded.one_to_one = false;
+  decoded.device_range_dispatch_version = 2;
+  EXPECT_FALSE(decoded.valid_device_range_dispatch_contract());
+  decoded.device_range_dispatch_version = 1;
+  decoded.range_bounds->end = RangeBound::constant(4);
+  EXPECT_FALSE(decoded.valid_device_range_dispatch_contract());
+}
+#endif
+
 }  // namespace
 }  // namespace taichi::lang

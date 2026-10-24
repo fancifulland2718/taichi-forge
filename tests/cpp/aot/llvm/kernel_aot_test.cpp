@@ -365,7 +365,7 @@ TEST(LlvmAotMetadataTest,
     metadata.kernel_format = format;
     EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
     auto typed = metadata;
-    typed.schema_version = LLVM::kTypedRangeBoundsAotSchemaVersion;
+    typed.schema_version = LLVM::kDeviceRangeProofAotSchemaVersion;
     EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(typed));
   }
   metadata.schema_version = LLVM::kCudaCubinAotSchemaVersion;
@@ -375,6 +375,15 @@ TEST(LlvmAotMetadataTest,
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
   metadata.resource_binding = "dense_v1";
   metadata.initial_root_data.clear();
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+}
+
+TEST(LlvmAotMetadataTest, RangeProofRejectsPreviousBinaryTaskLayout) {
+  LLVM::LlvmAotMetadata metadata;
+  metadata.schema_version = LLVM::kDeviceRangeProofAotSchemaVersion;
+  metadata.kernel_format = "bc";
+  EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  metadata.schema_version = LLVM::kTypedRangeBoundsAotSchemaVersion;
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
 }
 
@@ -435,7 +444,7 @@ TEST(LlvmAotMetadataTest, PersistedTaskPolicyRequiresNewReaderAndExistingAbi) {
     EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
   }
   auto malformed = metadata;
-  malformed.schema_version = LLVM::kTypedRangeBoundsAotSchemaVersion + 1;
+  malformed.schema_version = LLVM::kDeviceRangeProofAotSchemaVersion + 1;
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(malformed));
   malformed = metadata;
   malformed.kernel_launch_abis.clear();

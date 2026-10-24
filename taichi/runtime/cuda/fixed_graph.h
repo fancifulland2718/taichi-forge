@@ -40,6 +40,9 @@ class FixedGraph {
     bool grouped_update{false};
     const void *bounded_binding_identity{nullptr};
     std::vector<SubmissionParameterPatch> parameters;
+    // Cold, exact indices in the compiled task sequence. Only independently
+    // owned flat ordinary graphs currently admit this physical strategy.
+    std::vector<std::size_t> device_range_tasks;
   };
   struct While;
   struct Branch;

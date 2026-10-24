@@ -67,6 +67,29 @@ struct CudaGraphBoundedExtentControl {
   std::uint32_t max_grid_dim{0};
 };
 
+// Ordinary grid-stride task: readonly signed bounds, never logical clamping
+// or node disabling. A null bound pointer selects its frozen i32 constant.
+struct CudaGraphRangeControl {
+  std::uintptr_t device_node{0};
+  std::uintptr_t begin_pointer{0};
+  std::uintptr_t end_pointer{0};
+  std::int32_t begin_constant{0};
+  std::int32_t end_constant{0};
+  std::uint32_t block_dim{0};
+  std::uint32_t max_grid_dim{0};
+  std::uint32_t driver_status{0};
+  std::uint32_t last_grid_dim{0};
+};
+static_assert(sizeof(CudaGraphRangeControl) == 48);
+static_assert(offsetof(CudaGraphRangeControl, begin_pointer) == 8);
+static_assert(offsetof(CudaGraphRangeControl, end_pointer) == 16);
+static_assert(offsetof(CudaGraphRangeControl, begin_constant) == 24);
+static_assert(offsetof(CudaGraphRangeControl, end_constant) == 28);
+static_assert(offsetof(CudaGraphRangeControl, block_dim) == 32);
+static_assert(offsetof(CudaGraphRangeControl, max_grid_dim) == 36);
+static_assert(offsetof(CudaGraphRangeControl, driver_status) == 40);
+static_assert(offsetof(CudaGraphRangeControl, last_grid_dim) == 44);
+
 static_assert(sizeof(CudaGraphBoundedExtentControl) == 32);
 static_assert(offsetof(CudaGraphBoundedExtentControl, device_node) == 0);
 static_assert(offsetof(CudaGraphBoundedExtentControl, extent) == 8);
@@ -219,6 +242,7 @@ void driver_graph_latch_branch(void *selector,
 // allocating device memory.
 bool driver_graph_bounded_update_compiled();
 bool driver_graph_prepare_bounded_update(std::uint32_t *driver_error = nullptr);
+void driver_graph_update_range(CudaGraphRangeControl *control, void *stream);
 void driver_graph_update_bounded(CudaGraphBoundedControl *control,
                                  void *stream = nullptr);
 void driver_graph_update_bounded_extent(CudaGraphBoundedExtentControl *control,

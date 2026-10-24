@@ -17,6 +17,7 @@ target_sources(cuda_runtime
     ordered_submission.cpp
     parallel_graph.cpp
     predicate_graph.cpp
+    range_graph.cpp
     runtime_module.cpp
   )
 

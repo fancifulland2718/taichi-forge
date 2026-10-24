@@ -8,6 +8,7 @@
 #include "llvm/Linker/Linker.h"
 #include "taichi/analysis/offline_cache_util.h"
 #include "taichi/analysis/range_for_bounds.h"
+#include "taichi/analysis/range_dispatch.h"
 #include "taichi/ir/snode_hash_utils.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
@@ -2488,6 +2489,10 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
     current_task->requested_memory_strategy = spec.memory_strategy;
   }
   current_task->range_bounds = describe_range_for_bounds(*stmt);
+  current_task->device_range_dispatch_version =
+      compile_config.arch == Arch::cuda && supports_device_range_dispatch(*stmt)
+          ? 1u
+          : 0u;
   current_task->static_shared_array_bytes = stmt->bls_size;
   current_task->thread_local_bytes =
       stmt->tls_size > 1 ? static_cast<std::uint64_t>(stmt->tls_size) : 0;

@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Compiled task metadata carries shared typed range-bound sources.
-inline constexpr int kForgeNativeAbiRevision = 175;
+inline constexpr int kForgeNativeAbiRevision = 176;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
