@@ -8,6 +8,7 @@
 #include <thread>
 #include "taichi/program/runtime_fault.h"
 #include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/rhi/cuda/graph_region_builder.h"
 #include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/runtime/cuda/fixed_graph.h"
 #include "taichi/runtime/cuda/range_graph.h"
@@ -437,6 +438,112 @@ TEST_F(CudaRangeGraph, ControllerHandlesSignedExtremesWithoutClampingBounds) {
 }
 // A separate Python producer exports ordinary and selected names for one
 // physical payload. Both load orders must register exactly one executable.
+class CudaRangeConditionalStandalone : public CudaRangeGraph {};
+
+TEST_F(CudaRangeConditionalStandalone, ReadsBoundsInsideEachWhileIteration) {
+  auto context = CUDAContext::get_instance().get_guard();
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+  ASSERT_TRUE(cuda::GraphRegionBuilder::available());
+  auto &driver = CUDADriver::get_instance();
+  auto *entry = kernel("loop_stage");
+  ASSERT_NE(entry, nullptr);
+  auto &launcher = dynamic_cast<cuda::KernelLauncher &>(entry->launcher());
+  auto *state = static_cast<int *>(allocate(6 * sizeof(int)));
+  auto *output = allocate(65 * sizeof(int));
+  auto *control = static_cast<cuda::CudaGraphConditionalControl *>(
+      allocate(sizeof(cuda::CudaGraphConditionalControl)));
+  struct Recording {
+    void *stream{nullptr};
+    CUgraph graph{nullptr};
+    CUgraphExec executable{nullptr};
+    cuda::RangeGraphControls ranges;
+    ~Recording() {
+      auto &driver = CUDADriver::get_instance();
+      if (stream)
+        driver.stream_synchronize.call_with_warning(stream);
+      if (executable)
+        driver.graph_exec_destroy.call_with_warning(executable);
+      if (graph)
+        driver.graph_destroy.call_with_warning(graph);
+      ranges.release(true, stream);
+      if (stream)
+        driver.stream_destroy.call_with_warning(stream);
+    }
+  } recording;
+  driver.stream_create(&recording.stream, CU_STREAM_NON_BLOCKING);
+  std::vector<cuda::KernelLauncher::GraphLaunchPacket> packets(2);
+  std::vector<std::vector<std::size_t>> selections(2);
+  for (int i = 0; i < 2; ++i) {
+    LaunchContextBuilder arguments(entry);
+    arguments.set_arg_external_array_with_shape(
+        {0}, reinterpret_cast<std::uintptr_t>(state), 6 * 4, {6});
+    arguments.set_arg_external_array_with_shape(
+        {1}, reinterpret_cast<std::uintptr_t>(output), 65 * 4, {65});
+    arguments.set_arg_int({2}, i);
+    auto &packet = packets[i];
+    ASSERT_TRUE(launcher.prepare_cuda_graph_launch_packet(
+        entry->handle(), arguments, packet, true));
+    launcher.bind_runtime_temporaries(packet);
+    packet.device_arg_buffer = allocate(packet.arg_buffer_size);
+    driver.memcpy_host_to_device(packet.device_arg_buffer,
+                                 packet.context.arg_buffer, packet.arg_buffer_size);
+    packet.context.arg_buffer = static_cast<char *>(packet.device_arg_buffer);
+    for (std::size_t task = 0; task < packet.offloaded_tasks.size(); ++task)
+      if (packet.offloaded_tasks[task].device_range_dispatch_version == 1)
+        selections[i].push_back(task);
+    ASSERT_EQ(selections[i].size(), 1);
+  }
+  std::uint32_t error = 0;
+  ASSERT_TRUE(recording.ranges.initialize(packets, selections,
+                                          taichi_global_tmp_buffer_size, &error));
+  EXPECT_EQ(recording.ranges.device_bytes(), 96);
+  cuda::driver_graph_prepare_conditional_setter();
+  driver.graph_create(&recording.graph, 0);
+  cuda::GraphRegionBuilder builder(recording.graph, recording.stream);
+  const auto handle = builder.conditional_handle();
+  const auto prefix = builder.capture(recording.graph, {}, [&](void *stream) {
+    TI_ASSERT(recording.ranges.capture(0, launcher, packets[0], stream) == CUDA_SUCCESS);
+    cuda::driver_graph_set_conditional(control, handle, stream, true);
+  });
+  const auto loop = builder.add_while(recording.graph, prefix, handle);
+  builder.capture(loop.body, {}, [&](void *stream) {
+    TI_ASSERT(recording.ranges.capture(1, launcher, packets[1], stream) == CUDA_SUCCESS);
+    cuda::driver_graph_set_conditional(control, handle, stream, false);
+  });
+  builder.capture(recording.graph, {loop.node}, [&](void *stream) {
+    driver.memcpy_device_to_device_async(state + 5, state + 2, sizeof(int), stream);
+  });
+  driver.graph_instantiate_with_flags(&recording.executable, recording.graph, 0);
+  driver.graph_upload(recording.executable, recording.stream);
+  driver.stream_synchronize(recording.stream);
+  ASSERT_EQ(recording.ranges.upload(), CUDA_SUCCESS);
+  // Same executable: zero budget, early stop, exhausted budget, changing
+  // per-iteration bounds, then an entirely empty range after nonempty work.
+  const std::array<std::array<int, 3>, 5> cases{
+      std::array<int, 3>{65, 4, 0}, {65, 2, 4}, {65, 99, 3},
+      {33, 5, 8}, {0, 3, 8}};
+  for (const auto &test : cases) {
+    const auto n = test[0], target = test[1], budget = test[2];
+    write(state, std::array<int, 6>{n, target, 0, -99, -99, -99});
+    write(output, std::array<int, 65>{});
+    cuda::CudaGraphConditionalControl description;
+    description.predicate = reinterpret_cast<std::uintptr_t>(state + 4);
+    description.max_iterations = budget;
+    driver.memcpy_host_to_device(control, &description, sizeof(description));
+    driver.graph_launch(recording.executable, recording.stream);
+    driver.stream_synchronize(recording.stream);
+    const auto iterations = std::min(target, budget);
+    const auto values = read<int, 65>(output);
+    for (int i = 0; i < 65; ++i) {
+      int expected = 0;
+      for (int k = 0; k <= iterations; ++k)
+        expected += i < std::max(0, n - 17 * k);
+      EXPECT_EQ(values[i], expected) << "n=" << n << ", index=" << i;
+    }
+    EXPECT_EQ((read<int, 6>(state)[5]), iterations);
+  }
+}
+
 class CudaRangeAotEntry : public CudaRangeGraph {};
 
 TEST_F(CudaRangeAotEntry, OrdinaryFirst) {

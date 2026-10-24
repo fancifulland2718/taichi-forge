@@ -50,3 +50,34 @@ def test_native_range_recording_instances_and_explicit_adjoint(tmp_path):
     assert result.returncode == 0
     assert "[  PASSED  ] 5 tests." in result.stdout
     assert "[  SKIPPED ]" not in result.stdout
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_native_range_conditional_composition(tmp_path):
+    executable = Path(os.environ.get("TI_TEST_CPP_EXECUTABLE", "build/taichi_cpp_tests.exe"))
+    if not executable.is_file():
+        pytest.skip("Requires the native CUDA range test executable")
+
+    @ti.kernel
+    def loop_stage(state: ti.types.ndarray(ti.i32, 1),
+                   out: ti.types.ndarray(ti.i32, 1), advance: ti.i32):
+        state[2] += advance
+        state[3] = ti.max(0, state[0] - 17 * state[2])
+        ti.loop_config(block_dim=32)
+        for i in range(state[3]):
+            out[i] += 1
+        state[4] = ti.cast(state[2] < state[1], ti.i32)
+
+    module = ti.aot.Module()
+    module.add_kernel(loop_stage)
+    module.save(tmp_path)
+    result = subprocess.run(
+        [str(executable.resolve()), "--gtest_filter=CudaRangeConditionalStandalone.*"],
+        env={**os.environ, "TAICHI_CUDA_RANGE_AOT_FOLDER": str(tmp_path)},
+        capture_output=True, text=True, timeout=90,
+    )
+    print(result.stdout)
+    print(result.stderr)
+    assert result.returncode == 0
+    assert "[  PASSED  ] 1 test." in result.stdout
+    assert "[  SKIPPED ]" not in result.stdout
