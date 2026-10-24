@@ -12,6 +12,7 @@
 #include "taichi/program/program.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/storage_view.h"
+#include "taichi/program/prepared_vulkan_ray_access.h"
 #include "taichi/common/operation_json.h"
 
 #include <array>
@@ -20,6 +21,139 @@
 #include <vector>
 
 namespace taichi::lang {
+
+TEST(VulkanRayScene, ProgramPacketsHonorLoansAndReleaseBeforeDeviceDestruction) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  auto program = std::make_unique<Program>(Arch::vulkan);
+  program->materialize_runtime();
+  auto &device = static_cast<vulkan::VulkanDevice &>(*program->get_compute_device());
+  if (!device.vk_caps().acceleration_structure || !device.vk_caps().ray_query ||
+      !device.vk_caps().timeline_semaphore)
+    GTEST_SKIP();
+  auto *runtime = program->get_gfx_runtime_for_borrowing();
+  auto allocate = [&](DataType dtype, std::vector<int> shape) {
+    return program->create_ndarray(dtype, shape, ExternalArrayLayout::kNull, false);
+  };
+  auto *vertices = allocate(PrimitiveType::f32, {3, 3});
+  auto *indices = allocate(PrimitiveType::i32, {1, 3});
+  auto *rays = allocate(PrimitiveType::f32, {1, 8});
+  auto *hits = allocate(PrimitiveType::f32, {1, 4});
+  auto *transforms = allocate(PrimitiveType::f32, {1, 12});
+  auto *ids = allocate(PrimitiveType::i32, {1, 4});
+  auto upload = [&](Ndarray *array, const auto &values) {
+    auto pointer = array->get_device_allocation().get_ptr();
+    const void *source = values.data();
+    std::size_t bytes = sizeof(values);
+    ASSERT_EQ(device.upload_data(&pointer, &source, &bytes), RhiResult::success);
+  };
+  upload(vertices, std::array<float, 9>{0, 0, 0, 2, 0, 0, 0, 2, 0});
+  upload(indices, std::array<int32_t, 3>{0, 1, 2});
+  upload(rays, std::array<float, 8>{.5f, .5f, 3, .01f, 0, 0, -1, 10});
+  upload(transforms, std::array<float, 12>{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0});
+  const auto v = storage::describe_ndarray_storage(*vertices);
+  const auto ix = storage::describe_ndarray_storage(*indices);
+  const auto tr = storage::describe_ndarray_storage(*transforms);
+  const auto scene_id = program->create_vulkan_triangle_ray_scene(*v.descriptor, *ix.descriptor, 3, 1);
+  const auto blas_id = program->create_vulkan_triangle_blas_resource(3, 1);
+  auto build = program->prepare_vulkan_ray_geometry(blas_id, true, *v.descriptor, &*ix.descriptor, 3, 1);
+  program->execute_vulkan_ray_geometry(build);
+  const auto tlas_id = program->create_vulkan_instance_tlas_resource({blas_id});
+  const std::vector<VulkanRayInstanceInfo> metadata(1);
+  program->vulkan_instance_tlas_build(tlas_id, metadata, false);
+  auto scene_query = program->prepare_vulkan_ray_query(scene_id, false, rays, hits, 1, ids);
+  auto tlas_query = program->prepare_vulkan_ray_query(tlas_id, true, rays, hits, 1, ids);
+  auto scene_refit = program->prepare_vulkan_ray_geometry(scene_id, false, *v.descriptor, nullptr, 3, 1);
+  auto blas_refit = program->prepare_vulkan_ray_geometry(blas_id, true, *v.descriptor, nullptr, 3, 1);
+  auto transform = program->prepare_vulkan_tlas_transforms(tlas_id, *tr.descriptor, 1);
+  program->synchronize();
+  // Each row states ordinary permissions while this existing owner is loaned.
+  struct Case {
+    uint64_t handle;
+    bool triangle_scene, writes;
+    bool scene_read, tlas_read, scene_write, blas_write, tlas_write;
+  };
+  const std::array<Case, 6> cases{{
+      {scene_id, true, false, true, true, false, true, true},
+      {scene_id, true, true, false, true, false, true, true},
+      {tlas_id, false, false, true, true, true, false, false},
+      {tlas_id, false, true, true, false, true, false, false},
+      {blas_id, false, false, true, true, true, false, true},
+      {blas_id, false, true, true, false, true, false, false},
+  }};
+  for (const auto &entry : cases) {
+    auto root = program->acquire_vulkan_ray_native_resource(entry.handle, entry.triangle_scene);
+    auto workspace = runtime->create_fixed_graph_workspace();
+    runtime->prepare_fixed_shared_ray_resources(
+        workspace, collect_native_ray_uses(root, entry.writes), program->runtime_fault_domain());
+    for (const auto &dependency : workspace->shared_resource_dependencies())
+      dependency.wait();
+    const auto check = [&](bool allowed, auto &&submit) {
+      const auto before = device.queue_submission_snapshot().queue_submit_calls;
+      if (allowed) {
+        EXPECT_NO_THROW(submit());
+      } else {
+        EXPECT_ANY_THROW(submit());
+        EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before);
+      }
+    };
+    check(entry.scene_read, [&] { program->execute_vulkan_ray_query(scene_query); });
+    check(entry.tlas_read, [&] { program->execute_vulkan_ray_query(tlas_query); });
+    check(entry.scene_write, [&] { program->execute_vulkan_ray_geometry(scene_refit); });
+    check(entry.blas_write, [&] { program->execute_vulkan_ray_geometry(blas_refit); });
+    check(entry.blas_write, [&] { program->execute_vulkan_ray_geometry(build); });
+    check(entry.tlas_write, [&] { program->execute_vulkan_tlas_transforms(transform); });
+    check(entry.tlas_write, [&] { program->vulkan_instance_tlas_build(tlas_id, metadata, true); });
+    // No selected-domain work was submitted by this permission fixture.
+    workspace->retire_shared_ray_loans({});
+    program->execute_vulkan_ray_geometry(scene_refit);
+    program->execute_vulkan_ray_geometry(blas_refit);
+    program->execute_vulkan_tlas_transforms(transform);
+    program->execute_vulkan_ray_query(tlas_query);
+    program->synchronize();
+    std::array<float, 4> result{};
+    auto pointer = hits->get_device_allocation().get_ptr();
+    void *destination = result.data();
+    std::size_t bytes = sizeof(result);
+    ASSERT_EQ(device.readback_data(&pointer, &destination, &bytes), RhiResult::success);
+    // The typed float output reserves its fourth component; the hit flag is
+    // carried by the integer output, unlike the legacy query ABI.
+    EXPECT_EQ(result, (std::array<float, 4>{3, .25f, .25f, 0}));
+    std::array<int32_t, 4> hit_ids{};
+    pointer = ids->get_device_allocation().get_ptr();
+    destination = hit_ids.data();
+    bytes = sizeof(hit_ids);
+    ASSERT_EQ(device.readback_data(&pointer, &destination, &bytes), RhiResult::success);
+    EXPECT_EQ(hit_ids, (std::array<int32_t, 4>{0, 0, 0, 1}));
+  }
+  std::weak_ptr<NativeResource> blas = program->acquire_vulkan_ray_native_resource(blas_id);
+  std::weak_ptr<NativeResource> tlas = program->acquire_vulkan_ray_native_resource(tlas_id);
+  program->destroy_vulkan_ray_resource(blas_id);
+  EXPECT_ANY_THROW(program->execute_vulkan_ray_geometry(blas_refit));
+  // The TLAS owns the BLAS independently of its now closed public handle.
+  EXPECT_NO_THROW(program->execute_vulkan_ray_query(tlas_query));
+  program->synchronize();
+  program->destroy_vulkan_ray_resource(tlas_id);
+  EXPECT_ANY_THROW(program->execute_vulkan_ray_query(tlas_query));
+  EXPECT_ANY_THROW(program->execute_vulkan_tlas_transforms(transform));
+  EXPECT_TRUE(tlas.expired());
+  EXPECT_TRUE(blas.expired());
+  const std::weak_ptr<NativeResource> scene = program->acquire_vulkan_ray_native_resource(scene_id, true);
+  program->destroy_vulkan_triangle_ray_scene(scene_id);
+  EXPECT_ANY_THROW(program->execute_vulkan_ray_query(scene_query));
+  EXPECT_ANY_THROW(program->execute_vulkan_ray_geometry(scene_refit));
+  EXPECT_TRUE(scene.expired());
+
+  // Deliberately keep the prepared packet alive after Program/device teardown.
+  const auto reset_id = program->create_vulkan_triangle_ray_scene(*v.descriptor, *ix.descriptor, 3, 1);
+  const std::weak_ptr<NativeResource> reset_scene = program->acquire_vulkan_ray_native_resource(reset_id, true);
+  auto after_reset = program->prepare_vulkan_ray_query(reset_id, false, rays, hits, 1, ids);
+  program->execute_vulkan_ray_query(after_reset);
+  program->synchronize();
+  program.reset();
+  EXPECT_TRUE(reset_scene.expired());
+  EXPECT_THROW(after_reset.access->submit([] {}), std::runtime_error);
+}
 
 TEST(VulkanRayScene, ProgramKernelReadersHonorLoansAndRetireRecordings) {
   const auto *folder = std::getenv("TAICHI_VULKAN_RAY_DOMAIN_AOT_DIR");

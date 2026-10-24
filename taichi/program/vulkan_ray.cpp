@@ -1,5 +1,6 @@
 #include "taichi/program/program.h"
 #include "taichi/program/storage_view.h"
+#include "taichi/program/prepared_vulkan_ray_access.h"
 #include "taichi/runtime/vulkan_ray_query.h"
 #include "taichi/runtime/vulkan_ray_build.h"
 #include "taichi/runtime/vulkan_ray_scene.h"
@@ -474,59 +475,68 @@ VulkanRayQueryCommand Program::prepare_vulkan_ray_query_storage(
       hit_indices != nullptr, bindings);
   // Build only the selected shader variant at the cold boundary.
   auto submission_guard = acquire_runtime_resource_submission_guard();
-  std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
-  if (instance_tlas) {
-    const auto found = vulkan_ray_resources_.find(handle);
-    TI_ERROR_IF(found == vulkan_ray_resources_.end(),
-                "Vulkan instance TLAS handle is stale or closed.");
-    auto resource =
-        std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
-    TI_ERROR_IF(!resource, "Vulkan ray resource is not an instance TLAS.");
-    resource->prepare_query_variant(packet.query.variant);
-  } else {
-    const auto found = vulkan_ray_scenes_.find(handle);
-    TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
-                "Vulkan triangle ray scene handle is stale or closed.");
-    found->second->prepare_query_variant(packet.query.variant);
+  std::shared_ptr<NativeResource> root;
+  {
+    std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+    if (instance_tlas) {
+      const auto found = vulkan_ray_resources_.find(handle);
+      TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+                  "Vulkan instance TLAS handle is stale or closed.");
+      auto resource =
+          std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
+      TI_ERROR_IF(!resource, "Vulkan ray resource is not an instance TLAS.");
+      resource->prepare_query_variant(packet.query.variant);
+      root = resource;
+    } else {
+      const auto found = vulkan_ray_scenes_.find(handle);
+      TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
+                  "Vulkan triangle ray scene handle is stale or closed.");
+      found->second->prepare_query_variant(packet.query.variant);
+      root = found->second;
+    }
   }
+  packet.access = prepare_vulkan_ray_access({root});
   return packet;
 }
 
 std::size_t Program::execute_vulkan_ray_query(
     const VulkanRayQueryCommand &packet) {
   with_prepared_native_storage(*packet.storage, [&] {
-    if (packet.instance_tlas) {
-      std::shared_ptr<VulkanInstanceTlasResource> resource;
-      {
-        std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
-        const auto found = vulkan_ray_resources_.find(packet.scene_handle);
-        TI_ERROR_IF(found == vulkan_ray_resources_.end(),
-                    "Vulkan instance TLAS handle is stale or closed.");
-        resource = std::dynamic_pointer_cast<VulkanInstanceTlasResource>(
-            found->second);
+    TI_ERROR_IF(!packet.access, "Prepared Vulkan AS access is missing");
+    packet.access->submit([&] {
+      if (packet.instance_tlas) {
+        std::shared_ptr<VulkanInstanceTlasResource> resource;
+        {
+          std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+          const auto found = vulkan_ray_resources_.find(packet.scene_handle);
+          TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+                      "Vulkan instance TLAS handle is stale or closed.");
+          resource = std::dynamic_pointer_cast<VulkanInstanceTlasResource>(
+              found->second);
+        }
+        TI_ERROR_IF(!resource, "Vulkan ray resource is not an instance TLAS.");
+        enqueue_compute_op_lambda(
+            [resource, packet](Device *, CommandList *commands) {
+              resource->record_query(commands, packet.query);
+            },
+            {});
+      } else {
+        std::shared_ptr<VulkanTriangleSceneResource> scene;
+        {
+          std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+          const auto found = vulkan_ray_scenes_.find(packet.scene_handle);
+          TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
+                      "Vulkan triangle ray scene handle is stale or closed.");
+          scene = found->second;
+        }
+        enqueue_compute_op_lambda(
+            [scene, packet](Device *, CommandList *commands) {
+              scene->record_query(commands, packet.query);
+            },
+            {});
       }
-      TI_ERROR_IF(!resource, "Vulkan ray resource is not an instance TLAS.");
-      enqueue_compute_op_lambda(
-          [resource, packet](Device *, CommandList *commands) {
-            resource->record_query(commands, packet.query);
-          },
-          {});
-    } else {
-      std::shared_ptr<VulkanTriangleSceneResource> scene;
-      {
-        std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
-        const auto found = vulkan_ray_scenes_.find(packet.scene_handle);
-        TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
-                    "Vulkan triangle ray scene handle is stale or closed.");
-        scene = found->second;
-      }
-      enqueue_compute_op_lambda(
-          [scene, packet](Device *, CommandList *commands) {
-            scene->record_query(commands, packet.query);
-          },
-          {});
-    }
-    mark_runtime_submission_pending();
+      mark_runtime_submission_pending();
+    });
   });
   return 0;
 }
@@ -564,68 +574,77 @@ VulkanRayGeometryCommand Program::prepare_vulkan_ray_geometry(
   command.handle = handle;
   command.independent_blas = independent_blas;
   command.update = indices == nullptr;
-  // Handle/count validation is cold; execution only resolves the live owner.
+  // Handle/count validation and the access closure are cold.
   auto submission_guard = acquire_runtime_resource_submission_guard();
-  std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
-  if (independent_blas) {
-    const auto found = vulkan_ray_resources_.find(handle);
-    TI_ERROR_IF(found == vulkan_ray_resources_.end(),
-                "Vulkan triangle BLAS handle is stale or closed.");
-    const auto blas =
-        std::dynamic_pointer_cast<VulkanTriangleBlasResource>(found->second);
-    TI_ERROR_IF(!blas, "Vulkan ray resource is not a triangle BLAS.");
-    TI_ERROR_IF(vertex_count != blas->vertex_count() ||
-                    triangle_count != blas->triangle_count(),
-                "Vulkan triangle BLAS build must preserve geometry counts.");
-  } else {
-    const auto found = vulkan_ray_scenes_.find(handle);
-    TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
-                "Vulkan triangle ray scene handle is stale or closed.");
-    TI_ERROR_IF(vertex_count != found->second->vertex_count() ||
-                    triangle_count != found->second->triangle_count(),
-                "Vulkan triangle ray refit must preserve geometry counts.");
+  std::shared_ptr<NativeResource> root;
+  {
+    std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+    if (independent_blas) {
+      const auto found = vulkan_ray_resources_.find(handle);
+      TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+                  "Vulkan triangle BLAS handle is stale or closed.");
+      const auto blas =
+          std::dynamic_pointer_cast<VulkanTriangleBlasResource>(found->second);
+      TI_ERROR_IF(!blas, "Vulkan ray resource is not a triangle BLAS.");
+      TI_ERROR_IF(vertex_count != blas->vertex_count() ||
+                      triangle_count != blas->triangle_count(),
+                  "Vulkan triangle BLAS build must preserve geometry counts.");
+      root = blas;
+    } else {
+      const auto found = vulkan_ray_scenes_.find(handle);
+      TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
+                  "Vulkan triangle ray scene handle is stale or closed.");
+      TI_ERROR_IF(vertex_count != found->second->vertex_count() ||
+                      triangle_count != found->second->triangle_count(),
+                  "Vulkan triangle ray refit must preserve geometry counts.");
+      root = found->second;
+    }
   }
+  command.access = prepare_vulkan_ray_access({root}, true);
   return command;
 }
 
 std::size_t Program::execute_vulkan_ray_geometry(
     const VulkanRayGeometryCommand &command) {
   with_prepared_native_storage(*command.storage, [&] {
-    const auto vertices = command.storage->binding(0).pointer;
-    if (command.independent_blas) {
-      std::shared_ptr<VulkanTriangleBlasResource> resource;
-      {
-        std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
-        const auto found = vulkan_ray_resources_.find(command.handle);
-        TI_ERROR_IF(found == vulkan_ray_resources_.end(),
-                    "Vulkan triangle BLAS handle is stale or closed.");
-        resource =
-            std::static_pointer_cast<VulkanTriangleBlasResource>(found->second);
+    TI_ERROR_IF(!command.access, "Prepared Vulkan AS access is missing");
+    command.access->submit([&] {
+      const auto vertices = command.storage->binding(0).pointer;
+      if (command.independent_blas) {
+        std::shared_ptr<VulkanTriangleBlasResource> resource;
+        {
+          std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+          const auto found = vulkan_ray_resources_.find(command.handle);
+          TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+                      "Vulkan triangle BLAS handle is stale or closed.");
+          resource =
+              std::static_pointer_cast<VulkanTriangleBlasResource>(found->second);
+        }
+        const auto indices =
+            command.update ? DevicePtr{} : command.storage->binding(1).pointer;
+        enqueue_compute_op_lambda(
+            [resource, vertices, indices, update = command.update](
+                Device *, CommandList *commands) {
+              resource->record_build(commands, vertices, indices, update);
+            },
+            {});
+      } else {
+        std::shared_ptr<VulkanTriangleSceneResource> scene;
+        {
+          std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+          const auto found = vulkan_ray_scenes_.find(command.handle);
+          TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
+                      "Vulkan triangle ray scene handle is stale or closed.");
+          scene = found->second;
+        }
+        enqueue_compute_op_lambda(
+            [scene, vertices](Device *, CommandList *commands) {
+              scene->record_refit(commands, vertices);
+            },
+            {});
       }
-      const auto indices =
-          command.update ? DevicePtr{} : command.storage->binding(1).pointer;
-      enqueue_compute_op_lambda(
-          [resource, vertices, indices, update = command.update](
-              Device *, CommandList *commands) {
-            resource->record_build(commands, vertices, indices, update);
-          },
-          {});
-    } else {
-      std::shared_ptr<VulkanTriangleSceneResource> scene;
-      {
-        std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
-        const auto found = vulkan_ray_scenes_.find(command.handle);
-        TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
-                    "Vulkan triangle ray scene handle is stale or closed.");
-        scene = found->second;
-      }
-      enqueue_compute_op_lambda(
-          [scene, vertices](Device *, CommandList *commands) {
-            scene->record_refit(commands, vertices);
-          },
-          {});
-    }
-    mark_runtime_submission_pending();
+      mark_runtime_submission_pending();
+    });
   });
   return 0;
 }
@@ -739,6 +758,9 @@ std::size_t Program::vulkan_instance_tlas_build(
   TI_ERROR_IF(instances.size() != resource->instance_count(),
               "Vulkan instance TLAS build must preserve instance count {}.",
               resource->instance_count());
+  auto *runtime = get_gfx_runtime_for_borrowing();
+  auto access = runtime->ordinary_ray_scope();
+  runtime->require_ray_uses(collect_native_ray_uses(resource, true));
   enqueue_compute_op_lambda(
       [resource, instances, update](Device *, CommandList *commands) {
         resource->record_build(commands, instances, update);
@@ -781,38 +803,45 @@ VulkanTLASTransformCommand Program::prepare_vulkan_tlas_transforms(
   packet.parameters = qualified.parameters;
 
   auto submission_guard = acquire_runtime_resource_submission_guard();
-  std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
-  const auto found = vulkan_ray_resources_.find(handle);
-  TI_ERROR_IF(found == vulkan_ray_resources_.end(),
-              "Vulkan instance TLAS handle is stale or closed.");
-  const auto resource =
-      std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
+  std::shared_ptr<VulkanInstanceTlasResource> resource;
+  {
+    std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+    const auto found = vulkan_ray_resources_.find(handle);
+    TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+                "Vulkan instance TLAS handle is stale or closed.");
+    resource =
+        std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
+  }
   TI_ERROR_IF(!resource, "Vulkan ray resource is not an instance TLAS.");
   TI_ERROR_IF(instance_count != resource->instance_count(),
               "Vulkan TLAS transforms must preserve the fixed instance count.");
   resource->prepare_transforms();
+  packet.access = prepare_vulkan_ray_access({resource}, true);
   return packet;
 }
 
 std::size_t Program::execute_vulkan_tlas_transforms(
     const VulkanTLASTransformCommand &packet) {
   with_prepared_native_storage(*packet.storage, [&] {
-    std::shared_ptr<VulkanInstanceTlasResource> resource;
-    {
-      std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
-      const auto found = vulkan_ray_resources_.find(packet.handle);
-      TI_ERROR_IF(found == vulkan_ray_resources_.end(),
-                  "Vulkan instance TLAS handle is stale or closed.");
-      resource =
-          std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
-    }
-    TI_ERROR_IF(!resource, "Vulkan ray resource is not an instance TLAS.");
-    enqueue_compute_op_lambda(
-        [resource, packet](Device *, CommandList *commands) {
-          resource->record_transforms(commands, packet);
-        },
-        {});
-    mark_runtime_submission_pending();
+    TI_ERROR_IF(!packet.access, "Prepared Vulkan AS access is missing");
+    packet.access->submit([&] {
+      std::shared_ptr<VulkanInstanceTlasResource> resource;
+      {
+        std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+        const auto found = vulkan_ray_resources_.find(packet.handle);
+        TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+                    "Vulkan instance TLAS handle is stale or closed.");
+        resource =
+            std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
+      }
+      TI_ERROR_IF(!resource, "Vulkan ray resource is not an instance TLAS.");
+      enqueue_compute_op_lambda(
+          [resource, packet](Device *, CommandList *commands) {
+            resource->record_transforms(commands, packet);
+          },
+          {});
+      mark_runtime_submission_pending();
+    });
   });
   return 0;
 }
@@ -971,6 +1000,7 @@ void Program::destroy_vulkan_triangle_ray_scene(std::uint64_t handle) {
       return;
     }
     scene = found->second;
+    scene->invalidate_prepared_resources();
     vulkan_ray_scenes_.erase(found);
     if (!runtime_has_fatal_fault() &&
         runtime_submission_pending_.load(std::memory_order_acquire)) {
@@ -1030,9 +1060,34 @@ std::shared_ptr<NativeResource> Program::acquire_vulkan_ray_native_resource(
   return native;
 }
 
+std::shared_ptr<PreparedVulkanRayAccess> Program::prepare_vulkan_ray_access(
+    const std::vector<std::shared_ptr<NativeResource>> &roots, bool writes) {
+  auto guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(roots.empty(), "Prepared Vulkan AS access requires an owner");
+  std::vector<NativeResourceUse> uses;
+  std::vector<std::shared_ptr<VulkanRayResource>> owners;
+  for (const auto &root : roots) {
+    auto owner = std::dynamic_pointer_cast<VulkanRayResource>(root);
+    TI_ERROR_IF(!owner, "Prepared Vulkan AS access requires original Program owners");
+    owners.push_back(std::move(owner));
+    auto closure = collect_native_ray_uses(root, writes);
+    uses.insert(uses.end(), closure.begin(), closure.end());
+  }
+  auto access = std::make_shared<PreparedVulkanRayAccess>(
+      get_gfx_runtime_for_borrowing()->prepare_ray_uses(uses));
+  // Dependencies participate in admission, but closing a public BLAS handle
+  // does not invalidate a TLAS that still owns that BLAS. Only the packet's
+  // original public roots invalidate its permit at close/reset.
+  for (const auto &owner : owners)
+    owner->register_prepared_lease(access);
+  return access;
+}
+
 void Program::vulkan_clear_ray_scenes() {
   vulkan_clear_ray_programs();
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+  for (const auto &[handle, scene] : vulkan_ray_scenes_)
+    scene->invalidate_prepared_resources();
   vulkan_ray_scenes_.clear();
   vulkan_ray_scene_retirements_.clear();
   for (const auto &[handle, resource] : vulkan_ray_resources_) {
@@ -1047,6 +1102,11 @@ void Program::vulkan_clear_ray_scenes() {
 #else
 
 namespace taichi::lang {
+
+std::shared_ptr<PreparedVulkanRayAccess> Program::prepare_vulkan_ray_access(
+    const std::vector<std::shared_ptr<NativeResource>> &, bool) {
+  TI_ERROR("Vulkan AS access is unavailable in this build");
+}
 
 std::shared_ptr<NativeResource> Program::acquire_vulkan_ray_native_resource(
     std::uint64_t, bool) {

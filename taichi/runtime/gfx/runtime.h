@@ -651,6 +651,8 @@ class TI_DLL_EXPORT GfxRuntime {
     return shared_ray_admission_->ordinary_scope();
   }
   void require_ray_uses(const std::vector<NativeResourceUse> &uses);
+  std::shared_ptr<NativeRayAdmission::Permit> prepare_ray_uses(
+      const std::vector<NativeResourceUse> &uses);
   void prepare_fixed_shared_ray_resources(
       const std::shared_ptr<FixedGraphWorkspace> &workspace,
       const std::vector<NativeResourceUse> &uses,

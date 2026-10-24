@@ -179,8 +179,10 @@ struct VulkanBufferCommand {
 
 // Cold-qualified ray bindings. Aligned descriptor ranges and shader offsets
 // are derived from PreparedNativeStorage; no per-query layout reconstruction.
+class PreparedVulkanRayAccess;
 struct VulkanRayQueryCommand {
   std::shared_ptr<PreparedNativeStorage> storage;
+  std::shared_ptr<PreparedVulkanRayAccess> access;
   std::uint64_t scene_handle{0};
   bool instance_tlas{false};
   VulkanRayQueryPacket query;
@@ -188,6 +190,7 @@ struct VulkanRayQueryCommand {
 
 struct VulkanRayGeometryCommand {
   std::shared_ptr<PreparedNativeStorage> storage;
+  std::shared_ptr<PreparedVulkanRayAccess> access;
   std::uint64_t handle{0};
   bool independent_blas{false};
   bool update{true};
@@ -195,6 +198,7 @@ struct VulkanRayGeometryCommand {
 
 struct VulkanTLASTransformCommand {
   std::shared_ptr<PreparedNativeStorage> storage;
+  std::shared_ptr<PreparedVulkanRayAccess> access;
   std::uint64_t handle{0};
   PreparedNativeStorage::Binding shader_binding{};
   std::array<std::uint32_t, 2> parameters{};
@@ -1610,6 +1614,8 @@ class TI_DLL_EXPORT Program {
   // AS or grant cross-queue access; GFX admission supplies that separate loan.
   std::shared_ptr<NativeResource> acquire_vulkan_ray_native_resource(
       std::uint64_t handle, bool triangle_scene = false);
+  std::shared_ptr<PreparedVulkanRayAccess> prepare_vulkan_ray_access(
+      const std::vector<std::shared_ptr<NativeResource>> &roots, bool writes = false);
 
   bool vulkan_ray_program_available() const;
   std::uint64_t create_vulkan_ray_program(

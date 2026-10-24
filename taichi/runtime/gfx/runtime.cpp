@@ -7045,6 +7045,12 @@ std::vector<NativeRayAdmission::PinnedUse> GfxRuntime::bind_ray_uses(
   return result;
 }
 
+std::shared_ptr<NativeRayAdmission::Permit> GfxRuntime::prepare_ray_uses(
+    const std::vector<NativeResourceUse> &uses) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  return shared_ray_admission_->prepare(bind_ray_uses(uses));
+}
+
 void GfxRuntime::require_ray_uses(const std::vector<NativeResourceUse> &uses) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   // Validate all identities before checking any access. This routine records
