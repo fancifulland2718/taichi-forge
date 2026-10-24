@@ -2879,15 +2879,22 @@ void VulkanDevice::init_vulkan_structs(Params &params) {
   graphics_queue_ = params.graphics_queue;
   graphics_queue_family_index_ = params.graphics_queue_family_index;
   vk_caps_.timeline_semaphore = params.timeline_semaphore;
-  for (auto queue : params.additional_compute_queues) {
-    if (!queue || queue == compute_queue_ || queue == graphics_queue_ ||
-        additional_queue_states_.count(queue))
-      throw std::invalid_argument("Additional Vulkan compute queues must be distinct");
-    auto state = std::make_unique<AdditionalComputeQueue>();
-    state->queue = queue;
-    additional_queue_states_.emplace(queue, state.get());
-    additional_compute_queues_.push_back(std::move(state));
-  }
+  if (compute_queue_family_index_ == graphics_queue_family_index_ &&
+      !params.additional_graphics_queues.empty())
+    throw std::invalid_argument("Shared Vulkan families require one additional queue list");
+  const auto add_queues = [&](const auto &queues, auto &pool) {
+    for (auto queue : queues) {
+      if (!queue || queue == compute_queue_ || queue == graphics_queue_ ||
+          additional_queue_states_.count(queue))
+        throw std::invalid_argument("Additional Vulkan execution queues must be distinct");
+      auto state = std::make_unique<AdditionalExecutionQueue>();
+      state->queue = queue;
+      additional_queue_states_.emplace(queue, state.get());
+      pool.push_back(std::move(state));
+    }
+  };
+  add_queues(params.additional_compute_queues, additional_compute_queues_);
+  add_queues(params.additional_graphics_queues, additional_graphics_queues_);
 
   create_vma_allocator();
   {
@@ -3496,6 +3503,60 @@ void VulkanDevice::memcpy_internal(DevicePtr dst,
 
 uint32_t VulkanDevice::created_compute_queue_count() const noexcept {
   return static_cast<uint32_t>(additional_compute_queues_.size()) + 1;
+}
+
+const VulkanDevice::ExecutionQueuePool &VulkanDevice::execution_queue_pool(
+    VulkanExecutionQueueKind kind) const {
+  if (kind != VulkanExecutionQueueKind::compute &&
+      kind != VulkanExecutionQueueKind::graphics)
+    throw std::invalid_argument("Invalid Vulkan execution queue kind");
+  return kind == VulkanExecutionQueueKind::graphics &&
+                 graphics_queue_family_index_ != compute_queue_family_index_
+             ? additional_graphics_queues_ : additional_compute_queues_;
+}
+
+VulkanDevice::ExecutionQueuePool &VulkanDevice::execution_queue_pool(
+    VulkanExecutionQueueKind kind) {
+  return const_cast<ExecutionQueuePool &>(
+      static_cast<const VulkanDevice &>(*this).execution_queue_pool(kind));
+}
+
+uint32_t VulkanDevice::created_execution_queue_count(
+    VulkanExecutionQueueKind kind) const {
+  return static_cast<uint32_t>(execution_queue_pool(kind).size()) + 1;
+}
+
+uint32_t VulkanDevice::execution_queue_family_index(
+    VulkanExecutionQueueKind kind) const {
+  (void)execution_queue_pool(kind);
+  return kind == VulkanExecutionQueueKind::graphics
+             ? graphics_queue_family_index_ : compute_queue_family_index_;
+}
+
+VkQueue VulkanDevice::execution_queue_at(VulkanExecutionQueueKind kind,
+                                        uint32_t index) const {
+  const auto &pool = execution_queue_pool(kind);
+  if (index > pool.size())
+    throw std::out_of_range("Vulkan execution queue was not created by this owner");
+  return index ? pool[index - 1]->queue
+               : (kind == VulkanExecutionQueueKind::graphics ? graphics_queue_ : compute_queue_);
+}
+
+std::unique_ptr<VulkanStream> VulkanDevice::create_execution_stream(
+    VulkanExecutionQueueKind kind, uint32_t index) {
+  throw_if_backend_submission_disallowed("create Vulkan execution stream");
+  const auto family = execution_queue_family_index(kind);
+  uint32_t count = 0;
+  device_.instance_functions().vkGetPhysicalDeviceQueueFamilyProperties(
+      physical_device_, &count, nullptr);
+  std::vector<VkQueueFamilyProperties> properties(count);
+  device_.instance_functions().vkGetPhysicalDeviceQueueFamilyProperties(
+      physical_device_, &count, properties.data());
+  const VkQueueFlags required = VK_QUEUE_COMPUTE_BIT |
+      (kind == VulkanExecutionQueueKind::graphics ? VK_QUEUE_GRAPHICS_BIT : 0);
+  if (family >= count || (properties[family].queueFlags & required) != required)
+    throw std::invalid_argument("Vulkan execution queue family lacks requested capabilities");
+  return std::make_unique<VulkanStream>(*this, execution_queue_at(kind, index), family);
 }
 
 VkQueue VulkanDevice::compute_queue_at(uint32_t index) const {

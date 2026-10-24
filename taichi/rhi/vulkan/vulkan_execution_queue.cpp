@@ -128,6 +128,8 @@ struct VulkanExecutionQueue::State {
     std::vector<Point> dependencies;
   };
   VulkanDevice &device;
+  const VulkanExecutionQueueKind kind;
+  const std::uint32_t family;
   std::uint32_t index{0};
   std::unique_ptr<VulkanStream> stream;
   std::shared_ptr<VulkanTimelineState> timeline;
@@ -142,8 +144,8 @@ struct VulkanExecutionQueue::State {
   bool retirement_proven{false};
   bool accepting{true}, closing{false}, closed{false};
   std::exception_ptr error;
-  State(VulkanDevice &device, std::size_t capacity)
-      : device(device), slots(capacity) {}
+  State(VulkanDevice &device, std::size_t capacity, VulkanExecutionQueueKind kind)
+      : device(device), kind(kind), family(device.execution_queue_family_index(kind)), slots(capacity) {}
 };
 
 struct VulkanExecutionQueue::ForkJoin::State {
@@ -173,17 +175,19 @@ VulkanExecutionQueue::ForkJoin::queue_indices() const {
 }
 
 VulkanExecutionQueue::VulkanExecutionQueue(VulkanDevice &device,
-                                           std::size_t capacity) {
+                                           std::size_t capacity,
+                                           VulkanExecutionQueueKind kind) {
   if (!capacity || !device.vk_caps().timeline_semaphore)
     throw std::invalid_argument(
         "Vulkan execution queues require positive capacity and timeline support");
   device.throw_if_backend_submission_disallowed("create Vulkan execution queue");
-  state_ = std::make_unique<State>(device, capacity);
+  state_ = std::make_unique<State>(device, capacity, kind);
   auto &state = *state_;
   {
     std::lock_guard<std::mutex> lock(device.execution_queue_mutex_);
-    for (std::size_t i = 0; i < device.additional_compute_queues_.size(); ++i) {
-      auto &queue = *device.additional_compute_queues_[i];
+    auto &pool = device.execution_queue_pool(kind);
+    for (std::size_t i = 0; i < pool.size(); ++i) {
+      auto &queue = *pool[i];
       if (!queue.leased) {
         queue.leased = true;
         state.index = static_cast<std::uint32_t>(i + 1);
@@ -192,9 +196,11 @@ VulkanExecutionQueue::VulkanExecutionQueue(VulkanDevice &device,
     }
   }
   if (!state.index)
-    throw std::runtime_error("No independent Vulkan compute queue is available");
+    throw std::runtime_error(kind == VulkanExecutionQueueKind::graphics
+        ? "No independent Vulkan graphics/compute queue is available"
+        : "No independent Vulkan compute queue is available");
   try {
-    state.stream = device.create_compute_stream(state.index);
+    state.stream = device.create_execution_stream(kind, state.index);
     state.timeline = device.create_execution_timeline();
     if (capacity > state.timeline->max_difference)
       throw std::invalid_argument(
@@ -202,7 +208,7 @@ VulkanExecutionQueue::VulkanExecutionQueue(VulkanDevice &device,
 
   } catch (...) {
     std::lock_guard<std::mutex> lock(device.execution_queue_mutex_);
-    device.additional_compute_queues_[state.index - 1]->leased = false;
+    device.execution_queue_pool(kind)[state.index - 1]->leased = false;
     throw;
   }
 }
@@ -258,6 +264,7 @@ VulkanExecutionQueue::prepare(
     throw std::overflow_error("Vulkan command count exceeds uint32");
   auto result = std::shared_ptr<Commands>(new Commands);
   result->device = &state.device;
+  result->family = state.family;
   if (binary_waits.size() > UINT32_MAX || binary_signals.size() >= UINT32_MAX)
     throw std::overflow_error("Vulkan external semaphore count exceeds uint32");
   std::vector<VkSemaphore> seen;
@@ -285,7 +292,7 @@ VulkanExecutionQueue::prepare(
     auto buffer = native->finalize();
     if (buffer->device != state.device.vk_device() ||
         buffer->level != VK_COMMAND_BUFFER_LEVEL_PRIMARY ||
-        buffer->ref_pool->queue_family_index != state.device.compute_queue_family_index())
+        buffer->ref_pool->queue_family_index != state.family)
       throw std::invalid_argument("Vulkan execution command device/family mismatch");
     result->handles.push_back(buffer->buffer);
     result->buffers.push_back(std::move(buffer));
@@ -317,7 +324,7 @@ VulkanExecutionQueue::prepare_fork_join_commands(
       branches.size() != topology->state_->auxiliaries.size() + 1)
     throw std::invalid_argument("Vulkan fork/join topology belongs to another anchor or width");
   const auto validate = [&](const auto &part) {
-    if (!part || part->device != &state.device || part->parallel ||
+    if (!part || part->device != &state.device || part->family != state.family || part->parallel ||
         part->external_access || !part->binary_waits.empty() ||
         !part->binary_signals.empty())
       throw std::invalid_argument("Vulkan fork/join requires flat commands without external handshakes");
@@ -330,6 +337,7 @@ VulkanExecutionQueue::prepare_fork_join_commands(
       throw std::invalid_argument("Vulkan fork/join branches must be nonempty");
   }
   result->device = &state.device;
+  result->family = state.family;
   return result;
 }
 
@@ -357,9 +365,9 @@ VulkanExecutionQueue::prepare_fork_join(std::size_t branch_count) {
   // Construction/rollback never occurs under the anchor admission lock.
   {
     std::lock_guard<std::mutex> lock(state.device.execution_queue_mutex_);
+    const auto &pool = state.device.execution_queue_pool(state.kind);
     const auto available = std::count_if(
-        state.device.additional_compute_queues_.begin(),
-        state.device.additional_compute_queues_.end(),
+        pool.begin(), pool.end(),
         [](const auto &queue) { return !queue->leased; });
     if (branch_count - 1 > static_cast<std::size_t>(available))
       throw std::runtime_error("Insufficient independent Vulkan compute queues for fork/join: requested auxiliary=" +
@@ -369,7 +377,7 @@ VulkanExecutionQueue::prepare_fork_join(std::size_t branch_count) {
   topology->auxiliaries.reserve(branch_count - 1);
   for (std::size_t i = 1; i < branch_count; ++i)
     topology->auxiliaries.push_back(
-        std::make_unique<VulkanExecutionQueue>(state.device, capacity));
+        std::make_unique<VulkanExecutionQueue>(state.device, capacity, state.kind));
   auto result = std::shared_ptr<ForkJoin>(new ForkJoin(std::move(topology)));
   {
     std::lock_guard<std::mutex> lock(state.mutex);
@@ -392,7 +400,7 @@ VulkanExecutionQueue::prepare_external_access(
     const std::vector<vkapi::IVkSemaphore> &binary_waits,
     const std::vector<vkapi::IVkSemaphore> &binary_signals,
     std::shared_ptr<void> operands) {
-  if (!body || body->device != &state_->device ||
+  if (!body || body->device != &state_->device || body->family != state_->family ||
       body->parallel || body->external_access || !body->binary_waits.empty() ||
       !body->binary_signals.empty())
     throw std::invalid_argument(
@@ -409,6 +417,7 @@ VulkanExecutionQueue::prepare_external_access(
   };
   auto result = std::shared_ptr<Commands>(new Commands);
   result->device = body->device;
+  result->family = body->family;
   result->operands = std::make_shared<Closure>(Closure{body, boundaries});
   result->binary_waits = boundaries->binary_waits;
   result->binary_signals = boundaries->binary_signals;
@@ -437,7 +446,11 @@ VulkanExecutionQueue::prepare_external_access(
     std::shared_ptr<const VulkanExternalAccess> access) {
   if (!access)
     throw std::invalid_argument("Null Vulkan external access plan");
-  if (!body || body->device != &state_->device || body->parallel || body->external_access ||
+  // Managed external epochs currently identify queues in the compute pool.
+  // Do not reinterpret a family-local graphics index as a compute identity.
+  if (state_->kind != VulkanExecutionQueueKind::compute)
+    throw std::invalid_argument("Managed Vulkan external access requires a compute domain");
+  if (!body || body->device != &state_->device || body->family != state_->family || body->parallel || body->external_access ||
       !body->binary_waits.empty() || !body->binary_signals.empty())
     throw std::invalid_argument(
         "Managed access requires an unbound body from this Vulkan device");
@@ -476,8 +489,8 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
     std::rethrow_exception(state.error);
   if (!state.accepting)
     throw std::runtime_error("Vulkan execution queue is closed");
-  if (commands && commands->device != &state.device)
-    throw std::invalid_argument("Vulkan execution command device mismatch");
+  if (commands && (commands->device != &state.device || commands->family != state.family))
+    throw std::invalid_argument("Vulkan execution command device/family mismatch");
   std::vector<std::pair<VkSemaphore, std::uint64_t>> waits;
   waits.reserve(dependencies.size());
   for (const auto &point : dependencies) {
@@ -511,8 +524,8 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
   const auto index = (state.head + state.count) % state.slots.size();
   if (select)
     commands = select(index);
-  if (!commands || commands->device != &state.device)
-    throw std::invalid_argument("Vulkan execution command device mismatch");
+  if (!commands || commands->device != &state.device || commands->family != state.family)
+    throw std::invalid_argument("Vulkan execution command device/family mismatch");
   if (commands->parallel)
     return submit_fork_join_locked(commands, dependencies,
                                   std::move(semaphores), std::move(values), admit);
@@ -582,7 +595,7 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_precollected(
   submit.pSignalSemaphores =
       signals.empty() ? &state.timeline->semaphore->semaphore : signals.data();
   try {
-    const auto queue = state.device.compute_queue_at(state.index);
+    const auto queue = state.device.execution_queue_at(state.kind, state.index);
     auto queue_lock = state.device.acquire_queue_lock(queue);
     state.uncertain_submission = true;
     state.retirement_proven = false;
@@ -715,7 +728,7 @@ VulkanExecutionQueue::Point VulkanExecutionQueue::submit_fork_join_locked(
     // than wait a signal that may never have been enqueued.
     target.tail = point;
     try {
-      const auto queue = target.device.compute_queue_at(target.index);
+      const auto queue = target.device.execution_queue_at(target.kind, target.index);
       auto queue_lock = target.device.acquire_queue_lock(queue);
       target.uncertain_submission = true;
       target.retirement_proven = false;
@@ -780,6 +793,7 @@ std::size_t VulkanExecutionQueue::pending() const {
   return state_->count;
 }
 std::uint32_t VulkanExecutionQueue::queue_index() const { return state_->index; }
+std::uint32_t VulkanExecutionQueue::queue_family_index() const { return state_->family; }
 VulkanExecutionQueue::Point VulkanExecutionQueue::latest() const {
   std::lock_guard<std::mutex> lock(state_->mutex);
   return state_->tail;
@@ -859,7 +873,7 @@ void VulkanExecutionQueue::close() {
     state.stream.reset();
     {
       std::lock_guard<std::mutex> lock(state.device.execution_queue_mutex_);
-      state.device.additional_compute_queues_[state.index - 1]->leased = false;
+      state.device.execution_queue_pool(state.kind)[state.index - 1]->leased = false;
     }
   } catch (...) {
     std::lock_guard<std::mutex> lock(state.mutex);
@@ -878,7 +892,7 @@ void VulkanExecutionQueue::prove_retirement() {
   if (state.retirement_proven)
     return;
   if (state.uncertain_submission) {
-    const auto queue = state.device.compute_queue_at(state.index);
+    const auto queue = state.device.execution_queue_at(state.kind, state.index);
     auto queue_lock = state.device.acquire_queue_lock(queue);
     state.timeline->check(state.device.vk_device().functions().vkQueueWaitIdle(queue),
                           "vkQueueWaitIdle");

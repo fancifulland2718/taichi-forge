@@ -29,6 +29,8 @@ namespace vulkan {
 
 using std::unordered_map;
 
+enum class VulkanExecutionQueueKind { compute, graphics };
+
 rhi_impl::RhiReturn<BufferFormat> buffer_format_vk_to_ti(VkFormat format);
 rhi_impl::RhiReturn<VkFormat> buffer_format_ti_to_vk(BufferFormat format);
 
@@ -1095,6 +1097,9 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     // Explicit same-family queues created by the owner. Imported devices do
     // not discover or borrow queues that their caller did not supply.
     std::vector<VkQueue> additional_compute_queues;
+    // Only a distinct graphics family needs another list. A shared family
+    // uses the compute list and the same physical lease state.
+    std::vector<VkQueue> additional_graphics_queues;
     bool timeline_semaphore{false};
     uint32_t compute_queue_family_index{0};
     VkQueue graphics_queue{VK_NULL_HANDLE};
@@ -1161,6 +1166,11 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   Stream *get_compute_stream() override;
   uint32_t created_compute_queue_count() const noexcept;
+  uint32_t created_execution_queue_count(VulkanExecutionQueueKind kind) const;
+  uint32_t execution_queue_family_index(VulkanExecutionQueueKind kind) const;
+  VkQueue execution_queue_at(VulkanExecutionQueueKind kind, uint32_t index) const;
+  std::unique_ptr<VulkanStream> create_execution_stream(
+      VulkanExecutionQueueKind kind, uint32_t index);
   VkQueue compute_queue_at(uint32_t index) const;
   // Cold factory, not a domain reservation. The caller owns retirement and
   // must drain this stream before releasing it; ordinary thread-local streams
@@ -1448,7 +1458,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   std::mutex compute_queue_mutex_;
   VulkanQueueLockTelemetry compute_queue_lock_telemetry_;
   std::weak_ptr<vkapi::DeviceObjVkFence> compute_queue_tail_fence_;
-  struct AdditionalComputeQueue {
+  struct AdditionalExecutionQueue {
     VkQueue queue{VK_NULL_HANDLE};
     std::mutex mutex;
     VulkanQueueLockTelemetry telemetry;
@@ -1461,8 +1471,12 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   // prevents the last ticket destructor racing vkDestroyDevice after a failed
   // weak_ptr::lock(). All domain users must stop before device retirement.
   std::vector<std::shared_ptr<VulkanTimelineState>> execution_timelines_;
-  std::vector<std::unique_ptr<AdditionalComputeQueue>> additional_compute_queues_;
-  std::unordered_map<VkQueue, AdditionalComputeQueue *> additional_queue_states_;
+  using ExecutionQueuePool = std::vector<std::unique_ptr<AdditionalExecutionQueue>>;
+  ExecutionQueuePool &execution_queue_pool(VulkanExecutionQueueKind kind);
+  const ExecutionQueuePool &execution_queue_pool(VulkanExecutionQueueKind kind) const;
+  ExecutionQueuePool additional_compute_queues_;
+  ExecutionQueuePool additional_graphics_queues_;
+  std::unordered_map<VkQueue, AdditionalExecutionQueue *> additional_queue_states_;
 
   VkQueue graphics_queue_{VK_NULL_HANDLE};
   uint32_t graphics_queue_family_index_{0};

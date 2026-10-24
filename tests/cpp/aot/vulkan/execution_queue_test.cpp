@@ -27,6 +27,110 @@
 
 namespace taichi::lang {
 
+TEST(VulkanExecutionQueueFamilies, GraphicsLeaseBusyAndCrossFamilyAdmission) {
+  using Kind = vulkan::VulkanExecutionQueueKind;
+  using Queue = vulkan::VulkanExecutionQueue;
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (device.created_execution_queue_count(Kind::graphics) < 3 ||
+      device.created_compute_queue_count() < 2 || !device.vk_caps().timeline_semaphore)
+    GTEST_SKIP() << "Requires two additional graphics/compute queues and one compute queue";
+  Queue graphics(device, 1, Kind::graphics), peer(device, 1, Kind::graphics);
+  Queue compute(device, 1);
+  RecordProperty("graphics_family", graphics.queue_family_index());
+  RecordProperty("compute_family", compute.queue_family_index());
+  EXPECT_EQ(graphics.queue_family_index(), device.graphics_queue_family_index());
+  EXPECT_NE(device.execution_queue_at(Kind::graphics, graphics.queue_index()), device.graphics_queue());
+  EXPECT_NE(device.execution_queue_at(Kind::graphics, graphics.queue_index()),
+            device.execution_queue_at(Kind::graphics, peer.queue_index()));
+  auto [storage, status] = device.allocate_memory_unique(
+      {4, false, true, false, AllocUsage::Storage});
+  ASSERT_EQ(status, RhiResult::success);
+  auto command = graphics.new_command_list();
+  command->buffer_fill(storage->get_ptr(), 4, 73);
+  command->memory_barrier();
+  auto commands = graphics.prepare({command.get()});
+  if (graphics.queue_family_index() != compute.queue_family_index()) {
+    EXPECT_THROW(compute.prepare({command.get()}), std::invalid_argument);
+    bool admitted = false;
+    EXPECT_THROW(compute.submit(commands, {}, [&](auto, const auto &) { admitted = true; }),
+                 std::invalid_argument);
+    EXPECT_FALSE(admitted);
+    EXPECT_EQ(compute.pending(), 0u);
+  }
+  {
+    test_detail::TimelineGate gate(device, graphics.queue_index(), Kind::graphics);
+    auto blocked = graphics.submit(commands);
+    EXPECT_FALSE(blocked->is_ready());
+    bool admitted = false;
+    EXPECT_THROW(graphics.submit(commands, {}, [&](auto, const auto &) { admitted = true; }), Queue::Busy);
+    EXPECT_FALSE(admitted);
+    EXPECT_EQ(graphics.latest(), blocked);
+    auto peer_done = peer.submit(peer.prepare({}));
+    auto compute_done = compute.submit(compute.prepare({}));
+    // Host deadline is only a test failure bound, never a workload limit.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while ((!peer_done->is_ready() || !compute_done->is_ready()) &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT_TRUE(peer_done->is_ready());
+    EXPECT_TRUE(compute_done->is_ready());
+    EXPECT_FALSE(blocked->is_ready());
+    gate.release();
+    EXPECT_TRUE(blocked->wait());
+  }
+  void *mapped = nullptr;
+  ASSERT_EQ(device.map(*storage, &mapped), RhiResult::success);
+  EXPECT_EQ(*static_cast<const uint32_t *>(mapped), 73u);
+  device.unmap(*storage);
+  const auto released = graphics.queue_index();
+  graphics.close();
+  Queue reused(device, 1, Kind::graphics);
+  EXPECT_EQ(reused.queue_index(), released);
+  EXPECT_TRUE(reused.submit(reused.prepare({}))->wait());
+}
+
+TEST(VulkanExecutionQueueFamilies, ImportedSharedFamilyUsesOnePhysicalLeasePool) {
+  using Kind = vulkan::VulkanExecutionQueueKind;
+  using Queue = vulkan::VulkanExecutionQueue;
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (device.created_execution_queue_count(Kind::graphics) < 3 || !device.vk_caps().timeline_semaphore)
+    GTEST_SKIP();
+  // A real imported VkDevice with only the explicitly supplied queues. Both
+  // roles use its universal family; no queue is fetched behind the owner's back.
+  vulkan::VulkanDevice::Params params;
+  params.instance = device.vk_instance();
+  params.physical_device = device.vk_physical_device();
+  params.device = device.vk_device();
+  params.compute_queue = params.graphics_queue = device.graphics_queue();
+  params.compute_queue_family_index = params.graphics_queue_family_index = device.graphics_queue_family_index();
+  params.timeline_semaphore = true;
+  params.additional_compute_queues = {
+      device.execution_queue_at(Kind::graphics, 1), device.execution_queue_at(Kind::graphics, 2)};
+  vulkan::VulkanDevice imported;
+  imported.vk_caps() = device.vk_caps();
+  imported.init_vulkan_structs(params);
+  EXPECT_EQ(imported.created_execution_queue_count(Kind::graphics), 3u);
+  Queue compute(imported, 1), graphics(imported, 1, Kind::graphics);
+  EXPECT_EQ(compute.queue_family_index(), graphics.queue_family_index());
+  EXPECT_NE(compute.queue_index(), graphics.queue_index());
+  EXPECT_THROW(Queue(imported, 1), std::runtime_error);
+  EXPECT_THROW(Queue(imported, 1, Kind::graphics), std::runtime_error);
+  auto command = compute.new_command_list();
+  auto shared = compute.prepare({command.get()});
+  EXPECT_TRUE(graphics.submit(shared)->wait());
+  const auto released = compute.queue_index();
+  compute.close();
+  Queue replacement(imported, 1, Kind::graphics);
+  EXPECT_EQ(replacement.queue_index(), released);
+  EXPECT_TRUE(replacement.submit(shared)->wait());
+}
+
 TEST(VulkanExecutionQueues, UsesCreatedSameFamilyCapacityAndIndependentTails) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();

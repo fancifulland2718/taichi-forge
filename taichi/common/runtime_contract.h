@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // LLVM AOT entry policies share code without sharing recording state.
-inline constexpr int kForgeNativeAbiRevision = 180;
+inline constexpr int kForgeNativeAbiRevision = 181;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

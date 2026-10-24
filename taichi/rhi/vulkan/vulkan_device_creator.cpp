@@ -411,6 +411,7 @@ VulkanDeviceCreator::VulkanDeviceCreator(
     params.device = device_;
     params.compute_queue = compute_queue_;
     params.additional_compute_queues = std::move(additional_compute_queues_);
+    params.additional_graphics_queues = std::move(additional_graphics_queues_);
     params.timeline_semaphore = ti_device_->vk_caps().timeline_semaphore;
     params.compute_queue_family_index =
         queue_family_indices_.compute_family.value();
@@ -677,12 +678,17 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
                                           families.data());
   const auto compute_family = queue_family_indices_.compute_family.value();
   const auto compute_count = families.at(compute_family).queueCount;
-  std::vector<float> queue_priorities(compute_count, 1.0f);
+  const auto graphics_family = queue_family_indices_.graphics_family;
+  const auto graphics_count = graphics_family &&
+      (families.at(*graphics_family).queueFlags & VK_QUEUE_COMPUTE_BIT)
+      ? families.at(*graphics_family).queueCount : 1u;
+  std::vector<float> queue_priorities(std::max(compute_count, graphics_count), 1.0f);
   for (uint32_t queue_family : unique_families) {
     VkDeviceQueueCreateInfo queueCreateInfo{};
     queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     queueCreateInfo.queueFamilyIndex = queue_family;
-    queueCreateInfo.queueCount = queue_family == compute_family ? compute_count : 1;
+    queueCreateInfo.queueCount = queue_family == compute_family
+                                    ? compute_count : graphics_count;
     queueCreateInfo.pQueuePriorities = queue_priorities.data();
     queue_create_infos.push_back(queueCreateInfo);
   }
@@ -1698,6 +1704,12 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   if (queue_family_indices_.graphics_family.has_value()) {
     get_device_queue(device_, queue_family_indices_.graphics_family.value(), 0,
                      &graphics_queue_);
+    if (*graphics_family != compute_family) {
+      additional_graphics_queues_.resize(graphics_count - 1);
+      for (uint32_t index = 1; index < graphics_count; ++index)
+        get_device_queue(device_, *graphics_family, index,
+                         &additional_graphics_queues_[index - 1]);
+    }
   }
 
   // Dump capabilities

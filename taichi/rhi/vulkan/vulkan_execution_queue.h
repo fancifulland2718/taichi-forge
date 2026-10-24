@@ -34,6 +34,7 @@ class VulkanExecutionQueue {
     friend class VulkanExecutionQueue;
     Commands() = default;
     VulkanDevice *device{nullptr};
+    std::uint32_t family{0};
     std::vector<vkapi::IVkCommandBuffer> buffers;
     std::vector<VkCommandBuffer> handles;
     // Cold, owned binary semaphore payloads. Ready/done epoch admission is
@@ -54,7 +55,8 @@ class VulkanExecutionQueue {
     Busy() : std::runtime_error("Vulkan execution queue is full") {}
   };
 
-  VulkanExecutionQueue(VulkanDevice &device, std::size_t capacity);
+  VulkanExecutionQueue(VulkanDevice &device, std::size_t capacity,
+                       VulkanExecutionQueueKind kind = VulkanExecutionQueueKind::compute);
   ~VulkanExecutionQueue();
   VulkanExecutionQueue(const VulkanExecutionQueue &) = delete;
   VulkanExecutionQueue &operator=(const VulkanExecutionQueue &) = delete;
@@ -120,6 +122,7 @@ class VulkanExecutionQueue {
   std::size_t collect(std::size_t budget);
   std::size_t pending() const;
   std::uint32_t queue_index() const;
+  std::uint32_t queue_family_index() const;
   Point latest() const;
   void stop();
   void close();

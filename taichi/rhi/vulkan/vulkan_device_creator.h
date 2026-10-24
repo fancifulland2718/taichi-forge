@@ -120,6 +120,7 @@ class TI_DLL_EXPORT VulkanDeviceCreator {
 
   VkQueue compute_queue_{VK_NULL_HANDLE};
   std::vector<VkQueue> additional_compute_queues_;
+  std::vector<VkQueue> additional_graphics_queues_;
   VkQueue graphics_queue_{VK_NULL_HANDLE};
 
   uint32_t instance_api_version_{VK_API_VERSION_1_0};

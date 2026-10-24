@@ -6,7 +6,8 @@
 namespace taichi::lang::test_detail {
 class TimelineGate {
  public:
-  TimelineGate(vulkan::VulkanDevice &device, uint32_t queue_index)
+  TimelineGate(vulkan::VulkanDevice &device, uint32_t queue_index,
+               vulkan::VulkanExecutionQueueKind kind = vulkan::VulkanExecutionQueueKind::compute)
       : device_(device.vk_device()) {
     VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -23,7 +24,7 @@ class TimelineGate {
     wait.pWaitSemaphores = &semaphore_->semaphore;
     wait.pWaitDstStageMask = &stage;
     fence_ = vkapi::create_fence(device_, 0);
-    if (device_.functions().vkQueueSubmit(device.compute_queue_at(queue_index),
+    if (device_.functions().vkQueueSubmit(device.execution_queue_at(kind, queue_index),
                                           1, &wait, fence_->fence) != VK_SUCCESS)
       throw std::runtime_error("Cannot enqueue test timeline gate");
   }
