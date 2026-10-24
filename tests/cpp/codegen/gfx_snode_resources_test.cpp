@@ -15,6 +15,10 @@
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
+#include "taichi/runtime/fixed_execution_vulkan.h"
+#include "taichi/runtime/gfx/aot_graph_data.h"
+#include "taichi/runtime/completion_wait_set.h"
+#include "tests/cpp/aot/vulkan/timeline_gate.h"
 
 namespace taichi::lang {
 
@@ -554,6 +558,238 @@ TEST(GfxSNodeResources, SparseLoansPreflightWholeGraphsAndRetireGenerations) {
   runtime.launch_kernel(replacement, context);
   check(0, 1);
   runtime.release_aot_resources({first, second, replacement}, {0, 1});
+}
+
+namespace {
+void check_detached_diagnostics(bool aggregate) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto *device = creator.device();
+  if (!device->vk_caps().timeline_semaphore ||
+      device->created_compute_queue_count() < 3)
+    GTEST_SKIP() << "Requires two independent compute queues";
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 561);
+  device->set_backend_fault_reporter(owner);
+  gfx::GfxRuntime::Params config;
+  config.device = device;
+  gfx::GfxRuntime runtime(config);
+  gfx::SNodeTreeResources layout;
+  layout.root_size = 16;
+  layout.snode_ids = {4};
+  layout.listgen_capacity_entries = 1;
+  layout.hash_watches = {{4, 4, 8, 12}};
+  std::array<std::vector<int>, 2> roots{
+      runtime.allocate_aot_snode_trees({{31, &layout}}),
+      runtime.allocate_aot_snode_trees({{31, &layout}})};
+
+  // Actual selected shader writes both tree payload and a domain-local error
+  // record. The second execution reports overflow; the first remains clean.
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::spirv_version, 0x10300);
+  spirv::IRBuilder ir(Arch::vulkan, &caps);
+  ir.init_header();
+  auto root = ir.buffer_argument(ir.u32_type(), 0, 0, "root");
+  std::optional<spirv::Value> diagnostic;
+  if (aggregate)
+    diagnostic = ir.buffer_argument(ir.u32_type(), 0, 1, "diagnostic");
+  auto function = ir.new_function();
+  ir.start_function(function);
+  auto cell = ir.struct_array_access(ir.u32_type(), root, ir.const_i32_zero_);
+  auto one = ir.uint_immediate_number(ir.u32_type(), 1);
+  auto value = ir.make_value(spv::OpIAdd, ir.u32_type(),
+                             ir.load_variable(cell, ir.u32_type()), one);
+  ir.store_variable(cell, value);
+  auto failed = ir.make_value(spv::OpUGreaterThan, ir.bool_type(), value, one);
+  auto flag = ir.make_value(spv::OpSelect, ir.u32_type(), failed, one,
+                            ir.uint_immediate_number(ir.u32_type(), 0));
+  if (aggregate) {
+    const uint32_t words[]{0, 31, 4,
+                           0, 0,  uint32_t(spirv::SparseOverflowKind::Pointer)};
+    for (int i = 0; i < 6; ++i) {
+      auto data = i == 0   ? flag
+                  : i == 3 ? value
+                           : ir.uint_immediate_number(ir.u32_type(), words[i]);
+      ir.store_variable(
+          ir.struct_array_access(ir.u32_type(), *diagnostic,
+                                 ir.int_immediate_number(ir.i32_type(), i)),
+          data);
+    }
+  } else {
+    // Top-level Hash and compact-pool overflow can exist only in the root
+    // counters, with no HashOverflow descriptor in the compiled shader.
+    ir.store_variable(
+        ir.struct_array_access(ir.u32_type(), root, ir.const_i32_one_), flag);
+    ir.store_variable(
+        ir.struct_array_access(ir.u32_type(), root,
+                               ir.int_immediate_number(ir.i32_type(), 2)),
+        value);
+  }
+  ir.make_inst(spv::OpReturn);
+  ir.make_inst(spv::OpFunctionEnd);
+  ir.commit_kernel_function(function, "main", {}, {1, 1, 1});
+  const auto code = ir.finalize();
+
+  struct Parts final : RuntimeClient, RuntimeCompletionResources {
+    std::vector<std::shared_ptr<RuntimeClient>> parts;
+    std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> workspace;
+    std::size_t retained_resource_count(std::uint32_t) const noexcept override {
+      return workspace ? 1 : 0;
+    }
+    void retire() override {
+      for (const auto &part : parts)
+        part->retire();
+      parts.clear();
+    }
+    void retire_after(const RuntimeCompletion &prefix) override {
+      retire();
+      workspace->retire_shared_sparse_loans(prefix);
+      workspace.reset();
+    }
+  };
+  vulkan::ExecutionDomainRegistry registry(*device, owner);
+  std::array<std::shared_ptr<vulkan::ExecutionDomain>, 2> domains;
+  std::array<std::shared_ptr<vulkan::ExecutionInstance>, 2> registrations;
+  std::array<std::shared_ptr<Parts>, 2> clients;
+  std::array<std::unique_ptr<gfx::KernelImpl>, 2> kernels;
+  std::array<std::unique_ptr<LaunchContextBuilder>, 2> contexts;
+  std::array<std::unique_ptr<FixedExecution>, 2> executions;
+  for (int i = 0; i < 2; ++i) {
+    gfx::GfxRuntime::RegisterParams params;
+    params.num_snode_trees = 1;
+    params.root_buffer_bindings = params.snode_tree_ids = roots[i];
+    params.sparse_diagnostic_domain = roots[i].front();
+    spirv::TaskAttributes task;
+    task.name = "domain_sparse_diagnostic";
+    task.task_type = OffloadedTaskType::serial;
+    task.advisory_total_num_threads = task.advisory_num_threads_per_group = 1;
+    task.may_mutate_sparse_topology = true;
+    task.buffer_binds = {{{spirv::TaskAttributes::BufferType::Root, 0}, 0}};
+    if (aggregate)
+      task.buffer_binds.push_back(
+          {spirv::TaskAttributes::BufferType::HashOverflow, 1});
+    params.kernel_attribs.tasks_attribs = {task};
+    params.task_spirv_source_codes = {code};
+    kernels[i] = std::make_unique<gfx::KernelImpl>(&runtime, std::move(params));
+    contexts[i] = std::make_unique<LaunchContextBuilder>(kernels[i].get());
+    clients[i] = std::make_shared<Parts>();
+    auto workspace = runtime.create_fixed_graph_workspace();
+    clients[i]->workspace = workspace;
+    runtime.prepare_fixed_shared_sparse_resources(
+        workspace, {kernels[i]->handle()}, owner);
+    domains[i] = registry.create({2, 1, true});
+    FixedExecution::VulkanExecutionBinding binding{domains[i], clients[i]};
+    binding.workspace = workspace;
+    binding.retirement_parts = &clients[i]->parts;
+    registrations[i] = domains[i]->prepare_owned_instance(
+        clients[i], [&](const auto &instance) {
+          binding.instance = instance;
+          executions[i] = std::make_unique<FixedExecution>(
+              Arch::vulkan, *device, &runtime,
+              std::vector<FixedExecution::Operation>{FixedExecution::Dispatch{
+                  kernels[i].get(), contexts[i].get()}},
+              nullptr, owner, nullptr, nullptr, nullptr, nullptr, nullptr,
+              &binding);
+        });
+    EXPECT_EQ(workspace->bytes(), aggregate ? 24u : 0u);
+    EXPECT_EQ(executions[i]->workspace_bytes(), aggregate ? 96u : 48u);
+    auto initialize = domains[i]->new_command_list();
+    workspace->record_initialization(*initialize);
+    domains[i]
+        ->submit_instance(
+            registrations[i],
+            domains[i]->prepare_commands({initialize.get()}, workspace),
+            workspace->shared_resource_dependencies())
+        .wait();
+  }
+  const auto ready = [](const RuntimeCompletion &completion) {
+    CompletionWaitSet waits({completion}, std::chrono::milliseconds(1));
+    return waits.wait(std::chrono::seconds(3)).status ==
+           CompletionWaitSet::Status::ready;
+  };
+  RuntimeCompletion left, right;
+  {
+    test_detail::TimelineGate blocked(*device,
+                                      domains[0]->snapshot().queue_index);
+    {
+      test_detail::TimelineGate ordinary(*device, 0);
+      left = executions[0]->submit();
+      auto queued = executions[0]->submit();
+      EXPECT_FALSE(queued.done());
+      EXPECT_THROW(executions[0]->submit(), vulkan::ExecutionDomain::Busy);
+      right = executions[1]->submit({}, {}, true);
+      EXPECT_TRUE(ready(right));
+      EXPECT_FALSE(left.done());
+      const auto calls = device->queue_submission_snapshot().queue_submit_calls;
+      EXPECT_TRUE(right.done());
+      EXPECT_EQ(device->queue_submission_snapshot().queue_submit_calls, calls);
+    }
+    // No error on the first invocation. Synchronizing the ordinary stream
+    // must not read the live hash counters in the still-pending borrowed tree.
+    EXPECT_NO_THROW(runtime.synchronize());
+    EXPECT_FALSE(left.done());
+    auto overflow = executions[1]->submit({right});
+    EXPECT_TRUE(ready(overflow));
+    EXPECT_FALSE(left.done());
+    auto prefix = overflow.reusable_stream_dependency(Arch::vulkan, 561, owner);
+    EXPECT_NE(std::dynamic_pointer_cast<vulkan::VulkanTimelinePoint>(prefix),
+              nullptr);
+    for (int j = 0; j < 6; ++j)
+      executions[1]->submit().wait();  // reuse both snapshot slots
+    EXPECT_TRUE(right.done());  // old completion cannot reread a reused slot
+    domains[1]->retire_instance(registrations[1]);
+    EXPECT_TRUE(clients[1]->parts.empty());
+    // The error remains after private snapshot buffers retire, preserving
+    // the module-local source-to-runtime identity used by the selected code.
+    try {
+      runtime.synchronize();
+      FAIL() << "Expected detached sparse overflow";
+    } catch (const std::string &message) {
+      EXPECT_NE(message.find("root 1 SNode 4"), std::string::npos) << message;
+      EXPECT_NE(
+          message.find(aggregate ? "capacity is 2 cells" : "active_count=2"),
+          std::string::npos)
+          << message;
+    }
+  }
+  left.wait();
+  // Unqueried completion must still observe its snapshot on domain close.
+  executions[0]->submit();
+  auto empty = domains[0]->new_command_list();
+  auto commands = domains[0]->prepare_commands({empty.get()});
+  auto observed_on_close = std::make_shared<int>(0);
+  auto unobserved = domains[0]->submit_instance_selected(
+      registrations[0], [commands](std::size_t) { return commands; }, {}, {},
+      {}, {}, [observed_on_close](std::size_t) { ++*observed_on_close; });
+  EXPECT_EQ(*observed_on_close, 0);
+  domains[0]->close();
+  EXPECT_EQ(*observed_on_close, 1);
+  EXPECT_TRUE(unobserved.done());
+  unobserved.wait();
+  EXPECT_EQ(*observed_on_close, 1);
+  EXPECT_TRUE(clients[0]->parts.empty());
+  registry.retire();
+  for (int i = 0; i < 2; ++i) {
+    auto ptr = runtime.get_root_buffer(roots[i][0])->get_ptr();
+    uint32_t value = 0;
+    void *host = &value;
+    size_t bytes = sizeof(value);
+    ASSERT_EQ(device->readback_data(&ptr, &host, &bytes, 1),
+              RhiResult::success);
+    EXPECT_EQ(value, i == 0 ? 3u : 8u);
+    runtime.release_aot_resources({kernels[i]->handle()}, roots[i]);
+  }
+}
+
+}  // namespace
+
+TEST(GfxSNodeResources,
+     DetachedDiagnosticsCompleteBeforeSlotReuseAndRetirement) {
+  check_detached_diagnostics(true);
+}
+
+TEST(GfxSNodeResources, DetachedRootCountersSurvivePendingPeersAndRetirement) {
+  check_detached_diagnostics(false);
 }
 
 TEST(GfxSNodeResources, DenseLayoutHasNoSparseResources) {

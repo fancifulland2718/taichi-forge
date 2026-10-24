@@ -1038,6 +1038,32 @@ void GraphReplayRegistration::launch_prepared() const {
   registry_->launch_prepared(replay_key_);
 }
 
+// Only immutable host data crosses a completed submission's lifetime. A
+// retired instance must not discard an already observed overflow, nor retain
+// a device allocation merely to report it at the ordinary sync boundary.
+class SparseDiagnosticCollector {
+ public:
+  struct Record {
+    std::array<uint32_t, 6> words{};
+    std::shared_ptr<const SparseDiagnosticTreeMap> trees;
+  };
+  void publish(Record record) {
+    if (!record.words[0])
+      return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!first_.words[0])
+      first_ = std::move(record);
+  }
+  Record read() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return first_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  Record first_;
+};
+
 constexpr size_t kHashOverflowBufferSize = 6 * sizeof(uint32_t);
 constexpr size_t kListGenBufferSize = 32 << 20;
 constexpr size_t kListGenMinBufferSize = sizeof(uint32_t);
@@ -1056,7 +1082,8 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
       device_(ti_params.device),
       sparse_task_resources_(ti_params.sparse_task_resources),
       sparse_tree_uses_(ti_params.sparse_tree_uses),
-      sparse_tree_permit_(ti_params.sparse_tree_permit) {
+      sparse_tree_permit_(ti_params.sparse_tree_permit),
+      diagnostic_trees_(ti_params.diagnostic_trees) {
   TI_ASSERT(sparse_task_resources_.empty() || sparse_task_resources_.size() ==
             ti_kernel_attribs_.tasks_attribs.size());
   input_buffers_[BufferType::GlobalTmps] = ti_params.global_tmps_buffer;
@@ -1664,9 +1691,57 @@ void GfxRuntime::retire_sparse_tree_state(int tree_id) {
   }
 }
 
+namespace {
+void report_sparse_diagnostic(
+    std::array<uint32_t, 6> aggregate,
+    const std::shared_ptr<const SparseDiagnosticTreeMap> &trees) {
+  if (trees) {
+    TI_ERROR_IF(aggregate[1] > uint32_t(std::numeric_limits<int>::max()),
+                "Sparse diagnostic contains an invalid source tree ID");
+    const auto physical = trees->find(int(aggregate[1]));
+    TI_ERROR_IF(physical == trees->end(),
+                "Sparse diagnostic references undeclared source tree {}",
+                aggregate[1]);
+    aggregate[1] = physical->second;
+  }
+  const auto overflow_kind =
+      static_cast<spirv::SparseOverflowKind>(aggregate[5]);
+  if (overflow_kind == spirv::SparseOverflowKind::Pointer) {
+    TI_ERROR(
+        "Pointer SNode pool overflow on root {} SNode {}. The configured "
+        "capacity is {} cells. Increase vk_max_active or remove the reduced "
+        "capacity hint before materialization.",
+        aggregate[1], aggregate[2], aggregate[3]);
+  }
+  if (overflow_kind == spirv::SparseOverflowKind::Dynamic) {
+    TI_ERROR(
+        "Dynamic SNode capacity overflow on root {} SNode {}. The configured "
+        "capacity is {} cells.",
+        aggregate[1], aggregate[2], aggregate[3]);
+  }
+  uint32_t active_count = 0;
+  uint32_t tombstone_count = 0;
+  active_count = aggregate[3];
+  tombstone_count = aggregate[4];
+  TI_ERROR(
+      "Hash SNode table overflow on root {} SNode {}. Increase "
+      "capacity=... or expected_active=... before materialization, or rebuild "
+      "the SNode tree after high churn. active_count={}, tombstone_count={}.",
+      aggregate[1], aggregate[2], active_count, tombstone_count);
+}
+}  // namespace
+
 void GfxRuntime::check_hash_overflow_counters() {
   if (hash_overflow_error_reported_) {
     return;
+  }
+
+  if (sparse_diagnostic_collector_) {
+    const auto observed = sparse_diagnostic_collector_->read();
+    if (observed.words[0]) {
+      hash_overflow_error_reported_ = true;
+      report_sparse_diagnostic(observed.words, observed.trees);
+    }
   }
 
   std::vector<DevicePtr> ptrs;
@@ -1691,6 +1766,11 @@ void GfxRuntime::check_hash_overflow_counters() {
   live_watches.reserve(hash_overflow_watches_.size());
 
   for (const auto &watch : hash_overflow_watches_) {
+    const auto tree = sparse_tree_storage_.find(watch.root_id);
+    if (tree != sparse_tree_storage_.end() &&
+        shared_sparse_admission_->has_loan(
+            tree->second->registration->handle()))
+      continue;
     if (watch.root_id < 0 ||
         watch.root_id >= static_cast<int>(root_buffers_.size()) ||
         !root_buffers_[watch.root_id]) {
@@ -1770,43 +1850,9 @@ void GfxRuntime::check_hash_overflow_counters() {
     return;
   auto aggregate = *failed;
   const auto *domain = domains[std::distance(aggregates.begin(), failed)];
-  if (domain) {
-    TI_ERROR_IF(aggregate[1] > uint32_t(std::numeric_limits<int>::max()),
-                "Sparse diagnostic contains an invalid source tree ID");
-    const auto physical =
-        domain->source_to_runtime_tree.find(int(aggregate[1]));
-    TI_ERROR_IF(physical == domain->source_to_runtime_tree.end(),
-                "Sparse diagnostic references undeclared source tree {}",
-                aggregate[1]);
-    aggregate[1] = physical->second;
-  }
-  const auto overflow_kind =
-      static_cast<spirv::SparseOverflowKind>(aggregate[5]);
-  if (overflow_kind == spirv::SparseOverflowKind::Pointer) {
-    hash_overflow_error_reported_ = true;
-    TI_ERROR(
-        "Pointer SNode pool overflow on root {} SNode {}. The configured "
-        "capacity is {} cells. Increase vk_max_active or remove the reduced "
-        "capacity hint before materialization.",
-        aggregate[1], aggregate[2], aggregate[3]);
-  }
-  if (overflow_kind == spirv::SparseOverflowKind::Dynamic) {
-    hash_overflow_error_reported_ = true;
-    TI_ERROR(
-        "Dynamic SNode capacity overflow on root {} SNode {}. The configured "
-        "capacity is {} cells.",
-        aggregate[1], aggregate[2], aggregate[3]);
-  }
-  uint32_t active_count = 0;
-  uint32_t tombstone_count = 0;
-  active_count = aggregate[3];
-  tombstone_count = aggregate[4];
   hash_overflow_error_reported_ = true;
-  TI_ERROR(
-      "Hash SNode table overflow on root {} SNode {}. Increase "
-      "capacity=... or expected_active=... before materialization, or rebuild "
-      "the SNode tree after high churn. active_count={}, tombstone_count={}.",
-      aggregate[1], aggregate[2], active_count, tombstone_count);
+  report_sparse_diagnostic(aggregate,
+                           domain ? domain->source_to_runtime_tree : nullptr);
 }
 
 GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
@@ -1877,6 +1923,7 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
     TI_ERROR_IF(domain == sparse_diagnostic_domains_.end(),
                 "GFX sparse diagnostic domain is unavailable");
     params.hash_overflow_buffer = domain->second.buffer.get();
+    params.diagnostic_trees = domain->second.source_to_runtime_tree;
   }
   params.listgen_buffer = listgen_buffer_.get();
 #if defined(TI_WITH_VULKAN_POINTER)
@@ -2955,7 +3002,8 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
                      ShaderResourceSet *bindings,
                      bool patch_existing,
                      DeviceAllocation *listgen = nullptr,
-                     DeviceAllocation *global_tmps = nullptr) {
+                     DeviceAllocation *global_tmps = nullptr,
+                     DeviceAllocation *diagnostic = nullptr) {
   for (const auto &bind : pd.kernel->buffer_binding_plan(task_index)) {
     if (bind.binding < 0) {
       continue;
@@ -2968,6 +3016,9 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
             global_tmps && bind.buffer.type ==
                                spirv::TaskAttributes::BufferType::GlobalTmps
                 ? global_tmps
+            : diagnostic && bind.buffer.type ==
+                                spirv::TaskAttributes::BufferType::HashOverflow
+                ? diagnostic
                 : bind.static_alloc;
         bindings->rw_buffer(bind.binding,
                             allocation ? *allocation : kDeviceNullAllocation);
@@ -3229,7 +3280,12 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
 
 std::shared_ptr<GfxRuntime::FixedGraphWorkspace>
 GfxRuntime::create_fixed_graph_workspace() {
-  return std::shared_ptr<FixedGraphWorkspace>(new FixedGraphWorkspace(device_));
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  if (!sparse_diagnostic_collector_)
+    sparse_diagnostic_collector_ =
+        std::make_shared<SparseDiagnosticCollector>();
+  return std::shared_ptr<FixedGraphWorkspace>(
+      new FixedGraphWorkspace(device_, sparse_diagnostic_collector_));
 }
 
 void GfxRuntime::prepare_fixed_private_image(
@@ -3269,7 +3325,116 @@ void GfxRuntime::prepare_fixed_acceleration_structure(
 }
 
 std::size_t GfxRuntime::FixedGraphWorkspace::bytes() const {
-  return global_tmps_ ? kGtmpBufferSize : 0;
+  return (global_tmps_ ? kGtmpBufferSize : 0) +
+         diagnostics_.size() * kHashOverflowBufferSize;
+}
+
+DeviceAllocation *GfxRuntime::FixedGraphWorkspace::diagnostic_buffer(
+    const CompiledTaichiKernel &kernel) const {
+  const auto *source = kernel.get_buffer_bind(BufferType::HashOverflow);
+  if (!source)
+    return nullptr;
+  const auto found = diagnostics_.find(source->alloc_id);
+  return found == diagnostics_.end() ? nullptr : found->second.buffer.get();
+}
+
+std::size_t GfxRuntime::SparseDiagnosticSnapshot::bytes() const {
+  return sources_.size() * kHashOverflowBufferSize;
+}
+
+void GfxRuntime::SparseDiagnosticSnapshot::observe() {
+  void *mapped = nullptr;
+  auto *device = storage_->device;
+  TI_ERROR_IF(device->map(*storage_, &mapped) != RhiResult::success,
+              "Cannot map completed sparse diagnostic snapshot");
+  // No logical error is thrown here: it must not quarantine an otherwise
+  // completed execution or prevent safe loan retirement. The existing sync
+  // diagnostic boundary reports the immutable host copy.
+  for (std::size_t i = 0; i < sources_.size(); ++i) {
+    SparseDiagnosticCollector::Record record;
+    std::memcpy(record.words.data(),
+                static_cast<const char *>(mapped) + i * kHashOverflowBufferSize,
+                kHashOverflowBufferSize);
+    const auto &source = sources_[i];
+    record.trees = source.trees;
+    if (source.root >= 0) {
+      record.words[1] = source.root;
+      record.words[2] = source.snode;
+      record.words[5] = uint32_t(spirv::SparseOverflowKind::Hash);
+    }
+    collector_->publish(std::move(record));
+  }
+  device->unmap(*storage_);
+}
+
+std::shared_ptr<GfxRuntime::SparseDiagnosticSnapshot>
+GfxRuntime::FixedGraphWorkspace::record_diagnostic_snapshot(
+    CommandList &commands) const {
+  if (!has_sparse_diagnostics())
+    return {};
+  const auto count = diagnostics_.size() + hash_watches_.size();
+  TI_ERROR_IF(count < diagnostics_.size() ||
+                  count > std::numeric_limits<std::size_t>::max() /
+                              kHashOverflowBufferSize,
+              "Sparse diagnostic snapshot size overflows");
+  auto result = std::make_shared<SparseDiagnosticSnapshot>();
+  auto [buffer, status] = device_->allocate_memory_unique(
+      {count * kHashOverflowBufferSize, false, true, false, AllocUsage::None});
+  TI_ERROR_IF(status != RhiResult::success,
+              "Cannot allocate sparse diagnostic snapshot");
+  result->storage_ = std::move(buffer);
+  result->collector_ = diagnostic_collector_;
+  result->sources_.reserve(count);
+  const auto prepare_target = [&](DevicePtr target) {
+    commands.buffer_transition(
+        target, kHashOverflowBufferSize,
+        {BufferBarrierStage::Host | BufferBarrierStage::Transfer,
+         BufferBarrierAccess::HostRead | BufferBarrierAccess::TransferWrite,
+         BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite});
+  };
+  const auto copy = [&](DevicePtr target, DevicePtr source, std::size_t bytes) {
+    commands.buffer_transition(
+        source, bytes,
+        {BufferBarrierStage::Compute | BufferBarrierStage::Transfer,
+         BufferBarrierAccess::ShaderWrite | BufferBarrierAccess::TransferWrite,
+         BufferBarrierStage::Transfer, BufferBarrierAccess::TransferRead});
+    commands.buffer_copy(target, source, bytes);
+    commands.buffer_transition(
+        source, bytes,
+        {BufferBarrierStage::Transfer, BufferBarrierAccess::TransferRead,
+         BufferBarrierStage::Compute,
+         BufferBarrierAccess::ShaderRead | BufferBarrierAccess::ShaderWrite});
+  };
+  const auto finish_target = [&](DevicePtr target) {
+    commands.buffer_transition(
+        target, kHashOverflowBufferSize,
+        {BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite,
+         BufferBarrierStage::Host, BufferBarrierAccess::HostRead});
+  };
+  for (const auto &[id, diagnostic] : diagnostics_) {
+    const auto source = diagnostic.buffer->get_ptr();
+    const auto target = result->storage_->get_ptr(result->bytes());
+    prepare_target(target);
+    copy(target, source, kHashOverflowBufferSize);
+    finish_target(target);
+    result->sources_.push_back({diagnostic.trees});
+  }
+  for (const auto &watch : hash_watches_) {
+    const auto offset = result->bytes();
+    const auto target = result->storage_->get_ptr(offset);
+    prepare_target(target);
+    commands.buffer_fill(target, kHashOverflowBufferSize, 0);
+    commands.buffer_barrier(target, kHashOverflowBufferSize);
+    copy(target, watch.count, sizeof(uint32_t));
+    copy(result->storage_->get_ptr(offset + 3 * sizeof(uint32_t)), watch.active,
+         sizeof(uint32_t));
+    if (watch.tombstone != kDeviceNullPtr)
+      copy(result->storage_->get_ptr(offset + 4 * sizeof(uint32_t)),
+           watch.tombstone, sizeof(uint32_t));
+    finish_target(target);
+    result->sources_.push_back({{}, watch.root, watch.snode});
+  }
+  return result;
 }
 
 void GfxRuntime::FixedGraphWorkspace::record_initialization(
@@ -3279,6 +3444,12 @@ void GfxRuntime::FixedGraphWorkspace::record_initialization(
   if (global_tmps_) {
     commands.buffer_fill(global_tmps_->get_ptr(), kGtmpBufferSize, 0);
     commands.memory_barrier();
+  }
+  for (const auto &[id, diagnostic] : diagnostics_) {
+    commands.buffer_fill(diagnostic.buffer->get_ptr(), kHashOverflowBufferSize,
+                         0);
+    commands.buffer_barrier(diagnostic.buffer->get_ptr(),
+                            kHashOverflowBufferSize);
   }
   for (const auto &[id, image] : private_images_)
     if (image.initial != image.boundary)
@@ -3375,10 +3546,21 @@ void GfxRuntime::prepare_detached_kernel_workspace(
   TI_ERROR_IF(!workspace || workspace->device_ != device_,
               "Detached Graph requires same-device workspace");
   bool uses_global_tmps = false;
+  bool uses_diagnostics = false;
+  const auto loan = std::atomic_load(&workspace->shared_sparse_);
+  for (const auto &use : kernel.sparse_tree_uses()) {
+    TI_ERROR_IF(!loan || !loan->ready() ||
+                    std::find(workspace->shared_sparse_identities_.begin(),
+                              workspace->shared_sparse_identities_.end(),
+                              use.use.resource) ==
+                        workspace->shared_sparse_identities_.end(),
+                "Detached Graph requires the selected SNode storage loan");
+  }
   const auto &tasks = kernel.ti_kernel_attribs().tasks_attribs;
   for (std::size_t i = 0; i < tasks.size(); ++i) {
-    TI_ERROR_IF(tasks[i].may_mutate_sparse_topology,
-                "Detached Graph cannot borrow sparse mutation");
+    TI_ERROR_IF(tasks[i].may_mutate_sparse_topology &&
+                    kernel.sparse_tree_uses().empty(),
+                "Detached sparse mutation requires a declared tree closure");
     for (const auto &bind : tasks[i].acceleration_structure_binds) {
       const int offset = context.args_type->get_element_offset(bind.arg_id);
       const auto found = std::find_if(
@@ -3393,13 +3575,29 @@ void GfxRuntime::prepare_detached_kernel_workspace(
     for (const auto &bind : kernel.buffer_binding_plan(i)) {
       using BufferType = spirv::TaskAttributes::BufferType;
       uses_global_tmps |= bind.buffer.type == BufferType::GlobalTmps;
+      uses_diagnostics |= bind.buffer.type == BufferType::HashOverflow;
       workspace->has_field_dependencies_ |=
           bind.buffer.type == BufferType::Root;
-      TI_ERROR_IF(bind.buffer.type == BufferType::ListGen ||
-                      bind.buffer.type == BufferType::HashOverflow ||
-                      bind.buffer.type == BufferType::NodeAllocatorPool,
-                  "Detached Graph cannot borrow shared sparse runtime state");
+      TI_ERROR_IF((bind.buffer.type == BufferType::ListGen ||
+                   bind.buffer.type == BufferType::HashOverflow ||
+                   bind.buffer.type == BufferType::NodeAllocatorPool) &&
+                      kernel.sparse_tree_uses().empty(),
+                  "Detached sparse state requires a declared tree closure");
     }
+  }
+  if (uses_diagnostics && !workspace->diagnostic_buffer(kernel)) {
+    TI_ERROR_IF(
+        workspace->initialization_recorded_,
+        "Fixed Graph workspace was sealed before diagnostic preparation");
+    const auto *source = kernel.get_buffer_bind(BufferType::HashOverflow);
+    TI_ERROR_IF(!source, "Sparse diagnostic source is unavailable");
+    auto [buffer, result] = device_->allocate_memory_unique(
+        {kHashOverflowBufferSize, false, false, false, AllocUsage::Storage});
+    TI_ERROR_IF(result != RhiResult::success,
+                "Fixed Graph private diagnostic allocation failed");
+    workspace->diagnostics_.emplace(
+        source->alloc_id, FixedGraphWorkspace::PrivateDiagnostic{
+                              std::move(buffer), kernel.diagnostic_trees()});
   }
   if (uses_global_tmps && !workspace->global_tmps_) {
     TI_ERROR_IF(workspace->initialization_recorded_,
@@ -3578,9 +3776,9 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
          dispatch.device_range_tasks});
   }
   if (detached) {
-    TI_ERROR_IF(sparse.uses_listgen || sparse.unknown_mutation ||
-                    !sparse.mutated_trees.empty(),
-                "Detached Graph cannot borrow shared sparse runtime state");
+    TI_ERROR_IF(
+        !sparse.self_contained_lists,
+        "Detached Graph requires self-contained sparse traversal lists");
     slot.retained_owners.push_back(workspace);
   }
   prepare_fixed_sparse_resources(sparse, slot.retained_owners);
@@ -3840,8 +4038,10 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
       }
       bind_graph_task_images(pd, i, resources.get(), record_image_use);
       TI_ERROR_IF(
-          !bind_graph_task(pd, i, resources.get(), false, listgen.get(),
-                           workspace ? workspace->global_tmps_.get() : nullptr),
+          !bind_graph_task(
+              pd, i, resources.get(), false, listgen.get(),
+              workspace ? workspace->global_tmps_.get() : nullptr,
+              workspace ? workspace->diagnostic_buffer(*pd.kernel) : nullptr),
           "Prepared Vulkan Graph descriptor preparation failed");
       if (tasks[i].task_type == OffloadedTaskType::listgen) {
         commands->buffer_fill(listgen->get_ptr(0), sizeof(uint32_t), 0);
@@ -3892,6 +4092,8 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                     [](const auto &item) { return bool(item); }) *
       RangeDispatch::kPacketBytes;
   if (detached) {
+    slot.structured_control_bytes =
+        state.fixed_control_bytes + sparse.private_list_bytes;
     slot.cmdlist = std::move(commands);
     slot.recorded = true;
     return state;
@@ -4092,11 +4294,13 @@ GfxRuntime::prepare_fixed_control_commands(
                   bool(control) == bool(nested_control),
               "Detached control requires owned commands, workspace and one recipe");
   std::unordered_set<const NativeKernelResultStorage *> results;
+  FixedSparseReplayResources sparse;
   for (const auto &dispatch : dispatches) {
     const auto found = ti_kernels_.find(dispatch.handle.get_launch_id());
     TI_ERROR_IF(found == ti_kernels_.end() || !dispatch.host_ctx,
                 "Detached control requires registered kernels");
     prepare_detached_kernel_workspace(*found->second, *dispatch.host_ctx, workspace);
+    sparse.include(*found->second);
     if (dispatch.host_ctx && dispatch.host_ctx->prepared_result &&
         results.insert(dispatch.host_ctx->prepared_result.get()).second)
       owners.push_back(dispatch.host_ctx->prepared_result);
@@ -4108,17 +4312,23 @@ GfxRuntime::prepare_fixed_control_commands(
                 "Detached control SNodeTree root {} is unavailable", tree_id);
     owners.push_back(root_buffers_[tree_id]);
   }
+  TI_ERROR_IF(
+      !sparse.self_contained_lists,
+      "Detached control requires self-contained sparse traversal lists");
+  prepare_fixed_sparse_resources(sparse, owners);
   GraphReplayState state;
-  TI_ERROR_IF(!launch_graph_impl(dispatches, 0, nullptr, control, nullptr,
-                                 nested_control, nullptr, true, nullptr, &state,
-                                 std::move(commands), workspace),
-              "Detached control cannot record the selected strategy");
+  TI_ERROR_IF(
+      !launch_graph_impl(dispatches, 0, nullptr, control, nullptr,
+                         nested_control, nullptr, true, sparse.listgen.get(),
+                         &state, std::move(commands), workspace),
+      "Detached control cannot record the selected strategy");
   TI_ASSERT(state.executable.slots.size() == 1);
   auto payload = std::make_shared<GraphReplayExecutable::Slot>(
       std::move(state.executable.slots.front()));
   TI_ASSERT(payload->recorded && payload->cmdlist && !payload->completion);
   payload->retained_owners = std::move(owners);
   payload->retained_owners.push_back(workspace);
+  payload->structured_control_bytes += sparse.private_list_bytes;
   return payload;
 }
 
@@ -5047,9 +5257,10 @@ bool GfxRuntime::launch_graph_impl(
   auto update_task_bindings = [&](PreparedDispatch &pd, int task_index,
                                   ShaderResourceSet *bindings,
                                   bool patch_existing) {
-    return bind_graph_task(pd, task_index, bindings, patch_existing,
-                           fixed_listgen,
-                           workspace ? workspace->global_tmps_.get() : nullptr);
+    return bind_graph_task(
+        pd, task_index, bindings, patch_existing, fixed_listgen,
+        workspace ? workspace->global_tmps_.get() : nullptr,
+        workspace ? workspace->diagnostic_buffer(*pd.kernel) : nullptr);
   };
 
   auto patch_all_task_bindings = [&]() {
@@ -5921,6 +6132,8 @@ bool GfxRuntime::launch_graph_impl(
                     ? workspace->global_tmps_.get()
                 : bind.buffer.type == BufferType::ListGen && fixed_listgen
                     ? fixed_listgen
+                : bind.buffer.type == BufferType::HashOverflow && workspace
+                    ? workspace->diagnostic_buffer(*pd.kernel)
                     : pd.kernel->get_buffer_bind(bind.buffer);
             if (resolved != nullptr) {
               allocation = *resolved;
@@ -7184,6 +7397,23 @@ void GfxRuntime::prepare_fixed_shared_sparse_resources(
   std::sort(trees.begin(), trees.end());
   trees.erase(std::unique(trees.begin(), trees.end()), trees.end());
   auto loan = shared_sparse_admission_->reserve(uses);
+  std::vector<FixedGraphWorkspace::PrivateHashWatch> watches;
+  for (const auto &watch : hash_overflow_watches_) {
+    if (!std::binary_search(trees.begin(), trees.end(), watch.root_id))
+      continue;
+    const auto &root = root_buffers_.at(watch.root_id);
+    watches.push_back(
+        {watch.root_id, watch.snode_id,
+         root->get_ptr(watch.overflow_byte_offset),
+         root->get_ptr(watch.active_byte_offset),
+         watch.tombstone_byte_offset == static_cast<std::size_t>(-1)
+             ? kDeviceNullPtr
+             : root->get_ptr(watch.tombstone_byte_offset)});
+  }
+  std::vector<RuntimeResourceHandle> identities;
+  identities.reserve(uses.size());
+  for (const auto &use : uses)
+    identities.push_back(use.use.resource);
   auto prefix = std::make_shared<RuntimeCompletion>(
       RuntimeCompletion::from_stream_semaphore(
           Arch::vulkan, owner->program_domain(),
@@ -7195,6 +7425,8 @@ void GfxRuntime::prepare_fixed_shared_sparse_resources(
               "Shared SNode storage requires a reusable producer prefix");
   loan->publish_boundary(std::move(prefix));
   workspace->shared_sparse_tree_ids_ = std::move(trees);
+  workspace->shared_sparse_identities_ = std::move(identities);
+  workspace->hash_watches_ = std::move(watches);
   workspace->shared_resource_bridge_ = graph_replay_registry_;
   workspace->shared_resource_fault_ = owner;
   std::atomic_store(&workspace->shared_sparse_, std::move(loan));
@@ -8017,10 +8249,11 @@ std::vector<int> GfxRuntime::allocate_aot_snode_trees(
   if (sources.empty())
     return {};
   SparseDiagnosticDomain domain;
+  domain.source_to_runtime_tree = std::make_shared<SparseDiagnosticTreeMap>();
   for (const auto &source : sources) {
     TI_ERROR_IF(
         source.tree_id < 0 || source.resources == nullptr ||
-            !domain.source_to_runtime_tree.emplace(source.tree_id, -1).second,
+            !domain.source_to_runtime_tree->emplace(source.tree_id, -1).second,
         "GFX SNode reconstruction requires unique valid source trees");
     validate_snode_tree_resources(*source.resources);
   }
@@ -8030,7 +8263,7 @@ std::vector<int> GfxRuntime::allocate_aot_snode_trees(
     for (; allocated < sources.size(); ++allocated) {
       materialize_snode_tree_resources(ids[allocated],
                                        *sources[allocated].resources);
-      domain.source_to_runtime_tree.at(sources[allocated].tree_id) =
+      domain.source_to_runtime_tree->at(sources[allocated].tree_id) =
           ids[allocated];
     }
     auto [buffer, result] = device_->allocate_memory_unique(

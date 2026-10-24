@@ -154,6 +154,8 @@ struct FixedExecution::State {
     struct Slot {
       DeviceAllocationUnique parameters;
       StreamGpuTiming timing;
+      std::vector<std::shared_ptr<gfx::GfxRuntime::SparseDiagnosticSnapshot>>
+          diagnostics;
     };
     struct Variants {
       std::shared_ptr<const vulkan::ExecutionDomain::Commands> ordinary;
@@ -194,6 +196,7 @@ struct FixedExecution::State {
     std::vector<Variants> variants;
     std::size_t parameter_count{0};
     bool gpu_timing{false};
+    bool sparse_diagnostics{false};
     bool external_bound{false};
     std::mutex mutex;
     bool initialized{false};
@@ -1646,7 +1649,12 @@ FixedExecution::FixedExecution(
           first.insert(first.begin(), initialize.get());
           instance->first_commands = compose(first, suffix);
         }
-        if (instance->parameter_count || instance->gpu_timing) {
+        instance->sparse_diagnostics =
+            payload.workspace && payload.workspace->has_sparse_diagnostics();
+        for (const auto &workspace : payload.branch_workspaces)
+          instance->sparse_diagnostics |= workspace->has_sparse_diagnostics();
+        if (instance->parameter_count || instance->gpu_timing ||
+            instance->sparse_diagnostics) {
           const auto capacity = state_->vulkan_domain->snapshot().capacity;
           const auto parameter_bytes = instance->parameter_count * 8;
           if (parameter_bytes && capacity >
@@ -1655,6 +1663,21 @@ FixedExecution::FixedExecution(
           payload.slots.resize(capacity);
           instance->variants.resize(capacity);
           for (std::size_t slot = 0; slot < capacity; ++slot) {
+            std::unique_ptr<CommandList> observe;
+            if (instance->sparse_diagnostics) {
+              observe = state_->vulkan_domain->new_command_list();
+              const auto record_snapshot = [&](const auto &workspace) {
+                if (auto snapshot =
+                        workspace->record_diagnostic_snapshot(*observe)) {
+                  state_->workspace_bytes += snapshot->bytes();
+                  payload.slots[slot].diagnostics.push_back(
+                      std::move(snapshot));
+                }
+              };
+              record_snapshot(payload.workspace);
+              for (const auto &workspace : payload.branch_workspaces)
+                record_snapshot(workspace);
+            }
             std::unique_ptr<CommandList> upload;
             if (parameter_bytes) {
               auto [buffer, status] = device.allocate_memory_unique(
@@ -1686,9 +1709,18 @@ FixedExecution::FixedExecution(
             const auto record = [&](const std::vector<CommandList *> &steps,
                                     const std::vector<CommandList *> &tail, bool first) {
               auto commands = steps;
+              auto suffix_commands = tail;
               if (first && initialize)
                 commands.insert(commands.begin(), initialize.get());
-              return compose(commands, tail);
+              // Snapshot transfer follows the complete compute interval,
+              // including the fork/join suffix, and is outside GPU timing.
+              if (observe) {
+                if (payload.fork_join)
+                  suffix_commands.push_back(observe.get());
+                else
+                  commands.push_back(observe.get());
+              }
+              return compose(commands, suffix_commands);
             };
             variants.ordinary = record(sequence, suffix, false);
             variants.first = initialize ? record(sequence, suffix, true)
@@ -1849,6 +1881,12 @@ RuntimeCompletion FixedExecution::submit(
       throw std::invalid_argument("Submission parameter count does not match preparation");
     if (sample_gpu && !instance->gpu_timing)
       throw std::invalid_argument("GPU timing was not enabled for this Vulkan domain");
+    vulkan::ExecutionDomain::CompletionObserver observe;
+    if (instance->sparse_diagnostics)
+      observe = [payload = instance->payload](std::size_t slot) {
+        for (const auto &snapshot : payload->slots.at(slot).diagnostics)
+          snapshot->observe();
+      };
     return state_->vulkan_domain->submit_instance_selected(
         state_->vulkan_registration,
         [&](std::size_t slot) {
@@ -1860,7 +1898,8 @@ RuntimeCompletion FixedExecution::submit(
           }
           return !instance->initialized && instance->first_commands
                      ? instance->first_commands : instance->commands;
-        }, dependencies, instance,
+        },
+        dependencies, instance,
         [&](std::size_t slot, const RuntimeCompletion &) {
           if (instance->parameter_count) {
             const auto &payload = *instance->payload;
@@ -1871,9 +1910,11 @@ RuntimeCompletion FixedExecution::submit(
             payload.device->unmap(*payload.slots[slot].parameters);
           }
           instance->initialized = true;
-        }, [&](std::size_t slot) -> StreamGpuTiming {
+        },
+        [&](std::size_t slot) -> StreamGpuTiming {
           return sample_gpu ? instance->payload->slots.at(slot).timing : nullptr;
-        });
+        },
+        observe);
   }
 #endif
 #ifdef TI_WITH_CUDA

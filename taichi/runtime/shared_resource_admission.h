@@ -451,6 +451,15 @@ class SharedResourceAdmission {
           diagnostic("Ordinary resource use conflicts with a resource loan"));
   }
 
+  // Cold synchronization/diagnostics must not read mutable state currently
+  // owned by a domain. This query does not grant access or replace a permit.
+  bool has_loan(RuntimeResourceHandle resource) const {
+    std::lock_guard<std::recursive_mutex> lock(*control_->gate);
+    require_open(*control_);
+    const auto entry = find(*control_, resource);
+    return entry->exclusive || entry->readers;
+  }
+
   void close() noexcept {
     std::lock_guard<std::recursive_mutex> lock(*control_->gate);
     control_->closed = true;

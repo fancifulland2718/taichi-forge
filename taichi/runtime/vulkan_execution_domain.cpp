@@ -13,6 +13,41 @@ namespace taichi::lang::vulkan {
 namespace {
 std::atomic<std::uint64_t> next_domain_identity{1};
 
+class ObservedCompletion final : public StreamSemaphoreObject,
+                                 public ReusableStreamDependencySource {
+ public:
+  ObservedCompletion(std::shared_ptr<VulkanTimelinePoint> point,
+                     ExecutionDomain::CompletionObserver observe,
+                     std::size_t slot)
+      : point_(std::move(point)), observe_(std::move(observe)), slot_(slot) {
+  }
+  bool is_ready() const override {
+    if (!point_->is_ready())
+      return false;
+    finish();
+    return true;
+  }
+  bool wait() const override {
+    if (!point_->wait())
+      return false;
+    finish();
+    return true;
+  }
+  std::shared_ptr<ReusableStreamDependency> reusable_dependency()
+      const override {
+    return point_;
+  }
+
+ private:
+  void finish() const {
+    std::call_once(observed_, [&] { observe_(slot_); });
+  }
+  const std::shared_ptr<VulkanTimelinePoint> point_;
+  const ExecutionDomain::CompletionObserver observe_;
+  const std::size_t slot_;
+  mutable std::once_flag observed_;
+};
+
 void report(const std::shared_ptr<RuntimeFaultDomain> &owner,
             std::exception_ptr failure,
             std::uint64_t sequence) noexcept {
@@ -190,7 +225,8 @@ RuntimeCompletion ExecutionDomain::submit_impl(
     std::shared_ptr<RuntimeCompletionResources> resources,
     const Admission &admit,
     const CommandSelector &select,
-    const TimingSelector &timing) {
+    const TimingSelector &timing,
+    const CompletionObserver &observe) {
   auto &state = *state_;
   // Both completion and command operand destruction run outside admission.
   collect_ready(1);
@@ -216,12 +252,20 @@ RuntimeCompletion ExecutionDomain::submit_impl(
   const auto index = (state.head + state.count) % state.pending.size();
   bool reserved = false;
   try {
-    state.queue.submit_precollected(commands, points,
+    state.queue.submit_precollected(
+        commands, points,
         [&](std::size_t slot, const auto &point) {
-          ticket = RuntimeCompletion::from_reusable_stream_dependency(
-              Arch::vulkan, state.owner->program_domain(),
-              state.owner->allocate_submission_sequence(), point, state.owner,
-              timing ? timing(slot) : nullptr);
+          const auto sequence = state.owner->allocate_submission_sequence();
+          ticket =
+              observe
+                  ? RuntimeCompletion::from_stream_semaphore(
+                        Arch::vulkan, state.owner->program_domain(), sequence,
+                        std::make_shared<ObservedCompletion>(point, observe,
+                                                             slot),
+                        state.owner, timing ? timing(slot) : nullptr)
+                  : RuntimeCompletion::from_reusable_stream_dependency(
+                        Arch::vulkan, state.owner->program_domain(), sequence,
+                        point, state.owner, timing ? timing(slot) : nullptr);
           if (resources)
             ticket.attach_resources(resources);
           if (admit)
@@ -234,12 +278,14 @@ RuntimeCompletion ExecutionDomain::submit_impl(
           if (instance)
             instance->unsealed_submission = true;
           reserved = true;
-        }, select ? CommandSelector([&](std::size_t slot) {
+        },
+        select ? CommandSelector([&](std::size_t slot) {
           // Keep selected operands alive outside the wider admission lock,
           // including a failure before the queue accepts the commands.
           commands = select(slot);
           return commands;
-        }) : CommandSelector{});
+        })
+               : CommandSelector{});
   } catch (...) {
     if (reserved) {
       state.first_error = std::current_exception();
@@ -262,10 +308,12 @@ RuntimeCompletion ExecutionDomain::submit_instance_selected(
     const std::vector<RuntimeCompletion> &dependencies,
     std::shared_ptr<RuntimeCompletionResources> resources,
     const Admission &admit,
-    const TimingSelector &timing) {
+    const TimingSelector &timing,
+    const CompletionObserver &observe) {
   if (!instance || !select)
     throw std::invalid_argument("Vulkan submission requires an instance and selector");
-  return submit_impl(instance, {}, dependencies, std::move(resources), admit, select, timing);
+  return submit_impl(instance, {}, dependencies, std::move(resources), admit,
+                     select, timing, observe);
 }
 
 std::size_t ExecutionDomain::collect_ready(std::size_t budget) {
@@ -455,6 +503,12 @@ void ExecutionDomain::close() {
   }
   try {
     state.queue.close();
+    // Queue retirement proves device completion, but mark_completed() alone
+    // would discard per-submission host observations. No admission/collection
+    // can mutate pending while closing, and the timeline waits are now ready.
+    for (const auto &completion : state.pending)
+      if (completion.valid())
+        completion.wait();
   } catch (...) {
     const auto failure = std::current_exception();
     std::lock_guard<std::mutex> lock(state.mutex);

@@ -41,6 +41,10 @@ class ExecutionDomain {
   using Commands = VulkanExecutionQueue::Commands;
   using CommandSelector = VulkanExecutionQueue::CommandSelector;
   using TimingSelector = std::function<StreamGpuTiming(std::size_t)>;
+  // Observe a preallocated host snapshot after this exact prefix completes,
+  // before its admission slot can be reused. Must not enqueue or wait on any
+  // device queue; capture the snapshot owner rather than a mutable facade.
+  using CompletionObserver = std::function<void(std::size_t)>;
   using Busy = VulkanExecutionQueue::Busy;
   using Admission =
       std::function<void(std::size_t, const RuntimeCompletion &)>;
@@ -98,7 +102,8 @@ class ExecutionDomain {
       const std::vector<RuntimeCompletion> &dependencies = {},
       std::shared_ptr<RuntimeCompletionResources> resources = {},
       const Admission &admit = {},
-      const TimingSelector &timing = {});
+      const TimingSelector &timing = {},
+      const CompletionObserver &observe = {});
   std::size_t collect_ready(std::size_t budget);
   Snapshot snapshot() const;
   RuntimeCompletion latest_completion() const;
@@ -127,7 +132,8 @@ class ExecutionDomain {
       std::shared_ptr<RuntimeCompletionResources> resources,
       const Admission &admit,
       const CommandSelector &select = {},
-      const TimingSelector &timing = {});
+      const TimingSelector &timing = {},
+      const CompletionObserver &observe = {});
   struct State;
   std::unique_ptr<State> state_;
 };

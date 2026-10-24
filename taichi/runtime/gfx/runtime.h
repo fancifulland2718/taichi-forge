@@ -67,6 +67,8 @@ struct SparseTreeAdmissionName {
 using SparseTreeAdmission =
     SharedResourceAdmission<RuntimeCompletion, SparseTreeAdmissionName>;
 using SparseTreeRegistration = SharedResourceRegistration<SparseTreeAdmission>;
+using SparseDiagnosticTreeMap = std::unordered_map<int, int>;
+class SparseDiagnosticCollector;
 
 TI_DLL_EXPORT uint64_t get_graph_replay_slot_saturation_fallbacks();
 
@@ -174,6 +176,7 @@ class CompiledTaichiKernel {
     std::vector<std::pair<int, DeviceAllocation *>> root_buffers;
     DeviceAllocation *global_tmps_buffer{nullptr};
     DeviceAllocation *hash_overflow_buffer{nullptr};
+    std::shared_ptr<const SparseDiagnosticTreeMap> diagnostic_trees;
     DeviceAllocation *listgen_buffer{nullptr};
     std::vector<SparseTaskResources> sparse_task_resources;
     std::vector<SparseTreeAdmission::PinnedUse> sparse_tree_uses;
@@ -233,6 +236,9 @@ class CompiledTaichiKernel {
   const auto &sparse_tree_uses() const {
     return sparse_tree_uses_;
   }
+  const auto &diagnostic_trees() const {
+    return diagnostic_trees_;
+  }
   void require_sparse_tree_access() const {
     if (sparse_tree_permit_)
       sparse_tree_permit_->submit([] {});
@@ -244,6 +250,10 @@ class CompiledTaichiKernel {
 
   DeviceAllocation *get_buffer_bind(const BufferInfo &bind) {
     return input_buffers_[bind];
+  }
+  DeviceAllocation *get_buffer_bind(const BufferInfo &bind) const {
+    const auto found = input_buffers_.find(bind);
+    return found == input_buffers_.end() ? nullptr : found->second;
   }
 
   // C-2.5 (2026-05): retrieve all chunk DeviceAllocations for a chunked
@@ -280,6 +290,7 @@ class CompiledTaichiKernel {
   std::vector<SparseTaskResources> sparse_task_resources_;
   std::vector<SparseTreeAdmission::PinnedUse> sparse_tree_uses_;
   std::shared_ptr<SparseTreeAdmission::Permit> sparse_tree_permit_;
+  std::shared_ptr<const SparseDiagnosticTreeMap> diagnostic_trees_;
   std::vector<std::unique_ptr<Pipeline>> pipelines_;
   std::vector<std::unique_ptr<ShaderResourceSet>> cached_resource_sets_;
 };
@@ -613,10 +624,34 @@ class TI_DLL_EXPORT GfxRuntime {
   // Cold per-instance state shared by the instance's initialization/replay
   // segments. Allocation is lazy; initialization is recorded once, after all
   // segments are prepared, and must precede their first execution.
+  class FixedGraphWorkspace;
+  class SparseDiagnosticSnapshot {
+   public:
+    // Called after its exact completion, before its slot is reused. Mapping
+    // host-visible memory submits no work and never reads the live tree/pool.
+    void observe();
+    std::size_t bytes() const;
+
+   private:
+    friend class FixedGraphWorkspace;
+    DeviceAllocationUnique storage_;
+    struct Source {
+      std::shared_ptr<const SparseDiagnosticTreeMap> trees;
+      int root{-1};
+      int snode{-1};
+    };
+    std::vector<Source> sources_;
+    std::shared_ptr<SparseDiagnosticCollector> collector_;
+  };
   class FixedGraphWorkspace {
    public:
     void record_initialization(CommandList &commands);
     std::size_t bytes() const;
+    bool has_sparse_diagnostics() const {
+      return !diagnostics_.empty() || !hash_watches_.empty();
+    }
+    std::shared_ptr<SparseDiagnosticSnapshot> record_diagnostic_snapshot(
+        CommandList &commands) const;
     std::vector<RuntimeCompletion> shared_resource_dependencies() const;
     bool has_field_dependencies() const {
       return has_field_dependencies_;
@@ -629,9 +664,28 @@ class TI_DLL_EXPORT GfxRuntime {
 
    private:
     friend class GfxRuntime;
-    explicit FixedGraphWorkspace(Device *device) : device_(device) {}
+    FixedGraphWorkspace(Device *device,
+                        std::shared_ptr<SparseDiagnosticCollector> collector)
+        : device_(device), diagnostic_collector_(std::move(collector)) {
+    }
     Device *device_;
     std::shared_ptr<DeviceAllocationGuard> global_tmps_;
+    struct PrivateDiagnostic {
+      DeviceAllocationUnique buffer;
+      std::shared_ptr<const SparseDiagnosticTreeMap> trees;
+    };
+    std::unordered_map<DeviceAllocationId, PrivateDiagnostic> diagnostics_;
+    struct PrivateHashWatch {
+      int root;
+      int snode;
+      DevicePtr count;
+      DevicePtr active;
+      DevicePtr tombstone;
+    };
+    std::vector<PrivateHashWatch> hash_watches_;
+    std::shared_ptr<SparseDiagnosticCollector> diagnostic_collector_;
+    DeviceAllocation *diagnostic_buffer(
+        const CompiledTaichiKernel &kernel) const;
     struct PrivateImage {
       DeviceAllocation allocation;
       ImageLayout initial;
@@ -647,6 +701,7 @@ class TI_DLL_EXPORT GfxRuntime {
     std::unordered_map<DeviceAllocationId, SharedImageUse> shared_image_uses_;
     std::shared_ptr<NativeRayAdmission::Loan> shared_rays_;
     std::shared_ptr<SparseTreeAdmission::Loan> shared_sparse_;
+    std::vector<RuntimeResourceHandle> shared_sparse_identities_;
     std::vector<int> shared_sparse_tree_ids_;
     std::unordered_map<const NativeRayResourceRegistration *, SharedResourceUse>
         shared_ray_uses_;
@@ -1045,8 +1100,9 @@ class TI_DLL_EXPORT GfxRuntime {
   std::unique_ptr<DeviceAllocationGuard> hash_overflow_buffer_;
   struct SparseDiagnosticDomain {
     std::unique_ptr<DeviceAllocationGuard> buffer;
-    std::unordered_map<int, int> source_to_runtime_tree;
+    std::shared_ptr<SparseDiagnosticTreeMap> source_to_runtime_tree;
   };
+  std::shared_ptr<SparseDiagnosticCollector> sparse_diagnostic_collector_;
   // Keyed by the first reserved module root. Ordinary execution only uses
   // the cold-bound buffer; synchronization reads all records in one batch.
   std::unordered_map<int, SparseDiagnosticDomain> sparse_diagnostic_domains_;
