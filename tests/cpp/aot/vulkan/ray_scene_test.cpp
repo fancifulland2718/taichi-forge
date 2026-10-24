@@ -11,6 +11,39 @@
 
 namespace taichi::lang {
 
+TEST(VulkanRayShaderRead, SeparatesDomainBuildsFromRuntimeGraphicsSemaphores) {
+  using Order = VulkanRayShaderReadOrder;
+  const auto both = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+  const auto graphics = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+  for (bool default_queues_match : {false, true}) {
+    EXPECT_TRUE(vulkan_ray_shader_read_needs_barrier(
+        both, graphics, Order::execution_domain, default_queues_match));
+    EXPECT_TRUE(vulkan_ray_shader_read_needs_barrier(
+        VK_QUEUE_COMPUTE_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        Order::compute, default_queues_match));
+    EXPECT_EQ(vulkan_ray_shader_read_needs_barrier(
+                  both, graphics, Order::runtime_graphics, default_queues_match),
+              default_queues_match);
+  }
+  // A real graphics-only family can consume the ordinary runtime semaphore,
+  // but cannot record an AS-build source stage for a selected domain.
+  EXPECT_FALSE(vulkan_ray_shader_read_needs_barrier(
+      VK_QUEUE_GRAPHICS_BIT, graphics, Order::runtime_graphics, false));
+  EXPECT_THROW(vulkan_ray_shader_read_needs_barrier(
+                   VK_QUEUE_GRAPHICS_BIT, graphics, Order::execution_domain, false),
+               std::invalid_argument);
+  EXPECT_THROW(vulkan_ray_shader_read_needs_barrier(
+                   VK_QUEUE_COMPUTE_BIT, graphics, Order::execution_domain, false),
+               std::invalid_argument);
+  EXPECT_THROW(vulkan_ray_shader_read_needs_barrier(
+                   VK_QUEUE_GRAPHICS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                   Order::runtime_graphics, false), std::invalid_argument);
+  EXPECT_THROW(vulkan_ray_shader_read_needs_barrier(
+                   both, VK_PIPELINE_STAGE_TRANSFER_BIT, Order::compute, true),
+               std::invalid_argument);
+}
+
 TEST(VulkanRayScene, RejectsPhysicalPrimitiveOverflowBeforeAllocation) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();

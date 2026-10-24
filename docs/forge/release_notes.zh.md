@@ -53,7 +53,9 @@
   资源闭包包含全部 BLAS 和初始输入；私有 TLAS 可供同一计划的 DSL kernel 查询，
   与 native 操作共用初始化和所有权检查。平直计划的 ray program 也可使用私有 TLAS
   和图像，SBT 上传进入所选域初始化，保留的上传存储计入实例成本。
-  公共 live AS、micromap 及 graphics shader AS 绑定尚不属于该能力。
+  graphics 域的 vertex/fragment shader 也可绑定私有 TLAS，与前置设备 refit 和后续
+  计算共享一次提交，准备时检查实际队列能力和完整 AS 闭包。
+  公共 live AS、micromap 及控制流内 AS 操作尚不属于该能力。
   冷数据上传和 bootstrap 仍依赖普通队列，详见执行域合同。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、
   `advanced_optimization=False`。显式选择 `balanced/full` 且未覆盖高级 IR 优化时默认开启

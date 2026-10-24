@@ -341,6 +341,170 @@ TEST(VulkanExecutionOwner, PrivateOffscreenIgnoresDefaultQueue) {
   }
 }
 
+TEST(VulkanExecutionOwner, PrivateGraphicsAsIgnoresDefaultQueue) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  const char *path = std::getenv("TAICHI_VULKAN_GRAPHICS_AS_DOMAIN_AOT_DIR");
+  if (!path)
+    GTEST_SKIP() << "Requires the compiled private graphics AS fixture";
+  PublicDomainSession session;
+  const char *selected = std::getenv("TI_TEST_VULKAN_DEVICE_INDEX");
+  session.runtime = ti_create_runtime(TI_ARCH_VULKAN, selected ? std::stoul(selected) : 0);
+  ASSERT_NE(session.runtime, nullptr);
+  auto &runtime = *reinterpret_cast<VulkanRuntime *>(session.runtime);
+  auto &device = runtime.get_vk();
+  using Kind = vulkan::VulkanExecutionQueueKind;
+  if (device.created_execution_queue_count(Kind::graphics) < 3 ||
+      !device.vk_caps().timeline_semaphore)
+    GTEST_SKIP() << "Requires two additional graphics+compute queues";
+  session.module = ti_load_aot_module(session.runtime, path);
+  ASSERT_NE(session.module, nullptr);
+  std::ifstream input(std::string(path) + "/private.json");
+  ASSERT_TRUE(input.good());
+  const std::string plan((std::istreambuf_iterator<char>(input)), {});
+  const std::array<const char *, 7> names{
+      "seed_vertices", "seed_indices", "poses", "vertices", "output", "dout", "loss"};
+  const std::array<std::vector<uint32_t>, 7> shapes{
+      std::vector<uint32_t>{3, 3}, {1, 3}, {1, 12}, {6}, {8}, {8}, {1}};
+  const std::array<float, 9> triangle{-1, -1, .5f, 1, -1, .5f, 0, 1, .5f};
+  const std::array<int32_t, 3> indices{0, 1, 2};
+  const std::array<float, 12> pose{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+  const std::array<float, 6> vertices{-1, -1, 3, -1, -1, 3};
+  const char *parameter = "phase";
+  const TiVulkanExecutionDomainCreateInfo options{
+      1, 1, TI_TRUE, TI_VULKAN_EXECUTION_QUEUE_GRAPHICS};
+  std::array<TiVulkanExecutionDomainInfo, 2> domains{};
+  std::array<std::array<TiNamedArgument, 8>, 2> arguments{};
+  for (int lane = 0; lane < 2; ++lane) {
+    auto domain = ti_create_vulkan_execution_domain_ext(session.runtime, &options);
+    ASSERT_NE(domain, nullptr);
+    session.domains.push_back(domain);
+    ti_get_vulkan_execution_domain_info_ext(domain, &domains[lane]);
+    for (size_t i = 0; i < names.size(); ++i) {
+      uint32_t size = 1;
+      for (auto extent : shapes[i])
+        size *= extent;
+      TiMemoryAllocateInfo allocation{size * sizeof(float), TI_TRUE, TI_TRUE, TI_FALSE,
+          i == 3 ? TI_MEMORY_USAGE_VERTEX_BIT : TI_MEMORY_USAGE_STORAGE_BIT};
+      auto memory = ti_allocate_memory(session.runtime, &allocation);
+      ASSERT_NE(memory, nullptr);
+      session.memories.push_back(memory);
+      auto &argument = arguments[lane][i];
+      argument.name = names[i];
+      argument.argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+      auto &array = argument.argument.value.ndarray;
+      array.memory = memory;
+      array.shape.dim_count = shapes[i].size();
+      std::copy(shapes[i].begin(), shapes[i].end(), array.shape.dims);
+      array.elem_type = i == 1 ? TI_DATA_TYPE_I32 : TI_DATA_TYPE_F32;
+      auto *mapped = ti_map_memory(session.runtime, memory);
+      ASSERT_NE(mapped, nullptr);
+      std::memset(mapped, 0, size * sizeof(float));
+      if (i == 0) std::memcpy(mapped, triangle.data(), sizeof(triangle));
+      if (i == 1) std::memcpy(mapped, indices.data(), sizeof(indices));
+      if (i == 2) std::memcpy(mapped, pose.data(), sizeof(pose));
+      if (i == 3) std::memcpy(mapped, vertices.data(), sizeof(vertices));
+      ti_unmap_memory(session.runtime, memory);
+    }
+    arguments[lane].back().name = parameter;
+    arguments[lane].back().argument.type = TI_ARGUMENT_TYPE_SCALAR;
+    arguments[lane].back().argument.value.scalar.type = TI_DATA_TYPE_U64;
+  }
+  const auto prepare = [&](int lane) {
+    return ti_prepare_execution_plan_on_vulkan_domain_ext(
+        session.runtime, session.module, session.domains[lane], plan.size(), plan.data(),
+        arguments[lane].size(), arguments[lane].data(), 0, nullptr, 1, &parameter);
+  };
+  session.executions.push_back(prepare(0));
+  check_domain_error();
+  ASSERT_NE(session.executions[0], nullptr);
+  ti_initialize_prepared_ext(session.runtime, session.executions[0]);
+  check_domain_error();
+  {
+    // Once code registration is warm, the peer's private AS construction must
+    // not synchronously submit to queue zero during cold preparation either.
+    test_detail::TimelineGate gate(device, 0);
+    auto future = std::async(std::launch::async, [&] { return prepare(1); });
+    const auto status = future.wait_for(std::chrono::seconds(5));
+    gate.release();
+    session.executions.push_back(future.get());
+    EXPECT_EQ(status, std::future_status::ready);
+    ASSERT_NE(session.executions[1], nullptr);
+  }
+  ti_initialize_prepared_ext(session.runtime, session.executions[1]);
+  check_domain_error();
+  const auto submit = [&](int lane, uint64_t value) {
+    TiCompletion ticket = nullptr;
+    const bool accepted = ti_try_submit_prepared_sampled_ext(
+        session.runtime, session.executions[lane], 0, nullptr, &ticket,
+        TI_FALSE, TI_TRUE, 1, &value);
+    check_domain_error();
+    if (accepted)
+      session.completions.push_back(ticket);
+    else
+      EXPECT_EQ(ticket, nullptr);
+    return ticket;
+  };
+  const auto check = [&](int lane, bool miss) {
+    const std::array<float, 8> expected = miss
+        ? std::array<float, 8>{0, -1, -1, -1, 0, -1, -1, -1}
+        : std::array<float, 8>{1, 0, 17, 17, 0, -1, -1, 17};
+    for (int column : {4, 5, 6}) {
+      void *mapped = nullptr;
+      const auto memory = runtime.get_memory(session.memories[lane * names.size() + column]).allocation;
+      ASSERT_EQ(device.map(memory, &mapped), RhiResult::success);
+      const auto *values = static_cast<const float *>(mapped);
+      if (column < 6) {
+        for (int i = 0; i < 8; ++i)
+          EXPECT_EQ(values[i], expected[i]) << column << ":" << i;
+      } else {
+        float loss = 0;
+        for (float x : expected)
+          loss += .5f * x * x;
+        EXPECT_EQ(values[0], loss);
+      }
+      device.unmap(memory);
+    }
+  };
+  {
+    test_detail::TimelineGate default_gate(device, 0);
+    test_detail::TimelineGate left_gate(device, domains[0].queue_index, Kind::graphics);
+    const auto before = device.queue_submission_snapshot().queue_submit_calls;
+    auto left = submit(0, (uint64_t(1) << 48) | 1);
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before + 1);
+    EXPECT_EQ(ti_query_completion_ext(left), TI_FALSE);
+    EXPECT_EQ(submit(0, 0), nullptr);
+    EXPECT_EQ(device.queue_submission_snapshot().queue_submit_calls, before + 1);
+    auto right = submit(1, uint64_t(1) << 49);
+    ASSERT_NE(right, nullptr);
+    ti_wait_completion_ext(right);
+    check(1, false);
+    EXPECT_EQ(ti_query_completion_ext(left), TI_FALSE);
+    left_gate.release();
+    ti_wait_completion_ext(left);
+    check(0, true);
+    auto retired = ti_get_prepared_vulkan_instance_ext(session.runtime, session.executions[0]);
+    ASSERT_NE(retired, nullptr);
+    ti_retire_vulkan_execution_instance_ext(retired);
+    ti_finish_prepared_instance_retirement_ext(session.runtime, session.executions[0]);
+    check_domain_error();
+    session.executions[0] = nullptr;
+    ti_release_vulkan_execution_instance_ext(retired);
+    auto tail = submit(1, (uint64_t(1) << 49) | 1);
+    ASSERT_NE(tail, nullptr);
+    ti_wait_completion_ext(tail);
+    check(1, true);
+    for (auto ticket : {left, right, tail}) {
+      TiCompletionGpuTiming timing{};
+      ti_get_completion_gpu_timing_ext(ticket, &timing);
+      EXPECT_EQ(timing.status, TI_COMPLETION_GPU_TIMING_READY);
+      EXPECT_GT(timing.duration_ns, 0u);
+    }
+    check_domain_error();
+  }
+}
+
 void run_private_ray_domain(bool ray_program) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();

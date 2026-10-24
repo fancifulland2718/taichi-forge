@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Native and kernel AS consumers share a cold resource/initialization closure.
-inline constexpr int kForgeNativeAbiRevision = 187;
+inline constexpr int kForgeNativeAbiRevision = 188;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
@@ -56,6 +56,7 @@ inline constexpr std::uint64_t kForgeVulkanExecutionDomainLiveImageWrites = 1ull
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainPrivateRayResources = 1ull << 33;
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainPrivateRayKernels = 1ull << 34;
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainRayPrograms = 1ull << 35;
+inline constexpr std::uint64_t kForgeVulkanExecutionDomainPrivateGraphicsAs = 1ull << 36;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

@@ -16,6 +16,44 @@ static const std::uint32_t kRayInstanceTransformsSpv[] =
 static_assert(sizeof(VkAccelerationStructureInstanceKHR) == 16 * sizeof(float));
 static_assert(offsetof(VkAccelerationStructureInstanceKHR, transform) == 0);
 }  // namespace
+
+bool vulkan_ray_shader_read_needs_barrier(
+    VkQueueFlags queue_capabilities,
+    VkPipelineStageFlags consumer_stages,
+    VulkanRayShaderReadOrder order,
+    bool runtime_queues_match) {
+  constexpr auto graphics = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+  constexpr auto compute = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                           VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+  if (!consumer_stages || (consumer_stages & ~(graphics | compute)) ||
+      ((consumer_stages & graphics) &&
+       !(queue_capabilities & VK_QUEUE_GRAPHICS_BIT)) ||
+      ((consumer_stages & compute) &&
+       !(queue_capabilities & VK_QUEUE_COMPUTE_BIT)))
+    throw std::invalid_argument(
+        "AS shader stages are unsupported by the recording queue");
+  bool barrier = true;
+  switch (order) {
+    case VulkanRayShaderReadOrder::compute:
+    case VulkanRayShaderReadOrder::execution_domain:
+      break;
+    case VulkanRayShaderReadOrder::runtime_graphics:
+      // Only this existing runtime route supplies a cross-queue semaphore.
+      if (!(queue_capabilities & VK_QUEUE_GRAPHICS_BIT))
+        throw std::invalid_argument(
+            "Runtime graphics AS read requires a graphics queue");
+      barrier = runtime_queues_match;
+      break;
+    default:
+      throw std::invalid_argument("Unknown AS shader read ordering contract");
+  }
+  if (barrier && !(queue_capabilities & VK_QUEUE_COMPUTE_BIT))
+    throw std::invalid_argument(
+        "AS build dependency requires a compute-capable recording queue");
+  return barrier;
+}
+
 struct VulkanInstanceTlas::State {
  public:
   State(vulkan::VulkanDevice *device,
@@ -202,18 +240,23 @@ struct VulkanInstanceTlas::State {
 
   void record_shader_read(CommandList *commands,
                           VkPipelineStageFlags consumer_stages,
-                          bool graphics_queue) {
+                          VulkanRayShaderReadOrder order) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto command_buffer =
         static_cast<vulkan::VulkanCommandList *>(commands)->vk_command_buffer();
+    if (command_buffer->device != device_->vk_device() ||
+        !command_buffer->ref_pool)
+      throw std::invalid_argument(
+          "AS shader read requires its own device command pool");
+    const auto queue_flags = device_->queue_family_flags(
+        command_buffer->ref_pool->queue_family_index);
+    const bool needs_barrier = vulkan_ray_shader_read_needs_barrier(
+        queue_flags, consumer_stages, order,
+        device_->graphics_queue() == device_->compute_queue());
     VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    // Same-queue builds need an explicit shader dependency. With distinct
-    // queues the existing runtime-ordered graphics semaphore supplies it;
-    // an AS_BUILD stage is not legal on a graphics-only queue family.
-    if (!graphics_queue ||
-        device_->graphics_queue() == device_->compute_queue()) {
+    if (needs_barrier) {
       command_buffer->device.functions().vkCmdPipelineBarrier(
           command_buffer->buffer,
           VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
@@ -586,8 +629,8 @@ void VulkanInstanceTlas::bind_for_shader(ShaderResourceSet *bindings,
 }
 void VulkanInstanceTlas::record_shader_read(CommandList *commands,
                                             VkPipelineStageFlags stages,
-                                            bool graphics) {
-  state_->record_shader_read(commands, stages, graphics);
+                                            VulkanRayShaderReadOrder order) {
+  state_->record_shader_read(commands, stages, order);
 }
 void VulkanInstanceTlas::bind_for_kernel(ShaderResourceSet *bindings,
                                          int binding,

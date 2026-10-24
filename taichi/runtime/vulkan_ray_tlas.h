@@ -5,6 +5,21 @@
 
 #if defined(TI_WITH_VULKAN)
 namespace taichi::lang {
+// The consumer chooses the submission contract. A selected domain must never
+// infer its build dependency from the runtime's unrelated default queues.
+enum class VulkanRayShaderReadOrder {
+  compute,
+  runtime_graphics,
+  execution_domain,
+};
+
+// Cold recording policy; queue capabilities come from the actual command pool.
+bool vulkan_ray_shader_read_needs_barrier(
+    VkQueueFlags queue_capabilities,
+    VkPipelineStageFlags consumer_stages,
+    VulkanRayShaderReadOrder order,
+    bool runtime_queues_match);
+
 struct VulkanRayTransformPacket {
   VulkanRayQueryPacket::Binding shader_binding{};
   std::array<std::uint32_t, 2> parameters{};
@@ -45,7 +60,7 @@ class VulkanInstanceTlas {
   void bind_for_shader(ShaderResourceSet *bindings, int binding);
   void record_shader_read(CommandList *commands,
                           VkPipelineStageFlags consumer_stages,
-                          bool graphics_queue);
+                          VulkanRayShaderReadOrder order);
   void bind_for_kernel(ShaderResourceSet *bindings,
                        int binding,
                        CommandList *commands);

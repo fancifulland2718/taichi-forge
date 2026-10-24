@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 from pathlib import Path
 import statistics
 import sys
@@ -21,7 +22,7 @@ def main(mode, artifact):
         ti.init(arch=ti.vulkan, offline_cache=False)
         runtime = ti.aot.borrow_runtime()
     else:
-        runtime = Runtime("vulkan")
+        runtime = Runtime("vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", "0")))
     costs, calls, owners = [], [], []
     with runtime:
         assert runtime.native_operation_capabilities("vulkan_graphics_pass_direct", version=2) == {"vulkan_inline"}

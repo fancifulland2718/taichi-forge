@@ -9,6 +9,7 @@
 #include "taichi/program/texture.h"
 #include "picosha2.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -550,9 +551,13 @@ class PreparedPass final : public NativeOperation {
                 qualified |= native_shader_stage(PipelineStageType::fragment);
               auto [it, inserted] = scene_reads.emplace(
                   scene.get(), payload_->scene_reads.size());
-              if (inserted)
+              if (inserted) {
                 payload_->scene_reads.emplace_back(scene, qualified);
-              else
+                for (auto &resource : collect_native_ray_resources(scene))
+                  if (std::find(scenes_.begin(), scenes_.end(), resource) ==
+                      scenes_.end())
+                    scenes_.push_back(std::move(resource));
+              } else
                 payload_->scene_reads[it->second].second |= qualified;
             }
           });
@@ -576,6 +581,9 @@ class PreparedPass final : public NativeOperation {
     return 0;
   }
   void validate_recording(NativeRecordingState &state) const override {
+    for (const auto &scene : scenes_)
+      dynamic_cast<const NativeRayResourceAccess &>(*scene).require_initialized(
+          state);
     for (const auto &image : payload_->reads)
       image->validate_sampling(state);
     for (const auto &image : payload_->clears)
@@ -583,12 +591,12 @@ class PreparedPass final : public NativeOperation {
   }
   NativeVulkanRecordingRequirements vulkan_recording_requirements()
       const override {
-    return {images_, true, buffers_, image_uses_};
+    return {images_, true, buffers_, image_uses_, scenes_};
   }
   void validate_vulkan_execution_domain() const override {
-    if (!payload_->scene_reads.empty())
-      throw std::invalid_argument(
-          "Independent Vulkan graphics has no acceleration-structure lease contract");
+    // This concrete pass supplies complete image, buffer and AS requirements.
+    // FixedExecution proves their private ownership and the graphics queue;
+    // the default NativeOperation implementation rejects unknown graphics.
   }
   void record_vulkan(Device *, CommandList *commands) override {
     for (const auto &[scene, stages] : payload_->scene_reads)
@@ -613,6 +621,7 @@ class PreparedPass final : public NativeOperation {
   std::vector<std::pair<DeviceAllocation, ImageLayout>> images_;
   std::vector<DeviceAllocation> buffers_;
   std::vector<NativeVulkanRecordingRequirements::ImageUse> image_uses_;
+  std::vector<std::shared_ptr<NativeResource>> scenes_;
 };
 #endif
 

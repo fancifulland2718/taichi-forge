@@ -20,7 +20,8 @@ def test_aot_graphics_as_backend_isolation():
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_aot_graphics_as_shared_stages_refit_and_gradients(tmp_path):
+@pytest.mark.parametrize("domain", [False, True])
+def test_aot_graphics_as_shared_stages_refit_and_gradients(tmp_path, domain):
     if not ti.hardware.ray.is_available():
         pytest.skip("Vulkan ray query unavailable")
     gfx, arg, kind = ti.hardware.graphics, ti.graph.Arg, ti.graph.ArgKind
@@ -51,6 +52,11 @@ def test_aot_graphics_as_shared_stages_refit_and_gradients(tmp_path):
             transforms[i, j] = poses[i, j] + (shift[0] if j == 3 else 0.0)
 
     @ti.kernel
+    def move_parameter(poses: ti.types.ndarray(ti.f32, 2), transforms: ti.types.ndarray(ti.f32, 2), phase: ti.u64):
+        for i, j in poses:
+            transforms[i, j] = poses[i, j] + (4.0 * ti.cast(phase & 1, ti.f32) if j == 3 else 0.0)
+
+    @ti.kernel
     def consume(color: ti.types.texture(2), output: ti.types.ndarray(ti.f32, 1)):
         for i in range(2):
             xy = ti.Vector([4, 4]) if i == 0 else ti.Vector([0, 7])
@@ -74,7 +80,10 @@ def test_aot_graphics_as_shared_stages_refit_and_gradients(tmp_path):
     symbol = lambda name, ndim=1: arg(kind.NDARRAY, name, ti.f32, ndim=ndim)
     builder = ti.graph.GraphBuilder()
     transforms = builder.private_ndarray("transforms", ti.f32, (1, 12))
-    builder.dispatch(move, symbol("poses", 2), symbol("shift"), transforms)
+    if domain:
+        builder.dispatch(move_parameter, symbol("poses", 2), transforms, arg(kind.SCALAR, "phase", ti.u64))
+    else:
+        builder.dispatch(move, symbol("poses", 2), symbol("shift"), transforms)
     builder.append_native(scene.record_refit_transforms(), admission="explicit")
     builder.append_native(recording, admission="auto")
     builder.dispatch(consume, arg(kind.TEXTURE, "color", ndim=2), symbol("output"))
@@ -82,7 +91,7 @@ def test_aot_graphics_as_shared_stages_refit_and_gradients(tmp_path):
     builder.dispatch(seed, symbol("dout"), symbol("loss"), dloss)
     builder.dispatch(energy, symbol("output"), symbol("loss"))
     builder.dispatch(energy.grad, symbol("output"), symbol("loss"))
-    module = ti.aot.Module()
+    module = ti.aot.Module(caps=["spirv_has_int64"] if domain else [])
     graph = builder.compile()
     inputs = {pipeline: dict(zip(("shader_0", "shader_1"), pipeline._shader_artifacts))}
     try:
@@ -105,10 +114,14 @@ def test_aot_graphics_as_shared_stages_refit_and_gradients(tmp_path):
             refit = next(op for op in doc["operations"] if op.get("operation") == "instance_refit")
             assert raster["version"] == 2 and raster["parameters"]["scene_count"] == 1
             assert refit["bindings"]["scene"] == raster["bindings"]["scene_0"]
+            if domain and not public:
+                (tmp_path / "private.json").write_text(plan.to_json())
     finally:
         graph.close()
     artifact = tmp_path / "graphics-as.tcm"
     module.archive(str(artifact))
+    if domain:
+        module.save(str(tmp_path))
     (tmp_path / "producer.json").write_text(
         json.dumps(
             dict(producer_ms=(time.perf_counter() - start) * 1000, artifact_bytes=artifact.stat().st_size), indent=2
@@ -123,7 +136,11 @@ def test_aot_graphics_as_shared_stages_refit_and_gradients(tmp_path):
             [
                 sys.executable,
                 *(["-S"] if mode == "standalone" else []),
-                str(Path(__file__).with_name("aot_graphics_as_probe.py")),
+                str(
+                    Path(__file__).with_name(
+                        "aot_domain_graphics_as_probe.py" if domain else "aot_graphics_as_probe.py"
+                    )
+                ),
                 mode,
                 str(artifact),
             ],
@@ -132,6 +149,20 @@ def test_aot_graphics_as_shared_stages_refit_and_gradients(tmp_path):
             text=True,
             timeout=90,
         )
+        (tmp_path / (mode + ".log")).write_text(result.stdout + result.stderr)
         assert result.returncode == 0, result.stdout + result.stderr
         assert "Validation Error" not in result.stdout + result.stderr
         assert "cleanup failed" not in result.stdout + result.stderr
+    if domain:
+        executable = os.environ.get("TI_TEST_DOMAIN_EXECUTABLE")
+        assert executable and Path(executable).is_file(), "Require the native queue-gate consumer"
+        result = subprocess.run(
+            [executable, "--gtest_filter=VulkanExecutionOwner.PrivateGraphicsAsIgnoresDefaultQueue"],
+            env=dict(os.environ, TAICHI_VULKAN_GRAPHICS_AS_DOMAIN_AOT_DIR=str(tmp_path)),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        (tmp_path / "native-gate.log").write_text(result.stdout + result.stderr)
+        assert result.returncode == 0 and "[  PASSED  ] 1 test." in result.stdout, result.stdout + result.stderr
+        assert "Validation Error" not in result.stdout + result.stderr

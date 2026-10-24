@@ -199,11 +199,20 @@ workspace bytes. Warm replay neither repacks nor uploads the SBT. Preparation ch
 AS, image and buffer dependencies. Program outputs may feed later computation and
 its explicit adjoint; ray tracing itself is not differentiable.
 
+Graphics domains (`queue="graphics"`) can also consume private TLAS bindings in
+vertex and fragment shaders within a flat AOT plan. The capability is
+`vulkan_execution_domain_private_graphics_as`. Initialization, device transform
+updates/refit, rasterization and subsequent computation stay on that domain.
+Preparation validates the full BLAS closure and actual command-pool queue
+capabilities; build-to-shader barriers follow the selected domain's ordering.
+This does not rely on the ordinary runtime's cross-queue graphics semaphore.
+The existing private attachment, completion and retirement contracts still apply.
+
 All seed inputs and AS dependencies remain valid until instance retirement;
 closing an input early invalidates the instance. Wrapping a public AS in a
-private TLAS does not bypass ownership validation. Live AS loans, micromaps,
-graphics-shader AS parameters and AS operations inside control flow are outside
-this capability. Ordinary synchronous resource creation keeps its contract.
+private TLAS does not bypass ownership validation. Live AS loans, micromaps and
+AS operations inside control flow are outside this capability. Ordinary
+synchronous resource creation keeps its contract.
 Cold `initial_data` uploads still use the default queue and `initialize()` waits
 for bootstrap; cold preparation is not fully independent of that queue. Warm
 native queries and updates do not return to it.

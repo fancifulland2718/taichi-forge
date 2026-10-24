@@ -152,9 +152,16 @@ packed depth/stencil 和借用图像控制流仍不接纳。
 AS、图像和 buffer 依赖在准备时验证；ray program 的结果可供后续计算和显式梯度使用，
 不表示 ray tracing 本身可微。
 
+graphics 域（`queue="graphics"`）还可在平直 AOT 计划的 vertex/fragment shader
+中绑定私有 TLAS；能力项为 `vulkan_execution_domain_private_graphics_as`。
+初始化、设备变换与 refit、光栅化及后续计算均在该域执行。准备时检查完整 BLAS
+闭包和实际 command pool 的队列能力，按所选域的顺序插入 build→shader 屏障，
+不依赖普通 runtime 的跨队列 graphics semaphore。私有 attachment、完成票据及
+退休仍遵循已有合同。
+
 所有 seed 输入和 AS 依赖保持有效直至实例退休；提前关闭输入会使该实例失效。
 已有 public AS 不能通过包装成私有 TLAS 绕过所有权检查。此能力暂不包含 live AS
-借用、micromap、graphics shader AS 参数或控制流内的 AS 操作。普通同步资源创建合同
+借用、micromap 或控制流内的 AS 操作。普通同步资源创建合同
 保持不变。冷 `initial_data` 上传仍走默认队列，`initialize()` 仍等待 bootstrap；
 这不表示冷准备能完全脱离默认队列，暖态 native 查询与更新无需回到该队列。
 

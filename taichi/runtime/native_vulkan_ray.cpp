@@ -547,7 +547,12 @@ class PreparedTlas final
     if (!stages || shader_stages)
       throw std::invalid_argument(
           "Unqualified acceleration structure shader stages");
-    core_->record_shader_read(commands, stages, graphics_queue);
+    const auto order = deferred_
+                           ? VulkanRayShaderReadOrder::execution_domain
+                           : graphics_queue
+                                 ? VulkanRayShaderReadOrder::runtime_graphics
+                                 : VulkanRayShaderReadOrder::compute;
+    core_->record_shader_read(commands, stages, order);
   }
   std::uint32_t max_sbt_record_offset() const override {
     return core_->max_sbt_record_offset();

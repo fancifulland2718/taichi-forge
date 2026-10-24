@@ -189,7 +189,9 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
   void record_shader_read(CommandList *commands,
                           VkPipelineStageFlags stages,
                           bool graphics) {
-    core_->record_shader_read(commands, stages, graphics);
+    core_->record_shader_read(commands, stages,
+                             graphics ? VulkanRayShaderReadOrder::runtime_graphics
+                                      : VulkanRayShaderReadOrder::compute);
   }
   void bind_for_kernel(ShaderResourceSet *bindings,
                        int binding,

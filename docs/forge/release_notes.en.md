@@ -60,7 +60,10 @@ combination. Consult the linked API contracts and capability queries for exact s
   sharing native initialization and ownership checks. Flat-plan ray programs can also use
   private TLAS resources and images. SBT uploads join selected-domain initialization, with
   retained upload storage counted in instance costs. Public live AS, micromaps and
-  graphics-shader AS bindings remain outside this capability. Cold data uploads and bootstrap
+  AS operations inside control flow remain outside this capability. Graphics domains can
+  bind private TLAS resources in vertex/fragment shaders, sharing one submission with
+  preceding device refit and subsequent computation. Preparation checks actual queue
+  capabilities and the full AS closure. Cold data uploads and bootstrap
   still depend on the ordinary queue.
 - Python `ti.init()`, including wheel installations, keeps `compile_tier="fast"` and
   `advanced_optimization=False` as defaults. Explicit `balanced/full` enables advanced IR
