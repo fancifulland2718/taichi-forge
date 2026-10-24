@@ -420,6 +420,17 @@ Vulkan tests cover both formats, indexed/predefined states, filtered closest/any
 queries, refit, miss reset, standalone/borrowed owners and downstream gradients.
 These do not establish differentiable AS construction or traversal.
 
+Independent Vulkan domains report baked OMM implementation support through
+`vulkan_execution_domain_opacity_micromaps`; the device capability above is still
+required. Private OMM construction is recorded and completed on the selected
+domain during `prepare()`, then import inputs and scratch are released. BLAS/TLAS
+initialization still runs through `initialize()`. Fully private closures with
+described dependencies do not wait for unrelated default or peer queues. Replay
+does not rebuild the OMM. Private BLAS instances may share a public OMM, retained
+until dependent recordings retire. Public resource `close()` keeps its existing
+ordinary-prefix and dependent-consumer retirement contract. This does not promise
+asynchronous preparation or change the built-in opaque `query` semantics.
+
 Explicit AOT plans also reconstruct programmable RT through provider
 `vulkan_ray_program`, version 1. Check registration of
 `vulkan_ray_program_pipeline` / `vulkan_ray_program_launch` and the independent

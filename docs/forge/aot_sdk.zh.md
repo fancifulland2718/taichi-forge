@@ -331,6 +331,14 @@ BLAS 持有 micromap，二者三角形数必须一致；显式 `opaque=True` 与
 状态、filtered closest/any、refit、miss 重置、独立/借用 owner 和下游梯度；不表示
 AS 构建或遍历本身可微。
 
+独立 Vulkan 执行域通过 `vulkan_execution_domain_opacity_micromaps` 报告烘焙
+OMM 的实现能力，仍须检查上述设备能力。私有 OMM 在 `prepare()` 内向选定域
+录制并完成一次构建，随后释放导入输入和 scratch；BLAS/TLAS 初始化继续由
+`initialize()` 执行。全私有、依赖已描述的闭包不等待无关的默认队列或 peer 域。
+暖态不重建 OMM。公共 OMM 可供不同实例的私有 BLAS 共享，依赖录制退休前始终
+保留资源；公共资源 `close()` 保留既有普通队列前缀及依赖消费者的退休合同。
+这不承诺异步 `prepare()`，也不改变内置 opaque `query` 的面/透明度语义。
+
 显式 AOT 计划还可通过 `vulkan_ray_program` provider、version 1 重建程序化 RT。
 分配前检查 `vulkan_ray_program_pipeline` / `vulkan_ray_program_launch` 注册，以及
 独立设备能力 `vulkan_has_ray_tracing_pipeline`；它与 inline ray-query 能力不同。
