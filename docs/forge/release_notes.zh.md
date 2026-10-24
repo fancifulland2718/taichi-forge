@@ -46,6 +46,8 @@
   含 AS 的 pass 仍需单独接线。
   completion 的 GPU 时间范围名称为 `execution_envelope`，涵盖绘制与计算，排除
   参数上传和外部等待；详见[执行域合同](cuda_execution_domains.zh.md)。
+- Vulkan AS build/refit 的几何与实例输入屏障使用对应的 shader-read 访问类型，
+  正确覆盖 transfer 上传和设备变换后的构建输入；AS storage/scratch 的依赖保持不变。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、
   `advanced_optimization=False`。显式选择 `balanced/full` 且未覆盖高级 IR 优化时默认开启
   后者；kernel/export 的显式设置经共同编译请求解析。JIT 可面向当前设备，AOT 可声明

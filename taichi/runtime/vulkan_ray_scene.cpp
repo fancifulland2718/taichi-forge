@@ -129,7 +129,9 @@ struct VulkanTriangleRayScene::State {
     input_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     input_barrier.srcAccessMask =
         VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
-    input_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    // Vertex/index/instance inputs are shader reads in the AS build stage;
+    // AS_READ instead describes AS storage and scratch, not geometry inputs.
+    input_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     command_buffer->device.functions().vkCmdPipelineBarrier(
         command_buffer->buffer,
         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
@@ -188,7 +190,7 @@ struct VulkanTriangleRayScene::State {
     input_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     input_barrier.srcAccessMask =
         VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
-    input_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    input_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     command_buffer->device.functions().vkCmdPipelineBarrier(
         command_buffer->buffer,
         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,

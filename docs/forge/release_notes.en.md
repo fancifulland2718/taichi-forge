@@ -51,6 +51,8 @@ combination. Consult the linked API contracts and capability queries for exact s
   Completion GPU timing uses the
   `execution_envelope` scope, covering drawing and computation but excluding parameter uploads
   and external waits; see the [execution-domain contract](cuda_execution_domains.en.md).
+- Vulkan AS build/refit barriers use shader-read access for geometry and instance inputs,
+  covering transfer uploads and device transform packing. AS storage/scratch dependencies remain intact.
 - Python `ti.init()`, including wheel installations, keeps `compile_tier="fast"` and
   `advanced_optimization=False` as defaults. Explicit `balanced/full` enables advanced IR
   optimization unless separately overridden. Kernel/export overrides use the shared request

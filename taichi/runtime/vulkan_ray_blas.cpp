@@ -159,7 +159,8 @@ struct VulkanTriangleBlas::State {
     VkMemoryBarrier input_barrier{};
     input_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     input_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    input_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    // The build reads vertex/index inputs as SHADER_READ, unlike AS storage.
+    input_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     command_buffer->device.functions().vkCmdPipelineBarrier(
         command_buffer->buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1,
