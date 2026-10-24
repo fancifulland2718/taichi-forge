@@ -1580,6 +1580,15 @@ keep their construction-time copy and retained-input contract. To express staged
 initialization explicitly, omit that resource binding and put an `image/upload`
 operation in `ExecutionPlan(initialization=[...])`.
 
+When preparing a plan on an independent CUDA/Vulkan execution domain, image
+construction copies use that domain if their inputs come from private
+`initial_data` uploads completed during this preparation, including views wholly
+inside an uploaded range. The copy still completes before `prepare()` returns.
+Public inputs and inputs without a readiness proof keep their existing producer
+waits; owning a view handle is not such proof. This does not promise asynchronous
+driver allocation or remove the whole plan's bootstrap dependencies. Copy count,
+replay behavior and the time at which image contents are consumed are unchanged.
+
 For these qualified sampled Textures, export can instead name a public resource:
 
 ```python
