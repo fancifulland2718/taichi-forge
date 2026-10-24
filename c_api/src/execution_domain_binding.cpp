@@ -81,6 +81,19 @@ bool PreparedExecutionDomain::instance_retired(
   return false;
 }
 
+void PreparedExecutionDomain::retire_instance(
+    const PreparedExecutionInstance &instance) {
+#ifdef TI_WITH_CUDA
+  if (cuda)
+    return cuda->retire_instance(instance.cuda);
+#endif
+#ifdef TI_WITH_VULKAN
+  if (vulkan)
+    return vulkan->retire_instance(instance.vulkan);
+#endif
+  throw std::runtime_error("Execution domain backend is unavailable");
+}
+
 PreparedExecutionInstance PreparedExecutionDomain::prepare_owned_instance(
     const std::shared_ptr<taichi::lang::RuntimeClient> &client,
     const std::function<void(const PreparedExecutionInstance &)> &prepare) {

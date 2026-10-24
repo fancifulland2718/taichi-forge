@@ -685,6 +685,14 @@ class PreparedExecutionRegistry {
   void destroy(TiPreparedExecution handle) {
     auto &entry = get(handle);
     if (entry.domain) {
+      if (entry.domain->instance_retired(entry.domain_registration)) {
+        // Dependency retirement can release this instance while its queue
+        // stays open. Do not retain a dead host entry until whole-domain close.
+        entry.retire_binding(true);
+        remove_dependencies(handle, entry);
+        entries_.erase(handle);
+        return;
+      }
       // Host-only release. Code/storage edges remain authoritative through
       // explicit domain close, dependency destruction or runtime retirement.
       entry.released = true;
@@ -803,7 +811,10 @@ class PreparedExecutionRegistry {
     entries_.erase(handle);
   }
   void retire_memory(TiMemory memory) {
-    retire(memories_, memory);
+    // A storage generation owns its consumers, not the whole selected queue.
+    // Native instance retirement waits its exact prefix and releases the
+    // complete initialization/replay group before invalidating these bindings.
+    retire(memories_, memory, true, true);
   }
   void retire_resource(TiNativeResource resource, bool synchronize) {
     retire(resources_, resource, synchronize);
@@ -842,7 +853,8 @@ class PreparedExecutionRegistry {
     }
   }
   template <typename Map, typename Key>
-  void retire(Map &map, Key key, bool synchronize = true) {
+  void retire(Map &map, Key key, bool synchronize = true,
+              bool memory_instances_only = false) {
     auto found = map.find(key);
     if (found == map.end())
       return;
@@ -855,7 +867,10 @@ class PreparedExecutionRegistry {
       auto &entry = *entries_.at(handle);
       if (!entry.domain)
         default_queue = true;
-      entry.close_domain();
+      if (memory_instances_only && entry.domain)
+        entry.domain->retire_instance(entry.domain_registration);
+      else
+        entry.close_domain();
     }
     if (synchronize && default_queue &&
         runtime_.runtime_fault_domain()->backend_calls_safe())

@@ -6,6 +6,81 @@ from taichi_forge_runtime.aot import Runtime, ExecutionPlan, Completion, Submiss
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_memory_retirement_preserves_unrelated_domain_instance(tmp_path):
+    import array
+
+    @ti.kernel
+    def increment(out: ti.types.ndarray(ti.i32, 1)):
+        for i in out:
+            out[i] += 1
+
+    artifact = ti.aot.Module()
+    artifact.add_kernel(increment)
+    artifact.add_execution_plan("step", ExecutionPlan([
+        dict(kind="kernel", entry="increment", arguments=["out"]),
+    ]))
+    artifact.save(tmp_path / "module")
+    with ti.aot.borrow_runtime() as runtime:
+        module = runtime.load_module(tmp_path / "module")
+        first, peer = [runtime.ndarray("i32", 3) for _ in range(2)]
+        for output in (first, peer):
+            output.write(bytes(12))
+        try:
+            domain = runtime.execution_domain(capacity=2, instance_capacity=2)
+        except RuntimeError as error:
+            if ("No independent Vulkan compute queue is available" in str(error)
+                    or "timeline support" in str(error)):
+                pytest.skip(str(error))
+            raise
+        calls = [module.prepare_execution("step", dict(out=output), execution_domain=domain)
+                 for output in (first, peer)]
+        tickets = []
+        try:
+            for call in calls:
+                call.initialize()
+            ticket = calls[0].submit()
+            tickets.append(ticket)
+            # Freeing one actual C API allocation drains its own consumers,
+            # invalidates their bindings, and leaves the selected queue usable.
+            first.close()
+            assert ticket.done()
+            assert domain.info["accepting"] and not domain.info["closed"]
+            with pytest.raises(RuntimeError, match="live|retired|invalid"):
+                calls[0].submit()
+            calls[0].close()
+            # The retired instance's capacity can be reused while the peer
+            # stays resident. Released host handles need no domain shutdown.
+            for _ in range(3):
+                transient = runtime.ndarray("i32", 3)
+                transient.write(bytes(12))
+                call = module.prepare_execution("step", dict(out=transient), execution_domain=domain)
+                calls.append(call)
+                call.initialize()
+                done = call.submit()
+                tickets.append(done)
+                transient.close()
+                assert done.done()
+                call.close()
+                assert domain.info["accepting"] and not domain.info["closed"]
+            for _ in range(2):
+                done = calls[1].submit()
+                tickets.append(done)
+                done.wait()
+            values = array.array("i")
+            values.frombytes(peer.read())
+            assert list(values) == [2, 2, 2]
+        finally:
+            for call in calls:
+                call.close()
+            domain.close()
+            for ticket in tickets:
+                ticket.close()
+            first.close()
+            peer.close()
+            module.close()
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_prepare_capacity_rejection_preserves_resident_instance(tmp_path):
     import array

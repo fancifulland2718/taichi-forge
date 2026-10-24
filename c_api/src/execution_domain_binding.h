@@ -45,6 +45,7 @@ class PreparedExecutionDomain {
   Snapshot snapshot() const;
   bool belongs_to(const std::shared_ptr<taichi::lang::RuntimeFaultDomain> &owner) const;
   void close();
+  void retire_instance(const PreparedExecutionInstance &instance);
   bool instance_retired(const PreparedExecutionInstance &instance) const;
   PreparedExecutionInstance prepare_owned_instance(
       const std::shared_ptr<taichi::lang::RuntimeClient> &client,
