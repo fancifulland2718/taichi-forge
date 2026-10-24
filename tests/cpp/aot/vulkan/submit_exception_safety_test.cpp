@@ -11,6 +11,7 @@
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
+#include "taichi/rhi/vulkan/vulkan_execution_queue.h"
 
 namespace {
 thread_local bool deny_allocations = false;
@@ -227,6 +228,56 @@ TEST_F(VulkanSubmitClosureProbe, LaterFenceQueryFailureDoesNotDropEarlierPending
   query_mode = 0;
   stream->command_sync();
   EXPECT_EQ(device->profiler_get_sampler_count(), 0u);
+}
+
+TEST_F(VulkanSubmitClosureProbe, CompoundHasNoCppAllocationAfterFirstEnqueue) {
+  if (!device->vk_caps().timeline_semaphore || device->created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  VulkanExecutionQueue queue(*device, 1);
+  auto topology = queue.prepare_fork_join(2);
+  auto list = queue.new_command_list();
+  list->memory_barrier();
+  auto branch = queue.prepare({list.get()});
+  auto commands = queue.prepare_fork_join_commands(
+      topology, queue.prepare({}), {branch, branch}, queue.prepare({}));
+  VulkanExecutionQueue::Point point;
+  bool host_oom = false;
+  arm_after_success = true;
+  try { point = queue.submit(commands); }
+  catch (const std::bad_alloc &) { host_oom = true; }
+  catch (...) { deny_allocations = false; arm_after_success = false; throw; }
+  deny_allocations = false;
+  arm_after_success = false;
+  ASSERT_FALSE(host_oom);
+  ASSERT_TRUE(point);
+  EXPECT_EQ(submits, 4); // prefix, both branches, final join
+  EXPECT_TRUE(point->wait());
+  queue.close();
+}
+
+TEST_F(VulkanSubmitClosureProbe, CompoundPreEnqueueOomLeavesSlotAndTailUnchanged) {
+  if (!device->vk_caps().timeline_semaphore || device->created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  VulkanExecutionQueue queue(*device, 1);
+  auto topology = queue.prepare_fork_join(2);
+  auto list = queue.new_command_list();
+  list->memory_barrier();
+  auto branch = queue.prepare({list.get()});
+  auto commands = queue.prepare_fork_join_commands(
+      topology, queue.prepare({}), {branch, branch}, queue.prepare({}));
+  const auto before = queue.latest();
+  allocations_until_failure = 0;
+  bool failed = false;
+  try { queue.submit(commands); }
+  catch (const std::bad_alloc &) { failed = true; }
+  catch (...) { allocations_until_failure = -1; throw; }
+  allocations_until_failure = -1;
+  EXPECT_TRUE(failed);
+  EXPECT_EQ(submits, 0);
+  EXPECT_EQ(queue.latest(), before);
+  EXPECT_EQ(queue.pending(), 0u);
+  EXPECT_TRUE(queue.submit(commands)->wait());
+  queue.close();
 }
 }  // namespace
 }  // namespace taichi::lang::vulkan

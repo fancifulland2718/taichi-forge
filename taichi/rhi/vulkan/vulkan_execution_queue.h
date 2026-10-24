@@ -16,6 +16,19 @@ class VulkanExternalAccess;
 // comes from the device. No Vulkan object is allocated during submit.
 class VulkanExecutionQueue {
  public:
+  // Cold, anchor-owned topology. All first/ordinary/sampled/parameter variants
+  // of one prepared instance share this object; variants do not lease queues.
+  class ForkJoin {
+   public:
+    ~ForkJoin();
+    std::vector<std::uint32_t> queue_indices() const;
+
+   private:
+    friend class VulkanExecutionQueue;
+    struct State;
+    explicit ForkJoin(std::unique_ptr<State> state);
+    std::unique_ptr<State> state_;
+  };
   struct Commands {
    private:
     friend class VulkanExecutionQueue;
@@ -30,6 +43,8 @@ class VulkanExecutionQueue {
     std::vector<vkapi::IVkSemaphore> binary_signals;
     std::shared_ptr<void> operands;
     std::shared_ptr<const VulkanExternalAccess> external_access;
+    struct Parallel;
+    std::shared_ptr<const Parallel> parallel;
   };
   using Point = std::shared_ptr<VulkanTimelinePoint>;
   using CommandSelector =
@@ -57,6 +72,19 @@ class VulkanExecutionQueue {
       std::shared_ptr<void> operands = {},
       const std::vector<vkapi::IVkSemaphore> &binary_waits = {},
       const std::vector<vkapi::IVkSemaphore> &binary_signals = {});
+  // At least two branches; the anchor is branch zero. Hardware queue leases
+  // bound the width. No default queue, graphics queue or serial substitution.
+  std::shared_ptr<ForkJoin> prepare_fork_join(std::size_t branch_count);
+  // All inputs are immutable same-device/family primary commands. The caller
+  // proves cross-branch memory independence and retains their operands. Empty
+  // prefix/suffix are represented by prepare({}); branches must be nonempty.
+  // External binary handshakes and nested compound commands are not admitted.
+  std::shared_ptr<const Commands> prepare_fork_join_commands(
+      std::shared_ptr<ForkJoin> topology,
+      std::shared_ptr<const Commands> prefix,
+      const std::vector<std::shared_ptr<const Commands>> &branches,
+      std::shared_ptr<const Commands> suffix,
+      std::shared_ptr<void> operands = {});
   // Cold composition around an already selected immutable body. Reuses its
   // exact command buffers and operand closure; no kernel recording or submit.
   // The body must not already carry an external handshake. The caller supplies
@@ -100,6 +128,18 @@ class VulkanExecutionQueue {
   void retire_timeline();
 
  private:
+  // Teardown proof for already accepted work. Does not enable public query or
+  // submission after a runtime fault; native wait failures still propagate.
+  static void wait_retirement_prefix(const Point &point);
+  void prove_retirement();
+  // Called with the anchor admission lock held. All native submission inputs
+  // and the final unpublished point are constructed before admit/enqueue.
+  Point submit_fork_join_locked(
+      std::shared_ptr<const Commands> commands,
+      const std::vector<Point> &dependencies,
+      std::vector<VkSemaphore> semaphores,
+      std::vector<std::uint64_t> values,
+      const std::function<void(std::size_t, const Point &)> &admit);
   struct State;
   std::unique_ptr<State> state_;
 };

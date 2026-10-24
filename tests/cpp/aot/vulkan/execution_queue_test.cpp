@@ -21,6 +21,9 @@
 #include <thread>
 #include <cstdlib>
 #include <cstring>
+#include <array>
+#include <atomic>
+#include <algorithm>
 
 namespace taichi::lang {
 
@@ -115,6 +118,416 @@ TEST(VulkanExecutionQueues, UsesCreatedSameFamilyCapacityAndIndependentTails) {
   }
 }
 
+}  // namespace taichi::lang
+
+namespace taichi::lang {
+namespace {
+class DeferredForkGate {
+ public:
+  explicit DeferredForkGate(vulkan::VulkanDevice &device)
+      : device_(device.vk_device()) {
+    VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+    type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    semaphore_ = vkapi::create_semaphore(device_, 0, &type);
+    fence_ = vkapi::create_fence(device_, 0);
+  }
+  VkResult arm(VkQueue queue, PFN_vkQueueSubmit submit) {
+    const std::uint64_t value = 1;
+    VkTimelineSemaphoreSubmitInfo timeline{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    timeline.waitSemaphoreValueCount = 1;
+    timeline.pWaitSemaphoreValues = &value;
+    const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    info.pNext = &timeline;
+    info.waitSemaphoreCount = 1;
+    info.pWaitSemaphores = &semaphore_->semaphore;
+    info.pWaitDstStageMask = &stage;
+    const auto result = submit(queue, 1, &info, fence_->fence);
+    armed_ = result == VK_SUCCESS;
+    return result;
+  }
+  void release() {
+    if (released_)
+      return;
+    VkSemaphoreSignalInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+    signal.semaphore = semaphore_->semaphore;
+    signal.value = 1;
+    EXPECT_EQ(device_.functions().vkSignalSemaphore(device_, &signal), VK_SUCCESS);
+    released_ = true;
+  }
+  ~DeferredForkGate() {
+    release();
+    if (armed_)
+      device_.functions().vkWaitForFences(device_, 1, &fence_->fence, VK_TRUE, UINT64_MAX);
+  }
+ private:
+  vkapi::DeviceHandle device_;
+  vkapi::IVkSemaphore semaphore_;
+  vkapi::IVkFence fence_;
+  bool armed_{false}, released_{false};
+};
+
+// Observe actual native signals and optionally reject one native submission.
+// No production dispatch/completion is replaced with a synthetic success.
+class ForkJoinSubmitProbe {
+ public:
+  struct Signal { VkSemaphore semaphore; std::uint64_t value; };
+  explicit ForkJoinSubmitProbe(vulkan::VulkanDevice &device, int fail_at = 0,
+                               VkResult failure = VK_ERROR_OUT_OF_HOST_MEMORY)
+      : api_(const_cast<VolkDeviceTable &>(device.vk_device().functions())),
+        original_(api_.vkQueueSubmit), fail_at_(fail_at), failure_(failure) {
+    if (active_)
+      throw std::runtime_error("Nested fork/join submit probe");
+    active_ = this;
+    api_.vkQueueSubmit = hook;
+  }
+  ~ForkJoinSubmitProbe() { api_.vkQueueSubmit = original_; active_ = nullptr; }
+  int calls{0};
+  DeferredForkGate *gate_after_prefix{nullptr};
+  std::array<Signal, 32> signals{};
+ private:
+  static VKAPI_ATTR VkResult VKAPI_CALL hook(
+      VkQueue queue, std::uint32_t count, const VkSubmitInfo *info, VkFence fence) {
+    auto &probe = *active_;
+    const auto index = probe.calls++;
+    if (probe.fail_at_ && probe.calls == probe.fail_at_)
+      return probe.failure_;
+    const auto result = probe.original_(queue, count, info, fence);
+    if (result == VK_SUCCESS && index < int(probe.signals.size()) && count == 1 &&
+        info->signalSemaphoreCount == 1 && info->pNext) {
+      const auto *timeline = static_cast<const VkTimelineSemaphoreSubmitInfo *>(info->pNext);
+      if (timeline->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO &&
+          timeline->signalSemaphoreValueCount == 1)
+        probe.signals[index] = {info->pSignalSemaphores[0], timeline->pSignalSemaphoreValues[0]};
+    }
+    if (result == VK_SUCCESS && index == 0 && probe.gate_after_prefix)
+      return probe.gate_after_prefix->arm(queue, probe.original_);
+    return result;
+  }
+  inline static ForkJoinSubmitProbe *active_{nullptr};
+  VolkDeviceTable &api_;
+  PFN_vkQueueSubmit original_;
+  int fail_at_;
+  VkResult failure_;
+};
+
+class ForkJoinDrainProbe {
+ public:
+  explicit ForkJoinDrainProbe(vulkan::VulkanDevice &device, VkQueue failed)
+      : api_(const_cast<VolkDeviceTable &>(device.vk_device().functions())),
+        original_(api_.vkQueueWaitIdle), failed_(failed) {
+    active_ = this;
+    api_.vkQueueWaitIdle = hook;
+  }
+  ~ForkJoinDrainProbe() { api_.vkQueueWaitIdle = original_; active_ = nullptr; }
+  int calls{0};
+  std::array<VkQueue, 16> queues{};
+ private:
+  static VKAPI_ATTR VkResult VKAPI_CALL hook(VkQueue queue) {
+    auto &probe = *active_;
+    if (probe.calls < int(probe.queues.size()))
+      probe.queues[probe.calls] = queue;
+    ++probe.calls;
+    return queue == probe.failed_ ? VK_ERROR_DEVICE_LOST : probe.original_(queue);
+  }
+  inline static ForkJoinDrainProbe *active_{nullptr};
+  VolkDeviceTable &api_;
+  PFN_vkQueueWaitIdle original_;
+  VkQueue failed_;
+};
+
+bool fork_signal_ready(vulkan::VulkanDevice &device,
+                       const ForkJoinSubmitProbe::Signal &signal) {
+  if (!signal.semaphore)
+    return false;
+  std::uint64_t value = 0;
+  const auto &vk = device.vk_device();
+  return vk.functions().vkGetSemaphoreCounterValue(vk, signal.semaphore, &value) == VK_SUCCESS &&
+         value >= signal.value;
+}
+
+bool wait_fork_signal(vulkan::VulkanDevice &device,
+                      const ForkJoinSubmitProbe::Signal &signal) {
+  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (!fork_signal_ready(device, signal) && std::chrono::steady_clock::now() < end)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  return fork_signal_ready(device, signal);
+}
+}  // namespace
+
+TEST(VulkanForkJoin, OneLogicalSlotAllBranchesAndSharedVariants) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  const auto count = device.created_compute_queue_count();
+  if (!device.vk_caps().timeline_semaphore || count < 3)
+    GTEST_SKIP() << "Requires two non-default compute queues";
+  using Queue = vulkan::VulkanExecutionQueue;
+  Queue queue(device, 1);
+  const auto width = std::min<std::uint32_t>(3, count - 1);
+  RecordProperty("branches", width);
+  auto topology = queue.prepare_fork_join(width);
+  const auto indices = topology->queue_indices();
+  ASSERT_EQ(indices.size(), width);
+  std::set<std::uint32_t> unique(indices.begin(), indices.end());
+  EXPECT_EQ(unique.size(), width);
+  EXPECT_FALSE(unique.count(0));
+  auto [storage, status] = device.allocate_memory_unique(
+      {8 * width, false, true, false, AllocUsage::Storage});
+  ASSERT_EQ(status, RhiResult::success);
+  std::vector<std::shared_ptr<const Queue::Commands>> branches;
+  for (std::uint32_t i = 0; i < width; ++i) {
+    auto commands = queue.new_command_list();
+    commands->buffer_fill(storage->get_ptr(4 * i), 4, 30 + i);
+    commands->memory_barrier();
+    branches.push_back(queue.prepare({commands.get()}));
+  }
+  auto suffix = queue.new_command_list();
+  suffix->buffer_copy(storage->get_ptr(4 * width), storage->get_ptr(), 4 * width);
+  suffix->memory_barrier();
+  auto body = queue.prepare_fork_join_commands(
+      topology, queue.prepare({}), branches, queue.prepare({suffix.get()}));
+  auto variant = queue.prepare_fork_join_commands(
+      topology, queue.prepare({}), branches, queue.prepare({suffix.get()}));
+  // Variant creation must not lease another branch width.
+  std::vector<std::unique_ptr<Queue>> remaining;
+  for (std::uint32_t i = width + 1; i < count; ++i)
+    remaining.push_back(std::make_unique<Queue>(device, 1));
+  EXPECT_THROW(Queue(device, 1), std::runtime_error);
+  remaining.clear();
+  for (std::uint32_t blocked = 1; blocked < width; ++blocked) {
+    test_detail::TimelineGate ordinary(device, 0);
+    test_detail::TimelineGate gate(device, indices[blocked]);
+    ForkJoinSubmitProbe probe(device);
+    int admitted = 0;
+    const auto point = queue.submit(body, {}, [&](std::size_t slot, const auto &) {
+      EXPECT_EQ(slot, 0u);
+      ++admitted;
+    });
+    EXPECT_EQ(admitted, 1);
+    EXPECT_EQ(queue.pending(), 1u);
+    EXPECT_EQ(probe.calls, int(width + 2));
+    EXPECT_TRUE(wait_fork_signal(device, probe.signals[1])); // real branch-zero tail
+    for (std::uint32_t i = 1; i < width; ++i)
+      if (i != blocked)
+        EXPECT_TRUE(wait_fork_signal(device, probe.signals[i + 1]));
+    EXPECT_FALSE(point->is_ready());
+    const auto calls = probe.calls;
+    EXPECT_THROW(queue.submit(variant, {}, [&](std::size_t, const auto &) { ++admitted; }), Queue::Busy);
+    EXPECT_EQ(probe.calls, calls);
+    EXPECT_EQ(admitted, 1);
+    gate.release();
+    EXPECT_TRUE(wait_fork_signal(device, probe.signals[width + 1]));
+    ordinary.release(); // rescue before any blocking wait; a rescue never passes the check above
+    ASSERT_TRUE(point->wait());
+    EXPECT_EQ(queue.collect(1), 1u);
+    // The final native signal was observed while queue zero remained blocked.
+    void *mapped = nullptr;
+    ASSERT_EQ(device.map(*storage, &mapped), RhiResult::success);
+    for (std::uint32_t i = 0; i < width; ++i)
+      EXPECT_EQ(static_cast<const std::uint32_t *>(mapped)[width + i], 30u + i);
+    device.unmap(*storage);
+  }
+  // Mix ordinary and compound commands without changing logical capacity.
+  auto serial = queue.submit(queue.prepare({}));
+  ASSERT_TRUE(serial->wait());
+  auto final = queue.submit(variant, {serial, serial});
+  ASSERT_TRUE(final->wait());
+  queue.close();
+  EXPECT_TRUE(final->is_ready());
+  // Even retained cold variants must not keep physical queues leased after
+  // their anchor closes. Their old immutable completion remains queryable.
+  for (std::uint32_t i = 1; i < count; ++i)
+    remaining.push_back(std::make_unique<Queue>(device, 1));
+  EXPECT_EQ(remaining.size(), count - 1);
+}
+
+TEST(VulkanForkJoin, ColdRejectionAndHostAdmissionHaveNoDeviceEffects) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  using Queue = vulkan::VulkanExecutionQueue;
+  Queue queue(device, 1);
+  EXPECT_THROW(queue.prepare_fork_join(1), std::invalid_argument);
+  EXPECT_THROW(queue.prepare_fork_join(device.created_compute_queue_count()), std::runtime_error);
+  auto topology = queue.prepare_fork_join(2);
+  auto list = queue.new_command_list();
+  // Empty branch is rejected. These nonempty barrier-only lists have no
+  // conflicting writes; this test targets admission, not arithmetic.
+  list->memory_barrier();
+  auto empty = queue.prepare({});
+  auto branch = queue.prepare({list.get()});
+  EXPECT_THROW(queue.prepare_fork_join_commands(topology, empty, {branch, empty}, empty), std::invalid_argument);
+  auto body = queue.prepare_fork_join_commands(topology, empty, {branch, branch}, empty);
+  EXPECT_THROW(queue.prepare_fork_join_commands(topology, empty, {body, branch}, empty), std::invalid_argument);
+  auto binary = vkapi::create_semaphore(device.vk_device(), 0);
+  auto handshake = queue.prepare({list.get()}, {}, {binary}, {});
+  EXPECT_THROW(queue.prepare_fork_join_commands(topology, empty, {handshake, branch}, empty), std::invalid_argument);
+  bool retired = false;
+  auto rejected = queue.prepare_fork_join_commands(topology, empty, {branch, branch}, empty,
+      std::shared_ptr<void>(reinterpret_cast<void *>(1), [&](void *) {
+        EXPECT_EQ(queue.pending(), 0u); // must not run under admission lock
+        retired = true;
+      }));
+  ForkJoinSubmitProbe probe(device);
+  const auto before = queue.latest();
+  EXPECT_THROW(queue.submit(std::move(rejected), {}, [](std::size_t, const auto &) {
+    throw std::invalid_argument("reject parameters");
+  }), std::invalid_argument);
+  EXPECT_TRUE(retired);
+  EXPECT_EQ(queue.latest(), before);
+  EXPECT_EQ(probe.calls, 0);
+  ASSERT_TRUE(queue.submit(body)->wait());
+  queue.close();
+}
+
+TEST(VulkanForkJoin, FanoutDoesNotWaitForAnchorBranchZero) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  using Queue = vulkan::VulkanExecutionQueue;
+  Queue queue(device, 1);
+  auto topology = queue.prepare_fork_join(2);
+  auto [storage, status] = device.allocate_memory_unique({16, false, true, false, AllocUsage::Storage});
+  ASSERT_EQ(status, RhiResult::success);
+  auto prefix = queue.new_command_list();
+  prefix->buffer_fill(storage->get_ptr(), 4, 61);
+  auto first = queue.new_command_list();
+  first->buffer_copy(storage->get_ptr(4), storage->get_ptr(), 4);
+  auto second = queue.new_command_list();
+  second->buffer_copy(storage->get_ptr(8), storage->get_ptr(), 4);
+  auto suffix = queue.new_command_list();
+  suffix->buffer_copy(storage->get_ptr(12), storage->get_ptr(4), 4);
+  suffix->memory_barrier();
+  auto commands = queue.prepare_fork_join_commands(topology, queue.prepare({prefix.get()}),
+      {queue.prepare({first.get()}), queue.prepare({second.get()})}, queue.prepare({suffix.get()}));
+  DeferredForkGate gate(device); // native objects allocated cold
+  ForkJoinSubmitProbe probe(device);
+  probe.gate_after_prefix = &gate; // inject only between actual prefix and branch-zero enqueue
+  auto point = queue.submit(commands);
+  EXPECT_EQ(probe.calls, 4);
+  EXPECT_TRUE(wait_fork_signal(device, probe.signals[2])); // auxiliary sees prefix writes
+  EXPECT_FALSE(fork_signal_ready(device, probe.signals[1]));
+  EXPECT_FALSE(point->is_ready());
+  gate.release(); // release on every path before blocking waits / queue teardown
+  ASSERT_TRUE(point->wait());
+  void *mapped = nullptr;
+  ASSERT_EQ(device.map(*storage, &mapped), RhiResult::success);
+  for (int i = 0; i < 4; ++i)
+    EXPECT_EQ(static_cast<const std::uint32_t *>(mapped)[i], 61u);
+  device.unmap(*storage);
+  queue.close();
+}
+
+TEST(VulkanForkJoin, PrefixAndJoinFailureNeverPublishPartialCompletion) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  // Prefix failure must enqueue no branch. Join failure has real accepted
+  // branches, but neither failure can publish a completed logical invocation.
+  for (const int fail_at : {1, 4}) {
+    vulkan::VulkanDeviceCreator creator({});
+    auto &device = *creator.device();
+    if (!device.vk_caps().timeline_semaphore ||
+        device.created_compute_queue_count() < 3)
+      GTEST_SKIP();
+    using Queue = vulkan::VulkanExecutionQueue;
+    auto fault = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 74);
+    device.set_backend_fault_reporter(fault);
+    Queue queue(device, 1);
+    auto topology = queue.prepare_fork_join(2);
+    auto list = queue.new_command_list();
+    list->memory_barrier();
+    auto branch = queue.prepare({list.get()});
+    auto owner = std::make_shared<int>(fail_at);
+    std::weak_ptr<int> retained = owner;
+    auto commands = queue.prepare_fork_join_commands(
+        topology, queue.prepare({}), {branch, branch}, queue.prepare({}), owner);
+    owner.reset();
+    {
+      ForkJoinSubmitProbe probe(device, fail_at, VK_ERROR_DEVICE_LOST);
+      EXPECT_THROW(queue.submit(std::move(commands)), BackendRuntimeError);
+      EXPECT_EQ(probe.calls, fail_at);
+    }
+    EXPECT_FALSE(retained.expired());
+    EXPECT_EQ(queue.pending(), 1u);
+    EXPECT_THROW(queue.latest()->wait(), std::invalid_argument);
+    EXPECT_NO_THROW(queue.close());
+    EXPECT_TRUE(retained.expired());
+    EXPECT_FALSE(fault->submission_allowed());
+  }
+}
+
+TEST(VulkanForkJoin, LateNativeFailureRetainsAllBranchesUntilRelatedDrain) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().timeline_semaphore || device.created_compute_queue_count() < 4)
+    GTEST_SKIP() << "Requires three non-default compute queues";
+  using Queue = vulkan::VulkanExecutionQueue;
+  auto fault = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 73);
+  device.set_backend_fault_reporter(fault);
+  Queue queue(device, 1);
+  auto topology = queue.prepare_fork_join(3);
+  auto list = queue.new_command_list();
+  list->memory_barrier();
+  auto branch = queue.prepare({list.get()});
+  auto marker = std::make_shared<int>(19);
+  std::weak_ptr<int> retained = marker;
+  auto body = queue.prepare_fork_join_commands(topology, queue.prepare({}),
+      {branch, branch, branch}, queue.prepare({}), marker);
+  marker.reset();
+  test_detail::TimelineGate gate(device, topology->queue_indices()[1]);
+  {
+    ForkJoinSubmitProbe probe(device, 4, VK_ERROR_DEVICE_LOST);
+    // Fault injection: prefix, anchor and first aux are real accepted work;
+    // the late auxiliary reports a native error, with a real fault reporter.
+    EXPECT_THROW(queue.submit(std::move(body)), BackendRuntimeError);
+    EXPECT_EQ(probe.calls, 4); // no join waiting a never-enqueued signal
+  }
+  EXPECT_EQ(queue.pending(), 1u);
+  EXPECT_TRUE(fault->has_fatal_fault());
+  EXPECT_FALSE(retained.expired());
+  // The internal final point is not an accepted completion. Its wait rejects
+  // instead of hanging on a signal that no native submit ever accepted.
+  EXPECT_THROW(queue.latest()->wait(), std::invalid_argument);
+  EXPECT_THROW(queue.submit(branch), TaichiRuntimeError);
+  std::atomic<bool> entered{false}, closed{false};
+  std::exception_ptr failure;
+  {
+    const auto failed_queue = device.compute_queue_at(topology->queue_indices()[2]);
+    ForkJoinDrainProbe drain(device, failed_queue);
+    std::thread retire([&] {
+      entered.store(true);
+      try { queue.close(); } catch (...) { failure = std::current_exception(); }
+      closed.store(true);
+    });
+    while (!entered.load())
+      std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_FALSE(closed.load());
+    EXPECT_FALSE(retained.expired());
+    gate.release();
+    retire.join();
+    EXPECT_TRUE(failure); // injected failure of the only uncertain native queue
+    EXPECT_EQ(drain.calls, 1);
+    EXPECT_EQ(drain.queues[0], failed_queue);
+    EXPECT_FALSE(retained.expired());
+    EXPECT_EQ(queue.pending(), 1u);
+  } // restore native wait API before close retries
+  EXPECT_THROW(queue.submit(branch), TaichiRuntimeError);
+  EXPECT_NO_THROW(queue.close());
+  EXPECT_TRUE(retained.expired());
+  EXPECT_FALSE(fault->submission_allowed()); // retirement never repairs public health
+  EXPECT_NO_THROW(queue.close());
+}
 }  // namespace taichi::lang
 
 namespace taichi::lang {
