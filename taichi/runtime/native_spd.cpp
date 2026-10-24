@@ -166,6 +166,14 @@ class VulkanSpdPlan final : public SpdPlanResource {
   bool retains_input(const std::string &port) const override {
     return port != "shader";
   }
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    if (initialization_pending_)
+      return std::nullopt;
+    // Counter clearing is either completed or an explicit initialization
+    // command. Image dependencies retain their own preparation contracts.
+    return NativePreparationDependencies{{}, {source.get(), output.get()}};
+  }
   void record(CommandList *list) override {
     commands_.record_inline(list);
   }
@@ -182,6 +190,10 @@ class VulkanSpdPlan final : public SpdPlanResource {
 };
 class VulkanSpdInitialization final : public NativeOperation {
  public:
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    return NativePreparationDependencies{{}, {plan_.get()}};
+  }
   explicit VulkanSpdInitialization(std::shared_ptr<VulkanSpdPlan> plan)
       : plan_(std::move(plan)) {
   }
@@ -211,6 +223,10 @@ class VulkanSpdInitialization final : public NativeOperation {
 };
 class VulkanSpdRun final : public NativeOperation {
  public:
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    return NativePreparationDependencies{{}, {plan_.get()}};
+  }
   explicit VulkanSpdRun(std::shared_ptr<SpdPlanResource> plan)
       : plan_(std::move(plan)) {
   }

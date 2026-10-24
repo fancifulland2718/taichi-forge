@@ -102,6 +102,8 @@ struct PreparedExecution {
 #endif
   std::shared_ptr<RuntimeCompletionCudaEventPool> bootstrap_events;
   RuntimeCompletion bootstrap;
+  bool requires_default_prefix{true};
+  std::vector<DeviceAllocation> preparation_allocations;
   std::vector<SubmissionParameterValue> submission_values;
   // Declared before backend recordings so owned buffers are destroyed last.
   std::shared_ptr<ExecutionResourceStorage> resources;
@@ -130,6 +132,18 @@ struct PreparedExecution {
   void publish_bootstrap(Runtime &runtime) {
     if (!domain)
       return;
+    if (!requires_default_prefix) {
+#ifdef TI_WITH_CUDA
+      if (domain->cuda)
+        // Join during initialize(), so prepare does not occupy a submission
+        // slot while waiting for an allocation producer. Capacity one remains
+        // sufficient for both this join and the following initialization.
+        return;
+#endif
+      std::vector<DeviceAllocation>().swap(preparation_allocations);
+      return;
+    }
+    std::vector<DeviceAllocation>().swap(preparation_allocations);
     const auto &owner = runtime.runtime_fault_domain();
 #ifdef TI_WITH_VULKAN
     if (domain->vulkan) {
@@ -308,6 +322,7 @@ struct PreparedExecution {
       const VulkanSubmissionRecipe *submission_recipe = nullptr,
       const OrderedStorageRing *storage_ring = nullptr) {
     gfx::GfxRuntime *gfx_runtime = nullptr;
+    std::unordered_set<const NativeResource *> qualified_producers;
 #ifdef TI_WITH_VULKAN
     if (auto *gfx = dynamic_cast<::GfxRuntime *>(&runtime))
       gfx_runtime = &gfx->get_gfx_runtime();
@@ -347,6 +362,7 @@ struct PreparedExecution {
           use.access = sampled_only ? gfx::SharedImageUse::read
                                     : gfx::SharedImageUse::exclusive;
           shared_images.push_back(std::move(use));
+          qualified_producers.insert(image.get());
         };
         bool nonflat = false;
         const auto collect = [&](const auto &steps) {
@@ -385,6 +401,10 @@ struct PreparedExecution {
             vulkan_workspace, shared_images, runtime.runtime_fault_domain());
         gfx_runtime->prepare_fixed_shared_ray_resources(
             vulkan_workspace, shared_rays, runtime.runtime_fault_domain());
+        // These exact loans already publish a complete producer prefix. They
+        // do not justify skipping any other public or unknown dependency.
+        for (const auto &use : shared_rays)
+          qualified_producers.insert(use.resource.get());
         // Only factories invoked for this prepared instance populate this
         // private owner list. Public/borrowed native resources remain outside
         // it and need a separate cross-instance layout lease contract.
@@ -505,16 +525,77 @@ struct PreparedExecution {
       throw MemoryBindingError(error.what());
     }
     std::uint64_t dispatch_count = 0;
+    std::unordered_set<const NativeResource *> private_resources;
+    std::unordered_set<const NativeResource *> visited_resources;
+    std::function<void(const NativeResource *)> inspect_resource;
+    inspect_resource = [&](const NativeResource *resource) {
+      if (!resource || qualified_producers.count(resource) ||
+          !visited_resources.insert(resource).second)
+        return;
+      const auto dependencies = resource->preparation_dependencies();
+      if (!dependencies) {
+        requires_default_prefix = true;
+        return;
+      }
+      preparation_allocations.insert(preparation_allocations.end(),
+                                     dependencies->allocations.begin(),
+                                     dependencies->allocations.end());
+      for (const auto *dependency : dependencies->resources) {
+        if (!dependency || (!private_resources.count(dependency) &&
+                            !qualified_producers.count(dependency)))
+          requires_default_prefix = true;
+        else
+          inspect_resource(dependency);
+      }
+    };
+    if (domain) {
+      requires_default_prefix = !memories.empty();
+      if (resources) {
+        const auto allocations = resources->private_preparation_allocations();
+        if (allocations)
+          preparation_allocations = *allocations;
+        else
+          requires_default_prefix = true;
+      }
+      for (const auto &resource : native_resources)
+        private_resources.insert(resource.get());
+      for (const auto &resource : native_resources)
+        inspect_resource(resource.get());
+      for (const auto handle : external_resources)
+        if (!qualified_producers.count(
+                runtime.native_resource_registry().get(handle).get()))
+          requires_default_prefix = true;
+#ifdef TI_WITH_VULKAN
+      if (vulkan_workspace && vulkan_workspace->has_field_dependencies())
+        requires_default_prefix = true;
+#endif
+    }
     std::function<void(const std::vector<FixedExecution::Operation> &)>
         count_dispatches;
     count_dispatches = [&](const std::vector<FixedExecution::Operation>
                                &steps) {
       for (const auto &step : steps) {
-        if (std::holds_alternative<FixedExecution::Dispatch>(step))
+        if (const auto *dispatch =
+                std::get_if<FixedExecution::Dispatch>(&step)) {
           ++dispatch_count;
-        else if (const auto *branch =
-                     std::get_if<std::shared_ptr<const FixedExecution::Branch>>(
-                         &step)) {
+#ifdef TI_WITH_CUDA
+          if (domain && domain->cuda) {
+            const auto *kernel =
+                dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
+            auto *launcher =
+                kernel
+                    ? dynamic_cast<cuda::KernelLauncher *>(&kernel->launcher())
+                    : nullptr;
+            if (!launcher || launcher->has_field_dependencies(kernel->handle()))
+              requires_default_prefix = true;
+          }
+#endif
+        } else if (const auto *operation =
+                       std::get_if<std::shared_ptr<NativeOperation>>(&step)) {
+          if (domain)
+            inspect_resource(operation->get());
+        } else if (const auto *branch = std::get_if<
+                       std::shared_ptr<const FixedExecution::Branch>>(&step)) {
           count_dispatches((*branch)->condition);
           for (const auto &body : (*branch)->bodies)
             count_dispatches(body);
@@ -530,7 +611,13 @@ struct PreparedExecution {
         }
       }
     };
+    if (domain) {
+      count_dispatches(initializers);
+      dispatch_count = 0;
+    }
     count_dispatches(operations);
+    if (requires_default_prefix)
+      preparation_allocations.clear();
     if (storage_ring) {
       // The compact template expands to equal frames during cold parsing.
       // One replay selects one frame; memory statistics cover every frame.
@@ -623,14 +710,26 @@ struct PreparedExecution {
       if (domain_initialized)
         return;
       try {
-        // Publish the cold default-queue prefix, not an all-domain wait. The
-        // selected initialization follows it on the device. Keep both sets of
-        // recording operands until the domain retires; dropping an initializer
-        // wrapper must not free a still-resident graph's argument storage.
+#ifdef TI_WITH_CUDA
+        if (domain->cuda && !requires_default_prefix &&
+            !preparation_allocations.empty()) {
+          auto allocations = std::move(preparation_allocations);
+          domain->join_allocation_initialization(runtime.get(), allocations)
+              .wait();
+          domain->cuda->collect_ready(1);
+        }
+#endif
+        // Follow the required producer prefix, not an all-domain wait. Fully
+        // described private plans need only their allocation initialization;
+        // shared GFX loans retain their exact producer dependencies. Keep both
+        // sets of recording operands until the domain retires; dropping an
+        // initializer wrapper must not free a still-resident graph's argument
+        // storage.
 #ifdef TI_WITH_VULKAN
         if (domain->vulkan) {
           auto dependencies = vulkan_workspace->shared_resource_dependencies();
-          dependencies.push_back(bootstrap);
+          if (bootstrap.valid())
+            dependencies.push_back(bootstrap);
           domain->vulkan->submit_instance(domain_registration.vulkan,
               vulkan_workspace_initialization, dependencies).wait();
           if (initialization)
@@ -638,8 +737,12 @@ struct PreparedExecution {
         } else
 #endif
         if (initialization)
-          initialization->submit({bootstrap}).wait();
-        else
+          initialization
+              ->submit(bootstrap.valid()
+                           ? std::vector<RuntimeCompletion>{bootstrap}
+                           : std::vector<RuntimeCompletion>{})
+              .wait();
+        else if (bootstrap.valid())
           bootstrap.wait();
         bootstrap = {};
         domain_initialized = true;

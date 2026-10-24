@@ -19,6 +19,9 @@
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
+#include "taichi/runtime/llvm/aot_graph_data.h"
+#include "taichi/runtime/cuda/kernel_launcher.h"
+#include "c_api/src/taichi_core_impl.h"
 #include "tests/cpp/rhi/common/cuda_external_gate.h"
 #endif
 
@@ -118,6 +121,64 @@ TEST(DomainColdUpload, VulkanBatchIgnoresDefaultAndPeerButHonorsCapacity) {
 #endif
 
 #if defined(TI_WITH_CUDA) && defined(TI_WITH_VULKAN)
+TEST(DomainPreparation, CudaUsesActualKernelFieldDependencies) {
+  const auto *path = std::getenv("TI_TEST_PREPARATION_AOT_DIR");
+  if (!path || !cuda::ExecutionDomain::available())
+    GTEST_SKIP() << "Requires the compiled CUDA Field dependency fixture";
+  struct Session {
+    TiRuntime runtime{nullptr};
+    TiAotModule module{nullptr};
+    ~Session() {
+      if (module)
+        ti_destroy_aot_module(module);
+      if (runtime)
+        ti_destroy_runtime(runtime);
+    }
+  } session;
+  session.runtime = ti_create_runtime(TI_ARCH_CUDA, 0);
+  ASSERT_NE(session.runtime, nullptr);
+  session.module = ti_load_aot_module(session.runtime, path);
+  ASSERT_NE(session.module, nullptr);
+  auto &runtime = *reinterpret_cast<::Runtime *>(session.runtime);
+  for (const auto &entry :
+       {std::make_pair("rootless", false), std::make_pair("field", true)}) {
+    const auto handle = ti_get_aot_module_kernel(session.module, entry.first);
+    ASSERT_NE(handle, nullptr);
+    auto *kernel =
+        dynamic_cast<llvm_aot::KernelImpl *>(runtime.get_kernel(handle).kernel);
+    ASSERT_NE(kernel, nullptr);
+    auto *launcher = dynamic_cast<cuda::KernelLauncher *>(&kernel->launcher());
+    ASSERT_NE(launcher, nullptr);
+    EXPECT_EQ(launcher->has_field_dependencies(kernel->handle()), entry.second);
+  }
+}
+
+TEST(DomainColdUpload, CudaInitializationJoinIgnoresLaterDefaultWork) {
+  if (!cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  Program program(Arch::cuda);
+  program.materialize_runtime();
+  auto &device = *program.get_compute_device();
+  auto domain = std::make_shared<cuda::ExecutionDomain>(
+      program.runtime_fault_domain(), cuda::ExecutionDomain::Options{1, 0, 1});
+  capi::PreparedExecutionDomain selected(domain);
+  UploadArrays data(device);
+  program.synchronize();
+  testing::CudaExternalGate gate;
+  gate.enqueue_wait(nullptr);
+  auto joined = selected.join_allocation_initialization(
+      device, {*data.arrays[0], *data.arrays[1], *data.arrays[0]});
+  auto wait = std::async(std::launch::async, [&] { joined.wait(); });
+  const auto status = wait.wait_for(2s);
+  EXPECT_EQ(status, std::future_status::ready);
+  if (status != std::future_status::ready)
+    gate.release();
+  wait.get();
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  domain->close();
+}
+
 TEST(DomainColdUpload, CudaUploadWaitsForAllocationInitialization) {
   if (!cuda::ExecutionDomain::available())
     GTEST_SKIP();

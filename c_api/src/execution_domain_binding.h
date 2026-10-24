@@ -8,6 +8,7 @@
 #include "taichi/runtime/runtime_client.h"
 #include "taichi/runtime/native_data_upload.h"
 #include "taichi/runtime/native_operation_description.h"
+#include "taichi/program/runtime_completion.h"
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
@@ -63,6 +64,11 @@ class PreparedExecutionDomain {
       taichi::lang::gfx::GfxRuntime *gfx_runtime,
       std::shared_ptr<taichi::lang::NativeOperation> operation,
       const std::vector<taichi::lang::NativeArrayBinding> &inputs);
+  // Join generation-specific CUDA allocation initialization on this domain,
+  // retaining leases until completion. No ordinary queue prefix is recorded.
+  taichi::lang::RuntimeCompletion join_allocation_initialization(
+      taichi::lang::Device &device,
+      const std::vector<taichi::lang::DeviceAllocation> &allocations);
   void retire_instance(const PreparedExecutionInstance &instance);
   bool instance_retired(const PreparedExecutionInstance &instance) const;
   PreparedExecutionInstance prepare_owned_instance(

@@ -3318,6 +3318,8 @@ void GfxRuntime::prepare_detached_kernel_workspace(
     for (const auto &bind : kernel.buffer_binding_plan(i)) {
       using BufferType = spirv::TaskAttributes::BufferType;
       uses_global_tmps |= bind.buffer.type == BufferType::GlobalTmps;
+      workspace->has_field_dependencies_ |=
+          bind.buffer.type == BufferType::Root;
       TI_ERROR_IF(bind.buffer.type == BufferType::ListGen ||
                       bind.buffer.type == BufferType::HashOverflow ||
                       bind.buffer.type == BufferType::NodeAllocatorPool,

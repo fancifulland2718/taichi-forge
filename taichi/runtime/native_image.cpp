@@ -353,6 +353,7 @@ class CudaSampledImage final : public NativeSampledImage {
   }
   void initialize_pixels(const SampledImageDescription &d) {
     if (d.pixels) {
+      ordinary_upload_ = true;
       CUDADriver::get_instance().context_synchronize();
       storage_->upload_device(resolve_native_storage_range(Arch::cuda,
                                                            d.pixels->pointer,
@@ -393,6 +394,14 @@ class CudaSampledImage final : public NativeSampledImage {
   uint64_t cuda_sampled_object() const override {
     return storage_->sampled_object();
   }
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    // Synchronous device-to-device memcpy need not be host-complete. Only the
+    // selected construction transport certifies completion without a prefix.
+    if (ordinary_upload_)
+      return std::nullopt;
+    return NativePreparationDependencies{};
+  }
   void upload_cuda(uint64_t source, void *stream) override {
     storage_->upload_device_async(source, stream);
   }
@@ -401,6 +410,7 @@ class CudaSampledImage final : public NativeSampledImage {
   Device &device_;
   std::shared_ptr<RuntimeFaultDomain> fault_;
   std::unique_ptr<CudaTextureStorage> storage_;
+  bool ordinary_upload_{false};
 };
 
 class CudaImageUpload final : public NativeOperation {
@@ -425,6 +435,10 @@ class CudaImageUpload final : public NativeOperation {
     // CUDA array/multidimensional copies cannot change operands in an
     // instantiated graph. In-place source contents remain fully dynamic.
     return {image_->cuda_sampled_object(), source_};
+  }
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    return NativePreparationDependencies{{}, {image_.get()}};
   }
   void validate_recording(NativeRecordingState &state) const override {
     state.initialized.insert(image_.get());
@@ -551,6 +565,12 @@ class VulkanSampledImage final : public NativeSampledImage {
   DeviceAllocation gfx_sampled_allocation() const override {
     return image_;
   }
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    if (initialization_pending_)
+      return std::nullopt;
+    return NativePreparationDependencies{};
+  }
 
  private:
   Device &device_;
@@ -563,6 +583,10 @@ class VulkanSampledImage final : public NativeSampledImage {
 
 class VulkanImageUpload final : public NativeOperation {
  public:
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    return NativePreparationDependencies{{}, {image_.get()}};
+  }
   explicit VulkanImageUpload(const ImageUploadOperation &op)
       : image_(op.image),
         transfers_{

@@ -76,5 +76,8 @@ NativeArgPackStorage::NativeArgPackStorage(
                        buffers[i].size()});
   }
   upload_native_data(device, uploads, upload);
+  // The selected transport completes its exact transfer. An ordinary CUDA
+  // pageable H2D call can return before the device copy has finished.
+  initialization_completed_ = bool(upload) || arch != Arch::cuda;
 }
 }  // namespace taichi::lang

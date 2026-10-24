@@ -57,6 +57,23 @@ void ExecutionResourceStorage::remove_owned_dependencies(
       dependencies.end());
 }
 
+std::optional<std::vector<taichi::lang::DeviceAllocation>>
+ExecutionResourceStorage::private_preparation_allocations() const {
+  std::vector<taichi::lang::DeviceAllocation> allocations;
+  std::unordered_set<taichi::lang::DeviceAllocationId> owned;
+  for (const auto memory : memories_) {
+    if (!sizes_.at(memory))
+      continue;
+    const auto allocation = runtime_.get_memory(memory, true).allocation;
+    if (owned.insert(allocation.alloc_id).second)
+      allocations.push_back(allocation);
+  }
+  for (const auto memory : memories_)
+    if (!owned.count(runtime_.get_memory(memory, true).allocation.alloc_id))
+      return std::nullopt;
+  return allocations;
+}
+
 TiMemory ExecutionResourceStorage::view(TiMemory parent,
                                         uint64_t offset,
                                         uint64_t bytes) {

@@ -529,7 +529,7 @@ TEST(VulkanProgramASImport, OrderedAliasesRollbackAndOwnerRetirement) {
   EXPECT_NO_THROW(second->close());
 }
 
-TEST(VulkanColdPreparation, PayloadUploadPreservesLiveOutputBootstrap) {
+void check_live_output_bootstrap(bool view) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();
   PendingProgramAs session;
@@ -553,10 +553,16 @@ TEST(VulkanColdPreparation, PayloadUploadPreservesLiveOutputBootstrap) {
     require_success();
     output = session.array(0, "output", {1}, TI_DATA_TYPE_U32);
   }
-  const std::string plan = R"({"version":26,"operations":[
-    {"kind":"copy","source":"seed","destination":"output"}],"resources":[
+  std::string plan = R"({"version":26,"operations":[
+    {"kind":"copy","source":"seed","destination":")" +
+                     std::string(view ? "alias" : "output") +
+                     R"("}],"resources":[
     {"kind":"ndarray","name":"seed","dtype":"u32","shape":[1],"initial_data":")" +
-                           key + "\"}]}";
+                     key + "\"}";
+  if (view)
+    plan +=
+        R"(,{"kind":"ndarray_view","name":"alias","array":"output","offset":0,"shape":[1]})";
+  plan += "]}";
   session.program.synchronize();
   session.program.retain_runtime_client(session.gates);
   session.gates->gates[0] =
@@ -602,7 +608,13 @@ TEST(VulkanColdPreparation, PayloadUploadPreservesLiveOutputBootstrap) {
   EXPECT_EQ(*static_cast<uint32_t *>(mapped), value);
   session.device().unmap(allocation);
 }
-TEST(VulkanColdPreparation, SpdCounterClearDoesNotWaitForDefaultQueue) {
+TEST(VulkanColdPreparation, PayloadUploadPreservesLiveOutputBootstrap) {
+  check_live_output_bootstrap(false);
+}
+TEST(VulkanColdPreparation, PrivateViewHandlePreservesPublicParentBootstrap) {
+  check_live_output_bootstrap(true);
+}
+void check_spd_preparation_prefix(bool private_pixels) {
   const auto *shader_path = std::getenv("TI_TEST_SPD_SHADER");
   if (!shader_path || !vulkan::is_vulkan_api_available())
     GTEST_SKIP() << "Provide the 129x131, seven-level mean SPD shader";
@@ -627,12 +639,16 @@ TEST(VulkanColdPreparation, SpdCounterClearDoesNotWaitForDefaultQueue) {
     session.domains[0] =
         ti_create_vulkan_execution_domain_ext(session.runtimes[0], &options);
     require_success();
-    pixels = session.array(0, "pixels", {129, 131}, TI_DATA_TYPE_F32);
+    if (!private_pixels)
+      pixels = session.array(0, "pixels", {129, 131}, TI_DATA_TYPE_F32);
   }
-  const std::string plan =
-      R"({"version":26,"resources":[
+  std::string plan = R"({"version":26,"resources":[)";
+  if (private_pixels)
+    plan +=
+        R"({"kind":"ndarray","name":"pixels","dtype":"f32","shape":[129,131]},)";
+  plan += R"(
     {"kind":"host_blob","name":"shader","data":")" +
-      key + "\",\"byte_size\":" + std::to_string(shader.size()) + R"(},
+          key + "\",\"byte_size\":" + std::to_string(shader.size()) + R"(},
     {"kind":"native","name":"source","provider":"image","operation":"sampled","version":1,
      "parameters":{"shape":[129,131],"format":"r32f","storage":true},"bindings":{}},
     {"kind":"native","name":"pyramid","provider":"image","operation":"sampled","version":1,
@@ -653,16 +669,32 @@ TEST(VulkanColdPreparation, SpdCounterClearDoesNotWaitForDefaultQueue) {
     BorrowScope scope(*session.borrowers[0]);
     session.executions[0] = ti_prepare_execution_plan_on_vulkan_domain_ext(
         session.runtimes[0], session.modules[0], session.domains[0],
-        plan.size(), plan.data(), 1, &pixels, 0, nullptr, 0, nullptr);
+        plan.size(), plan.data(), private_pixels ? 0 : 1,
+        private_pixels ? nullptr : &pixels, 0, nullptr, 0, nullptr);
     require_success();
     if (!session.executions[0])
       throw std::runtime_error("SPD cold preparation failed");
+    if (private_pixels) {
+      ti_initialize_prepared_ext(session.runtimes[0], session.executions[0]);
+      require_success();
+      if (!ti_try_submit_prepared_ext(session.runtimes[0],
+                                      session.executions[0], 0, nullptr,
+                                      &session.completions[0]))
+        throw std::runtime_error("Private SPD submission was not admitted");
+      require_success();
+      ti_wait_completion_ext(session.completions[0]);
+      require_success();
+    }
   });
   const auto status = prepare.status(2s);
   EXPECT_EQ(status, std::future_status::ready);
   if (status != std::future_status::ready)
     session.gates->release(0);
   prepare.finish();
+  if (private_pixels) {
+    session.gates->release(0);
+    return;
+  }
   // The public pixel input still requires its real producer boundary. Only
   // the private counter's clear moved into the domain initialization phase.
   session.gates->release(0);
@@ -678,7 +710,14 @@ TEST(VulkanColdPreparation, SpdCounterClearDoesNotWaitForDefaultQueue) {
   ti_wait_completion_ext(session.completions[0]);
   require_success();
 }
-void check_image_preparation_prefix(bool private_pixels) {
+TEST(VulkanColdPreparation, SpdCounterClearDoesNotWaitForDefaultQueue) {
+  check_spd_preparation_prefix(false);
+}
+TEST(VulkanColdPreparation, PrivateSpdInitializationAndRunIgnoreDefaultQueue) {
+  check_spd_preparation_prefix(true);
+}
+void check_image_preparation_prefix(bool private_pixels,
+                                    bool unknown_factory = false) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();
   PendingProgramAs session;
@@ -715,6 +754,10 @@ void check_image_preparation_prefix(bool private_pixels) {
     "parameters":{"shape":[4],"format":"r32f"},"bindings":{"pixels":"pixels"}}],
     "operations":[{"kind":"native","provider":"image","operation":"upload","version":1,
     "parameters":{},"bindings":{"image":"image","pixels":"pixels"}}]})";
+  if (unknown_factory) {
+    plan.resize(plan.size() - 2);
+    plan += R"(,{"kind":"sort","keys":"pixels"}]})";
+  }
   session.program.synchronize();
   session.program.retain_runtime_client(session.gates);
   session.gates->gates[0] =
@@ -730,10 +773,34 @@ void check_image_preparation_prefix(bool private_pixels) {
     require_success();
     if (!session.executions[0])
       throw std::runtime_error("Image preparation failed");
+    if (private_pixels && !unknown_factory) {
+      ti_initialize_prepared_ext(session.runtimes[0], session.executions[0]);
+      require_success();
+      if (!ti_try_submit_prepared_ext(session.runtimes[0],
+                                      session.executions[0], 0, nullptr,
+                                      &session.completions[0]))
+        throw std::runtime_error("Private image submission was not admitted");
+      require_success();
+      ti_wait_completion_ext(session.completions[0]);
+      require_success();
+    }
   });
   const auto status = prepare.status(private_pixels ? 2s : 100ms);
   EXPECT_EQ(status, private_pixels ? std::future_status::ready
                                    : std::future_status::timeout);
+  if (unknown_factory && status == std::future_status::ready) {
+    prepare.finish();
+    test_detail::PendingAction initialize(session.gates, [&] {
+      BorrowScope scope(*session.borrowers[0]);
+      ti_initialize_prepared_ext(session.runtimes[0], session.executions[0]);
+      require_success();
+    });
+    EXPECT_EQ(initialize.status(100ms), std::future_status::timeout);
+    session.gates->release(0);
+    initialize.finish();
+    session.gates->release(1);
+    return;
+  }
   // Public pixels still need their producer; the unrelated peer stays pending.
   session.gates->release(0);
   if (prepare.status(2s) != std::future_status::ready)
@@ -753,6 +820,71 @@ TEST(VulkanColdPreparation, PrivateImagePixelsIgnoreDefaultAndPeer) {
 }
 TEST(VulkanColdPreparation, PublicImagePixelsStillWaitForProducer) {
   check_image_preparation_prefix(false);
+}
+TEST(VulkanColdPreparation, UndescribedNativeConstructionPreservesBootstrap) {
+  check_image_preparation_prefix(true, true);
+}
+
+void check_kernel_preparation_prefix(bool field) {
+  const auto *path = std::getenv("TI_TEST_PREPARATION_AOT_DIR");
+  if (!path || !vulkan::is_vulkan_api_available())
+    GTEST_SKIP() << "Requires the rootless and Field-dependent kernel fixture";
+  PendingProgramAs session;
+  if (session.device().created_compute_queue_count() < 3)
+    GTEST_SKIP();
+  session.borrowers[0] = AotRuntimeClient::create(session.program);
+  session.runtimes[0] =
+      reinterpret_cast<TiRuntime>(session.borrowers[0]->handle());
+  {
+    BorrowScope scope(*session.borrowers[0]);
+    session.modules[0] = ti_load_aot_module(session.runtimes[0], path);
+    require_success();
+    ASSERT_NE(session.modules[0], nullptr);
+    const TiVulkanExecutionDomainCreateInfo options{1, 1, TI_FALSE};
+    session.domains[0] =
+        ti_create_vulkan_execution_domain_ext(session.runtimes[0], &options);
+    require_success();
+  }
+  const std::string plan =
+      R"({"version":26,"resources":[{"kind":"ndarray","name":"out","dtype":"u32","shape":[1]}],"operations":[{"kind":"kernel","entry":")" +
+      std::string(field ? "field" : "rootless") + R"(","arguments":["out"]}]})";
+  session.program.synchronize();
+  session.program.retain_runtime_client(session.gates);
+  session.gates->gates[0] =
+      std::make_unique<test_detail::TimelineGate>(session.device(), 0);
+  session.gates->gates[1] =
+      std::make_unique<test_detail::TimelineGate>(session.device(), 2);
+  test_detail::PendingAction run(session.gates, [&] {
+    BorrowScope scope(*session.borrowers[0]);
+    session.executions[0] = ti_prepare_execution_plan_on_vulkan_domain_ext(
+        session.runtimes[0], session.modules[0], session.domains[0],
+        plan.size(), plan.data(), 0, nullptr, 0, nullptr, 0, nullptr);
+    require_success();
+    ti_initialize_prepared_ext(session.runtimes[0], session.executions[0]);
+    require_success();
+    if (!ti_try_submit_prepared_ext(session.runtimes[0], session.executions[0],
+                                    0, nullptr, &session.completions[0]))
+      throw std::runtime_error("Kernel bootstrap fixture could not submit");
+    require_success();
+    ti_wait_completion_ext(session.completions[0]);
+    require_success();
+  });
+  const auto status = run.status(field ? 100ms : 2s);
+  EXPECT_EQ(status,
+            field ? std::future_status::timeout : std::future_status::ready);
+  session.gates->release(0);
+  if (run.status(2s) != std::future_status::ready)
+    session.gates->release(1);
+  EXPECT_EQ(run.status(2s), std::future_status::ready);
+  run.finish();
+  session.gates->release(1);
+}
+
+TEST(VulkanColdPreparation, RootlessKernelIgnoresDefaultAndPeer) {
+  check_kernel_preparation_prefix(false);
+}
+TEST(VulkanColdPreparation, FieldKernelPreservesProducerPrefix) {
+  check_kernel_preparation_prefix(true);
 }
 }  // namespace taichi::lang
 #endif

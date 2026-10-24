@@ -2,10 +2,22 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 #include "taichi/rhi/device.h"
 
 namespace taichi::lang {
+
+class NativeResource;
+// Cold construction dependencies, separate from replay access permissions.
+// Listed allocations may still have RHI initialization in flight. Resources
+// name the complete retained construction closure; the caller also proves
+// private ownership or obtains an explicit producer loan for each dependency.
+struct NativePreparationDependencies {
+  std::vector<DeviceAllocation> allocations;
+  std::vector<const NativeResource *> resources;
+};
 
 // An owner-local prepared object. Operations can retain resources, and resources
 // can retain their dependencies. Destruction follows backend recording retirement.
@@ -21,6 +33,13 @@ class NativeResource {
   // not assert that opaque provider/driver allocations consume no memory.
   virtual std::size_t device_payload_bytes() const {
     return 0;
+  }
+  // nullopt preserves the ordinary producer prefix for unknown factories.
+  // An empty value certifies no pending construction work. Explicit recorded
+  // initializers still execute before replay. Never queried on warm submission.
+  virtual std::optional<NativePreparationDependencies>
+  preparation_dependencies() const {
+    return std::nullopt;
   }
   // Cold factory input ownership after successful construction. False means
   // all use of this input has completed; no pending work or retained pointer

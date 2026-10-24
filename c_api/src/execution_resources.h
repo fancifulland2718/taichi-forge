@@ -30,6 +30,10 @@ class ExecutionResourceStorage {
     return bytes_;
   }
   void remove_owned_dependencies(std::vector<TiMemory> &dependencies) const;
+  // Unlike handle ownership, this proves the physical parents of every view.
+  // A module/public alias requires its ordinary producer prefix.
+  std::optional<std::vector<taichi::lang::DeviceAllocation>>
+  private_preparation_allocations() const;
   void retain(const std::unordered_set<TiMemory> &memories);
 
  private:

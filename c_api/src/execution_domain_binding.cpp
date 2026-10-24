@@ -5,6 +5,7 @@
 #include <limits>
 #include <algorithm>
 #include <map>
+#include <unordered_set>
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_image.h"
 #ifdef TI_WITH_CUDA
@@ -18,6 +19,47 @@
 #endif
 
 namespace capi {
+
+taichi::lang::RuntimeCompletion
+PreparedExecutionDomain::join_allocation_initialization(
+    taichi::lang::Device &device,
+    const std::vector<taichi::lang::DeviceAllocation> &allocations) {
+  using namespace taichi::lang;
+#ifdef TI_WITH_CUDA
+  if (cuda) {
+    if (allocations.empty())
+      return {};
+    struct Resources final : RuntimeCompletionResources {
+      std::vector<
+          std::unique_ptr<taichi::lang::cuda::CudaDevice::AllocationLease>>
+          leases;
+      std::size_t retained_resource_count(
+          std::uint32_t) const noexcept override {
+        return 0;
+      }
+    };
+    auto resources = std::make_shared<Resources>();
+    auto &cuda_device = dynamic_cast<taichi::lang::cuda::CudaDevice &>(device);
+    std::unordered_set<DeviceAllocationId> seen;
+    for (const auto &allocation : allocations) {
+      if (allocation.device != &device)
+        throw std::invalid_argument(
+            "Cold dependency belongs to another device");
+      if (!seen.insert(allocation.alloc_id).second)
+        continue;
+      auto lease = cuda_device.acquire_allocation_lease(allocation.get_ptr());
+      if (!lease)
+        throw std::invalid_argument("Cold dependency allocation is retired");
+      resources->leases.push_back(std::move(lease));
+    }
+    return cuda->submit({}, resources, [resources](void *stream) {
+      for (const auto &lease : resources->leases)
+        lease->wait_for_initialization(stream);
+    });
+  }
+#endif
+  throw std::invalid_argument("Allocation initialization join requires CUDA");
+}
 
 bool PreparedExecutionDomain::complete_owned_initialization(
     taichi::lang::Device &device,

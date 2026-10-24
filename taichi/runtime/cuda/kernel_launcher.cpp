@@ -1024,6 +1024,14 @@ void KernelLauncher::validate_execution_domain(Handle handle) {
     throw std::invalid_argument(blocker);
 }
 
+bool KernelLauncher::has_field_dependencies(Handle handle) {
+  std::shared_lock<std::shared_mutex> lock(registration_mutex());
+  const auto iter = contexts_.find(handle.get_launch_id());
+  if (iter == contexts_.end())
+    throw std::invalid_argument("CUDA execution kernel is not registered");
+  return !iter->second->snode_tree_ids.empty();
+}
+
 void KernelLauncher::bind_runtime_temporaries(GraphLaunchPacket &packet) {
   auto *executor = get_runtime_executor();
   if (packet.context.runtime != executor->get_llvm_runtime() ||

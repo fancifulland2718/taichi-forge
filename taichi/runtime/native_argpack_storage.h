@@ -8,8 +8,9 @@
 
 namespace taichi::lang {
 
-// Immutable, owner-local storage. Construction completes uploads before
-// publishing; replay only consumes allocations/addresses. Enclosing bindings
+// Immutable, owner-local storage. Selected construction uploads complete before
+// publishing; ordinary CUDA uploads retain the producer prefix. Replay only
+// consumes allocations/addresses. Enclosing bindings
 // must retain this resource and its device through their completion fence.
 // Lifted arrays/images keep their existing binding/retirement contracts.
 class NativeArgPackStorage final : public NativeResource {
@@ -32,6 +33,12 @@ class NativeArgPackStorage final : public NativeResource {
   std::size_t device_payload_bytes() const override {
     return bytes_;
   }
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    if (!initialization_completed_)
+      return std::nullopt;
+    return NativePreparationDependencies{};
+  }
   const aot::ArgPackLayout &layout() const {
     return *layout_;
   }
@@ -49,6 +56,7 @@ class NativeArgPackStorage final : public NativeResource {
   std::vector<DeviceAllocationUnique> allocations_;
   std::vector<std::uint64_t> addresses_;
   std::size_t bytes_{0};
+  bool initialization_completed_{false};
 };
 
 }  // namespace taichi::lang

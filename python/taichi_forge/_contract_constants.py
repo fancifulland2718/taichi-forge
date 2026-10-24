@@ -1,7 +1,7 @@
 """Pure-Python constants for the split native-runtime bootstrap contract."""
 
 FORGE_CONTRACT_MANIFEST_SCHEMA_VERSION = 1
-FORGE_NATIVE_ABI_REVISION = 196
+FORGE_NATIVE_ABI_REVISION = 197
 
 
 __all__ = [

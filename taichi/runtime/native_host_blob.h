@@ -30,6 +30,10 @@ class NativeHostBlobResource final : public NativeResource {
   std::size_t workspace_bytes() const override {
     return 0;
   }
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    return NativePreparationDependencies{};
+  }
   const Bytes &bytes() const {
     return *bytes_;
   }

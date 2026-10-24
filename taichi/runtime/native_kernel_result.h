@@ -26,6 +26,16 @@ class NativeKernelResultStorage final : public NativeResource {
   }
   std::uint64_t address() const { return address_; }
   bool observable() const { return use_ == Use::host_result; }
+  std::optional<NativePreparationDependencies> preparation_dependencies()
+      const override {
+    // Observable padding is uploaded through the ordinary RHI transport.
+    if (observable() && bytes_)
+      return std::nullopt;
+    NativePreparationDependencies result;
+    if (allocation_)
+      result.allocations.push_back(*allocation_);
+    return result;
+  }
   bool matches(Arch arch, Device &device, const CallableBase &kernel) const;
   // The caller has waited for the exact producer and owns its submission lock.
   // Copying never changes ownership or releases the reusable frame.

@@ -599,6 +599,9 @@ class TI_DLL_EXPORT GfxRuntime {
     void record_initialization(CommandList &commands);
     std::size_t bytes() const;
     std::vector<RuntimeCompletion> shared_resource_dependencies() const;
+    bool has_field_dependencies() const {
+      return has_field_dependencies_;
+    }
     // Called only after the owning instance's exact prefix and recordings
     // retire. Resource storage may remain referenced by released C API handles.
     void retire_shared_image_loans();
@@ -628,6 +631,7 @@ class TI_DLL_EXPORT GfxRuntime {
     std::shared_ptr<GraphReplayRegistry> shared_resource_bridge_;
     std::shared_ptr<RuntimeFaultDomain> shared_resource_fault_;
     bool initialization_recorded_{false};
+    bool has_field_dependencies_{false};
   };
   std::shared_ptr<FixedGraphWorkspace> create_fixed_graph_workspace();
   struct SharedImage {
