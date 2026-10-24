@@ -4,6 +4,7 @@
 #include "taichi/common/operation_json.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_acceleration_structure.h"
+#include "taichi/runtime/native_vulkan_ray_access.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/vulkan_ray_types.h"
 #ifdef TI_WITH_VULKAN
@@ -16,52 +17,37 @@
 #endif
 
 namespace taichi::lang {
+#ifdef TI_WITH_VULKAN
+void native_vulkan_ray::record_shader_read(
+    VulkanInstanceTlas &tlas, CommandList *commands,
+    NativeShaderStages shader_stages, bool graphics_queue, bool independent) {
+  VkPipelineStageFlags stages = 0;
+  for (const auto &[source, target] :
+       {std::make_pair(PipelineStageType::compute,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT),
+        std::make_pair(PipelineStageType::vertex,
+                       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT),
+        std::make_pair(PipelineStageType::fragment,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT),
+        std::make_pair(PipelineStageType::raytracing,
+                       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR)}) {
+    const auto bit = native_shader_stage(source);
+    if (shader_stages & bit) {
+      stages |= target;
+      shader_stages &= ~bit;
+    }
+  }
+  if (!stages || shader_stages)
+    throw std::invalid_argument("Unqualified acceleration structure shader stages");
+  tlas.record_shader_read(
+      commands, stages,
+      independent ? VulkanRayShaderReadOrder::execution_domain
+                  : graphics_queue ? VulkanRayShaderReadOrder::runtime_graphics
+                                   : VulkanRayShaderReadOrder::compute);
+}
+#endif
 namespace {
-// Typed views share the NativeResource owner's control block. A TLAS is
-// queryable but is not geometry; a BLAS is geometry but cannot be queried
-// alone.
-class QueryAccess : public virtual NativeRayResourceAccess {
- public:
-  virtual ~QueryAccess() = default;
-  virtual Device &device() const = 0;
-#ifdef TI_WITH_VULKAN
-  virtual void prepare_query_variant(unsigned variant) = 0;
-  virtual void record_query(CommandList *, const VulkanRayQueryPacket &) = 0;
-#endif
-};
-class GeometryAccess : public virtual NativeRayResourceAccess {
- public:
-  virtual ~GeometryAccess() = default;
-  virtual Device &device() const = 0;
-  virtual size_t vertex_count() const = 0;
-#ifdef TI_WITH_VULKAN
-  virtual void record_refit(CommandList *, DevicePtr vertices) = 0;
-#endif
-};
-class BlasAccess : public GeometryAccess {
- public:
-  virtual size_t triangle_count() const = 0;
-#ifdef TI_WITH_VULKAN
-  virtual VulkanTriangleBlas &blas_core() = 0;
-  virtual void record_build(CommandList *,
-                            DevicePtr vertices,
-                            DevicePtr indices) = 0;
-#endif
-};
-class InstanceAccess : public virtual NativeRayResourceAccess {
- public:
-  virtual ~InstanceAccess() = default;
-  virtual Device &device() const = 0;
-  virtual size_t instance_count() const = 0;
-#ifdef TI_WITH_VULKAN
-  virtual void prepare_transforms() = 0;
-  virtual void record_transforms(CommandList *,
-                                 const VulkanRayTransformPacket &) = 0;
-  virtual void record_metadata(CommandList *,
-                               const std::vector<VulkanRayInstanceInfo> &,
-                               bool update) = 0;
-#endif
-};
+using namespace native_vulkan_ray;
 
 struct SceneDescription {
   static constexpr const char *kind = "vulkan_ray_triangle_scene";
@@ -535,31 +521,8 @@ class PreparedTlas final
                           NativeShaderStages shader_stages,
                           bool graphics_queue,
                           bool independent) override {
-    VkPipelineStageFlags stages = 0;
-    for (const auto &[source, target] :
-         {std::make_pair(PipelineStageType::compute,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT),
-          std::make_pair(PipelineStageType::vertex,
-                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT),
-          std::make_pair(PipelineStageType::fragment,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT),
-          std::make_pair(PipelineStageType::raytracing,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR)}) {
-      const auto bit = native_shader_stage(source);
-      if (shader_stages & bit) {
-        stages |= target;
-        shader_stages &= ~bit;
-      }
-    }
-    if (!stages || shader_stages)
-      throw std::invalid_argument(
-          "Unqualified acceleration structure shader stages");
-    const auto order = independent
-                           ? VulkanRayShaderReadOrder::execution_domain
-                           : graphics_queue
-                                 ? VulkanRayShaderReadOrder::runtime_graphics
-                                 : VulkanRayShaderReadOrder::compute;
-    core_->record_shader_read(commands, stages, order);
+    native_vulkan_ray::record_shader_read(*core_, commands, shader_stages,
+                                          graphics_queue, independent);
   }
   std::uint32_t max_sbt_record_offset() const override {
     return core_->max_sbt_record_offset();

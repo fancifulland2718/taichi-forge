@@ -5,6 +5,7 @@
 #include "taichi/runtime/vulkan_ray_scene.h"
 #include "taichi/runtime/vulkan_ray_blas.h"
 #include "taichi/runtime/vulkan_ray_tlas.h"
+#include "taichi/runtime/native_vulkan_ray_access.h"
 
 #include <algorithm>
 #include <array>
@@ -49,6 +50,7 @@ void check_ray_storage(const storage::DenseStorageDescriptor &value,
 }  // namespace
 
 enum class VulkanRayResourceKind {
+  kTriangleScene,
   kTriangleBlas,
   kInstanceTlas,
 };
@@ -85,15 +87,85 @@ class VulkanRayResource {
   std::vector<std::weak_ptr<PreparedResourceLease>> prepared_leases_;
 };
 
+// The Program retains the original physical cores and its existing prepared
+// leases. A native view shares that owner, registration and dependency closure;
+// it neither recreates storage nor changes Program retirement ordering.
+template <class Base = NativeResource>
+class VulkanRayNativeOwner : public VulkanRayResource,
+                             public Base,
+                             public virtual NativeRayResourceAccess {
+ public:
+  explicit VulkanRayNativeOwner(Program *program)
+      : device_(*program->get_compute_device()),
+        registration_(program->get_gfx_runtime_for_borrowing()
+                          ->register_ray_resource(program->runtime_fault_domain())) {
+  }
+  Arch arch() const override { return Arch::vulkan; }
+  Device &device() const override { return device_; }
+  std::size_t workspace_bytes() const override {
+    // This is borrowed Program storage; the Program still accounts for it.
+    return 0;
+  }
+  void require_initialized(const NativeRecordingState &) const override {
+    // Existing Program build ordering is captured by the exact producer tail.
+  }
+  const std::vector<std::shared_ptr<NativeResource>> &dependencies() const override {
+    return dependencies_;
+  }
+  std::shared_ptr<NativeRayResourceRegistration> ray_registration() const override {
+    return registration_;
+  }
+
+ protected:
+  Device &device_;
+  std::shared_ptr<NativeRayResourceRegistration> registration_;
+  std::vector<std::shared_ptr<NativeResource>> dependencies_;
+};
+
+class VulkanTriangleSceneResource final : public VulkanRayNativeOwner<>,
+                                         public native_vulkan_ray::QueryAccess,
+                                         public native_vulkan_ray::GeometryAccess {
+ public:
+  VulkanTriangleSceneResource(Program *program, std::size_t vertices,
+                               std::size_t triangles)
+      : VulkanRayNativeOwner(program),
+        core_(std::make_shared<VulkanTriangleRayScene>(
+            static_cast<vulkan::VulkanDevice *>(&device_), vertices, triangles)) {
+  }
+  VulkanRayResourceKind kind() const override { return VulkanRayResourceKind::kTriangleScene; }
+  Device &device() const override { return device_; }
+  VulkanTriangleRaySceneMemoryStatistics memory_statistics() const override {
+    return core_->memory_statistics();
+  }
+  std::size_t vertex_count() const override { return core_->vertex_count(); }
+  std::size_t triangle_count() const { return core_->triangle_count(); }
+  void record_build(CommandList *commands, DevicePtr vertices, DevicePtr indices) {
+    core_->record_build(commands, vertices, indices);
+  }
+  void record_refit(CommandList *commands, DevicePtr vertices) override {
+    core_->record_refit(commands, vertices);
+  }
+  void prepare_query_variant(unsigned variant) override {
+    core_->prepare_query_variant(variant);
+  }
+  void record_query(CommandList *commands, const VulkanRayQueryPacket &packet) override {
+    core_->record_query(commands, packet);
+  }
+
+ private:
+  std::shared_ptr<VulkanTriangleRayScene> core_;
+};
+
 // Program handles retain prepared leases; the AS core only owns device state.
-class VulkanTriangleBlasResource final : public VulkanRayResource {
+class VulkanTriangleBlasResource final : public VulkanRayNativeOwner<>,
+                                        public native_vulkan_ray::BlasAccess {
  public:
   VulkanTriangleBlasResource(
       Program *program,
       std::size_t vertices,
       std::size_t triangles,
       std::shared_ptr<VulkanOpacityMicromap> micromap = {},
-      bool opaque = true) {
+      bool opaque = true) : VulkanRayNativeOwner(program) {
     TI_ERROR_IF(program == nullptr,
                 "Vulkan triangle BLAS requires a live Program.");
     core_ = std::make_shared<VulkanTriangleBlas>(
@@ -103,6 +175,7 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
   VulkanRayResourceKind kind() const override {
     return VulkanRayResourceKind::kTriangleBlas;
   }
+  Device &device() const override { return device_; }
   VulkanTriangleRaySceneMemoryStatistics memory_statistics() const override {
     return core_->memory_statistics();
   }
@@ -121,6 +194,14 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
                     bool update) {
     core_->record_build(commands, vertices, indices, update);
   }
+  void record_build(CommandList *commands, DevicePtr vertices,
+                    DevicePtr indices) override {
+    record_build(commands, vertices, indices, false);
+  }
+  void record_refit(CommandList *commands, DevicePtr vertices) override {
+    record_build(commands, vertices, {}, true);
+  }
+  VulkanTriangleBlas &blas_core() override { return *core_; }
   void retain(const vkapi::IVkCommandBuffer &commands) const {
     core_->retain(commands);
   }
@@ -133,19 +214,23 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
   std::shared_ptr<VulkanTriangleBlas> core_;
 };
 
-class VulkanInstanceTlasResource final : public VulkanRayResource {
+class VulkanInstanceTlasResource final
+    : public VulkanRayNativeOwner<NativeShaderAccelerationStructure>,
+      public native_vulkan_ray::QueryAccess,
+      public native_vulkan_ray::InstanceAccess {
  public:
   VulkanInstanceTlasResource(
       Program *program,
       std::vector<std::shared_ptr<VulkanTriangleBlasResource>> blases,
-      std::vector<std::uint32_t> offsets) {
+      std::vector<std::uint32_t> offsets) : VulkanRayNativeOwner(program) {
     TI_ERROR_IF(!program, "Vulkan instance TLAS requires a live Program.");
     std::vector<std::shared_ptr<VulkanTriangleBlas>> cores;
     std::unordered_set<VulkanTriangleBlasResource *> seen;
     for (const auto &blas : blases) {
       cores.push_back(blas->core());
-      if (seen.insert(blas.get()).second)
-        leases_.push_back(blas);
+      if (seen.insert(blas.get()).second) {
+        dependencies_.push_back(blas);
+      }
     }
     core_ = std::make_shared<VulkanInstanceTlas>(
         static_cast<vulkan::VulkanDevice *>(program->get_compute_device()),
@@ -154,6 +239,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
   VulkanRayResourceKind kind() const override {
     return VulkanRayResourceKind::kInstanceTlas;
   }
+  Device &device() const override { return device_; }
   VulkanTriangleRaySceneMemoryStatistics memory_statistics() const override {
     return core_->memory_statistics();
   }
@@ -168,6 +254,11 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
                     bool update) {
     core_->record_build(commands, instances, update);
   }
+  void record_metadata(CommandList *commands,
+                        const std::vector<VulkanRayInstanceInfo> &instances,
+                        bool update) override {
+    core_->record_build(commands, instances, update);
+  }
   void prepare_transforms() {
     core_->prepare_transforms();
   }
@@ -176,6 +267,10 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     core_->record_transforms(
         commands, {{packet.shader_binding.pointer, packet.shader_binding.bytes},
                    packet.parameters});
+  }
+  void record_transforms(CommandList *commands,
+                         const VulkanRayTransformPacket &packet) override {
+    core_->record_transforms(commands, packet);
   }
   void prepare_query_variant(unsigned variant) {
     core_->prepare_query_variant(variant);
@@ -193,6 +288,10 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
                              graphics ? VulkanRayShaderReadOrder::runtime_graphics
                                       : VulkanRayShaderReadOrder::compute);
   }
+  void record_shader_read(CommandList *commands, NativeShaderStages stages,
+                          bool graphics, bool independent) override {
+    native_vulkan_ray::record_shader_read(*core_, commands, stages, graphics, independent);
+  }
   void bind_for_kernel(ShaderResourceSet *bindings,
                        int binding,
                        CommandList *commands) {
@@ -200,8 +299,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
   }
 
  private:
-  // Keep existing Program lease owners alive, once per distinct source BLAS.
-  std::vector<std::shared_ptr<VulkanTriangleBlasResource>> leases_;
+  // dependencies_ retains each original Program BLAS owner exactly once.
   std::shared_ptr<VulkanInstanceTlas> core_;
 };
 
@@ -298,9 +396,8 @@ std::uint64_t Program::create_vulkan_triangle_ray_scene(
   auto storage = prepare_native_storage({&vertices, &indices}, {false, false});
   std::uint64_t handle = 0;
   with_prepared_native_storage(*storage, [&] {
-    auto scene = std::make_shared<VulkanTriangleRayScene>(
-        static_cast<vulkan::VulkanDevice *>(get_compute_device()), vertex_count,
-        triangle_count);
+    auto scene = std::make_shared<VulkanTriangleSceneResource>(
+        this, vertex_count, triangle_count);
     const auto vertex_pointer = storage->binding(0).pointer;
     const auto index_pointer = storage->binding(1).pointer;
     enqueue_compute_op_lambda(
@@ -415,7 +512,7 @@ std::size_t Program::execute_vulkan_ray_query(
           },
           {});
     } else {
-      std::shared_ptr<VulkanTriangleRayScene> scene;
+      std::shared_ptr<VulkanTriangleSceneResource> scene;
       {
         std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
         const auto found = vulkan_ray_scenes_.find(packet.scene_handle);
@@ -514,7 +611,7 @@ std::size_t Program::execute_vulkan_ray_geometry(
           },
           {});
     } else {
-      std::shared_ptr<VulkanTriangleRayScene> scene;
+      std::shared_ptr<VulkanTriangleSceneResource> scene;
       {
         std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
         const auto found = vulkan_ray_scenes_.find(command.handle);
@@ -864,7 +961,7 @@ Program::debug_vulkan_ray_resource_stats() {
 }
 
 void Program::destroy_vulkan_triangle_ray_scene(std::uint64_t handle) {
-  std::shared_ptr<VulkanTriangleRayScene> scene;
+  std::shared_ptr<VulkanTriangleSceneResource> scene;
   bool record_retirement = false;
   {
     auto submission_guard = acquire_runtime_resource_submission_guard();
@@ -915,6 +1012,24 @@ void Program::destroy_vulkan_ray_resource(std::uint64_t handle) {
   }
 }
 
+std::shared_ptr<NativeResource> Program::acquire_vulkan_ray_native_resource(
+    std::uint64_t handle, bool triangle_scene) {
+  auto guard = acquire_runtime_resource_submission_guard();
+  std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+  if (triangle_scene) {
+    const auto found = vulkan_ray_scenes_.find(handle);
+    TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
+                "Vulkan triangle ray scene handle is stale or closed.");
+    return found->second;
+  }
+  const auto found = vulkan_ray_resources_.find(handle);
+  TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+              "Vulkan ray resource handle is stale or closed.");
+  auto native = std::dynamic_pointer_cast<NativeResource>(found->second);
+  TI_ASSERT(native);
+  return native;
+}
+
 void Program::vulkan_clear_ray_scenes() {
   vulkan_clear_ray_programs();
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
@@ -932,6 +1047,11 @@ void Program::vulkan_clear_ray_scenes() {
 #else
 
 namespace taichi::lang {
+
+std::shared_ptr<NativeResource> Program::acquire_vulkan_ray_native_resource(
+    std::uint64_t, bool) {
+  TI_ERROR("Vulkan AS views require TI_WITH_VULKAN=ON.");
+}
 
 std::function<void(CommandList *)> Program::prepare_vulkan_ray_shader_binding(
     std::uint64_t,

@@ -220,7 +220,8 @@ class VulkanParallelSortPlan;
 class VulkanSpdPlan;
 class CudaCudssPlan;
 struct CudaCudssPlanSnapshot;
-class VulkanTriangleRayScene;
+class VulkanTriangleSceneResource;
+class NativeResource;
 class VulkanRayResource;
 class VulkanGraphicsPipelineResource;
 class VulkanRayProgramResource;
@@ -1604,6 +1605,11 @@ class TI_DLL_EXPORT Program {
                                        CommandList *command_list);
 
   void destroy_vulkan_ray_resource(std::uint64_t handle);
+
+  // Cold native view of the original physical owner. This does not create an
+  // AS or grant cross-queue access; GFX admission supplies that separate loan.
+  std::shared_ptr<NativeResource> acquire_vulkan_ray_native_resource(
+      std::uint64_t handle, bool triangle_scene = false);
 
   bool vulkan_ray_program_available() const;
   std::uint64_t create_vulkan_ray_program(
@@ -4428,7 +4434,7 @@ class TI_DLL_EXPORT Program {
     CudaProviderInflightPlanMap cuda_provider_plans;
     std::vector<std::shared_ptr<VulkanGraphicsPipelineResource>>
         vulkan_graphics_pipelines;
-    std::vector<std::shared_ptr<VulkanTriangleRayScene>> vulkan_ray_scenes;
+    std::vector<std::shared_ptr<VulkanTriangleSceneResource>> vulkan_ray_scenes;
     std::vector<std::shared_ptr<VulkanRayResource>> vulkan_ray_resources;
     std::shared_ptr<RuntimeCompletionCudaEventPool> cuda_event_pool;
     std::vector<void *> cuda_batch_events;
@@ -4605,9 +4611,9 @@ class TI_DLL_EXPORT Program {
       vulkan_graphics_pipeline_retirements_;
   std::uint64_t next_vulkan_graphics_pipeline_handle_{1};
   std::mutex vulkan_ray_scene_mutex_;
-  std::unordered_map<std::uint64_t, std::shared_ptr<VulkanTriangleRayScene>>
+  std::unordered_map<std::uint64_t, std::shared_ptr<VulkanTriangleSceneResource>>
       vulkan_ray_scenes_;
-  std::vector<std::shared_ptr<VulkanTriangleRayScene>>
+  std::vector<std::shared_ptr<VulkanTriangleSceneResource>>
       vulkan_ray_scene_retirements_;
   std::uint64_t next_vulkan_ray_scene_handle_{1};
   std::unordered_map<std::uint64_t, std::shared_ptr<VulkanRayResource>>

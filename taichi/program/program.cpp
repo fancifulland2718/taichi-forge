@@ -6604,7 +6604,7 @@ void Program::release_completed_vulkan_native_resources() {
     runtime_completion_cuda_event_pool_->release(event, /*reusable=*/true);
   }
   std::vector<std::shared_ptr<VulkanGraphicsPipelineResource>> graphics;
-  std::vector<std::shared_ptr<VulkanTriangleRayScene>> ray_scenes;
+  std::vector<std::shared_ptr<VulkanTriangleSceneResource>> ray_scenes;
   std::vector<std::shared_ptr<VulkanRayResource>> ray_resources;
   {
     std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);

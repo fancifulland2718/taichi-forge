@@ -4,12 +4,176 @@
 #include "taichi/runtime/vulkan_ray_query.h"
 #include "taichi/runtime/vulkan_ray_scene.h"
 #include "taichi/runtime/vulkan_ray_tlas.h"
+#include "taichi/runtime/native_vulkan_ray_access.h"
+#include "taichi/runtime/native_ray_admission.h"
+#include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/gfx/runtime.h"
+#include "taichi/program/program.h"
+#include "taichi/program/ndarray.h"
+#include "taichi/program/storage_view.h"
+#include "taichi/common/operation_json.h"
 
 #include <array>
 #include <limits>
 #include <vector>
 
 namespace taichi::lang {
+
+TEST(VulkanRayScene, ProgramOwnersUseTheNativeOperationContracts) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  Program program(Arch::vulkan);
+  program.materialize_runtime();
+  auto &device = static_cast<vulkan::VulkanDevice &>(*program.get_compute_device());
+  if (!device.vk_caps().acceleration_structure || !device.vk_caps().ray_query)
+    GTEST_SKIP() << "Acceleration structures and ray queries required";
+  auto *runtime = program.get_gfx_runtime_for_borrowing();
+  auto allocate = [&](DataType dtype, std::vector<int> shape) {
+    return program.create_ndarray(dtype, shape, ExternalArrayLayout::kNull, false);
+  };
+  auto *vertices = allocate(PrimitiveType::f32, {3, 3});
+  auto *indices = allocate(PrimitiveType::i32, {1, 3});
+  auto *rays = allocate(PrimitiveType::f32, {1, 8});
+  auto *hits = allocate(PrimitiveType::f32, {1, 4});
+  auto *ids = allocate(PrimitiveType::i32, {1, 4});
+  auto upload = [&](Ndarray *array, const auto &data) {
+    auto pointer = array->get_device_allocation().get_ptr();
+    const void *source = data.data();
+    std::size_t bytes = sizeof(data);
+    ASSERT_EQ(device.upload_data(&pointer, &source, &bytes), RhiResult::success);
+  };
+  auto binding = [](Ndarray *array, DataType dtype, std::vector<uint64_t> shape) {
+    std::size_t bytes = 4;
+    for (auto extent : shape)
+      bytes *= extent;
+    return NativeArrayBinding{array->get_device_allocation().get_ptr(), bytes,
+                              dtype, std::move(shape), {}};
+  };
+  const auto v = storage::describe_ndarray_storage(*vertices);
+  const auto ix = storage::describe_ndarray_storage(*indices);
+  ASSERT_TRUE(v);
+  ASSERT_TRUE(ix);
+  upload(indices, std::array<int32_t, 3>{0, 1, 2});
+  upload(vertices, std::array<float, 9>{0, 0, 0, 2, 0, 0, 0, 2, 0});
+  upload(rays, std::array<float, 8>{0.5f, 0.5f, 3, 0.01f, 0, 0, -1, 10});
+  const auto scene_id = program.create_vulkan_triangle_ray_scene(
+      *v.descriptor, *ix.descriptor, 3, 1);
+  const auto blas_id = program.create_vulkan_triangle_blas_resource(3, 1);
+  program.execute_vulkan_ray_geometry(program.prepare_vulkan_ray_geometry(
+      blas_id, true, *v.descriptor, &*ix.descriptor, 3, 1));
+  const auto tlas_id = program.create_vulkan_instance_tlas_resource({blas_id});
+  VulkanRayInstanceInfo metadata;
+  metadata.custom_index = 37;
+  program.vulkan_instance_tlas_build(tlas_id, {metadata}, false);
+  program.synchronize();
+  {
+    auto scene = program.acquire_vulkan_ray_native_resource(scene_id, true);
+    auto blas = program.acquire_vulkan_ray_native_resource(blas_id);
+    auto tlas = program.acquire_vulkan_ray_native_resource(tlas_id);
+    EXPECT_EQ(tlas, program.acquire_vulkan_ray_native_resource(tlas_id));
+    EXPECT_TRUE(dynamic_cast<native_vulkan_ray::QueryAccess *>(scene.get()));
+    EXPECT_TRUE(dynamic_cast<native_vulkan_ray::GeometryAccess *>(scene.get()));
+    EXPECT_FALSE(dynamic_cast<NativeAccelerationStructure *>(scene.get()));
+    EXPECT_TRUE(dynamic_cast<native_vulkan_ray::BlasAccess *>(blas.get()));
+    EXPECT_FALSE(dynamic_cast<native_vulkan_ray::QueryAccess *>(blas.get()));
+    EXPECT_TRUE(dynamic_cast<NativeShaderAccelerationStructure *>(tlas.get()));
+    auto uses = collect_native_ray_uses(tlas, true);
+    ASSERT_EQ(uses.size(), 2u);
+    EXPECT_EQ(uses[0].resource, tlas);
+    EXPECT_TRUE(uses[0].writes);
+    EXPECT_EQ(uses[1].resource, blas);
+    EXPECT_FALSE(uses[1].writes);
+    const auto original = dynamic_cast<NativeRayResourceAccess &>(*blas).ray_registration();
+    EXPECT_EQ(original, dynamic_cast<NativeRayResourceAccess &>(*uses[1].resource).ray_registration());
+    EXPECT_EQ(tlas->workspace_bytes(), 0u);  // The Program owns the AS allocation.
+
+    NativePreparationContext context(Arch::vulkan, device, {}, program.runtime_fault_domain());
+    context.gfx_runtime = runtime;
+    const auto &registry = native_operation_registry();
+    auto prepare = [&](const char *operation, NativeOperationBindings bindings,
+                       const char *parameters = "{}") {
+      NativeOperationDescription description;
+      description.provider = "vulkan_ray";
+      description.operation = operation;
+      description.version = 1;
+      description.parameters = liong::json::parse_complete(parameters);
+      for (const auto &[name, value] : bindings)
+        description.bindings.emplace(name, name);
+      return registry.prepare(context, registry.decode(description), bindings);
+    };
+    const auto vertex_binding = binding(vertices, PrimitiveType::f32, {3, 3});
+    auto scene_refit = prepare("refit", {{"scene", scene}, {"vertices", vertex_binding}});
+    auto blas_refit = prepare("refit", {{"scene", blas}, {"vertices", vertex_binding}});
+    auto query = [&](const std::shared_ptr<NativeResource> &resource) {
+      return prepare("query", {{"scene", resource},
+                     {"rays", binding(rays, PrimitiveType::f32, {1, 8})},
+                     {"hits", binding(hits, PrimitiveType::f32, {1, 4})},
+                     {"hit_indices", binding(ids, PrimitiveType::i32, {1, 4})}},
+                     "{\"ray_count\":1}");
+    };
+    auto scene_query = query(scene);
+    auto tlas_query = query(tlas);
+    auto run = [&](const std::shared_ptr<NativeOperation> &operation) {
+      NativeRecordingState state;
+      operation->validate_recording(state);
+      runtime->enqueue_compute_op_lambda(
+          [operation](Device *device, CommandList *commands) {
+            operation->record_vulkan(device, commands);
+          }, {});
+    };
+    auto expect_hit = [&](float distance, bool instance) {
+      program.synchronize();
+      std::array<float, 4> result{};
+      auto pointer = hits->get_device_allocation().get_ptr();
+      void *destination = result.data();
+      std::size_t bytes = sizeof(result);
+      ASSERT_EQ(device.readback_data(&pointer, &destination, &bytes), RhiResult::success);
+      EXPECT_FLOAT_EQ(result[0], distance);
+      if (distance >= 0) {
+        EXPECT_FLOAT_EQ(result[1], 0.25f);
+        EXPECT_FLOAT_EQ(result[2], 0.25f);
+      } else {
+        EXPECT_EQ(result, (std::array<float, 4>{-1, 0, 0, 0}));
+      }
+      std::array<int32_t, 4> indices{};
+      pointer = ids->get_device_allocation().get_ptr();
+      destination = indices.data();
+      bytes = sizeof(indices);
+      ASSERT_EQ(device.readback_data(&pointer, &destination, &bytes), RhiResult::success);
+      EXPECT_EQ(indices[0], distance < 0 ? -1 : 0);
+      if (distance < 0)
+        EXPECT_EQ(indices, (std::array<int32_t, 4>{-1, -1, -1, 0}));
+      if (instance && distance >= 0)
+        EXPECT_EQ(indices[2], 37);
+    };
+    for (int step = 0; step < 4; ++step) {
+      const float x = step == 2 ? 8 : 0;
+      const float z = step == 1 ? 1 : 0;
+      upload(vertices, std::array<float, 9>{x, 0, z, x + 2, 0, z, x, 2, z});
+      const float distance = step == 2 ? -1 : 3 - z;
+      run(scene_refit);
+      run(blas_refit);
+      program.vulkan_instance_tlas_build(tlas_id, {metadata}, true);
+      run(tlas_query);
+      expect_hit(distance, true);
+      // A native mutation is visible through the original Program API.
+      program.vulkan_triangle_ray_query(scene_id, rays, hits, 1, ids);
+      expect_hit(distance, false);
+      program.execute_vulkan_ray_geometry(program.prepare_vulkan_ray_geometry(
+          scene_id, false, *v.descriptor, nullptr, 3, 1));
+      run(scene_query);
+      expect_hit(distance, false);
+    }
+    // A TLAS retains the original BLAS owner after its public handle closes.
+    program.destroy_vulkan_ray_resource(blas_id);
+    EXPECT_ANY_THROW(program.acquire_vulkan_ray_native_resource(blas_id));
+    EXPECT_EQ(original, dynamic_cast<NativeRayResourceAccess &>(*uses[1].resource).ray_registration());
+    run(tlas_query);
+    expect_hit(3, true);
+  }
+  program.destroy_vulkan_ray_resource(tlas_id);
+  program.destroy_vulkan_triangle_ray_scene(scene_id);
+}
 
 TEST(VulkanRayShaderRead, SeparatesDomainBuildsFromRuntimeGraphicsSemaphores) {
   using Order = VulkanRayShaderReadOrder;
