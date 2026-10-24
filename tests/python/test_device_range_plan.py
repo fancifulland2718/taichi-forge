@@ -64,10 +64,12 @@ def test_range_plan_keeps_code_shared_and_snapshots_per_task(tmp_path):
     baseline, selected = select(sequence, out, limits)
     assert len(selected.device_range_tasks) == 2
     symbols = [ti.graph.Arg(ti.graph.ArgKind.NDARRAY, n, ti.i32, ndim=1) for n in ("out", "limits")]
-    fixed = graph(sequence, baseline, symbols)
     program = ti.lang.impl.get_runtime()
     program.set_kernel_executable_lifecycle_telemetry_enabled(True)
     program.debug_kernel_executable_lifecycle_stats(True)
+    # select() already compiled the ordinary specialization to obtain its
+    # proof. Neither a baseline plan nor its launch-only selection needs new code.
+    fixed = graph(sequence, baseline, symbols)
     device = graph(sequence, selected, symbols)
     assert program.debug_kernel_executable_lifecycle_stats()["compiler_invocations"] == 0
     program.set_kernel_executable_lifecycle_telemetry_enabled(False)

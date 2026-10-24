@@ -374,6 +374,12 @@ Kernel::get_kernel_optimization_spec() const {
 
 std::string Kernel::optimization_spec_cache_key() const {
   if (offload_execution_plan_.has_value()) {
+    // Vulkan admission permits only launch-time range selection. Its exact
+    // topology and proof are validated against the compiled artifact, while
+    // the selected indices belong to the invocation/Graph entry. Reuse the
+    // ordinary payload instead of compiling it again under an all-default plan.
+    if (program->compile_config().arch == Arch::vulkan)
+      return {};
     return fmt::format("oep:{}",
                        offload_execution_plan_->compilation_identity);
   }
@@ -401,6 +407,8 @@ std::string Kernel::optimization_spec_cache_key() const {
 const std::string &Kernel::optimization_spec_identity() const {
   static const std::string kEmptyIdentity;
   if (offload_execution_plan_.has_value()) {
+    if (program->compile_config().arch == Arch::vulkan)
+      return kEmptyIdentity;
     return offload_execution_plan_->compilation_identity;
   }
   return kernel_optimization_spec_.has_value()
