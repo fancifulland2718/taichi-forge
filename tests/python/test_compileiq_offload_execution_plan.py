@@ -78,9 +78,8 @@ def test_compileiq_plan_domain_is_complete_opaque_and_baseline_inclusive():
     baseline = search.recipe_manifest(search.baseline_recipe_id)
     task_count = len(baseline["tasks"])
 
-    assert search.capability["package_version"] == (
-        "1.0.0dev6+taichiforge.report1"
-    )
+    assert search.capability["protocol_revision"] == 6
+    assert search.capability["package_version"]
     assert search.baseline_recipe_id in search.recipe_ids
     assert 3 <= len(search.recipe_ids) <= 4096
     assert all(len(search.recipe_manifest(recipe_id)["tasks"]) == task_count for recipe_id in search.recipe_ids)
@@ -241,6 +240,10 @@ def test_modified_compileiq_exhausts_and_materializes_full_plan_domain():
 
     plans = compileiq_offload_execution_plan_search(fill, values)
     resets = []
+    # Search identity describes a baseline plus edits. The materialized plan
+    # retains its existing execution identity, independently of that encoding.
+    ordinal_by_plan = {plans.recipe_manifest(recipe_id)["execution_plan_identity"]: i
+                       for i, recipe_id in enumerate(plans.recipe_ids)}
 
     def reset_workload():
         resets.append(len(resets))
@@ -248,7 +251,7 @@ def test_modified_compileiq_exhausts_and_materializes_full_plan_domain():
     def measure(bound):
         bound(values)
         ti.sync()
-        return float(plans.recipe_ids.index(bound.plan.recipe_id))
+        return float(ordinal_by_plan[bound.plan.identity])
 
     search = plans.compileiq_search(
         lambda parameters: plans.objective(

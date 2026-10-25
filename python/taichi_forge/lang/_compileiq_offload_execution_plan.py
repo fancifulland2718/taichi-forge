@@ -22,8 +22,8 @@ from taichi_forge.lang._offload_execution_plan import (
 
 
 _PROVIDER_NAMESPACE = "taichi_forge.lang.offload_execution_plan"
-_FIRST_STAGE_VERSION = "single-task-perturbation.v2"
-_REFINED_STAGE_VERSION = "observed-frontier-pairwise.v1"
+_FIRST_STAGE_VERSION = "single-task-perturbation.v3"
+_REFINED_STAGE_VERSION = "observed-frontier-pairwise.v2"
 _WORKGROUP_SIZES = (64, 128, 256, 512)
 _THREAD_LOCAL_MODES = ("on", "off")
 _CUDA_MIN_BLOCKS_PER_SM = (1, 4)
@@ -72,13 +72,27 @@ class _PlanEdit:
 
 @dataclass(frozen=True)
 class _PlanRecipe:
-    plan: _OffloadExecutionPlan
+    baseline: _OffloadExecutionPlan
     edits: tuple[_PlanEdit, ...] = ()
     parent_recipe_ids: tuple[str, ...] = ()
 
     @property
+    def plan(self):
+        # Generation retains deltas, not a complete task topology per choice.
+        # A concrete plan is created only for inspection or materialization.
+        plan = self.baseline
+        for edit in self.edits:
+            plan = plan.replace_task(edit.task_index, **{edit.field: edit.value})
+        return plan
+
+    @property
     def recipe_id(self):
-        return self.plan.recipe_id
+        if not self.edits:
+            return self.baseline.recipe_id
+        return _identity("forge-offload-delta-v1:", {
+            "baseline": self.baseline.identity,
+            "edits": tuple(asdict(edit) for edit in self.edits),
+        })
 
 
 @dataclass(frozen=True)
@@ -348,9 +362,9 @@ class CompileIQOffloadExecutionPlanSearch:
     @staticmethod
     def _add_single_axis(recipes, baseline, task_index, field, values):
         for value in values:
-            plan = baseline.replace_task(task_index, **{field: value})
             edit = _PlanEdit(task_index, field, value)
-            recipes.setdefault(plan.recipe_id, _PlanRecipe(plan, (edit,)))
+            recipe = _PlanRecipe(baseline, (edit,))
+            recipes.setdefault(recipe.recipe_id, recipe)
 
     def _initialize(
         self,
@@ -369,14 +383,14 @@ class CompileIQOffloadExecutionPlanSearch:
         if len(recipes) > 4096:
             raise ValueError("complete plan domain exceeds the 4096-recipe limit")
         semantic_payload = {
-            "schema": "taichi_forge.compileiq-offload-plan-semantics.v1",
+            "schema": "taichi_forge.compileiq-offload-plan-semantics.v2",
             "semantic_kernel_identity": baseline_plan.semantic_kernel_identity,
+            "baseline": baseline_plan.stable_payload,
             "stage": stage,
             "stage_manifest": stage_manifest,
             "recipes": tuple(
                 {
                     "recipe_id": recipe.recipe_id,
-                    "plan": recipe.plan.stable_payload,
                     "edits": tuple(asdict(edit) for edit in recipe.edits),
                     "parent_recipe_ids": recipe.parent_recipe_ids,
                 }
@@ -449,12 +463,13 @@ class CompileIQOffloadExecutionPlanSearch:
 
     def select(self, parameters):
         recipe = self._recipe(self._decoded_recipe_id(parameters))
+        plan = recipe.plan
         return OffloadExecutionPlanRecipeSelection(
             recipe_id=recipe.recipe_id,
-            execution_plan_identity=recipe.plan.identity,
-            compilation_identity=recipe.plan.compilation_identity,
-            semantic_kernel_identity=recipe.plan.semantic_kernel_identity,
-            task_count=len(recipe.plan.tasks),
+            execution_plan_identity=plan.identity,
+            compilation_identity=plan.compilation_identity,
+            semantic_kernel_identity=plan.semantic_kernel_identity,
+            task_count=len(plan.tasks),
             stage=self.stage,
             edits=tuple(asdict(edit) for edit in recipe.edits),
             parent_recipe_ids=recipe.parent_recipe_ids,
@@ -496,14 +511,15 @@ class CompileIQOffloadExecutionPlanSearch:
 
     def recipe_manifest(self, recipe_id):
         recipe = self._recipe(recipe_id)
+        plan = recipe.plan
         return MappingProxyType(
             {
                 "recipe_id": recipe.recipe_id,
                 "is_baseline": recipe.recipe_id == self.baseline_recipe_id,
-                "execution_plan_identity": recipe.plan.identity,
-                "compilation_identity": recipe.plan.compilation_identity,
-                "semantic_kernel_identity": recipe.plan.semantic_kernel_identity,
-                "tasks": tuple(asdict(task) for task in recipe.plan.tasks),
+                "execution_plan_identity": plan.identity,
+                "compilation_identity": plan.compilation_identity,
+                "semantic_kernel_identity": plan.semantic_kernel_identity,
+                "tasks": tuple(asdict(task) for task in plan.tasks),
                 "edits": tuple(asdict(edit) for edit in recipe.edits),
                 "parent_recipe_ids": recipe.parent_recipe_ids,
             }
@@ -535,17 +551,12 @@ class CompileIQOffloadExecutionPlanSearch:
                 fields = tuple((edit.task_index, edit.field) for edit in edits)
                 if len(set(fields)) != len(fields):
                     continue
-                plan = self._baseline_plan
-                for edit in edits:
-                    plan = plan.replace_task(edit.task_index, **{edit.field: edit.value})
-                recipes.setdefault(
-                    plan.recipe_id,
-                    _PlanRecipe(
-                        plan=plan,
-                        edits=edits,
-                        parent_recipe_ids=tuple(sorted((left.recipe_id, right.recipe_id))),
-                    ),
+                recipe = _PlanRecipe(
+                    baseline=self._baseline_plan,
+                    edits=edits,
+                    parent_recipe_ids=tuple(sorted((left.recipe_id, right.recipe_id))),
                 )
+                recipes.setdefault(recipe.recipe_id, recipe)
         if len(recipes) > 4096:
             raise ValueError("observed-frontier pairwise domain exceeds 4096 recipes")
 
@@ -641,7 +652,7 @@ class CompileIQOffloadExecutionPlanSearch:
 
     def manifest(self):
         return {
-            "schema": "taichi_forge.compileiq-offload-plan-search.v1",
+            "schema": "taichi_forge.compileiq-offload-plan-search.v2",
             **self._transport.manifest(),
             "stage": self.stage,
             "stage_manifest": dict(self._stage_manifest),
@@ -654,7 +665,13 @@ class CompileIQOffloadExecutionPlanSearch:
                 }
                 for logical_task_id, axes in self._eligibility
             ),
-            "recipes": tuple(dict(self.recipe_manifest(recipe_id)) for recipe_id in self.recipe_ids),
+            "baseline_plan": self._baseline_plan.stable_payload,
+            "recipes": tuple({
+                "recipe_id": recipe.recipe_id,
+                "is_baseline": not recipe.edits,
+                "edits": tuple(asdict(edit) for edit in recipe.edits),
+                "parent_recipe_ids": recipe.parent_recipe_ids,
+            } for recipe in self._recipes.values()),
             "compileiq_visibility": "opaque_complete_recipe_tokens_only",
             "qualification": "independent_forge_worst_positive_v1",
             "runtime_admission": "explicit_qualified_scope_only",

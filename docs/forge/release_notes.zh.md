@@ -57,6 +57,9 @@
   recording 执行的候选。**CompileIQ 自动调优默认关闭**，普通 JIT/Graph/AOT 不会自动搜索。
   [搜索报告](graph_recipe_integration.zh.md)新增完整搜索成本账、观测来源及冷成本等效执行次数，
   与回本次数分开；失败/未选中试验计入搜索，续跑中缺失的历史墙钟时间保持未知。
+- 显式 CUDA offload-plan 搜索共用基线并保留不可变修改，不再为每个候选常驻完整任务计划；
+  查看或绑定时才构造所选计划，已准备执行的重放不变。紧凑搜索 manifest 升为版本 2，
+  候选描述身份单独版本化，原有执行计划及代码身份保持不变。
 - frontend 与 native runtime 使用私有 ABI **220**，持久执行计划为 **27**，
   编译缓存 schema 为 **85**；LLVM AOT metadata 为 **19/20**、GFX metadata 为 **15**。
   请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。

@@ -70,6 +70,10 @@ combination. Consult the linked API contracts and capability queries for exact s
   [Search reports](graph_recipe_integration.en.md) add whole-search accounting, measurement
   sources and cold-cost execution equivalents, separately from break-even counts. Failed and
   unselected trials are included; missing historical wall time after resume stays unknown.
+- Explicit CUDA offload-plan search retains a shared baseline and immutable edits instead
+  of a full task plan for every candidate. Inspection or binding constructs the selected
+  plan; prepared execution is unchanged. The compact search manifest is version 2, with
+  versioned candidate identities distinct from the unchanged execution/code identities.
 - The frontend/native private ABI is **220**, persistent execution-plan version **27**, and
   compiled-cache schema **85**; LLVM AOT metadata is **19/20**, GFX metadata **15**.
   Update compatible components together; matching Git commits
