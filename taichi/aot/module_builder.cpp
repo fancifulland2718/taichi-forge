@@ -72,7 +72,8 @@ void AotModuleBuilder::record_kernel_export(const std::string &name,
     argument_origins_.emplace(
         name, aot::canonical_argument_origins(*kernel->argument_origins));
   }
-  kernel_exports_.emplace(name, ExportIdentity{kernel, launch_abi});
+  kernel_exports_.emplace(
+      name, ExportIdentity{kernel, launch_abi, kernel->retain_definition()});
   if (launch_abi == "ordinary")
     ordinary_export_names_.emplace(kernel, name);
 }

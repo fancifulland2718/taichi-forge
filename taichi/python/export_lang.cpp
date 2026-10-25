@@ -2455,8 +2455,13 @@ void export_lang(py::module &m) {
            &Program::debug_cpu_scheduler_telemetry,
            py::arg("reset") = false)
       .def("_debug_kernel_definition_count", [](const Program &program) {
+        auto lock = program.acquire_kernel_definition_lock();
         return program.kernels.size();
       })
+      .def("_collect_unused_kernel_definitions",
+           &Program::collect_unused_kernel_definitions,
+           py::arg("force") = false,
+           py::call_guard<py::gil_scoped_release>())
       .def("_debug_kernel_lifecycle_stats", [](Program &program) {
         const auto registered = [&] {
           py::gil_scoped_release release;
@@ -2464,6 +2469,7 @@ void export_lang(py::module &m) {
         }();
         std::size_t live_definitions = 0;
         std::size_t retired_shells = 0;
+        auto definitions_lock = program.acquire_kernel_definition_lock();
         for (const auto &kernel : program.kernels) {
           if (kernel->ir == nullptr) {
             ++retired_shells;
@@ -2767,11 +2773,26 @@ void export_lang(py::module &m) {
       .def(
           "create_kernel",
           [](Program *program, const std::function<void(Kernel *)> &body,
-             const std::string &name, AutodiffMode autodiff_mode) -> Kernel * {
-            py::gil_scoped_release release;
-            return &program->kernel(body, name, autodiff_mode);
-          },
-          py::return_value_policy::reference)
+             const std::string &name, AutodiffMode autodiff_mode) {
+            Kernel *kernel;
+            {
+              py::gil_scoped_release release;
+              kernel = &program->kernel(body, name, autodiff_mode);
+            }
+            std::unique_ptr<std::shared_ptr<void>> lease;
+            {
+              auto lock = program->acquire_kernel_definition_lock();
+              lease = std::make_unique<std::shared_ptr<void>>(
+                  kernel->enable_definition_reclamation());
+            }
+            py::capsule owner(lease.get(), [](void *ptr) {
+              delete static_cast<std::shared_ptr<void> *>(ptr);
+            });
+            lease.release();
+            auto wrapper = py::cast(kernel, py::return_value_policy::reference);
+            py::detail::keep_alive_impl(wrapper, owner);
+            return wrapper;
+          })
       .def("create_function", &Program::create_function,
            py::return_value_policy::reference)
        .def("create_sparse_matrix",
@@ -5752,7 +5773,8 @@ void export_lang(py::module &m) {
         py::dict entries;
         for (const auto &[entry, kernel] : builder->add_graph(name, graph)) {
           entries[py::str(entry)] =
-              py::cast(kernel, py::return_value_policy::reference);
+              py::cast(kernel, py::return_value_policy::reference_internal,
+                       py::cast(builder, py::return_value_policy::reference));
         }
         return entries;
       })
@@ -7611,6 +7633,8 @@ void export_lang(py::module &m) {
            py::arg("conditional_type"), py::arg("default_branch") = -1);
 
   py::class_<Kernel>(m, "Kernel")
+      .def("_charge_specialization", &Kernel::charge_specialization)
+      .def("_release_specialization_charge", &Kernel::release_specialization_charge)
       .def("_argpack_layout_json", [](Kernel *kernel, int argument) {
         TI_ERROR_IF(!kernel->program || kernel->definition_retired() || argument < 0,
                     "ArgPack layout requires a live compiled kernel argument");
@@ -7680,7 +7704,7 @@ void export_lang(py::module &m) {
           [](Kernel *self) -> ASTBuilder * {
             return &self->context->builder();
           },
-          py::return_value_policy::reference)
+          py::return_value_policy::reference_internal)
       .def("create_inline_function", &Kernel::create_inline_function,
            py::return_value_policy::reference_internal);
 
@@ -10179,7 +10203,8 @@ void export_lang(py::module &m) {
             for (const auto &dispatch : graph->dispatches) {
               result.append(py::make_tuple(
                   py::cast(dispatch.ti_kernel,
-                           py::return_value_policy::reference),
+                           py::return_value_policy::reference_internal,
+                           py::cast(&record, py::return_value_policy::reference)),
                   dispatch.symbolic_args));
             }
             return result;

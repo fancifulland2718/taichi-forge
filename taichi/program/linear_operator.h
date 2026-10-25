@@ -195,6 +195,7 @@ class LinearOperatorRecordableKernel {
  private:
   Program *program_{nullptr};
   Kernel *kernel_{nullptr};
+  std::shared_ptr<void> definition_lease_;
   const aot::CompiledGraph *graph_{nullptr};
   std::int32_t active_size_{0};
   Ndarray *topology_{nullptr};

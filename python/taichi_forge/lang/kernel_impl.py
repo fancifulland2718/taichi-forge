@@ -1665,6 +1665,10 @@ class Kernel:
         with self.runtime._kernel_compilation_lock:
             if key in self.compiled_kernels:
                 return
+            self.runtime.collect_unused_kernel_definitions(
+                force=self.runtime._resident_specialization_count
+                >= self.runtime.kernel_specialization_limit
+            )
             if offload_execution_plan is None and self._try_relocatable_template(
                 key, args, task_launch_policy, range_one_to_one
             ):
@@ -1726,6 +1730,7 @@ class Kernel:
                 offload_execution_plan,
             )
             self.runtime._compiled_specialization_count += 1
+            self.compiled_kernels[key]._charge_specialization()
             self.runtime._resident_specialization_count += 1
             if offload_execution_plan is None:
                 self._publish_relocatable_candidate(

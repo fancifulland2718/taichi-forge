@@ -5,6 +5,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "taichi/util/lang_util.h"
@@ -142,6 +143,29 @@ class TI_DLL_EXPORT Kernel : public Callable {
          AutodiffMode autodiff_mode = AutodiffMode::kNone);
 
   ~Kernel() override;
+
+  // Python-created definitions are reclaimable once every cold consumer has
+  // released this token. Legacy C++ definitions remain Program-owned.
+  std::shared_ptr<void> enable_definition_reclamation();
+  std::shared_ptr<void> retain_definition() const {
+    return definition_lease_.lock();
+  }
+  bool definition_unreferenced() const {
+    return definition_reclaimable_ && definition_lease_.expired();
+  }
+  void charge_specialization() {
+    specialization_charged_ = true;
+  }
+  bool release_specialization_charge() {
+    return std::exchange(specialization_charged_, false);
+  }
+
+ private:
+  std::weak_ptr<void> definition_lease_;
+  bool definition_reclaimable_{false};
+  bool specialization_charged_{false};
+
+ public:
 
   bool ir_is_ast() const {
     return ir_is_ast_;

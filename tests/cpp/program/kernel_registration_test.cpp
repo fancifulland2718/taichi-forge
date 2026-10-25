@@ -53,6 +53,55 @@ TEST(ExecutionHandleInventory, KeepsAllLiveOwnersWithoutCapacityLimit) {
   EXPECT_EQ(count, owners.size());
 }
 
+TEST(KernelDefinitionOwnership, ColdConsumersRetainDefinition) {
+  TestProgram test;
+  test.setup(Arch::x64);
+  auto *program = test.prog();
+  auto source = setup_kernel1(program);
+  auto *kernel = source.get();
+  program->kernels.emplace_back(std::move(source));
+  auto lease = kernel->enable_definition_reclamation();
+  kernel->charge_specialization();
+  std::optional<LaunchContextBuilder> context(kernel->make_launch_context());
+  aot::Arg input;
+  input.tag = aot::ArgKind::kNdarray;
+  input.name = "input";
+  input.dtype_id = PrimitiveTypeID::i32;
+  input.field_dim = 1;
+  auto dispatch = std::make_unique<Dispatch>(kernel, std::vector<aot::Arg>{input});
+  lease.reset();
+  EXPECT_EQ(program->collect_unused_kernel_definitions(true), 0);
+  auto compiled = dispatch->compile_dispatch();
+  dispatch.reset();
+  EXPECT_EQ(program->collect_unused_kernel_definitions(true), 0);
+  compiled = {};
+  EXPECT_EQ(program->collect_unused_kernel_definitions(true), 0);
+  context.reset();
+  EXPECT_EQ(program->collect_unused_kernel_definitions(true), 1);
+  EXPECT_TRUE(program->kernels.empty());
+  EXPECT_EQ(program->collect_unused_kernel_definitions(true), 0);
+}
+
+TEST(KernelDefinitionOwnership, LegacyDefinitionsAndLateLeaseRelease) {
+  auto test = std::make_unique<TestProgram>();
+  test->setup(Arch::x64);
+  auto *program = test->prog();
+  auto &legacy = program->kernel([](Kernel *) {}, "legacy");
+  auto &managed = program->kernel([](Kernel *) {}, "managed");
+  auto lease = managed.enable_definition_reclamation();
+  EXPECT_EQ(program->collect_unused_kernel_definitions(true), 0);
+  EXPECT_EQ(program->kernels.size(), 2);
+  lease.reset();
+  program->collect_unused_kernel_definitions(true);
+  ASSERT_EQ(program->kernels.size(), 1);
+  EXPECT_EQ(program->kernels[0].get(), &legacy);
+  auto late = legacy.enable_definition_reclamation();
+  program->finalize();
+  test.reset();
+  // The token contains no callback or pointer into the destroyed Program.
+  late.reset();
+}
+
 namespace {
 void check_graph_metadata_sharing(Arch arch) {
   TestProgram test;

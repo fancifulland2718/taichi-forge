@@ -761,14 +761,23 @@ class PyTaichi:
                 {key[1] for key in retired if isinstance(key, tuple) and len(key) > 1}
             )
             for key in retired:
-                k.compiled_kernels.pop(key, None)
+                kernel = k.compiled_kernels.pop(key)
                 k._external_grad_accesses.pop(key, None)
                 # A relocatable alias borrows the already charged native
                 # archive; it never incremented Python resident ownership.
                 if key in k._relocatable_alias_keys:
                     k._relocatable_alias_keys.discard(key)
                 else:
-                    reclaimed += 1
+                    reclaimed += kernel._release_specialization_charge()
+        self._release_specialization_charges(reclaimed)
+        self.collect_unused_kernel_definitions(force=True)
+
+    def collect_unused_kernel_definitions(self, force=False):
+        if self.prog is not None:
+            reclaimed = self.prog._collect_unused_kernel_definitions(force)
+            self._release_specialization_charges(reclaimed)
+
+    def _release_specialization_charges(self, reclaimed):
         if reclaimed:
             if reclaimed > self._resident_specialization_count:
                 raise RuntimeError(

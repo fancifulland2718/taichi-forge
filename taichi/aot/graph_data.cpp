@@ -59,6 +59,7 @@ struct CompiledGraphKernelInvocation {
   CallableBase callable;
   std::weak_ptr<void> owner_lifetime;
   std::shared_ptr<KernelExecutionHandle> execution_handle;
+  std::shared_ptr<void> definition_lease;
   struct TaskLaunchPlan {
     std::string identity;
     LaunchContextBuilder::CudaTaskExecutionPlanDigest digest;
@@ -74,7 +75,8 @@ struct CompiledGraphKernelInvocation {
                                 std::shared_ptr<KernelExecutionHandle> handle)
       : callable(static_cast<const CallableBase &>(kernel)),
         owner_lifetime(kernel.program->weak_lifetime_token()),
-        execution_handle(std::move(handle)) {
+        execution_handle(std::move(handle)),
+        definition_lease(kernel.retain_definition()) {
     // Use the ordinary context constructor to freeze launch policy before
     // copying its immutable values. No frontend IR or SNode pointers survive
     // in this snapshot, even if another variant later retires the definition.

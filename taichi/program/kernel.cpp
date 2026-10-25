@@ -103,8 +103,17 @@ Kernel::Kernel(Program &program,
   }
 }
 
+std::shared_ptr<void> Kernel::enable_definition_reclamation() {
+  TI_ASSERT(!definition_reclaimable_);
+  auto lease = std::make_shared<char>();
+  definition_lease_ = lease;
+  definition_reclaimable_ = true;
+  return lease;
+}
+
 LaunchContextBuilder Kernel::make_launch_context(bool cpu_bounded_range) {
   LaunchContextBuilder builder(this, cpu_bounded_range);
+  builder.definition_lease_ = retain_definition();
   const OffloadExecutionPlan *plan = nullptr;
   if (offload_execution_plan_frozen_.load(std::memory_order_acquire)) {
     TI_ASSERT(offload_execution_plan_.has_value());

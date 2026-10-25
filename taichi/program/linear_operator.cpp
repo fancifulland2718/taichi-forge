@@ -2895,6 +2895,7 @@ LinearOperatorRecordableKernel::LinearOperatorRecordableKernel(
     std::shared_ptr<void> generation_owner)
     : program_(program),
       kernel_(kernel),
+      definition_lease_(kernel ? kernel->retain_definition() : nullptr),
       active_size_(active_size),
       topology_(topology),
       numeric_(numeric),
@@ -3926,6 +3927,9 @@ class CompiledKernelActionProvider {
       : program_(program),
         forward_kernel_(&forward_kernel),
         adjoint_kernel_(adjoint_kernel),
+        forward_definition_lease_(forward_kernel.retain_definition()),
+        adjoint_definition_lease_(
+            adjoint_kernel ? adjoint_kernel->retain_definition() : nullptr),
         descriptor_(std::move(descriptor)),
         topology_version_(topology_version),
         numeric_version_(numeric_version) {
@@ -4182,6 +4186,8 @@ class CompiledKernelActionProvider {
   Program *program_{nullptr};
   Kernel *forward_kernel_{nullptr};
   Kernel *adjoint_kernel_{nullptr};
+  std::shared_ptr<void> forward_definition_lease_;
+  std::shared_ptr<void> adjoint_definition_lease_;
   std::shared_ptr<KernelExecutionHandle> forward_compiled_{nullptr};
   std::shared_ptr<KernelExecutionHandle> adjoint_compiled_{nullptr};
   OperatorDescriptor descriptor_;

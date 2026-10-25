@@ -40,14 +40,7 @@ class Dispatch : public Node {
           cuda_bounded_dispatch = std::nullopt,
       std::string dispatch_label = {},
       std::uint64_t logical_dispatch_id =
-          std::numeric_limits<std::uint64_t>::max())
-      : kernel_(kernel),
-        symbolic_args_(args),
-        indirect_dispatch_arg_(std::move(indirect_dispatch_arg)),
-        cuda_bounded_dispatch_(std::move(cuda_bounded_dispatch)),
-        dispatch_label_(std::move(dispatch_label)),
-        logical_dispatch_id_(logical_dispatch_id) {
-  }
+          std::numeric_limits<std::uint64_t>::max());
 
   void compile(
       std::vector<aot::CompiledDispatch> &compiled_dispatches) override;
@@ -89,6 +82,7 @@ class Dispatch : public Node {
  private:
   mutable bool serialized_{false};
   Kernel *kernel_{nullptr};
+  std::shared_ptr<void> definition_lease_;
   std::vector<aot::Arg> symbolic_args_;
   std::optional<aot::Arg> indirect_dispatch_arg_;
   std::optional<aot::CudaBoundedDispatchMetadata> cuda_bounded_dispatch_;

@@ -562,6 +562,12 @@ class TI_DLL_EXPORT Program {
 
   std::vector<std::unique_ptr<Kernel>> kernels;
 
+  std::unique_lock<std::mutex> acquire_kernel_definition_lock() const {
+    return std::unique_lock<std::mutex>(kernel_definition_mutex_);
+  }
+  // Returns the resident specialization charges released by this cold sweep.
+  std::size_t collect_unused_kernel_definitions(bool force = false);
+
   std::unique_ptr<KernelProfilerBase> profiler{nullptr};
 
   // Note: for now we let all Programs share a single TypeFactory for smooth
@@ -789,7 +795,9 @@ class TI_DLL_EXPORT Program {
     // Expr::set_allow_store(true);
     auto func = std::make_unique<Kernel>(*this, body, name, autodiff_mode);
     // Expr::set_allow_store(false);
+    auto lock = acquire_kernel_definition_lock();
     kernels.emplace_back(std::move(func));
+    ++kernel_definitions_added_since_sweep_;
     return *kernels.back();
   }
 
@@ -4593,6 +4601,8 @@ class TI_DLL_EXPORT Program {
   std::vector<std::uint64_t> snode_tree_generations_;
   std::vector<std::uint8_t> snode_tree_active_;
   mutable std::shared_mutex snode_tree_lifecycle_mutex_;
+  mutable std::mutex kernel_definition_mutex_;
+  std::size_t kernel_definitions_added_since_sweep_{0};
   std::atomic<std::uint64_t> snode_tree_mutation_epoch_{1};
 
   std::vector<std::unique_ptr<Function>> functions_;

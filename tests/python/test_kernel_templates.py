@@ -171,7 +171,7 @@ def test_kernel_specialization_budget_preserves_cache_hits():
 
 
 @test_utils.test(arch=ti.cpu, kernel_specialization_limit=1)
-def test_dead_kernel_definition_cannot_reclaim_native_specialization_budget():
+def test_dead_kernel_definition_reclaims_resident_specialization_budget():
     @ti.kernel
     def temporary() -> ti.i32:
         return 1
@@ -184,8 +184,10 @@ def test_dead_kernel_definition_cannot_reclaim_native_specialization_budget():
     def replacement() -> ti.i32:
         return 2
 
-    with pytest.raises(ti.TaichiRuntimeError, match="kernel_specialization_limit=1"):
-        replacement()
+    assert replacement() == 2
+    stats = ti.lang.impl.get_runtime().debug_kernel_executable_lifecycle_stats()
+    assert stats["resident_specializations"] == 1
+    assert stats["specialization_reclaims"] == 1
 
 
 @test_utils.test(arch=ti.cpu, kernel_specialization_limit=1)

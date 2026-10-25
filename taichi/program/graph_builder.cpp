@@ -13,6 +13,22 @@
 #include "picosha2.h"
 
 namespace taichi::lang {
+Dispatch::Dispatch(
+    Kernel *kernel,
+    const std::vector<aot::Arg> &args,
+    std::optional<aot::Arg> indirect_dispatch_arg,
+    std::optional<aot::CudaBoundedDispatchMetadata> cuda_bounded_dispatch,
+    std::string dispatch_label,
+    std::uint64_t logical_dispatch_id)
+    : kernel_(kernel),
+      definition_lease_(kernel->retain_definition()),
+      symbolic_args_(args),
+      indirect_dispatch_arg_(std::move(indirect_dispatch_arg)),
+      cuda_bounded_dispatch_(std::move(cuda_bounded_dispatch)),
+      dispatch_label_(std::move(dispatch_label)),
+      logical_dispatch_id_(logical_dispatch_id) {
+}
+
 namespace {
 
 const Ndarray *cuda_sparse_spmv_ndarray(

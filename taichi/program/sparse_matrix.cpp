@@ -490,6 +490,7 @@ CompiledKernelLinearOperator::CompiledKernelLinearOperator(
   ProgramNdarrayOwner numeric_owner(program, owned_numeric_data);
   program_ = program;
   kernel_ = &kernel;
+  definition_lease_ = kernel.retain_definition();
   compiled_kernel_ = compiled;
   topology_state_ =
       std::make_shared<TopologyState>(program, topology_owner.get());

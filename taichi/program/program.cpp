@@ -3506,6 +3506,29 @@ std::size_t Program::get_dense_field_stride(SNode *snode,
   return value_size;
 }
 
+std::size_t Program::collect_unused_kernel_definitions(bool force) {
+  // Match tree retirement's lock order. No device synchronization is needed:
+  // submitted work owns executable state independently of frontend IR.
+  std::unique_lock<std::shared_mutex> lifecycle_lock(snode_tree_lifecycle_mutex_);
+  auto definitions_lock = acquire_kernel_definition_lock();
+  if (!force && kernel_definitions_added_since_sweep_ <
+                    kernels.size() / 2 + kernels.size() % 2) {
+    return 0;
+  }
+  kernel_definitions_added_since_sweep_ = 0;
+  std::size_t released_charges = 0;
+  std::lock_guard<std::mutex> candidate_lock(relocatable_kernel_candidate_mutex_);
+  kernels.erase(std::remove_if(kernels.begin(), kernels.end(),
+                               [&](const std::unique_ptr<Kernel> &kernel) {
+    if (!kernel->definition_unreferenced())
+      return false;
+    released_charges += kernel->release_specialization_charge();
+    relocatable_kernel_candidates_.erase(kernel.get());
+    return true;
+  }), kernels.end());
+  return released_charges;
+}
+
 Program::Program(Arch desired_arch)
     : snode_rw_accessors_bank_(this),
       lifetime_token_(std::make_shared<ProgramLifetimeToken>(this)),
@@ -4811,6 +4834,7 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
       snapshot_snode_tree_dependencies_unlocked(active_tree_ids);
 
   std::unordered_set<Kernel *> retired_accessor_kernels;
+  auto definitions_lock = acquire_kernel_definition_lock();
   std::vector<std::shared_ptr<FieldExpression>> retired_fields;
   // Remove frontend state keyed by SNode pointers before destroying the root.
   {

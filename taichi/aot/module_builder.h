@@ -141,6 +141,7 @@ class AotModuleBuilder {
   struct ExportIdentity {
     Kernel *kernel;
     std::string launch_abi;
+    std::shared_ptr<void> definition_lease;
   };
   bool needs_kernel_export(const std::string &name,
                            Kernel *kernel,

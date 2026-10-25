@@ -437,6 +437,7 @@ class CompiledKernelLinearOperator final : public SparseMatrix {
 
   Program *program_{nullptr};
   Kernel *kernel_{nullptr};
+  std::shared_ptr<void> definition_lease_;
   std::shared_ptr<KernelExecutionHandle> compiled_kernel_{nullptr};
   std::shared_ptr<TopologyState> topology_state_;
   std::shared_ptr<ResourceGeneration> current_resource_generation_;
