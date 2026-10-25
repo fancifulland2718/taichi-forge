@@ -33,9 +33,8 @@ def test_optional_execution_snapshot_does_not_replace_execution_failure():
 
 
 @pytest.mark.parametrize("failure_phase", (None, "materialization", "objective", "observation", "cleanup", "protocol"))
-def test_trial_boundary_evidence_survives_each_failure_without_inventing_memory(monkeypatch, failure_phase):
+def test_trial_boundary_evidence_survives_each_failure_without_inventing_memory(failure_phase):
     from compileiq.forge_support import TrialCleanupV2, TrialFailureV2, TrialOutcomeV2
-    from taichi_forge.graph._recipes import physical
     from taichi_forge.graph._trial_observations import _PROVENANCE_KEY, _boundary_markdown, _trial_boundaries
 
     events = []
@@ -57,6 +56,7 @@ def test_trial_boundary_evidence_survives_each_failure_without_inventing_memory(
             persistent_allocated_bytes=size,
             transient_requested_bytes=0,
             transient_allocated_bytes=0,
+            refresh_from_graph=observe,
         )
 
     def enter(phase):
@@ -98,7 +98,6 @@ def test_trial_boundary_evidence_survives_each_failure_without_inventing_memory(
     session._failure_type = TrialFailureV2
     session._scalar_metric = False
     session._target_contract = SimpleNamespace(metric_names=("score", "materialized_memory_bytes"))
-    monkeypatch.setattr(physical, "observe_graph_physical_manifest", observe)
     outcome = session._evaluate(request)
     assert (outcome.failure is None) == (failure_phase is None)
     encoded = outcome.provenance[_PROVENANCE_KEY]
