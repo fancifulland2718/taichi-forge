@@ -2522,10 +2522,9 @@ retain the original grid. The descriptor never reads device memory. CPU keeps
 its existing scheduler; CUDA/Vulkan can also eliminate the serial transport of
 immutable begin/end expressions. Mutable prepared parameters retain the compiled
 envelope when they overlap any bound input.
-The current task layout uses LLVM AOT schema 19 (20 for entry aliases or selected
-range policies), GFX metadata 15, JIT cache schema 84 and native ABI 219.
-Re-export older candidate artifacts and use a paired frontend
-and runtime package.
+See the [0.6.4 upgrade guidance](release_notes.en.md#064) for the current LLVM/GFX
+metadata, JIT cache and native ABI versions used by task layouts and entry policies.
+Re-export older candidate artifacts and use a paired frontend and runtime package.
 
 CUDA's selected device-range task policy can now be consumed by an ordinary
 flat `Graph.run()` recording and by a borrowed-domain `Graph.prepare()`.
@@ -2535,9 +2534,14 @@ range snapshot, preserves the logical loop bounds, and caps the physical grid
 at the existing compiled/device limit. Ordinary recordings borrow the runtime
 temporary workspace; independent instances keep their private workspace.
 This remains an explicit internal task-plan policy, with no default change.
-Structured/parallel/frame combinations and CUDA AOT persistence of this policy
-are not yet admitted; an unavailable recording cannot silently run with a
-different range strategy. This is not a general application speedup claim.
+`Module.add_execution_plan()` can export the selected policy. Ordinary and selected
+entries with identical effective code share their payload, while each instance keeps
+its own control storage. A native WHILE's prefix, body and suffix can also compose
+in one recording for JIT, AOT and independent instances; repeated conditions retain
+separate controls for each physical capture site. Masked, branch, parallel and
+binding-frame combinations remain outside this qualification. An unavailable
+recording cannot silently run with a different range strategy. This is not a
+general application speedup claim.
 
 `task_id` is stable for the same specialization cache identity, task ordinal,
 task kind, compile configuration, device capabilities, and backend. It is not

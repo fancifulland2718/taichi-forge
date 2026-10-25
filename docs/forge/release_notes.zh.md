@@ -60,6 +60,11 @@
 - 显式 CUDA offload-plan 搜索共用基线并保留不可变修改，不再为每个候选常驻完整任务计划；
   查看或绑定时才构造所选计划，已准备执行的重放不变。紧凑搜索 manifest 升为版本 2，
   候选描述身份单独版本化，原有执行计划及代码身份保持不变。
+- 完整 Graph 与实验性 CUDA offload-plan 搜索支持候选分页、跨页比较及预算中断后续跑。
+  原 4096-ID 限制仅约束单个传输帧，不再限制总候选域；分页需要配套 CompileIQ fork
+  的 `logical_stage_pages_v1` 能力。大域 kernel 搜索要求显式试验预算，跨 session 恢复
+  要求可移植评价上下文。目录、测量记录和实际编译缓存仍随搜索增长；分页不代表恒定
+  内存，也不减少实际试验次数。详见[搜索合同](graph_recipe_integration.zh.md)。
 - frontend 与 native runtime 使用私有 ABI **220**，持久执行计划为 **27**，
   编译缓存 schema 为 **85**；LLVM AOT metadata 为 **19/20**、GFX metadata 为 **15**。
   请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
@@ -151,7 +156,7 @@
   显式梯度。有效代码相同的普通入口与选中入口共用一份 LLVM 产物及一次 runtime 注册，
   各 prepared 实例保留自己的范围控制存储和工作区策略；直接调用 kernel 不能绕过所选
   录制策略。它仍是显式选择，每个选中 task 增加一个控制器，不据此宣称运行提速。
-  普通 LLVM 产物沿用 schema 15，含入口别名或范围策略的产物使用 schema 16。
+  产物版本见上方升级说明；旧 reader 必须支持对应的入口策略和范围合同。
 - 显式 CUDA 设备范围策略可与原生 WHILE 的前段、循环体和后段共同录制，保持整步
   一次提交；JIT、AOT 和独立实例复用范围录制器。重复条件按物理录制位置分别持有
   控制记录，不按循环预算展开。每处选中 task 增加 48B 控制存储及一个控制器；
@@ -162,8 +167,7 @@
   JIT code loan 借用已编译代码，AOT adapter 处理部署闭包。普通调用的执行与提交路径保持。
 - CUDA AOT 保留每个入口选定的 occupancy waves/work-per-thread 启动策略，普通执行与
   Graph 录制共用消费端的冷阶段解析，不再静默回到基线网格。同一代码的不同策略保持
-  独立；普通 LLVM 产物使用 schema 15，入口别名或选定设备范围策略使用 schema 16，
-  不支持对应版本的旧 reader 明确拒绝。
+  独立；不支持对应 metadata 版本的旧 reader 明确拒绝，版本见上方升级说明。
 - CPU/CUDA/Vulkan 的执行注册状态归执行 owner，编译代码可共享；在途租约、独立实例、
   reset/close 和进程退出按资源依赖退休，修复借用 runtime 及 Vulkan 退出访问异常。
 - CUDA 独立域按完整 prepared 实例计数，初始化和 replay 共享一个容量名额；部分构造

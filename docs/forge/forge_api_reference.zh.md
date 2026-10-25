@@ -2069,17 +2069,18 @@ host 边界选择也覆盖受支持 scalar/shape 边界与常量的加、减、�
 后续钳制不能掩盖之前的溢出。不支持或发生溢出的边界沿用原 grid，描述求值不读取
 设备内存。CPU 保留现有调度；CUDA/Vulkan 还可消除不可变起止表达式的串行传递。
 prepared 参数可变且与任一边界输入重叠时，保留编译时的启动容量。
-当前 task 布局采用 LLVM AOT schema 19（含入口别名或选定范围策略时为 20）、
-GFX metadata 15 和 JIT cache schema 84；原生 ABI 为 219。
-旧候选产物需要重新导出并使用配对的前端/runtime 包。
+当前 task 布局与入口策略使用的 LLVM/GFX metadata、JIT cache 和原生 ABI 版本见
+[0.6.4 升级说明](release_notes.zh.md#064)。旧候选产物需要重新导出并使用配对的前端/runtime 包。
 
 CUDA 选中的设备范围 task 策略现可进入普通平直 `Graph.run()` 录制与借用域的
 `Graph.prepare()`。它复用编译产物，每个选中 task 增加一个设备控制器和 48 B 控制
 存储。控制器读取该 task 已冻结的范围快照，保留逻辑循环边界，物理 grid 不超过
 原编译值和设备限制。普通录制借用 runtime 临时区，独立实例保持私有临时区。
-这仍是内部 task-plan 的显式策略，默认不变；结构化、parallel、frame 组合及此策略
-的 CUDA AOT 持久化尚未接纳。无法录制时明确报错，不静默改用其他范围策略；
-此支持声明不代表一般应用必然提速。
+这仍是内部 task-plan 的显式策略，默认不变。`Module.add_execution_plan()` 可导出
+选定策略；普通入口和有效代码相同的选中入口共用代码，各实例保留自己的控制存储。
+原生 WHILE 的前段、循环体和后段也可共同录制，支持 JIT、AOT 及独立实例；重复条件
+按物理录制位置分别持有控制存储。masked、分支、parallel 和 binding-frame 组合尚未
+接纳。无法录制时明确报错，不静默改用其他范围策略；此支持声明不代表一般应用必然提速。
 
 `task_id` 在相同 specialization cache identity、task ordinal/kind、compile config、device
 capabilities 与 backend 下稳定；不承诺跨 backend、跨配置或跨版本稳定。manifest 只读：冷查询

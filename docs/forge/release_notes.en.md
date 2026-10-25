@@ -74,6 +74,13 @@ combination. Consult the linked API contracts and capability queries for exact s
   of a full task plan for every candidate. Inspection or binding constructs the selected
   plan; prepared execution is unchanged. The compact search manifest is version 2, with
   versioned candidate identities distinct from the unchanged execution/code identities.
+- Complete Graph and experimental CUDA offload-plan searches support candidate paging,
+  comparisons across pages and resumption after a budget interruption. The 4096-ID limit
+  bounds one transport frame, not the full candidate domain. Paging requires the companion
+  CompileIQ fork's `logical_stage_pages_v1` capability. Large kernel searches require an
+  explicit trial budget; cross-session resume requires a portable evaluation context.
+  Catalogs, measurements and compiled caches still grow with search work. Paging does not
+  imply constant memory or fewer trials. See the [search contract](graph_recipe_integration.en.md).
 - The frontend/native private ABI is **220**, persistent execution-plan version **27**, and
   compiled-cache schema **85**; LLVM AOT metadata is **19/20**, GFX metadata **15**.
   Update compatible components together; matching Git commits
@@ -195,8 +202,8 @@ combination. Consult the linked API contracts and capability queries for exact s
 - CUDA AOT preserves each entry's selected occupancy waves/work-per-thread launch policy.
   Ordinary execution and Graph recording share cold resolution on the consumer device
   instead of silently using the baseline grid. Different policies on shared code remain
-  independent. Current ordinary LLVM artifacts use schema 15; aliases or selected
-  device-range entries require schema 16 and are rejected by older readers.
+  independent. Readers that do not support the required metadata version reject the
+  artifact; see the version information under upgrade guidance above.
 - CUDA AOT can preserve explicitly selected device-range tasks in flat Graph recordings,
   including independent execution domains and explicit gradients. Ordinary and selected
   entries with identical effective code share one LLVM payload and one runtime registration;
