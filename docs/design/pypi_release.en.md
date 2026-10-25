@@ -95,6 +95,28 @@ ABI checks. Select representative CPU/CUDA/Vulkan checks for the changes and rep
 scope honestly. CI build/smoke is not full GPU qualification; follow the
 [Linux checklist](../forge/linux_revalidation.en.md) where relevant.
 
+## Prefer validated artifact reuse
+
+Both existing workflows default to `reuse=true`. Full-matrix runs first read small source
+records, selecting complete, unexpired candidates in this repository with the **same source
+commit, package version, and exact runtime dependency for shims**. A successful validation
+job is required. Selected wheels are downloaded and checked again, skipping native or
+CPython compilation. Tag-triggered shim publication also discovers same-commit dry runs;
+a later upload/Release failure does not invalidate successful validation.
+
+Both workflows accept explicit `wheel_run_id` values for their own validated wheel sets.
+Runtime can therefore build the full matrix with `publish=false`, then publish those exact
+wheels using that ID and `publish=true`. Records retain the original build commit/run,
+LLVM and configuration; publication does not become build provenance. Changed versions,
+corrupt or missing files fail validation. Automatic lookup with no eligible candidate
+builds normally. Candidate metadata and wheel sets are retained for 90 days.
+
+To use changed toolchain repository variables or force qualification, set `reuse=false`
+and leave `wheel_run_id` blank. Automatic matching retains the artifact's recorded toolchain;
+it does not reinterpret the build using current repository variables. Platform-scoped
+validation keeps its original build path and cannot publish a partial matrix. GitHub
+Release always consumes published artifacts and never compiles them.
+
 ## Recovery and attachment rehearsal
 
 - Original PyPI upload failed: **Re-run failed jobs** in that run, retaining its wheels.

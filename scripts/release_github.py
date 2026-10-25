@@ -49,14 +49,20 @@ def record_runtime(directory: Path, version: str, index: str, output: Path) -> N
         base = "https://pypi.org/pypi" if index == "pypi" else "https://test.pypi.org/pypi"
         if prepare_upload(directory, Path(temporary) / "missing", base):
             raise ValueError("Runtime publication is not complete")
+    candidate = json.loads((directory / "runtime-build-info.json").read_text(encoding="utf-8"))
+    if candidate["version"] != version or candidate["wheels"] != wheel_facts(directory):
+        raise ValueError("Runtime publication differs from the validated candidate")
     records = []
     for platform in ("windows", "linux"):
         record = json.loads((directory / f"build-info-{platform}.json").read_text(encoding="utf-8"))
-        if record["version"] != version or record["platform"] != platform or record["commit"] != os.environ["GITHUB_SHA"]:
+        if record["version"] != version or record["platform"] != platform or record["commit"] != candidate["commit"]:
             raise ValueError("Runtime build record identity differs")
         records.append(record)
+    if records != candidate["build_inputs"]:
+        raise ValueError("Runtime publication build inputs differ")
     write_json(output, {"schema": 1, "index": index, "version": version,
-                       "commit": os.environ["GITHUB_SHA"], "run_id": os.environ["GITHUB_RUN_ID"],
+                       "commit": candidate["commit"], "source_run_id": candidate["source_run_id"],
+                       "run_id": os.environ["GITHUB_RUN_ID"],
                        "wheels": wheel_facts(directory), "build_inputs": records})
 
 
@@ -113,13 +119,16 @@ def resolve_sources(directory: Path, repository: str, shim_run_id: str, version:
     for artifact in (item for page in pages for item in page["artifacts"]):
         if artifact["expired"] or artifact["name"] != name:
             continue
-        producer = checked_run(repository, str(artifact["workflow_run"]["id"]), "publish_runtime_pypi.yml")
+        checked_run(repository, str(artifact["workflow_run"]["id"]), "publish_runtime_pypi.yml")
         publication = artifact_json(repository, artifact, "runtime-publication.json")
         if (publication.get("schema") != 1 or publication["index"] != "pypi"
                 or publication["version"] != runtime_version or publication["wheels"] != expected_runtime
-                or publication["commit"] != producer["head_sha"]
                 or str(publication["run_id"]) != str(artifact["workflow_run"]["id"])):
             continue
+        build_source = checked_run(repository, str(publication["source_run_id"]), "publish_runtime_pypi.yml", completed=False)
+        require_job(repository, str(publication["source_run_id"]), "Validate runtime wheel set")
+        if publication["commit"] != build_source["head_sha"]:
+            raise ValueError("Runtime compile source differs")
         records = publication["build_inputs"]
         if {r["platform"] for r in records} != {"windows", "linux"} or len(records) != 2:
             raise ValueError("Incomplete runtime build records")

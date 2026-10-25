@@ -275,13 +275,13 @@ def published_sources(tmp_path, monkeypatch):
     facts = github.wheel_facts(directory)
     shim = {"schema": 1, "commit": "a" * 40, "source_run_id": "10", "version": "0.7.0", "runtime_version": "0.6.3", "wheels": facts[:1]}
     artifacts.write_json(directory / "shim-build-info.json", shim)
-    runtime = {"schema": 1, "index": "pypi", "version": "0.6.3", "commit": "b" * 40, "run_id": "20", "wheels": facts[1:],
+    runtime = {"schema": 1, "index": "pypi", "version": "0.6.3", "commit": "b" * 40, "run_id": "20", "source_run_id": "20", "wheels": facts[1:],
                "build_inputs": [{"platform": platform, "commit": "b" * 40, "version": "0.6.3"} for platform in ("windows", "linux")]}
     state = {"tag": "a" * 40, "job_conclusion": "success", "artifacts": [{"id": 88, "name": "runtime-publication-0.6.3-pypi", "expired": False, "workflow_run": {"id": 20}}]}
     def fake_gh(*args):
         path = args[1]
         if "/jobs?" in path:
-            return json.dumps([{"jobs": [{"name": name, "conclusion": state["job_conclusion"]} for name in ("Publish validated shim wheels", "Validate shim wheel set")]}])
+            return json.dumps([{"jobs": [{"name": name, "conclusion": state["job_conclusion"]} for name in ("Publish validated shim wheels", "Validate shim wheel set", "Validate runtime wheel set")]}])
         if "/commits/" in path:
             return state["tag"]
         if "/artifacts?" in path:
@@ -388,9 +388,75 @@ def test_runtime_record_requires_complete_index_and_correct_build(published_sour
     monkeypatch.setattr(github, "prepare_upload", lambda *a: 0)
     for record in runtime["build_inputs"]:
         artifacts.write_json(directory / f"build-info-{record['platform']}.json", record)
+    artifacts.write_json(directory / "runtime-build-info.json", {
+        "schema": 1, "commit": "b" * 40, "source_run_id": "20", "version": "0.6.3",
+        "wheels": github.wheel_facts(directory), "build_inputs": runtime["build_inputs"],
+    })
     output = tmp_path / "runtime-publication.json"
     github.record_runtime(directory, "0.6.3", "pypi", output)
     assert json.loads(output.read_text()) == runtime
     monkeypatch.setattr(github, "prepare_upload", lambda *a: 1)
     with pytest.raises(ValueError, match="not complete"):
         github.record_runtime(directory, "0.6.3", "pypi", output)
+
+
+def test_candidate_discovery_reuses_only_matching_live_validated_sets(monkeypatch):
+    from scripts import release_candidates as candidates
+    source = {"schema": 1, "commit": "a" * 40, "version": "0.7.0", "runtime_version": "0.7.0"}
+    candidate = {"id": 42, "name": "validated-shim-source", "expired": False,
+                 "workflow_run": {"id": 10, "head_sha": "a" * 40}}
+    wheels = {"name": "validated-shim-wheel-set", "expired": False}
+    reads = []
+    def api(*args):
+        reads.append(args)
+        return json.dumps([{"artifacts": [wheels] if "/runs/" in args[1] else [candidate]}])
+    monkeypatch.setattr(candidates, "gh", api)
+    monkeypatch.setattr(candidates, "checked_run", lambda *a, **kw: {})
+    monkeypatch.setattr(candidates, "require_job", lambda *a: None)
+    monkeypatch.setattr(candidates, "artifact_json", lambda *a: source)
+    assert candidates.select("shim", "owner/repo", "a" * 40, "0.7.0", "0.7.0") == "10"
+    assert candidates.select("shim", "owner/repo", "b" * 40, "0.7.0", "0.7.0") == ""
+    assert candidates.select("shim", "owner/repo", "a" * 40, "0.7.1", "0.7.0") == ""
+    assert candidates.select("shim", "owner/repo", "a" * 40, "0.7.0", "0.6.3") == ""
+    wheels["expired"] = True
+    assert candidates.select("shim", "owner/repo", "a" * 40, "0.7.0", "0.7.0") == ""
+    reads.clear()
+    assert candidates.select("shim", "owner/repo", "a" * 40, "0.7.0", "0.7.0", reuse=False) == ""
+    assert reads == []
+    # Explicit selection is checked even when automatic reuse is disabled.
+    assert candidates.select("shim", "owner/repo", "a" * 40, "0.7.0", "0.7.0", run_id="12", reuse=False) == "12"
+
+
+def test_runtime_candidate_keeps_original_build_identity(published_sources, monkeypatch):
+    from scripts import release_candidates as candidates
+    directory, shim, runtime, state = published_sources
+    for path in directory.glob("taichi_forge-*.whl"):
+        path.unlink()
+    for record in runtime["build_inputs"]:
+        record["schema"] = 1
+        artifacts.write_json(directory / f"build-info-{record['platform']}.json", record)
+    monkeypatch.setattr(candidates, "validate_release_set", lambda *a, **kw: None)
+    monkeypatch.setenv("GITHUB_SHA", "b" * 40)
+    monkeypatch.setenv("GITHUB_RUN_ID", "20")
+    candidates.record_runtime(directory, "0.6.3", reused=False)
+    before = (directory / "runtime-build-info.json").read_bytes()
+    monkeypatch.setenv("GITHUB_SHA", "c" * 40)
+    monkeypatch.setenv("GITHUB_RUN_ID", "21")
+    candidates.record_runtime(directory, "0.6.3", reused=True)
+    assert (directory / "runtime-build-info.json").read_bytes() == before
+    path = next(directory.glob("*.whl"))
+    path.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="validated candidate"):
+        candidates.record_runtime(directory, "0.6.3", reused=True)
+
+
+def test_runtime_reuse_skips_builders_but_not_validation_or_bound_publisher():
+    import yaml
+    workflow = yaml.safe_load((ROOT / ".github/workflows/publish_runtime_pypi.yml").read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+    for name in ("build_linux_runtime", "build_windows_runtime"):
+        assert "!needs.resolve_version.outputs.wheel_run_id" in jobs[name]["if"]
+    assert "needs.resolve_version.outputs.wheel_run_id ||" in jobs["validate_wheel_set"]["if"]
+    assert jobs["publish_runtime"]["needs"] == ["resolve_version", "validate_wheel_set"]
+    assert "needs.validate_wheel_set.result == 'success'" in jobs["publish_runtime"]["if"]
+    assert jobs["publish_runtime"]["permissions"]["id-token"] == "write"

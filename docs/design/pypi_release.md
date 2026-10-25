@@ -82,6 +82,22 @@ git push origin forge-v0.7.0
 按本次变更选择代表性 CPU/CUDA/Vulkan 验证并如实记录未测范围；CI build/smoke 不等同
 完整 GPU 验收，Linux 按[复测清单](../forge/linux_revalidation.zh.md)处理。
 
+## 优先复用已验证产物
+
+两个原 workflow 默认 `reuse=true`。完整矩阵运行会先读取小型来源清单，在同仓库查找
+**相同源码 commit、包版本，以及 shim 的 runtime 精确依赖**；候选完整、未过期且验证 job
+成功时，直接下载其 wheel 集合并复核，跳过 native 或 CPython 编译。tag 触发的主包发布也
+会查找相同 commit 的预演产物。上传/Release 失败不会使已经通过的验证失效。
+
+两者均可显式填写 `wheel_run_id`（各自 workflow 的已验证集合编号）。runtime 因此可以先
+`publish=false` 完成完整构建，再指定该编号 `publish=true`，无需再次编译。复用记录保留
+原构建 commit/run、LLVM 与配置；发布运行不会冒充构建运行。改变版本、损坏或缺失文件
+会被拒绝；自动查找无合格候选时正常构建。候选来源和 wheel 集合均保留 90 天。
+
+如需使用变更后的仓库工具链变量或强制重新资格化，设 `reuse=false` 并留空 `wheel_run_id`。
+自动匹配复用原产物的已记录工具链，不会因仓库变量改变而重新解释它。单平台诊断仍按原路径
+构建，不把部分矩阵冒充可发布集合。GitHub Release 始终只消费已发布的产物，不编译。
+
 ## 失败恢复与附件预演
 
 - 原 PyPI 发布失败：在原运行 **Re-run failed jobs**，沿用原 wheel，不重新编译。

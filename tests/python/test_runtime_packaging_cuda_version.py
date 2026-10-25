@@ -1421,7 +1421,7 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
     assert "actions: read" in workflow
     windows_job = workflow.split("  build_windows:\n", 1)[1].split("  validate_wheel_set:\n", 1)[0]
     assert "needs: resolve_version" in windows_job
-    assert "if: ${{ !inputs.wheel_run_id }}" in windows_job
+    assert "if: ${{ !needs.resolve_version.outputs.wheel_run_id }}" in windows_job
     for job in ("build_linux", "validate_wheel_set"):
         section = workflow.split(f"  {job}:\n", 1)[1].split("    steps:\n", 1)[0]
         assert "inputs.validation_platform != 'windows'" in section
@@ -1431,11 +1431,11 @@ def test_shim_artifact_publication_skips_compilation_but_requires_validation():
     workflow = (REPO_ROOT / ".github" / "workflows" / "publish_pypi.yml").read_text(encoding="utf-8")
     for name in ("build_linux", "build_windows"):
         job = workflow.split(f"  {name}:\n", 1)[1].split("    steps:\n", 1)[0]
-        assert "!inputs.wheel_run_id" in job
+        assert "!needs.resolve_version.outputs.wheel_run_id" in job
     validation = workflow.split("  validate_wheel_set:\n", 1)[1].split("  publish_shim:\n", 1)[0]
     assert "!cancelled()" in validation
-    assert "inputs.wheel_run_id || (needs.build_linux.result == 'success'" in validation
-    assert "run-id: ${{ inputs.wheel_run_id }}" in validation
+    assert "needs.resolve_version.outputs.wheel_run_id || (needs.build_linux.result == 'success'" in validation
+    assert "run-id: ${{ needs.resolve_version.outputs.wheel_run_id }}" in validation
     assert "name: validated-shim-wheel-set" in validation
     assert "--project shim --runtime-version" in validation
     assert "for platform in win_amd64 manylinux_2_35_x86_64" in validation
