@@ -133,7 +133,8 @@ std::uint64_t get_forge_native_feature_bitmap() {
             kForgeCudaSubmissionParameters | kForgeCudaCompletionGpuTiming |
             kForgeCudaExecutionInstanceRetirement;
 #if defined(TI_WITH_LLVM)
-  result |= kForgeCudaJitGraphExecutionDomains;
+  result |= kForgeCudaJitGraphExecutionDomains |
+            kForgeCudaExecutionDomainSparseFields;
 #endif
 #if defined(TI_WITH_VULKAN) && defined(TI_WITH_GGUI)
   result |= kForgeCudaCanvasExecutionDomains;

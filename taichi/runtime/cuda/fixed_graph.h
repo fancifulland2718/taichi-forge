@@ -21,6 +21,7 @@ namespace taichi::lang::cuda {
 class KernelLauncher;
 class ExecutionDomain;
 class ExecutionInstance;
+class SparseRuntimeView;
 
 // Backend-owned fixed execution, independent of the Python/JIT Program. Source
 // contexts are consumed only during construction. Registered code and bound
@@ -43,6 +44,7 @@ class FixedGraph {
     // Cold, exact indices in the compiled task sequence. Flat ordinary graphs
     // use their runtime workspace; independent instances use private storage.
     std::vector<std::size_t> device_range_tasks;
+    std::shared_ptr<SparseRuntimeView> runtime_view;
   };
   struct While;
   struct Branch;

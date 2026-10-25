@@ -55,6 +55,7 @@ _FEATURE_BITS = {
     "vulkan_execution_domain_native_ray_loans": 37,
     "vulkan_execution_domain_opacity_micromaps": 38,
     "vulkan_execution_domain_sparse_fields": 39,
+    "cuda_execution_domain_sparse_fields": 40,
 }
 
 

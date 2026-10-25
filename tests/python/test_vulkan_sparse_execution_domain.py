@@ -39,7 +39,7 @@ def export_domain_cases(module):
         "unsupported_branch",
         ti.aot.ExecutionPlan([
             dict(kind="branch", selector="state", selection="nonzero", has_default=False,
-                 lowering=dict(kind="vulkan_host", version=1), condition=[],
+                 lowering=dict(kind="vulkan_host" if ti.cfg.arch == ti.vulkan else "cuda_host", version=1), condition=[],
                  bodies=[[dict(kind="kernel", entry="initialize_only", arguments=[])]])
         ]),
     )
@@ -61,8 +61,10 @@ def test_aot_vulkan_sparse_domain_control_and_retirement(tmp_path, pool):
                    consumer="aot_sparse_domain_probe.py")
 
 
-@test_utils.test(arch=ti.vulkan, offline_cache=False)
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_jit_sparse_domain_selected_code_gradient_and_tree_retirement():
+    weight = ti.field(ti.f32, shape=())
+    weight[None] = 2
     values = ti.field(ti.f32, needs_grad=True)
     fields = ti.FieldsBuilder()
     blocks = fields.pointer(ti.i, 4)
@@ -81,7 +83,7 @@ def test_jit_sparse_domain_selected_code_gradient_and_tree_retirement():
     @ti.kernel
     def energy(loss: ti.types.ndarray(ti.f32, 1, needs_grad=True)):
         for i in values:
-            loss[0] += 0.5 * values[i] * values[i]
+            loss[0] += 0.5 * weight[None] * values[i] * values[i]
 
     @ti.kernel
     def gather(gradient: ti.types.ndarray(ti.f32, 1)):
@@ -117,15 +119,15 @@ def test_jit_sparse_domain_selected_code_gradient_and_tree_retirement():
         call.initialize()
         for _ in range(2):
             call.submit().wait()
-            np.testing.assert_array_equal(loss.to_numpy(), [22.5])
-            np.testing.assert_array_equal(gradient.to_numpy(), [9])
+            np.testing.assert_array_equal(loss.to_numpy(), [45])
+            np.testing.assert_array_equal(gradient.to_numpy(), [18])
         call.close()
         seed(3, loss)
         energy(loss)
         energy.grad(loss)
         gather(gradient)
         ti.sync()
-        np.testing.assert_array_equal(gradient.to_numpy(), [9])
+        np.testing.assert_array_equal(gradient.to_numpy(), [18])
         call = graph.prepare(dict(arguments, scale=-3), execution_domain=domain)
         call.initialize()
         pending = call.submit()

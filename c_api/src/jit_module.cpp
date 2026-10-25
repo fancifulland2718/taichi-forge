@@ -287,9 +287,14 @@ std::uintptr_t import_jit_module(
       const auto *llvm = dynamic_cast<const LLVM::CompiledKernelData *>(&compiled);
       if (!llvm)
         throw std::invalid_argument("JIT Graph needs its selected CUDA code");
-      const auto *blocker =
-          independent_runtime_state_blocker(LLVM::runtime_state_use(
-              *llvm->get_internal_data().compiled_data.module));
+      const auto &module = *llvm->get_internal_data().compiled_data.module;
+      auto state = LLVM::runtime_state_use(module);
+      // This import only qualifies selected code. Public preparation still
+      // has to reserve, initialize and bind its complete runtime view owner.
+      if (LLVM::runtime_context_abi(module) == LLVM::kRuntimeContextABI &&
+          LLVM::sparse_runtime_view_abi(module) == LLVM::kSparseRuntimeViewABI)
+        state &= ~(runtime_state_sparse | runtime_state_error);
+      const auto *blocker = independent_runtime_state_blocker(state);
       if (blocker)
         throw std::invalid_argument(blocker);
     }

@@ -73,7 +73,10 @@ class PreparedExecutionDomain {
   bool instance_retired(const PreparedExecutionInstance &instance) const;
   PreparedExecutionInstance prepare_owned_instance(
       const std::shared_ptr<taichi::lang::RuntimeClient> &client,
-      const std::function<void(const PreparedExecutionInstance &)> &prepare);
+      const std::function<void(const PreparedExecutionInstance &)> &prepare,
+      std::function<std::shared_ptr<taichi::lang::RuntimeCompletionObserver>(
+          void *,
+          std::size_t)> collect_cuda_result = {});
 };
 
 }  // namespace capi

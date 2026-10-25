@@ -111,6 +111,8 @@ class LlvmRuntimeExecutor {
       const std::vector<int> &tree_ids);
   std::shared_ptr<SparseTreeAdmission::Loan> reserve_cuda_sparse_trees(
       const std::vector<LlvmSparseRuntimeViewTree> &trees);
+  std::vector<LlvmSparseRuntimeViewTree> cuda_runtime_view_trees(
+      const std::vector<int> &tree_ids);
 
   const CompileConfig &get_config() const {
     return config_;
@@ -186,7 +188,8 @@ class LlvmRuntimeExecutor {
   void ensure_snode_tree_runtime_directory_capacity(std::size_t required);
   void zero_device_memory(void *ptr, std::size_t size);
   std::vector<SparseTreeAdmission::PinnedUse> bind_cuda_sparse_trees(
-      const std::vector<LlvmSparseRuntimeViewTree> &trees);
+      const std::vector<LlvmSparseRuntimeViewTree> &trees,
+      bool include_dense = false);
   void require_no_cuda_sparse_loans() const;
 
   /* ------------------------- */

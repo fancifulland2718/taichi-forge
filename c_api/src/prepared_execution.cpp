@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <set>
 #include <limits>
+#include <map>
 #include "taichi/aot/execution_plan.h"
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/runtime/native_operation.h"
@@ -25,6 +26,8 @@
 #include "taichi/runtime/cuda/binding_frame_replay.h"
 #include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/cuda/sparse_runtime_view.h"
+#include "taichi/runtime/llvm/llvm_runtime_executor.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #endif
@@ -41,6 +44,35 @@ using namespace taichi::lang;
 // domain reservation counts the logical instance, independent of phase count.
 struct PreparedDomainInstance final : RuntimeClient {
   std::vector<std::shared_ptr<RuntimeClient>> parts;
+#ifdef TI_WITH_CUDA
+  std::vector<std::shared_ptr<cuda::SparseRuntimeView>> cuda_views;
+  struct CudaResult final : RuntimeCompletionObserver {
+    std::vector<std::shared_ptr<cuda::SparseRuntimeView::DiagnosticSnapshot>>
+        snapshots;
+    void observe() const override {
+      std::exception_ptr error;
+      for (const auto &snapshot : snapshots) {
+        try {
+          snapshot->observe();
+        } catch (...) {
+          if (!error)
+            error = std::current_exception();
+        }
+      }
+      if (error)
+        std::rethrow_exception(error);
+    }
+  };
+  std::vector<std::shared_ptr<CudaResult>> cuda_results;
+  std::shared_ptr<RuntimeCompletionObserver> collect_cuda_result(
+      void *stream,
+      std::size_t slot) {
+    const auto &result = cuda_results.at(slot);
+    for (std::size_t i = 0; i < cuda_views.size(); ++i)
+      cuda_views[i]->enqueue_diagnostics(*result->snapshots.at(i), stream);
+    return result;
+  }
+#endif
 #ifdef TI_WITH_VULKAN
   std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> shared_workspace;
 #endif
@@ -48,6 +80,10 @@ struct PreparedDomainInstance final : RuntimeClient {
   std::exception_ptr retirement_error;
   bool safely_released() {
     std::lock_guard<std::mutex> lock(mutex);
+#ifdef TI_WITH_CUDA
+    if (!cuda_views.empty())
+      return false;
+#endif
     return parts.empty() && !retirement_error;
   }
   void retire() override {
@@ -68,6 +104,20 @@ struct PreparedDomainInstance final : RuntimeClient {
     if (retirement_error)
       std::rethrow_exception(retirement_error);
     parts.clear();
+#ifdef TI_WITH_CUDA
+    try {
+      // The domain has proved its prefix complete; all command parts are
+      // already retired. Return managers before releasing tree allocation
+      // loans.
+      for (const auto &view : cuda_views)
+        view->retire();
+      cuda_views.clear();
+      cuda_results.clear();
+    } catch (...) {
+      retirement_error = std::current_exception();
+      throw;
+    }
+#endif
 #ifdef TI_WITH_VULKAN
     if (shared_workspace) {
       shared_workspace->retire_shared_ray_loans(prefix);
@@ -197,6 +247,14 @@ struct PreparedExecution {
   }
   uint64_t workspace_bytes() const {
     uint64_t total = native_resource_workspace_bytes;
+#ifdef TI_WITH_CUDA
+    if (domain_instance)
+      for (const auto &view : domain_instance->cuda_views) {
+        if (view->bytes() > std::numeric_limits<uint64_t>::max() - total)
+          throw MemoryBindingError("Prepared workspace size overflow");
+        total += view->bytes();
+      }
+#endif
     for (const auto bytes :
          {native ? native->workspace_bytes() : 0,
           initialization ? initialization->workspace_bytes() : 0}) {
@@ -336,6 +394,71 @@ struct PreparedExecution {
       if ((!family || !family->prepared) && !initializers.empty())
         bind_discarded_results(runtime, initializers, false);
       FixedExecution::CudaExecutionBinding selected{domain ? domain->cuda : nullptr, {}};
+#ifdef TI_WITH_CUDA
+      struct CudaClosure {
+        bool needs_view{false};
+        std::vector<int> trees;
+        std::set<cuda::KernelLauncher *> launchers;
+      };
+      std::map<LlvmRuntimeExecutor *, CudaClosure> cuda_closures;
+      std::set<std::pair<cuda::KernelLauncher *, int>> cuda_selected;
+      std::function<void(const std::vector<FixedExecution::Operation> &)>
+          collect_cuda;
+      collect_cuda = [&](const auto &steps) {
+        for (const auto &step : steps) {
+          if (const auto *dispatch =
+                  std::get_if<FixedExecution::Dispatch>(&step)) {
+            auto *kernel =
+                dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
+            auto *launcher =
+                kernel
+                    ? dynamic_cast<cuda::KernelLauncher *>(&kernel->launcher())
+                    : nullptr;
+            if (!launcher)
+              throw MemoryBindingError(
+                  "CUDA domain requires selected CUDA kernels");
+            if (!cuda_selected
+                     .emplace(launcher, kernel->handle().get_launch_id())
+                     .second)
+              continue;
+            const auto requirements =
+                launcher->execution_domain_requirements(kernel->handle());
+            auto &closure = cuda_closures[requirements.executor];
+            closure.needs_view |= requirements.runtime_view;
+            closure.trees.insert(closure.trees.end(),
+                                 requirements.trees.begin(),
+                                 requirements.trees.end());
+            closure.launchers.insert(launcher);
+          } else if (const auto *loop = std::get_if<
+                         std::shared_ptr<const FixedExecution::While>>(&step)) {
+            if (!*loop)
+              throw MemoryBindingError("CUDA domain has an empty loop");
+            collect_cuda((*loop)->condition);
+            collect_cuda((*loop)->body);
+          } else if (const auto *branch = std::get_if<
+                         std::shared_ptr<const FixedExecution::Branch>>(
+                         &step)) {
+            if (!*branch)
+              throw MemoryBindingError("CUDA domain has an empty branch");
+            collect_cuda((*branch)->condition);
+            for (const auto &body : (*branch)->bodies)
+              collect_cuda(body);
+          } else if (const auto *parallel = std::get_if<
+                         std::shared_ptr<const FixedExecution::Parallel>>(
+                         &step)) {
+            if (!*parallel)
+              throw MemoryBindingError(
+                  "CUDA domain has an empty parallel region");
+            for (const auto &body : (*parallel)->branches)
+              collect_cuda(body);
+          }
+        }
+      };
+      if (selected.domain) {
+        collect_cuda(initializers);
+        collect_cuda(operations);
+      }
+#endif
 #ifdef TI_WITH_VULKAN
       FixedExecution::VulkanExecutionBinding selected_vulkan;
       if (domain && domain->vulkan) {
@@ -545,9 +668,47 @@ struct PreparedExecution {
         }
       };
       if (domain) {
+        std::function<std::shared_ptr<RuntimeCompletionObserver>(void *,
+                                                                 std::size_t)>
+            collect_cuda_result;
+#ifdef TI_WITH_CUDA
+        if (std::any_of(
+                cuda_closures.begin(), cuda_closures.end(),
+                [](const auto &entry) { return entry.second.needs_view; })) {
+          collect_cuda_result = [owner = domain_instance](void *stream,
+                                                          std::size_t slot) {
+            return owner->collect_cuda_result(stream, slot);
+          };
+        }
+#endif
         domain_registration = domain->prepare_owned_instance(
-            domain_instance, [&](const auto &instance) {
+            domain_instance,
+            [&](const auto &instance) {
               selected.instance = instance.cuda;
+#ifdef TI_WITH_CUDA
+              for (const auto &[executor, closure] : cuda_closures) {
+                if (!closure.needs_view)
+                  continue;
+                auto view = std::make_shared<cuda::SparseRuntimeView>();
+                domain_instance->cuda_views.push_back(view);
+                view->initialize(
+                    *executor, executor->cuda_runtime_view_trees(closure.trees),
+                    runtime.runtime_fault_domain());
+                for (auto *launcher : closure.launchers)
+                  selected.runtime_views.emplace(launcher, view);
+              }
+              if (!domain_instance->cuda_views.empty()) {
+                for (std::size_t slot = 0;
+                     slot < domain->cuda->snapshot().capacity; ++slot) {
+                  auto result =
+                      std::make_shared<PreparedDomainInstance::CudaResult>();
+                  for (const auto &view : domain_instance->cuda_views)
+                    result->snapshots.push_back(
+                        view->prepare_diagnostic_snapshot());
+                  domain_instance->cuda_results.push_back(std::move(result));
+                }
+              }
+#endif
 #ifdef TI_WITH_VULKAN
               selected_vulkan.instance = instance.vulkan;
 #endif
@@ -560,7 +721,8 @@ struct PreparedExecution {
                     {commands.get()}, vulkan_workspace);
               }
 #endif
-            });
+            },
+            std::move(collect_cuda_result));
         domain_instance_admitted = true;
       } else
         prepare_recordings();
@@ -1574,7 +1736,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
       if (!launcher)
         throw MemoryBindingError(
             "Execution domain requires a CUDA kernel launcher");
-      launcher->validate_execution_domain(kernel->handle());
+      launcher->execution_domain_requirements(kernel->handle());
     }
   }
 #endif

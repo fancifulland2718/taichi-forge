@@ -8322,6 +8322,8 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeVulkanExecutionDomainOpacityMicromaps);
     features["vulkan_execution_domain_sparse_fields"] =
         bool(bitmap & kForgeVulkanExecutionDomainSparseFields);
+    features["cuda_execution_domain_sparse_fields"] =
+        bool(bitmap & kForgeCudaExecutionDomainSparseFields);
     result["features"] = std::move(features);
     result["legacy_runtime"] = false;
     return result;

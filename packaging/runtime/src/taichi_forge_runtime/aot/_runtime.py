@@ -1137,6 +1137,7 @@ class PreparedCall(_Resource):
                 self._owners, self._replay_owners = self._replay_owners, None
 
     def close(self):
+        retirement_error = None
         if self._execution_domain is None:
             super().close()
         else:
@@ -1158,15 +1159,26 @@ class PreparedCall(_Resource):
                     # must not hold Runtime or borrowed Program submission locks.
                     try:
                         runtime._api.call(self._execution_domain._functions["retire_instance"], retirement)
+                    except Exception as error:
+                        # A completed device result may carry a logical error.
+                        # The native finish below is the proof that retirement
+                        # nevertheless succeeded; backend/cleanup failures do
+                        # not pass it and must retain all resource owners.
+                        retirement_error = error
                     finally:
                         runtime._api.call(self._execution_domain._functions["release_instance"], retirement)
                 with runtime._lock:
                     if runtime._borrower is not None and runtime._borrower.closed:
                         runtime.close()
                     if live and (self._kind, handle) in runtime._resources:
-                        runtime._api.call(
-                            runtime._api.ti_finish_prepared_instance_retirement_ext, runtime._handle, handle
-                        )
+                        try:
+                            runtime._api.call(
+                                runtime._api.ti_finish_prepared_instance_retirement_ext, runtime._handle, handle
+                            )
+                        except Exception:
+                            if retirement_error is not None:
+                                raise retirement_error from None
+                            raise
                         runtime._resources.remove((self._kind, handle))
                     # Native retirement and edge removal already prove these
                     # private import handles idle. Ordinary _Resource.close()
@@ -1184,6 +1196,9 @@ class PreparedCall(_Resource):
         self._owners = ()
         self._replay_owners = None
         self._family = None
+
+        if retirement_error is not None:
+            raise retirement_error
 
     def release(self):
         """Drop an independent host handle; retain its budget until domain close.

@@ -26,15 +26,23 @@ def rejected(action, *words):
 
 
 def main(arch, mode, artifact):
-    assert arch == "vulkan"
+    assert arch in ("cuda", "vulkan")
     if mode == "borrowed":
         import taichi_forge as ti
-        ti.init(arch=ti.vulkan, offline_cache=False)
+        ti.init(arch=getattr(ti, arch), offline_cache=False)
         runtime = ti.aot.borrow_runtime()
     else:
-        runtime = Runtime(arch, device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", "0")))
+        runtime = Runtime(arch, **(dict(device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", "0")))
+                                   if arch == "vulkan" else {}))
     with runtime:
         modules = [runtime.load_module(artifact) for _ in range(2)]
+        if arch == "cuda":
+            # CUDA tree materialization may replace the source allocator.
+            # Complete each module's cold tree closure before lending any
+            # managers. This resolves code/resources without executing kernels.
+            for module in modules:
+                module.kernel("deactivate")
+                module.kernel("initialize_only")
         domains = [runtime.execution_domain(capacity=2, instance_capacity=1) for _ in modules]
         frames = []
         for _ in modules:
@@ -57,7 +65,9 @@ def main(arch, mode, artifact):
         modules[0].kernel("read_initial")(probe)
         assert read(probe, "i") == [71]
 
-        cases = [("loop", 0, 0), ("loop", 2, 2), ("loop", 10, 4), ("zero", 3, 0), ("nested", 2, 2)]
+        cases = [("loop", 0, 0), ("loop", 2, 2), ("loop", 10, 4), ("zero", 3, 0)]
+        if arch == "vulkan":
+            cases.append(("nested", 2, 2))
         costs = []
         for name, target, count in cases:
             calls, arguments = [], []
@@ -103,13 +113,14 @@ def main(arch, mode, artifact):
             modules[0].kernel("gather")(frames[0]["out"])
             assert read(frames[0]["out"]) == ([6, 8, 2] if count else [0, 0, 0])
             calls[1].submit().wait()  # Peer stays usable after the first closes.
-            if name == "nested":
+            if name == cases[-1][0]:
                 pending = calls[1].submit()
                 modules[1].close()  # In-flight nested traversal and adjoint retire.
                 pending.wait()
                 rejected(calls[1].submit, "retired", "closed", "live")
             calls[1].close()
         modules[0].close()
+        modules[1].close()
         for domain in domains:
             domain.close()
         print("SPARSE_DOMAIN_COSTS=" + json.dumps(dict(mode=mode, cases=costs)))

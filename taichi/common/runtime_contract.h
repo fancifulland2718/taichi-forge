@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Embedded LLVM runtime views carry a source allocator and private tree directory.
-inline constexpr int kForgeNativeAbiRevision = 205;
+inline constexpr int kForgeNativeAbiRevision = 206;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
@@ -64,6 +64,8 @@ inline constexpr std::uint64_t kForgeVulkanExecutionDomainOpacityMicromaps =
 // Generation-qualified exclusive Field loans with private lists/diagnostics.
 inline constexpr std::uint64_t kForgeVulkanExecutionDomainSparseFields =
     1ull << 39;
+inline constexpr std::uint64_t kForgeCudaExecutionDomainSparseFields = 1ull
+                                                                       << 40;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

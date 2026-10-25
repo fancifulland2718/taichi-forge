@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <optional>
 #include <variant>
 #include <vector>
@@ -32,6 +33,8 @@ namespace cuda {
 class BindingFrameReplay;
 class ExecutionDomain;
 class ExecutionInstance;
+class KernelLauncher;
+class SparseRuntimeView;
 }
 
 // Cold bindings shared by loaded AOT entries and native runtime adapters. The
@@ -53,6 +56,10 @@ class FixedExecution {
     std::vector<std::shared_ptr<RuntimeClient>> *retirement_parts{nullptr};
     // Both initialization and replay record use against this logical owner.
     std::shared_ptr<cuda::ExecutionInstance> instance;
+    // Cold launcher-to-owner bindings for the complete initializer/replay
+    // closure. Owners outlive all recording parts and their final completion.
+    std::map<cuda::KernelLauncher *, std::shared_ptr<cuda::SparseRuntimeView>>
+        runtime_views;
   };
   struct Dispatch {
     aot::Kernel *kernel;

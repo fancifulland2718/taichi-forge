@@ -13,6 +13,7 @@
 #include "taichi/rhi/cuda/primitives/graph_ptx.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/cuda/sparse_runtime_view.h"
 #include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/runtime/cuda/bounded_graph.h"
 #include "taichi/runtime/cuda/range_graph.h"
@@ -331,6 +332,10 @@ FixedGraph::FixedGraph(
           if (!dispatch->external) {
             if (!dispatch->launcher)
               throw std::invalid_argument("CUDA dispatch has no launcher");
+            // Standalone instances do not own a public preparation's views.
+            if (dispatch->runtime_view)
+              throw std::invalid_argument(
+                  "CUDA runtime view requires its enclosing prepared owner");
             dispatch->launcher->validate_execution_domain(dispatch->handle);
           }
           continue;
@@ -816,7 +821,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
   std::vector<std::pair<KernelLauncher *, KernelLaunchHandle>>
       sparse_dispatches;
   for (const auto *dispatch : dispatches)
-    if (!dispatch->external)
+    if (!dispatch->external && !dispatch->runtime_view)
       sparse_dispatches.emplace_back(dispatch->launcher, dispatch->handle);
   state.sparse_access =
       KernelLauncher::prepare_sparse_graph_access(sparse_dispatches);
@@ -829,9 +834,11 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
   std::vector<std::size_t> offsets;
   auto &image = state.host_arguments;
   constexpr std::size_t alignment = 16;  // RuntimeContext argument ABI.
-  if (state.independent &&
-      std::any_of(dispatches.begin(), dispatches.end(),
-                  [](const auto *dispatch) { return !dispatch->external; })) {
+  if (state.independent && std::any_of(dispatches.begin(), dispatches.end(),
+                                       [](const auto *dispatch) {
+                                         return !dispatch->external &&
+                                                !dispatch->runtime_view;
+                                       })) {
     if (temporary_regions >
         std::numeric_limits<std::size_t>::max() / taichi_global_tmp_buffer_size)
       throw std::invalid_argument(
@@ -849,6 +856,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
     }
     const auto gate =
         i >= gated_begin ? packet_gates[i - gated_begin] : GateBinding{nullptr, 0};
+    packets[i].runtime_view = dispatch.runtime_view.get();
     TI_ERROR_IF(
         !dispatch.launcher || !dispatch.context ||
             !(gate.pointer
@@ -863,7 +871,13 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
                         dispatch.handle, *dispatch.context, packets[i], true)),
         "Unsupported fixed CUDA Graph dispatch");
     auto &packet = packets[i];
-    if (state.independent) {
+    if (dispatch.runtime_view) {
+      TI_ERROR_IF(
+          !state.independent || parallel_dispatches.count(&dispatch),
+          "CUDA sparse runtime views require an ordered independent region");
+      dispatch.launcher->bind_sparse_runtime_view(packet,
+                                                  *dispatch.runtime_view);
+    } else if (state.independent) {
       const auto region = parallel_dispatches.find(&dispatch);
       const auto index =
           region == parallel_dispatches.end() ? 0 : region->second;

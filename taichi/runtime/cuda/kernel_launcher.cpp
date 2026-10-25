@@ -767,18 +767,17 @@ void KernelLauncher::enable_sparse_graph_replay() {
   sparse_graph_contract_ = true;
 }
 
-bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
-                                                LaunchContextBuilder &ctx,
-                                                RuntimeContext &context,
-                                                std::vector<OffloadedTask>
-                                                    *resolved_tasks,
-                                                std::string
-                                                    *task_plan_identity,
-                                                std::size_t
-                                                    *resolved_task_count,
-                                                KernelLaunchABI launch_abi,
-                                                bool allow_sparse_replay,
-                                                std::shared_ptr<void> *sparse_lease) {
+bool KernelLauncher::prepare_cuda_graph_context(
+    Handle handle,
+    LaunchContextBuilder &ctx,
+    RuntimeContext &context,
+    std::vector<OffloadedTask> *resolved_tasks,
+    std::string *task_plan_identity,
+    std::size_t *resolved_task_count,
+    KernelLaunchABI launch_abi,
+    bool allow_sparse_replay,
+    std::shared_ptr<void> *sparse_lease,
+    const SparseRuntimeView *runtime_view) {
   std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
   std::shared_ptr<const Context> launcher_ctx;
   auto iter = contexts_.find(handle.get_launch_id());
@@ -816,7 +815,16 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
       uses_sparse = true;
     }
   }
-  if (uses_sparse && (!allow_sparse_replay || !sparse_graph_contract_))
+  if (runtime_view) {
+    if (launcher_ctx->runtime_context_abi != LLVM::kRuntimeContextABI ||
+        launcher_ctx->sparse_runtime_view_abi != LLVM::kSparseRuntimeViewABI)
+      throw std::invalid_argument(
+          "CUDA runtime view requires qualified selected code");
+    runtime_view->bind(get_runtime_executor()->get_llvm_runtime(),
+                       launcher_ctx->snode_tree_ids);
+  }
+  if (uses_sparse &&
+      (!allow_sparse_replay || (!sparse_graph_contract_ && !runtime_view)))
     return false;
   if (ctx.result_buffer_size > 0 && !ctx.prepared_result) {
     return false;
@@ -980,10 +988,11 @@ bool KernelLauncher::prepare_cuda_graph_launch_packet(
     GraphLaunchPacket &packet,
     bool retain_sparse_replay) {
   RuntimeContext context;
-  if (!prepare_cuda_graph_context(handle, ctx, context, &packet.offloaded_tasks,
-                                  &packet.task_execution_plan_identity, nullptr,
-                                  KernelLaunchABI::ordinary, retain_sparse_replay,
-                                  &packet.sparse_replay_lease)) {
+  if (!prepare_cuda_graph_context(
+          handle, ctx, context, &packet.offloaded_tasks,
+          &packet.task_execution_plan_identity, nullptr,
+          KernelLaunchABI::ordinary, retain_sparse_replay,
+          &packet.sparse_replay_lease, packet.runtime_view)) {
     return false;
   }
   packet.handle = handle;
@@ -1013,7 +1022,8 @@ std::uint32_t KernelLauncher::bounded_graph_grid_limit() {
   return grid > 0 ? static_cast<std::uint32_t>(grid) : 0;
 }
 
-void KernelLauncher::validate_execution_domain(Handle handle) {
+KernelLauncher::ExecutionDomainRequirements
+KernelLauncher::execution_domain_requirements(Handle handle) {
   std::shared_lock<std::shared_mutex> lock(registration_mutex());
   const auto iter = contexts_.find(handle.get_launch_id());
   if (iter == contexts_.end())
@@ -1021,9 +1031,27 @@ void KernelLauncher::validate_execution_domain(Handle handle) {
   if (iter->second->runtime_context_abi < LLVM::kRuntimeContextABI)
     throw std::invalid_argument(
         "CUDA kernel was compiled without execution-instance temporaries");
-  if (const auto *blocker =
-          independent_runtime_state_blocker(iter->second->runtime_state))
+  const auto &context = *iter->second;
+  const bool view =
+      context.runtime_state & (runtime_state_sparse | runtime_state_error);
+  if (view && context.sparse_runtime_view_abi != LLVM::kSparseRuntimeViewABI)
+    throw std::invalid_argument(
+        "CUDA kernel has no compiled sparse runtime view qualification");
+  if (const auto *blocker = independent_runtime_state_blocker(
+          context.runtime_state &
+          ~(runtime_state_sparse | runtime_state_error)))
     throw std::invalid_argument(blocker);
+  return {get_runtime_executor(), view, context.snode_tree_ids};
+}
+
+void KernelLauncher::validate_execution_domain(Handle handle,
+                                               const SparseRuntimeView *view) {
+  const auto requirements = execution_domain_requirements(handle);
+  if (view)
+    view->bind(get_runtime_executor()->get_llvm_runtime(), requirements.trees);
+  else if (requirements.runtime_view)
+    throw std::invalid_argument(
+        "CUDA kernel requires an owned sparse runtime view");
 }
 
 bool KernelLauncher::has_field_dependencies(Handle handle) {
@@ -1168,11 +1196,11 @@ bool KernelLauncher::prepare_cuda_graph_gated_packet(
     return false;
   }
   RuntimeContext context;
-  if (!prepare_cuda_graph_context(handle, ctx, context,
-                                  &packet.offloaded_tasks,
-                                  &packet.task_execution_plan_identity,
-                                  nullptr, KernelLaunchABI::graph_gate_v1,
-                                  retain_sparse_replay, &packet.sparse_replay_lease)) {
+  if (!prepare_cuda_graph_context(
+          handle, ctx, context, &packet.offloaded_tasks,
+          &packet.task_execution_plan_identity, nullptr,
+          KernelLaunchABI::graph_gate_v1, retain_sparse_replay,
+          &packet.sparse_replay_lease, packet.runtime_view)) {
     return false;
   }
 

@@ -359,18 +359,24 @@ void PreparedExecutionDomain::retire_instance(
 
 PreparedExecutionInstance PreparedExecutionDomain::prepare_owned_instance(
     const std::shared_ptr<taichi::lang::RuntimeClient> &client,
-    const std::function<void(const PreparedExecutionInstance &)> &prepare) {
+    const std::function<void(const PreparedExecutionInstance &)> &prepare,
+    std::function<std::shared_ptr<taichi::lang::RuntimeCompletionObserver>(
+        void *,
+        std::size_t)> collect_cuda_result) {
   PreparedExecutionInstance result;
 #ifdef TI_WITH_CUDA
   if (cuda) {
-    result.cuda = cuda->prepare_owned_instance(client, [&](const auto &instance) {
-      prepare({instance, {}});
-    });
+    result.cuda = cuda->prepare_owned_instance(
+        client, [&](const auto &instance) { prepare({instance, {}}); },
+        std::move(collect_cuda_result));
     return result;
   }
 #endif
 #ifdef TI_WITH_VULKAN
   if (vulkan) {
+    if (collect_cuda_result)
+      throw std::invalid_argument(
+          "CUDA result collector requires a CUDA domain");
     result.vulkan = vulkan->prepare_owned_instance(client, [&](const auto &instance) {
       prepare({{}, instance});
     });

@@ -716,9 +716,13 @@ FixedExecution::FixedExecution(
           if (!launcher)
             throw std::invalid_argument(
                 "CUDA execution domain requires a CUDA kernel launcher");
-          if (execution_binding)
-            launcher->validate_execution_domain(kernel->handle());
-          else
+          if (execution_binding) {
+            const auto view = execution_binding->runtime_views.find(launcher);
+            launcher->validate_execution_domain(
+                kernel->handle(), view == execution_binding->runtime_views.end()
+                                      ? nullptr
+                                      : view->second.get());
+          } else
             cuda_sparse_dispatches.emplace_back(launcher, kernel->handle());
         }
 #endif
@@ -1233,6 +1237,12 @@ FixedExecution::FixedExecution(
               dispatch->bounded_binding_identity,
               dispatch->parameters,
               std::vector<std::size_t>(selection.begin(), selection.end())});
+          if (execution_binding) {
+            const auto view = execution_binding->runtime_views.find(launcher);
+            if (view != execution_binding->runtime_views.end())
+              std::get<cuda::FixedGraph::Dispatch>(native.back()).runtime_view =
+                  view->second;
+          }
         } else if (const auto *external =
                        std::get_if<std::shared_ptr<NativeOperation>>(
                            &operation)) {
@@ -1964,9 +1974,18 @@ RuntimeCompletion FixedExecution::submit(
         [&] {
           // All readiness checks precede provider reservations, dependency
           // waits, external semaphore consumption and sequence allocation.
-          if (instance->parameter_use.valid() &&
-              !instance->parameter_use.done())
-            throw cuda::ExecutionDomainBusy();
+          if (instance->parameter_use.valid()) {
+            try {
+              if (!instance->parameter_use.done())
+                throw cuda::ExecutionDomainBusy();
+            } catch (...) {
+              // Logical result errors do not keep the completed parameter
+              // upload in flight. The old ticket retains its frozen error;
+              // real backend failures still prohibit storage reuse.
+              if (!instance->parameter_use.result_observation_failed())
+                throw;
+            }
+          }
           if (instance->external_access && !instance->external_access->ready())
             throw cuda::ExecutionDomainBusy();
           if (ordered)

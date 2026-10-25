@@ -204,6 +204,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::string task_execution_plan_identity;
     std::vector<OffloadedTask> offloaded_tasks;
     std::shared_ptr<void> sparse_replay_lease;
+    // Cold qualification supplied by the enclosing preparation owner. It does
+    // not enter the device ABI or grant ordinary Graphs a global capability.
+    const SparseRuntimeView *runtime_view{nullptr};
   };
 
   // Cold AOT qualification, before registering any kernels. Old persisted
@@ -220,7 +223,16 @@ class KernelLauncher : public LLVM::KernelLauncher {
   void bind_runtime_temporaries(GraphLaunchPacket &packet);
   void bind_sparse_runtime_view(GraphLaunchPacket &packet,
                                 const SparseRuntimeView &view);
-  void validate_execution_domain(Handle handle);
+  struct ExecutionDomainRequirements {
+    LlvmRuntimeExecutor *executor{nullptr};
+    bool runtime_view{false};
+    std::vector<int> trees;
+  };
+  // Qualification is cold and does not grant execution permission. Actual
+  // capture must bind a matching owner for the complete selected closure.
+  ExecutionDomainRequirements execution_domain_requirements(Handle handle);
+  void validate_execution_domain(Handle handle,
+                                 const SparseRuntimeView *view = nullptr);
   bool has_field_dependencies(Handle handle);
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
@@ -314,18 +326,17 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                            std::uint32_t *driver_error);
 
  private:
-  bool prepare_cuda_graph_context(Handle handle,
-                                  LaunchContextBuilder &ctx,
-                                  RuntimeContext &context,
-                                  std::vector<OffloadedTask> *offloaded_tasks =
-                                      nullptr,
-                                  std::string *task_execution_plan_identity =
-                                      nullptr,
-                                  std::size_t *offloaded_task_count = nullptr,
-                                  KernelLaunchABI launch_abi =
-                                      KernelLaunchABI::ordinary,
-                                  bool allow_sparse_replay = false,
-                                  std::shared_ptr<void> *sparse_lease = nullptr);
+  bool prepare_cuda_graph_context(
+      Handle handle,
+      LaunchContextBuilder &ctx,
+      RuntimeContext &context,
+      std::vector<OffloadedTask> *offloaded_tasks = nullptr,
+      std::string *task_execution_plan_identity = nullptr,
+      std::size_t *offloaded_task_count = nullptr,
+      KernelLaunchABI launch_abi = KernelLaunchABI::ordinary,
+      bool allow_sparse_replay = false,
+      std::shared_ptr<void> *sparse_lease = nullptr,
+      const SparseRuntimeView *runtime_view = nullptr);
   bool on_cuda_device(void *ptr);
   int64 get_sparse_list_version(int snode_id) const;
   void record_sparse_list_reuse_sample(SparseListState &state,

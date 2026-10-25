@@ -124,9 +124,9 @@ void SparseRuntimeView::initialize(
     std::shared_ptr<RuntimeFaultDomain> owner) {
   auto &s = *state_;
   if (s.attempted || !owner || owner->backend() != Arch::cuda ||
-      trees.empty() ||
       trees.size() > std::size_t(std::numeric_limits<int>::max()) ||
-      trees.back().tree_id == std::numeric_limits<int>::max())
+      (!trees.empty() &&
+       trees.back().tree_id == std::numeric_limits<int>::max()))
     throw std::invalid_argument("Invalid CUDA sparse runtime view preparation");
   owner->throw_if_new_submission_disallowed("prepare CUDA sparse runtime view");
   s.owner = std::move(owner);
@@ -146,7 +146,8 @@ void SparseRuntimeView::initialize(
     producer = RuntimeCompletion::from_cuda_stream(
         s.owner->snapshot().program_domain,
         s.owner->allocate_submission_sequence(), nullptr, s.owner);
-    s.loan->publish_boundary(std::make_shared<RuntimeCompletion>(producer));
+    if (s.loan)
+      s.loan->publish_boundary(std::make_shared<RuntimeCompletion>(producer));
   }
   // No global submission gate is held while waiting on this exact producer.
   auto &driver = CUDADriver::get_instance();
@@ -174,18 +175,21 @@ void SparseRuntimeView::initialize(
   s.view = static_cast<LLVMRuntime *>(s.allocate(view_bytes));
   driver.memsetd32_async(s.view, 0, view_bytes / sizeof(std::uint32_t),
                          s.stream);
-  const int capacity = trees.back().tree_id + 1;
-  auto *directory = s.allocate(std::size_t(capacity) * sizeof(void *));
+  const int capacity = trees.empty() ? 0 : trees.back().tree_id + 1;
+  auto *directory =
+      capacity ? s.allocate(std::size_t(capacity) * sizeof(void *)) : nullptr;
   s.temporary = s.allocate(taichi_global_tmp_buffer_size);
   auto *result =
       s.allocate(taichi_result_buffer_entries * sizeof(std::uint64_t));
   s.status =
       static_cast<LlvmSparseRuntimeViewStatus *>(s.allocate(sizeof(*s.status)));
-  s.device_trees =
-      static_cast<LlvmSparseRuntimeViewTree *>(s.allocate(input_bytes));
-  std::memcpy(s.host, trees.data(), input_bytes);
-  driver.memcpy_host_to_device_async(s.device_trees, s.host, input_bytes,
-                                     s.stream);
+  if (input_bytes) {
+    s.device_trees =
+        static_cast<LlvmSparseRuntimeViewTree *>(s.allocate(input_bytes));
+    std::memcpy(s.host, trees.data(), input_bytes);
+    driver.memcpy_host_to_device_async(s.device_trees, s.host, input_bytes,
+                                       s.stream);
+  }
   s.call(initialize_function, "runtime_sparse_view_initialize", s.stream,
          s.source, s.view, directory, capacity, s.temporary, result, s.status);
   s.check_status("initialize");

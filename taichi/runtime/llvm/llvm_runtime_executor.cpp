@@ -1271,7 +1271,7 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
                                                    !all_dense})
           .second;
   TI_ASSERT(state_inserted);
-  if (config_.arch == Arch::cuda && !all_dense)
+  if (config_.arch == Arch::cuda)
     active_snode_tree_runtime_states_.at(tree_id).registration =
         SparseTreeRegistration::create(sparse_identities_, sparse_admission_);
 
@@ -1931,7 +1931,8 @@ void LlvmRuntimeExecutor::require_no_cuda_sparse_loans() const {
 
 std::vector<SparseTreeAdmission::PinnedUse>
 LlvmRuntimeExecutor::bind_cuda_sparse_trees(
-    const std::vector<LlvmSparseRuntimeViewTree> &trees) {
+    const std::vector<LlvmSparseRuntimeViewTree> &trees,
+    bool include_dense) {
   if (config_.arch != Arch::cuda || finalized_)
     throw std::invalid_argument("Sparse CUDA access requires a live CUDA executor");
   // Validate the entire request before acquiring any allocation lease.
@@ -1954,7 +1955,7 @@ LlvmRuntimeExecutor::bind_cuda_sparse_trees(
   };
   for (const auto &tree : trees) {
     const auto &state = active_snode_tree_runtime_states_.at(tree.tree_id);
-    if (!state.registration)
+    if (!state.registration || (!include_dense && !state.element_lists))
       continue;
     auto storage = std::make_shared<Storage>();
     storage->device = device_;
@@ -1984,7 +1985,11 @@ LlvmRuntimeExecutor::bind_cuda_sparse_trees(
       if (backing)
         pin(*backing);
     }
-    uses.push_back({{state.registration->handle(), SharedResourceUse::exclusive},
+    // Dense directories have no mutable managers. Share their lifetime, while
+    // leaving value hazards to the existing Field/dependency contract.
+    uses.push_back({{state.registration->handle(),
+                     state.element_lists ? SharedResourceUse::exclusive
+                                         : SharedResourceUse::read},
                     std::move(storage)});
   }
 #endif
@@ -1993,6 +1998,15 @@ LlvmRuntimeExecutor::bind_cuda_sparse_trees(
 
 std::shared_ptr<SparseTreeAdmission::Permit>
 LlvmRuntimeExecutor::prepare_cuda_sparse_access(const std::vector<int> &ids) {
+#if defined(TI_WITH_CUDA)
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+#endif
+  auto uses = bind_cuda_sparse_trees(cuda_runtime_view_trees(ids));
+  return uses.empty() ? nullptr : sparse_admission_->prepare(uses);
+}
+
+std::vector<LlvmSparseRuntimeViewTree>
+LlvmRuntimeExecutor::cuda_runtime_view_trees(const std::vector<int> &ids) {
 #if defined(TI_WITH_CUDA)
   auto submission = CUDAContext::get_instance().get_submission_lock_guard();
 #endif
@@ -2006,8 +2020,7 @@ LlvmRuntimeExecutor::prepare_cuda_sparse_access(const std::vector<int> &ids) {
       throw std::invalid_argument("CUDA kernel references an unmaterialized tree");
     trees.push_back({id, 0, state->second.generation});
   }
-  auto uses = bind_cuda_sparse_trees(trees);
-  return uses.empty() ? nullptr : sparse_admission_->prepare(uses);
+  return trees;
 }
 
 std::shared_ptr<SparseTreeAdmission::Loan>
@@ -2016,9 +2029,9 @@ LlvmRuntimeExecutor::reserve_cuda_sparse_trees(
 #if defined(TI_WITH_CUDA)
   auto submission = CUDAContext::get_instance().get_submission_lock_guard();
 #endif
-  auto uses = bind_cuda_sparse_trees(trees);
-  if (uses.size() != trees.size())
-    throw std::invalid_argument("CUDA sparse view closure contains a dense-only tree");
+  auto uses = bind_cuda_sparse_trees(trees, true);
+  if (uses.empty())
+    return nullptr;
   return sparse_admission_->reserve(uses);
 }
 
