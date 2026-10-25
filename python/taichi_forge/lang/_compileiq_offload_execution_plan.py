@@ -30,7 +30,6 @@ _CUDA_MIN_BLOCKS_PER_SM = (1, 4)
 _CUDA_MAX_REGISTERS = (24, 48)
 _RANGE_WORK_PER_THREAD_TARGETS = (2, 4, 8)
 _CUDA_GRID_RESIDENCY_WAVES = (1, 2, 4)
-_MAX_FRONTIER_RECIPES = 32
 _MIN_QUALIFICATION_BLOCKS = 10
 
 
@@ -231,7 +230,7 @@ class CompileIQOffloadExecutionPlanSearch:
         recipes, eligibility = self._first_stage_recipes(baseline, manifests)
         stage_manifest = {
             "generation": "baseline_plus_all_legal_single_task_perturbations",
-            "candidate_limit": 4096,
+            "candidate_limit": None,
             "axes": {
                 "workgroup_size": _WORKGROUP_SIZES,
                 "thread_local": ("auto", *_THREAD_LOCAL_MODES),
@@ -353,10 +352,6 @@ class CompileIQOffloadExecutionPlanSearch:
             )
             eligibility.append((spec.logical_task_id, axis_status))
 
-        if len(recipes) > 4096:
-            raise ValueError(
-                "single-task plan domain exceeds 4096 recipes; staged generation " "must be narrowed explicitly"
-            )
         return recipes, tuple(eligibility)
 
     @staticmethod
@@ -380,8 +375,6 @@ class CompileIQOffloadExecutionPlanSearch:
     ):
         if baseline_plan.recipe_id not in recipes:
             raise ValueError("complete plan domain must retain its baseline sentinel")
-        if len(recipes) > 4096:
-            raise ValueError("complete plan domain exceeds the 4096-recipe limit")
         semantic_payload = {
             "schema": "taichi_forge.compileiq-offload-plan-semantics.v2",
             "semantic_kernel_identity": baseline_plan.semantic_kernel_identity,
@@ -408,6 +401,7 @@ class CompileIQOffloadExecutionPlanSearch:
             capability_components=capability_components,
             domain_owner="offload execution-plan",
             recipe_description="complete offload execution plan",
+            dynamic_only=len(recipes) > 4096,
         )
         self._kernel = kernel
         self._sample_args = tuple(sample_args)
@@ -489,25 +483,49 @@ class CompileIQOffloadExecutionPlanSearch:
         reset_workload()
         return measure(self.bind(parameters))
 
-    def compileiq_search(self, objective_function, *, problem_type="min"):
-        """Create a complete, deterministic search in the reviewed fork."""
+    def compileiq_search(self, objective_function, *, problem_type="min", budget=None,
+                         checkpoint=None, evaluation_context=None, repeat_count=1):
+        """Create an explicit search; a budget selects resumable paged trials.
 
+        Domains larger than a protocol frame require an explicit search budget.
+        This limits requested tuning work, not the compilable workload or domain.
+        Program code caches and caller-owned data remain outside trial memory.
+        """
+        if budget is not None:
+            from taichi_forge.lang._compileiq_plan_pages import _OffloadPlanSearchSessionV2
+
+            return _OffloadPlanSearchSessionV2(
+                self, objective_function, budget=budget, problem_type=problem_type,
+                checkpoint=checkpoint, evaluation_context=evaluation_context, repeat_count=repeat_count,
+            )
+        if checkpoint is not None or evaluation_context is not None or repeat_count != 1:
+            raise ValueError("checkpoint, evaluation_context and repeats require a search budget")
+        if len(self.recipe_ids) > 4096:
+            raise ValueError("paged offload search requires an explicit evaluation/time/memory budget")
         return self._transport.exhaustive_search(objective_function, problem_type=problem_type)
 
     def search_coverage(self, compileiq_search):
+        from taichi_forge.lang._compileiq_plan_pages import _OffloadPlanSearchSessionV2
+
+        if isinstance(compileiq_search, _OffloadPlanSearchSessionV2):
+            return compileiq_search.coverage(self)
         return self._transport.search_coverage(compileiq_search)
 
     def require_complete_search(self, compileiq_search):
-        return self._transport.require_complete_search(compileiq_search)
+        coverage = self.search_coverage(compileiq_search)
+        if not coverage["complete"]:
+            raise RuntimeError("CompileIQ did not evaluate the complete frozen offload plan domain")
+        return coverage
 
     def select_best_result(self, compileiq_search, result):
-        recipe_id = self._transport.select_best_recipe_id(compileiq_search, result)
-        return self.select(
-            {
-                "domain_fingerprint": self.domain_fingerprint,
-                "recipe_id": recipe_id,
-            }
-        )
+        if getattr(compileiq_search, "PROTOCOL", "") == "dynamic_batch_pareto_racing_main_thread_v2":
+            self.require_complete_search(compileiq_search)
+            if result.checkpoint() != compileiq_search.checkpoint():
+                raise ValueError("result belongs to another offload search checkpoint")
+            recipe_id = result.get_best_result()["recipe_id"]
+        else:
+            recipe_id = self._transport.select_best_recipe_id(compileiq_search, result)
+        return self.select({"domain_fingerprint": self.domain_fingerprint, "recipe_id": recipe_id})
 
     def recipe_manifest(self, recipe_id):
         recipe = self._recipe(recipe_id)
@@ -535,8 +553,6 @@ class CompileIQOffloadExecutionPlanSearch:
         )
         if not frontier_recipe_ids:
             raise ValueError("refinement requires at least one measured nonbaseline plan")
-        if len(frontier_recipe_ids) > _MAX_FRONTIER_RECIPES:
-            raise ValueError(f"refinement frontier exceeds {_MAX_FRONTIER_RECIPES} recipes")
         frontier = tuple(self._recipe(recipe_id) for recipe_id in frontier_recipe_ids)
         if any(len(recipe.edits) != 1 for recipe in frontier):
             raise ValueError("refinement frontier must contain first-stage perturbations")
@@ -557,8 +573,6 @@ class CompileIQOffloadExecutionPlanSearch:
                     parent_recipe_ids=tuple(sorted((left.recipe_id, right.recipe_id))),
                 )
                 recipes.setdefault(recipe.recipe_id, recipe)
-        if len(recipes) > 4096:
-            raise ValueError("observed-frontier pairwise domain exceeds 4096 recipes")
 
         refined = object.__new__(type(self))
         refined._initialize(
@@ -572,9 +586,9 @@ class CompileIQOffloadExecutionPlanSearch:
                 "generation": "baseline_plus_observed_frontier_plus_all_legal_pairs",
                 "parent_domain_fingerprint": self.domain_fingerprint,
                 "frontier_recipe_ids": tuple(sorted(frontier_recipe_ids)),
-                "frontier_limit": _MAX_FRONTIER_RECIPES,
-                "candidate_limit": 4096,
-                "overflow": "fail_closed_without_truncation",
+                "frontier_limit": None,
+                "candidate_limit": None,
+                "transport": "paged_when_required",
             },
             capability_components=self._capability_components,
         )

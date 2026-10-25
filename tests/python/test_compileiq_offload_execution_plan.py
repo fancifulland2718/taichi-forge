@@ -270,3 +270,76 @@ def test_modified_compileiq_exhausts_and_materializes_full_plan_domain():
     assert len(resets) == len(plans.recipe_ids)
     assert selected.recipe_id == plans.recipe_ids[0]
     np.testing.assert_array_equal(values.to_numpy(), np.arange(count, dtype=np.int32) * 7 + 3)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_offload_paged_search_materializes_and_resumes_exact_plans(monkeypatch):
+    import pytest
+    from compileiq.forge_support import ForgeOpaqueEvaluationContextV1
+    from taichi_forge.lang._compileiq_offload_execution_plan import compileiq_offload_execution_plan_search
+
+    from taichi_forge._compileiq_opaque import _CompileIQOpaqueRecipeTransport
+
+    original_pages = _CompileIQOpaqueRecipeTransport.recipe_pages
+    monkeypatch.setattr(_CompileIQOpaqueRecipeTransport, "recipe_pages",
+                        lambda self, ids=None, **kwargs: original_pages(self, ids, page_size=2))
+    array = ti.ndarray(ti.i32, shape=65)
+
+    @ti.kernel
+    def kernel(out: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in out:
+            out[i] = i * 3 + 1
+
+    plans = compileiq_offload_execution_plan_search(kernel, array)
+    # Keep representative launch edits; no large compilation matrix is needed.
+    selected = {plans.baseline_recipe_id: plans._recipes[plans.baseline_recipe_id]}
+    selected.update(
+        (key, recipe)
+        for key, recipe in plans._recipes.items()
+        if len(recipe.edits) == 1 and recipe.edits[0].field == "grid_residency_waves"
+    )
+    plans._initialize(
+        kernel=kernel,
+        sample_args=(array,),
+        baseline_plan=plans._baseline_plan,
+        recipes=selected,
+        eligibility=plans._eligibility,
+        stage=plans.stage,
+        stage_manifest=dict(plans._stage_manifest),
+        capability_components=plans._capability_components,
+    )
+    assert len(plans.recipe_ids) >= 3
+    context = ForgeOpaqueEvaluationContextV1(
+        reuse_scope="portable",
+        workload_context_id="65-integer-map",
+        evaluation_contract_id="exact-oracle-synthetic-score",
+        backend_environment_id="test-cuda-device",
+    )
+    winner = sorted(key for key in plans.recipe_ids if key != plans.baseline_recipe_id)[0]
+    calls = []
+
+    def objective(parameters):
+        plans.bind(parameters)(array)
+        ti.sync()
+        np.testing.assert_array_equal(array.to_numpy(), np.arange(65, dtype=np.int32) * 3 + 1)
+        calls.append(parameters["recipe_id"])
+        return 1.0 if parameters["recipe_id"] == winner else 10.0
+
+    def budget(limit):
+        return dict(evaluation_limit=limit, time_limit_seconds=60.0, materialized_memory_limit_bytes=0)
+
+    search = plans.compileiq_search(objective, budget=budget(2), evaluation_context=context)
+    search.start()
+    assert not plans.search_coverage(search)["complete"]
+    with pytest.raises(ValueError, match="portable evaluation_context"):
+        plans.compileiq_search(objective, budget=budget(20), checkpoint=search.checkpoint())
+    resumed = plans.compileiq_search(
+        objective,
+        budget=budget(20),
+        evaluation_context=context,
+        checkpoint=search.checkpoint().model_dump(by_alias=True),
+    )
+    result = resumed.start()
+    assert plans.search_coverage(resumed)["complete"]
+    assert plans.select_best_result(resumed, result).recipe_id == winner
+    assert len(calls) == len(set(calls)) == len(plans.recipe_ids)
