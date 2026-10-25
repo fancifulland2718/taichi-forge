@@ -2472,19 +2472,28 @@ CUDA adaptive 物理 grid 更新也可导出，保留选中的 `per_node` 或 `g
 消费端不需要生产端 Python 源码。CPU/Vulkan 明确拒绝此 CUDA 专用节点。
 
 当前分支只接受普通 kernel；分支内嵌套 parallel/control、控制体内 parallel、native
-回调及有界/间接分支派发仍需单独取得资格。自动发现仍使用既有两链形状，显式构建
-没有四分支上限。
+回调及有界/间接分支派发仍需单独取得资格。自动发现按完整资源依赖生成一个连续分区
+候选，支持单 kernel 复制分支与不读取复制结果的 READY 后段；后段等待所有分支。
+没有按分支数量设置人为上限，也不因生成了候选而自动改变默认执行路线。
 
 手写 ExecutionPlan 版本 27 可使用
 `{"kind": "vulkan_parallel", "branches": [[kernel_operation, ...], ...]}`，
 并通过 `execution_domain=` 指定独立 Vulkan 域进行准备。当前支持一个平坦并行区域，
 分支为普通 kernel 序列，外部前后段可包含 kernel、copy 和 fill32。调用方负责声明
-合法依赖与不相交约束；这不代表高层 Graph 已能自动发现、导出 Vulkan 并行方案。
+合法依赖与不相交约束。高层冻结 Graph 的 `branch_join_schedule` provider 已在
+CUDA/Vulkan 共用依赖分析；选中该 recipe 后，`Graph.prepare(..., execution_domain=...)`
+借用实际选中的 dispatch，`Module.add_execution_plan()` 导出同一分组及约束。
+当前自动发现针对一个普通 dispatch 平坦序列及末端后段，不跨越未知副作用或控制边界。
 普通队列、其他后端及与其他提交 recipe 混用会在准备前或准备期拒绝。
-使用配对的 private ABI 207 或后续匹配组件。Windows Vulkan 独立/借用消费检查覆盖
+选中 Vulkan 并行方案后，普通 `Graph.run()` 明确拒绝；使用独立域准备，避免丢失所选
+物理结构。使用配对的当前 private ABI 组件。Windows Vulkan 独立/借用消费检查覆盖
 归约的分支私有工作区、显式梯度、u64 参数更新、双实例、别名拒绝和 close/reset。
+公共 recipe 另验证三条 dense Field 复制分支、多 task 的队列归属、标量 READY 后段、
+重复导出不改变 producer、源 Graph 关闭后的 JIT 借用及无源码 AOT 消费。
 completion 覆盖全部分支及后段；采样时间仍为 `execution_envelope`，包含内部等待。
 工作区成本见 `prepared.info["workspace_bytes"]`，并行不保证小工作量更快。
+逐提交更新仍限于声明的 `u64` 参数；其他标量可在冷阶段固定为独立 prepared 实例，
+不能据此声称任意 dtype 的参数更新已经支持。
 
 host count 截断、producer-owned launch state
 和结构化控制内的 exact/adaptive/indirect 仍需各自重建支持；

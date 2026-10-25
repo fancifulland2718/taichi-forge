@@ -2980,23 +2980,39 @@ producer Python source. CPU/Vulkan reject this CUDA-specific node.
 
 Branches currently require ordinary kernels; nested parallel/control branches,
 parallel regions inside control bodies, native callbacks and bounded/indirect
-branch launches require separate qualification. Automatic discovery continues to
-select the existing two-chain shape; the explicit schedule has no four-branch cap.
+branch launches require separate qualification. Automatic discovery constructs one
+contiguous partition from complete resource effects. Single-kernel copy branches
+and a READY suffix that does not read their outputs are accepted; the suffix waits
+for every branch. There is no artificial branch-count cap, and discovering a
+candidate does not change the default execution route.
 
 Handwritten ExecutionPlan version 27 supports
 `{"kind": "vulkan_parallel", "branches": [[kernel_operation, ...], ...]}`
 when prepared with an independent Vulkan `execution_domain=`. The current path
 accepts one flat parallel region of ordinary kernel branches, with kernel, copy
 and fill32 operations in the prefix/suffix. The caller declares valid dependencies
-and disjointness constraints; this does not enable automatic Vulkan parallel
-discovery/export from high-level Graphs. Ordinary queues, other backends and
+and disjointness constraints. The frozen Graph `branch_join_schedule` provider
+shares dependency analysis across CUDA/Vulkan. After selecting its recipe,
+`Graph.prepare(..., execution_domain=...)` borrows the actual selected dispatches;
+`Module.add_execution_plan()` exports the same groups and constraints. Automatic
+discovery currently covers one flat ordinary dispatch sequence and its final
+suffix, without crossing unknown effects or control boundaries. Ordinary queues, other backends and
 combinations with other submission recipes are rejected before execution.
-Use paired private ABI 207 or later matching components. Windows Vulkan standalone
+An ordinary `Graph.run()` rejects a selected Vulkan parallel recipe; prepare it
+on an independent domain to preserve its physical structure. Use paired current
+private ABI components. Windows Vulkan standalone
 and borrowed tests cover private reduction workspaces, explicit gradients, u64
 parameter updates, two instances, alias rejection and close/reset. Completion
-covers every branch and the suffix; sampled timing remains `execution_envelope`,
-including internal waits. See `prepared.info["workspace_bytes"]` for storage cost;
+covers every branch and the suffix. Public recipe checks additionally cover three
+dense Field copy branches, queue attribution for multi-task dispatches, scalar
+READY publication, repeat export without changing the producer, JIT loans after
+source Graph close, and source-free AOT consumption. Sampled timing remains
+`execution_envelope`, including internal waits. See
+`prepared.info["workspace_bytes"]` for storage cost;
 parallel execution does not guarantee lower latency for small workloads.
+Per-submission updates remain limited to declared `u64` parameters. Other scalar
+types can be fixed in separate instances during cold preparation; this does not
+qualify arbitrary-dtype parameter updates.
 
 Host-count clamping, producer-owned launch state, and exact/adaptive/indirect
 dispatch inside structured control still require separate reconstruction support;
