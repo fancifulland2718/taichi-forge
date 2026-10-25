@@ -28,6 +28,7 @@ enum class EmptyRangeGroupProof {
   physical_thread,
   local_storage,
   sparse_topology,
+  compiler_tls_reduction,
 };
 
 inline const char *empty_range_group_proof_name(EmptyRangeGroupProof proof) {
@@ -48,6 +49,8 @@ inline const char *empty_range_group_proof_name(EmptyRangeGroupProof proof) {
       return "local_storage";
     case EmptyRangeGroupProof::sparse_topology:
       return "sparse_topology";
+    case EmptyRangeGroupProof::compiler_tls_reduction:
+      return "compiler_tls_reduction";
   }
   return nullptr;
 }
@@ -193,10 +196,14 @@ struct RangeForBounds {
   EmptyRangeGroupProof empty_group_elision{EmptyRangeGroupProof::unknown};
 
   bool can_elide_empty_groups() const {
-    return empty_group_elision == EmptyRangeGroupProof::independent_iterations;
+    return empty_group_elision == EmptyRangeGroupProof::independent_iterations ||
+           empty_group_elision == EmptyRangeGroupProof::compiler_tls_reduction;
   }
   bool supports_device_dispatch() const {
-    return can_elide_empty_groups() && valid() && !const_range() &&
+    // The current persisted device controller contract excludes TLS. Host
+    // trimming can be qualified independently without widening that contract.
+    return empty_group_elision == EmptyRangeGroupProof::independent_iterations &&
+           valid() && !const_range() &&
            begin.kind != RangeBoundKind::unknown &&
            end.kind != RangeBoundKind::unknown;
   }

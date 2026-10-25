@@ -48,6 +48,48 @@ TEST(DeviceRangeProof, RejectsUnknownBoundsAndPhysicalThreadBehavior) {
   EXPECT_EQ(cpu_bounds->empty_group_elision, EmptyRangeGroupProof::fixed_mapping);
   EXPECT_FALSE(cpu_bounds->supports_device_dispatch());
 }
+TEST(RangeCollectiveProof, RequiresNeutralCompilerReductionAndKnownSlots) {
+  for (auto type : {PrimitiveType::f32, PrimitiveType::i32}) {
+    for (const auto op : {AtomicOpType::add, AtomicOpType::min, AtomicOpType::max}) {
+      OffloadedStmt task(OffloadedTaskType::range_for, Arch::cuda, nullptr);
+      task.const_begin = true;
+      task.end_offset = 4;
+      task.host_launch_range = HostRangeBounds{{0, {}, false}, {1, {0}, false}};
+      task.tls_size = 4;
+      task.tls_prologue = std::make_unique<Block>();
+      task.tls_epilogue = std::make_unique<Block>();
+      const auto pointer = TypeFactory::get_instance().get_pointer_type(type);
+      auto *local = task.tls_prologue->push_back<ThreadLocalPtrStmt>(0, pointer);
+      const auto neutral = op == AtomicOpType::min ? get_max_value(type)
+                           : op == AtomicOpType::max ? get_min_value(type)
+                                                      : TypedConstant(type, 0);
+      auto *value = task.tls_prologue->push_back<ConstStmt>(neutral)->as<ConstStmt>();
+      task.tls_prologue->push_back<GlobalStoreStmt>(local, value);
+      auto *body_ptr = task.body->push_back<ThreadLocalPtrStmt>(0, pointer)->as<ThreadLocalPtrStmt>();
+      auto *read_ptr = task.tls_epilogue->push_back<ThreadLocalPtrStmt>(0, pointer);
+      auto *load = task.tls_epilogue->push_back<GlobalLoadStmt>(read_ptr);
+      auto *destination = task.tls_epilogue->push_back<GlobalTemporaryStmt>(32, pointer);
+      auto *atomic = task.tls_epilogue->push_back<AtomicOpStmt>(op, destination, load)->as<AtomicOpStmt>();
+      atomic->is_reduction = true;
+      const auto bounds = describe_launch_range_for_bounds(task);
+      EXPECT_EQ(bounds->empty_group_elision, EmptyRangeGroupProof::compiler_tls_reduction);
+      const std::int32_t count = 65;
+      EXPECT_EQ(bounds->launch_grid(8160, 128, &count, 4), 1);
+      EXPECT_FALSE(bounds->supports_device_dispatch());
+      value->val = TypedConstant(type, 7);
+      EXPECT_FALSE(describe_launch_range_for_bounds(task)->can_elide_empty_groups());
+      value->val = neutral;
+      atomic->is_reduction = false;
+      EXPECT_FALSE(describe_launch_range_for_bounds(task)->can_elide_empty_groups());
+      atomic->is_reduction = true;
+      body_ptr->offset = 4;
+      EXPECT_FALSE(describe_launch_range_for_bounds(task)->can_elide_empty_groups());
+      body_ptr->offset = 0;
+      task.tls_epilogue->push_back<InternalFuncStmt>("future_epilogue", std::vector<Stmt *>{});
+      EXPECT_FALSE(describe_launch_range_for_bounds(task)->can_elide_empty_groups());
+    }
+  }
+}
 }  // namespace taichi::lang
 
 #ifdef TI_WITH_VULKAN

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "taichi/analysis/range_for_bounds.h"
+#include "taichi/analysis/range_collective.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/snode.h"
 #include "taichi/rhi/arch.h"
@@ -21,11 +22,14 @@ inline EmptyRangeGroupProof describe_empty_range_group_elision(
     return EmptyRangeGroupProof::fixed_mapping;
   if (task.external_shared_staged || task.bls_size)
     return EmptyRangeGroupProof::local_storage;
-  if (task.tls_prologue || task.tls_epilogue || task.bls_prologue ||
-      task.bls_epilogue || task.mesh_prologue)
+  if (task.bls_prologue || task.bls_epilogue || task.mesh_prologue)
+    return EmptyRangeGroupProof::auxiliary_region;
+  RangeReductionSlots reductions;
+  const bool has_tls = task.tls_prologue || task.tls_epilogue;
+  if (has_tls && !describe_range_reduction_slots(task, reductions))
     return EmptyRangeGroupProof::auxiliary_region;
   auto proof = EmptyRangeGroupProof::independent_iterations;
-  irpass::analysis::any_statement(task.body.get(), [&proof](Stmt *stmt) {
+  irpass::analysis::any_statement(task.body.get(), [&](Stmt *stmt) {
     if (stmt->is<InternalFuncStmt>() || stmt->is<ExternalFuncCallStmt>() ||
         stmt->is<FuncCallStmt>())
       proof = EmptyRangeGroupProof::unproven_call;
@@ -33,7 +37,11 @@ inline EmptyRangeGroupProof describe_empty_range_group_elision(
              stmt->is<BlockCornerIndexStmt>() || stmt->is<LoopLinearIndexStmt>() ||
              stmt->is<RandStmt>())
       proof = EmptyRangeGroupProof::physical_thread;
-    else if (stmt->is<ThreadLocalPtrStmt>() || stmt->is<BlockLocalPtrStmt>())
+    else if (auto *ptr = stmt->cast<ThreadLocalPtrStmt>()) {
+      const auto found = reductions.find(ptr->offset);
+      if (found == reductions.end() || found->second.dt != ptr->ret_type.ptr_removed())
+        proof = EmptyRangeGroupProof::local_storage;
+    } else if (stmt->is<BlockLocalPtrStmt>())
       proof = EmptyRangeGroupProof::local_storage;
     else if (stmt->is<SNodeOpStmt>())
       proof = EmptyRangeGroupProof::sparse_topology;
@@ -47,7 +55,9 @@ inline EmptyRangeGroupProof describe_empty_range_group_elision(
     }
     return proof != EmptyRangeGroupProof::independent_iterations;
   });
-  return proof;
+  return has_tls && proof == EmptyRangeGroupProof::independent_iterations
+             ? EmptyRangeGroupProof::compiler_tls_reduction
+             : proof;
 }
 
 inline std::optional<RangeForBounds> describe_launch_range_for_bounds(
