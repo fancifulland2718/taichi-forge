@@ -2,6 +2,7 @@
 
 #include "taichi/runtime/kernel_execution_handle.h"
 #include "taichi/program/graph_builder.h"
+#include "taichi/util/weak_registry.h"
 #include "tests/cpp/program/test_program.h"
 #include "tests/cpp/ir/ndarray_kernel.h"
 #ifdef TI_WITH_VULKAN
@@ -16,6 +17,41 @@
 #endif
 
 namespace taichi::lang {
+
+TEST(ExecutionHandleInventory, ReclaimsExpiredEntriesWithoutDiagnostics) {
+  WeakRegistry<int> registry;
+  std::vector<std::shared_ptr<int>> pinned;
+  for (int i = 0; i < 37; ++i) {
+    pinned.push_back(std::make_shared<int>(i));
+    registry.add(pinned.back());
+  }
+  // No statistics/iteration call is allowed to hide missing normal cleanup.
+  for (int i = 0; i < 10000; ++i) {
+    registry.add(std::make_shared<int>(i));
+    EXPECT_LT(registry.size(), 4 * (pinned.size() + 1));
+  }
+  std::size_t count = 0;
+  registry.for_each_live([&](const auto &) { ++count; });
+  EXPECT_EQ(count, pinned.size());
+  pinned.clear();
+  registry.prune();
+  EXPECT_EQ(registry.size(), 0);
+}
+
+TEST(ExecutionHandleInventory, KeepsAllLiveOwnersWithoutCapacityLimit) {
+  WeakRegistry<int> registry;
+  std::vector<std::shared_ptr<int>> owners;
+  for (int i = 0; i < 2049; ++i) {
+    owners.push_back(std::make_shared<int>(i));
+    registry.add(owners.back());
+  }
+  EXPECT_EQ(registry.size(), owners.size());
+  for (const auto &owner : owners) EXPECT_EQ(owner.use_count(), 1);
+  owners.erase(owners.begin(), owners.begin() + 1000);
+  std::size_t count = 0;
+  registry.for_each_live([&](const auto &) { ++count; });
+  EXPECT_EQ(count, owners.size());
+}
 
 namespace {
 void check_graph_metadata_sharing(Arch arch) {

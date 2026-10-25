@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include "taichi/util/offline_cache.h"
+#include "taichi/util/weak_registry.h"
 #include "taichi/codegen/kernel_compiler.h"
 #include "taichi/runtime/kernel_execution_handle.h"
 #include "taichi/struct/snode_tree.h"
@@ -228,7 +229,7 @@ class KernelCompilationManager final {
   std::condition_variable cache_cv_;
   std::unordered_set<std::string> in_progress_keys_;
   std::atomic<std::uint64_t> next_execution_handle_identity_{1};
-  std::vector<std::weak_ptr<KernelExecutionHandle>> execution_handles_;
+  WeakRegistry<KernelExecutionHandle> execution_handles_;
 
   struct RelocatableExecutableTemplate {
     std::shared_ptr<CompiledKernelData> compiled;

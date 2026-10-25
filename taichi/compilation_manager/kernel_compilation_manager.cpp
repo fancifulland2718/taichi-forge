@@ -444,6 +444,7 @@ void KernelCompilationManager::clear() {
   in_progress_keys_.clear();
   relocatable_templates_.clear();
   relocatable_candidate_keys_.clear();
+  execution_handles_.prune();
 }
 
 void KernelCompilationManager::invalidate_snode_tree(
@@ -536,6 +537,7 @@ void KernelCompilationManager::invalidate_snode_tree(
             : cached_data_.size - iter->second.size;
     iter = cached_data_.kernels.erase(iter);
   }
+  execution_handles_.prune();
 }
 
 bool KernelCompilationManager::register_relocatable_template_candidate(
@@ -681,13 +683,7 @@ KernelCompilationManager::executable_lifecycle_statistics(bool reset) {
     }
     result.in_progress_compiles = in_progress_keys_.size();
     result.relocatable_templates = relocatable_templates_.size();
-    for (auto iter = execution_handles_.begin();
-         iter != execution_handles_.end();) {
-      auto handle = iter->lock();
-      if (handle == nullptr) {
-        iter = execution_handles_.erase(iter);
-        continue;
-      }
+    execution_handles_.for_each_live([&](const auto &handle) {
       if (handle->active()) {
         ++result.live_handles;
       } else {
@@ -704,8 +700,7 @@ KernelCompilationManager::executable_lifecycle_statistics(bool reset) {
         // state-specific floor is an ordinary/Graph/AOT/in-flight lease.
         ++result.pinned_handles;
       }
-      ++iter;
-    }
+    });
     result.handle_inline_bytes =
         (result.live_handles + result.retired_handles) *
         sizeof(KernelExecutionHandle);
@@ -843,7 +838,7 @@ KernelCompilationManager::ensure_execution_handle_locked(
                 "ti.reset().");
     kernel.execution_handle = std::make_shared<KernelExecutionHandle>(
         identity, kernel.compiled_kernel_data);
-    execution_handles_.push_back(kernel.execution_handle);
+    execution_handles_.add(kernel.execution_handle);
   }
   return kernel.execution_handle;
 }

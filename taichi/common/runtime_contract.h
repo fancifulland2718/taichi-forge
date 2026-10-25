@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Graph dispatch and source metadata share immutable compiled-payload leases.
-inline constexpr int kForgeNativeAbiRevision = 211;
+// Compilation-manager handle inventory includes amortized weak-entry cleanup.
+inline constexpr int kForgeNativeAbiRevision = 212;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
