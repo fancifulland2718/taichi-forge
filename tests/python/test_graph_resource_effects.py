@@ -43,7 +43,16 @@ def test_ir_metadata_shares_readonly_facts_and_preserves_snapshot_isolation():
         return value
 
     assert normalize(views) == normalize(snapshots)
-    fallback = graph._spec.pre_optimization_ir_root.children
+    fallback = graph._spec.nodes[0].ir_node.children
+    assert len(fallback) == len(views)
+    assert fallback[0].effects is fallback[2].effects
+    assert fallback[0].bindings is fallback[2].bindings
+    assert fallback[0].effects != fallback[1].effects
+    assert fallback[0].bindings != fallback[1].bindings
+    plan = graph._spec._aot_graph_builder
+    assert plan._items[0][-1] is plan._items[2][-1]
+    assert plan._items[0][-1] != plan._items[1][-1]
+    assert not plan._runtime_arg_name_sets, "Frozen plans must not retain the authoring interner"
     assert _compiled_dispatch_ir_nodes(compiled, fallback) == _compiled_dispatch_ir_nodes(
         SimpleNamespace(_dispatch_metadata=snapshots), fallback
     )
@@ -85,6 +94,33 @@ def test_opaque_ir_metadata_does_not_convert_discarded_effects(monkeypatch):
     }])
     result, = _graph._compiled_dispatch_ir_nodes(compiled, [fallback])
     assert result.opaque and result.effects == fallback.effects
+
+
+def test_ir_descriptor_sharing_preserves_custom_subresource_identity():
+    from types import SimpleNamespace
+    from taichi_forge.graph._graph import _compiled_dispatch_ir_nodes
+    from taichi_forge.graph._ir import DispatchNode, GraphAccess, ResourceEffect
+
+    class MutableRegion:
+        def __init__(self):
+            self.offset = 0
+
+        def __hash__(self):
+            return 1
+
+        def __eq__(self, other):
+            return isinstance(other, MutableRegion) and self.offset == other.offset
+
+    first, second = MutableRegion(), MutableRegion()
+    nodes = tuple(DispatchNode(name="extension", effects=(
+        ResourceEffect("x", GraphAccess.READ, subresource=region),
+    )) for region in (first, second))
+    compiled = SimpleNamespace(_dispatch_ir_metadata=[{"opaque": True}] * 2)
+    left, right = _compiled_dispatch_ir_nodes(compiled, nodes)
+    assert left.effects is nodes[0].effects and right.effects is nodes[1].effects
+    first.offset = 4
+    assert left.effects[0].subresource.offset == 4
+    assert right.effects[0].subresource.offset == 0
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

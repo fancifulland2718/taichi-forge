@@ -106,6 +106,14 @@ combination. Consult the linked API contracts and capability queries for exact s
   definitions retain compressed canonical JSON snapshots, decoded only for
   inspection or export. Graph identity, bindings, retry and execution order
   remain unchanged; warm replay does not decompress snapshots.
+- Cold Graph IR conversion shares read-only metadata instead of constructing
+  a complete diagnostic dictionary for every dispatch. Full diagnostic
+  snapshots remain independently mutable. Within one Graph compilation,
+  identical kernels, execution handles and frozen launch policies share their
+  invocation ABI; per-dispatch bindings, runtime state and resource retirement
+  retain their existing ownership. Repeated argument-name sets and built-in
+  immutable effect/binding descriptions are deduplicated locally, without a
+  permanent global table, dispatch-count cap or extra warm-path lookup.
 - Weak execution-handle registrations are pruned on cold paths instead of
   accumulating with historical calls. Temporary Python kernel definitions
   are reclaimed on a cold path after their last consumer releases them;

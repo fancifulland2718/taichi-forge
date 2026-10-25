@@ -13984,16 +13984,19 @@ class _AOTGraphBuilderPlan:
     def __init__(self):
         self._items = []
         self._runtime_arg_names = set()
+        self._runtime_arg_name_sets = {}
         self._has_indirect_dispatch = False
         self._has_internal_fixed_bindings = False
 
     def dispatch(self, kernel_cpp, args, label=""):
-        runtime_arg_names = frozenset(_runtime_arg_names(args))
+        runtime_arg_names = self._share_runtime_arg_names(_runtime_arg_names(args))
         self._items.append(("dispatch", kernel_cpp, args, label, runtime_arg_names))
         self._runtime_arg_names.update(runtime_arg_names)
 
     def dispatch_indirect(self, kernel_cpp, args, dispatch_packet, label=""):
-        runtime_arg_names = frozenset((*_runtime_arg_names(args), dispatch_packet.name))
+        runtime_arg_names = self._share_runtime_arg_names(
+            (*_runtime_arg_names(args), dispatch_packet.name)
+        )
         self._items.append(
             (
                 "indirect",
@@ -14006,6 +14009,10 @@ class _AOTGraphBuilderPlan:
         )
         self._runtime_arg_names.update(runtime_arg_names)
         self._has_indirect_dispatch = True
+
+    def _share_runtime_arg_names(self, names):
+        names = frozenset(names)
+        return self._runtime_arg_name_sets.setdefault(names, names)
 
     @property
     def runtime_arg_names(self):
@@ -14032,7 +14039,7 @@ class _AOTGraphBuilderPlan:
         # Freeze each append at the point where the runtime builder consumes it.
         # Reusing and then mutating one Sequential between appends must not make
         # the lazily compiled AOT plan observe only its final definition.
-        runtime_arg_names = frozenset(node._runtime_arg_names)
+        runtime_arg_names = self._share_runtime_arg_names(node._runtime_arg_names)
         self._items.append(
             (
                 "append",
@@ -14093,6 +14100,8 @@ class _AOTGraphBuilderPlan:
                 raise TaichiRuntimeError(f"Unknown AOT graph item kind {item[0]}")
 
         snapshot = _AOTGraphBuilderPlan()
+        # Items already share immutable sets. The frozen plan needs no copy
+        # of the authoring lookup table and cannot retain obsolete entries.
         snapshot._items = tuple(items)
         snapshot._runtime_arg_names = set(self._runtime_arg_names)
         snapshot._has_indirect_dispatch = self._has_indirect_dispatch
@@ -16090,6 +16099,33 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
     if records is None or len(records) != len(fallback_nodes):
         return fallback_nodes
     result = []
+    effect_sets, binding_sets, domains = {}, {}, {}
+
+    def share_effects(effects):
+        # Only value-only built-in effects are interchangeable. An extension
+        # may attach a hashable but mutable subresource or custom identity.
+        if not isinstance(effects, tuple) or any(
+            type(effect) is not ResourceEffect
+            or type(effect.resource) is not str
+            or type(effect.access) is not GraphAccess
+            or type(effect.runtime_bound) is not bool
+            or effect.subresource is not None
+            for effect in effects
+        ):
+            return effects
+        return effect_sets.setdefault(effects, effects)
+
+    def share_bindings(bindings):
+        if not isinstance(bindings, tuple) or any(
+            type(binding) is not RuntimeBinding
+            or type(binding.name) is not str
+            or type(binding.kind) is not str
+            or type(binding.required) is not bool
+            for binding in bindings
+        ):
+            return bindings
+        return binding_sets.setdefault(bindings, bindings)
+
     for record, fallback in zip(records, fallback_nodes):
         if not isinstance(fallback, DispatchNode):
             # JIT-only provider commands carry their own NativeCallNode IR.
@@ -16108,6 +16144,8 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
             record.get("logical_kernel_identity") or fallback.logical_kernel_identity
         )
         iteration_domain = _metadata_iteration_domain(record)
+        iteration_domain = domains.setdefault(iteration_domain, iteration_domain)
+        bindings = share_bindings(fallback.bindings)
         proven = (
             bool(record.get("available", False))
             and not any(
@@ -16129,8 +16167,8 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
             result.append(
                 DispatchNode(
                     name=fallback.name,
-                    effects=fallback.effects,
-                    bindings=fallback.bindings,
+                    effects=share_effects(fallback.effects),
+                    bindings=bindings,
                     synchronization=bool(record.get("synchronization", False)),
                     opaque=True,
                     elementwise=False,
@@ -16148,8 +16186,8 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
         result.append(
             DispatchNode(
                 name=fallback.name,
-                effects=effects,
-                bindings=fallback.bindings,
+                effects=share_effects(effects),
+                bindings=bindings,
                 iteration_domain=iteration_domain,
                 synchronization=bool(record.get("synchronization", False)),
                 opaque=False,
