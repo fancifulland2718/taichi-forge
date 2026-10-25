@@ -5333,6 +5333,7 @@ class _CompiledCGraphNode:
         self.native_action_manifests = tuple(native_action_manifests)
         self.recipe_operations = tuple(recipe_operations)
         self.recording_operations = tuple(recording_operations)
+        self.parallel_backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
         self.parallel_dispatch_groups = tuple(
             tuple(int(index) for index in group) for group in parallel_dispatch_groups
         )
@@ -5440,7 +5441,7 @@ class _CompiledCGraphNode:
         if self.source_native_count:
             info["lowered_native_count"] = self.source_native_count
         if self.parallel_dispatch_groups:
-            info["cuda_parallel_dispatch_groups"] = self.parallel_dispatch_groups
+            info["parallel_dispatch_groups"] = self.parallel_dispatch_groups
         return info
 
 
@@ -9257,6 +9258,7 @@ def _recordable_backend_dispatches(node, backend):
         if (
             node.dispatch_count == 0
             or len(node.recording_dispatches) != node.dispatch_count
+            or node.parallel_dispatch_groups
         ):
             return None
         return node.recording_dispatches
@@ -9579,7 +9581,7 @@ def _runtime_node_physical_plan_id(node):
         encoded = ";".join(
             ",".join(str(index) for index in group) for group in parallel_groups
         )
-        return "cuda-fork-join:" + encoded
+        return f"{node.parallel_backend}-fork-join:" + encoded
     controls = (
         (node,)
         if _is_structured_control_node(node)
@@ -9662,6 +9664,7 @@ def _graph_pipeline_definition(nodes):
                 "kind": kind,
                 "region_kind": str(getattr(node, "region_kind", kind)),
                 "physical_plan_id": _runtime_node_physical_plan_id(node),
+                "parallel_backend": getattr(node, "parallel_backend", ""),
                 "parallel_dispatch_groups": tuple(
                     getattr(node, "parallel_dispatch_groups", ())
                 ),
@@ -9951,7 +9954,7 @@ def _parallel_logical_root_children(root):
 
 @dataclass(frozen=True)
 class _GraphBranchJoinRecipeSource:
-    """One compiler-proven coarse CUDA fork/join candidate."""
+    """One compiler-proven contiguous fork/join candidate."""
 
     source_key: str
     node_index: int
@@ -9960,13 +9963,14 @@ class _GraphBranchJoinRecipeSource:
     disjoint_pairs: tuple
     sequential_temporary_bytes: int
     parallel_temporary_bytes: int
+    backend: str
 
     @property
     def recipe_id(self):
         groups = ";".join(
             ",".join(str(index) for index in group) for group in self.branch_groups
         )
-        return f"cuda-fork-join-v1:{self.node_index}:{groups}:{self.join_index}"
+        return f"{self.backend}-fork-join-v1:{self.node_index}:{groups}:{self.join_index}"
 
 
 @dataclass(frozen=True)
@@ -9988,60 +9992,15 @@ class _GraphRecordingPartitionRecipeSource:
         )
 
 
-def _effect_reads(access):
-    return access in (
-        GraphAccess.READ,
-        GraphAccess.READ_WRITE,
-        GraphAccess.ATOMIC,
-    )
+def _discover_branch_join_sources(source_nodes, backend):
+    """Offer one dependency-closed partition, retaining the final serial suffix.
 
+    A suffix may publish READY without reading the branch outputs. Its original
+    order still requires every branch to complete first; no fake read is needed.
+    """
+    from taichi_forge.graph._ir import contiguous_parallel_groups
 
-def _effect_writes(access):
-    return access in (
-        GraphAccess.WRITE,
-        GraphAccess.READ_WRITE,
-        GraphAccess.ATOMIC,
-        GraphAccess.OPAQUE,
-    )
-
-
-def _branch_has_internal_dependency(nodes):
-    for left_index, left in enumerate(nodes):
-        for right in nodes[left_index + 1 :]:
-            for left_effect in left.effects:
-                if not _effect_writes(left_effect.access):
-                    continue
-                for right_effect in right.effects:
-                    if left_effect.resource == right_effect.resource and (
-                        _effect_reads(right_effect.access)
-                        or _effect_writes(right_effect.access)
-                    ):
-                        return True
-    return False
-
-
-def _join_consumes_each_branch(branches, join):
-    join_reads = {
-        effect.resource for effect in join.effects if _effect_reads(effect.access)
-    }
-    if not join_reads:
-        return False
-    for branch in branches:
-        written = {
-            effect.resource
-            for node in branch
-            for effect in node.effects
-            if _effect_writes(effect.access)
-        }
-        if not written.intersection(join_reads):
-            return False
-    return True
-
-
-def _discover_cuda_branch_join_sources(source_nodes, backend):
-    """Find exact two-chain/final-join shapes without timing heuristics."""
-
-    if backend != "cuda" or len(source_nodes) != 1:
+    if backend not in ("cuda", "vulkan") or len(source_nodes) != 1:
         return ()
     node = source_nodes[0]
     if not isinstance(node, _CompiledCGraphNode):
@@ -10049,66 +10008,40 @@ def _discover_cuda_branch_join_sources(source_nodes, backend):
     children = tuple(node.ir_node.children)
     operations = tuple(node.recipe_operations)
     if (
-        len(children) < 5
+        len(children) < 3
         or len(operations) != len(children)
         or any(operation[0] != "dispatch" for operation in operations)
-        or any(operation[3] for operation in operations)
-        or any(child.bounded_domain is not None for child in children)
+        or any(not isinstance(child, DispatchNode) or child.bounded_domain is not None
+               or child.opaque or child.synchronization or child.side_effects
+               for child in children)
     ):
         return ()
+    groups = contiguous_parallel_groups(children[:-1])
+    if len(groups) < 2:
+        return ()
+    plan = analyze_parallel_candidate(tuple(
+        SequentialRegion(tuple(children[index] for index in group),
+                         name=f"branch_join_candidate_{branch}")
+        for branch, group in enumerate(groups)
+    ))
+    if plan.blockers or plan.conflicts:
+        return ()
+    disjoint_pairs = tuple(sorted({
+        tuple(sorted((item.left_resource, item.right_resource)))
+        for item in plan.unresolved_aliases
+    }))
     join_index = len(children) - 1
-    join = children[join_index]
-    if (
-        not isinstance(join, DispatchNode)
-        or join.opaque
-        or join.synchronization
-        or join.side_effects
-    ):
-        return ()
-
-    sources = []
-    for split in range(2, join_index - 1):
-        branches = (children[:split], children[split:join_index])
-        if any(len(branch) < 2 for branch in branches):
-            continue
-        if not all(_branch_has_internal_dependency(branch) for branch in branches):
-            continue
-        if not _join_consumes_each_branch(branches, join):
-            continue
-        plan = analyze_parallel_candidate(
-            tuple(
-                SequentialRegion(
-                    tuple(branch),
-                    name=f"branch_join_candidate_{branch_index}",
-                )
-                for branch_index, branch in enumerate(branches)
-            )
-        )
-        if plan.blockers or plan.conflicts:
-            continue
-        disjoint_pairs = tuple(
-            sorted(
-                {
-                    tuple(sorted((item.left_resource, item.right_resource)))
-                    for item in plan.unresolved_aliases
-                }
-            )
-        )
-        sources.append(
-            _GraphBranchJoinRecipeSource(
-                source_key=f"branch-join:{split}:{join_index}",
-                node_index=0,
-                branch_groups=(
-                    tuple(range(0, split)),
-                    tuple(range(split, join_index)),
-                ),
-                join_index=join_index,
-                disjoint_pairs=disjoint_pairs,
-                sequential_temporary_bytes=(plan.sequential_fallback_peak_bytes),
-                parallel_temporary_bytes=plan.parallel_peak_bytes,
-            )
-        )
-    return tuple(sources)
+    cuts = ",".join(str(group[-1] + 1) for group in groups[:-1])
+    return (_GraphBranchJoinRecipeSource(
+        source_key=f"branch-join:{cuts}:{join_index}",
+        node_index=0,
+        branch_groups=groups,
+        join_index=join_index,
+        disjoint_pairs=disjoint_pairs,
+        sequential_temporary_bytes=plan.sequential_fallback_peak_bytes,
+        parallel_temporary_bytes=plan.parallel_peak_bytes,
+        backend=backend,
+    ),)
 
 
 def _discover_cuda_recording_partition_sources(source_nodes, backend):
@@ -11136,7 +11069,7 @@ def _replay_recipe_cgraph_node(
                 )
             ),
         )
-        builder._set_cuda_parallel_dispatch_groups(parallel_dispatch_groups)
+        builder._set_parallel_dispatch_groups(parallel_dispatch_groups)
     builder._flush_graph_builder()
     if len(builder._nodes) != 1 or not isinstance(
         builder._nodes[0], _CompiledCGraphNode
@@ -11517,7 +11450,7 @@ class _GraphSpec:
             lowering_available=lowering_available,
         )
         backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
-        self._graph_branch_join_sources = _discover_cuda_branch_join_sources(
+        self._graph_branch_join_sources = _discover_branch_join_sources(
             source_nodes,
             backend,
         )
@@ -16944,7 +16877,7 @@ class GraphBuilder:
         self._graph_offload_fusion_sources = []
         self._graph_sparse_traversal_sources = []
         self._graph_bounded_sources = []
-        self._cuda_parallel_dispatch_groups = ()
+        self._parallel_dispatch_groups = ()
 
         self._graph_reduction_sources = []
         self._graph_native_algorithm_sources = []
@@ -18057,14 +17990,14 @@ class GraphBuilder:
     def _ensure_runtime_graph_builder(self):
         return self._runtime_graph_builder
 
-    def _set_cuda_parallel_dispatch_groups(self, groups):
+    def _set_parallel_dispatch_groups(self, groups):
         groups = tuple(tuple(int(index) for index in group) for group in groups)
         if self._dispatch_count == 0 or len(groups) < 2:
             raise TaichiRuntimeError(
-                "CUDA parallel Graph schedule requires an active CGraph segment"
+                "Parallel Graph schedule requires an active CGraph segment"
             )
-        self._runtime_graph_builder._set_cuda_parallel_dispatch_groups(groups)
-        self._cuda_parallel_dispatch_groups = groups
+        self._runtime_graph_builder._set_parallel_dispatch_groups(groups)
+        self._parallel_dispatch_groups = groups
 
     def _flush_graph_builder(self):
         if self._dispatch_count == 0:
@@ -18099,7 +18032,7 @@ class GraphBuilder:
                     )
                     else ()
                 ),
-                parallel_dispatch_groups=self._cuda_parallel_dispatch_groups,
+                parallel_dispatch_groups=self._parallel_dispatch_groups,
             )
         )
         self._runtime_graph_builder = _new_runtime_graph_builder(
@@ -18115,7 +18048,7 @@ class GraphBuilder:
         self._runtime_graph_native_action_manifests = []
         self._runtime_graph_recipe_operations = []
         self._runtime_graph_recording_operations = []
-        self._cuda_parallel_dispatch_groups = ()
+        self._parallel_dispatch_groups = ()
 
         self._active_bounded_publication = None
 

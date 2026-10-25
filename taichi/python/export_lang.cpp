@@ -6031,21 +6031,19 @@ void export_lang(py::module &m) {
       .def("dispatch", &GraphBuilder::dispatch, py::arg("kernel"),
            py::arg("args"), py::arg("label") = "")
       .def("dispatch_indirect", &GraphBuilder::dispatch_indirect,
-           py::arg("kernel"), py::arg("args"),
-           py::arg("dispatch_packet"), py::arg("label") = "")
+           py::arg("kernel"), py::arg("args"), py::arg("dispatch_packet"),
+           py::arg("label") = "")
       .def("dispatch_cuda_bounded", &GraphBuilder::dispatch_cuda_bounded,
            py::arg("kernel"), py::arg("args"), py::arg("extent"),
-           py::arg("capacity"), py::arg("block_dim"),
-           py::arg("adaptive_grid"), py::arg("grouped_update") = false,
-           py::arg("label") = "")
+           py::arg("capacity"), py::arg("block_dim"), py::arg("adaptive_grid"),
+           py::arg("grouped_update") = false, py::arg("label") = "")
       .def("dispatch_cpu_bounded", &GraphBuilder::dispatch_cpu_bounded,
            py::arg("kernel"), py::arg("args"), py::arg("extent"),
            py::arg("capacity"), py::arg("label") = "")
       .def(
           "_dispatch_cuda_cusparse_spmv_capture_recipe",
-          [](GraphBuilder &builder, const py::object &matrix,
-             Program *program, const aot::Arg &input,
-             const aot::Arg &output) {
+          [](GraphBuilder &builder, const py::object &matrix, Program *program,
+             const aot::Arg &input, const aot::Arg &output) {
             builder.dispatch_cuda_capture_cusparse_spmv(
                 matrix.cast<SparseMatrix *>(), program, input, output);
           },
@@ -6053,9 +6051,9 @@ void export_lang(py::module &m) {
           py::arg("output"))
       .def(
           "_dispatch_cuda_cusparse_spmm_capture_recipe",
-          [](GraphBuilder &builder, const py::object &matrix,
-             Program *program, const aot::Arg &input,
-             const aot::Arg &output, int rhs_count, int algorithm) {
+          [](GraphBuilder &builder, const py::object &matrix, Program *program,
+             const aot::Arg &input, const aot::Arg &output, int rhs_count,
+             int algorithm) {
             auto *csr = dynamic_cast<CuSparseMatrix *>(
                 matrix.cast<SparseMatrix *>());
             TI_ERROR_IF(csr == nullptr,
@@ -6084,10 +6082,9 @@ void export_lang(py::module &m) {
           py::arg("expected_workspace") = -1)
       .def(
           "_dispatch_cuda_cusparse_triangular_capture_recipe",
-          [](GraphBuilder &builder, const py::object &matrix,
-             Program *program, const aot::Arg &input,
-             const aot::Arg &output, int rhs_count, int fill_mode,
-             bool unit_diagonal, bool transpose) {
+          [](GraphBuilder &builder, const py::object &matrix, Program *program,
+             const aot::Arg &input, const aot::Arg &output, int rhs_count,
+             int fill_mode, bool unit_diagonal, bool transpose) {
             auto *csr = dynamic_cast<CuSparseMatrix *>(
                 matrix.cast<SparseMatrix *>());
             TI_ERROR_IF(csr == nullptr,
@@ -6101,50 +6098,48 @@ void export_lang(py::module &m) {
           py::arg("output"), py::arg("rhs_count"), py::arg("fill_mode"),
           py::arg("unit_diagonal"), py::arg("transpose"))
       .def("_dispatch_cuda_cufft_capture_recipe",
-           &GraphBuilder::dispatch_cuda_capture_cufft,
-           py::arg("plan_handle"), py::arg("program"), py::arg("input"),
-           py::arg("output"), py::arg("direction"),
-           py::arg("input_scalars"), py::arg("output_scalars"))
+           &GraphBuilder::dispatch_cuda_capture_cufft, py::arg("plan_handle"),
+           py::arg("program"), py::arg("input"), py::arg("output"),
+           py::arg("direction"), py::arg("input_scalars"),
+           py::arg("output_scalars"))
       .def("_dispatch_cuda_capture_description",
-           &GraphBuilder::dispatch_cuda_capture_description,
-           py::arg("program"), py::arg("kind"), py::arg("arguments"))
+           &GraphBuilder::dispatch_cuda_capture_description, py::arg("program"),
+           py::arg("kind"), py::arg("arguments"))
       .def("_dispatch_cuda_addon_capture_recipe",
-           &GraphBuilder::dispatch_cuda_capture_addon,
-           py::arg("program"), py::arg("invoke_address"), py::arg("payload"),
+           &GraphBuilder::dispatch_cuda_capture_addon, py::arg("program"),
+           py::arg("invoke_address"), py::arg("payload"),
            py::arg("stream_offset"), py::arg("arguments"),
            py::arg("pointer_offsets"), py::arg("scalar_counts"),
            py::arg("writable"), py::arg("error_address") = 0)
-      .def("_dispatch_cuda_capture_command", &GraphBuilder::dispatch_cuda_capture_command)
+      .def("_dispatch_cuda_capture_command",
+           &GraphBuilder::dispatch_cuda_capture_command)
       .def("_dispatch_cuda_scan_capture_recipe",
-           &GraphBuilder::dispatch_cuda_capture_scan,
-           py::arg("program"), py::arg("values"), py::arg("workspace"),
-           py::arg("num_items"), py::arg("value_type"))
+           &GraphBuilder::dispatch_cuda_capture_scan, py::arg("program"),
+           py::arg("values"), py::arg("workspace"), py::arg("num_items"),
+           py::arg("value_type"))
       .def("_dispatch_cuda_cublaslt_capture_recipe",
-           &GraphBuilder::dispatch_cuda_capture_cublaslt,
-           py::arg("program"), py::arg("plan"), py::arg("arguments"))
+           &GraphBuilder::dispatch_cuda_capture_cublaslt, py::arg("program"),
+           py::arg("plan"), py::arg("arguments"))
       .def("_dispatch_cuda_cutensor_capture_recipe",
-           &GraphBuilder::dispatch_cuda_capture_cutensor,
-           py::arg("program"), py::arg("plan"), py::arg("arguments"))
+           &GraphBuilder::dispatch_cuda_capture_cutensor, py::arg("program"),
+           py::arg("plan"), py::arg("arguments"))
       .def("_dispatch_cuda_cusparselt_capture_recipe",
-           &GraphBuilder::dispatch_cuda_capture_cusparselt,
-           py::arg("program"), py::arg("plan"), py::arg("arguments"))
+           &GraphBuilder::dispatch_cuda_capture_cusparselt, py::arg("program"),
+           py::arg("plan"), py::arg("arguments"))
       .def("_dispatch_cuda_cudss_capture_recipe",
-           &GraphBuilder::dispatch_cuda_capture_cudss,
-           py::arg("program"), py::arg("handle"), py::arg("numeric_phase"),
-           py::arg("arguments"))
+           &GraphBuilder::dispatch_cuda_capture_cudss, py::arg("program"),
+           py::arg("handle"), py::arg("numeric_phase"), py::arg("arguments"))
       .def("_dispatch_cuda_cudss_capture_group",
-           &GraphBuilder::dispatch_cuda_capture_cudss,
-           py::arg("program"), py::arg("handle"), py::arg("numeric_phase"),
-           py::arg("arguments"))
+           &GraphBuilder::dispatch_cuda_capture_cudss, py::arg("program"),
+           py::arg("handle"), py::arg("numeric_phase"), py::arg("arguments"))
       .def("compile", &GraphBuilder::compile)
-      .def("_enable_two_map_composer",
-           &GraphBuilder::enable_two_map_composer)
+      .def("_enable_two_map_composer", &GraphBuilder::enable_two_map_composer)
       .def("_set_map_composer_max_group_size",
            &GraphBuilder::set_map_composer_max_group_size)
       .def("_set_map_composer_allowed_groups",
            &GraphBuilder::set_map_composer_allowed_groups)
-      .def("_set_cuda_parallel_dispatch_groups",
-           &GraphBuilder::set_cuda_parallel_dispatch_groups)
+      .def("_set_parallel_dispatch_groups",
+           &GraphBuilder::set_parallel_dispatch_groups)
       .def("create_sequential", &GraphBuilder::new_sequential_node,
            py::return_value_policy::reference)
       .def("seq", &GraphBuilder::seq, py::return_value_policy::reference);
@@ -6883,7 +6878,7 @@ void export_lang(py::module &m) {
                                     bool include_launch,
                                     bool include_parallel = false) {
     const auto &graph = owner.cast<const aot::CompiledGraph &>();
-    TI_ERROR_IF(!include_parallel && !graph.cuda_parallel_dispatch_groups.empty(),
+    TI_ERROR_IF(!include_parallel && !graph.parallel_dispatch_groups.empty(),
                 "Parallel Graph dispatch requires an execution recipe");
     py::list sources;
     size_t native_ordinal = 0;
@@ -6987,8 +6982,9 @@ void export_lang(py::module &m) {
           "_physical_jit_parallel_execution_sources",
           [physical_graph_sources](const py::object &owner) {
             const auto &graph = owner.cast<const aot::CompiledGraph &>();
-            return py::make_tuple(physical_graph_sources(owner, true, true, true),
-                                  graph.cuda_parallel_dispatch_groups);
+            return py::make_tuple(
+                physical_graph_sources(owner, true, true, true),
+                graph.parallel_dispatch_groups);
           })
       .def_property_readonly(
           "_physical_jit_dispatch_sources",

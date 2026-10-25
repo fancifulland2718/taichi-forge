@@ -18,7 +18,7 @@ class GraphBranchJoinRecipeProvider(GraphRuntimeFragmentProvider):
         namespace="taichi_forge.graph.branch_join_schedule",
         provider_version="complete-graph-family-v1",
         domain_version="branch-join-domain-v1",
-        semantic_fingerprint="branch-join-fragment-generation-v1",
+        semantic_fingerprint="branch-join-dependency-partition-v2",
         assembly_protocols=(RUNTIME_GRAPH_ASSEMBLY_V1,),
         capabilities=("branch-join-dag", "typed-runtime-fragment"),
         fragment_key_schema="branch_join_schedule:source:choice.v1",
@@ -38,14 +38,14 @@ class GraphBranchJoinRecipeProvider(GraphRuntimeFragmentProvider):
                     task_id = f"{source.source_key}:dispatch:{dispatch_index}"
                     task = GraphFragmentTask.create(
                         task_id,
-                        "cuda_branch_dispatch",
+                        f"{source.backend}_branch_dispatch",
                         depends_on=(() if previous is None else (previous,)),
                         effects=logical_nodes[dispatch_index].effects,
                         bindings=logical_nodes[dispatch_index].bindings,
                         temporaries=logical_nodes[dispatch_index].temporaries,
                         physical={
                             "family": "branch_join_schedule",
-                            "queue": f"cuda_branch:{branch_index}",
+                            "queue": f"{source.backend}_branch:{branch_index}",
                             "dispatch_index": dispatch_index,
                         },
                     )
@@ -58,7 +58,7 @@ class GraphBranchJoinRecipeProvider(GraphRuntimeFragmentProvider):
             tasks.append(
                 GraphFragmentTask.create(
                     join_task_id,
-                    "cuda_branch_join",
+                    f"{source.backend}_branch_join",
                     depends_on=tuple(
                         task_by_dispatch[group[-1]] for group in source.branch_groups
                     ),

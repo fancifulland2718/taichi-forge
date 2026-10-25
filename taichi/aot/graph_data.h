@@ -873,11 +873,11 @@ struct TI_DLL_EXPORT CompiledGraph {
   std::vector<CompiledDispatch> dispatches;
   std::unordered_map<std::string, aot::Arg> args;
   std::vector<SNodeTreeDependency> snode_tree_dependencies;
-  // JIT-only dispatch ranges captured as sibling CUDA Graph branches. Each
-  // group is ordered and contiguous; all groups together cover one contiguous
-  // interval followed by at least one serial join/suffix dispatch. The public
-  // AOT schema intentionally remains linear.
-  std::vector<std::vector<std::uint32_t>> cuda_parallel_dispatch_groups;
+  // Selected physical fork/join shared by CUDA capture and the JIT/AOT
+  // ExecutionPlan lowerer. Each group is ordered and contiguous; all groups
+  // cover one contiguous interval followed by a serial join/suffix. Vulkan
+  // consumes this schedule only through an independent prepared domain.
+  std::vector<std::vector<std::uint32_t>> parallel_dispatch_groups;
   // JIT-only ownership for synthetic kernels created by Graph composition.
   // Shared ownership preserves CompiledGraph's existing copy contract.
   std::vector<std::shared_ptr<taichi::lang::Kernel>> owned_jit_kernels;
@@ -889,8 +889,8 @@ struct TI_DLL_EXPORT CompiledGraph {
   CompiledGraph(const CompiledGraph &) = default;
   CompiledGraph &operator=(const CompiledGraph &) = default;
 
-  bool has_cuda_parallel_dispatch_groups() const {
-    return !cuda_parallel_dispatch_groups.empty();
+  bool has_parallel_dispatch_groups() const {
+    return !parallel_dispatch_groups.empty();
   }
   CompiledGraph(CompiledGraph &&) = default;
   CompiledGraph &operator=(CompiledGraph &&) = default;

@@ -38,7 +38,7 @@ def parallel_graph(branches, count):
         builder.dispatch(advance, symbols[f"lane_{i}_0"], symbols[f"lane_{i}_1"], scale)
     for i in range(branches):
         builder.dispatch(accumulate, symbols[f"lane_{i}_1"], symbols["result"])
-    builder._set_cuda_parallel_dispatch_groups(tuple((1 + 2 * i, 2 + 2 * i) for i in range(branches)))
+    builder._set_parallel_dispatch_groups(tuple((1 + 2 * i, 2 + 2 * i) for i in range(branches)))
     return builder.compile(), names
 
 
@@ -81,8 +81,8 @@ def test_parallel_schedule_rejects_invalid_groups():
         builder.dispatch(increment, symbol)
     for groups in ((), ((0,),), ((), (1,)), ((0,), (0,)), ((0,), (2,))):
         with pytest.raises(RuntimeError):
-            builder._set_cuda_parallel_dispatch_groups(groups)
-    builder._set_cuda_parallel_dispatch_groups(((0, 1), (2, 3)))
+            builder._set_parallel_dispatch_groups(groups)
+    builder._set_parallel_dispatch_groups(((0, 1), (2, 3)))
     with pytest.raises(RuntimeError, match="suffix"):
         builder.compile()
 
@@ -116,8 +116,8 @@ def test_parallel_field_forward_and_backward():
         backward.dispatch(square.grad, symbol)
     forward.dispatch(seed)
     backward.dispatch(publish, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "gradient", ti.f32, ndim=2))
-    forward._set_cuda_parallel_dispatch_groups(((0,), (1,)))
-    backward._set_cuda_parallel_dispatch_groups(((0,), (1,)))
+    forward._set_parallel_dispatch_groups(((0,), (1,)))
+    backward._set_parallel_dispatch_groups(((0,), (1,)))
     primal, adjoint = forward.compile(), backward.compile()
     gradient = ti.ndarray(ti.f32, (2, count))
     indices = dict(branch_0=0, branch_1=1)

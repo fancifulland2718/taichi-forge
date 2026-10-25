@@ -174,11 +174,12 @@ GraphBindingExecutor::GraphBindingExecutor(const aot::CompiledGraph &graph,
       config.arch != Arch::cuda || config.debug || config.kernel_profiler,
       "CUDA binding frames require non-debug CUDA execution without "
       "kernel-profiler instrumentation");
-  TI_ERROR_IF(
-      graph.dispatches.empty() || !graph.snode_tree_dependencies.empty() ||
-          graph.has_indirect_dispatches() ||
-          graph.has_cuda_parallel_dispatch_groups(),
-      "CUDA binding frames require a flat CUDA Graph without SNode dependencies");
+  TI_ERROR_IF(graph.dispatches.empty() ||
+                  !graph.snode_tree_dependencies.empty() ||
+                  graph.has_indirect_dispatches() ||
+                  graph.has_parallel_dispatch_groups(),
+              "CUDA binding frames require a flat CUDA Graph without SNode "
+              "dependencies");
   auto state = std::make_shared<State>(graph, config, program_owner);
   auto &driver = CUDADriver::get_instance();
   TI_ERROR_IF(!available(),

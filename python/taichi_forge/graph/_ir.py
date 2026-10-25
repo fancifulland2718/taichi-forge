@@ -1076,6 +1076,46 @@ def _parallel_branch_metadata(region, branch_index):
     return summary, tuple(blockers), frozenset(temporary_names)
 
 
+def contiguous_parallel_groups(nodes):
+    """Partition a serial dispatch prefix without cutting known dependencies.
+
+    A resource written anywhere connects its first and last use; the interval
+    closure also preserves dispatch order for interleaved chains. Shared reads
+    need no edge. Distinct runtime bindings still require alias admission by
+    ``analyze_parallel_candidate``. This constructs one maximal partition,
+    rather than enumerating every split or imposing a branch-count limit.
+    """
+    nodes = tuple(nodes)
+    spans = {}
+
+    def use(key, index, writes):
+        first, _, was_written = spans.get(key, (index, index, False))
+        spans[key] = (first, index, was_written or writes)
+
+    for index, node in enumerate(nodes):
+        if (not isinstance(node, DispatchNode) or node.opaque
+                or node.synchronization or node.side_effects):
+            return ()
+        for effect in node.effects:
+            if effect.access == GraphAccess.OPAQUE:
+                return ()
+            use(("resource", effect.resource), index, effect.access != GraphAccess.READ)
+        for temporary in node.temporaries:
+            use(("temporary", temporary.name), index, True)
+    reach = list(range(len(nodes)))
+    for first, last, written in spans.values():
+        if written:
+            reach[first] = max(reach[first], last)
+    groups = []
+    begin = end = 0
+    for index, last in enumerate(reach):
+        end = max(end, last)
+        if index == end:
+            groups.append(tuple(range(begin, index + 1)))
+            begin = index + 1
+    return tuple(groups)
+
+
 def analyze_parallel_candidate(branches):
     """Conservatively analyze sibling branches without changing execution."""
 

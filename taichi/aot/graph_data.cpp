@@ -2332,7 +2332,7 @@ std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
                                           stream);
   };
 
-  if (!graph.has_cuda_parallel_dispatch_groups()) {
+  if (!graph.has_parallel_dispatch_groups()) {
     for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
       const auto error = capture_dispatch(i, capture_stream);
       if (error != CUDA_SUCCESS) {
@@ -2342,7 +2342,7 @@ std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
     return CUDA_SUCCESS;
   }
 
-  const auto &groups = graph.cuda_parallel_dispatch_groups;
+  const auto &groups = graph.parallel_dispatch_groups;
   TI_ASSERT(state.parallel_capture.branch_count() == groups.size());
   const std::size_t parallel_begin = groups.front().front();
   const std::size_t parallel_end = groups.back().back() + 1;
@@ -2501,7 +2501,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   const bool range_selected = graph.has_device_range_dispatches();
   TI_ERROR_IF(range_selected &&
                   (cuda_concurrent_batch_lane ||
-                   graph.has_cuda_parallel_dispatch_groups() ||
+                   graph.has_parallel_dispatch_groups() ||
                    std::any_of(graph.dispatches.begin(), graph.dispatches.end(),
                                [](const auto &dispatch) {
                                  return dispatch.cuda_bounded_dispatch.has_value() ||
@@ -2539,7 +2539,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     return false;
   }
   const bool has_capture_commands = graph.has_cuda_capture_commands();
-  if (graph.has_cuda_parallel_dispatch_groups() &&
+  if (graph.has_parallel_dispatch_groups() &&
       (has_capture_commands ||
        std::any_of(graph.dispatches.begin(), graph.dispatches.end(),
                    [](const auto &dispatch) {
@@ -2850,8 +2850,8 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
                   });
 
   driver.stream_synchronize(capture_stream);
-  if (graph.has_cuda_parallel_dispatch_groups()) {
-    state->parallel_capture.prepare(graph.cuda_parallel_dispatch_groups.size());
+  if (graph.has_parallel_dispatch_groups()) {
+    state->parallel_capture.prepare(graph.parallel_dispatch_groups.size());
   }
   auto capture_lock = CUDAContext::get_instance().get_graph_capture_lock_guard();
   auto begin_err = driver.stream_begin_capture.call(
@@ -4502,7 +4502,7 @@ bool try_run_cuda_bounded_graph(
   }
   const bool range_selected = graph.has_device_range_dispatches();
   TI_ERROR_IF(range_selected && (graph.has_indirect_dispatches() ||
-                                graph.has_cuda_parallel_dispatch_groups()),
+                                 graph.has_parallel_dispatch_groups()),
               "CUDA device range requires ordinary native while regions");
   if (!cuda_conditional_dispatches_eligible(graph)) {
     return structural_fallback();
@@ -6190,6 +6190,10 @@ void CompiledGraph::jit_run(
   TI_ERROR_IF(has_indirect_dispatches() || has_device_range_dispatches(),
               "Graph indirect dispatch requires the cached Vulkan JIT "
               "execution path");
+  TI_ERROR_IF(
+      has_parallel_dispatch_groups() && compile_config.arch != Arch::cuda,
+      "Selected parallel Graph requires prepare(execution_domain=...) "
+      "on this backend; ordinary replay cannot discard its schedule");
   Program *program = jit_graph_program(*this);
   if (program != nullptr) {
     program->ensure_runtime_submission_allowed("Graph launch");
@@ -6277,6 +6281,10 @@ void CompiledGraph::jit_run_cached(
     const std::unordered_map<std::string, IValue> &args,
     CompiledGraphJITCache &cache,
     bool cuda_concurrent_batch_lane) const try {
+  TI_ERROR_IF(
+      has_parallel_dispatch_groups() && compile_config.arch != Arch::cuda,
+      "Selected parallel Graph requires prepare(execution_domain=...) "
+      "on this backend; ordinary replay cannot discard its schedule");
   const bool has_device_range_dispatch = has_device_range_dispatches();
   const bool has_indirect_dispatch =
       has_indirect_dispatches() || has_device_range_dispatch;

@@ -295,9 +295,10 @@ Program::create_vulkan_graph_recording(
     if (const auto *graph_pointer =
             std::get_if<aot::CompiledGraph *>(&source.value)) {
       const auto &graph = **graph_pointer;
-      TI_ERROR_IF(graph.has_indirect_dispatches() ||
-                      graph.has_cuda_parallel_dispatch_groups(),
-                  "Prepared Vulkan Graph requires flat fixed-dispatch segments");
+      TI_ERROR_IF(
+          graph.has_indirect_dispatches() ||
+              graph.has_parallel_dispatch_groups(),
+          "Prepared Vulkan Graph requires flat fixed-dispatch segments");
       retain_dependencies(graph.snode_tree_dependencies);
       // Retain synthetic kernels and their compiled payloads independently of
       // Python builders and subsequent compilation-cache eviction.

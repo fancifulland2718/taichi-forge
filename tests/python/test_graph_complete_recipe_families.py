@@ -1801,7 +1801,11 @@ def test_complete_recipe_materializes_coarse_cuda_branch_join_dag():
     short.dispatch(advance_a, symbols["a0"], symbols["a1"])
     short.dispatch(advance_b, symbols["b0"], symbols["b1"])
     short.dispatch(join, symbols["a1"], symbols["b1"], symbols["output"])
-    assert not short.freeze()._runtime_spec._graph_branch_join_sources
+    # Legality does not depend on a minimum number of kernels per branch.
+    # A single-copy branch is needed by real snapshot publication as well.
+    short_sources = short.freeze()._runtime_spec._graph_branch_join_sources
+    assert len(short_sources) == 1
+    assert short_sources[0].branch_groups == ((0,), (1,))
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

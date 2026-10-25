@@ -843,8 +843,11 @@ def _while(context, node):
 
 def _parallel(context, node):
     """Preserve the selected physical fork/join and its local dispatch order."""
-    if context.arch != core.Arch.cuda:
-        raise TaichiRuntimeError("AOT parallel requires its selected CUDA backend")
+    if context.arch not in (core.Arch.cuda, core.Arch.vulkan):
+        raise TaichiRuntimeError("Parallel lowering requires its selected GPU backend")
+    backend = "cuda" if context.arch == core.Arch.cuda else "vulkan"
+    if node.parallel_backend != backend:
+        raise TaichiRuntimeError("Parallel lowering backend does not match its physical recipe")
     sources, native_groups = node.compiled_graph._physical_jit_parallel_execution_sources
     groups = tuple(tuple(group) for group in native_groups)
     if groups != node.parallel_dispatch_groups or len(groups) < 2 or not all(groups):
@@ -864,7 +867,7 @@ def _parallel(context, node):
             context.kernel(*sources[index][1:], jit_source=(node.compiled_graph, index))
 
     emit(context, range(indices[0]))
-    context.operations.append(dict(kind="cuda_parallel", branches=[context.region(emit, group) for group in groups]))
+    context.operations.append(dict(kind=f"{backend}_parallel", branches=[context.region(emit, group) for group in groups]))
     emit(context, range(indices[-1] + 1, len(sources)))
 
 

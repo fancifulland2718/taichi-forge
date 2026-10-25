@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Complete resource effects are independent of pointwise fusion eligibility.
-inline constexpr int kForgeNativeAbiRevision = 208;
+inline constexpr int kForgeNativeAbiRevision = 209;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

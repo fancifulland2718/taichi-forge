@@ -142,7 +142,7 @@ def test_aot_parallel_real_field_gradient(tmp_path):
         builder.dispatch(square, symbol)
         builder.dispatch(square.grad, symbol)
     builder.dispatch(publish, symbols["output"], symbols["gradient"])
-    builder._set_cuda_parallel_dispatch_groups(((1, 2), (3, 4)))
+    builder._set_parallel_dispatch_groups(((1, 2), (3, 4)))
     graph = builder.compile()
     module = ti.aot.Module()
     module.add_execution_plan("step", graph, snapshot_state=True)

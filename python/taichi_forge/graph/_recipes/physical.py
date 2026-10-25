@@ -1355,10 +1355,11 @@ def observe_graph_physical_manifest(definition, recipe, graph):
                     previous_same_dispatch = last_task_by_dispatch.get(
                         dispatch_index
                     )
+                    if branch_index is not None:
+                        queue = f"{stage['parallel_backend']}_branch:{branch_index}"
                     if previous_same_dispatch is not None:
                         task_dependencies = (previous_same_dispatch,)
                     elif branch_index is not None:
-                        queue = f"cuda_branch:{branch_index}"
                         group = parallel_groups[branch_index]
                         if dispatch_index == group[0]:
                             task_dependencies = (

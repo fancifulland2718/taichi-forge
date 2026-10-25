@@ -42,7 +42,7 @@ def test_argpack_selected_fork_join_keeps_branch_gradients(tmp_path):
     # Explicit internal physical selection, as in the existing fork/join gate;
     # branch arrays below are distinct. This does not qualify automatic hazard
     # inference or arbitrary aliased pack members for parallel scheduling.
-    builder._set_cuda_parallel_dispatch_groups(((0, 1), (2, 3)))
+    builder._set_parallel_dispatch_groups(((0, 1), (2, 3)))
     graph = builder.compile()
     module = ti.aot.Module()
     frozen = module.add_execution_plan(

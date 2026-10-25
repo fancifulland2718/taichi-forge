@@ -296,7 +296,7 @@ class GraphBuilder {
   // Private JIT-only physical schedule selected by a complete Forge recipe.
   // Indices address the post-composition dispatch vector; callers must keep
   // map composition disabled when installing this schedule.
-  void set_cuda_parallel_dispatch_groups(
+  void set_parallel_dispatch_groups(
       const std::vector<std::vector<std::uint32_t>> &groups);
 
   std::uint32_t map_composer_max_group_size() const {
@@ -316,7 +316,7 @@ class GraphBuilder {
   std::vector<std::unique_ptr<Kernel>> composed_kernels_;
   std::uint32_t map_composer_max_group_size_{1};
   std::set<std::vector<std::uint64_t>> map_composer_allowed_groups_;
-  std::vector<std::vector<std::uint32_t>> cuda_parallel_dispatch_groups_;
+  std::vector<std::vector<std::uint32_t>> parallel_dispatch_groups_;
   std::uint64_t next_logical_dispatch_id_{0};
 };
 
