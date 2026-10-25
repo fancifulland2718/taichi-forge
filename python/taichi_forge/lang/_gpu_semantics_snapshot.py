@@ -1,5 +1,7 @@
 """Explicit resident snapshot construction for CUDA/Vulkan kernels."""
 
+from taichi_forge.lang.task_manifest import RangeForBounds
+
 from taichi_forge.lang._gpu_semantics import (
     _GpuAccessFootprint,
     _GpuAccessPattern,
@@ -396,6 +398,16 @@ def _build_resident_gpu_semantics(raw, *, primal_program_id=""):
                     _GpuBindingTime.CODEGEN,
                     _GpuOwnership.COMPILER,
                     provenance,
+                ),
+                range_bounds=(
+                    _proven(
+                        RangeForBounds._from_core(task["range_bounds"]),
+                        _GpuBindingTime.CODEGEN,
+                        _GpuOwnership.COMPILER,
+                        provenance,
+                    )
+                    if task.get("range_bounds") is not None
+                    else _gpu_fact_unknown("no compiled range bounds for this dispatch")
                 ),
                 effects=single_dispatch_effects,
                 effects_blocker=(

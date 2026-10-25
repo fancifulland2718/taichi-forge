@@ -285,6 +285,26 @@ py::dict offloaded_task_manifest_to_python(
     py::dict bounds;
     bounds["begin"] = bound(task.range_bounds->begin);
     bounds["end"] = bound(task.range_bounds->end);
+    bounds["empty_group_elision"] =
+        lang::empty_range_group_proof_name(task.range_bounds->empty_group_elision);
+    bounds["host_launch"] = py::none();
+    if (task.range_bounds->host_launch) {
+      const auto host_bound = [](const lang::HostRangeBound &value) {
+        py::dict result;
+        result["factor"] = value.factor;
+        result["offsets"] = value.offsets;
+        result["shape_product"] = value.shape_product;
+        result["scale"] = value.scale;
+        result["bias"] = value.bias;
+        result["input_min"] = value.input_min;
+        result["input_max"] = value.input_max;
+        return result;
+      };
+      py::dict host;
+      host["begin"] = host_bound(task.range_bounds->host_launch->begin);
+      host["end"] = host_bound(task.range_bounds->host_launch->end);
+      bounds["host_launch"] = host;
+    }
     item["range_bounds"] = bounds;
   } else {
     item["range_bounds"] = py::none();

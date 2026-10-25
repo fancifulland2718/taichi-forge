@@ -180,7 +180,7 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
         item.actual_geometry_reason =
             "the Graph payload uses the saturation-capped static grid and "
             "loads its logical range end from a device extent";
-      } else if (task.range_bounds && task.range_bounds->host_launch) {
+      } else if (task.range_bounds && task.range_bounds->uses_host_launch_grid()) {
         item.actual_grid_size.reset();
         item.actual_geometry_kind = "host_argument_bound";
         item.actual_geometry_reason =

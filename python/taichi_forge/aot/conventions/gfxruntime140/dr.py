@@ -119,6 +119,7 @@ class RangeForAttributes:
         self.begin: RangeBound = RangeBound(j["begin"])
         self.end: RangeBound = RangeBound(j["end"])
         self.host_launch: Optional[Dict[str, Any]] = j.get("host_launch")
+        self.empty_group_elision: int = j.get("empty_group_elision", 0)
 
 
 @json_data_model

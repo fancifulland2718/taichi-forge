@@ -1,6 +1,6 @@
 """Internal, GPU-only execution semantics contracts.
 
-This module intentionally depends only on the Python standard library.  It is
+This module depends only on the standard library and passive task metadata. It is
 loaded by explicit introspection/tuning paths, never by ordinary kernel launch.
 The schema models physical CUDA/Vulkan dispatches; Taichi functions are source
 composition details and are not represented as GPU execution objects.
@@ -11,9 +11,16 @@ from enum import Enum
 import json
 from typing import Any, Optional, Tuple
 
+from taichi_forge.lang.task_manifest import (
+    HostRangeBound,
+    HostRangeBounds,
+    RangeBound,
+    RangeForBounds,
+)
+
 
 _GPU_SEMANTICS_SCHEMA_NAME = "taichi-forge-gpu-semantics"
-_GPU_SEMANTICS_SCHEMA_VERSION = 1
+_GPU_SEMANTICS_SCHEMA_VERSION = 2
 
 
 class _GpuBackend(str, Enum):
@@ -175,6 +182,12 @@ def _schema_type(cls):
         raise RuntimeError(f"duplicate GPU semantics schema type {cls.__name__}")
     _SCHEMA_TYPES[cls.__name__] = cls
     return cls
+
+
+# Reuse the compiled task's immutable domain types instead of interpreting
+# bounds again in the tuning schema. These types hold no runtime objects.
+for _range_type in (HostRangeBound, HostRangeBounds, RangeBound, RangeForBounds):
+    _schema_type(_range_type)
 
 
 def _require_text(value, name):
@@ -742,6 +755,7 @@ class _GpuDispatchSemantics:
     intrinsic_requirements: Tuple[_GpuIntrinsicRequirement, ...] = ()
     effects_blocker: str = ""
     provenance: str = ""
+    range_bounds: _GpuFact = field(default_factory=_default_unknown_fact)
 
     def __post_init__(self):
         _require_text(self.logical_task_id, "logical_task_id")
@@ -763,6 +777,8 @@ class _GpuDispatchSemantics:
             raise TypeError("workgroup_shape must be a _GpuResolvedValue")
         if not isinstance(self.range_mapping, _GpuFact):
             raise TypeError("range_mapping must be a _GpuFact")
+        if not isinstance(self.range_bounds, _GpuFact):
+            raise TypeError("range_bounds must be a _GpuFact")
         _require_tuple_members(self.effects, _GpuResourceEffect, "dispatch effects")
         _require_tuple_members(
             self.intrinsic_requirements,

@@ -55,7 +55,7 @@ def test_cuda_aot_range_entry_shares_payload_and_survives_export(tmp_path, artif
     directory = tmp_path / "module"
     module.save(directory)
     metadata = json.loads((directory / "aot_metadata.json").read_text())
-    assert metadata["schema_version"] == 16
+    assert metadata["schema_version"] == 18
     assert len(list(directory.glob("*." + artifact_format))) == 1
     assert len(metadata["kernel_aliases"]) == 1
     assert metadata["device_range_dispatch"] == [
@@ -143,7 +143,7 @@ def test_cpu_aot_aliases_share_code_and_keep_module_state(tmp_path):
     assert len(dependencies) == 1
     module.save(tmp_path)
     assert len(list(tmp_path.glob("*.bc"))) == 1
-    assert json.loads((tmp_path / "aot_metadata.json").read_text())["schema_version"] == 16
+    assert json.loads((tmp_path / "aot_metadata.json").read_text())["schema_version"] == 18
     with ti.aot.borrow_runtime() as runtime:
         modules = [runtime.load_module(tmp_path) for _ in range(2)]
         output = runtime.ndarray("i32", (1,))

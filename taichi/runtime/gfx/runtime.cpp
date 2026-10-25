@@ -4799,7 +4799,7 @@ bool GfxRuntime::launch_graph_impl(
     // or scalar update crossing a block boundary must also invalidate a
     // descriptor-only replay patch; unchanged grids reuse the recording.
     for (const auto &task : ti_kernel->ti_kernel_attribs().tasks_attribs) {
-      if (task.range_for_attribs && task.range_for_attribs->host_launch) {
+      if (task.range_for_attribs && task.range_for_attribs->uses_host_launch_grid()) {
         const auto groups = host_launch_groups(task, *dispatch.host_ctx);
         key.push_back(groups);
         structure_key.push_back(groups);

@@ -18,7 +18,10 @@ TEST(DeviceRangeProof, RejectsUnknownBoundsAndPhysicalThreadBehavior) {
   EXPECT_TRUE(describe_launch_range_for_bounds(*ordinary)->host_launch);
   EXPECT_TRUE(supports_device_range_dispatch(*ordinary));
   ordinary->one_to_one = true;
-  EXPECT_FALSE(describe_launch_range_for_bounds(*ordinary)->host_launch);
+  const auto fixed = describe_launch_range_for_bounds(*ordinary);
+  EXPECT_TRUE(fixed->host_launch);
+  EXPECT_EQ(fixed->empty_group_elision, EmptyRangeGroupProof::fixed_mapping);
+  EXPECT_FALSE(fixed->uses_host_launch_grid());
   EXPECT_FALSE(supports_device_range_dispatch(*ordinary));
   auto unknown = make();
   auto expression = Stmt::make_typed<ConstStmt>(TypedConstant(5));
@@ -37,6 +40,13 @@ TEST(DeviceRangeProof, RejectsUnknownBoundsAndPhysicalThreadBehavior) {
   shared->body->insert(std::make_unique<AllocaStmt>(
       std::vector<int>{32}, PrimitiveType::i32, true));
   EXPECT_FALSE(supports_device_range_dispatch(*shared));
+  auto cpu = make();
+  cpu->device = Arch::x64;
+  cpu->host_launch_range = ordinary->host_launch_range;
+  const auto cpu_bounds = describe_launch_range_for_bounds(*cpu);
+  EXPECT_TRUE(cpu_bounds->host_launch);
+  EXPECT_EQ(cpu_bounds->empty_group_elision, EmptyRangeGroupProof::fixed_mapping);
+  EXPECT_FALSE(cpu_bounds->supports_device_dispatch());
 }
 }  // namespace taichi::lang
 
@@ -102,6 +112,7 @@ TEST_F(VulkanRangeDispatch, SignedControllerDoesNotOverflowOrReadHostCounts) {
   task.device_range_dispatch_version = 1;
   task.range_for_attribs = RangeForBounds{RangeBound::global_tmp(0),
                                         RangeBound::global_tmp(4)};
+  task.range_for_attribs->empty_group_elision = EmptyRangeGroupProof::independent_iterations;
   task.advisory_total_num_threads = 128;
   task.advisory_num_threads_per_group = 32;
   gfx::RangeDispatch controller(*device, task, *bounds, 8);

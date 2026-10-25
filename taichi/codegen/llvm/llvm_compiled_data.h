@@ -57,9 +57,7 @@ class OffloadedTask {
       return true;
     return device_range_dispatch_version == 1 &&
            task_type == OffloadedTaskType::range_for && range_bounds &&
-           range_bounds->valid() && !range_bounds->const_range() &&
-           range_bounds->begin.kind != RangeBoundKind::unknown &&
-           range_bounds->end.kind != RangeBoundKind::unknown &&
+           range_bounds->supports_device_dispatch() &&
            !one_to_one && !external_shared_staged &&
            !static_shared_array_bytes && !dynamic_shared_array_bytes &&
            !thread_local_bytes && !may_mutate_sparse_topology &&

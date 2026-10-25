@@ -13,11 +13,47 @@ class RangeBound:
 
 
 @dataclass(frozen=True)
+class HostRangeBound:
+    """Checked i32 expression over argument byte offsets, not a bound value."""
+
+    factor: int
+    offsets: tuple
+    shape_product: bool
+    scale: int
+    bias: int
+    input_min: int
+    input_max: int
+
+    def __post_init__(self):
+        object.__setattr__(self, "offsets", tuple(self.offsets))
+
+
+@dataclass(frozen=True)
+class HostRangeBounds:
+    begin: HostRangeBound
+    end: HostRangeBound
+
+
+@dataclass(frozen=True)
 class RangeForBounds:
     """Read-only bound sources; these do not certify a grid change is safe."""
 
     begin: RangeBound
     end: RangeBound
+    host_launch: Optional[HostRangeBounds] = None
+    empty_group_elision: str = "unknown"
+
+    @classmethod
+    def _from_core(cls, bounds):
+        host = bounds.get("host_launch")
+        return cls(
+            RangeBound(**bounds["begin"]),
+            RangeBound(**bounds["end"]),
+            None if host is None else HostRangeBounds(
+                HostRangeBound(**host["begin"]), HostRangeBound(**host["end"])
+            ),
+            bounds.get("empty_group_elision", "unknown"),
+        )
 
 
 @dataclass(frozen=True)
@@ -95,7 +131,7 @@ class OffloadedTaskManifest:
         payload["range_bounds"] = (
             None
             if bounds is None
-            else RangeForBounds(RangeBound(**bounds["begin"]), RangeBound(**bounds["end"]))
+            else RangeForBounds._from_core(bounds)
         )
         for name in (
             "staged_external_arg_indices",
@@ -137,4 +173,7 @@ class GraphTaskManifest(OffloadedTaskManifest):
     source_dispatch_count: int
 
 
-__all__ = ["GraphTaskManifest", "OffloadedTaskManifest", "RangeBound", "RangeForBounds"]
+__all__ = [
+    "GraphTaskManifest", "OffloadedTaskManifest", "RangeBound", "RangeForBounds",
+    "HostRangeBound", "HostRangeBounds",
+]

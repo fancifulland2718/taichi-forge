@@ -813,7 +813,7 @@ bool KernelLauncher::prepare_cuda_graph_context(
       return false;
     for (std::size_t i = 0; i < offloaded_tasks.size(); ++i) {
       const auto &task = offloaded_tasks[i];
-      if (task.range_bounds && task.range_bounds->host_launch &&
+      if (task.range_bounds && task.range_bounds->uses_host_launch_grid() &&
           task.launch_grid(ctx.get_context().arg_buffer, ctx.arg_buffer_size,
                            &ctx.mutable_argument_ranges) !=
               (*recorded_tasks)[i].grid_dim)

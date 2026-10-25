@@ -97,6 +97,18 @@ def test_shape_expression_and_aot_share_bound_facts(tmp_path):
     values = ti.ndarray(ti.i32, shape=7)
     manifest = ranges(fill, values)
     assert manifest
+    domain = manifest[0].range_bounds
+    if impl.current_cfg().arch != ti.cpu:
+        from taichi_forge.lang._gpu_semantics import _dumps_gpu_semantics, _loads_gpu_semantics
+
+        assert domain.host_launch is not None
+        assert isinstance(domain.host_launch.end.offsets, tuple)
+        with pytest.raises(FrozenInstanceError):
+            domain.host_launch.end.bias = 1
+        snapshot = fill._primal._gpu_semantics_snapshot(values)
+        assert snapshot.dispatches[0].range_bounds.value == domain
+        assert _loads_gpu_semantics(_dumps_gpu_semantics(snapshot)) == snapshot
+        assert domain.empty_group_elision == "independent_iterations"
     if impl.current_cfg().arch == ti.vulkan:
         assert manifest[0].range_bounds.end.kind == "unknown"
         assert manifest[0].range_bounds.end.value is None
@@ -108,7 +120,7 @@ def test_shape_expression_and_aot_share_bound_facts(tmp_path):
         from taichi_forge.aot.conventions.gfxruntime140 import dr, sr
 
         data = json.loads((tmp_path / "metadata.json").read_text())
-        assert data["metadata_version"] == 13
+        assert data["metadata_version"] == 14
         tasks = [t for k in data["kernels"] for t in k["tasks_attribs"] if t["range_for_attribs"]]
         assert tasks
         assert tasks[0]["range_for_attribs"]["end"] == {"kind": 0, "value": 0}
@@ -118,3 +130,24 @@ def test_shape_expression_and_aot_share_bound_facts(tmp_path):
     fill(values)
     np.testing.assert_array_equal(values.to_numpy(), np.arange(2, 9, dtype=np.int32))
     assert ranges(fill, values) == manifest
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_physical_thread_observation_retains_workload_without_grid_permission():
+    @ti.kernel
+    def physical(values: ti.types.ndarray(ti.i32, 1)):
+        ti.loop_config(block_dim=128)
+        for i in range(values.shape[0]):
+            values[i] = ti.simt.block.global_thread_idx()
+
+    values = ti.ndarray(ti.i32, 65)
+    physical(values)
+    np.testing.assert_array_equal(values.to_numpy(), np.arange(65))
+    task, = ranges(physical, values)
+    assert task.range_bounds.host_launch is not None
+    assert task.range_bounds.empty_group_elision in ("physical_thread", "unproven_call")
+    assert task.actual_geometry_kind == "static_direct"
+    assert task.actual_grid_size == task.selected_grid_size
+    assert task.device_range_dispatch_version == 0
+    snapshot = physical._primal._gpu_semantics_snapshot(values)
+    assert snapshot.dispatches[0].range_bounds.value == task.range_bounds

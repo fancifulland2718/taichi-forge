@@ -98,7 +98,8 @@ TEST(HostRangeBounds, AffineGuardMatchesCheckedSourceOperations) {
 TEST(HostRangeBounds, MutableBoundsRetainEnvelopeButOtherParametersDoNot) {
   const std::int32_t arguments[] = {7, 64};
   RangeForBounds bounds{RangeBound::constant(0), RangeBound::global_tmp(0),
-                        HostRangeBounds{{0, {}, false}, {1, {4}, true}}};
+                        HostRangeBounds{{0, {}, false}, {1, {4}, true}},
+                        EmptyRangeGroupProof::independent_iterations};
   std::vector<std::pair<std::uint64_t, std::uint64_t>> patches{{0, 4}};
   EXPECT_EQ(bounds.launch_grid(8160, 128, arguments, sizeof(arguments), &patches), 1);
   patches = {{4, 4}};
@@ -112,7 +113,8 @@ TEST(HostRangeBounds, MutableBoundsRetainEnvelopeButOtherParametersDoNot) {
 TEST(HostRangeBounds, CodecAndCloneRetainTheFrozenProof) {
   HostRangeBounds host{{0, {}, false}, {1, {8, 12}, true}};
   ASSERT_TRUE(compose_host_range_affine(host.end, 3, -1));
-  RangeForBounds bounds{RangeBound::constant(0), RangeBound::global_tmp(4), host};
+  RangeForBounds bounds{RangeBound::constant(0), RangeBound::global_tmp(4), host,
+                        EmptyRangeGroupProof::independent_iterations};
   BinaryOutputSerializer output;
   output.initialize();
   output(bounds);
@@ -128,10 +130,37 @@ TEST(HostRangeBounds, CodecAndCloneRetainTheFrozenProof) {
   RangeForBounds json;
   liong::json::deserialize(liong::json::serialize(bounds), json, true);
   EXPECT_EQ(json.host_launch, decoded.host_launch);
+  EXPECT_EQ(json.empty_group_elision, bounds.empty_group_elision);
+  EXPECT_EQ(decoded.empty_group_elision, bounds.empty_group_elision);
   OffloadedStmt task(OffloadedTaskType::range_for, Arch::cuda, nullptr);
   task.host_launch_range = host;
   auto clone = task.clone();
   EXPECT_EQ(clone->as<OffloadedStmt>()->host_launch_range, task.host_launch_range);
+}
+
+TEST(HostRangeBounds, KnownWorkloadDoesNotAuthorizeAnUnprovedTransformation) {
+  const std::int32_t count = 65;
+  RangeForBounds bounds{RangeBound::constant(0), RangeBound::global_tmp(0),
+                        HostRangeBounds{{0, {}, false}, {1, {0}, false}}};
+  for (auto proof : {EmptyRangeGroupProof::unknown,
+                     EmptyRangeGroupProof::auxiliary_region,
+                     EmptyRangeGroupProof::physical_thread}) {
+    bounds.empty_group_elision = proof;
+    EXPECT_TRUE(bounds.valid(sizeof(count)));
+    EXPECT_EQ(bounds.host_launch->end.evaluate(&count, sizeof(count)), count);
+    EXPECT_EQ(bounds.launch_grid(8160, 128, &count, sizeof(count)), 8160);
+    EXPECT_FALSE(bounds.supports_device_dispatch());
+    RangeForBounds decoded;
+    liong::json::deserialize(liong::json::serialize(bounds), decoded, true);
+    EXPECT_EQ(decoded.empty_group_elision, proof);
+    EXPECT_EQ(decoded.host_launch, bounds.host_launch);
+  }
+  bounds.empty_group_elision = EmptyRangeGroupProof::independent_iterations;
+  EXPECT_TRUE(bounds.supports_device_dispatch());
+  EXPECT_EQ(bounds.launch_grid(8160, 128, &count, sizeof(count)), 1);
+  bounds.empty_group_elision = static_cast<EmptyRangeGroupProof>(999);
+  EXPECT_FALSE(bounds.valid());
+  EXPECT_EQ(bounds.launch_grid(8160, 128, &count, sizeof(count)), 8160);
 }
 
 TEST(RangeForBounds, SignedExtentsAndWorkspaceValidation) {
@@ -303,6 +332,7 @@ TEST(RangeForBounds, LlvmRangeProofSurvivesCodecAndChecksPhysicalContract) {
   OffloadedTask task;
   task.task_type = OffloadedTaskType::range_for;
   task.range_bounds = RangeForBounds{RangeBound::constant(-3), RangeBound::global_tmp(4)};
+  task.range_bounds->empty_group_elision = EmptyRangeGroupProof::independent_iterations;
   task.block_dim = 32;
   task.grid_dim = 64;
   task.device_range_dispatch_version = 1;

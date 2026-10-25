@@ -79,7 +79,7 @@ def export_execution_context_module(tmp_path, artifact_format, explicit_target, 
     directory = tmp_path / "module"
     module.save(directory)
     metadata = json.loads((directory / "aot_metadata.json").read_text(encoding="utf-8"))
-    assert metadata["schema_version"] == 15
+    assert metadata["schema_version"] == 17
     assert metadata["kernel_format"] == artifact_format
     if not explicit_target:
         assert {item["key"]: item["value"] for item in metadata["required_caps"]} == {

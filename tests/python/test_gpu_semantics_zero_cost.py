@@ -41,7 +41,13 @@ def test_gpu_semantics_are_absent_from_python_launch_hot_paths():
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
-def test_ordinary_direct_and_graph_paths_do_not_touch_semantics_providers():
+def test_ordinary_direct_and_graph_paths_do_not_touch_semantics_providers(monkeypatch):
+    from taichi_forge._compileiq_opaque import _CompileIQOpaqueRecipeTransport
+
+    def unexpected_search(*args, **kwargs):
+        raise AssertionError("ordinary execution must not start CompileIQ search")
+
+    monkeypatch.setattr(_CompileIQOpaqueRecipeTransport, "__init__", unexpected_search)
     count = 256
     values = ti.ndarray(ti.i32, shape=count)
 

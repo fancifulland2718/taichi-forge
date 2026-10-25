@@ -93,7 +93,7 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     item.actual_geometry_kind = "static_direct";
     item.actual_geometry_reason =
         "ordinary direct launch uses the backend-selected geometry";
-    if (task.range_for_attribs && task.range_for_attribs->host_launch) {
+    if (task.range_for_attribs && task.range_for_attribs->uses_host_launch_grid()) {
       item.actual_grid_size.reset();
       item.actual_geometry_kind = "host_argument_bound";
       item.actual_geometry_reason =

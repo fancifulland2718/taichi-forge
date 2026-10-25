@@ -208,9 +208,7 @@ struct TaskAttributes {
       return true;
     return device_range_dispatch_version == 1 &&
            task_type == OffloadedTaskType::range_for && range_for_attribs &&
-           range_for_attribs->valid() && !range_for_attribs->const_range() &&
-           range_for_attribs->begin.kind != RangeBoundKind::unknown &&
-           range_for_attribs->end.kind != RangeBoundKind::unknown &&
+           range_for_attribs->supports_device_dispatch() &&
            !one_to_one && !may_mutate_sparse_topology &&
            !static_shared_array_bytes && cooperative_matrix_requirements.empty() &&
            sparse_list_op == kSparseListOpNone &&

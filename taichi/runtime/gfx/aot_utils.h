@@ -48,7 +48,7 @@ struct TaichiAotData {
   // v11 persists per-entry range recording selection without duplicating code.
   // v12 carries host-argument launch bounds with each qualified task.
   // v13 adds affine bounds and their intermediate-overflow input interval.
-  static constexpr uint32_t kMetadataVersion = 13;
+  static constexpr uint32_t kMetadataVersion = 14;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;

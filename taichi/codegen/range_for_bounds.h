@@ -16,6 +16,42 @@ namespace taichi::lang {
 // Unknown expressions must never be interpreted as global temporary offset 0.
 enum class RangeBoundKind { unknown, constant_i32, global_tmp_i32 };
 
+// Permission for one transformation only: remove whole groups beyond the
+// logical range, keeping the block size and range mapping unchanged. This is
+// not permission to coarsen productive groups, change TLS, or specialize code.
+enum class EmptyRangeGroupProof {
+  unknown,
+  independent_iterations,
+  fixed_mapping,
+  auxiliary_region,
+  unproven_call,
+  physical_thread,
+  local_storage,
+  sparse_topology,
+};
+
+inline const char *empty_range_group_proof_name(EmptyRangeGroupProof proof) {
+  switch (proof) {
+    case EmptyRangeGroupProof::unknown:
+      return "unknown";
+    case EmptyRangeGroupProof::independent_iterations:
+      return "independent_iterations";
+    case EmptyRangeGroupProof::fixed_mapping:
+      return "fixed_mapping";
+    case EmptyRangeGroupProof::auxiliary_region:
+      return "auxiliary_region";
+    case EmptyRangeGroupProof::unproven_call:
+      return "unproven_call";
+    case EmptyRangeGroupProof::physical_thread:
+      return "physical_thread";
+    case EmptyRangeGroupProof::local_storage:
+      return "local_storage";
+    case EmptyRangeGroupProof::sparse_topology:
+      return "sparse_topology";
+  }
+  return nullptr;
+}
+
 // A small, proven expression over the immutable launch-argument image. It is
 // either a constant, one i32 scalar, or a product of ndarray dimensions and a
 // nonnegative constant, followed by a normalized affine transform. The input
@@ -154,9 +190,23 @@ struct RangeForBounds {
   RangeBound begin;
   RangeBound end;
   std::optional<HostRangeBounds> host_launch;
+  EmptyRangeGroupProof empty_group_elision{EmptyRangeGroupProof::unknown};
+
+  bool can_elide_empty_groups() const {
+    return empty_group_elision == EmptyRangeGroupProof::independent_iterations;
+  }
+  bool supports_device_dispatch() const {
+    return can_elide_empty_groups() && valid() && !const_range() &&
+           begin.kind != RangeBoundKind::unknown &&
+           end.kind != RangeBoundKind::unknown;
+  }
+  bool uses_host_launch_grid() const {
+    return host_launch.has_value() && can_elide_empty_groups();
+  }
 
   bool valid() const {
-    return begin.valid() && end.valid();
+    return begin.valid() && end.valid() &&
+           empty_range_group_proof_name(empty_group_elision) != nullptr;
   }
   bool valid(std::uint64_t argument_bytes) const {
     return valid() && (!host_launch || host_launch->valid(argument_bytes));
@@ -165,19 +215,19 @@ struct RangeForBounds {
                   std::uint64_t argument_bytes,
                   const std::vector<std::pair<std::uint64_t, std::uint64_t>>
                       *mutable_arguments = nullptr) const {
+    if (!uses_host_launch_grid())
+      return baseline;
     // A prepared graph cannot resize its launch at each parameter upload. Do
     // not size it from the initial value of an explicitly mutable bound. Other
     // mutable arguments do not disable shape-based selection for this task.
-    if (host_launch && mutable_arguments) {
+    if (mutable_arguments) {
       for (const auto &[offset, bytes] : *mutable_arguments) {
         if (host_launch->begin.reads(offset, bytes) ||
             host_launch->end.reads(offset, bytes))
           return baseline;
       }
     }
-    return host_launch ? host_launch->grid(baseline, block, arguments,
-                                           argument_bytes)
-                       : baseline;
+    return host_launch->grid(baseline, block, arguments, argument_bytes);
   }
   bool const_range() const {
     return valid() && begin.kind == RangeBoundKind::constant_i32 &&
@@ -190,7 +240,7 @@ struct RangeForBounds {
     return std::max<std::int64_t>(end.value - begin.value, 0);
   }
 
-  TI_IO_DEF(begin, end, host_launch);
+  TI_IO_DEF(begin, end, host_launch, empty_group_elision);
 };
 
 }  // namespace taichi::lang

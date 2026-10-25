@@ -58,8 +58,9 @@ LlvmAotModule::LlvmAotModule(
   liong::json::deserialize(json, metadata);
   TI_ERROR_IF(metadata.schema_version != kDeviceRangeProofAotSchemaVersion &&
                   metadata.schema_version != kKernelEntryPolicyAotSchemaVersion,
-              "LLVM AOT task layout requires schema 15 or 16. Rebuild the artifact "
-              "with the current Forge AOT compiler.");
+              "LLVM AOT task layout requires schema {} or {}. Rebuild the artifact "
+              "with the current Forge AOT compiler.",
+              kDeviceRangeProofAotSchemaVersion, kKernelEntryPolicyAotSchemaVersion);
   if (metadata.schema_version == kKernelEntryPolicyAotSchemaVersion) {
     bool aliases = false, ranges = false, checksum = false;
     for (const auto &[name, value] : json.fields()) {
@@ -300,8 +301,8 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
                     (arch() != Arch::cuda ||
                      (metadata_.schema_version != kDeviceRangeProofAotSchemaVersion &&
                       metadata_.schema_version != kKernelEntryPolicyAotSchemaVersion)),
-                "Persisted CUDA task launch policy requires AOT schema 15 or 16: {}",
-                name);
+                "Persisted CUDA task launch policy requires AOT schema {} or {}: {}",
+                kDeviceRangeProofAotSchemaVersion, kKernelEntryPolicyAotSchemaVersion, name);
   }
   for (int tree_id : loaded.used_snode_tree_ids) {
     TI_ERROR_IF(!std::binary_search(snode_tree_ids_.begin(),

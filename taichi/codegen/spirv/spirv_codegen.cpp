@@ -5481,7 +5481,7 @@ class TaskCodegen : public IRVisitor {
 
     task_attribs_.range_for_attribs = describe_launch_range_for_bounds(*stmt);
     task_attribs_.device_range_dispatch_version =
-        supports_device_range_dispatch(*stmt) ? 1 : 0;
+        task_attribs_.range_for_attribs->supports_device_dispatch() ? 1 : 0;
 
     ir_->start_function(kernel_function_);
     const std::string total_elems_name("total_elems");

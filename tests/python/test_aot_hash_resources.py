@@ -113,7 +113,7 @@ def test_aot_hash_module_isolation_and_gradients(tmp_path, nested):
     with zipfile.ZipFile(artifact) as archive:
         metadata = json.loads(archive.read("metadata.json" if arch == "vulkan" else "aot_metadata.json"))
     if arch == "vulkan":
-        assert metadata["metadata_version"] == 13
+        assert metadata["metadata_version"] == 14
         assert any(tree["storage_kind"] == 2 for tree in metadata["snode_tree_resources"])
     else:
         assert metadata["resource_binding"] == ("sparse_v2" if arch == "cuda" else "sparse_v1")

@@ -2490,7 +2490,8 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
   }
   current_task->range_bounds = describe_launch_range_for_bounds(*stmt);
   current_task->device_range_dispatch_version =
-      compile_config.arch == Arch::cuda && supports_device_range_dispatch(*stmt)
+      compile_config.arch == Arch::cuda && current_task->range_bounds &&
+              current_task->range_bounds->supports_device_dispatch()
           ? 1u
           : 0u;
   current_task->static_shared_array_bytes = stmt->bls_size;
