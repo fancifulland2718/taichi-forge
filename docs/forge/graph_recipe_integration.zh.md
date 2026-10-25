@@ -28,8 +28,9 @@ controller 资格，为一个 dispatch 的合格动态范围生成完整候选�
 和有效迭代映射，代码与 baseline 共享；物理执行身份、控制存储和可变绑定仍分别管理。
 候选只在显式 discovery/search 中构建，不会因启用了普通 host 范围裁剪而自动采用。
 已选 Graph 可沿现有 AOT 导出路径部署，无需在消费端安装 CompileIQ。
-host 已知工作量、允许裁掉空工作组、允许设备控制是不同事实；例如新验证的 CUDA TLS
-归约只获得 host 裁剪资格，不因此进入 device-range 候选。CPU 保留既有 scheduler。
+host 已知工作量、允许裁掉空工作组、允许设备控制是不同事实。最终 IR 已验证的 CUDA 标量
+TLS 归约在边界为常量/设备快照时也可进入 device-range 候选；controller 增加设备操作，
+需要与省去的空 block 成本一起测量，不会自动采用。CPU 保留既有 scheduler。
 controller 仅适用于 Graph recording，普通 kernel 直接测速不提供该轴。
 
 以下可运行示例使用 CUDA，演示 provider 与搜索 API，不是应用基准或加速承诺。

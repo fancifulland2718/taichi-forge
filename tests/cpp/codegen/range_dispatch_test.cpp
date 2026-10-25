@@ -75,7 +75,7 @@ TEST(RangeCollectiveProof, RequiresNeutralCompilerReductionAndKnownSlots) {
       EXPECT_EQ(bounds->empty_group_elision, EmptyRangeGroupProof::compiler_tls_reduction);
       const std::int32_t count = 65;
       EXPECT_EQ(bounds->launch_grid(8160, 128, &count, 4), 1);
-      EXPECT_FALSE(bounds->supports_device_dispatch());
+      EXPECT_TRUE(bounds->supports_device_dispatch());
       value->val = TypedConstant(type, 7);
       EXPECT_FALSE(describe_launch_range_for_bounds(task)->can_elide_empty_groups());
       value->val = neutral;

@@ -38,8 +38,10 @@ identity, controller storage and mutable bindings separate. Candidates are const
 only during explicit discovery/search; host range trimming does not select them.
 Selected Graphs use the existing AOT export path without a deployment-time CompileIQ
 dependency. Known workload, empty-group elision and device control are distinct
-qualifications: verified CUDA TLS reductions gain host elision, not device-controller
-support. CPU keeps its scheduler. Controllers require Graph recording and are excluded
+qualifications: verified CUDA scalar TLS reductions can also use the device controller
+when their bounds are constant/device snapshots. The controller adds a device operation;
+measure its cost against the empty blocks it removes. It is not selected automatically.
+CPU keeps its scheduler. Controllers require Graph recording and are excluded
 from direct-kernel timing trials.
 
 The executable example below uses CUDA. It is a demonstration of the provider

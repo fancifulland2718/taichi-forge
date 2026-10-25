@@ -60,7 +60,10 @@ class OffloadedTask {
            range_bounds->supports_device_dispatch() &&
            !one_to_one && !external_shared_staged &&
            !static_shared_array_bytes && !dynamic_shared_array_bytes &&
-           !thread_local_bytes && !may_mutate_sparse_topology &&
+           ((thread_local_bytes != 0) ==
+            (range_bounds->empty_group_elision ==
+             EmptyRangeGroupProof::compiler_tls_reduction)) &&
+           !may_mutate_sparse_topology &&
            sparse_list_op == kSparseListOpNone && block_dim > 0 && grid_dim > 0;
   }
   std::int64_t constant_range_size() const {

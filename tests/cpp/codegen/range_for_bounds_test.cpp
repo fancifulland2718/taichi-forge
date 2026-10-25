@@ -488,6 +488,13 @@ TEST(RangeForBounds, LlvmRangeProofSurvivesCodecAndChecksPhysicalContract) {
   input(decoded);
   EXPECT_EQ(decoded.device_range_dispatch_version, 1);
   EXPECT_TRUE(decoded.valid_device_range_dispatch_contract());
+  decoded.thread_local_bytes = 4;
+  EXPECT_FALSE(decoded.valid_device_range_dispatch_contract());
+  decoded.range_bounds->empty_group_elision = EmptyRangeGroupProof::compiler_tls_reduction;
+  EXPECT_TRUE(decoded.valid_device_range_dispatch_contract());
+  decoded.thread_local_bytes = 0;
+  EXPECT_FALSE(decoded.valid_device_range_dispatch_contract());
+  decoded.range_bounds->empty_group_elision = EmptyRangeGroupProof::independent_iterations;
   decoded.one_to_one = true;
   EXPECT_FALSE(decoded.valid_device_range_dispatch_contract());
   decoded.one_to_one = false;

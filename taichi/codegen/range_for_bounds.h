@@ -221,10 +221,9 @@ struct RangeForBounds {
            empty_group_elision == EmptyRangeGroupProof::compiler_tls_reduction;
   }
   bool supports_device_dispatch() const {
-    // The current persisted device controller contract excludes TLS. Host
-    // trimming can be qualified independently without widening that contract.
-    return empty_group_elision == EmptyRangeGroupProof::independent_iterations &&
-           valid() && !const_range() &&
+    // The controller only removes empty blocks. For a proved compiler
+    // collective, productive blocks retain their lanes and reduction grouping.
+    return can_elide_empty_groups() && valid() && !const_range() &&
            begin.kind != RangeBoundKind::unknown &&
            end.kind != RangeBoundKind::unknown;
   }

@@ -60,7 +60,9 @@ combination. Consult the linked API contracts and capability queries for exact s
   CUDA can also elide whole empty groups for verified scalar sum/dot/min/max TLS reductions,
   preserving productive blocks, tail participation and reduction grouping. Unknown TLS,
   physical-thread observations, shared memory and unproven calls retain their existing route.
-  This does not widen the device-range controller's TLS contract or change CPU scheduling.
+  The same proof admits device-count collectives to explicit Graph controller selections;
+  each offload retains its range snapshot and serial initialization/finalization. The extra
+  controller cost must be measured. CPU scheduling and default device-count launches are unchanged.
 - Explicit complete Graph recipe search can consume CUDA/Vulkan compiled device-range
   qualifications, retaining code sharing, mutable bindings and selected-plan AOT export.
   Direct-kernel trials do not include recording-only alternatives. **CompileIQ autotuning
@@ -68,8 +70,8 @@ combination. Consult the linked API contracts and capability queries for exact s
   [Search reports](graph_recipe_integration.en.md) add whole-search accounting, measurement
   sources and cold-cost execution equivalents, separately from break-even counts. Failed and
   unselected trials are included; missing historical wall time after resume stays unknown.
-- The frontend/native private ABI is **219**, persistent execution-plan version **27**, and
-  compiled-cache schema **84**; LLVM AOT metadata is **19/20**, GFX metadata **15**.
+- The frontend/native private ABI is **220**, persistent execution-plan version **27**, and
+  compiled-cache schema **85**; LLVM AOT metadata is **19/20**, GFX metadata **15**.
   Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
