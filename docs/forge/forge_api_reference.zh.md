@@ -2,7 +2,7 @@
 
 [English](forge_api_reference.en.md) · [文档入口](index.zh.md)
 
-本文列出 Taichi Forge 0.6.4（开发中）的公共符号、调用位置与支持边界，
+本文列出 Taichi Forge 0.7.0（开发中）的公共符号、调用位置与支持边界，
 请核对[安装版本说明](index.zh.md#版本与安装)。初始化和编译配置统一见 [Forge 选项](forge_options.zh.md)。
 
 ## 导航
@@ -195,10 +195,10 @@ vendor runtime 就自动成为默认 provider。
 runtime-ordered compute queue 和 `rerecord` replay。它不可从 `@ti.kernel` 内调用，
 不支持 structured `Sequential`，也不等于 RasterPass/AS provider。
 越界、overlap copy、错误 backend/device、reset 后的旧 Graph
-都会失败。0.6.4 移除了此前 4096 条命令的软件上限；命令存储仍受可用内存约束。
+都会失败。0.7.0 移除了此前 4096 条命令的软件上限；命令存储仍受可用内存约束。
 该功能完全使用官方 wheel 已包含的 runtime，不增加 wheel 发行矩阵。
 
-0.6.4 的 `Module.add_execution_plan()` 可通过共享的
+0.7.0 的 `Module.add_execution_plan()` 可通过共享的
 `vulkan_rhi/buffer_commands@1` 导出该具体 recording，保留显式 barrier 及仅含
 barrier 的序列。公开数组由 `source_bindings` 指定，保留的 dense Field/view 状态
 遵守已有 `snapshot_state=True` 合同。准备时一次检查有限范围、copy 物理别名和
@@ -445,7 +445,7 @@ SPIR-V 避免新增 shader-toolchain 依赖，也不增加官方 wheel 变体。
 与 shader-module 内存按 opaque memory 报告，不做虚假估算。
 
 固定 storage-buffer 描述符数组使用 `ShaderBufferArrayBinding`，单数组容量取设备的
-`bindless_buffer_capabilities()["max_fixed_count"]`；0.6.4 移除原有 64 元素 provider 上限。
+`bindless_buffer_capabilities()["max_fixed_count"]`；0.7.0 移除原有 64 元素 provider 上限。
 该值不保证多个数组合并后仍可容纳：准备阶段检查跨 shader 的共享 binding 类型/数量一致性，
 以及普通和 update-after-bind set 的 storage 描述符合计。pass 至少包含一个 draw，
 不再设置固定软件 draw 数量上限；各条命令仍保留设备及整数范围检查。
@@ -1368,7 +1368,7 @@ sort。dtype、对齐、NaN 策略和生命周期边界见 [prepared sort](nativ
 #### `ti.algorithms.prepare_compact(values, flags, output, count)`
 #### `ti.algorithms.prepare_compact_columns(columns, flags, count)`
 
-多列版本（0.6.4）冻结非空 `(values, output)` 配对序列，共用一次 flag 扫描与设备 count。
+多列版本（0.7.0）冻结非空 `(values, output)` 配对序列，共用一次 flag 扫描与设备 count。
 列可使用不同的记录类型，各输入容量与 flags 一致；输出尾部未定义。直接执行、根 Graph
 recording 和 AOT 导出共用已有描述，workspace 所有权和 capture 限制保持不变。
 
@@ -1947,7 +1947,7 @@ LLVM 产物自动携带导出 kernel 实际引用的 SNodeTree 布局，包括�
 Vulkan 自动微分栈支持。独立部署回归覆盖稠密多项式 field、正向/梯度存储、重复播种和
 普通 AOT Graph 重放。C API 是单独的原生构建；本次不改变 wheel SDK 打包方式。
 
-### 显式 ndarray 梯度绑定（0.6.4）
+### 显式 ndarray 梯度绑定（0.7.0）
 
 用 `ti.types.ndarray(..., needs_grad=True)` 声明并导出内核及其显式 `.grad`。
 独立部署使用新增 C API 扩展：
@@ -2070,7 +2070,7 @@ host 边界选择也覆盖受支持 scalar/shape 边界与常量的加、减、�
 设备内存。CPU 保留现有调度；CUDA/Vulkan 还可消除不可变起止表达式的串行传递。
 prepared 参数可变且与任一边界输入重叠时，保留编译时的启动容量。
 当前 task 布局与入口策略使用的 LLVM/GFX metadata、JIT cache 和原生 ABI 版本见
-[0.6.4 升级说明](release_notes.zh.md#064)。旧候选产物需要重新导出并使用配对的前端/runtime 包。
+[0.7.0 升级说明](release_notes.zh.md#070)。旧候选产物需要重新导出并使用配对的前端/runtime 包。
 
 CUDA 选中的设备范围 task 策略现可进入普通平直 `Graph.run()` 录制与借用域的
 `Graph.prepare()`。它复用编译产物，每个选中 task 增加一个设备控制器和 48 B 控制

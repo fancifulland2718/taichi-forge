@@ -14,7 +14,7 @@
 frontend、Python bridge 与 native runtime 的私有 ABI 必须匹配。当前修订为 **147**，
 权威定义见 [`runtime_contract.h`](../../taichi/common/runtime_contract.h) 与
 [`_contract_constants.py`](../../python/taichi_forge/_contract_constants.py)。
-使用同一配套构建的组件，不承诺兼容 0.6.3–0.6.4 期间的开发中间修订。
+使用同一配套构建的组件，不承诺兼容 0.6.3–0.7.0 期间的开发中间修订。
 下文的组件要求均指当前配套关系，不要求安装各功能开发时的历史 ABI。
 
 Native operation schema 版本、ExecutionPlan 版本（当前最高为 26）和外部 provider ABI
@@ -23,7 +23,7 @@ Native operation schema 版本、ExecutionPlan 版本（当前最高为 26）和
 
 ## SDK 构建与安装
 
-0.6.4 开发版可以单独安装 C/C++ SDK。生产端通过 Forge Python 导出模块；
+0.7.0 开发版可以单独安装 C/C++ SDK。生产端通过 Forge Python 导出模块；
 消费端链接 `TaichiForge::c_api`，无需导入 Python。CPU/CUDA 仍使用随 SDK
 提供的 LLVM runtime 与编译器。这是一份完整 SDK，不是无编译器 runtime。
 
@@ -72,7 +72,7 @@ cmake --install BUILD --prefix SDK --component TaichiSDK
 消费端仍链接 `TaichiForge::c_api`；CMake package 选择 `taichi_runtime`，
 清单通过 `native_library` 和 `build_features.runtime_c_api` 记录此配置。
 构建匹配的 shim 和私有导出合同需要 Python，C/C++ 消费进程无需加载 Python。
-`TI_WITH_RUNTIME_C_API` 在独立 CMake 配置中默认关闭，0.6.4 runtime wheel 构建
+`TI_WITH_RUNTIME_C_API` 在独立 CMake 配置中默认关闭，0.7.0 runtime wheel 构建
 会开启它；此前构建的 wheel 可能没有这些入口。shim 与原生库必须配对。
 通过 `TI_PREBUILT_PYTHON_RUNTIME_DIR` 单独构建 shim 时，对包含兼容 C API 的
 runtime 同样启用 `TI_WITH_RUNTIME_C_API=ON`。这会编译 `borrow_runtime()` 绑定，
@@ -2837,7 +2837,7 @@ primitive sequence 的冷／暖 Graph 导出复用该策略，配合 `snapshot_s
 不由此提供原生变换的自动伴随或任意 tensor 分量操作。
 
 此扩展要求配对的私有 ABI121 组件及 root 元数据格式2；执行计划仍为 v24。
-此前 0.6.4 开发产物中的格式1 root 目录需重新导出，不提供中间格式兼容转换。
+此前 0.7.0 开发产物中的格式1 root 目录需重新导出，不提供中间格式兼容转换。
 
 计划可以将一次性初始化与重放分开：
 

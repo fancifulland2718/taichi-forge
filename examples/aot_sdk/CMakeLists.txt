@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 project(forge_aot_consumer LANGUAGES CXX)
-find_package(TaichiForge 0.6.4 CONFIG REQUIRED)
+find_package(TaichiForge 0.7.0 CONFIG REQUIRED)
 add_executable(aot_runner main.cpp)
 target_compile_features(aot_runner PRIVATE cxx_std_17)
 target_link_libraries(aot_runner PRIVATE TaichiForge::c_api)

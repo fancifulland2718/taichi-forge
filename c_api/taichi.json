@@ -603,7 +603,7 @@
                 {
                     "name": "nd_array_gradient_binding",
                     "type": "structure",
-                    "since": "v0.6.4",
+                    "since": "v0.7.0",
                     "fields": [
                         {
                             "name": "argument_index",
@@ -618,7 +618,7 @@
                 {
                     "name": "named_nd_array_gradient_binding",
                     "type": "structure",
-                    "since": "v0.6.4",
+                    "since": "v0.7.0",
                     "fields": [
                         {
                             "name": "name",
@@ -991,7 +991,7 @@
                 {
                     "name": "launch_kernel_with_gradients_ext",
                     "type": "function",
-                    "since": "v0.6.4",
+                    "since": "v0.7.0",
                     "is_device_command": true,
                     "parameters": [
                         {
@@ -1046,7 +1046,7 @@
                 {
                     "name": "launch_compute_graph_with_gradients_ext",
                     "type": "function",
-                    "since": "v0.6.4",
+                    "since": "v0.7.0",
                     "is_device_command": true,
                     "parameters": [
                         {

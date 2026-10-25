@@ -3,7 +3,7 @@
 [中文](forge_api_reference.zh.md) · [Documentation](index.en.md)
 
 This reference lists public symbols, call positions and support limits for
-Taichi Forge 0.6.4 (in development); see the
+Taichi Forge 0.7.0 (in development); see the
 [installed-version guidance](index.en.md#versions-and-installation).
 Initialization and compile options belong in [Forge options](forge_options.en.md).
 
@@ -240,12 +240,12 @@ The contract requires four-byte-aligned ranges, explicit barriers, the runtime-o
 and `rerecord` replay. It is not callable inside `@ti.kernel`, is not qualified
 inside a structured `Sequential`, and is not itself a
 RasterPass or AS provider. Bounds errors, overlapping copies, backend/device
-mismatches, and Graph use after reset fail. Version 0.6.4 removes the previous
+mismatches, and Graph use after reset fail. Version 0.7.0 removes the previous
 4096-command software limit; command storage remains subject to available memory.
 The route uses only runtime code already present in official wheels and does
 not add a wheel variant.
 
-In 0.6.4, `Module.add_execution_plan()` exports this concrete recording through
+In 0.7.0, `Module.add_execution_plan()` exports this concrete recording through
 the shared `vulkan_rhi/buffer_commands@1` operation, including explicit barriers
 and barrier-only sequences. Public arrays use `source_bindings`; retained dense
 Field/view state uses the existing `snapshot_state=True` contract. Preparation
@@ -558,7 +558,7 @@ wheel variant. Driver-owned pipeline and shader-module memory is reported as
 opaque rather than estimated.
 
 Fixed storage-buffer descriptor arrays use `ShaderBufferArrayBinding` and the
-device's `bindless_buffer_capabilities()["max_fixed_count"]`; 0.6.4 removes the
+device's `bindless_buffer_capabilities()["max_fixed_count"]`; 0.7.0 removes the
 former 64-element provider cap. This is a per-array ceiling, not a guarantee that
 several such arrays fit together. Preparation checks the merged shader layout,
 including shared binding type/count agreement and ordinary/update-after-bind
@@ -1671,7 +1671,7 @@ NaN policy and lifetime boundaries.
 Returns `PreparedCompactPlan` for stable nonzero-i32-flag selection over fixed
 CUDA/Vulkan dense bindings. Scalar/vector/matrix records use 32/64-bit lanes;
 the count stays on device. Preparation does not execute the operation.
-The columns variant (0.6.4) freezes a nonempty iterable of `(values, output)` pairs
+The columns variant (0.7.0) freezes a nonempty iterable of `(values, output)` pairs
 and shares one flag scan and device count. Columns can have different record
 types; each input matches the flag capacity. Output tails remain undefined.
 Direct execution, root Graph recording and AOT export use the same definition;
@@ -2363,7 +2363,7 @@ support. The deployment regression covers dense polynomial fields, separate
 primal/gradient storage, repeated seeding and ordinary AOT Graph replay. The
 C API is a separate native build; this does not change wheel SDK packaging.
 
-### Explicit ndarray gradient bindings (0.6.4)
+### Explicit ndarray gradient bindings (0.7.0)
 
 Export kernels with `ti.types.ndarray(..., needs_grad=True)` and export their
 explicit `.grad` targets. Deployment uses additive C API extensions:
@@ -2522,7 +2522,7 @@ retain the original grid. The descriptor never reads device memory. CPU keeps
 its existing scheduler; CUDA/Vulkan can also eliminate the serial transport of
 immutable begin/end expressions. Mutable prepared parameters retain the compiled
 envelope when they overlap any bound input.
-See the [0.6.4 upgrade guidance](release_notes.en.md#064) for the current LLVM/GFX
+See the [0.7.0 upgrade guidance](release_notes.en.md#070) for the current LLVM/GFX
 metadata, JIT cache and native ABI versions used by task layouts and entry policies.
 Re-export older candidate artifacts and use a paired frontend and runtime package.
 

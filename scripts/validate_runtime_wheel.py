@@ -187,7 +187,7 @@ def _expected_optional_runtime_provider_members(platform: str, version: str) -> 
         stem
         for provider, (stem, _symbol) in OPTIONAL_RUNTIME_PROVIDERS.items()
         if provider not in {"cusolverdn", "cublaslt", "cub_source", "cutlass_source"}
-        or Version(version).release >= (0, 6, 4)
+        or Version(version).release >= (0, 7, 0)
     ]
     if platform == "windows":
         return {f"{prefix}{stem}.dll" for stem in providers}
@@ -778,7 +778,7 @@ def inspect_runtime_wheel(
         if len(native_runtimes) != 1:
             raise RuntimeError(f"Expected one platform native runtime in {wheel.name}, " f"found {native_runtimes}")
         export_manifest = _validate_export_manifest(zf, names, platform)
-        if Version(version).release >= (0, 6, 4):
+        if Version(version).release >= (0, 7, 0):
             missing_files = [name for name in AOT_CONSUMER_FILES if names.count(name) != 1]
             prefix = "_" if platform == "macos" else ""
             missing_symbols = {prefix + name for name in AOT_CONSUMER_SYMBOLS} - set(export_manifest["actual_exports"])

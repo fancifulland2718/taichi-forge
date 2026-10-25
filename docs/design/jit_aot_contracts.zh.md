@@ -1,6 +1,6 @@
 # JIT 与 AOT 内部契约
 
-本文记录 Forge 0.6.4 共同编译与执行契约的维护方式，不是新的公共插件 ABI，
+本文记录 Forge 0.7.0 共同编译与执行契约的维护方式，不是新的公共插件 ABI，
 也不表示所有 native 操作均可重建。[English](jit_aot_contracts.en.md)
 
 ## 权威来源与所有权

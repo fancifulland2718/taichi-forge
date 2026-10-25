@@ -896,7 +896,7 @@ It remains runtime-ordered, not CUDA Graph capture. Older adapters without the
 
 <a id="optix-face-rules"></a>
 
-#### OptiX candidate face rules (0.6.4)
+#### OptiX candidate face rules (0.7.0)
 
 Both `record_typed(..., face_rules=...)` and `record_occlusion(..., face_rules=...)`
 accept a fixed tuple in **instance ordinal order** (one entry for a triangle scene).

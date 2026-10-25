@@ -313,7 +313,7 @@ typedef struct TiKernel_t *TiKernel;
 // target in a predefined order.
 typedef struct TiComputeGraph_t *TiComputeGraph;
 
-// Forge 0.6.4: immutable native execution with fixed bindings. Runtime-local;
+// Forge 0.7.0: immutable native execution with fixed bindings. Runtime-local;
 // closing any bound memory or its module invalidates future launches.
 typedef struct TiPreparedExecution_t *TiPreparedExecution;
 typedef struct TiSubmissionTicket_t *TiSubmissionTicket;
@@ -430,7 +430,7 @@ typedef struct TiPreparedBindingFamilyInfo {
   uint64_t resource_bytes;
 } TiPreparedBindingFamilyInfo;
 
-// Forge 0.6.4: immutable fixed-AoS layout owned by an AOT module. Valid until
+// Forge 0.7.0: immutable fixed-AoS layout owned by an AOT module. Valid until
 // that module is destroyed; obtain it once from an exported argument.
 typedef struct TiNdArrayLayout_t *TiNdArrayLayout;
 
@@ -686,7 +686,7 @@ typedef struct TiNdArray {
   TiDataType elem_type;
 } TiNdArray;
 
-// Forge 0.6.4: separate descriptors preserve the TiNdArray/TiArgument ABI.
+// Forge 0.7.0: separate descriptors preserve the TiNdArray/TiArgument ABI.
 // Gradient layout and type must exactly match the primal ndarray. Both memory
 // allocations must remain alive until device execution completes.
 typedef struct TiNdArrayGradientBinding {
@@ -1220,7 +1220,7 @@ ti_copy_memory_device_to_device(TiRuntime runtime,
                                 const TiMemorySlice *dst_memory,
                                 const TiMemorySlice *src_memory);
 
-// Forge 0.6.4: synchronous transfers between host and device memory.
+// Forge 0.7.0: synchronous transfers between host and device memory.
 // Nonempty transfers wait for prior work on this runtime and complete before
 // returning. The device allocation need not be host-mappable. The host pointer
 // must address at least slice.size bytes and must not alias the device slice.
@@ -1281,7 +1281,7 @@ ti_launch_compute_graph(TiRuntime runtime,
                         uint32_t arg_count,
                         const TiNamedArgument *args);
 
-// Forge 0.6.4: explicit ndarray adjoints for kernels exported with needs_grad.
+// Forge 0.7.0: explicit ndarray adjoints for kernels exported with needs_grad.
 // Every needs_grad argument requires a binding, including forward kernels.
 // Gradients are neither cleared nor seeded automatically. Binding validation
 // precedes submission; this does not add automatic Tape orchestration.

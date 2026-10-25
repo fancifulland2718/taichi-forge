@@ -48,7 +48,7 @@ HIP runtime、AMD 驱动与 linker，参见 [ROCm 配置与支持边界](docs/fo
 Taichi 1.7.4 是公共编程模型的兼容参考；Forge 使用独立版本线。
 受支持的源码兼容 API 不代表私有实现、二进制 ABI、后端覆盖或性能完全相同。
 
-本文档适用于 **Taichi Forge 0.6.4（开发中）**，版本变化与升级说明见
+本文档适用于 **Taichi Forge 0.7.0（开发中）**，版本变化与升级说明见
 [发布说明](docs/forge/release_notes.zh.md)。上面的安装命令选择最新已发布包，不会选择此开发中源码。
 使用已发布版本时，请查阅对应 release tag 的文档。
 

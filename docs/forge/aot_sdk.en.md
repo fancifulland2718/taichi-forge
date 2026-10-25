@@ -14,7 +14,7 @@ revisions. The current revision is **147**, defined in
 [`runtime_contract.h`](../../taichi/common/runtime_contract.h) and
 [`_contract_constants.py`](../../python/taichi_forge/_contract_constants.py).
 Use components from the same matched build; development revisions within
-0.6.3–0.6.4 are not compatibility targets. Requirements below refer to this
+0.6.3–0.7.0 are not compatibility targets. Requirements below refer to this
 current pairing, not a historical per-feature ABI revision.
 
 Native operation schema versions, ExecutionPlan versions (currently up to 26)
@@ -24,7 +24,7 @@ sizes measured at the time; they are not current installation requirements.
 
 ## SDK build and installation
 
-The 0.6.4 development build can install a separate C/C++ SDK. The producer uses
+The 0.7.0 development build can install a separate C/C++ SDK. The producer uses
 Forge Python to export modules; the consumer links `TaichiForge::c_api` and does
 not import Python. CPU/CUDA still use the supplied LLVM runtime and compiler.
 This is a full SDK, not a compiler-free runtime.
@@ -86,7 +86,7 @@ The consumer still links `TaichiForge::c_api`; the CMake package selects
 `build_features.runtime_c_api`. Python is required to build the matching shim
 and its private export contract, but the C/C++ consumer does not load Python.
 `TI_WITH_RUNTIME_C_API` defaults to `OFF` for standalone CMake configuration;
-the 0.6.4 runtime-wheel build enables it. Previously built wheels may lack the
+the 0.7.0 runtime-wheel build enables it. Previously built wheels may lack the
 C API. Keep the shim and native library paired.
 When building only the shim with `TI_PREBUILT_PYTHON_RUNTIME_DIR`, also enable
 `TI_WITH_RUNTIME_C_API=ON` for a compatible C API runtime. This includes the
@@ -3754,7 +3754,7 @@ kernels for a downstream floating-point computation work; this does not supply
 an automatic adjoint for the native transform or arbitrary tensor-component operations.
 
 This extension requires paired private ABI121 components and root metadata
-format 2; execution plans remain at v24. Re-export earlier 0.6.4 development
+format 2; execution plans remain at v24. Re-export earlier 0.7.0 development
 artifacts with format 1 root catalogs; no intermediate-format converter is provided.
 
 Plans can separate one-time initialization from replay:

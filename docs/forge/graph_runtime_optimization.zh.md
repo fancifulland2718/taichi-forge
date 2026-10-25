@@ -206,7 +206,7 @@ fence 等待；CPU 提交通常已经完成。其他后端显式选择 blocking 
 工作。两类 CUDA 事件分别复用，共用原有缓存总量限制。`done()` 仍是非阻塞查询，
 同票据的后端等待不占用状态查询锁；首次错误、reset 和资源释放合同保持不变。
 
-使用启动阶段的只读能力合同识别修复，不按 `0.6.4` 版本号或源码 hash 猜测：
+使用启动阶段的只读能力合同识别修复，不按 `0.7.0` 版本号或源码 hash 猜测：
 
 ```python
 features = ti.validate_runtime_contract()["features"]  # ti.init() 前也可查询

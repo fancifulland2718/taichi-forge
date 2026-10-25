@@ -544,8 +544,8 @@ def main() -> None:
     _checkpoint("cpu native AD: passed")
     _validate_cpu_dynamic_workload()
     _checkpoint("cpu dynamic workload: passed")
-    if (Version(version).release >= (0, 6, 4)
-            and Version(metadata.version("taichi-forge-runtime")).release >= (0, 6, 4)):
+    if (Version(version).release >= (0, 7, 0)
+            and Version(metadata.version("taichi-forge-runtime")).release >= (0, 7, 0)):
         _validate_cpu_aot_borrowing()
         _checkpoint("cpu AOT borrowing: passed")
     if cudart is None:

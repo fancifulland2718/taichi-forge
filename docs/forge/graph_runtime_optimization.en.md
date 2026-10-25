@@ -273,7 +273,7 @@ does not hold the completion state lock; first-error, reset and resource-release
 contracts are unchanged.
 
 Use the read-only startup contract to identify capabilities instead of inferring
-them from the `0.6.4` version or source hash:
+them from the `0.7.0` version or source hash:
 
 ```python
 features = ti.validate_runtime_contract()["features"]  # also safe before ti.init()

@@ -129,7 +129,7 @@ gradient kernels reject real functions. Function bodies execute serially within
 each calling thread, and device calls, argument buffers and recursion stacks
 can increase runtime cost. A small pure-scalar or recursion check does not
 qualify Field or ndarray argument paths. The CUDA template-Field root-binding
-bug is fixed in the current 0.6.4 development source. Regression coverage
+bug is fixed in the current 0.7.0 development source. Regression coverage
 includes nested/recursive calls, return values, separate Field trees and Graph
 replay with dependency retirement. Validate the actual argument forms and
 lifetime patterns before adopting this route.

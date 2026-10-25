@@ -1,6 +1,6 @@
 # JIT and AOT internal contracts
 
-This describes the shared compilation and execution contracts in Forge 0.6.4. It is a
+This describes the shared compilation and execution contracts in Forge 0.7.0. It is a
 maintenance guide, not a new public plugin ABI or a claim that every native
 operation can be reconstructed. [中文版](jit_aot_contracts.zh.md)
 

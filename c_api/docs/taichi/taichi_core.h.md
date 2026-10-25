@@ -594,11 +594,11 @@ Launches a Taichi compute graph with provided named arguments. The named argumen
 
 `structure.nd_array_gradient_binding`
 
-Forge 0.6.4 positional gradient binding. The gradient ndarray must match the primal argument's dtype, logical shape and element shape. Both allocations must remain valid until device execution completes.
+Forge 0.7.0 positional gradient binding. The gradient ndarray must match the primal argument's dtype, logical shape and element shape. Both allocations must remain valid until device execution completes.
 
 `structure.named_nd_array_gradient_binding`
 
-Forge 0.6.4 named gradient binding for an AOT Graph. The name identifies the primal ndarray argument.
+Forge 0.7.0 named gradient binding for an AOT Graph. The name identifies the primal ndarray argument.
 
 `function.launch_kernel_with_gradients_ext`
 

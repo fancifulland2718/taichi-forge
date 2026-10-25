@@ -700,7 +700,7 @@ builder.append_native(query, admission="explicit")
 
 <a id="optix-face-rules"></a>
 
-#### OptiX 候选面规则（0.6.4）
+#### OptiX 候选面规则（0.7.0）
 
 `record_typed(..., face_rules=...)` 与 `record_occlusion(..., face_rules=...)`
 均接受按 **instance ordinal 顺序**排列的固定 tuple；triangle scene 提供一个元素。

@@ -176,7 +176,7 @@ def test_real_host_build_semantics_cache_and_source_boundary(tmp_path):
         readme = "README.md"
         license = "MIT"
         license-files = ["LICENSE.txt"]
-        dependencies = ["taichi-forge>=0.6.4", "typing-extensions>=4.9; python_version<'3.11'"]
+        dependencies = ["taichi-forge>=0.7.0", "typing-extensions>=4.9; python_version<'3.11'"]
         [project.optional-dependencies]
         render = ["Pillow>=11"]
         [project.scripts]
@@ -238,7 +238,7 @@ def test_real_host_build_semantics_cache_and_source_boundary(tmp_path):
         assert not any(n.endswith((".py", ".pyx", ".cpp", ".dll")) for n in names)
         metadata = next(n for n in names if n.endswith(".dist-info/METADATA"))
         content = archive.read(metadata).decode()
-        assert "Requires-Dist: taichi-forge>=0.6.4" in content
+        assert "Requires-Dist: taichi-forge>=0.7.0" in content
         assert "Requires-Dist: typing-extensions>=4.9; python_version <" in content
         assert 'Requires-Dist: Pillow>=11; extra == "render"' in content
         assert any(n.endswith(".dist-info/forge-host.json") for n in names)

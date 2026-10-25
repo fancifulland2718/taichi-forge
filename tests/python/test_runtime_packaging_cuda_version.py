@@ -82,7 +82,7 @@ def _write_runtime_wheel(
         )
         zf.writestr(f"{dist_info}/RECORD", "")
         zf.writestr(f"{native}/{runtime_name}", b"runtime")
-        if Version(version).release >= (0, 6, 4) and include_aot_consumer:
+        if Version(version).release >= (0, 7, 0) and include_aot_consumer:
             for name in validate_runtime_wheel.AOT_CONSUMER_FILES:
                 zf.writestr(name, "# lightweight consumer\n")
         if include_optix_providers and Version(version) >= Version("0.6.3") and platform != "macos":
@@ -107,13 +107,13 @@ def _write_runtime_wheel(
                 "taichi_forge_cutensor_provider_abi2_api200_207",
                 "taichi_forge_amgx_provider_abi2_stable_c",
             )
-            if include_cusolverdn_provider and Version(version).release >= (0, 6, 4):
+            if include_cusolverdn_provider and Version(version).release >= (0, 7, 0):
                 stems += ("taichi_forge_cusolverdn_provider_abi2_generic_v1",)
-            if include_cublaslt_provider and Version(version).release >= (0, 6, 4):
+            if include_cublaslt_provider and Version(version).release >= (0, 7, 0):
                 stems += ("taichi_forge_cublaslt_provider_abi2_configured_v1",)
-            if include_cub_source_provider and Version(version).release >= (0, 6, 4):
+            if include_cub_source_provider and Version(version).release >= (0, 7, 0):
                 stems += ("taichi_forge_cub_source_provider_abi2_addon_v1",)
-            if include_cutlass_source_provider and Version(version).release >= (0, 6, 4):
+            if include_cutlass_source_provider and Version(version).release >= (0, 7, 0):
                 stems += ("taichi_forge_cutlass_source_provider_abi2_addon_v1",)
             for stem in stems:
                 provider_name = f"{stem}.dll" if platform == "windows" else f"lib{stem}.so"
@@ -184,7 +184,7 @@ def _write_runtime_wheel(
                     if "taichi_forge_runtime_bootstrap_v1" not in symbol
                 ]
             c_api = []
-            if Version(version).release >= (0, 6, 4) and include_c_api:
+            if Version(version).release >= (0, 7, 0) and include_c_api:
                 prefix = "_" if platform == "macos" else ""
                 c_api = [prefix + name for name in validate_runtime_wheel.AOT_CONSUMER_SYMBOLS]
                 requested.extend(c_api)
@@ -357,10 +357,10 @@ def test_shim_wheel_validator_rejects_abi_tag_mismatch(tmp_path):
 
 def test_pypi_release_preflight_normalizes_versions():
     versions = check_pypi_version_available._released_versions(
-        {"releases": {"0.6.3": [], "0.6.3.0": [], "0.6.4rc1": []}}
+        {"releases": {"0.6.3": [], "0.6.3.0": [], "0.7.0rc1": []}}
     )
 
-    assert versions == {Version("0.6.3"), Version("0.6.4rc1")}
+    assert versions == {Version("0.6.3"), Version("0.7.0rc1")}
 
 
 @pytest.mark.parametrize("project", ["runtime", "shim", "all"])
@@ -375,11 +375,11 @@ def test_release_sets_allow_independent_projects_and_reused_runtime(tmp_path, pr
         if project != "runtime":
             for tag in validate_release_wheel_set.EXPECTED_PYTHON_TAGS:
                 _write_shim_wheel(
-                    tmp_path / f"taichi_forge-0.6.4-{tag}-{tag}-{suffix}.whl",
-                    platform=platform, version="0.6.4", runtime_version="0.6.3",
+                    tmp_path / f"taichi_forge-0.7.0-{tag}-{tag}-{suffix}.whl",
+                    platform=platform, version="0.7.0", runtime_version="0.6.3",
                 )
     validate_release_wheel_set.validate_release_set(
-        tmp_path, Version("0.6.3" if project == "runtime" else "0.6.4"),
+        tmp_path, Version("0.6.3" if project == "runtime" else "0.7.0"),
         project=project, runtime_version=Version("0.6.3"),
     )
 
@@ -391,7 +391,7 @@ def test_publication_stages_only_missing_identical_wheels(tmp_path, monkeypatch,
     candidates = tmp_path / "candidates"
     candidates.mkdir()
     wheels = [candidates / "taichi_forge_runtime-0.6.3-py3-none-win_amd64.whl",
-              candidates / "taichi_forge-0.6.4-cp310-cp310-win_amd64.whl"]
+              candidates / "taichi_forge-0.7.0-cp310-cp310-win_amd64.whl"]
     for wheel in wheels:
         wheel.write_bytes(wheel.name.encode())
 
@@ -440,15 +440,15 @@ def test_publication_conflicts_do_not_stage_partial_upload(tmp_path, monkeypatch
                                          ("macos", "macosx_11_0_arm64")])
 @pytest.mark.parametrize("missing", [None, "python", "c_api"])
 def test_runtime_064_requires_lightweight_aot_payload(tmp_path, platform, tag, missing):
-    wheel = tmp_path / f"taichi_forge_runtime-0.6.4rc1-py3-none-{tag}.whl"
-    _write_runtime_wheel(wheel, platform=platform, version="0.6.4rc1", cuda_major=13,
+    wheel = tmp_path / f"taichi_forge_runtime-0.7.0rc1-py3-none-{tag}.whl"
+    _write_runtime_wheel(wheel, platform=platform, version="0.7.0rc1", cuda_major=13,
                          dependency_class="driver-only", include_aot_consumer=missing != "python",
                          include_c_api=missing != "c_api")
     if missing:
         with pytest.raises(RuntimeError, match="lightweight AOT consumer"):
             validate_runtime_wheel.inspect_runtime_wheel(wheel)
     else:
-        assert validate_runtime_wheel.inspect_runtime_wheel(wheel).version == "0.6.4rc1"
+        assert validate_runtime_wheel.inspect_runtime_wheel(wheel).version == "0.7.0rc1"
 
 
 def test_runtime_repair_discovers_versioned_windows_cudart(tmp_path):
@@ -1007,10 +1007,10 @@ def test_shim_wheel_validator_checks_selected_runtime_version(tmp_path):
 
 def test_installed_runtime_uses_declared_dependency_not_shim_version(monkeypatch):
     monkeypatch.setattr(validate_installed_runtime.metadata, "version", {
-        "taichi-forge": "0.6.4", "taichi-forge-runtime": "0.6.3"
+        "taichi-forge": "0.7.0", "taichi-forge-runtime": "0.6.3"
     }.__getitem__)
     monkeypatch.setattr(validate_installed_runtime.metadata, "requires", lambda _: ["taichi-forge-runtime==0.6.3"])
-    assert validate_installed_runtime._validate_distribution_versions() == "0.6.4"
+    assert validate_installed_runtime._validate_distribution_versions() == "0.7.0"
 
 
 @pytest.mark.parametrize("requirement", ["taichi-forge-runtime>=0.6.3", "taichi-forge-runtime==0.6.*", "taichi-forge-runtime==0.6.3; python_version < '3.12'"])
@@ -1032,12 +1032,13 @@ def test_sync_runtime_dependency_preserves_shim_version(tmp_path, monkeypatch):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text((REPO_ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
         monkeypatch.setattr(sync_runtime_dependency, name, target)
-    sync_runtime_dependency.VERSION.write_text("v0.6.4", encoding="utf-8")
+    sync_runtime_dependency.VERSION.write_text("v0.7.0", encoding="utf-8")
     monkeypatch.setattr(sys, "argv", ["sync", "--runtime-version", "0.6.3"])
     assert sync_runtime_dependency.main() == 0
     project = sync_runtime_dependency.PYPROJECT.read_text(encoding="utf-8")
     assert '"taichi-forge-runtime==0.6.3"' in project
-    assert 'TI_VERSION_PATCH = "4"' in project
+    assert 'TI_VERSION_MINOR = "7"' in project
+    assert 'TI_VERSION_PATCH = "0"' in project
 
 
 @pytest.mark.parametrize("dependency", ["colorama", "dill", "numpy", "rich"])
@@ -1509,7 +1510,7 @@ def test_release_workflow_powershell_stops_on_each_native_command_failure(filena
         assert block.count("$PSNativeCommandUseErrorActionPreference") == 1
 
 
-@pytest.mark.parametrize("expected", [None, "0.6.3", "0.6.4"])
+@pytest.mark.parametrize("expected", [None, "0.6.3", "0.7.0"])
 def test_runtime_wheel_cli_checks_selected_link_version(tmp_path, monkeypatch, capsys, expected):
     wheel = tmp_path / "taichi_forge_runtime-0.6.3-py3-none-win_amd64.whl"
     _write_runtime_wheel(wheel, platform="windows", version="0.6.3", cuda_major=12,
@@ -1518,8 +1519,8 @@ def test_runtime_wheel_cli_checks_selected_link_version(tmp_path, monkeypatch, c
     if expected is not None:
         argv.extend(["--version", expected])
     monkeypatch.setattr("sys.argv", argv)
-    if expected == "0.6.4":
-        with pytest.raises(SystemExit, match="Expected runtime version 0.6.4, found 0.6.3"):
+    if expected == "0.7.0":
+        with pytest.raises(SystemExit, match="Expected runtime version 0.7.0, found 0.6.3"):
             validate_runtime_wheel.main()
     else:
         validate_runtime_wheel.main()
@@ -1527,7 +1528,7 @@ def test_runtime_wheel_cli_checks_selected_link_version(tmp_path, monkeypatch, c
 
 
 @pytest.mark.parametrize("platform", ("windows", "manylinux"))
-@pytest.mark.parametrize("version", ("0.6.3", "0.6.4", "0.6.4.dev1"))
+@pytest.mark.parametrize("version", ("0.6.3", "0.7.0", "0.7.0.dev1"))
 @pytest.mark.parametrize("include_provider", (False, True))
 @pytest.mark.parametrize("provider", ("cusolverdn", "cublaslt", "cub_source", "cutlass_source"))
 def test_runtime_wheel_new_provider_membership_preserves_legacy(tmp_path, platform, version, include_provider, provider):
@@ -1537,7 +1538,7 @@ def test_runtime_wheel_new_provider_membership_preserves_legacy(tmp_path, platfo
         wheel, platform=platform, version=version, cuda_major=13,
         dependency_class="driver-only", **{f"include_{provider}_provider": include_provider},
     )
-    if Version(version).release >= (0, 6, 4) and not include_provider:
+    if Version(version).release >= (0, 7, 0) and not include_provider:
         with pytest.raises(RuntimeError, match="optional provider adapter set"):
             validate_runtime_wheel.inspect_runtime_wheel(wheel)
     else:

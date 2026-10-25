@@ -4,7 +4,7 @@
 
 ## Versions and installation
 
-These pages document **Taichi Forge 0.6.4 (unreleased)**. See the
+These pages document **Taichi Forge 0.7.0 (unreleased)**. See the
 [release notes](release_notes.en.md) for changes and upgrade guidance.
 The install command below selects the latest published package; it does not
 select this unreleased checkout. For a released version, use the documentation
