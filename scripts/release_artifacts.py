@@ -67,8 +67,6 @@ def check_version(root: Path, ref: str, *, publishing: bool = False) -> str:
         actual = tuple(int(defines[f"TI_VERSION_{part}"]) for part in ("MAJOR", "MINOR", "PATCH"))
         if actual != parsed.release:
             raise ValueError(f"CMake version differs: {relative}")
-        if relative == "pyproject.toml" and f"taichi-forge-runtime=={version}" not in metadata["project"]["dependencies"]:
-            raise ValueError("Coordinated release requires the matching runtime version")
     header = (root / "taichi/common/version.h").read_text(encoding="utf-8")
     for part, number in zip(("MAJOR", "MINOR", "PATCH"), parsed.release):
         if not re.search(rf"^#define TI_VERSION_{part} {number}$", header, re.M):
@@ -168,12 +166,13 @@ def notes(root: Path, version: str, commit: str) -> str:
             + "\n\n".join(sections) + "\n")
 
 
-def build_bundle(root: Path, wheels: Path, output: Path, ref: str) -> None:
+def build_bundle(root: Path, wheels: Path, output: Path, ref: str, *, runtime_version: str | None = None) -> None:
     version = check_version(root, ref)
+    runtime_version = str(Version(runtime_version or version))
     commit = git(root, "rev-parse", "HEAD").decode().strip()
     if git(root, "status", "--porcelain", "--untracked-files=no", "--ignore-submodules"):
         raise ValueError("Release packaging requires a clean committed source tree")
-    validate_release_set(wheels, Version(version))
+    validate_release_set(wheels, Version(version), runtime_version=Version(runtime_version))
     if output.exists() and any(output.iterdir()):
         raise ValueError("Release output directory must be empty")
     output.mkdir(parents=True, exist_ok=True)
@@ -194,8 +193,9 @@ def build_bundle(root: Path, wheels: Path, output: Path, ref: str) -> None:
     for platform in ("windows", "linux"):
         record = json.loads((wheels / f"build-info-{platform}.json").read_text(encoding="utf-8"))
         if (record.get("schema") != 1 or record.get("platform") != platform
-                or record.get("commit") != commit or record.get("version") != version):
-            raise ValueError("Runtime build inputs differ from release source")
+                or not re.fullmatch(r"[0-9a-f]{40}", record.get("commit", ""))
+                or record.get("version") != runtime_version):
+            raise ValueError("Invalid runtime build source identity")
         url, sha = record["llvm"]["url"], record["llvm"]["sha256"]
         public_url(url)
         if not re.fullmatch(r"[0-9a-f]{64}", sha):
@@ -203,12 +203,28 @@ def build_bundle(root: Path, wheels: Path, output: Path, ref: str) -> None:
         if set(record["constraints"]) != {"packaging/constraints/release-build.txt", "packaging/constraints/cudss-build.txt"}:
             raise ValueError("Incomplete runtime build constraints")
         for relative, checksum in record["constraints"].items():
-            if relative not in {"packaging/constraints/release-build.txt", "packaging/constraints/cudss-build.txt"} or digest(root / relative) != checksum:
+            if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+                raise ValueError("Invalid runtime build constraint digest")
+            if record["commit"] == commit and digest(root / relative) != checksum:
                 raise ValueError("Runtime build constraints differ from release source")
         build_inputs.append(record)
+    if len({record["commit"] for record in build_inputs}) != 1:
+        raise ValueError("Runtime platforms must share their actual source commit")
+    publication_sources = json.loads((wheels / "publication-sources.json").read_text(encoding="utf-8"))
+    shim, runtime = publication_sources["shim"], publication_sources["runtime"]
+    if (shim["commit"] != commit or shim["version"] != version or shim["runtime_version"] != runtime_version
+            or runtime["version"] != runtime_version or runtime["commit"] != build_inputs[0]["commit"]
+            or runtime["build_inputs"] != build_inputs or runtime["index"] != "pypi"):
+        raise ValueError("Publication records disagree with the release sources")
+    for record, pattern in ((shim, "taichi_forge-[0-9]*.whl"), (runtime, "taichi_forge_runtime-*.whl")):
+        actual = [{"name": p.name, "sha256": digest(p)} for p in sorted(wheels.glob(pattern), key=lambda p: p.name)]
+        if record["wheels"] != actual:
+            raise ValueError("Publication records disagree with release wheels")
     manifest.update({
         "tag": f"forge-v{version}", "workflow": ".github/workflows/release.yml",
-        "run_id": os.environ.get("GITHUB_RUN_ID"), "build_inputs": build_inputs,
+        "runtime_version": runtime_version,
+        "runtime_source": f"{REPOSITORY}/tree/{runtime['commit']}",
+        "publication_sources": publication_sources, "build_inputs": build_inputs,
         "build_constraints": "packaging/constraints/release-build.txt",
         "files": [{"name": p.name, "size": p.stat().st_size, "sha256": digest(p)} for p in sorted(output.iterdir(), key=lambda p: p.name)],
     })
@@ -238,7 +254,7 @@ def verify_bundle(directory: Path, commit: str, version: str) -> dict:
     expected_sums = "".join(f"{digest(directory / name)}  {name}\n" for name in sorted(expected - {"SHA256SUMS"}))
     if (directory / "SHA256SUMS").read_text(encoding="utf-8") != expected_sums:
         raise ValueError("SHA256SUMS differs")
-    validate_release_set(directory, Version(version))
+    validate_release_set(directory, Version(version), runtime_version=Version(manifest["runtime_version"]))
     body = (directory / "RELEASE_NOTES.md").read_text(encoding="utf-8")
     if "## 中文" not in body or "## English" not in body:
         raise ValueError("Release notes must include both languages")
@@ -252,6 +268,7 @@ def main() -> None:
     parser.add_argument("--ref", default=os.environ.get("GITHUB_REF", ""))
     parser.add_argument("--publishing", action="store_true")
     parser.add_argument("--wheels", type=Path)
+    parser.add_argument("--runtime-version")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     version = check_version(args.root, args.ref, publishing=args.publishing)
@@ -261,7 +278,7 @@ def main() -> None:
     elif args.command == "build":
         if args.wheels is None or args.output is None:
             parser.error("build requires --wheels and --output")
-        build_bundle(args.root, args.wheels, args.output, args.ref)
+        build_bundle(args.root, args.wheels, args.output, args.ref, runtime_version=args.runtime_version)
     else:
         if args.output is None:
             parser.error("verify requires --output")

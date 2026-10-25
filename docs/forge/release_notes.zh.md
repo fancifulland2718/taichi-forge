@@ -32,9 +32,10 @@
 下面按最终行为归纳变化；发布状态以 GitHub Release 与 PyPI 为准。具体后端、provider
 和布局组合的支持范围，以链接中的 API 合同及能力查询为准。
 
-本次编译器、JIT/AOT 合同与部署链路的大幅更新归入 0.7 系列。统一发行流程向 GitHub
-和 PyPI 发布相同的 wheel，附带同时包含中英文的发布说明、完整源码、公开文档、
-构建清单与校验和。参见[标准发布流程](../design/pypi_release.md)。
+本次编译器、JIT/AOT 合同与部署链路的大幅更新归入 0.7 系列。原有两个工作流继续向
+PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub Release
+提供相同的 wheel，以及中英文发布说明、完整源码、公开文档、构建清单与校验和。
+这些额外附件不进入 PyPI。参见[标准发布流程](../design/pypi_release.md)。
 
 ### 升级与编译设置
 

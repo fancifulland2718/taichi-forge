@@ -10,15 +10,14 @@ want to reproduce the PyPI-style Windows or Ubuntu builds locally.
 
 ## Wheel Matrix
 
-[release.yml](../../.github/workflows/release.yml) coordinates both packages and
-GitHub Release from one source commit. The reusable `publish_runtime_pypi.yml`
-and `publish_pypi.yml` workflows only build and validate; despite their historical
-filenames, neither independently publishes. The shim builder can still use an
-existing compatible runtime for local validation. A standard release builds two
-runtime wheels first and links all ten shims against those exact artifacts.
-Use `candidate_run_id` on the release workflow to promote a complete validated
-bundle from the same commit without rebuilding. See the bilingual
-[maintainer release procedure](../design/pypi_release.en.md).
+[publish_runtime_pypi.yml](../../.github/workflows/publish_runtime_pypi.yml) and
+[publish_pypi.yml](../../.github/workflows/publish_pypi.yml) retain their existing PyPI
+publisher bindings: publish runtime, then build/validate/publish shims. Compatible
+runtimes can be reused independently. The new [release.yml](../../.github/workflows/release.yml)
+only handles GitHub Release after production main-package publication. It verifies and
+reuses published wheels, adding sources, public docs and bilingual notes without PyPI uploads.
+The main publisher's `wheel_run_id` reuses validated shims; the GitHub stage uses
+`shim_run_id` for recovery. See the [maintainer release procedure](../design/pypi_release.en.md).
 
 The Release's `taichi-forge-<version>-source.tar.gz` includes pinned submodule
 sources, their licenses, `SOURCE_MANIFEST.json` and `SOURCE_COMMIT`. Extract it
@@ -416,7 +415,7 @@ Then set `LLVM_DIR` to the generated `dist\taichi-llvm-20\lib\cmake\llvm`.
 
 The `publish_pypi.yml` manual workflow accepts `validation_platform=windows`.
 It builds and validates the five Windows CPython shims; Linux jobs and full-release
-aggregation are skipped, and this builder never publishes. The default
+aggregation are skipped, and this Windows-only run cannot publish. The default
 `validation_platform=all` retains the complete release matrix.
 
 To reuse a successful Windows runtime build, set `runtime_source=artifact` and

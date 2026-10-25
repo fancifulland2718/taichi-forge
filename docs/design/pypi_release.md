@@ -2,10 +2,12 @@
 
 [English](pypi_release.en.md) · [构建 wheel](../forge/build_wheels.zh.md)
 
-本文以 **0.7.0** 为例，不表示版本已经上线。正式入口是
-[release.yml](../../.github/workflows/release.yml)：同一 commit 构建并验证完整矩阵，
-然后发布两个 PyPI 项目，最后公开同一批附件的 GitHub Release。
-跨服务没有原子事务；“同步”指同源、同版本、同字节及有序确认，不保证瞬间同时可见。
+本文以 **0.7.0** 为例，不表示版本已经上线。沿用已经绑定的两个 PyPI 发布入口：
+[publish_runtime_pypi.yml](../../.github/workflows/publish_runtime_pypi.yml) 发布 runtime，
+[publish_pypi.yml](../../.github/workflows/publish_pypi.yml) 发布主包。
+新增 [release.yml](../../.github/workflows/release.yml) **只负责 GitHub Release**，在主包
+成功发布到生产 PyPI 后自动接续，不构建 wheel，也不上传 PyPI。
+跨服务没有原子事务；这里的同步是先确认索引文件，再将相同字节的 wheel 与公开附件发布到 GitHub。
 
 ## 交付物
 
@@ -26,64 +28,76 @@ GitHub 自动 Source code ZIP 缺少子模块，不能替代完整源码包。Py
 独立 C/C++ AOT SDK 可从同一源码按 [SDK 文档](../forge/aot_sdk.zh.md)构建，
 未经独立安装验证的 SDK 二进制不列为预编译发行物。
 
-## 一次性配置
+## 保留现有发布绑定
 
-1. 配置 GitHub Environments `pypi`、`testpypi`，按维护策略设置审核人和 tag 限制。
-2. 在 PyPI/TestPyPI 为 **taichi-forge、taichi-forge-runtime 两个项目**分别绑定 Trusted Publisher：
-   owner `fancifulland2718`，repository `taichi-forge`，workflow **`release.yml`**，environment
-   对应 `pypi`/`testpypi`。旧 builder 的绑定要在索引管理页更改；提交 YAML 不修改账户设置。
-   不需要 PyPI 长期 token 或 `RELEASE_PAT`。
-3. 配置 `LLVM20_WIN_URL`、`LLVM20_WIN_SHA256`、`LLVM20_LINUX_URL`、`LLVM20_LINUX_SHA256`。
-   Linux URL 支持别名 `LLVM20_LINUX_MANYLINUX_URL`。使用公开 HTTPS URL，无登录令牌；
-   SHA256 为 64 位十六进制。源码构建脚本：[Windows](../../.github/workflows/build_llvm20_windows.yml)、
-   [Linux](../../.github/workflows/build_llvm20_linux.yml)。
-4. 上传 job 需要 `id-token: write`；只有 GitHub draft/finalize job 需要 `contents: write`。
-   构建只读，Actions 固定 SHA，保留 PyPA 默认发布证明。可启用 GitHub release immutability，
-   流程先补齐 draft 附件再公开。
+| PyPI / TestPyPI 项目 | 已有 Trusted Publisher workflow |
+| --- | --- |
+| `taichi-forge-runtime` | `publish_runtime_pypi.yml` |
+| `taichi-forge` | `publish_pypi.yml` |
 
-## 准备、预演与发布
+**已有绑定不需要修改；不要改绑到 `release.yml`。** owner 为 `fancifulland2718`，repository
+为 `taichi-forge`，environment 仍为相应的 `pypi` / `testpypi`。两个原上传 job 使用
+`id-token: write`，无需长期 PyPI token。GitHub Release job 只需 `contents: write` 与
+读取 Actions 产物的权限，不需要 PyPI 环境或 OIDC 上传身份。
 
-1. 更新 `version.txt`，运行 `python scripts/sync_runtime_dependency.py`，同步两包 CMake 版本、
-   native header 和 runtime 精确依赖。联合发行要求两包同版本；ABI/格式编号独立维护。
-2. 更新两份 `docs/forge/release_notes.*.md` 的版本节、升级边界与支持范围，提交全部修改。
-   正文由两份说明生成，链接固定 commit，不以自动提交日志替代发布说明。
-3. 运行打包合同和代表后端检查，最终 wheel 经过 binary audit、`pip check`、源码目录外导入、
-   Python/NumPy ABI 检查。如实记录 CPU/CUDA/Vulkan/AMDGPU 与 Linux 未测范围；CI build/smoke
-   不是完整 GPU 验收。Linux 适用门槛见[复测清单](../forge/linux_revalidation.zh.md)。
-4. 手动运行 **Release / 发布**，选候选分支、`publish=false`，生成 2+10 wheel 的完整
-   `release-bundle` artifact（90 天），不创建 Release 或上传索引。下载并检查双语说明、
-   manifest、checksum，在目标机器安装验证。内容变化需要新 commit/候选，不重命名旧 wheel。
-5. 确认后推送版本 tag，自动触发生产发行：
+继续配置 `LLVM20_WIN_URL`、`LLVM20_WIN_SHA256`、`LLVM20_LINUX_URL`、
+`LLVM20_LINUX_SHA256`（Linux URL 支持 `LLVM20_LINUX_MANYLINUX_URL` 别名）。
+URL 使用公开 HTTPS，摘要为 SHA256。源码构建脚本：[Windows](../../.github/workflows/build_llvm20_windows.yml)、
+[Linux](../../.github/workflows/build_llvm20_linux.yml)。实际下载摘要与编译配置由构建 job 记录。
+
+## 准备与发布顺序
+
+1. 更新 `version.txt`、CMake 版本、native header、runtime 依赖和两份
+   `docs/forge/release_notes.*.md`，提交修改。ABI/格式编号独立维护。
+   两包可以独立发布；复用兼容 runtime 时显式设置 `runtime_version`，不重命名旧 wheel。
+2. 用原 runtime workflow 构建、验证并发布 runtime：`platform=all`、`publish=true`、
+   `target=pypi`。`publish=false` 仅构建验证；`platform=windows` 用于单平台诊断，不能发布。
+   成功上传后保存 `runtime-publication-<version>-pypi` Actions 元数据产物（90 天），
+   包含已发布 wheel 的哈希、实际源码 commit、LLVM 和构建约束；它不进入 PyPI。
+3. 原主包 workflow 用已发布 runtime 链接、安装并验证十个 CPython shim。可先手动
+   `publish=false` 预演；`wheel_run_id` 可复用该流程的 `validated-shim-wheel-set`，
+   其中 `shim-build-info.json` 保留实际构建来源。选择 `target` 本身不会启用上传。
+4. 推送匹配的版本 tag，自动触发主包正式发布。runtime 必须已经可从生产 PyPI 获取：
 
 ```bash
 git tag -a forge-v0.7.0 -m "Taichi Forge 0.7.0"
 git push origin forge-v0.7.0
 ```
 
-手动在已有 tag 上运行可设置 `publish=true`、`target=pypi`、`candidate_run_id=<成功预演 run ID>`
-复用候选，要求同仓库 `release.yml`、成功完成、完全相同 commit。避免与 tag 自动运行重复
-发布，不移动已发布 tag。第一次 tag 推送通常直接使用自动构建发布。仅选择 target 不启用上传。
+也可在已有 tag 上手动运行原主包 workflow，设置 `publish=true`、`target=pypi` 和可选
+`wheel_run_id`。复用的 shim 实际构建 commit 必须与 tag 一致，避免和 tag 自动运行重复提交。
+`runtime_source=artifact` 与数字 `runtime_run_id` 仍可用于验证；正式发布前它必须已经发布。
+`validation_platform=windows` 不发布。TestPyPI 继续由原入口处理，不触发正式 GitHub Release。
 
-顺序：完整验证 → 保存 bundle → GitHub draft → runtime 上传 → 确认 runtime 可获取 →
-shim 上传 → 核对 PyPI 全部 wheel SHA256 → 公开 Release。预发布如 `0.7.0rc1` 标记 prerelease，
-不替换 latest。手动 `target=testpypi` 只上传 TestPyPI，不创建正式 GitHub Release，仍要求匹配 tag。
+主包 PyPI 上传成功后自动调用 GitHub-only workflow：获取已验证 shim 与 PyPI runtime →
+核对全套 wheel 的已发布哈希、原发布 job、实际源码身份与 tag → 整理完整源码、公开文档、
+双语说明和校验和 → 补齐 GitHub draft → 公开 Release。只将两个项目的 `.whl` 放进 PyPI
+上传目录，源码、文档、JSON 和校验和均只作为 GitHub 附件。
 
-仅 Windows 排查可使用 runtime builder 的 `platform=windows` 和 shim 的 `validation_platform=windows`。
-shim 用 `runtime_source=artifact` 与数字 `runtime_run_id`，或 `index` 复用兼容 runtime。
-两个 builder 均只构建/验证。`wheel_run_id` 是 shim 验证产物，不是完整候选编号。
+源码归档对应 tag 的主包源码。独立发布的兼容 runtime 可以来自另一 commit / 版本，其实际
+构建输入、commit 和公开源码链接单独记录在 `release-manifest.json`；不伪称它与主包同源。
+两平台 runtime 必须来自同一个 runtime 构建 commit。
 
-## 失败恢复
+最终 wheel 仍须完成 binary audit、`pip check`、源码目录外导入及 Python/NumPy ABI 检查。
+按本次变更选择代表性 CPU/CUDA/Vulkan 验证并如实记录未测范围；CI build/smoke 不等同
+完整 GPU 验收，Linux 按[复测清单](../forge/linux_revalidation.zh.md)处理。
 
-- 构建失败不上传；内容变化需重新提交和验证。
-- 部分 PyPI 上传：原运行 **Re-run failed jobs**，保留原 bundle，不重编。
-  同名同 SHA256 跳过，缺失文件继续传，不同字节或 yanked 报错；不盲目 skip-existing，不覆盖文件。
-- PyPI 成功但 finalize 失败：draft 保留，重跑校验后公开。
-- draft 上传中断：校验已有附件，补齐缺失文件，不使用 `--clobber`。
-- 已公开 Release 仅允许相同元数据/字节的幂等验证，变更内容使用新版本。
-- OIDC invalid-publisher：核对两项目的 workflow、owner/repository、environment；fork PR 无上传权限正常。
-- 缺子模块：在固定 commit 运行 `git submodule update --init --recursive`，不跳过源文件或打包 LFS pointer。
+## 失败恢复与附件预演
 
-用户安装方式仍为 `python -m pip install taichi-forge==0.7.0`，随后 `python -m pip check`，
+- 原 PyPI 发布失败：在原运行 **Re-run failed jobs**，沿用原 wheel，不重新编译。
+  同名同 SHA256 跳过，只补缺失文件；不同字节或 yanked 报错，不盲目 skip-existing。
+- PyPI 成功、GitHub 阶段失败：先重跑失败 job。也可手动运行 **GitHub Release / GitHub 发行**，
+  提供 `version`、`runtime_version`、成功上传主包的 `shim_run_id`。
+  `publish=false` 只生成附件 bundle（两包须已在生产 PyPI），`publish=true` 补齐并公开 GitHub；
+  两种情况都不会上传 PyPI 或重编 wheel。
+- 恢复依赖原 `validated-shim-wheel-set` 和 runtime publication 元数据；在 Actions 保留期内完成。
+  过期或缺失时恢复原始产物，不能重新编译再冒充原来源。完整 provenance 会保存在 GitHub manifest 中。
+- draft 上传中断时核对已有附件并补齐缺失项，不使用 `--clobber`。已公开 Release 只接受
+  相同元数据/字节的幂等核对；变更内容使用新版本。预发布版本不会替换 latest。
+- OIDC invalid-publisher：核对上述两个原 YAML 的项目绑定及 environment，不改绑到新流程。
+- 缺子模块：在固定 commit 运行 `git submodule update --init --recursive`，不省略源码或打包 LFS pointer。
+
+用户安装仍为 `python -m pip install taichi-forge==0.7.0`，随后 `python -m pip check`，
 通过 `import taichi_forge as ti; print(ti.__version__)` 核对版本。
 
 ## 规范依据

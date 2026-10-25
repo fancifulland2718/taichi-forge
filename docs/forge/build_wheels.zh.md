@@ -9,11 +9,12 @@ PyPI 风格的 Windows 或 Ubuntu 构建。
 
 ## Wheel 矩阵
 
-[release.yml](../../.github/workflows/release.yml) 从同一源码 commit 协调两类包与
-GitHub Release。保留历史文件名的 `publish_runtime_pypi.yml`、`publish_pypi.yml`
-现在只构建与验证，不再分别上传；shim builder 仍可使用已有兼容 runtime 做本地验证。
-标准发布先构建两个 runtime wheel，再用这批原样产物链接十个 shim。
-发布入口的 `candidate_run_id` 可直接提升同一 commit 已验证的完整发行包，无需重编。
+[publish_runtime_pypi.yml](../../.github/workflows/publish_runtime_pypi.yml) 和
+[publish_pypi.yml](../../.github/workflows/publish_pypi.yml) 保留各自的 PyPI 发布与现有绑定：
+先发布 runtime，再构建/验证/发布 shim；兼容 runtime 可以独立复用。
+新增 [release.yml](../../.github/workflows/release.yml) 只负责主包生产发布后的 GitHub Release，
+复用并核对已发布 wheel，附上源码、公开文档和双语说明，不上传 PyPI。
+原主包的 `wheel_run_id` 可复用已验证 shim；GitHub 阶段使用 `shim_run_id` 恢复附件发布。
 参数、权限和恢复方式见[双语维护者发行流程](../design/pypi_release.md)。
 
 Release 的 `taichi-forge-<version>-source.tar.gz` 包含固定子模块源码、许可证、

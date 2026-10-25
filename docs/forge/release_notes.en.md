@@ -35,7 +35,8 @@ publication status is shown on GitHub Releases and PyPI. Support is limited to t
 backend/provider/layout combinations in the linked API contracts and capability queries.
 
 This release moves the compiler, JIT/AOT contracts and deployment changes to the 0.7 series.
-The coordinated release publishes identical wheels to GitHub and PyPI, with bilingual notes,
+The existing workflows publish only `taichi-forge-runtime` and `taichi-forge` wheels to PyPI.
+GitHub Release then provides identical wheels plus bilingual notes,
 complete source and public-documentation archives, a build manifest and checksums.
 See the [release procedure](../design/pypi_release.en.md).
 

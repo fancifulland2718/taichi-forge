@@ -1396,24 +1396,26 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
     assert "uses: ./.github/workflows/publish_runtime_pypi.yml" not in workflow
     assert "scripts.validate_release_wheel_set" in workflow
     assert "skip-existing:" not in workflow
-    assert "workflow_call:" in workflow
-    assert "push:" not in workflow
+    assert '- "forge-v*"' in workflow
+    assert "refs/tags/forge-v*" in workflow
     assert "action-gh-release" not in workflow
-    assert "contents: write" not in workflow
+    assert "contents: write" not in workflow.split("  github_release:\n", 1)[0]
     # Runtime reuse is independent of platform scope; partial audits still do
     # not enter the release aggregation/publication path.
     assert "validation_platform:" in workflow
     assert "options: [all, windows]" in workflow
+    assert "Platform-scoped validation cannot publish" in workflow
     assert re.search(r"put \d+\.\d+\.\d+ in runtime_version", workflow)
     assert "options: [index, artifact]" in workflow
     assert "default: index" in workflow
     assert "Joint builds" not in workflow
-    assert "id-token: write" not in workflow
+    assert "Publish the selected runtime independently" in workflow
     assert "--runtime-version" in workflow
     assert "--project shim" in workflow
     assert "pattern: wheel-*-py*" in workflow
     assert "name: validated-shim-wheel-set" in workflow
-    assert "packages-dir: upload" not in workflow
+    assert "--wheel-dir dist --upload-dir upload" in workflow
+    assert workflow.count("packages-dir: upload") == 2
     assert "run-id: ${{ inputs.runtime_run_id || github.run_id }}" in workflow
     assert "github-token: ${{ github.token }}" in workflow
     assert "actions: read" in workflow
@@ -1425,19 +1427,26 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
         assert "inputs.validation_platform != 'windows'" in section
 
 
-def test_shim_artifact_reuse_validates_without_publication():
-    workflow = (REPO_ROOT / ".github/workflows/publish_pypi.yml").read_text(encoding="utf-8")
+def test_shim_artifact_publication_skips_compilation_but_requires_validation():
+    workflow = (REPO_ROOT / ".github" / "workflows" / "publish_pypi.yml").read_text(encoding="utf-8")
     for name in ("build_linux", "build_windows"):
         job = workflow.split(f"  {name}:\n", 1)[1].split("    steps:\n", 1)[0]
         assert "!inputs.wheel_run_id" in job
-    validation = workflow.split("  validate_wheel_set:\n", 1)[1]
+    validation = workflow.split("  validate_wheel_set:\n", 1)[1].split("  publish_shim:\n", 1)[0]
     assert "!cancelled()" in validation
     assert "inputs.wheel_run_id || (needs.build_linux.result == 'success'" in validation
     assert "run-id: ${{ inputs.wheel_run_id }}" in validation
     assert "name: validated-shim-wheel-set" in validation
     assert "--project shim --runtime-version" in validation
-    assert "id-token: write" not in workflow
-    assert "release.yml owns publication" in workflow
+    assert "for platform in win_amd64 manylinux_2_35_x86_64" in validation
+    publication = workflow.split("  publish_shim:\n", 1)[1]
+    assert "!cancelled()" in publication
+    assert "needs.validate_wheel_set.result == 'success'" in publication
+    assert "needs.resolve_version.outputs.publish == 'true'" in publication
+    assert "id-token: write" in publication
+    assert "id-token: write" not in workflow.split("  publish_shim:\n", 1)[0]
+    assert "Build/validate only — no upload requested" in workflow
+    assert "set publish=true to upload" in workflow
 
 
 def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
@@ -1451,10 +1460,13 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert workflow.count("--wheel-dir wheelhouse-runtime --platform manylinux") == 2
     assert "--wheel-dir dist-runtime --platform windows" in workflow
     assert "workflow_call:" in workflow
-    assert "gh-action-pypi-publish" not in workflow
-    assert "id-token: write" not in workflow
-    assert "workflow_call:" in workflow
-    assert "packages-dir: upload" not in workflow
+    assert "gh-action-pypi-publish" in workflow
+    assert "github.event_name == 'workflow_dispatch' && inputs.publish" in workflow
+    assert "Runtime publication requires both platforms" in workflow
+    assert "--project runtime" in workflow
+    assert "pattern: wheel-*-runtime" in workflow
+    assert "--wheel-dir dist --upload-dir upload" in workflow
+    assert workflow.count("packages-dir: upload") == 2
     assert "skip-existing:" not in workflow
     assert "auditwheel show wheelhouse-runtime/*.whl" in workflow
     assert "--exclude libcuda.so.1" in workflow

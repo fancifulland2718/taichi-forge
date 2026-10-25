@@ -112,7 +112,7 @@ def test_release_notes_have_both_languages_and_pinned_links(source):
 def bundle(source, tmp_path, monkeypatch):
     # Content/matrix validation has its own real wheel-fixture suite; this tests
     # the orchestration's provenance, archives and tamper detection independently.
-    monkeypatch.setattr(artifacts, "validate_release_set", lambda *args: None)
+    monkeypatch.setattr(artifacts, "validate_release_set", lambda *args, **kwargs: None)
     wheels = tmp_path / "wheels"
     wheels.mkdir()
     for platform in ("windows", "linux"):
@@ -122,6 +122,12 @@ def bundle(source, tmp_path, monkeypatch):
             "constraints": {name: artifacts.digest(source / name) for name in ("packaging/constraints/release-build.txt", "packaging/constraints/cudss-build.txt")},
         })
     (wheels / "fixture.whl").write_bytes(b"original bytes")
+    records = [json.loads((wheels / f"build-info-{platform}.json").read_text()) for platform in ("windows", "linux")]
+    artifacts.write_json(wheels / "publication-sources.json", {
+        "shim_run_id": "123",
+        "shim": {"commit": run(source, "rev-parse", "HEAD"), "version": "0.7.0", "runtime_version": "0.7.0", "wheels": []},
+        "runtime": {"index": "pypi", "version": "0.7.0", "commit": records[0]["commit"], "build_inputs": records, "wheels": []},
+    })
     output = tmp_path / "release"
     artifacts.build_bundle(source, wheels, output, "refs/heads/master")
     return output, run(source, "rev-parse", "HEAD")
@@ -144,15 +150,15 @@ def test_bundle_rejects_cross_commit_reuse_and_unlisted_assets(bundle):
         artifacts.verify_bundle(output, revision, "0.7.0")
 
 
-def test_candidate_provenance_must_be_successful_same_source(monkeypatch):
-    record = {"head_sha": "a" * 40, "path": ".github/workflows/release.yml", "head_repository": {"full_name": "owner/repo"}, "status": "completed", "conclusion": "success"}
+def test_publisher_provenance_requires_original_workflow_and_success(monkeypatch):
+    record = {"head_sha": "a" * 40, "event": "workflow_dispatch", "path": ".github/workflows/publish_runtime_pypi.yml", "head_repository": {"full_name": "owner/repo"}, "status": "completed", "conclusion": "success"}
     monkeypatch.setattr(github, "gh", lambda *args: json.dumps(record))
-    github.check_run("owner/repo", "123", "a" * 40)
-    for key, value in (("head_sha", "b" * 40), ("conclusion", "failure"), ("path", ".github/workflows/other.yml")):
+    assert github.checked_run("owner/repo", "123", "publish_runtime_pypi.yml") == record
+    for key, value in (("conclusion", "failure"), ("path", ".github/workflows/release.yml"), ("event", "pull_request"), ("head_repository", {"full_name": "fork/repo"})):
         original = record[key]
         record[key] = value
-        with pytest.raises(ValueError, match="successful release.yml"):
-            github.check_run("owner/repo", "123", "a" * 40)
+        with pytest.raises(ValueError, match="existing publisher"):
+            github.checked_run("owner/repo", "123", "publish_runtime_pypi.yml")
         record[key] = original
 
 
@@ -236,16 +242,155 @@ def test_archive_commit_works_without_git_and_rejects_bad_identity(tmp_path):
     assert result.returncode != 0 and "Invalid source archive" in result.stderr
 
 
-def test_workflow_has_one_publisher_and_orders_complete_release():
+def test_existing_publishers_keep_oidc_and_new_workflow_only_publishes_github():
     import yaml
-    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
-    jobs = workflow["jobs"]
-    assert "runtime" in jobs["shim"]["needs"]
-    assert {"runtime", "shim"}.issubset(jobs["bundle"]["needs"])
-    assert "github_draft" in jobs["publish_runtime"]["needs"]
-    assert "publish_runtime" in jobs["publish_shim"]["needs"]
-    assert "publish_shim" in jobs["finalize"]["needs"]
-    for builder in ("publish_pypi.yml", "publish_runtime_pypi.yml"):
-        text = (ROOT / ".github/workflows" / builder).read_text(encoding="utf-8")
-        assert "gh-action-pypi-publish" not in text and "contents: write" not in text and "id-token: write" not in text
-    assert jobs["preflight"]["steps"][-1]["env"]["PUBLISH"] == "${{ github.event_name == 'push' || inputs.publish }}"
+    github_text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    workflow = yaml.safe_load(github_text)
+    assert set(workflow["jobs"]) == {"bundle", "github_release"}
+    assert "id-token" not in github_text and "gh-action-pypi-publish" not in github_text
+    assert "environment:" not in github_text
+    assert "--require-published" in github_text
+    for name, job, project in (("publish_pypi.yml", "publish_shim", "shim"), ("publish_runtime_pypi.yml", "publish_runtime", "runtime")):
+        workflow = yaml.safe_load((ROOT / ".github/workflows" / name).read_text(encoding="utf-8"))
+        publisher = workflow["jobs"][job]
+        assert publisher["permissions"]["id-token"] == "write"
+        uploads = [step for step in publisher["steps"] if "gh-action-pypi-publish" in step.get("uses", "")]
+        assert len(uploads) == 2
+        assert all(step["with"]["packages-dir"] == "upload" for step in uploads)
+        if project == "shim":
+            following = workflow["jobs"]["github_release"]
+            assert "publish_shim" in following["needs"]
+            assert "publish_shim.result == 'success'" in following["if"]
+            assert "target == 'pypi'" in following["if"]
+            assert following["uses"] == "./.github/workflows/release.yml"
+            assert "id-token" not in following["permissions"]
+
+
+@pytest.fixture
+def published_sources(tmp_path, monkeypatch):
+    directory = tmp_path / "wheels"
+    directory.mkdir()
+    for name in ("taichi_forge-0.7.0-cp313-cp313-win_amd64.whl", "taichi_forge_runtime-0.6.3-py3-none-win_amd64.whl"):
+        (directory / name).write_bytes(name.encode())
+    facts = github.wheel_facts(directory)
+    shim = {"schema": 1, "commit": "a" * 40, "source_run_id": "10", "version": "0.7.0", "runtime_version": "0.6.3", "wheels": facts[:1]}
+    artifacts.write_json(directory / "shim-build-info.json", shim)
+    runtime = {"schema": 1, "index": "pypi", "version": "0.6.3", "commit": "b" * 40, "run_id": "20", "wheels": facts[1:],
+               "build_inputs": [{"platform": platform, "commit": "b" * 40, "version": "0.6.3"} for platform in ("windows", "linux")]}
+    state = {"tag": "a" * 40, "job_conclusion": "success", "artifacts": [{"id": 88, "name": "runtime-publication-0.6.3-pypi", "expired": False, "workflow_run": {"id": 20}}]}
+    def fake_gh(*args):
+        path = args[1]
+        if "/jobs?" in path:
+            return json.dumps([{"jobs": [{"name": name, "conclusion": state["job_conclusion"]} for name in ("Publish validated shim wheels", "Validate shim wheel set")]}])
+        if "/commits/" in path:
+            return state["tag"]
+        if "/artifacts?" in path:
+            return json.dumps([{"artifacts": state["artifacts"]}])
+        run_id = path.rsplit("/", 1)[-1]
+        return json.dumps({"path": ".github/workflows/publish_runtime_pypi.yml" if run_id == "20" else ".github/workflows/publish_pypi.yml",
+                           "head_repository": {"full_name": "owner/repo"}, "event": "workflow_dispatch",
+                           "status": "completed" if run_id == "20" else "in_progress", "conclusion": "success" if run_id == "20" else None,
+                           "head_sha": "b" * 40 if run_id == "20" else "a" * 40})
+    monkeypatch.setattr(github, "gh", fake_gh)
+    monkeypatch.setattr(github, "artifact_json", lambda *args: runtime)
+    return directory, shim, runtime, state
+
+
+def test_github_resolves_independent_runtime_and_active_parent_publication(published_sources):
+    directory, shim, runtime, state = published_sources
+    assert github.resolve_sources(directory, "owner/repo", "11", "0.7.0", "0.6.3") == shim["commit"]
+    sources = json.loads((directory / "publication-sources.json").read_text())
+    assert sources["shim"] == shim and sources["runtime"] == runtime
+    assert sources["shim_run_id"] == "11"
+    assert json.loads((directory / "build-info-windows.json").read_text())["commit"] == "b" * 40
+
+
+@pytest.mark.parametrize("mutation,reason", [("tag", "actual shim source"), ("job", "completed successfully"), ("wheel", "validated source"), ("runtime", "No retained"), ("expired", "No retained"), ("subset", "validated source")])
+def test_github_refuses_incomplete_or_mismatched_publication(published_sources, mutation, reason):
+    directory, shim, runtime, state = published_sources
+    if mutation == "tag":
+        state["tag"] = "c" * 40
+    elif mutation == "job":
+        state["job_conclusion"] = "skipped"
+    elif mutation == "wheel":
+        (directory / shim["wheels"][0]["name"]).write_bytes(b"different")
+    elif mutation == "runtime":
+        runtime["wheels"][0]["sha256"] = "0" * 64
+    elif mutation == "expired":
+        state["artifacts"][0]["expired"] = True
+    else:
+        shim["wheels"] = []
+        artifacts.write_json(directory / "shim-build-info.json", shim)
+    with pytest.raises(ValueError, match=reason):
+        github.resolve_sources(directory, "owner/repo", "11", "0.7.0", "0.6.3")
+
+
+def test_reused_shim_keeps_compile_identity_across_republication(published_sources, monkeypatch, tmp_path):
+    directory, shim, runtime, state = published_sources
+    for path in directory.glob("taichi_forge_runtime-*.whl"):
+        path.unlink()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "artifacts").mkdir()
+    artifacts.write_json(tmp_path / "artifacts/shim-build-info.json", shim)
+    monkeypatch.setenv("GITHUB_RUN_ID", "12")
+    monkeypatch.setattr(github, "validate_release_set", lambda *a, **kw: None)
+    github.record_shim(directory, "owner/repo", "11", "0.7.0", "0.6.3")
+    assert json.loads((directory / "shim-build-info.json").read_text()) == shim
+    (tmp_path / "artifacts/shim-build-info.json").unlink()
+    with pytest.raises(ValueError, match="original shim-build-info"):
+        github.record_shim(directory, "owner/repo", "11", "0.7.0", "0.6.3")
+
+
+def test_pypi_staging_excludes_all_github_sidecars(tmp_path, monkeypatch):
+    import io
+    directory = tmp_path / "assets"
+    directory.mkdir()
+    wheel = directory / "taichi_forge-0.7.0-cp313-cp313-win_amd64.whl"
+    wheel.write_bytes(b"wheel")
+    for name in ("source.tar.gz", "docs.zip", "release-manifest.json", "shim-build-info.json", "build-info-linux.json", "SHA256SUMS", "RELEASE_NOTES.md"):
+        (directory / name).write_bytes(b"github only")
+    monkeypatch.setattr(index, "urlopen", lambda *a, **kw: io.BytesIO(b'{"urls": []}'))
+    output = tmp_path / "upload"
+    assert index.prepare_upload(directory, output, "https://pypi.org/pypi") == 1
+    assert [p.name for p in output.iterdir()] == [wheel.name]
+
+
+def test_bundle_retains_runtime_producer_separately(source, bundle, tmp_path):
+    wheels = tmp_path / "wheels"
+    records = []
+    for platform in ("windows", "linux"):
+        path = wheels / f"build-info-{platform}.json"
+        record = json.loads(path.read_text())
+        record["commit"], record["version"] = "b" * 40, "0.6.3"
+        record["constraints"] = {name: "c" * 64 for name in record["constraints"]}
+        artifacts.write_json(path, record)
+        records.append(record)
+    path = wheels / "publication-sources.json"
+    sources = json.loads(path.read_text())
+    sources["shim"]["runtime_version"] = "0.6.3"
+    sources["runtime"].update({"commit": "b" * 40, "version": "0.6.3", "build_inputs": records})
+    artifacts.write_json(path, sources)
+    output = tmp_path / "independent"
+    artifacts.build_bundle(source, wheels, output, "refs/heads/master", runtime_version="0.6.3")
+    manifest = artifacts.verify_bundle(output, run(source, "rev-parse", "HEAD"), "0.7.0")
+    assert manifest["runtime_version"] == "0.6.3"
+    assert manifest["runtime_source"].endswith("/" + "b" * 40)
+    assert manifest["commit"] != "b" * 40
+
+
+def test_runtime_record_requires_complete_index_and_correct_build(published_sources, monkeypatch, tmp_path):
+    directory, shim, runtime, state = published_sources
+    for path in directory.glob("taichi_forge-*.whl"):
+        path.unlink()
+    monkeypatch.setenv("GITHUB_SHA", "b" * 40)
+    monkeypatch.setenv("GITHUB_RUN_ID", "20")
+    monkeypatch.setattr(github, "validate_release_set", lambda *a, **kw: None)
+    monkeypatch.setattr(github, "prepare_upload", lambda *a: 0)
+    for record in runtime["build_inputs"]:
+        artifacts.write_json(directory / f"build-info-{record['platform']}.json", record)
+    output = tmp_path / "runtime-publication.json"
+    github.record_runtime(directory, "0.6.3", "pypi", output)
+    assert json.loads(output.read_text()) == runtime
+    monkeypatch.setattr(github, "prepare_upload", lambda *a: 1)
+    with pytest.raises(ValueError, match="not complete"):
+        github.record_runtime(directory, "0.6.3", "pypi", output)

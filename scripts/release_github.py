@@ -7,24 +7,129 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import zipfile
+from urllib.parse import quote
 
 from packaging.version import Version
 
-from scripts.release_artifacts import digest, verify_bundle
+from scripts.release_artifacts import digest, verify_bundle, write_json
+from scripts.check_pypi_version_available import prepare_upload
+from scripts.validate_release_wheel_set import validate_release_set
 
 
 def gh(*args: str) -> str:
     return subprocess.check_output(["gh", *args], text=True, encoding="utf-8")
 
 
-def check_run(repository: str, run_id: str, commit: str) -> None:
+def checked_run(repository: str, run_id: str, workflow: str, *, completed: bool = True) -> dict:
     if not run_id.isdecimal():
-        raise ValueError("candidate_run_id must be numeric")
+        raise ValueError("Workflow run ID must be numeric")
     run = json.loads(gh("api", f"repos/{repository}/actions/runs/{run_id}"))
-    if (run["head_sha"] != commit or run["path"] != ".github/workflows/release.yml"
-            or run["head_repository"]["full_name"] != repository
-            or run["status"] != "completed" or run["conclusion"] != "success"):
-        raise ValueError("Candidate must be a successful release.yml run on this exact source commit")
+    if (run["path"] != f".github/workflows/{workflow}"
+            or (run.get("head_repository") or {}).get("full_name") != repository
+            or run.get("event") not in {"push", "workflow_dispatch"}
+            or (completed and (run["status"] != "completed" or run["conclusion"] != "success"))):
+        raise ValueError("Artifact must come from the existing publisher in this repository")
+    return run
+
+
+def wheel_facts(directory: Path) -> list[dict]:
+    return [{"name": p.name, "sha256": digest(p)} for p in sorted(directory.glob("*.whl"), key=lambda p: p.name)]
+
+
+def require_job(repository: str, run_id: str, name: str) -> None:
+    pages = json.loads(gh("api", f"repos/{repository}/actions/runs/{run_id}/jobs?per_page=100", "--paginate", "--slurp"))
+    if not any(j["name"] == name and j["conclusion"] == "success" for page in pages for j in page["jobs"]):
+        raise ValueError(f"Required publisher job has not completed successfully: {name}")
+
+
+def record_runtime(directory: Path, version: str, index: str, output: Path) -> None:
+    validate_release_set(directory, Version(version), project="runtime")
+    with tempfile.TemporaryDirectory() as temporary:
+        base = "https://pypi.org/pypi" if index == "pypi" else "https://test.pypi.org/pypi"
+        if prepare_upload(directory, Path(temporary) / "missing", base):
+            raise ValueError("Runtime publication is not complete")
+    records = []
+    for platform in ("windows", "linux"):
+        record = json.loads((directory / f"build-info-{platform}.json").read_text(encoding="utf-8"))
+        if record["version"] != version or record["platform"] != platform or record["commit"] != os.environ["GITHUB_SHA"]:
+            raise ValueError("Runtime build record identity differs")
+        records.append(record)
+    write_json(output, {"schema": 1, "index": index, "version": version,
+                       "commit": os.environ["GITHUB_SHA"], "run_id": os.environ["GITHUB_RUN_ID"],
+                       "wheels": wheel_facts(directory), "build_inputs": records})
+
+
+def record_shim(directory: Path, repository: str, run_id: str, version: str, runtime_version: str) -> None:
+    run = checked_run(repository, run_id, "publish_pypi.yml", completed=False)
+    validate_release_set(directory, Version(version), project="shim", runtime_version=Version(runtime_version))
+    # A re-publication must preserve the original compile provenance, even when
+    # the selected source run itself reused an older validated wheel set.
+    previous = Path("artifacts/shim-build-info.json")
+    if run_id != os.environ.get("GITHUB_RUN_ID"):
+        require_job(repository, run_id, "Validate shim wheel set")
+        if not previous.is_file():
+            raise ValueError("Reused shims require their original shim-build-info.json")
+        info = json.loads(previous.read_text(encoding="utf-8"))
+        if info["wheels"] != wheel_facts(directory) or info["version"] != version or info["runtime_version"] != runtime_version:
+            raise ValueError("Reused shim source record differs")
+    else:
+        info = {"schema": 1, "commit": run["head_sha"], "version": version,
+                "runtime_version": runtime_version, "source_run_id": run_id,
+                "wheels": wheel_facts(directory)}
+    write_json(directory / "shim-build-info.json", info)
+
+
+def artifact_json(repository: str, artifact: dict, filename: str) -> dict:
+    with tempfile.TemporaryFile() as downloaded:
+        subprocess.run(["gh", "api", f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"], stdout=downloaded, check=True)
+        downloaded.seek(0)
+        with zipfile.ZipFile(downloaded) as archive:
+            if archive.namelist() != [filename]:
+                raise ValueError("Unexpected publication manifest contents")
+            return json.loads(archive.read(filename))
+
+
+def resolve_sources(directory: Path, repository: str, shim_run_id: str, version: str, runtime_version: str) -> str:
+    # The caller may still be running its final GitHub job. Its PyPI job must
+    # already have succeeded; a merely successful build/dry run is insufficient.
+    checked_run(repository, shim_run_id, "publish_pypi.yml", completed=False)
+    require_job(repository, shim_run_id, "Publish validated shim wheels")
+    info = json.loads((directory / "shim-build-info.json").read_text(encoding="utf-8"))
+    source = checked_run(repository, str(info["source_run_id"]), "publish_pypi.yml", completed=False)
+    require_job(repository, str(info["source_run_id"]), "Validate shim wheel set")
+    if info.get("schema") != 1 or info["commit"] != source["head_sha"] or info["version"] != version or info["runtime_version"] != runtime_version:
+        raise ValueError("Shim source record differs")
+    actual = {entry["name"]: entry for entry in wheel_facts(directory)}
+    if [entry for entry in actual.values() if entry["name"].startswith("taichi_forge-")] != info["wheels"]:
+        raise ValueError("Shim wheel differs from its validated source record")
+    remote = gh("api", f"repos/{repository}/commits/forge-v{version}", "--jq", ".sha").strip()
+    if remote != info["commit"]:
+        raise ValueError("Version tag must identify the actual shim source commit")
+    # This named artifact is metadata only; all runtime wheel bytes come from PyPI.
+    name = f"runtime-publication-{runtime_version}-pypi"
+    pages = json.loads(gh("api", f"repos/{repository}/actions/artifacts?name={quote(name)}&per_page=100", "--paginate", "--slurp"))
+    expected_runtime = [entry for entry in actual.values() if entry["name"].startswith("taichi_forge_runtime-")]
+    for artifact in (item for page in pages for item in page["artifacts"]):
+        if artifact["expired"] or artifact["name"] != name:
+            continue
+        producer = checked_run(repository, str(artifact["workflow_run"]["id"]), "publish_runtime_pypi.yml")
+        publication = artifact_json(repository, artifact, "runtime-publication.json")
+        if (publication.get("schema") != 1 or publication["index"] != "pypi"
+                or publication["version"] != runtime_version or publication["wheels"] != expected_runtime
+                or publication["commit"] != producer["head_sha"]
+                or str(publication["run_id"]) != str(artifact["workflow_run"]["id"])):
+            continue
+        records = publication["build_inputs"]
+        if {r["platform"] for r in records} != {"windows", "linux"} or len(records) != 2:
+            raise ValueError("Incomplete runtime build records")
+        for record in records:
+            if record["commit"] != publication["commit"] or record["version"] != runtime_version:
+                raise ValueError("Runtime build source differs")
+            write_json(directory / f"build-info-{record['platform']}.json", record)
+        write_json(directory / "publication-sources.json", {"shim_run_id": shim_run_id, "shim": info, "runtime": publication})
+        return info["commit"]
+    raise ValueError("No retained runtime publication record matches the PyPI wheels; restore the original publication artifact")
 
 
 def synchronize(directory: Path, repository: str, commit: str, version: str, *, publish: bool) -> None:
@@ -81,15 +186,24 @@ def synchronize(directory: Path, repository: str, commit: str, version: str, *, 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check-run", "stage", "publish"))
+    parser.add_argument("command", choices=("record-runtime", "record-shim", "resolve-sources", "stage", "publish"))
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--commit", default=os.environ.get("GITHUB_SHA"))
     parser.add_argument("--version")
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--run-id")
+    parser.add_argument("--runtime-version")
+    parser.add_argument("--index", choices=("pypi", "testpypi"))
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if args.command == "check-run":
-        check_run(args.repository, args.run_id or "", args.commit)
+    if args.command == "record-runtime":
+        record_runtime(args.directory, args.version, args.index, args.output)
+    elif args.command == "record-shim":
+        record_shim(args.directory, args.repository, args.run_id, args.version, args.runtime_version)
+    elif args.command == "resolve-sources":
+        commit = resolve_sources(args.directory, args.repository, args.run_id, args.version, args.runtime_version)
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"commit={commit}\n")
     else:
         synchronize(args.directory, args.repository, args.commit, args.version, publish=args.command == "publish")
 

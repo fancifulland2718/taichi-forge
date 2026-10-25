@@ -3,10 +3,12 @@
 [中文](pypi_release.md) · [Build wheels](../forge/build_wheels.en.md)
 
 This guide uses **0.7.0** as an example without claiming it is published.
-[release.yml](../../.github/workflows/release.yml) builds one commit, validates the full
-matrix, publishes both PyPI projects, then publishes GitHub with identical artifacts.
-Cross-service publication is not atomic: synchronization means identical provenance,
-versions and bytes with ordered confirmation, not simultaneous visibility.
+Keep the already-bound PyPI publishers: [publish_runtime_pypi.yml](../../.github/workflows/publish_runtime_pypi.yml)
+for runtime and [publish_pypi.yml](../../.github/workflows/publish_pypi.yml) for the main package.
+The new [release.yml](../../.github/workflows/release.yml) **only handles GitHub Release**,
+automatically following successful production PyPI publication of the main package.
+It neither builds wheels nor uploads to PyPI. Cross-service publication is not atomic:
+verify the index files first, then publish identical wheel bytes and public assets on GitHub.
 
 ## Deliverables
 
@@ -29,74 +31,92 @@ source build recipes are public. Build the standalone C/C++ AOT SDK from the sam
 using the [SDK guide](../forge/aot_sdk.en.md); binaries without separate installation
 qualification are not advertised as prebuilt release assets.
 
-## One-time configuration
+## Keep existing publisher bindings
 
-1. Configure GitHub environments `pypi` and `testpypi`, with reviewers/tag policies as appropriate.
-2. Configure Trusted Publishers on PyPI/TestPyPI for **both taichi-forge and taichi-forge-runtime**:
-   owner `fancifulland2718`, repository `taichi-forge`, workflow **`release.yml`**, environment
-   `pypi`/`testpypi`. Replace old builder bindings in index settings; YAML cannot modify them.
-   No long-lived PyPI token or `RELEASE_PAT` is required.
-3. Set `LLVM20_WIN_URL`, `LLVM20_WIN_SHA256`, `LLVM20_LINUX_URL`, `LLVM20_LINUX_SHA256`.
-   `LLVM20_LINUX_MANYLINUX_URL` is an alias. Use public HTTPS without credentials and
-   64-digit SHA256 values. Source recipes: [Windows](../../.github/workflows/build_llvm20_windows.yml),
-   [Linux](../../.github/workflows/build_llvm20_linux.yml).
-4. Upload jobs need `id-token: write`; only draft/finalize jobs need `contents: write`.
-   Builds are read-only, Actions SHA-pinned, and PyPA's publish attestations remain enabled.
-   GitHub release immutability is supported by populating draft assets before publication.
+| PyPI / TestPyPI project | Existing Trusted Publisher workflow |
+| --- | --- |
+| `taichi-forge-runtime` | `publish_runtime_pypi.yml` |
+| `taichi-forge` | `publish_pypi.yml` |
 
-## Prepare, rehearse and publish
+**No rebinding is required; do not bind either project to `release.yml`.** Keep owner
+`fancifulland2718`, repository `taichi-forge`, and the corresponding `pypi` / `testpypi`
+environment. The original upload jobs retain `id-token: write` without long-lived PyPI
+tokens. The GitHub Release job only needs `contents: write` and Actions artifact read
+access; it needs neither a PyPI environment nor an OIDC upload identity.
 
-1. Update `version.txt`; run `python scripts/sync_runtime_dependency.py` to align CMake
-   versions, native header and runtime dependency. Coordinated releases use matching
-   package versions; ABI/format revisions remain independently maintained.
-2. Update both `docs/forge/release_notes.*.md` version sections, upgrade boundaries and
-   support. Commit everything. The release body uses both notes with commit-pinned links,
-   rather than an automatically generated commit log.
-3. Run packaging contracts and representative backend checks. Final wheels require binary
-   audit, `pip check`, outside-checkout imports and Python/NumPy ABI tests. Record untested
-   CPU/CUDA/Vulkan/AMDGPU and Linux scope honestly; build/smoke is not complete GPU qualification.
-   Apply the [Linux checklist](../forge/linux_revalidation.en.md) where relevant.
-4. Dispatch **Release / 发布** on the candidate branch with `publish=false` to build the
-   complete 2+10 wheel `release-bundle` artifact (90 days), without publication. Download,
-   inspect both languages/manifest/checksums and install on target machines. Changed contents
-   require a new commit/candidate; never rename old wheels to a new version.
-5. Push the matching tag to trigger production publication:
+Keep `LLVM20_WIN_URL`, `LLVM20_WIN_SHA256`, `LLVM20_LINUX_URL`, and
+`LLVM20_LINUX_SHA256` (`LLVM20_LINUX_MANYLINUX_URL` remains an alias). Use public HTTPS
+URLs and SHA256 digests. Source recipes: [Windows](../../.github/workflows/build_llvm20_windows.yml),
+[Linux](../../.github/workflows/build_llvm20_linux.yml). Build jobs record actual download hashes and configuration.
+
+## Prepare and publish in order
+
+1. Update `version.txt`, CMake versions, native header, runtime dependency and both
+   `docs/forge/release_notes.*.md` files; commit the changes. ABI/format revisions are
+   maintained separately. Packages may publish independently; explicitly select
+   `runtime_version` when reusing a compatible runtime. Never rename an old wheel.
+2. Build, validate and publish runtime with its existing workflow: `platform=all`,
+   `publish=true`, `target=pypi`. `publish=false` only builds/validates;
+   `platform=windows` is diagnostic and cannot publish. Successful upload saves the
+   `runtime-publication-<version>-pypi` Actions metadata artifact (90 days), containing
+   published wheel hashes, actual source commit, LLVM and build constraints. It never goes to PyPI.
+3. The existing main-package workflow links, installs and validates ten CPython shims
+   against the published runtime. Rehearse with `publish=false`; `wheel_run_id` can reuse
+   its `validated-shim-wheel-set`, whose `shim-build-info.json` preserves actual build
+   provenance. Selecting `target` alone does not enable uploading.
+4. Push the matching version tag to trigger main-package publication. Runtime must already
+   be available from production PyPI:
 
 ```bash
 git tag -a forge-v0.7.0 -m "Taichi Forge 0.7.0"
 git push origin forge-v0.7.0
 ```
 
-A manual run on an existing tag can reuse `candidate_run_id=<successful dry-run ID>` with
-`publish=true`, `target=pypi`. Reuse requires this repository's successful `release.yml`
-run at the identical commit. Avoid duplicating the tag-triggered run or moving a published
-tag. The first tag normally uses automatic build/publication. Target alone never enables upload.
+Alternatively dispatch the original main-package workflow on the existing tag, with
+`publish=true`, `target=pypi` and optional `wheel_run_id`. Reused shims' actual build commit
+must match the tag; avoid duplicate submissions alongside the automatic tag run.
+`runtime_source=artifact` and numeric `runtime_run_id` remain available for validation;
+that runtime must be published before releasing its shim. `validation_platform=windows`
+cannot publish. TestPyPI still uses the original workflows and triggers no production GitHub Release.
 
-Order: full validation → save bundle → GitHub draft → runtime upload → confirm runtime
-availability → shim upload → verify all PyPI wheel SHA256 values → publish GitHub Release.
-Versions such as `0.7.0rc1` are prereleases, not latest. Manual `target=testpypi` uploads
-only to TestPyPI and creates no production GitHub Release; a matching tag is still required.
+Successful main-package PyPI upload automatically calls the GitHub-only workflow: download
+validated shims and PyPI runtime → verify all published wheel hashes, publisher jobs, actual
+source identity and tag → assemble complete source, public docs, bilingual notes and hashes →
+populate a draft → publish GitHub Release. PyPI staging contains only `.whl` files belonging
+to the two projects. Sources, documentation, JSON and checksums are GitHub assets only.
 
-For Windows diagnosis use runtime `platform=windows`, shim `validation_platform=windows`.
-The shim accepts `runtime_source=artifact` with numeric `runtime_run_id`, or `index` with a
-compatible published runtime. Both builders only validate. `wheel_run_id` reuses shim
-validation artifacts, not a complete release candidate.
+The source archive represents the tagged main-package source. An independently published
+compatible runtime may originate at a different commit/version; `release-manifest.json`
+records its actual build inputs, commit and public source link separately. Both runtime
+platforms must originate at the same runtime source commit.
 
-## Recovery
+Final wheels still require binary audit, `pip check`, outside-checkout imports and Python/NumPy
+ABI checks. Select representative CPU/CUDA/Vulkan checks for the changes and report untested
+scope honestly. CI build/smoke is not full GPU qualification; follow the
+[Linux checklist](../forge/linux_revalidation.en.md) where relevant.
 
-- Build failure: no upload. Changed contents require a new commit and validation.
-- Partial PyPI upload: **Re-run failed jobs** in the original run to keep its bundle.
-  Matching filename/SHA256 files remain; missing files upload. Different bytes or yanked
-  files fail; no blind skip-existing or replacement.
-- PyPI complete, finalize failed: the draft remains; retry revalidates before publication.
-- Interrupted draft upload: check existing assets and add missing files without `--clobber`.
-- Published releases only permit identical metadata/byte verification. Changes need a new version.
-- OIDC invalid-publisher: check both projects' workflow, owner/repository and environment.
-  Fork PRs intentionally lack upload permissions.
+## Recovery and attachment rehearsal
+
+- Original PyPI upload failed: **Re-run failed jobs** in that run, retaining its wheels.
+  Matching filename/SHA256 files stay; only missing files upload. Different bytes or
+  yanked files fail. No blind skip-existing or recompilation.
+- PyPI succeeded but GitHub failed: retry failed jobs first. Alternatively dispatch
+  **GitHub Release / GitHub 发行**, specifying `version`, `runtime_version` and the
+  main-package upload's `shim_run_id`. `publish=false` only assembles the attachment bundle
+  (both packages must already be on production PyPI); `publish=true` completes GitHub
+  publication. Neither mode uploads to PyPI or rebuilds wheels.
+- Recovery needs the original `validated-shim-wheel-set` and runtime publication metadata;
+  finish within Actions retention. Restore original artifacts if missing/expired rather
+  than rebuilding and inventing provenance. The GitHub manifest retains full provenance.
+- Interrupted draft upload checks existing assets and adds missing ones without `--clobber`.
+  Published releases only accept identical metadata/bytes. Changes need a new version;
+  prereleases do not replace latest.
+- OIDC invalid-publisher: check the two original workflow bindings and environments above;
+  do not rebind to the new workflow.
 - Missing submodule: `git submodule update --init --recursive` at the pinned commit;
   never omit required sources or archive unresolved LFS pointers.
 
-Normal installation remains `python -m pip install taichi-forge==0.7.0`, then `python -m pip check`;
+Install using `python -m pip install taichi-forge==0.7.0`, then `python -m pip check`;
 verify with `import taichi_forge as ti; print(ti.__version__)`.
 
 ## Standards

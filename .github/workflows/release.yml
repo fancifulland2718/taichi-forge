@@ -1,121 +1,103 @@
-name: Release / 发布
-run-name: "Forge ${{ github.ref_name }} — ${{ (github.event_name == 'push' || inputs.publish) && 'publish / 发布' || 'validate / 预演' }}"
+name: GitHub Release / GitHub 发行
 
+# PyPI remains in the two existing, already-bound publisher workflows.
+# This workflow only assembles and publishes GitHub assets after PyPI succeeds.
 on:
-  push:
-    tags: ["forge-v*"]
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      runtime_version:
+        type: string
+        required: true
+      shim_run_id:
+        type: string
+        required: true
+      publish:
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
+      version:
+        description: "Released taichi-forge version (matching forge-v tag required)"
+        type: string
+        required: true
+      runtime_version:
+        description: "Published runtime version used by these shims"
+        type: string
+        required: true
+      shim_run_id:
+        description: "Existing publish_pypi.yml run whose PyPI upload succeeded"
+        type: string
+        required: true
       publish:
-        description: "Publish both packages and GitHub Release (must select the matching tag)"
+        description: "Publish GitHub assets; false only assembles the attachment bundle"
         type: boolean
         default: false
-      target:
-        description: "Package index; a production GitHub Release is finalized only for pypi"
-        type: choice
-        options: [testpypi, pypi]
-        default: testpypi
-      candidate_run_id:
-        description: "Optional successful release.yml run on this exact commit; reuse its complete bundle"
-        type: string
-        default: ""
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: forge-release-${{ github.ref }}
+  group: forge-github-release-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
-  preflight:
+  bundle:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.check.outputs.version }}
-      publish: ${{ steps.check.outputs.publish }}
-      target: ${{ steps.check.outputs.target }}
+      commit: ${{ steps.source.outputs.commit }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
       - run: python -m pip install packaging==26.0
-      - id: check
-        env:
-          PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
-          TARGET: ${{ github.event_name == 'push' && 'pypi' || inputs.target }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          args=()
-          if [[ "$PUBLISH" == true ]]; then args+=(--publishing); fi
-          version=$(python -m scripts.release_artifacts check "${args[@]}")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
-          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
-          if [[ -n "$CANDIDATE_RUN_ID" ]]; then
-            python -m scripts.release_github check-run --run-id "$CANDIDATE_RUN_ID"
-          fi
-
-  runtime:
-    needs: preflight
-    if: ${{ !inputs.candidate_run_id }}
-    uses: ./.github/workflows/publish_runtime_pypi.yml
-    with:
-      version: ${{ needs.preflight.outputs.version }}
-      platform: all
-
-  shim:
-    needs: [preflight, runtime]
-    if: ${{ !inputs.candidate_run_id }}
-    uses: ./.github/workflows/publish_pypi.yml
-    with:
-      version: ${{ needs.preflight.outputs.version }}
-      runtime_version: ${{ needs.preflight.outputs.version }}
-      runtime_source: artifact
-      runtime_run_id: ${{ github.run_id }}
-      validation_platform: all
-
-  bundle:
-    needs: [preflight, runtime, shim]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && (inputs.candidate_run_id || (needs.runtime.result == 'success' && needs.shim.result == 'success')) }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.13"
-      - run: python -m pip install packaging==26.0
-      - name: Download runtime wheels / 获取 runtime
-        if: ${{ !inputs.candidate_run_id }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: wheel-*-runtime
-          merge-multiple: true
-          path: wheels
-      - name: Download validated shims / 获取已验证主包
-        if: ${{ !inputs.candidate_run_id }}
+      - name: Download published shim candidates / 获取已发布主包
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: validated-shim-wheel-set
           path: wheels
-      - name: Assemble sources, docs, notes and hashes / 整理发行附件
-        if: ${{ !inputs.candidate_run_id }}
-        run: python -m scripts.release_artifacts build --wheels wheels --output release
-      - name: Reuse the complete candidate / 复用完整候选
-        if: ${{ inputs.candidate_run_id }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-bundle
-          path: release
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.candidate_run_id }}
-      - run: python -m scripts.release_artifacts verify --output release
+          run-id: ${{ inputs.shim_run_id }}
+      - name: Download runtime and verify both published packages / 核对两包
+        env:
+          VERSION: ${{ inputs.version }}
+          RUNTIME_VERSION: ${{ inputs.runtime_version }}
+        run: |
+          set -euo pipefail
+          for platform in win_amd64 manylinux_2_35_x86_64; do
+            python -m pip download --only-binary=:all: --no-deps --index-url https://pypi.org/simple/ \
+              --platform "$platform" "taichi-forge-runtime==$RUNTIME_VERSION" -d wheels
+          done
+          python -m scripts.validate_release_wheel_set --wheel-dir wheels --version "$VERSION" --runtime-version "$RUNTIME_VERSION"
+          python scripts/check_pypi_version_available.py --repository pypi --wheel-dir wheels --upload-dir missing --require-published
+      - name: Resolve actual publisher provenance / 核对实际构建来源
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          RUNTIME_VERSION: ${{ inputs.runtime_version }}
+          SHIM_RUN_ID: ${{ inputs.shim_run_id }}
+        run: |
+          python -m scripts.release_github resolve-sources --directory wheels --run-id "$SHIM_RUN_ID" \
+            --version "$VERSION" --runtime-version "$RUNTIME_VERSION"
+      - name: Check out tagged public source / 获取固定源码
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.source.outputs.commit }}
+          path: source
+          submodules: recursive
+          fetch-depth: 0
+      - name: Assemble sources, docs, bilingual notes and hashes / 整理附件
+        env:
+          VERSION: ${{ inputs.version }}
+          RUNTIME_VERSION: ${{ inputs.runtime_version }}
+        run: |
+          python -m scripts.release_artifacts build --root source --ref "refs/tags/forge-v$VERSION" \
+            --runtime-version "$RUNTIME_VERSION" --wheels wheels --output release
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-bundle
@@ -123,14 +105,13 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  github_draft:
-    needs: [preflight, bundle]
-    if: ${{ !cancelled() && needs.bundle.result == 'success' && needs.preflight.outputs.publish == 'true' && needs.preflight.outputs.target == 'pypi' }}
+  github_release:
+    needs: bundle
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
       actions: read
-    environment: pypi
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -141,115 +122,15 @@ jobs:
         with:
           name: release-bundle
           path: release
-      - name: Stage all assets without replacing existing bytes / 暂存完整附件
+      - name: Publish verified GitHub attachments / 发布已核对附件
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: python -m scripts.release_github stage --directory release --version "$VERSION"
-
-  publish_runtime:
-    needs: [preflight, bundle, github_draft]
-    if: ${{ !cancelled() && needs.bundle.result == 'success' && needs.preflight.outputs.publish == 'true' && (needs.github_draft.result == 'success' || needs.preflight.outputs.target == 'testpypi') }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-      id-token: write
-    environment: ${{ needs.preflight.outputs.target }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.13"
-      - run: python -m pip install packaging==26.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-bundle
-          path: release
-      - name: Verify bundle and prepare missing runtime wheels
-        id: upload
-        env:
-          TARGET: ${{ needs.preflight.outputs.target }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ needs.bundle.outputs.commit }}
         run: |
           set -euo pipefail
-          python -m scripts.release_artifacts verify --output release
-          mkdir wheels
-          cp release/taichi_forge_runtime-*.whl wheels/
-          python scripts/check_pypi_version_available.py --repository "$TARGET" --wheel-dir wheels --upload-dir upload
-          echo "count=$(find upload -name '*.whl' | wc -l)" >> "$GITHUB_OUTPUT"
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
-        if: steps.upload.outputs.count != '0'
-        with:
-          repository-url: ${{ needs.preflight.outputs.target == 'pypi' && 'https://upload.pypi.org/legacy/' || 'https://test.pypi.org/legacy/' }}
-          packages-dir: upload
-
-  publish_shim:
-    needs: [preflight, publish_runtime]
-    if: ${{ !cancelled() && needs.publish_runtime.result == 'success' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-      id-token: write
-    environment: ${{ needs.preflight.outputs.target }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.13"
-      - run: python -m pip install packaging==26.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-bundle
-          path: release
-      - name: Verify runtime availability before publishing its shims
-        id: upload
-        env:
-          TARGET: ${{ needs.preflight.outputs.target }}
-        run: |
-          set -euo pipefail
-          python -m scripts.release_artifacts verify --output release
-          mkdir runtime wheels
-          cp release/taichi_forge_runtime-*.whl runtime/
-          python scripts/check_pypi_version_available.py --repository "$TARGET" --wheel-dir runtime --upload-dir missing-runtime --require-published
-          cp release/taichi_forge-[0-9]*.whl wheels/
-          python scripts/check_pypi_version_available.py --repository "$TARGET" --wheel-dir wheels --upload-dir upload
-          echo "count=$(find upload -name '*.whl' | wc -l)" >> "$GITHUB_OUTPUT"
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
-        if: steps.upload.outputs.count != '0'
-        with:
-          repository-url: ${{ needs.preflight.outputs.target == 'pypi' && 'https://upload.pypi.org/legacy/' || 'https://test.pypi.org/legacy/' }}
-          packages-dir: upload
-
-  finalize:
-    needs: [preflight, publish_shim]
-    if: ${{ !cancelled() && needs.publish_shim.result == 'success' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-    environment: ${{ needs.preflight.outputs.target }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.13"
-      - run: python -m pip install packaging==26.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-bundle
-          path: release
-      - name: Verify both projects, then finalize GitHub / 核对后正式发布
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET: ${{ needs.preflight.outputs.target }}
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          python -m scripts.release_artifacts verify --output release
-          python scripts/check_pypi_version_available.py --repository "$TARGET" --wheel-dir release --upload-dir missing --require-published
-          if [[ "$TARGET" == pypi ]]; then
-            python -m scripts.release_github publish --directory release --version "$VERSION"
-          fi
-          echo "### $VERSION — 已核对发布文件 / Published files verified" >> "$GITHUB_STEP_SUMMARY"
-          echo "Index: $TARGET; SHA256 verified for runtime and shim wheels. / 两类 wheel 校验通过。" >> "$GITHUB_STEP_SUMMARY"
+          python scripts/check_pypi_version_available.py --repository pypi --wheel-dir release --upload-dir missing --require-published
+          python -m scripts.release_github stage --directory release --version "$VERSION" --commit "$SOURCE_COMMIT"
+          python -m scripts.release_github publish --directory release --version "$VERSION" --commit "$SOURCE_COMMIT"
+          echo "### $VERSION — GitHub Release 已发布 / Published" >> "$GITHUB_STEP_SUMMARY"
+          echo "Both packages were already published by their existing PyPI workflows. / 两包已由原有流程发布至 PyPI。" >> "$GITHUB_STEP_SUMMARY"
