@@ -10,16 +10,23 @@ want to reproduce the PyPI-style Windows or Ubuntu builds locally.
 
 ## Wheel Matrix
 
-The two packages have independent publishing workflows. `publish_runtime_pypi.yml`
-builds and optionally publishes the native runtime. `publish_pypi.yml` defaults to
-linking and install-validating shims against a published runtime, and publishes
-only `taichi-forge`. Its `runtime_version` input can select a compatible runtime
-with a different package version. The shim workflow never builds the runtime.
-Use `wheel_run_id` to publish an existing `validated-shim-wheel-set` without
-rebuilding any wheel. Set `publish=true` explicitly to upload; selecting
-`target=pypi` alone only chooses the index. GitHub Releases are not created.
-For publication inputs and permissions, see the
-[maintainer release procedure](../design/pypi_release.md).
+[release.yml](../../.github/workflows/release.yml) coordinates both packages and
+GitHub Release from one source commit. The reusable `publish_runtime_pypi.yml`
+and `publish_pypi.yml` workflows only build and validate; despite their historical
+filenames, neither independently publishes. The shim builder can still use an
+existing compatible runtime for local validation. A standard release builds two
+runtime wheels first and links all ten shims against those exact artifacts.
+Use `candidate_run_id` on the release workflow to promote a complete validated
+bundle from the same commit without rebuilding. See the bilingual
+[maintainer release procedure](../design/pypi_release.en.md).
+
+The Release's `taichi-forge-<version>-source.tar.gz` includes pinned submodule
+sources, their licenses, `SOURCE_MANIFEST.json` and `SOURCE_COMMIT`. Extract it
+and follow this guide just as for a recursive checkout. `release-manifest.json`
+records public LLVM download URLs and SHA256 values; LLVM build workflows and
+constraints are included in the source. GitHub's automatic source ZIP omits
+submodule contents and is not an equivalent build input. The full-source archive
+is a GitHub asset, not a pip-installable sdist; PyPI receives validated wheels.
 
 Together, the workflows build two wheel families:
 
@@ -407,9 +414,9 @@ Then set `LLVM_DIR` to the generated `dist\taichi-llvm-20\lib\cmake\llvm`.
 
 ### Windows-only CI validation
 
-The `publish_pypi.yml` manual workflow accepts `validation_platform=windows`
-with `publish=false`. It builds and validates the five Windows CPython shims;
-Linux jobs, full-release aggregation and publication are skipped. The default
+The `publish_pypi.yml` manual workflow accepts `validation_platform=windows`.
+It builds and validates the five Windows CPython shims; Linux jobs and full-release
+aggregation are skipped, and this builder never publishes. The default
 `validation_platform=all` retains the complete release matrix.
 
 To reuse a successful Windows runtime build, set `runtime_source=artifact` and

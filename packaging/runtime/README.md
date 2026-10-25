@@ -50,3 +50,15 @@ sharing a library does not make their array handles interchangeable.
 The Windows wheel also includes the `taichi_runtime.lib` import library so the
 CPython shim wheels can link against the already-published runtime package
 during release builds.
+
+## Release information / 发行信息
+
+The 0.7 series is distributed through coordinated GitHub and PyPI releases.
+[GitHub Releases](https://github.com/fancifulland2718/taichi-forge/releases) include
+the same platform wheels, bilingual release notes, complete sources, public docs
+and checksums. External vendor libraries remain separately installed dependencies.
+
+0.7 系列通过 GitHub 与 PyPI 协调发布。GitHub Release 提供相同的平台 wheel、
+中英双语发布说明、完整源码、公开文档和校验和。本包承载原生 runtime，通常由
+`taichi-forge` 自动安装；外部厂商库仍由用户独立安装，不重复打包进 runtime。
+发布状态以实际 Release 与 PyPI 文件为准。

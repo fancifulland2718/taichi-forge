@@ -11,6 +11,19 @@ execution, reusable Graphs, native algorithms and optional hardware providers.
 [![Python](https://img.shields.io/pypi/pyversions/taichi-forge.svg)](https://pypi.org/project/taichi-forge/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
+## 0.7.0 release information / 0.7.0 发行信息
+
+The 0.7 series includes compilation improvements, broader AOT deployment and shared
+JIT/AOT contracts. See the [English release notes](https://github.com/fancifulland2718/taichi-forge/blob/master/docs/forge/release_notes.en.md)
+for supported configurations and upgrade requirements. [GitHub Releases](https://github.com/fancifulland2718/taichi-forge/releases)
+provide bilingual notes, the same wheels as PyPI, complete sources, public documentation and checksums.
+Publication status is determined by the available release and PyPI files.
+
+0.7 系列包括编译改进、AOT 部署扩展及 JIT/AOT 共同合同整理。支持范围与升级要求见
+[中文发布说明](https://github.com/fancifulland2718/taichi-forge/blob/master/docs/forge/release_notes.zh.md)。
+GitHub Release 同时提供中英文说明、与 PyPI 相同的 wheel、完整源码、公开文档和校验和；
+是否已发布，以实际 Release 与 PyPI 文件为准。
+
 ## Install
 
 ```bash

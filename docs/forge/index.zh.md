@@ -21,6 +21,8 @@ vendor 库及 Vulkan shader 编译 addon 另有显式依赖。
 参见[外部 provider](external_hardware_providers.zh.md)、
 [Linux 环境](linux_revalidation.zh.md)和[源码构建](build_wheels.zh.md)。
 
+发行附件、完整源码和维护者步骤：[标准发布流程](../design/pypi_release.md)。
+
 ## 按任务选择入口
 
 | 任务 | 文档 |

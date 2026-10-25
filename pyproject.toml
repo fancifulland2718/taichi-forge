@@ -46,6 +46,9 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/fancifulland2718/taichi-forge"
 Issues = "https://github.com/fancifulland2718/taichi-forge/issues"
+Documentation = "https://github.com/fancifulland2718/taichi-forge/blob/master/docs/forge/index.en.md"
+Changelog = "https://github.com/fancifulland2718/taichi-forge/blob/master/docs/forge/release_notes.en.md"
+Releases = "https://github.com/fancifulland2718/taichi-forge/releases"
 
 [project.scripts]
 ti = "taichi_forge._main:main"

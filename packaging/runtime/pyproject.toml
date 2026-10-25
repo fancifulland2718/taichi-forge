@@ -28,6 +28,12 @@ classifiers = [
   "Programming Language :: Python :: 3",
 ]
 
+[project.urls]
+Homepage = "https://github.com/fancifulland2718/taichi-forge"
+Documentation = "https://github.com/fancifulland2718/taichi-forge/blob/master/docs/forge/index.en.md"
+Releases = "https://github.com/fancifulland2718/taichi-forge/releases"
+Issues = "https://github.com/fancifulland2718/taichi-forge/issues"
+
 [tool.scikit-build]
 minimum-version = "build-system.requires"
 cmake.source-dir = "../.."

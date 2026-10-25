@@ -9,13 +9,18 @@ PyPI 风格的 Windows 或 Ubuntu 构建。
 
 ## Wheel 矩阵
 
-两个包独立发布。`publish_runtime_pypi.yml` 构建并可选发布原生 runtime；
-`publish_pypi.yml` 默认使用已发布的 runtime 链接并安装验证 shim，只发布 `taichi-forge`。
-通过 `runtime_version` 可选择不同包版本的兼容 runtime，主包 workflow 不会重编 runtime。
-已有 `validated-shim-wheel-set` 可以通过 `wheel_run_id` 直接发布，不重建任何 wheel。
-上传需显式设置 `publish=true`，单选 `target=pypi` 仅选择索引；流程不自动创建 GitHub Release。
-发布参数与权限见
-[维护者发行流程](../design/pypi_release.md)。
+[release.yml](../../.github/workflows/release.yml) 从同一源码 commit 协调两类包与
+GitHub Release。保留历史文件名的 `publish_runtime_pypi.yml`、`publish_pypi.yml`
+现在只构建与验证，不再分别上传；shim builder 仍可使用已有兼容 runtime 做本地验证。
+标准发布先构建两个 runtime wheel，再用这批原样产物链接十个 shim。
+发布入口的 `candidate_run_id` 可直接提升同一 commit 已验证的完整发行包，无需重编。
+参数、权限和恢复方式见[双语维护者发行流程](../design/pypi_release.md)。
+
+Release 的 `taichi-forge-<version>-source.tar.gz` 包含固定子模块源码、许可证、
+`SOURCE_MANIFEST.json` 与 `SOURCE_COMMIT`。解压后按本文构建，效果等同递归 checkout。
+`release-manifest.json` 记录公开 LLVM 下载 URL 与 SHA256；源码内保留 LLVM 构建工作流
+及依赖约束。GitHub 自动生成的源码 ZIP 不含子模块内容，不能替代完整源码包。
+完整源码包是 GitHub 附件，不是可由 pip 自动安装的 sdist；PyPI 接收经过验证的 wheel。
 
 两个 workflow 共构建两类 wheel：
 
@@ -357,7 +362,7 @@ powershell -File scripts\build_llvm20_local.ps1
 
 ### 仅 Windows 的 CI 验证
 
-手动触发 `publish_pypi.yml` 时，可设置 `validation_platform=windows` 与 `publish=false`。
+手动触发 `publish_pypi.yml` 时，可设置 `validation_platform=windows`。
 此时构建并验证五个 Windows CPython shim，跳过 Linux、完整发布集合汇总和发布。
 默认 `validation_platform=all` 保留完整发布矩阵。
 

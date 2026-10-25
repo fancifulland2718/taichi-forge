@@ -31,8 +31,13 @@ Use the documentation at your release tag for version-specific API details.
 
 This release focuses on compilation improvements and correctness fixes, with broader AOT
 deployment coverage and shared JIT/AOT contracts. These notes describe the resulting behavior;
-they do not indicate publication to PyPI or qualification of every backend/provider/layout
-combination. Consult the linked API contracts and capability queries for exact support.
+publication status is shown on GitHub Releases and PyPI. Support is limited to the qualified
+backend/provider/layout combinations in the linked API contracts and capability queries.
+
+This release moves the compiler, JIT/AOT contracts and deployment changes to the 0.7 series.
+The coordinated release publishes identical wheels to GitHub and PyPI, with bilingual notes,
+complete source and public-documentation archives, a build manifest and checksums.
+See the [release procedure](../design/pypi_release.en.md).
 
 ### Upgrading and compilation settings
 

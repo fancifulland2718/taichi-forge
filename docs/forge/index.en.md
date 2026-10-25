@@ -24,6 +24,8 @@ its driver and linker remain user-installed and are optional for other backends.
 See [external providers](external_hardware_providers.en.md),
 [Linux setup](linux_revalidation.en.md) and [source builds](build_wheels.en.md).
 
+Release artifacts, source archives and maintainer steps: [release process](../design/pypi_release.en.md).
+
 ## Choose a task
 
 | Task | Start here |
