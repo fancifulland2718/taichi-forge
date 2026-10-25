@@ -38,7 +38,7 @@ class GraphRangeDispatchSource:
 
     @classmethod
     def try_create(cls, kernel_fn, args, label, kernel_cpp, template_args, task_facts):
-        from taichi_forge.graph._graph import _kernel_task_manifests
+        from taichi_forge.graph._recipes.task_facts import GraphKernelTaskFacts
         from taichi_forge.lang import kernel_impl, impl
         from taichi_forge._lib import core
 
@@ -46,15 +46,10 @@ class GraphRangeDispatchSource:
             kernel_fn, kernel_impl._OffloadExecutionPlanBinding
         ):
             return None
-        # Builder-local facts are shared by repeated occurrences and disappear
-        # with the builder. No shape-keyed global cache or live binding here.
-        manifests = task_facts.get(kernel_cpp)
-        if manifests is None:
-            manifests = _kernel_task_manifests(kernel_cpp)
-            task_facts[kernel_cpp] = manifests
-        if not any(device_range_dispatch_rejection(task) is None for task in manifests):
+        facts = (task_facts or GraphKernelTaskFacts(kernel_cpp)).snapshot
+        if not facts.device_range:
             return None
-        return cls(kernel_fn, args, label, kernel_cpp, manifests, template_args)
+        return cls(kernel_fn, args, label, kernel_cpp, facts.manifests, template_args)
 
     def _manifest(self, plan, manifests):
         payload = {

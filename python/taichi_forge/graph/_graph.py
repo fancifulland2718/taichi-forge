@@ -15133,7 +15133,7 @@ class _GraphMemoryRecipeSource:
     """Frozen Graph-definition lineage with a lazy physical candidate cache."""
 
     def __init__(
-        self, kernel_fn, args, label, baseline_kernel_cpp, template_args=None
+        self, kernel_fn, args, label, baseline_kernel_cpp, template_args=None, task_facts=None
     ):
         self.kernel_fn = kernel_fn
         # Preserve the exact specialization inputs without serializing self or
@@ -15143,6 +15143,7 @@ class _GraphMemoryRecipeSource:
         self.args = tuple(args)
         self.label = label
         self.baseline_kernel_cpp = baseline_kernel_cpp
+        self._task_facts = task_facts
         self.baseline_manifests = None
         self.baseline_plan = None
         self.direct_manifest = None
@@ -15153,7 +15154,9 @@ class _GraphMemoryRecipeSource:
         self._candidate_lock = threading.Lock()
 
     @classmethod
-    def try_create(cls, kernel_fn, args, label, baseline_kernel_cpp, template_args):
+    def try_create(
+        cls, kernel_fn, args, label, baseline_kernel_cpp, template_args, task_facts=None
+    ):
         if impl.current_cfg().arch != _ti_core.Arch.cuda:
             return None
         if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
@@ -15171,7 +15174,7 @@ class _GraphMemoryRecipeSource:
             # shared-memory specialization.
             return None
 
-        return cls(kernel_fn, args, label, baseline_kernel_cpp, template_args)
+        return cls(kernel_fn, args, label, baseline_kernel_cpp, template_args, task_facts)
 
     def _prepare_definition(self):
         if self.direct_manifest is not None:
@@ -15183,7 +15186,11 @@ class _GraphMemoryRecipeSource:
                 _OffloadExecutionPlan,
             )
 
-            manifests = _kernel_task_manifests(self.baseline_kernel_cpp)
+            manifests = (
+                self._task_facts.snapshot.manifests
+                if self._task_facts is not None
+                else _kernel_task_manifests(self.baseline_kernel_cpp)
+            )
             plan = _OffloadExecutionPlan.from_task_manifests(manifests)
             ranges = tuple(task for task in plan.tasks if task.task_kind == "range_for")
             if len(ranges) != 1:
@@ -15460,38 +15467,24 @@ class _GraphSparseTraversalRecipeSource:
         self._candidate_lock = threading.Lock()
 
     @classmethod
-    def try_create(cls, kernel_fn, args, label, baseline_kernel_cpp, template_args):
+    def try_create(
+        cls, kernel_fn, args, label, baseline_kernel_cpp, template_args, task_facts=None
+    ):
         if impl.current_cfg().arch != _ti_core.Arch.cuda or template_args:
             return None
         if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
             return None
         if not hasattr(kernel_fn, "with_launch_policy"):
             return None
+        from taichi_forge.graph._recipes.task_facts import GraphKernelTaskFacts
+
         try:
-            manifests = _kernel_task_manifests(baseline_kernel_cpp)
+            facts = (task_facts or GraphKernelTaskFacts(baseline_kernel_cpp)).snapshot
         except (RuntimeError, TaichiRuntimeError):
             return None
-        listgens = tuple(task for task in manifests if task.task_type == "listgen")
-        if (
-            not listgens
-            or any(task.may_mutate_sparse_topology for task in manifests)
-            or any(
-                task.sparse_list_op != 2
-                or task.sparse_list_snode_id < 0
-                or task.sparse_list_parent_snode_id < 0
-                or task.sparse_list_parent_grid_bound is None
-                or task.sparse_list_parent_grid_bound <= 0
-                or task.selected_grid_size is None
-                or task.selected_grid_size <= 0
-                for task in listgens
-            )
-            or not any(
-                task.sparse_list_parent_grid_bound < task.selected_grid_size
-                for task in listgens
-            )
-        ):
+        if not facts.bounded_sparse_parent:
             return None
-        return cls(kernel_fn, args, label, baseline_kernel_cpp, manifests)
+        return cls(kernel_fn, args, label, baseline_kernel_cpp, facts.manifests)
 
     def _prepare_definition(self):
         if self.direct_manifest is not None:
@@ -15684,25 +15677,26 @@ class _GraphOffloadFusionRecipeSource:
         self._candidate_lock = threading.Lock()
 
     @classmethod
-    def try_create(cls, kernel_fn, args, label, baseline_kernel_cpp, template_args):
+    def try_create(
+        cls, kernel_fn, args, label, baseline_kernel_cpp, template_args, task_facts=None
+    ):
         if impl.current_cfg().arch != _ti_core.Arch.cuda:
             return None
         if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
             return None
         if not hasattr(kernel_fn, "with_launch_policy"):
             return None
+        from taichi_forge.graph._recipes.task_facts import GraphKernelTaskFacts
+
         try:
-            manifests = _kernel_task_manifests(baseline_kernel_cpp)
+            facts = (task_facts or GraphKernelTaskFacts(baseline_kernel_cpp)).snapshot
         except (RuntimeError, TaichiRuntimeError):
             return None
         # Every fusion candidate needs consecutive range-for tasks. Do not
         # retain bound methods or template owners for an impossible domain.
-        if not any(
-            first.task_type == second.task_type == "range_for"
-            for first, second in zip(manifests, manifests[1:])
-        ):
+        if not facts.fusible_ranges:
             return None
-        return cls(kernel_fn, args, label, baseline_kernel_cpp, manifests, template_args)
+        return cls(kernel_fn, args, label, baseline_kernel_cpp, facts.manifests, template_args)
 
     def _prepare_definition(self):
         if self.direct_manifest is not None:
@@ -16926,7 +16920,7 @@ class GraphBuilder:
         self._graph_offload_fusion_sources = []
         self._graph_sparse_traversal_sources = []
         self._graph_range_dispatch_sources = []
-        self._range_dispatch_task_facts = {}
+        self._recipe_task_facts = {}
         self._graph_bounded_sources = []
         self._parallel_dispatch_groups = ()
 
@@ -16973,12 +16967,21 @@ class GraphBuilder:
         label = _normalize_dispatch_label(label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
+        task_facts = None
+        if impl.current_cfg().arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
+            from taichi_forge.graph._recipes.task_facts import GraphKernelTaskFacts
+
+            task_facts = self._recipe_task_facts.get(kernel_cpp)
+            if task_facts is None:
+                task_facts = GraphKernelTaskFacts(kernel_cpp)
+                self._recipe_task_facts[kernel_cpp] = task_facts
         source = _GraphMemoryRecipeSource.try_create(
             kernel_fn,
             unzipped_args,
             label,
             kernel_cpp,
             template_args,
+            task_facts,
         )
         offload_source = _GraphOffloadFusionRecipeSource.try_create(
             kernel_fn,
@@ -16986,6 +16989,7 @@ class GraphBuilder:
             label,
             kernel_cpp,
             template_args,
+            task_facts,
         )
         sparse_source = _GraphSparseTraversalRecipeSource.try_create(
             kernel_fn,
@@ -16993,12 +16997,13 @@ class GraphBuilder:
             label,
             kernel_cpp,
             template_args,
+            task_facts,
         )
         from taichi_forge.graph._recipes.range_dispatch import GraphRangeDispatchSource
 
         range_source = (
             GraphRangeDispatchSource.try_create(
-                kernel_fn, unzipped_args, label, kernel_cpp, template_args, self._range_dispatch_task_facts
+                kernel_fn, unzipped_args, label, kernel_cpp, template_args, task_facts
             )
             if self._capture_recipe_sources else None
         )
