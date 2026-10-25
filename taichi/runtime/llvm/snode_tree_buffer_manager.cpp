@@ -39,4 +39,11 @@ std::size_t SNodeTreeBufferManager::get_size(int snode_tree_id) const {
   return it->second;
 }
 
+DeviceAllocation SNodeTreeBufferManager::get_allocation(int tree_id) const {
+  auto it = snode_tree_id_to_device_alloc_.find(tree_id);
+  TI_ERROR_IF(it == snode_tree_id_to_device_alloc_.end(),
+              "SNodeTree id={} has no live LLVM root allocation.", tree_id);
+  return it->second;
+}
+
 }  // namespace taichi::lang

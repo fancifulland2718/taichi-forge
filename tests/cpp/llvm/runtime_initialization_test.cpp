@@ -12,6 +12,9 @@
 #ifdef TI_WITH_CUDA
 #include "taichi/platform/cuda/detect_cuda.h"
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/llvm/aot_graph_data.h"
+#include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #endif
 
 namespace taichi::lang {
@@ -332,6 +335,89 @@ TEST_P(LlvmSparseRuntimeView,
 }
 
 #ifdef TI_WITH_CUDA
+TEST(CudaSparseAccess, RealKernelClosureRejectsConflictsAndRetires) {
+  const auto *folder = std::getenv("TAICHI_CUDA_SPARSE_ACCESS_FIXTURE");
+  if (!folder || !is_cuda_api_available())
+    GTEST_SKIP() << "Requires the CUDA sparse access AOT fixture";
+  CompileConfig config;
+  config.arch = Arch::cuda;
+  LlvmRuntimeExecutor executor(config, nullptr);
+  uint64 *result = nullptr;
+  executor.materialize_runtime(nullptr, &result);
+  LLVM::AotModuleParams params;
+  params.module_path = folder;
+  params.executor_ = &executor;
+  params.allocation_result_buffer = result;
+  params.kernel_launcher = std::make_unique<cuda::KernelLauncher>(
+      cuda::KernelLauncher::Config{&executor});
+  auto module = LLVM::make_aot_module(std::move(params));
+  auto invoke = [&](const char *name, bool returns = false) {
+    auto *kernel = module->get_kernel(name);
+    LaunchContextBuilder args(kernel);
+    kernel->launch(args);
+    return returns ? args.get_ret<int>(0) : 0;
+  };
+  invoke("initialize");
+  auto layout = [&](const char *name) {
+    return dynamic_cast<llvm_aot::FieldImpl &>(
+               *static_cast<LLVM::LlvmAotModule &>(*module).get_snode_tree(name))
+        .get_snode_tree_cache();
+  };
+  const auto left = layout("0"), right = layout("1");
+  const LlvmSparseRuntimeViewTree a{left.tree_id, 0, left.tree_generation};
+  const LlvmSparseRuntimeViewTree b{right.tree_id, 0, right.tree_generation};
+  ASSERT_LT(a.tree_id, b.tree_id);
+  auto permit = executor.prepare_cuda_sparse_access({a.tree_id, a.tree_id});
+  ASSERT_NE(permit, nullptr);
+  auto stale = b;
+  ++stale.generation;
+  EXPECT_THROW(executor.reserve_cuda_sparse_trees({a, stale}),
+               std::invalid_argument);
+  invoke("bump_left");  // Failed batch must not reserve its valid prefix.
+  EXPECT_EQ(invoke("peek_left", true), 4);
+  auto first = executor.reserve_cuda_sparse_trees({a});
+  EXPECT_THROW(invoke("bump_left"), std::invalid_argument);
+  // A cold registration after reservation must be blocked as well.
+  EXPECT_THROW(invoke("cold_bump_left"), std::invalid_argument);
+  invoke("bump_right");
+  EXPECT_EQ(invoke("peek_right", true), 8);
+  auto second = executor.reserve_cuda_sparse_trees({b});
+  EXPECT_THROW(executor.reserve_cuda_sparse_trees({a, b}),
+               std::invalid_argument);
+  EXPECT_THROW(executor.destroy_snode_tree_runtime(left),
+               std::invalid_argument);
+  EXPECT_THROW(executor.finalize(), std::invalid_argument);
+  auto new_tree = left;
+  new_tree.tree_id = b.tree_id + 1;
+  EXPECT_THROW(executor.initialize_llvm_runtime_snodes(new_tree, result),
+               std::invalid_argument);
+  EXPECT_FALSE(executor.has_snode_tree_runtime_state(new_tree.tree_id));
+  EXPECT_TRUE(executor.has_snode_tree_runtime_state(a.tree_id));
+  EXPECT_TRUE(executor.has_snode_tree_runtime_state(b.tree_id));
+  first.reset();
+  invoke("bump_left");
+  EXPECT_EQ(invoke("peek_left", true), 5);
+  invoke("cold_bump_left");
+  EXPECT_EQ(invoke("peek_left", true), 15);
+  EXPECT_THROW(invoke("bump_right"), std::invalid_argument);
+  second.reset();
+  invoke("bump_right");
+  EXPECT_EQ(invoke("peek_right", true), 9);
+  executor.synchronize();
+  executor.check_runtime_error(result);
+
+  // Closing the module retires tree identities even when a cached permit
+  // keeps the owning allocation leases alive. It may never submit again.
+  module.reset();
+  bool submitted = false;
+  EXPECT_THROW(permit->submit([&] { submitted = true; }),
+               std::invalid_argument);
+  EXPECT_FALSE(submitted);
+  EXPECT_FALSE(executor.has_snode_tree_runtime_state(a.tree_id));
+  permit.reset();
+  executor.finalize();
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends,
                          LlvmSparseRuntimeView,
                          ::testing::Values(host_arch(), Arch::cuda));

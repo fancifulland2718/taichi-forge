@@ -100,6 +100,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
     JITModule *jit_module{nullptr};
     std::vector<int> snode_tree_ids;
+    mutable std::once_flag sparse_access_once;
+    mutable std::shared_ptr<SparseTreeAdmission::Permit> sparse_access;
     std::vector<std::pair<std::vector<int>, Callable::Parameter>> parameters;
     std::vector<OffloadedTask> offloaded_tasks;
     // Consumer-owned default requests. Keep baseline tasks intact so explicit
@@ -301,6 +303,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                   bool device_replay = false);
   void mark_sparse_list_task_launched(const OffloadedTask &task);
   void invalidate_sparse_list_cache(int sparse_mutation_snode_id);
+  void launch_ordinary_context(const Context &selected,
+                               LaunchContextBuilder &ctx);
   void configure_launch_bindings(
       const LLVM::CompiledKernelData::InternalData &compiled,
       Context &context);

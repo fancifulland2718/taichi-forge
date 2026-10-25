@@ -25,6 +25,7 @@ class SNodeTreeBufferManager {
   void destroy(int tree_id);
 
   std::size_t get_size(int snode_tree_id) const;
+  DeviceAllocation get_allocation(int snode_tree_id) const;
 
  private:
   LlvmRuntimeExecutor *runtime_exec_;

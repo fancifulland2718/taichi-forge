@@ -11,6 +11,8 @@
 #include "taichi/runtime/llvm/snode_tree_layout.h"
 #include "taichi/runtime/llvm/snode_tree_buffer_manager.h"
 #include "taichi/runtime/snode_tree_id_registry.h"
+#include "taichi/runtime/sparse_tree_admission.h"
+#include "taichi/runtime/llvm/sparse_runtime_view.h"
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/struct/snode_tree.h"
 #include "taichi/program/compile_config.h"
@@ -100,6 +102,16 @@ class LlvmRuntimeExecutor {
   // Non-owning RHI view for cold JIT snapshots and AOT state initialization.
   DevicePtr get_snode_tree_device_ptr(int tree_id);
 
+  // Cold CUDA binding. Permits cache the complete selected tree closure;
+  // replay checks counters rather than looking up trees or acquiring owners.
+  // Loans are internal preparation transactions, not permission to execute:
+  // the consumer must also bind a qualified runtime view, publish/wait the
+  // producer prefix, and return managers before releasing the loan.
+  std::shared_ptr<SparseTreeAdmission::Permit> prepare_cuda_sparse_access(
+      const std::vector<int> &tree_ids);
+  std::shared_ptr<SparseTreeAdmission::Loan> reserve_cuda_sparse_trees(
+      const std::vector<LlvmSparseRuntimeViewTree> &trees);
+
   const CompileConfig &get_config() const {
     return config_;
   }
@@ -173,6 +185,9 @@ class LlvmRuntimeExecutor {
   void preallocate_runtime_memory(std::size_t override_size = 0);
   void ensure_snode_tree_runtime_directory_capacity(std::size_t required);
   void zero_device_memory(void *ptr, std::size_t size);
+  std::vector<SparseTreeAdmission::PinnedUse> bind_cuda_sparse_trees(
+      const std::vector<LlvmSparseRuntimeViewTree> &trees);
+  void require_no_cuda_sparse_loans() const;
 
   /* ------------------------- */
   /* ---- Runtime Helpers ---- */
@@ -238,6 +253,7 @@ class LlvmRuntimeExecutor {
     std::uint64_t generation{0};
     // Allocation, accounting and retirement use this same immutable fact.
     bool element_lists{false};
+    std::shared_ptr<SparseTreeRegistration> registration;
   };
   DeviceAllocationUnique snode_tree_runtime_directory_alloc_{nullptr};
   std::vector<void *> snode_tree_runtime_host_directory_;
@@ -246,6 +262,12 @@ class LlvmRuntimeExecutor {
   std::unordered_map<int, ActiveSNodeTreeRuntimeState>
       active_snode_tree_runtime_states_;
   SNodeTreeIdRegistry snode_tree_id_registry_;
+  std::shared_ptr<std::recursive_mutex> sparse_access_gate_{
+      std::make_shared<std::recursive_mutex>()};
+  std::shared_ptr<SparseTreeAdmission> sparse_admission_{
+      std::make_shared<SparseTreeAdmission>(sparse_access_gate_)};
+  std::shared_ptr<SparseTreeRegistration::Registry> sparse_identities_{
+      std::make_shared<SparseTreeRegistration::Registry>(1)};
   DeviceAllocationUnique preallocated_runtime_objects_allocs_ = nullptr;
   DeviceAllocationUnique preallocated_runtime_memory_allocs_ = nullptr;
   std::unordered_map<DeviceAllocationId, DeviceAllocation>
@@ -257,6 +279,7 @@ class LlvmRuntimeExecutor {
   // allocation after Program has synchronized outstanding work.
   std::unordered_map<int, DeviceAllocationUnique> sparse_tree_pool_allocs_;
   std::unordered_map<int, std::size_t> sparse_tree_pool_sizes_;
+  int sparse_runtime_backing_tree_{-1};
 
   // good buddy
   friend LlvmProgramImpl;

@@ -1,5 +1,6 @@
 #pragma once
 #include "taichi/runtime/snode_tree_id_registry.h"
+#include "taichi/runtime/sparse_tree_admission.h"
 #include "taichi/runtime/gfx/snode_tree_resources.h"
 #include "taichi/runtime/gfx/shared_image_admission.h"
 #include "taichi/runtime/native_ray_admission.h"
@@ -61,12 +62,8 @@ class GfxRuntime;
 class GraphReplayRegistry;
 class KernelLauncher;
 
-struct SparseTreeAdmissionName {
-  static constexpr const char *value = "SNode tree";
-};
-using SparseTreeAdmission =
-    SharedResourceAdmission<RuntimeCompletion, SparseTreeAdmissionName>;
-using SparseTreeRegistration = SharedResourceRegistration<SparseTreeAdmission>;
+using ::taichi::lang::SparseTreeAdmission;
+using ::taichi::lang::SparseTreeRegistration;
 using SparseDiagnosticTreeMap = std::unordered_map<int, int>;
 class SparseDiagnosticCollector;
 

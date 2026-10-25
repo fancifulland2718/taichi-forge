@@ -704,6 +704,15 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
     const LLVM::SNodeTreeLayout &field_cache_data,
     uint64 *result_buffer,
     std::optional<bool> element_lists) {
+  std::unique_lock<std::recursive_mutex> submission;
+#if defined(TI_WITH_CUDA)
+  if (config_.arch == Arch::cuda)
+    submission = CUDAContext::get_instance().get_submission_lock_guard();
+#endif
+  // Materialization may replace the shared allocator cursor, even when the
+  // new tree itself does not overlap an existing view. Drain/return borrowed
+  // views before this cold mutation; a default-stream wait is insufficient.
+  require_no_cuda_sparse_loans();
   auto *const runtime_jit = get_runtime_jit_module();
   // By the time this creator is called, "this" is already destroyed.
   // Therefore it is necessary to capture members by values.
@@ -1197,6 +1206,7 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         TI_ASSERT(size_inserted);
         void *buf = preallocate_memory(total_buffer, pool_it->second);
         sparse_tree_pool_alloc = &pool_it->second;
+        sparse_runtime_backing_tree_ = tree_id;
         // Initialize runtime_memory_chunk to cover only the global region.
         auto *const runtime_jit2 = get_runtime_jit_module();
         runtime_jit2->call<void *, std::size_t, void *>(
@@ -1261,6 +1271,9 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
                                                    !all_dense})
           .second;
   TI_ASSERT(state_inserted);
+  if (config_.arch == Arch::cuda && !all_dense)
+    active_snode_tree_runtime_states_.at(tree_id).registration =
+        SparseTreeRegistration::create(sparse_identities_, sparse_admission_);
 
   if (!all_dense) {
     for (const auto &meta : snode_metas) {
@@ -1508,6 +1521,16 @@ HostMemoryPoolStats LlvmRuntimeExecutor::get_host_memory_pool_stats() const {
 }
 
 void LlvmRuntimeExecutor::finalize() {
+  std::unique_lock<std::recursive_mutex> submission;
+#if defined(TI_WITH_CUDA)
+  if (config_.arch == Arch::cuda)
+    submission = CUDAContext::get_instance().get_submission_lock_guard();
+#endif
+  require_no_cuda_sparse_loans();
+  for (auto &[id, state] : active_snode_tree_runtime_states_)
+    if (state.registration)
+      state.registration->retire();
+  sparse_admission_->close();
   runtime_temporaries_ = nullptr;
   profiler_ = nullptr;
   active_snode_tree_runtime_states_.clear();
@@ -1529,6 +1552,7 @@ void LlvmRuntimeExecutor::finalize() {
     preallocated_runtime_memory_allocs_.reset();
     sparse_tree_pool_allocs_.clear();
     sparse_tree_pool_sizes_.clear();
+    sparse_runtime_backing_tree_ = -1;
 
     // Reset runtime memory
     if (backend_calls_safe) {
@@ -1841,10 +1865,19 @@ void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler,
 
 void LlvmRuntimeExecutor::destroy_snode_tree_runtime(
     const LLVM::SNodeTreeLayout &field) {
+  std::unique_lock<std::recursive_mutex> submission;
+#if defined(TI_WITH_CUDA)
+  if (config_.arch == Arch::cuda)
+    submission = CUDAContext::get_instance().get_submission_lock_guard();
+#endif
   const auto state = active_snode_tree_runtime_states_.find(field.tree_id);
   TI_ERROR_IF(state == active_snode_tree_runtime_states_.end() ||
                   state->second.generation != field.tree_generation,
               "Cannot retire an unowned LLVM SNode tree {}", field.tree_id);
+  if (state->second.registration)
+    state->second.registration->require_use(SharedResourceUse::exclusive);
+  if (field.tree_id == sparse_runtime_backing_tree_)
+    require_no_cuda_sparse_loans();
   if (arch_is_cpu(config_.arch)) {
     const bool all_dense = !state->second.element_lists;
     auto *runtime_jit = get_runtime_jit_module();
@@ -1872,6 +1905,8 @@ void LlvmRuntimeExecutor::destroy_snode_tree_runtime(
   // Unregistration is itself a device task. Complete it before returning the
   // allocation to the pool, so a later module cannot reuse it while in flight.
   synchronize();
+  if (state->second.registration)
+    state->second.registration->retire();
   active_snode_tree_runtime_states_.erase(state);
   auto alloc = snode_tree_allocs_.find(field.tree_id);
   TI_ASSERT(alloc != snode_tree_allocs_.end());
@@ -1882,6 +1917,109 @@ void LlvmRuntimeExecutor::destroy_snode_tree_runtime(
   // The common/global allocator remains owned by the executor.
   sparse_tree_pool_allocs_.erase(field.tree_id);
   sparse_tree_pool_sizes_.erase(field.tree_id);
+  if (sparse_runtime_backing_tree_ == field.tree_id)
+    sparse_runtime_backing_tree_ = -1;
+}
+
+void LlvmRuntimeExecutor::require_no_cuda_sparse_loans() const {
+  for (const auto &[id, state] : active_snode_tree_runtime_states_)
+    if (state.registration &&
+        sparse_admission_->has_loan(state.registration->handle()))
+      throw std::invalid_argument(
+          "Return CUDA sparse runtime views before changing allocator storage");
+}
+
+std::vector<SparseTreeAdmission::PinnedUse>
+LlvmRuntimeExecutor::bind_cuda_sparse_trees(
+    const std::vector<LlvmSparseRuntimeViewTree> &trees) {
+  if (config_.arch != Arch::cuda || finalized_)
+    throw std::invalid_argument("Sparse CUDA access requires a live CUDA executor");
+  // Validate the entire request before acquiring any allocation lease.
+  int previous = -1;
+  for (const auto &tree : trees) {
+    auto found = active_snode_tree_runtime_states_.find(tree.tree_id);
+    if (tree.tree_id <= previous || tree.reserved ||
+        found == active_snode_tree_runtime_states_.end() ||
+        tree.generation != found->second.generation)
+      throw std::invalid_argument("Invalid or stale CUDA sparse tree closure");
+    previous = tree.tree_id;
+  }
+  std::vector<SparseTreeAdmission::PinnedUse> uses;
+#if defined(TI_WITH_CUDA)
+  struct Storage {
+    // Leases call into Device when they drain; keep it alive until then.
+    std::shared_ptr<Device> device;
+    std::shared_ptr<SparseTreeRegistration> registration;
+    std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>> allocations;
+  };
+  for (const auto &tree : trees) {
+    const auto &state = active_snode_tree_runtime_states_.at(tree.tree_id);
+    if (!state.registration)
+      continue;
+    auto storage = std::make_shared<Storage>();
+    storage->device = device_;
+    storage->registration = state.registration;
+    auto pin = [&](DeviceAllocation allocation) {
+      auto lease = llvm_device()->as<cuda::CudaDevice>()
+                       ->acquire_allocation_lease(allocation);
+      if (!lease)
+        throw std::invalid_argument("CUDA sparse backing allocation is retired");
+      storage->allocations.push_back(std::move(lease));
+    };
+    // Pin the real owning root allocation, not its imported non-owning view.
+    pin(snode_tree_buffer_manager_->get_allocation(tree.tree_id));
+    if (preallocated_runtime_objects_allocs_)
+      pin(*preallocated_runtime_objects_allocs_);
+    if (preallocated_runtime_memory_allocs_)
+      pin(*preallocated_runtime_memory_allocs_);
+    auto pool = sparse_tree_pool_allocs_.find(tree.tree_id);
+    if (pool != sparse_tree_pool_allocs_.end() && pool->second)
+      pin(*pool->second);
+    // A legacy/fallback allocation resolves the source's current cursor.
+    // Its backing can belong to a different tree than the selected closure.
+    if (sparse_runtime_backing_tree_ >= 0 &&
+        sparse_runtime_backing_tree_ != tree.tree_id) {
+      const auto &backing =
+          sparse_tree_pool_allocs_.at(sparse_runtime_backing_tree_);
+      if (backing)
+        pin(*backing);
+    }
+    uses.push_back({{state.registration->handle(), SharedResourceUse::exclusive},
+                    std::move(storage)});
+  }
+#endif
+  return uses;
+}
+
+std::shared_ptr<SparseTreeAdmission::Permit>
+LlvmRuntimeExecutor::prepare_cuda_sparse_access(const std::vector<int> &ids) {
+#if defined(TI_WITH_CUDA)
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+#endif
+  std::vector<int> sorted = ids;
+  std::sort(sorted.begin(), sorted.end());
+  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+  std::vector<LlvmSparseRuntimeViewTree> trees;
+  for (int id : sorted) {
+    auto state = active_snode_tree_runtime_states_.find(id);
+    if (state == active_snode_tree_runtime_states_.end())
+      throw std::invalid_argument("CUDA kernel references an unmaterialized tree");
+    trees.push_back({id, 0, state->second.generation});
+  }
+  auto uses = bind_cuda_sparse_trees(trees);
+  return uses.empty() ? nullptr : sparse_admission_->prepare(uses);
+}
+
+std::shared_ptr<SparseTreeAdmission::Loan>
+LlvmRuntimeExecutor::reserve_cuda_sparse_trees(
+    const std::vector<LlvmSparseRuntimeViewTree> &trees) {
+#if defined(TI_WITH_CUDA)
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+#endif
+  auto uses = bind_cuda_sparse_trees(trees);
+  if (uses.size() != trees.size())
+    throw std::invalid_argument("CUDA sparse view closure contains a dense-only tree");
+  return sparse_admission_->reserve(uses);
 }
 
 void LlvmRuntimeExecutor::destroy_snode_tree(SNodeTree *snode_tree) {

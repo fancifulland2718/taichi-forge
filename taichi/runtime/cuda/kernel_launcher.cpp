@@ -1471,6 +1471,23 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   auto iter = contexts_.find(handle.get_launch_id());
   TI_ASSERT(iter != contexts_.end());
   launcher_ctx = iter->second;
+  std::call_once(launcher_ctx->sparse_access_once, [&] {
+    if (!launcher_ctx->snode_tree_ids.empty())
+      launcher_ctx->sparse_access = get_runtime_executor()
+                                        ->prepare_cuda_sparse_access(
+                                            launcher_ctx->snode_tree_ids);
+  });
+  auto launch = [&] { launch_ordinary_context(*launcher_ctx, ctx); };
+  if (launcher_ctx->sparse_access)
+    launcher_ctx->sparse_access->submit(launch);
+  else
+    launch();
+}
+
+void KernelLauncher::launch_ordinary_context(const Context &selected,
+                                             LaunchContextBuilder &ctx) {
+  // Called only under submission/registration locks and the sparse permit.
+  const auto *launcher_ctx = &selected;
   TI_ERROR_IF(launcher_ctx->launch_abi != KernelLaunchABI::ordinary,
               "CUDA gated kernel requires its Graph gate launch recipe");
   TI_ERROR_IF(
