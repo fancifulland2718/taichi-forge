@@ -11,22 +11,26 @@ from types import MappingProxyType
 
 _CAPABILITY_SCHEMA = "compileiq.taichi-forge-recipe-search-capability.v2"
 _FORK_BUILD_ID = "compileiq-taichi-forge-complete-recipes.v2"
-_PACKAGE_VERSION = "1.0.0dev6+taichiforge.report1"
+_PACKAGE_VERSION = "1.1.0b2+taichiforge.1"
 _REVIEWED_FORK_REPOSITORY = "https://github.com/fancifulland2718/CompileIQ"
-_REVIEWED_FORK_REF = "refs/heads/main"
-_REVIEWED_FORK_COMMIT = "f604a79934792a5b17cade81299603fbdb626130"
+_REVIEWED_FORK_REF = "refs/heads/codex/forge-1.1-integration"
+_REVIEWED_FORK_COMMIT = "09d6a68f1e11d9a0f2bedf446c0bd7d2e03283c0"
 _REVIEWED_WHEEL_PLATFORM = "win32/amd64"
 _REVIEWED_WHEEL_FILENAME = (
-    "compileiq-1.0.0.dev6+taichiforge.report1-py3-none-win_amd64.whl"
+    "compileiq-1.1.0b2+taichiforge.1-cp313-cp313-win_amd64.whl"
 )
 _REVIEWED_WHEEL_SHA256 = (
-    "fe8c45f71341736609cc9b2374d7c79e6d9e25e984c5fad2fd087714b2608c9c"
+    "e7878888d83176a90ed0bc65bfab421a52596ef72efd1e03e2c5b7894101e66b"
 )
 _REVIEWED_WHEEL_CORE_LOCK = (
-    "sha256:b4838970b7b913bbb7ce6bd50aaa0d132b0df8b11765bd76284736be8a16040b"
+    "sha256:fb43fc217c4cc955f6ab50d91f9f5c3008324c0cfc79e3fc22b7b0a9e1f0395b"
 )
 _REVIEWED_WHEEL_CAPABILITY_ID = (
-    "ciq-forge-cap-v2:36e64005bfc7d99fcbed6654f476086482d509c5820640028f3c4af03e5bad08"
+    "ciq-forge-cap-v2:419b6cb9a85eca617a0af57ba0e4a351cdcba1f1e60b518bfb20690f344cb4f8"
+)
+_REVIEWED_PYTHON_SOURCE_LOCK = (
+    "ciq-python-source-v1:"
+    "eac6355d168201a4416bec58dfa8f6355263965ca6f839a53fe9cbb932919dc4"
 )
 _DOMAIN_SCHEMA = "compileiq.opaque-recipe-domain.v1"
 _BATCH_SCHEMA = "compileiq.opaque-recipe-batch.v2"
@@ -251,9 +255,12 @@ def _validated_compileiq_capability(
     ):
         raise error_type("modified CompileIQ capability has a missing required field")
 
+    revision = capability.get("protocol_revision")
+    if type(revision) is not int or revision not in (6, 7):
+        raise error_type("installed CompileIQ recipe protocol revision is unsupported")
     expected = {
         "schema": _CAPABILITY_SCHEMA,
-        "protocol_revision": 6,
+        "protocol_revision": revision,
         "fork_build_id": _FORK_BUILD_ID,
         "opaque_recipe_domain_schema": _DOMAIN_SCHEMA,
         "opaque_recipe_batch_schema": _BATCH_SCHEMA,
@@ -294,6 +301,15 @@ def _validated_compileiq_capability(
         ),
         "opaque_recipe_search_v1": "bounded_exhaustive_main_thread_v1",
     }
+    if revision == 7:
+        # 1.1 removed the IPC core. Complete-recipe search runs in the fork's
+        # Python scheduler; the existing identity slots now pin that code.
+        # Amber remains an independent engine for generic compiler controls.
+        expected.update(
+            execution_engine="forge_complete_recipes_python_v1",
+            core_verification="python_scheduler_source_digest_at_search_start",
+            opaque_domain_binding="capability_id_scheduler_source_lock",
+        )
     if any(capability.get(name) != value for name, value in expected.items()):
         raise error_type(
             "installed CompileIQ capability is incompatible with Forge recipe search"
@@ -310,7 +326,7 @@ def _validated_compileiq_capability(
         raise error_type("CompileIQ capability has no valid core manifest version")
     core_commit = capability["core_commit"]
     if not isinstance(core_commit, str) or not core_commit:
-        raise error_type("CompileIQ capability has no valid bundled-core commit")
+        raise error_type("CompileIQ capability has no valid search implementation identity")
     core_lock = capability["core_lock"]
     if (
         not isinstance(core_lock, str)
@@ -318,7 +334,7 @@ def _validated_compileiq_capability(
         or not core_lock.startswith("sha256:")
         or any(character not in "0123456789abcdef" for character in core_lock[7:])
     ):
-        raise error_type("CompileIQ capability has no valid bundled-core lock")
+        raise error_type("CompileIQ capability has no valid search implementation lock")
     identity_payload = {
         name: value for name, value in capability.items() if name != "capability_id"
     }
@@ -346,7 +362,8 @@ def _reviewed_distribution_manifest():
         "acceptance": "compatible_capability_not_commit_or_wheel_hash",
         "compatibility": {
             "schema": _CAPABILITY_SCHEMA,
-            "protocol_revision": 6,
+            "protocol_revision": 7,
+            "accepted_protocol_revisions": (6, 7),
             "fork_build_id": _FORK_BUILD_ID,
         },
         "qualified_snapshot": {
@@ -356,12 +373,14 @@ def _reviewed_distribution_manifest():
             "wheel_platform": _REVIEWED_WHEEL_PLATFORM,
             "wheel_sha256": _REVIEWED_WHEEL_SHA256,
             "capability_id": _REVIEWED_WHEEL_CAPABILITY_ID,
-            "core_commit": _EXPECTED_CORE_COMMIT,
+            "core_commit": "python:" + _PACKAGE_VERSION,
             "core_lock": _REVIEWED_WHEEL_CORE_LOCK,
-            "python_source_lock": _EXPECTED_PYTHON_SOURCE_LOCK,
+            "python_source_lock": _REVIEWED_PYTHON_SOURCE_LOCK,
+            "execution_engine": "forge_complete_recipes_python_v1",
+            "python_abi": "cp313",
         },
         "runtime_verification": (
-            "capability_identity_core_manifest_and_session_source_identity"
+            "capability_identity_implementation_lock_and_session_source_identity"
         ),
     }
 
@@ -820,6 +839,11 @@ class _CompileIQOpaqueRecipeTransport:
             raise ValueError(
                 "CompileIQ search has no matching verified core provenance"
             )
+        if self._capability["protocol_revision"] == 7 and (
+            provenance.get("execution_engine") != self._capability["execution_engine"]
+            or provenance.get("verification") != self._capability["core_verification"]
+        ):
+            raise ValueError("CompileIQ search has no matching scheduler provenance")
         records = getattr(compileiq_search, "opaque_recipe_audit_records", None)
         if not isinstance(records, tuple):
             raise TypeError(

@@ -429,14 +429,18 @@ def test_reviewed_compileiq_distribution_keeps_qualification_out_of_acceptance()
     assert snapshot["commit"] == _shared_compileiq_opaque._REVIEWED_FORK_COMMIT
     assert snapshot["wheel_platform"] == "win32/amd64"
     assert snapshot["wheel_sha256"] == (
-        "fe8c45f71341736609cc9b2374d7c79e6d9e25e984c5fad2fd087714b2608c9c"
+        "e7878888d83176a90ed0bc65bfab421a52596ef72efd1e03e2c5b7894101e66b"
     )
     assert snapshot["core_lock"] == (
-        "sha256:b4838970b7b913bbb7ce6bd50aaa0d132b0df8b11765bd76284736be8a16040b"
+        "sha256:fb43fc217c4cc955f6ab50d91f9f5c3008324c0cfc79e3fc22b7b0a9e1f0395b"
     )
+    assert snapshot["python_abi"] == "cp313"
+    assert snapshot["execution_engine"] == "forge_complete_recipes_python_v1"
+    assert distribution["compatibility"]["accepted_protocol_revisions"] == (6, 7)
 
 
-def test_future_compatible_compileiq_build_is_not_commit_or_wheel_locked(tmp_path):
+@pytest.mark.parametrize("revision", [6, 7])
+def test_future_compatible_compileiq_build_is_not_commit_or_wheel_locked(tmp_path, revision):
     capability = dict(_capability())
     capability.update(
         {
@@ -447,6 +451,14 @@ def test_future_compatible_compileiq_build_is_not_commit_or_wheel_locked(tmp_pat
             "compatible_additive_fact": "accepted",
         }
     )
+    if revision == 7:
+        capability.update(
+            protocol_revision=7,
+            execution_engine="forge_complete_recipes_python_v1",
+            core_verification="python_scheduler_source_digest_at_search_start",
+            opaque_domain_binding="capability_id_scheduler_source_lock",
+            core_commit="python:1.1.0b2+taichiforge.1",
+        )
     identity_payload = {
         name: value for name, value in capability.items() if name != "capability_id"
     }
@@ -502,6 +514,23 @@ def test_future_compatible_compileiq_build_is_not_commit_or_wheel_locked(tmp_pat
     assert accepted["compatible_additive_fact"] == "accepted"
     assert source_lock.startswith("ciq-python-source-v1:")
     assert source_lock != _shared_compileiq_opaque._EXPECTED_PYTHON_SOURCE_LOCK
+    if revision == 7:
+        # A digest alone is insufficient: the capability must identify the
+        # implementation that actually evaluates complete recipes.
+        for field, bad in (
+            ("execution_engine", "amber"),
+            ("core_verification", "bundled_manifest_lock_and_platform_hashes_at_search_start_no_override"),
+            ("opaque_domain_binding", "capability_id_core_commit_core_lock"),
+        ):
+            saved = capability[field]
+            capability[field] = bad
+            capability["capability_id"] = _shared_compileiq_opaque._identity(
+                _shared_compileiq_opaque._CAPABILITY_ID_PREFIX,
+                {name: value for name, value in capability.items() if name != "capability_id"},
+            )
+            with pytest.raises(_shared_compileiq_opaque.CompileIQOpaqueUnavailableError, match="incompatible"):
+                _shared_compileiq_opaque._validated_compileiq_capability(importer=modules.__getitem__)
+            capability[field] = saved
 
 
 @test_utils.test(arch=ti.cpu)

@@ -54,6 +54,8 @@ def _complete_compileiq_audit(search, *, omit=()):
         opaque_recipe_core_provenance={
             "core_commit": search.capability["core_commit"],
             "core_lock": search.capability["core_lock"],
+            "verification": search.capability["core_verification"],
+            "execution_engine": search.capability.get("execution_engine"),
         },
         opaque_recipe_audit_records=tuple(records),
     )
@@ -78,7 +80,7 @@ def test_compileiq_plan_domain_is_complete_opaque_and_baseline_inclusive():
     baseline = search.recipe_manifest(search.baseline_recipe_id)
     task_count = len(baseline["tasks"])
 
-    assert search.capability["protocol_revision"] == 6
+    assert search.capability["protocol_revision"] in (6, 7)
     assert search.capability["package_version"]
     assert search.baseline_recipe_id in search.recipe_ids
     assert 3 <= len(search.recipe_ids) <= 4096
