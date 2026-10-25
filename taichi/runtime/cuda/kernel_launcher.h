@@ -336,7 +336,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
       KernelLaunchABI launch_abi = KernelLaunchABI::ordinary,
       bool allow_sparse_replay = false,
       std::shared_ptr<void> *sparse_lease = nullptr,
-      const SparseRuntimeView *runtime_view = nullptr);
+      const SparseRuntimeView *runtime_view = nullptr,
+      const std::vector<OffloadedTask> *recorded_tasks = nullptr);
   bool on_cuda_device(void *ptr);
   int64 get_sparse_list_version(int snode_id) const;
   void record_sparse_list_reuse_sample(SparseListState &state,

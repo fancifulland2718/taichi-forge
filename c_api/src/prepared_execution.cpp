@@ -2307,6 +2307,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
                                  {static_cast<int>(i)}),
                              prepared->submission_widths.at(slot->second)});
           patched_parameters.insert(name);
+          bound->context->mutable_argument_ranges.emplace_back(
+              patches.back().argument_offset, patches.back().bytes);
         }
         bound->context->append_dispatch_label(kernel->label);
         DevicePtr indirect_packet{kDeviceNullPtr};

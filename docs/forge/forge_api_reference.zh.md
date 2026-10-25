@@ -2050,6 +2050,9 @@ geometry。CPU 不伪造 GPU grid，selected/actual 留空，并报告
 `actual_geometry_kind="cpu_runtime_scheduler"`。Vulkan device-indirect dispatch 报告静态
 selected capacity，但 actual grid/block 留空并标记 `"runtime_indirect"`，因为每次调用由
 device packet 决定且不做 host readback。静态与动态 shared-memory bytes 分开报告。
+CUDA/Vulkan 可由 host 参数确定工作量的普通 range task 报告
+`actual_geometry_kind="host_argument_bound"`：selected grid 是编译时上界，actual grid
+留空，因为实际值取决于调用或准备时的参数；block 大小保持 selected 值。
 `range_mapping` 字段取 `cpu_scheduler`、`grid_stride`、`device_bounded_grid_stride`、
 `one_to_one` 或 `not_applicable`。CUDA device-bounded mapping 使用 device-loaded logical end，
 同时保留 saturation-capped grid-stride worker envelope。其中 `one_to_one` 是编译器保证：缩小 indirect grid 会同时减少该 task
@@ -2060,8 +2063,9 @@ device packet 决定且不做 host readback。静态与动态 shared-memory byte
 `unknown`（`value=None`，例如尚未描述的参数/shape 表达式）。它不表示该 task 可以
 安全缩小 grid；CPU 调度器降级后的范围也不一定等于用户源码范围。两端为常量时，
 `constant_range_size` 用 64 位差值计算，反向或空区间为零。描述不增加设备读回或运行时同步。
-当前 task 布局采用 LLVM AOT schema 11、GFX metadata 10（选中范围策略时为 11）和
-JIT cache schema 74；原生 ABI 为 178，旧候选产物需要重新导出并使用配对的前端/runtime 包。
+当前 task 布局采用 LLVM AOT schema 13（含入口别名或选定范围策略时为 14）、
+GFX metadata 12 和 JIT cache schema 78；原生 ABI 为 214。
+旧候选产物需要重新导出并使用配对的前端/runtime 包。
 
 CUDA 选中的设备范围 task 策略现可进入普通平直 `Graph.run()` 录制与借用域的
 `Graph.prepare()`。它复用编译产物，每个选中 task 增加一个设备控制器和 48 B 控制

@@ -370,6 +370,10 @@ class LaunchContextBuilder {
 
  public:
   size_t arg_buffer_size{0};
+  // Cold byte ranges declared mutable by an independent prepared instance.
+  // Ordinary calls leave this empty; shape-only bounds remain immutable even
+  // when an unrelated scalar is updated between submissions.
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> mutable_argument_ranges;
   const StructType *args_type{nullptr};
   size_t result_buffer_size{0};
 

@@ -777,7 +777,8 @@ bool KernelLauncher::prepare_cuda_graph_context(
     KernelLaunchABI launch_abi,
     bool allow_sparse_replay,
     std::shared_ptr<void> *sparse_lease,
-    const SparseRuntimeView *runtime_view) {
+    const SparseRuntimeView *runtime_view,
+    const std::vector<OffloadedTask> *recorded_tasks) {
   std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
   std::shared_ptr<const Context> launcher_ctx;
   auto iter = contexts_.find(handle.get_launch_id());
@@ -805,6 +806,20 @@ bool KernelLauncher::prepare_cuda_graph_context(
     return false;
   }
   const auto &offloaded_tasks = *offloaded_tasks_ptr;
+  // Compare host-dependent geometry without copying the compiled task table.
+  // A changed grid must enter the existing recapture transaction before upload.
+  if (recorded_tasks) {
+    if (recorded_tasks->size() != offloaded_tasks.size())
+      return false;
+    for (std::size_t i = 0; i < offloaded_tasks.size(); ++i) {
+      const auto &task = offloaded_tasks[i];
+      if (task.range_bounds && task.range_bounds->host_launch &&
+          task.launch_grid(ctx.get_context().arg_buffer, ctx.arg_buffer_size,
+                           &ctx.mutable_argument_ranges) !=
+              (*recorded_tasks)[i].grid_dim)
+        return false;
+    }
+  }
   bool uses_sparse = false;
   for (const auto &task : offloaded_tasks) {
     if (task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
@@ -935,6 +950,10 @@ bool KernelLauncher::prepare_cuda_graph_context(
                                   : nullptr;
   if (resolved_tasks != nullptr) {
     *resolved_tasks = offloaded_tasks;
+    for (auto &task : *resolved_tasks) {
+      task.grid_dim = task.launch_grid(context.arg_buffer, ctx.arg_buffer_size,
+                                      &ctx.mutable_argument_ranges);
+    }
     if (uses_sparse && allow_sparse_replay && plan == nullptr) {
       // Reuse the existing grid-stride parent bound on the default fixed
       // replay route. Explicit task plans retain their own launch policy.
@@ -1235,7 +1254,8 @@ bool KernelLauncher::update_cuda_graph_launch(
   if (!prepare_cuda_graph_context(packet.handle, ctx, context,
                                   nullptr, &task_plan_identity,
                                   &resolved_task_count, packet.launch_abi,
-                                  bool(packet.sparse_replay_lease))) {
+                                  bool(packet.sparse_replay_lease), nullptr,
+                                  packet.runtime_view, &packet.offloaded_tasks)) {
     return false;
   }
   if (task_plan_identity != packet.task_execution_plan_identity ||
@@ -1849,18 +1869,20 @@ void KernelLauncher::launch_ordinary_context(const Context &selected,
       TI_TRACE("Skipping current sparse list kernel {}", task.name);
       continue;
     }
-    TI_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
+    const int grid = task.launch_grid(host_arg_buffer, ctx.arg_buffer_size,
+                                      &ctx.mutable_argument_ranges);
+    TI_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, grid,
              task.block_dim);
     if (ctx.dispatch_label().empty()) {
       cuda_jit_module->launch_function_with_stream(
-          task.native_function, task.name, task.grid_dim, task.block_dim,
+          task.native_function, task.name, grid, task.block_dim,
           task.dynamic_shared_array_bytes, {&ctx.get_context()}, {}, nullptr);
     } else {
       const auto trace_name = make_labeled_task_name(
           task.name, task.task_id, ctx.dispatch_label());
       ScopedExternalProfilerAnnotation annotation(trace_name);
       cuda_jit_module->launch_function_with_stream(
-          task.native_function, task.name, task.grid_dim, task.block_dim,
+          task.native_function, task.name, grid, task.block_dim,
           task.dynamic_shared_array_bytes, {&ctx.get_context()}, {}, nullptr,
           &trace_name);
     }

@@ -36,8 +36,16 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **213**, persistent execution-plan version **27**, and
-  compiled-cache schema **77**. Update compatible components together; matching Git commits
+- Ordinary CUDA/Vulkan grid-stride kernels can reduce idle blocks from host-known
+  ndarray shapes, shape products or direct `i32` range bounds, retaining the
+  existing block size and saturation grid envelope. This needs no timing search,
+  device-count readback or extra compiled specialization; unqualified tasks retain
+  their scheduling. Ordinary Graph updates re-record when the resolved grid changes.
+  Prepared instances retain the original grid for bounds that depend on mutable
+  submission parameters; unrelated updates do not disable shape-based selection.
+  CPU scheduling is unchanged.
+- The frontend/native private ABI is **214**, persistent execution-plan version **27**, and
+  compiled-cache schema **78**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
   Old compiled caches are invalidated; distinguish the resulting cold start from warm replay.
@@ -156,8 +164,8 @@ combination. Consult the linked API contracts and capability queries for exact s
 - CUDA AOT preserves each entry's selected occupancy waves/work-per-thread launch policy.
   Ordinary execution and Graph recording share cold resolution on the consumer device
   instead of silently using the baseline grid. Different policies on shared code remain
-  independent. Current ordinary LLVM artifacts use schema 11; aliases or selected
-  device-range entries require schema 12 and are rejected by older readers.
+  independent. Current ordinary LLVM artifacts use schema 13; aliases or selected
+  device-range entries require schema 14 and are rejected by older readers.
 - CUDA AOT can preserve explicitly selected device-range tasks in flat Graph recordings,
   including independent execution domains and explicit gradients. Ordinary and selected
   entries with identical effective code share one LLVM payload and one runtime registration;

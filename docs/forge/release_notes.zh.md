@@ -34,8 +34,13 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **213**，持久执行计划为 **27**，
-  编译缓存 schema 为 **77**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
+- CUDA/Vulkan 普通 grid-stride kernel 可根据 host 参数中已知的 ndarray shape、
+  shape 乘积或直接 `i32` 区间边界减少空 block，保留原 block 大小与饱和 grid 上界。
+  不测速、不读回设备计数、不新增编译特化；不能证明安全的任务保持原调度。
+  Graph 在录制时确定几何，普通参数更新跨越 grid 边界时重新录制；prepared 实例
+  中依赖逐提交可变参数的边界保留原 grid，无关参数更新不阻止 shape 选参。CPU 调度不变。
+- frontend 与 native runtime 使用私有 ABI **214**，持久执行计划为 **27**，
+  编译缓存 schema 为 **78**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
 - Vulkan 独立域支持有完整树代次证明的稀疏 Field 固定执行，AOT 重建和 JIT 已选
@@ -124,7 +129,7 @@
   显式梯度。有效代码相同的普通入口与选中入口共用一份 LLVM 产物及一次 runtime 注册，
   各 prepared 实例保留自己的范围控制存储和工作区策略；直接调用 kernel 不能绕过所选
   录制策略。它仍是显式选择，每个选中 task 增加一个控制器，不据此宣称运行提速。
-  普通 LLVM 产物沿用 schema 11，含入口别名或范围策略的产物使用 schema 12。
+  普通 LLVM 产物沿用 schema 13，含入口别名或范围策略的产物使用 schema 14。
 - 显式 CUDA 设备范围策略可与原生 WHILE 的前段、循环体和后段共同录制，保持整步
   一次提交；JIT、AOT 和独立实例复用范围录制器。重复条件按物理录制位置分别持有
   控制记录，不按循环预算展开。每处选中 task 增加 48B 控制存储及一个控制器；
@@ -135,7 +140,7 @@
   JIT code loan 借用已编译代码，AOT adapter 处理部署闭包。普通调用的执行与提交路径保持。
 - CUDA AOT 保留每个入口选定的 occupancy waves/work-per-thread 启动策略，普通执行与
   Graph 录制共用消费端的冷阶段解析，不再静默回到基线网格。同一代码的不同策略保持
-  独立；普通 LLVM 产物使用 schema 11，入口别名或选定设备范围策略使用 schema 12，
+  独立；普通 LLVM 产物使用 schema 13，入口别名或选定设备范围策略使用 schema 14，
   不支持对应版本的旧 reader 明确拒绝。
 - CPU/CUDA/Vulkan 的执行注册状态归执行 owner，编译代码可共享；在途租约、独立实例、
   reset/close 和进程退出按资源依赖退休，修复借用 runtime 及 Vulkan 退出访问异常。

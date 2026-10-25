@@ -2492,7 +2492,11 @@ unset and reports `actual_geometry_kind="cpu_runtime_scheduler"`. A Vulkan
 device-indirect dispatch reports its static selected capacity but leaves
 actual grid/block unset with `actual_geometry_kind="runtime_indirect"`, since
 the device packet determines each invocation without host readback. Static
-and dynamic shared-memory byte counts are reported separately. The
+and dynamic shared-memory byte counts are reported separately. Ordinary CUDA/Vulkan
+range tasks whose workload is proven from host arguments report
+`actual_geometry_kind="host_argument_bound"`: selected grid is the compiled upper
+bound and actual grid is unset because it depends on invocation/preparation arguments;
+the block size retains its selected value. The
 `range_mapping` field is `cpu_scheduler`, `grid_stride`,
 `device_bounded_grid_stride`, `one_to_one`, or `not_applicable`. The CUDA
 device-bounded mapping has a device-loaded logical end while retaining a
@@ -2508,8 +2512,9 @@ do not certify that reducing the grid is safe. CPU scheduler demotion can also
 change the physical range relative to the source loop. Two constant bounds
 produce `constant_range_size` using a 64-bit difference, with empty or reversed
 intervals reporting zero. Reporting adds no device readback or synchronization.
-The current task layout uses LLVM AOT schema 11, GFX metadata 10 (11 for
-selected range policies), JIT cache schema 74 and native ABI 178. Re-export older candidate artifacts and use a paired frontend
+The current task layout uses LLVM AOT schema 13 (14 for entry aliases or selected
+range policies), GFX metadata 12, JIT cache schema 78 and native ABI 214.
+Re-export older candidate artifacts and use a paired frontend
 and runtime package.
 
 CUDA's selected device-range task policy can now be consumed by an ordinary
