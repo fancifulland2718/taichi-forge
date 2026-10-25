@@ -53,9 +53,21 @@ combination. Consult the linked API contracts and capability queries for exact s
   snapshots, debug arithmetic and effectful prefixes retain their existing
   execution. CPU scheduling is unchanged. Cloning preserves direct end-bound
   references within the cloned task.
-  CPU scheduling is unchanged.
-- The frontend/native private ABI is **215**, persistent execution-plan version **27**, and
-  compiled-cache schema **80**. Update compatible components together; matching Git commits
+- Range metadata separates workload sources from qualification for a specific transformation.
+  CUDA can also elide whole empty groups for verified scalar sum/dot/min/max TLS reductions,
+  preserving productive blocks, tail participation and reduction grouping. Unknown TLS,
+  physical-thread observations, shared memory and unproven calls retain their existing route.
+  This does not widen the device-range controller's TLS contract or change CPU scheduling.
+- Explicit complete Graph recipe search can consume CUDA/Vulkan compiled device-range
+  qualifications, retaining code sharing, mutable bindings and selected-plan AOT export.
+  Direct-kernel trials do not include recording-only alternatives. **CompileIQ autotuning
+  remains disabled by default**; ordinary JIT/Graph/AOT execution never starts a search.
+  [Search reports](graph_recipe_integration.en.md) add whole-search accounting, measurement
+  sources and cold-cost execution equivalents, separately from break-even counts. Failed and
+  unselected trials are included; missing historical wall time after resume stays unknown.
+- The frontend/native private ABI is **217**, persistent execution-plan version **27**, and
+  compiled-cache schema **82**; LLVM AOT metadata is **17/18**, GFX metadata **14**.
+  Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
   Old compiled caches are invalidated; distinguish the resulting cold start from warm replay.

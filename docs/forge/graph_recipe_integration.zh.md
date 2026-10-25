@@ -4,6 +4,7 @@
 
 应用有稳定 Graph definition 和完整执行方案的 evaluator 时，可使用此流程。
 搜索是可选能力；普通 `builder.compile()` / `graph.run()` 不依赖 CompileIQ。
+CompileIQ 自动调优默认关闭；普通 JIT、Graph prepare/replay 和 AOT 加载不会自动启动搜索。
 
 ## 安装边界
 
@@ -21,6 +22,15 @@ CUDA recipe discovery 可以在 template 专门化后合并相邻的常量范围
 掩码。全局读取、跨段写同一 field、缺别名证明的外部内存和跨 lane 依赖不进入这条不等长路径。
 循环前后的串行工作仍保持串行。发现候选不会改变普通编译，也不保证融合更快；应测完整应用窗口，
 并保留 baseline。
+
+CUDA/Vulkan 的 `range_dispatch` family 复用最终 compiled task 中已有的 device-range
+controller 资格，为一个 dispatch 的合格动态范围生成完整候选。它保留串行前后段、block
+和有效迭代映射，代码与 baseline 共享；物理执行身份、控制存储和可变绑定仍分别管理。
+候选只在显式 discovery/search 中构建，不会因启用了普通 host 范围裁剪而自动采用。
+已选 Graph 可沿现有 AOT 导出路径部署，无需在消费端安装 CompileIQ。
+host 已知工作量、允许裁掉空工作组、允许设备控制是不同事实；例如新验证的 CUDA TLS
+归约只获得 host 裁剪资格，不因此进入 device-range 候选。CPU 保留既有 scheduler。
+controller 仅适用于 Graph recording，普通 kernel 直接测速不提供该轴。
 
 以下可运行示例使用 CUDA，演示 provider 与搜索 API，不是应用基准或加速承诺。
 
@@ -464,6 +474,20 @@ cost profile 单位可为 `s`、`ms`、`us` 或 `ns`，同一个 profile 的各�
 setup 与 first 不应重叠。只有同 stage/fidelity 的完整且可行 baseline/candidate 证据可用于估算；缺测、
 无正向稳态收益或证据不可比时，不产生摊销次数。中位数估算与样本极值的算术边界分开，后者不是统计置信区间。
 范围重叠或单样本会明确标注，不构成自动采用门槛。host/device/end-to-end profile 不自动相加。
+
+每个 cost profile 同时投影其 `metric_definitions`，包括仅作观测、未作为 objective 的指标。
+`break_even.extra_cold_equivalent_steady_executions` 是额外 setup+first 成本除以候选
+steady 耗时；`additional_warm_executions` 则除以每次节省并向上取整。后者加 1 才是模型的
+总执行次数，不能把等效等待量当作回本次数。单位是 profile 声明的执行区间；一次 Graph
+重放不自动等于一个仿真步。缺测或零分母不填零。
+
+`decision.report.search_cost_ledger` 单独记录当前搜索构建与 `run()`（含 context close）
+的 host 墙钟时间，覆盖失败与未选中试验。它不含源 Graph 创建、调用者在构建与运行间的
+空闲以及最终报告生成。JSON 保留所有 checkpoint 试验的分阶段已测小计与缺测数量，
+不会用最后胜出候选的耗时代替整个搜索。断点续跑会区分历史/新增记录；此前整个搜索的
+墙钟时间不可得时，`whole_search_host_seconds` 为 `None`。
+若选中方案提供 steady 测量，还报告搜索耗时相当于多少次该区间；这是等效时间而非回本或
+加速结论。trial timer、调用者 setup/first/steady 和整个搜索墙钟可能重叠，不应相加。
 
 Markdown 同时展示 recipe 注释中已有的 provider-owned `preparation_observation`。FFT 观测范围是计划创建；
 SpMM 观测范围是可能命中计划缓存的准备过程。共享初始化未单独拆分，selected-only restore 未测量。这些不是

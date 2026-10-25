@@ -45,8 +45,18 @@
   搬运这些值和普通按值 scalar 输入的串行任务。设备内存快照、动态起点快照、
   debug 算术及有副作用的前段保留原执行；CPU 调度不变。
   task 克隆会将直接终点引用保留在克隆后的任务内部。
-- frontend 与 native runtime 使用私有 ABI **215**，持久执行计划为 **27**，
-  编译缓存 schema 为 **80**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
+- 范围元数据将工作量来源与具体调度变换的资格分开。CUDA 对最终 IR 已验证的
+  标量 sum/dot/min/max TLS 归约也可裁掉整块空工作组，保留有效块、尾块参与和
+  归约分组；未知 TLS、物理线程访问、共享内存与未证明调用保留原路线。
+  这不扩大 device-range controller 的 TLS 支持，也不改变 CPU 调度。
+- 显式完整 Graph recipe 搜索可以复用 CUDA/Vulkan 已编译的 device-range 资格，
+  保留代码共享、可变绑定与选中方案的 AOT 导出；普通 kernel 直接测速不会加入只能
+  recording 执行的候选。**CompileIQ 自动调优默认关闭**，普通 JIT/Graph/AOT 不会自动搜索。
+  [搜索报告](graph_recipe_integration.zh.md)新增完整搜索成本账、观测来源及冷成本等效执行次数，
+  与回本次数分开；失败/未选中试验计入搜索，续跑中缺失的历史墙钟时间保持未知。
+- frontend 与 native runtime 使用私有 ABI **217**，持久执行计划为 **27**，
+  编译缓存 schema 为 **82**；LLVM AOT metadata 为 **17/18**、GFX metadata 为 **14**。
+  请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
 - Vulkan 独立域支持有完整树代次证明的稀疏 Field 固定执行，AOT 重建和 JIT 已选

@@ -29,6 +29,19 @@ unequal-range path. Serial work before/after the loops stays serial. Discovery
 does not change ordinary compilation or guarantee that fusion is faster; measure
 the complete application window and retain the baseline.
 
+CompileIQ autotuning is disabled by default. Ordinary JIT, Graph prepare/replay and
+AOT loading never start a search. The CUDA/Vulkan `range_dispatch` family consumes
+existing compiled device-range controller qualifications to build a complete
+dispatch candidate. It preserves serial prefixes/suffixes, block size and productive
+iteration mapping, sharing code with the baseline while keeping physical execution
+identity, controller storage and mutable bindings separate. Candidates are constructed
+only during explicit discovery/search; host range trimming does not select them.
+Selected Graphs use the existing AOT export path without a deployment-time CompileIQ
+dependency. Known workload, empty-group elision and device control are distinct
+qualifications: verified CUDA TLS reductions gain host elision, not device-controller
+support. CPU keeps its scheduler. Controllers require Graph recording and are excluded
+from direct-kernel timing trials.
+
 The executable example below uses CUDA. It is a demonstration of the provider
 and search API, not an application benchmark or a promise of acceleration.
 
@@ -578,6 +591,25 @@ evidence do not produce a break-even count. Median estimates and arithmetic boun
 over observed sample extrema are separate; the latter are **not confidence intervals**.
 Overlap and single-sample evidence are labeled, not turned into adoption gates.
 Independent host/device/end-to-end profiles are never summed automatically.
+
+Each cost profile also projects its `metric_definitions`, including metrics that are
+observational rather than objectives. `break_even.extra_cold_equivalent_steady_executions`
+divides extra setup+first cost by the candidate steady interval;
+`additional_warm_executions` divides it by the per-execution saving and rounds up.
+Adding one to the latter gives total executions in the model. These are different
+quantities. A Graph replay is not automatically a simulation step. Missing measurements
+and zero denominators are not reported as zero cost.
+
+`decision.report.search_cost_ledger` separately records host wall time for constructing
+the current search and running it, including search-context close and failed/unselected
+trials. Source Graph construction, caller idle between construction/run and final report
+rendering are excluded. JSON retains measured phase subtotals and missing counts for
+every checkpoint trial; the winning candidate's cost never substitutes for the whole
+search. Resume distinguishes historical and new records; unavailable historical total
+wall time leaves `whole_search_host_seconds` as `None`. When the selected candidate has
+a steady measurement, the ledger reports search wall time in equivalent execution units.
+This is not a break-even or speedup claim. Trial timers, caller lifecycle measurements
+and whole-search wall time overlap and must not be added together.
 
 Markdown also renders provider-owned `preparation_observation` facts already
 retained in recipe annotations. FFT observations cover plan creation; SpMM
