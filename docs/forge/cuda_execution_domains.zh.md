@@ -217,7 +217,7 @@ Graph 或另一实例对同一树的冲突访问会在提交前被拒绝。不�
 与 chunked pool、零轮/早停/耗尽/嵌套循环及显式梯度；这不表示任意稀疏布局已获资格。
 
 独立 Vulkan 路线还不接纳 host selection、公共并行 recipe，以及尚未隔离的
-RNG/runtime-error 状态。CUDA 稀疏独立域状态合同另行处理。
+RNG/runtime-error 状态。
 普通 Graph 保持既有能力；CUDA Canvas 和外部内存协议不会因此自动适用于 Vulkan 域。
 
 初始化导入普通队列已提交的准备前缀，并在所选队列执行实例初始化。暖态提交把依赖、
@@ -518,9 +518,28 @@ with Runtime("cuda") as runtime:
 
 ## 所有权和内部状态
 
+`cuda_execution_domain_sparse_fields` 表示 CUDA 的公共 JIT/AOT 固定准备可使用有完整
+编译资格和树代次证明的稀疏闭包。共同准备层收集初始化、条件与循环体、分支及收尾的
+选中 kernel；每个实际 executor 的闭包只建立一份私有 runtime 视图。使用原代码，
+不重编译，也不改变选中的控制结构。稀疏管理器排他借用；没有遍历管理器的 dense 树
+只共享目录及存储寿命，数据读写仍需调用方提供依赖。使用这些 runtime 视图的
+parallel 分支仍不接纳。
+
+先完成全部相关树的冷阶段物化，再准备这些实例。AOT 同一 runtime 加载多个稀疏模块
+时，可以先取得各计划涉及的 `module.kernel(name)`，使其代码和树资源准备完成，
+无需执行用户 kernel；再逐个 `prepare_execution(..., execution_domain=...)`。
+借用期间创建新树可能替换共享 allocator，因此仍会拒绝。增加这类资源应先关闭相关
+实例，完成物化后重新准备；这不是运行中动态创建稀疏资源的支持声明。
+
+CUDA 每个视图复用一份私有临时区，各提交槽预分配诊断快照。GPU 完成后才读取快照，
+原票据固定保存逻辑错误；错误不阻止已完成参数存储的复用。`close()` 先确认安全退休、
+释放引用和容量，再报告最后一次提交的逻辑错误。真正的后端或清理失败仍保留资源。
+计时区间不包含尾部诊断写回。Windows 验证覆盖 pointer/bitmasked/dynamic、混合 dense
+依赖、双实例、零轮/早停/预算耗尽、显式梯度及源码无关的 AOT 消费；其他布局需另行验证。
+
 冷准备消费持久化的编译事实。已经资格验证的 dense field、`real_func`、向量参数和
 跨 task 临时量沿用现有编译器及 AOT loader，BC/PTX/cubin 均保存这些事实。缺少事实的旧
-产物，以及使用尚未隔离的共享 RNG、runtime error、CUDA sparse list/allocator、打印、mesh
+产物，以及使用尚未隔离的共享 RNG、未获资格的 runtime error/sparse 状态、打印、mesh
 或未资格外部调用的 kernel，会被独立域拒绝。旧默认队列 API 维持原合同。绑定帧、storage
 ring 和 host selection 不会被悄悄改写为其他物理路线；native operation 也必须明确允许
 独立域路线。

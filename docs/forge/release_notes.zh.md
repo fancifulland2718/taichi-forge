@@ -34,13 +34,16 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **205**，持久执行计划为 **26**，
+- frontend 与 native runtime 使用私有 ABI **206**，持久执行计划为 **26**，
   编译缓存 schema 为 **76**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
 - Vulkan 独立域支持有完整树代次证明的稀疏 Field 固定执行，AOT 重建和 JIT 已选
   代码借用共用排他准入、私有遍历列表及诊断。已验证独立/chunked pool、设备循环和
-  显式梯度；同树冲突访问在提交前拒绝。CUDA 稀疏独立域仍需单独资格，详见
+  显式梯度；同树冲突访问在提交前拒绝。CUDA 公共 JIT/AOT 准备也支持已物化稀疏闭包，
+  覆盖初始化、设备循环和显式梯度；混合 dense Field 只共享目录寿命，保留调用方的数据
+  依赖责任。完成后的逻辑错误不阻止参数槽复用或安全退休，原票据保留错误。
+  CUDA 借用期间不能创建会替换共享 allocator 的新树，详见
   [执行域合同](cuda_execution_domains.zh.md)。
 - Vulkan 独立域可显式选择 `queue="graphics"`，在同一队列执行实例私有的离屏
   color/depth 绘制与后续计算。平直 storage kernel 和描述完整的低层 graphics pass

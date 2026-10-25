@@ -36,7 +36,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **205**, persistent execution-plan version **26**, and
+- The frontend/native private ABI is **206**, persistent execution-plan version **26**, and
   compiled-cache schema **76**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
@@ -45,7 +45,12 @@ combination. Consult the linked API contracts and capability queries for exact s
   proofs. AOT reconstruction and selected JIT code loans share exclusive admission,
   private traversal lists and diagnostics. Independent/chunked pools, device loops
   and explicit gradients are qualified; conflicting same-tree access is rejected
-  before submission. CUDA sparse domains require separate qualification. See the
+  before submission. Public CUDA JIT/AOT preparation also supports materialized sparse
+  closures, including initialization, device loops and explicit gradients. Mixed dense
+  Fields share directory lifetime while callers retain responsibility for data dependencies.
+  Completed logical errors do not prevent parameter-slot reuse or safe retirement; original
+  tickets retain their errors. CUDA loans prevent new trees from replacing the shared
+  allocator while borrowed. See the
   [execution-domain contract](cuda_execution_domains.en.md).
 - Vulkan domains can explicitly select `queue="graphics"` for instance-private offscreen
   color/depth drawing and compute consumers on one queue. Flat storage kernels and described

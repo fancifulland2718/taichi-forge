@@ -293,7 +293,7 @@ storage; replay does not allocate lists. Preparation retains the ordinary-queue
 producer prefix for the source trees. Windows qualification covers
 pointer/bitmasked/dynamic storage, independent and chunked pools, zero/early/budget
 termination, nested loops and explicit gradients; it is not qualification of
-every sparse layout. CUDA sparse independent-domain state is a separate contract.
+every sparse layout. The CUDA contract is described under ownership below.
 
 Host selection, public parallel recipes and unisolated RNG/runtime-error
 state remain outside this independent Vulkan route. Ordinary Graph execution keeps
@@ -682,11 +682,37 @@ host handle and does not cancel work.
 
 ## Ownership and supported state
 
+`cuda_execution_domain_sparse_fields` declares public CUDA JIT/AOT fixed preparation
+for sparse closures with compiled qualification and complete tree-generation proofs.
+Common preparation collects selected kernels from initialization, conditions, loop bodies,
+branches and the suffix, creating one private runtime view per actual executor closure.
+It uses the selected code and control structure without recompilation. Sparse managers
+are borrowed exclusively; dense trees without traversal managers share directory/storage
+lifetime only. Callers still provide data dependencies. Parallel branches consuming these
+runtime views are rejected.
+
+Materialize all relevant trees in the cold phase before preparing instances. For multiple
+sparse AOT modules on one runtime, first obtain every plan's required `module.kernel(name)`
+to prepare code and tree resources without executing user kernels, then call
+`prepare_execution(..., execution_domain=...)`. Creating another tree can replace the shared
+allocator and remains rejected while loans are active. Close the affected instances before
+adding these resources, then prepare again. This does not qualify dynamic sparse resource
+creation during replay.
+
+Each CUDA view reuses private temporaries and preallocates diagnostic snapshots per submission
+slot. Snapshots are observed after GPU completion; original tickets retain logical errors,
+without preventing reuse of completed parameter storage. `close()` confirms safe retirement
+and releases references/capacity before reporting the last submission's logical error.
+Real backend or cleanup failures retain resources. GPU timing excludes the trailing diagnostic
+write. Windows qualification covers pointer/bitmasked/dynamic storage, mixed dense dependencies,
+two instances, zero/early/budget termination, explicit gradients and source-free AOT consumption;
+other layouts require separate qualification.
+
 Cold preparation uses persisted compiler facts to qualify internal state.
 Qualified dense-field kernels, `real_func` calls, vector arguments and cross-task
 temporaries use the existing compiler and AOT loader. BC, PTX and cubin retain
 these facts. Unknown older artifacts and kernels using unisolated shared RNG,
-runtime errors, CUDA sparse lists/allocators, printing, mesh state or unqualified
+unqualified runtime-error/sparse state, printing, mesh state or unqualified
 external calls are rejected for independent execution. Ordinary default-queue
 APIs remain available under their existing contracts. Selected binding families,
 storage rings and host-selected branches are not silently converted to another
