@@ -387,80 +387,79 @@ class GraphRecipeCatalog:
                 key=lambda item: item.encode("utf-8"),
             )
         )
-        candidates = {}
-        physical_candidates = {}
+        # Keep only admitted physical candidates. A large measured frontier must
+        # not materialize its entire pair/product space before applying the
+        # caller's generation budget.
+        known_selections = {frozenset(entry.recipe.fragment_ids) for entry in self.entries()}
 
-        def offer(fragments, parents, stage):
-            try:
-                recipe = self.composer.compose(tuple(fragments))
-            except GraphRecipeCompositionError as error:
-                self._record_rejection(stage, fragments, error)
-                return
-            if recipe.recipe_id in self._entries:
-                return
-            if recipe.planned_physical_id in self._planned_physical_representatives:
-                return
-            previous_id = physical_candidates.get(recipe.planned_physical_id)
-            if previous_id is not None:
-                if previous_id.encode("utf-8") <= recipe.recipe_id.encode("utf-8"):
-                    return
-                candidates.pop(previous_id, None)
-            physical_candidates[recipe.planned_physical_id] = recipe.recipe_id
-            candidates[recipe.recipe_id] = (
-                recipe,
-                tuple(sorted(set(parents), key=lambda item: item.encode("utf-8"))),
-                stage,
-            )
+        def merges():
+            # Diagonals spread early combinations across the measured frontier.
+            for distance in range(1, len(survivors)):
+                for left_index in range(len(survivors) - distance):
+                    left_id, left = survivors[left_index]
+                    right_id, right = survivors[left_index + distance]
+                    by_id = {
+                        fragment.fragment_id: fragment
+                        for fragment in (*left.recipe.fragments, *right.recipe.fragments)
+                    }
+                    yield tuple(by_id.values()), (left_id, right_id), "survivor-merge"
 
-        for left_index, (left_id, left) in enumerate(survivors):
-            for right_id, right in survivors[left_index + 1 :]:
-                by_id = {
-                    fragment.fragment_id: fragment
-                    for fragment in (*left.recipe.fragments, *right.recipe.fragments)
-                }
-                offer(by_id.values(), (left_id, right_id), "survivor-merge")
-
-        for survivor_id, survivor in survivors:
-            selected = {
-                fragment.fragment_id: fragment for fragment in survivor.recipe.fragments
-            }
+        def additions():
             for seed in seeds:
-                if seed.fragment_id in selected:
-                    continue
-                offer(
-                    (*selected.values(), seed),
-                    (survivor_id,),
-                    "survivor-addition",
-                )
+                for survivor_id, survivor in survivors:
+                    selected = survivor.recipe.fragments
+                    if seed.fragment_id not in survivor.recipe.fragment_ids:
+                        yield (*selected, seed), (survivor_id,), "survivor-addition"
 
-        if self.provider_set is not None:
+        def neighbors():
+            if self.provider_set is None:
+                return
+            expanded = {}
             for survivor_id, survivor in survivors:
                 selected = survivor.recipe.fragments
                 for current in selected:
-                    for neighbor in self.provider_set.expand(current):
+                    if current.fragment_id not in expanded:
+                        expanded[current.fragment_id] = self.provider_set.expand(current)
+                    for neighbor in expanded[current.fragment_id]:
                         by_id = {
                             fragment.fragment_id: fragment
                             for fragment in selected
                             if fragment.fragment_id != current.fragment_id
                         }
                         by_id[neighbor.fragment_id] = neighbor
-                        offer(
-                            by_id.values(),
-                            (survivor_id,),
-                            "neighbor-expansion",
-                        )
+                        yield tuple(by_id.values()), (survivor_id,), "neighbor-expansion"
 
         admitted = []
-        for recipe_id in sorted(candidates, key=lambda item: item.encode("utf-8"))[
-            :candidate_limit
-        ]:
-            recipe, parents, stage = candidates[recipe_id]
-            for fragment in recipe.fragments:
-                self.register_fragment(fragment)
-            before = len(self._ordered_recipe_ids)
-            entry = self._admit(stage, recipe, parents)
-            if len(self._ordered_recipe_ids) != before:
+        routes = [merges(), additions(), neighbors()]
+        while routes and len(admitted) < candidate_limit:
+            active = []
+            for route in routes:
+                candidate = next(route, None)
+                if candidate is None:
+                    continue
+                active.append(route)
+                fragments, parents, stage = candidate
+                selection = frozenset(item.fragment_id for item in fragments)
+                if selection in known_selections:
+                    continue
+                try:
+                    recipe = self.composer.compose(fragments)
+                except GraphRecipeCompositionError as error:
+                    self._record_rejection(stage, fragments, error)
+                    continue
+                if recipe.planned_physical_id in self._planned_physical_representatives:
+                    continue
+                for fragment in recipe.fragments:
+                    if fragment.fragment_id not in self._fragments:
+                        self.register_fragment(fragment)
+                entry = self._admit(
+                    stage, recipe, tuple(sorted(set(parents), key=lambda item: item.encode("utf-8")))
+                )
+                known_selections.add(selection)
                 admitted.append(entry)
+                if len(admitted) == candidate_limit:
+                    break
+            routes = active
         return tuple(admitted)
 
     def build_compatible_stage(self, *, candidate_limit):

@@ -252,7 +252,10 @@ class GraphRecipeSearchStrategy:
 
     @property
     def strategy_id(self):
-        payload = _canonical_json(self.to_dict()).encode("ascii")
+        payload = _canonical_json({
+            "strategy": self.to_dict(),
+            "survivor_generation": "incremental-round-robin-v2",
+        }).encode("ascii")
         return "graph-recipe-search-strategy-v1:" + hashlib.sha256(payload).hexdigest()
 
     def to_dict(self):

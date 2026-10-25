@@ -898,3 +898,93 @@ def test_actual_graph_definition_feeds_the_fragment_composer_without_v1_space():
         if region.region_id not in combined.coverage_region_ids
     }
     assert not hasattr(recipe, "executable_optimization_spec")
+
+
+
+def test_survivor_generation_stops_composing_at_the_requested_budget(monkeypatch):
+    definition = _definition()
+    fragments = tuple(
+        _fragment(definition, (region,), f"budget_{region}_{variant}")
+        for region in range(3) for variant in range(10)
+    )
+    runs = []
+    for reverse in (False, True):
+        catalog = GraphRecipeCatalog(definition)
+        for fragment in reversed(fragments) if reverse else fragments:
+            catalog.register_fragment(fragment)
+        singles = catalog.build_single_region_stage()
+        frontier = tuple(entry.recipe.recipe_id for entry in singles)
+        compose = catalog.composer.compose
+        calls = []
+
+        def counted(selected=()):
+            calls.append(tuple(selected))
+            return compose(selected)
+
+        monkeypatch.setattr(catalog.composer, "compose", counted)
+        result = catalog.build_survivor_stage(
+            tuple(reversed(frontier)) if reverse else frontier,
+            seed_fragment_ids=tuple(fragment.fragment_id for fragment in fragments),
+            candidate_limit=6,
+        )
+        assert len(result) == 6
+        # The old implementation composes every pair and frontier x seed:
+        # 435 + 870 attempts, even though only six can be admitted.
+        assert len(calls) < 100
+        assert len(catalog.entries()) == 1 + len(singles) + 6
+        assert all(set(entry.parent_recipe_ids).issubset(frontier) for entry in result)
+        runs.append(tuple(entry.to_dict() for entry in result))
+    assert runs[0] == runs[1]
+
+
+def test_survivor_generation_interleaves_merge_addition_and_neighbor_routes():
+    definition = _definition()
+    head = _fragment(definition, (0,), "fair_head")
+    middle = _fragment(definition, (1,), "fair_middle")
+    tail = _fragment(definition, (2,), "fair_tail")
+    neighbor = _fragment(definition, (0,), "fair_neighbor")
+
+    class Provider:
+        descriptor = _provider_descriptor()
+
+        def discover(self, requested_definition):
+            return (head, middle, tail)
+
+        def resolve(self, requested_definition, fragment_key):
+            return {item.fragment_key: item for item in (head, middle, tail, neighbor)}[fragment_key]
+
+        def expand(self, requested_definition, fragment_key):
+            return (neighbor,) if fragment_key == head.fragment_key else ()
+
+    catalog = GraphRecipeCatalog(definition)
+    catalog.discover((Provider(),))
+    singles = catalog.build_single_region_stage()
+    frontier = tuple(entry.recipe.recipe_id for entry in singles if middle not in entry.recipe.fragments)
+    result = catalog.build_survivor_stage(
+        frontier,
+        seed_fragment_ids=(middle.fragment_id,),
+        candidate_limit=3,
+    )
+    assert {entry.stage for entry in result} == {
+        "survivor-merge", "survivor-addition", "neighbor-expansion"
+    }
+    assert len({entry.recipe.planned_physical_id for entry in result}) == 3
+
+
+def test_survivor_generation_skips_known_selections_in_semantic_region_order(monkeypatch):
+    definition = _definition()
+    fragments = tuple(_fragment(definition, (i,), f"known_{i}") for i in range(2))
+    catalog = GraphRecipeCatalog(definition)
+    for fragment in fragments:
+        catalog.register_fragment(fragment)
+    singles = catalog.build_single_region_stage()
+    combined = catalog.compose(tuple(item.fragment_id for item in fragments), stage="fixture")
+    frontier = tuple(entry.recipe.recipe_id for entry in (*singles, combined))
+
+    def unexpected_composition(*args):
+        pytest.fail("already admitted fragment sets must not be composed again")
+
+    monkeypatch.setattr(catalog.composer, "compose", unexpected_composition)
+    assert catalog.build_survivor_stage(
+        frontier, seed_fragment_ids=tuple(item.fragment_id for item in fragments), candidate_limit=4
+    ) == ()
