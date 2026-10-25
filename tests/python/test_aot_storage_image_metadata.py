@@ -23,7 +23,7 @@ def test_aot_rwtexture_format_and_shape_only_mip_metadata(tmp_path):
     module.save(str(tmp_path / "image"))
     path = tmp_path / "image" / "metadata.json"
     metadata = json.loads(path.read_text())
-    assert metadata["metadata_version"] == 12
+    assert metadata["metadata_version"] == 13
     argument = next(
         item["value"] for item in metadata["kernels"][0]["ctx_attribs"]["arg_attribs_vec_"] if item["key"] == [0]
     )
@@ -40,4 +40,4 @@ def test_aot_rwtexture_format_and_shape_only_mip_metadata(tmp_path):
     plain = ti.aot.Module()
     plain.add_kernel(ordinary)
     plain.save(str(tmp_path / "ordinary"))
-    assert json.loads((tmp_path / "ordinary" / "metadata.json").read_text())["metadata_version"] == 12
+    assert json.loads((tmp_path / "ordinary" / "metadata.json").read_text())["metadata_version"] == 13

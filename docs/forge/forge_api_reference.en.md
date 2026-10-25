@@ -2512,8 +2512,12 @@ do not certify that reducing the grid is safe. CPU scheduler demotion can also
 change the physical range relative to the source loop. Two constant bounds
 produce `constant_range_size` using a 64-bit difference, with empty or reversed
 intervals reporting zero. Reporting adds no device readback or synchronization.
-The current task layout uses LLVM AOT schema 13 (14 for entry aliases or selected
-range policies), GFX metadata 12, JIT cache schema 78 and native ABI 214.
+Host-bound selection also covers constant addition, subtraction and multiplication
+over supported scalar/shape bounds. A normalized affine transform and input
+interval preserve intermediate i32 overflow checks; unsupported expressions or
+out-of-interval values retain the original grid.
+The current task layout uses LLVM AOT schema 15 (16 for entry aliases or selected
+range policies), GFX metadata 13, JIT cache schema 79 and native ABI 215.
 Re-export older candidate artifacts and use a paired frontend
 and runtime package.
 

@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 
 #include "taichi/analysis/range_for_bounds.h"
+#include "taichi/analysis/host_range_bounds.h"
 #include "taichi/codegen/spirv/compiled_kernel_data.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
@@ -40,6 +41,60 @@ TEST(HostRangeBounds, InvalidArgumentImageFallsBackWithoutReadingIt) {
   EXPECT_FALSE(bounds.valid(8));
 }
 
+TEST(HostRangeBounds, AffineCompositionPreservesIntermediateOverflow) {
+  HostRangeBound bound{1, {0}, false};
+  ASSERT_TRUE(compose_host_range_affine(bound, 3, 0));
+  ASSERT_TRUE(compose_host_range_affine(bound, 1, -1));
+  std::int32_t value = 64;
+  EXPECT_EQ(bound.evaluate(&value, 4), 191);
+  value = -4;
+  EXPECT_EQ(bound.evaluate(&value, 4), -13);
+  value = INT32_MAX;
+  EXPECT_FALSE(bound.evaluate(&value, 4));
+  EXPECT_TRUE(bound.valid(4));
+  bound.input_max = INT32_MAX;
+  EXPECT_FALSE(bound.valid(4));
+
+  bound = {1, {0}, false};
+  ASSERT_TRUE(compose_host_range_affine(bound, 1, 1));
+  ASSERT_TRUE(compose_host_range_affine(bound, 1, -1));
+  EXPECT_EQ(bound.scale, 1);
+  EXPECT_EQ(bound.bias, 0);
+  EXPECT_FALSE(bound.evaluate(&value, 4));  // (INT_MAX + 1) - 1
+  value = INT32_MAX - 1;
+  EXPECT_EQ(bound.evaluate(&value, 4), value);
+
+  bound = {1, {0}, false};
+  ASSERT_TRUE(compose_host_range_affine(bound, -1, 7));
+  value = -3;
+  EXPECT_EQ(bound.evaluate(&value, 4), 10);
+  value = INT32_MIN;
+  EXPECT_FALSE(bound.evaluate(&value, 4));
+  ASSERT_TRUE(compose_host_range_affine(bound, 0, 0));
+  EXPECT_FALSE(bound.evaluate(&value, 4));  // Cancellation keeps prior guards.
+}
+
+TEST(HostRangeBounds, AffineGuardMatchesCheckedSourceOperations) {
+  for (int scale : {-7, -1, 0, 1, 3, INT32_MAX}) {
+    for (int bias : {INT32_MIN, -1, 0, 9, INT32_MAX}) {
+      HostRangeBound bound{1, {0}, false};
+      ASSERT_TRUE(compose_host_range_affine(bound, scale, 0));
+      ASSERT_TRUE(compose_host_range_affine(bound, 1, bias));
+      EXPECT_TRUE(bound.valid(4));
+      for (int value : {INT32_MIN, INT32_MIN + 1, -8, -1, 0, 1, 8,
+                        INT32_MAX - 1, INT32_MAX}) {
+        const auto product = std::int64_t(value) * scale;
+        const auto sum = product + bias;
+        const bool safe = product >= INT32_MIN && product <= INT32_MAX &&
+                          sum >= INT32_MIN && sum <= INT32_MAX;
+        const auto result = bound.evaluate(&value, 4);
+        EXPECT_EQ(result.has_value(), safe);
+        if (safe) EXPECT_EQ(*result, sum);
+      }
+    }
+  }
+}
+
 TEST(HostRangeBounds, MutableBoundsRetainEnvelopeButOtherParametersDoNot) {
   const std::int32_t arguments[] = {7, 64};
   RangeForBounds bounds{RangeBound::constant(0), RangeBound::global_tmp(0),
@@ -55,7 +110,8 @@ TEST(HostRangeBounds, MutableBoundsRetainEnvelopeButOtherParametersDoNot) {
 }
 
 TEST(HostRangeBounds, CodecAndCloneRetainTheFrozenProof) {
-  const HostRangeBounds host{{0, {}, false}, {1, {8, 12}, true}};
+  HostRangeBounds host{{0, {}, false}, {1, {8, 12}, true}};
+  ASSERT_TRUE(compose_host_range_affine(host.end, 3, -1));
   RangeForBounds bounds{RangeBound::constant(0), RangeBound::global_tmp(4), host};
   BinaryOutputSerializer output;
   output.initialize();

@@ -29,10 +29,10 @@ inline constexpr std::uint32_t kTaskLaunchPolicyAotSchemaVersion = 9;
 // either runtime attempts to decode metadata.tcb.
 inline constexpr std::uint32_t kTypedRangeBoundsAotSchemaVersion = 10;
 // Adds the final-IR range-dispatch proof to each serialized LLVM task.
-// v13 adds host-argument launch bounds to the binary task layout (was v11).
-inline constexpr std::uint32_t kDeviceRangeProofAotSchemaVersion = 13;
+// v15 adds normalized affine launch bounds and intermediate-overflow guards.
+inline constexpr std::uint32_t kDeviceRangeProofAotSchemaVersion = 15;
 // Entry aliases and selected range policies reference shared code metadata.
-inline constexpr std::uint32_t kKernelEntryPolicyAotSchemaVersion = 14;
+inline constexpr std::uint32_t kKernelEntryPolicyAotSchemaVersion = 16;
 
 inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";
@@ -133,7 +133,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                   (entry_policy ? (metadata.kernel_entry_sha256.size() != 64 ||
                                     metadata.abi_sha256.size() != 64)
                                 : !metadata.kernel_entry_sha256.empty()),
-              "AOT kernel entry policies require schema 14 and checksums");
+              "AOT kernel entry policies require schema 16 and checksums");
   const bool typed_ranges = base_schema == kDeviceRangeProofAotSchemaVersion ||
                             entry_policy;
   const bool launch_abi = base_schema == kKernelLaunchAbiAotSchemaVersion ||
@@ -141,7 +141,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                           (typed_ranges && !metadata.kernel_launch_abis.empty());
   TI_ERROR_IF(launch_abi != !metadata.kernel_launch_abis.empty() ||
                   (!launch_abi && !metadata.launch_abi_sha256.empty()),
-              "AOT kernel launch ABI declarations require schema 8, 9, 13 or 14");
+              "AOT kernel launch ABI declarations require schema 8, 9, 15 or 16");
   if (launch_abi) {
     TI_ERROR_IF(metadata.abi_sha256.size() != 64 ||
                     metadata.launch_abi_sha256.size() != 64 ||

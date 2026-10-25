@@ -10,6 +10,49 @@ from tests import test_utils
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_affine_bounds_keep_signed_semantics_and_graph_rebinding():
+    @ti.kernel
+    def affine(x: ti.types.ndarray(ti.i32, 1), first: ti.i32, last: ti.i32):
+        for i in range(2 * first + 1, 3 * last - 1):
+            x[i + 5] += i + 17
+
+    @ti.kernel
+    def reversed_affine(x: ti.types.ndarray(ti.i32, 1), n: ti.i32):
+        for i in range(7 - n):
+            x[i] = i + 1
+
+    builder = ti.graph.GraphBuilder()
+    symbol = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x", ti.i32, ndim=1)
+    builder.dispatch(affine, symbol,
+                     ti.graph.Arg(ti.graph.ArgKind.SCALAR, "first", ti.i32),
+                     ti.graph.Arg(ti.graph.ArgKind.SCALAR, "last", ti.i32))
+    graph = builder.compile()
+    array = ti.ndarray(ti.i32, 1030)
+    for first, last in ((-3, 0), (0, 22), (2, 86), (2, 342), (5, 1), (-3, -2)):
+        expected = np.zeros(1030, dtype=np.int32)
+        begin, end = 2 * first + 1, 3 * last - 1
+        if end > begin:
+            expected[begin + 5:end + 5] = np.arange(begin, end) + 17
+        array.fill(0)
+        affine(array, first, last)
+        np.testing.assert_array_equal(array.to_numpy(), expected)
+        graph.run(dict(x=array, first=first, last=last))
+        np.testing.assert_array_equal(array.to_numpy(), expected * 2)
+    for n in (-4, 3, 7, 11):
+        array.fill(0)
+        reversed_affine(array, n)
+        expected = np.zeros(1030, dtype=np.int32)
+        expected[:max(7 - n, 0)] = np.arange(1, max(7 - n, 0) + 1)
+        np.testing.assert_array_equal(array.to_numpy(), expected)
+    if impl.current_cfg().arch != ti.cpu:
+        for kernel, arguments in ((affine, (array, 0, 22)),
+                                  (reversed_affine, (array, 3))):
+            tasks = [t for t in kernel.task_manifest(*arguments) if t.task_type == "range_for"]
+            assert len(tasks) == 1
+            assert tasks[0].actual_geometry_kind == "host_argument_bound"
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_shape_products_and_graph_rebinding(tmp_path):
     @ti.kernel
     def fill(x: ti.types.ndarray(ti.i32, ndim=2)):
@@ -90,7 +133,7 @@ def test_aot_instances_and_gradients_keep_dynamic_shape(tmp_path):
     @ti.kernel
     def square(x: ti.types.ndarray(ti.f32, 1, needs_grad=True),
                y: ti.types.ndarray(ti.f32, 1, needs_grad=True)):
-        for i in x:
+        for i in range(x.shape[0] - 1):
             y[i] = x[i] * x[i]
 
     module = ti.aot.Module()
@@ -111,16 +154,21 @@ def test_aot_instances_and_gradients_keep_dynamic_shape(tmp_path):
             bindings = {name: runtime.ndarray("f32", (size,))
                         for name in ("x", "y", "dx", "dy")}
             arrays.append(bindings)
+            bindings["y"].write(np.zeros(size, dtype=np.float32).tobytes())
             calls.append(loaded.prepare_execution("differentiate", bindings))
         for iteration in (1, 2):
             for bindings, call in zip(arrays, calls):
                 values = np.arange(bindings["x"].shape[0], dtype=np.float32) + iteration
                 bindings["x"].write(values.tobytes())
                 call()
+                expected = values ** 2
+                expected[-1] = 0
                 np.testing.assert_array_equal(
-                    np.frombuffer(bindings["y"].read(), dtype=np.float32), values ** 2)
+                    np.frombuffer(bindings["y"].read(), dtype=np.float32), expected)
+                expected = values * 2
+                expected[-1] = 0
                 np.testing.assert_array_equal(
-                    np.frombuffer(bindings["dx"].read(), dtype=np.float32), values * 2)
+                    np.frombuffer(bindings["dx"].read(), dtype=np.float32), expected)
         calls[0].close()
         calls[1]()
         calls[1].close()
@@ -136,7 +184,7 @@ def test_prepared_mutable_bound_and_unrelated_parameter(tmp_path):
 
     @ti.kernel
     def fill(x: ti.types.ndarray(ti.i32, 1), n: ti.i32, value: ti.i32):
-        for i in range(n):
+        for i in range(3 * n - 1):
             x[i] = value
         for i in x:
             x[i] += 1
@@ -165,7 +213,7 @@ def test_prepared_mutable_bound_and_unrelated_parameter(tmp_path):
             execution_domain=aot_domain, mutable_parameters=("n", "value")))
         for call in (jit, aot):
             call.initialize()
-        for stop in (0, 1, 513, 1025, 3):
+        for stop in (0, 1, 171, 342, 2):
             array.fill(0)
             ti.sync()
             output.write(np.zeros(1025, dtype=np.int32).tobytes())
@@ -175,6 +223,6 @@ def test_prepared_mutable_bound_and_unrelated_parameter(tmp_path):
                 ticket.wait()
                 ticket.close()
             expected = np.ones(1025, dtype=np.int32)
-            expected[:stop] = 8
+            expected[:max(3 * stop - 1, 0)] = 8
             np.testing.assert_array_equal(array.to_numpy(), expected)
             np.testing.assert_array_equal(np.frombuffer(output.read(), dtype=np.int32), expected)

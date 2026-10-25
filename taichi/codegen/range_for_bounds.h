@@ -18,11 +18,15 @@ enum class RangeBoundKind { unknown, constant_i32, global_tmp_i32 };
 
 // A small, proven expression over the immutable launch-argument image. It is
 // either a constant, one i32 scalar, or a product of ndarray dimensions and a
-// nonnegative constant. No device reads, expression interpreter or shape cache.
+// nonnegative constant, followed by a normalized affine transform. The input
+// interval preserves every intermediate i32 overflow check without replaying
+// the source expression at launch. No device reads or expression bytecode.
 struct HostRangeBound {
   std::int32_t factor{1};
   std::vector<std::uint64_t> offsets;
   bool shape_product{false};
+  std::int32_t scale{1}, bias{0};
+  std::int32_t input_min{INT32_MIN}, input_max{INT32_MAX};
 
   bool reads(std::uint64_t offset, std::uint64_t bytes) const {
     // Difference-based overlap avoids overflow for untrusted byte ranges.
@@ -36,14 +40,21 @@ struct HostRangeBound {
 
   bool operator==(const HostRangeBound &other) const {
     return factor == other.factor && offsets == other.offsets &&
-           shape_product == other.shape_product;
+           shape_product == other.shape_product && scale == other.scale &&
+           bias == other.bias && input_min == other.input_min &&
+           input_max == other.input_max;
   }
 
   bool valid(std::uint64_t argument_bytes) const {
     if ((!shape_product && !offsets.empty() &&
          (factor != 1 || offsets.size() != 1)) ||
-        (shape_product && factor < 0))
+        (shape_product && factor < 0) || input_min > input_max)
       return false;
+    for (auto endpoint : {input_min, input_max}) {
+      const auto value = std::int64_t(scale) * endpoint + bias;
+      if (value < INT32_MIN || value > INT32_MAX)
+        return false;
+    }
     for (auto offset : offsets)
       if (argument_bytes < sizeof(std::int32_t) ||
           offset > argument_bytes - sizeof(std::int32_t) ||
@@ -70,10 +81,12 @@ struct HostRangeBound {
           value > std::numeric_limits<std::int32_t>::max())
         return std::nullopt;
     }
-    return static_cast<std::int32_t>(value);
+    if (value < input_min || value > input_max)
+      return std::nullopt;
+    return static_cast<std::int32_t>(value * scale + bias);
   }
 
-  TI_IO_DEF(factor, offsets, shape_product);
+  TI_IO_DEF(factor, offsets, shape_product, scale, bias, input_min, input_max);
 };
 
 struct HostRangeBounds {

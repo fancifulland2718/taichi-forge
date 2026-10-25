@@ -47,7 +47,8 @@ struct TaichiAotData {
   // v10 preserves the final-IR device-range dispatch qualification.
   // v11 persists per-entry range recording selection without duplicating code.
   // v12 carries host-argument launch bounds with each qualified task.
-  static constexpr uint32_t kMetadataVersion = 12;
+  // v13 adds affine bounds and their intermediate-overflow input interval.
+  static constexpr uint32_t kMetadataVersion = 13;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;
