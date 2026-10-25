@@ -36,7 +36,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **210**, persistent execution-plan version **27**, and
+- The frontend/native private ABI is **213**, persistent execution-plan version **27**, and
   compiled-cache schema **77**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
@@ -100,6 +100,18 @@ combination. Consult the linked API contracts and capability queries for exact s
   This release makes no universal compile-time or runtime speedup claim.
 
 ### Compilation cost and artifacts
+
+- Repeated dispatches in large Graphs share immutable kernel access metadata,
+  and compilation transfers dispatch storage to the finished Graph. Frozen
+  definitions retain compressed canonical JSON snapshots, decoded only for
+  inspection or export. Graph identity, bindings, retry and execution order
+  remain unchanged; warm replay does not decompress snapshots.
+- Weak execution-handle registrations are pruned on cold paths instead of
+  accumulating with historical calls. Temporary Python kernel definitions
+  are reclaimed on a cold path after their last consumer releases them;
+  Graphs, launch contexts, AOT builders and native operators retain the
+  definitions they need. Reusable artifacts remain managed by the compilation
+  cache. Cleanup introduces no definition-count cap and does not disable retry.
 
 - Ordinary fixed ranges can absorb proven-safe integer preludes, removing a serial task
   and cross-task temporaries. CUDA/Vulkan also admit dense scalar i32 Field reads when
