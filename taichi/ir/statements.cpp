@@ -491,6 +491,20 @@ std::unique_ptr<Stmt> OffloadedStmt::clone() const {
   if (body) {
     new_stmt->body = body->clone();
     new_stmt->body->set_parent_stmt(new_stmt.get());
+    // end_stmt is a hidden reference into the body, not an ordinary operand.
+    // Preserve its identity within the clone instead of losing the direct
+    // argument bound and silently falling back to temporary offset zero.
+    if (end_stmt) {
+      bool found = false;
+      for (std::size_t i = 0; i < body->statements.size(); ++i) {
+        if (body->statements[i].get() == end_stmt) {
+          new_stmt->end_stmt = new_stmt->body->statements[i].get();
+          found = true;
+          break;
+        }
+      }
+      TI_ASSERT_INFO(found, "Range end expression must be owned by its task body");
+    }
   }
   if (bls_epilogue) {
     new_stmt->bls_epilogue = bls_epilogue->clone();

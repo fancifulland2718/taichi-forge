@@ -77,9 +77,19 @@ bool demotable_scalar_argument(Stmt *stmt) {
          arg->ret_type->is<PrimitiveType>();
 }
 
-bool demotable_range_end(Stmt *stmt, Arch arch) {
-  return demotable_axis_load(stmt) ||
-         (arch == Arch::vulkan && demotable_scalar_argument(stmt));
+bool demotable_range_end(Stmt *stmt, const CompileConfig &config,
+                         const StructType *arguments) {
+  // Only immutable argument reads and checked integer expressions gain this
+  // path. Device reads keep their serial snapshot, and debug arithmetic keeps
+  // its original execution/error site. CPU scheduling is unchanged.
+  const auto arch = config.arch;
+  if (!config.debug && (arch == Arch::cuda || arch == Arch::vulkan) &&
+      (demotable_scalar_argument(stmt) ||
+       describe_host_range_bound(stmt, arguments)))
+    return true;
+  return arch != Arch::cuda &&
+         (demotable_axis_load(stmt) ||
+          (arch == Arch::vulkan && demotable_scalar_argument(stmt)));
 }
 class SquashPtrOffset : public IRVisitor {
  public:
@@ -171,11 +181,10 @@ class Offloader {
           offloaded->const_end = true;
           offloaded->end_value = val->val.val_int32();
         } else {
-          if ((arch == Arch::opengl || arch == Arch::vulkan ||
-               arch == Arch::gles || arch == Arch::metal) &&
-              demotable_range_end(s->end, arch)) {
-            // Graphics backends can evaluate these immutable values
-            // directly in the range shader.
+          if ((arch == Arch::cuda || arch == Arch::opengl ||
+               arch == Arch::vulkan || arch == Arch::gles || arch == Arch::metal) &&
+              demotable_range_end(s->end, config, kernel->args_type)) {
+            // Evaluate immutable bounds directly in the range task.
             auto end_copy = s->end->clone();
             offloaded->end_stmt = end_copy.get();
             offloaded->body->insert(std::move(end_copy));
@@ -522,9 +531,12 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
         (stmt->is<ArgLoadStmt>() && (stmt->as<ArgLoadStmt>()->is_ptr ||
                                      !stmt->as<ArgLoadStmt>()->create_load)))
       return;
-    if ((config_.arch == Arch::opengl || config_.arch == Arch::vulkan ||
+    if ((config_.arch == Arch::cuda || config_.arch == Arch::opengl ||
+         config_.arch == Arch::vulkan ||
          config_.arch == Arch::gles || config_.arch == Arch::metal) &&
-        !range_bound && demotable_range_end(stmt, config_.arch))
+        !range_bound &&
+        demotable_range_end(
+            stmt, config_, current_offloaded_->as<OffloadedStmt>()->kernel_->args_type))
       return;
     // Not yet allocated
     if (local_to_global_.find(top_level_ptr) == local_to_global_.end()) {

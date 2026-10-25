@@ -2598,6 +2598,34 @@ std::tuple<llvm::Value *, llvm::Value *> TaskCodeGenLLVM::get_range_for_bounds(
   }
   if (stmt->const_end) {
     end = tlctx->get_constant(stmt->end_value);
+  } else if (stmt->end_stmt) {
+    // The loop body is emitted in a different LLVM function. Re-emit this
+    // immutable dependency DAG in the dispatch wrapper, without reusing values
+    // defined in the body function. Restore its mapping afterwards.
+    std::unordered_map<Stmt *, llvm::Value *> saved;
+    std::vector<std::pair<Stmt *, bool>> pending{{stmt->end_stmt, false}};
+    while (!pending.empty()) {
+      auto [node, emit] = pending.back();
+      pending.pop_back();
+      if (saved.count(node))
+        continue;
+      if (!emit) {
+        pending.emplace_back(node, true);
+        for (int i = node->num_operands(); i-- > 0;)
+          pending.emplace_back(node->operand(i), false);
+      } else {
+        auto previous = llvm_val.find(node);
+        saved.emplace(node, previous == llvm_val.end() ? nullptr : previous->second);
+        node->accept(this);
+      }
+    }
+    end = llvm_val.at(stmt->end_stmt);
+    for (auto [node, value] : saved) {
+      if (value)
+        llvm_val[node] = value;
+      else
+        llvm_val.erase(node);
+    }
   } else {
     auto end_stmt =
         Stmt::make<GlobalTemporaryStmt>(stmt->end_offset, PrimitiveType::i32);

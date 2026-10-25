@@ -2517,7 +2517,7 @@ over supported scalar/shape bounds. A normalized affine transform and input
 interval preserve intermediate i32 overflow checks; unsupported expressions or
 out-of-interval values retain the original grid.
 The current task layout uses LLVM AOT schema 15 (16 for entry aliases or selected
-range policies), GFX metadata 13, JIT cache schema 79 and native ABI 215.
+range policies), GFX metadata 13, JIT cache schema 80 and native ABI 215.
 Re-export older candidate artifacts and use a paired frontend
 and runtime package.
 

@@ -194,6 +194,23 @@ TEST(RangeForBounds, FinalTaskSourcesDoNotInventTemporaryOffsets) {
   }
 }
 
+TEST(RangeForBounds, TaskClonePreservesItsOwnedDirectEnd) {
+  for (auto arch : {Arch::cuda, Arch::vulkan}) {
+    OffloadedStmt task(OffloadedTaskType::range_for, arch, nullptr);
+    task.const_begin = true;
+    task.end_stmt = task.body->push_back<ArgLoadStmt>(
+        std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+    auto copy = task.clone();
+    auto *cloned = copy->as<OffloadedStmt>();
+    ASSERT_NE(cloned->end_stmt, nullptr);
+    EXPECT_NE(cloned->end_stmt, task.end_stmt);
+    EXPECT_EQ(cloned->end_stmt->parent, cloned->body.get());
+    EXPECT_EQ(describe_range_for_bounds(*cloned)->end.kind, RangeBoundKind::unknown);
+    task.body->statements.clear();
+    EXPECT_TRUE(cloned->end_stmt->is<ArgLoadStmt>());
+  }
+}
+
 TEST(RangeForBounds, SharedCodecPreservesSignedAndUnknownSources) {
   const RangeForBounds sources[] = {
       {RangeBound::constant(-9), RangeBound::constant(4)},

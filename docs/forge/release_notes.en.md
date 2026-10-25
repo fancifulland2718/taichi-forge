@@ -47,9 +47,15 @@ combination. Consult the linked API contracts and capability queries for exact s
   Every intermediate integer operation must fit i32; otherwise the existing grid
   is retained. Expressions are normalized at compile time, without launch-time
   expression interpretation or workload size limits.
+- Ordinary CUDA/Vulkan range tasks can read immutable scalar/shape end bounds
+  directly, removing serial tasks used only to transport these values and
+  ordinary by-value scalar inputs. Device-memory snapshots, dynamic-start
+  snapshots, debug arithmetic and effectful prefixes retain their existing
+  execution. CPU scheduling is unchanged. Cloning preserves direct end-bound
+  references within the cloned task.
   CPU scheduling is unchanged.
 - The frontend/native private ABI is **215**, persistent execution-plan version **27**, and
-  compiled-cache schema **79**. Update compatible components together; matching Git commits
+  compiled-cache schema **80**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
   Old compiled caches are invalidated; distinguish the resulting cold start from warm replay.

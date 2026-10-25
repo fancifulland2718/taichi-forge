@@ -2067,7 +2067,7 @@ host 边界选择也覆盖受支持 scalar/shape 边界与常量的加、减、�
 编译时归一化的仿射变换和输入区间保留每个中间步骤的 i32 溢出检查；
 不支持的表达式或超出该区间的值沿用原 grid。
 当前 task 布局采用 LLVM AOT schema 15（含入口别名或选定范围策略时为 16）、
-GFX metadata 13 和 JIT cache schema 79；原生 ABI 为 215。
+GFX metadata 13 和 JIT cache schema 80；原生 ABI 为 215。
 旧候选产物需要重新导出并使用配对的前端/runtime 包。
 
 CUDA 选中的设备范围 task 策略现可进入普通平直 `Graph.run()` 录制与借用域的

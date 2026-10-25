@@ -9,6 +9,50 @@ from taichi_forge.lang import impl
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False, debug=True)
+def test_debug_affine_end_retains_serial_evaluation():
+    @ti.kernel
+    def fill(x: ti.types.ndarray(ti.i32, 1), n: ti.i32):
+        for i in range(3 * n - 1):
+            x[i] = i + 1
+
+    x = ti.ndarray(ti.i32, 8)
+    fill(x, 3)
+    np.testing.assert_array_equal(x.to_numpy(), np.arange(1, 9))
+    assert any(t.task_type == "serial" for t in fill.task_manifest(x, 3))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_immutable_end_and_scalar_body_do_not_need_a_serial_task():
+    @ti.kernel
+    def fill(x: ti.types.ndarray(ti.f32, 1), n: ti.i32, delta: ti.f32):
+        for i in range(3 * n - 1):
+            x[i] = i + delta
+
+    @ti.kernel
+    def shape(x: ti.types.ndarray(ti.f32, 2), delta: ti.f32):
+        for i, j in x:
+            x[i, j] = i * x.shape[1] + j + delta
+
+    x = ti.ndarray(ti.f32, 1025)
+    for n in (0, 1, 171, 342, 2):
+        x.fill(-7)
+        fill(x, n, 2.5)
+        count = max(0, 3 * n - 1)
+        expected = np.full(1025, -7, np.float32)
+        expected[:count] = np.arange(count) + 2.5
+        np.testing.assert_array_equal(x.to_numpy(), expected)
+    y = ti.ndarray(ti.f32, (3, 129))
+    shape(y, 2.5)
+    np.testing.assert_array_equal(y.to_numpy(), np.arange(387).reshape(3, 129) + 2.5)
+    if impl.current_cfg().arch != ti.cpu:
+        for kernel, arguments in ((fill, (x, 1, 2.5)), (shape, (y, 2.5))):
+            tasks = kernel.task_manifest(*arguments)
+            assert [task.task_type for task in tasks] == ["range_for"]
+            assert tasks[0].range_bounds.end.kind == "unknown"
+            assert tasks[0].actual_geometry_kind == "host_argument_bound"
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_affine_bounds_keep_signed_semantics_and_graph_rebinding():
     @ti.kernel
