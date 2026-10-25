@@ -31,6 +31,16 @@ plan candidates share a baseline plus compact edits, constructing a full task
 list only when inspected or materialized. These changes affect explicit search
 preparation, not ordinary JIT, Graph replay or AOT consumption.
 
+The fork's `1.1.0b2+taichiforge.1` line follows upstream 1.1 and requires Python
+3.11–3.14. Its capability revision 7 identifies the actual complete-recipe Python
+scheduler by a source digest. Ordinary compiler-control searches use the bundled
+Amber engine. Existing `core_commit` / `core_lock` protocol fields carry scheduler
+version / source identity in revision 7; they do not identify an unused native
+core. Checkpoints cannot cross a scheduler identity change. Revision 6 forks remain
+accepted, including the older Python 3.10 distribution; new wheels are not claimed
+to support Python 3.10. Workload facts, full physical recipe identities, logical
+stage pages, explicit budgets and cost reports retain their existing contracts.
+
 Use one environment for Forge and the fork. Vendor libraries and compilers are
 needed only for the providers you choose. Rendering additionally needs a
 graphics-enabled runtime; a headless compute build does not provide windows.

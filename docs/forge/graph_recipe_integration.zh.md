@@ -26,6 +26,14 @@ Git commit 用于记录来源，不是安装白名单。
 已冻结的 kernel plan 候选共用基线与紧凑差分，检查或物化某个候选时才构造完整任务列表。
 这些变化仅影响显式搜索的冷阶段，不改变普通 JIT、Graph 重放或 AOT 消费。
 
+fork 的 `1.1.0b2+taichiforge.1` 系列跟随上游 1.1，要求 Python 3.11–3.14。
+能力协议 revision 7 用源码摘要标识实际执行完整 recipe 的 Python 调度器；
+普通编译器参数搜索使用随包提供的 Amber 引擎。现有 `core_commit` / `core_lock`
+协议字段在 revision 7 中承载调度器版本与源码身份，不再指向未使用的原生 core。
+调度器身份变化后不能复用旧 checkpoint。Forge 仍接受 revision 6 fork，包括旧的
+Python 3.10 发行物；新版 wheel 不宣称支持 Python 3.10。工作量事实、完整物理 recipe
+身份、逻辑阶段分页、显式预算和成本报告继续使用原有合同。
+
 Forge 与 fork 使用同一环境；vendor 库和编译器只为所选 provider 配置。
 渲染还需要启用 graphics 的 runtime，headless 计算构建不提供窗口。
 参见[安装说明](index.zh.md#版本与安装)和[硬件依赖](external_hardware_providers.zh.md)。
