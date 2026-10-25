@@ -2983,6 +2983,21 @@ parallel regions inside control bodies, native callbacks and bounded/indirect
 branch launches require separate qualification. Automatic discovery continues to
 select the existing two-chain shape; the explicit schedule has no four-branch cap.
 
+Handwritten ExecutionPlan version 27 supports
+`{"kind": "vulkan_parallel", "branches": [[kernel_operation, ...], ...]}`
+when prepared with an independent Vulkan `execution_domain=`. The current path
+accepts one flat parallel region of ordinary kernel branches, with kernel, copy
+and fill32 operations in the prefix/suffix. The caller declares valid dependencies
+and disjointness constraints; this does not enable automatic Vulkan parallel
+discovery/export from high-level Graphs. Ordinary queues, other backends and
+combinations with other submission recipes are rejected before execution.
+Use paired private ABI 207 or later matching components. Windows Vulkan standalone
+and borrowed tests cover private reduction workspaces, explicit gradients, u64
+parameter updates, two instances, alias rejection and close/reset. Completion
+covers every branch and the suffix; sampled timing remains `execution_envelope`,
+including internal waits. See `prepared.info["workspace_bytes"]` for storage cost;
+parallel execution does not guarantee lower latency for small workloads.
+
 Host-count clamping, producer-owned launch state, and exact/adaptive/indirect
 dispatch inside structured control still require separate reconstruction support;
 export does not replace them with fixed-capacity work.

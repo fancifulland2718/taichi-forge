@@ -2475,6 +2475,17 @@ CUDA adaptive 物理 grid 更新也可导出，保留选中的 `per_node` 或 `g
 回调及有界/间接分支派发仍需单独取得资格。自动发现仍使用既有两链形状，显式构建
 没有四分支上限。
 
+手写 ExecutionPlan 版本 27 可使用
+`{"kind": "vulkan_parallel", "branches": [[kernel_operation, ...], ...]}`，
+并通过 `execution_domain=` 指定独立 Vulkan 域进行准备。当前支持一个平坦并行区域，
+分支为普通 kernel 序列，外部前后段可包含 kernel、copy 和 fill32。调用方负责声明
+合法依赖与不相交约束；这不代表高层 Graph 已能自动发现、导出 Vulkan 并行方案。
+普通队列、其他后端及与其他提交 recipe 混用会在准备前或准备期拒绝。
+使用配对的 private ABI 207 或后续匹配组件。Windows Vulkan 独立/借用消费检查覆盖
+归约的分支私有工作区、显式梯度、u64 参数更新、双实例、别名拒绝和 close/reset。
+completion 覆盖全部分支及后段；采样时间仍为 `execution_envelope`，包含内部等待。
+工作区成本见 `prepared.info["workspace_bytes"]`，并行不保证小工作量更快。
+
 host count 截断、producer-owned launch state
 和结构化控制内的 exact/adaptive/indirect 仍需各自重建支持；
 导出不会将其替换为固定容量执行。
