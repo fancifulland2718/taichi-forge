@@ -36,7 +36,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **202**, persistent execution-plan version **26**, and
+- The frontend/native private ABI is **203**, persistent execution-plan version **26**, and
   compiled-cache schema **75**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
