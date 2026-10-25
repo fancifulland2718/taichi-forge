@@ -632,16 +632,16 @@ def test_graph_memory_static_stencil_accumulator_is_not_a_global_atomic_effect()
     )
 
     search = compileiq_recipe_search(source_graph)
-    assert len(search.recipe_ids) == 4
+    # Other complete-recipe families can coexist with memory strategies.
+    staged_recipes = []
+    for recipe_id in search.recipe_ids:
+        manifest = search.recipe_manifest(recipe_id).get("memory_recipe_manifest", {})
+        if manifest.get("strategy") == "shared_staged_1d":
+            staged_recipes.append((recipe_id, manifest))
+    assert {m["offload_plan"]["tasks"][0]["workgroup_size"] for _, m in staged_recipes} == {64, 128, 256}
     staged_id, staged = next(
-        (recipe_id, search.recipe_manifest(recipe_id)["memory_recipe_manifest"])
-        for recipe_id in search.recipe_ids
-        if search.recipe_manifest(recipe_id)["memory_recipe_manifest"]["strategy"]
-        == "shared_staged_1d"
-        and search.recipe_manifest(recipe_id)["memory_recipe_manifest"]["offload_plan"][
-            "tasks"
-        ][0]["workgroup_size"]
-        == 128
+        (recipe_id, manifest) for recipe_id, manifest in staged_recipes
+        if manifest["offload_plan"]["tasks"][0]["workgroup_size"] == 128
     )
     staged_source = staged["staged_sources"][0]
     assert staged["schema_version"] == 5
