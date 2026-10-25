@@ -7,6 +7,7 @@ top in later stages; the existing Graph runtime remains the baseline executor.
 
 import hashlib
 import json
+import zlib
 from dataclasses import dataclass, field
 
 from taichi_forge.graph._ir import graph_ir_to_dict
@@ -287,8 +288,11 @@ class GraphDefinition:
     binding_abi: tuple[GraphBindingABIEntry, ...]
     compile_provenance: GraphCompileProvenance
     baseline_recipe: GraphBaselineRecipe
-    _semantic_payload_json: str = field(repr=False)
-    _planned_payload_json: str = field(repr=False)
+    # Canonical bytes are a frozen snapshot, independent of live resource
+    # owners. Expanded Graphs repeat most of this description; retain compact
+    # bytes and decode only for cold inspection/export, never during replay.
+    _semantic_payload_zlib: bytes = field(repr=False)
+    _planned_payload_zlib: bytes = field(repr=False)
     _runtime_spec: object = field(repr=False, compare=False, hash=False)
 
     @classmethod
@@ -348,10 +352,18 @@ class GraphDefinition:
             binding_abi=binding_abi,
             compile_provenance=GraphCompileProvenance(core_commit=core_commit),
             baseline_recipe=baseline_recipe,
-            _semantic_payload_json=semantic_payload_json,
-            _planned_payload_json=planned_payload_json,
+            _semantic_payload_zlib=zlib.compress(semantic_payload_json.encode("utf-8"), level=1),
+            _planned_payload_zlib=zlib.compress(planned_payload_json.encode("utf-8"), level=1),
             _runtime_spec=spec,
         )
+
+    @property
+    def _semantic_payload_json(self):
+        return zlib.decompress(self._semantic_payload_zlib).decode("utf-8")
+
+    @property
+    def _planned_payload_json(self):
+        return zlib.decompress(self._planned_payload_zlib).decode("utf-8")
 
     @property
     def semantic_root(self):
@@ -810,18 +822,17 @@ class GraphDefinition:
         return result
 
     def to_dict(self):
+        semantic = json.loads(self._semantic_payload_json)
         return {
             "schema": _GRAPH_DEFINITION_SCHEMA,
             "semantic_graph_id": self.semantic_graph_id,
             "backend": self.backend,
             "compile_provenance": self.compile_provenance.to_dict(),
-            "semantic_root": self.semantic_root,
+            "semantic_root": semantic["root"],
             "regions": tuple(region.to_dict() for region in self.regions),
             "sources": tuple(source.to_dict() for source in self.sources),
             "binding_abi": tuple(item.to_dict() for item in self.binding_abi),
-            "provider_sources": json.loads(self._semantic_payload_json)[
-                "provider_sources"
-            ],
+            "provider_sources": semantic["provider_sources"],
             "baseline_recipe": self.baseline_recipe.to_dict(),
             "planned_physical_manifest": self.planned_physical_manifest,
         }

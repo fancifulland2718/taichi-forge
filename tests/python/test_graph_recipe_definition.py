@@ -20,6 +20,73 @@ from taichi_forge.graph._recipes import GraphDefinition
 from tests import test_utils
 
 
+def test_graph_definition_compacts_frozen_bytes_without_changing_identity():
+    import hashlib
+    import json
+
+    node = DispatchNode(
+        name="repeat", effects=(ResourceEffect("x", GraphAccess.READ_WRITE),)
+    )
+    spec = _static_spec(SequentialRegion(children=(node,) * 256))
+    definition = GraphDefinition._from_graph_spec(spec, "cpu")
+    semantic = definition._semantic_payload_json
+    planned = definition._planned_payload_json
+    assert definition.semantic_graph_id == "semantic-graph:" + hashlib.sha256(
+        semantic.encode("utf-8")
+    ).hexdigest()
+    assert definition.baseline_recipe.planned_physical_id == "planned-physical:" + hashlib.sha256(
+        planned.encode("utf-8")
+    ).hexdigest()
+    assert len(definition._semantic_payload_zlib) < len(semantic) // 4
+    assert len(definition._planned_payload_zlib) < len(planned) // 4
+    # The stored snapshot must not be reconstructed from mutable live owners.
+    spec.ir_root = SequentialRegion(children=())
+    spec.definition_semantic_root = spec.ir_root
+    spec.execution_definition["dispatch_count"] = 0
+    manifest = definition.to_dict()
+    assert manifest["semantic_root"] == json.loads(semantic)["root"]
+    assert manifest["planned_physical_manifest"] == json.loads(planned)
+    manifest["semantic_root"].clear()
+    assert definition._semantic_payload_json == semantic
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_graph_repeated_metadata_keeps_bindings_and_decoding_cold(monkeypatch):
+    import taichi_forge.graph._recipes.definition as definition_module
+
+    @ti.kernel
+    def add(x: ti.types.ndarray(ti.i32, ndim=1), delta: ti.i32):
+        for i in x:
+            x[i] += delta
+
+    a = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a", ti.i32, ndim=1)
+    b = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b", ti.i32, ndim=1)
+    delta = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "delta", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    for _ in range(8):
+        builder.dispatch(add, a, delta)
+        builder.dispatch(add, b, delta)
+    graph = builder.compile()
+    x, y = ti.ndarray(ti.i32, 4), ti.ndarray(ti.i32, 4)
+    x.fill(0)
+    y.fill(10)
+    args = {"a": x, "b": y, "delta": 1}
+    graph.run(args)
+    ti.sync()
+
+    def unexpected_decode(*_args, **_kwargs):
+        raise AssertionError("Graph replay must not decode definition snapshots")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(definition_module.zlib, "decompress", unexpected_decode)
+        args["delta"] = 3
+        graph.run(args)
+        graph.run({"a": y, "b": x, "delta": 2})
+        ti.sync()
+    assert x.to_numpy().tolist() == [48] * 4
+    assert y.to_numpy().tolist() == [58] * 4
+
+
 def test_graph_definition_serializes_static_storage_without_losing_alias_topology():
     def definition(*, shared=False, size=32):
         first = SimpleNamespace(shape=(size,), dtype="u8", element_shape=())
