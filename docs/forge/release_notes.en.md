@@ -248,7 +248,7 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Execution domains, windows and qualification
 
-- Independent CUDA and fixed-compute Vulkan domains accept explicitly declared `u64` parameters frozen per accepted submission.
+- Independent CUDA and fixed-compute Vulkan domains accept explicitly declared `i32/u32/i64/u64` parameters frozen per accepted submission, with compiled ABI widths and integer range checks.
   Upload and Graph execution use that domain; busy returns before upload. Domains can preallocate
   timing events for sparse `Completion.gpu_timing` samples. The compute interval excludes predecessor
   waits, parameter uploads and external acquire/release, and includes internal Graph/provider gaps.

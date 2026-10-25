@@ -302,14 +302,19 @@ ticket = step.submit(values={"epoch": epoch, "simulation_step": step_id,
 ```
 
 `module.prepare_execution(..., mutable_parameters=names)` 提供相同的 AOT 合同。
-首版支持仅用于重放内核的 `u64` scalar；初始化阶段使用的 scalar、数组或其他类型在
-准备时拒绝。名称和数量由调用方声明，每次提交必须完整提供，值必须在 `[0, 2**64)`。
+支持仅用于重放内核的 `i32/u32/i64/u64` scalar。选择路线前检查 runtime manifest 的
+`cuda_submission_parameters_integer` / `vulkan_submission_parameters_integer`；
+旧 `_u64` 能力项不能证明新增类型可用。初始化阶段使用的 scalar、数组、浮点及更小
+整数类型在准备时拒绝。名称和数量由调用方声明，每次提交必须完整提供，值须在声明
+整数类型的范围内；不接受 bool。
 接受提交后，修改原字典不影响该次执行。预分配的 staging 参数和设备参数区属于实例，
 上传与完整 Graph 都进入所选域，completion 精确覆盖二者。
 CUDA 上传使用读取 pinned 存储的小型 GPU kernel，避免 DMA 拷贝引擎的跨流队头阻塞。
 冷准备要求 CUDA unified addressing；重放不分配 pinned 内存。
 Vulkan 使用预备 staging 与 buffer copy，在租用队列上显式安排 transfer/compute 依赖，
 上传不会绕到普通队列。
+host staging 每个参数仍占 8 字节；编译 ABI 决定每处目标只复制 4 或 8 字节，不覆盖
+相邻固定参数。C API 以补码低位表示有符号值，32 位参数的 uint64 槽高 32 位必须为零。
 
 CUDA 实例只有一份可变参数存储，在途时再次提交返回 `None`。Vulkan 按实例及队列槽位
 预分配 staging，同一实例已接纳的提交在该队列依次执行，不覆盖此前快照。需要独立可变

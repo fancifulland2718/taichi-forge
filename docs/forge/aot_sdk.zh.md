@@ -2492,8 +2492,9 @@ CUDA/Vulkan 共用依赖分析；选中该 recipe 后，`Graph.prepare(..., exec
 重复导出不改变 producer、源 Graph 关闭后的 JIT 借用及无源码 AOT 消费。
 completion 覆盖全部分支及后段；采样时间仍为 `execution_envelope`，包含内部等待。
 工作区成本见 `prepared.info["workspace_bytes"]`，并行不保证小工作量更快。
-逐提交更新仍限于声明的 `u64` 参数；其他标量可在冷阶段固定为独立 prepared 实例，
-不能据此声称任意 dtype 的参数更新已经支持。
+声明为 replay-only 的 `i32/u32/i64/u64` 参数可按编译 ABI 宽度逐提交更新。
+能力发现、取值检查和所有权见[整数参数更新](cuda_execution_domains.zh.md#逐提交参数)。
+其他标量仍在准备时固定，不支持任意 dtype 的参数更新。
 
 host count 截断、producer-owned launch state
 和结构化控制内的 exact/adaptive/indirect 仍需各自重建支持；

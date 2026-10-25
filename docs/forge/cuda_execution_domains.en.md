@@ -400,10 +400,14 @@ ticket = step.submit(values={"epoch": epoch, "simulation_step": step_id,
 ```
 
 `module.prepare_execution(..., mutable_parameters=names)` has the same AOT
-contract. This first implementation accepts replay-only `u64` kernel scalars.
-Scalars also used in initialization, arrays and other types are rejected during
-preparation. Names and count are caller-defined. Every submit requires all
-declared values in `[0, 2**64)`. Mutating the original dictionary after acceptance
+contract. Replay-only `i32/u32/i64/u64` kernel scalars are supported. Check
+`cuda_submission_parameters_integer` / `vulkan_submission_parameters_integer`
+in the runtime contract manifest before selecting this route; the older `_u64`
+feature alone does not qualify the additional types. Scalars also used in
+initialization, arrays, floating point and smaller integer types are rejected
+during preparation. Names and count are caller-defined. Every submit requires all
+declared values, within their declared integer range; bool is rejected.
+Mutating the original dictionary after acceptance
 cannot change accepted work. Each instance owns preallocated staging and device
 arguments. Uploads and the complete Graph use the selected queue, and
 the completion covers both.
@@ -412,6 +416,10 @@ head-of-line blocking on the DMA engine. Preparation requires CUDA unified
 addressing; replay never allocates pinned memory.
 Vulkan uses prepared staging and buffer copies with explicit transfer/compute
 dependencies on its leased queue. No upload is redirected to the ordinary queue.
+Host staging keeps an eight-byte slot per parameter. The compiled ABI determines
+whether each destination receives four or eight bytes, preserving neighboring
+fixed arguments. C API consumers pass two's-complement low bits for signed values;
+32-bit values must have zero upper 32 bits in the uint64 submission slot.
 
 CUDA's mutable argument frame permits one in-flight submission per instance;
 another returns `None`. Vulkan preallocates staging per instance and queue slot,

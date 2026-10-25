@@ -3010,9 +3010,10 @@ source Graph close, and source-free AOT consumption. Sampled timing remains
 `execution_envelope`, including internal waits. See
 `prepared.info["workspace_bytes"]` for storage cost;
 parallel execution does not guarantee lower latency for small workloads.
-Per-submission updates remain limited to declared `u64` parameters. Other scalar
-types can be fixed in separate instances during cold preparation; this does not
-qualify arbitrary-dtype parameter updates.
+Declared replay-only `i32/u32/i64/u64` parameters can be updated per submission,
+using their compiled ABI widths. See [integer submission parameters](cuda_execution_domains.en.md#per-submission-parameters)
+for capability discovery, range checks and ownership. Other scalar types stay
+fixed at preparation; arbitrary-dtype updates are not supported.
 
 Host-count clamping, producer-owned launch state, and exact/adaptive/indirect
 dispatch inside structured control still require separate reconstruction support;

@@ -195,7 +195,7 @@
 
 ### 执行域、窗口与验收边界
 
-- CUDA 及 Vulkan 固定 compute 独立域接受逐提交冻结的显式 `u64` 参数；上传与 Graph 执行同域，busy
+- CUDA 及 Vulkan 固定 compute 独立域接受逐提交冻结的显式 `i32/u32/i64/u64` 参数，按编译 ABI 宽度复制并检查整数范围；上传与 Graph 执行同域，busy
   在上传前返回。冷阶段可预分配计时资源，提交时稀疏采样 `Completion.gpu_timing`。
   计算区间排除前驱、参数上传与外部 acquire/release，包含 Graph/provider 内部间隙；
   未采样、pending、不支持和失败均有明确状态，不用零伪装时长。
