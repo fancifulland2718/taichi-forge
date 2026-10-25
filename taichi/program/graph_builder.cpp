@@ -940,7 +940,7 @@ Sequential *GraphBuilder::new_sequential_node() {
 std::unique_ptr<aot::CompiledGraph> GraphBuilder::compile() {
   std::vector<aot::CompiledDispatch> dispatches;
   seq()->compile(dispatches);
-  aot::CompiledGraph graph{dispatches, all_args_};
+  aot::CompiledGraph graph{std::move(dispatches), all_args_};
   if (!parallel_dispatch_groups_.empty()) {
     const auto first = parallel_dispatch_groups_.front().front();
     std::uint64_t expected = first;
@@ -952,7 +952,7 @@ std::unique_ptr<aot::CompiledGraph> GraphBuilder::compile() {
         ++expected;
       }
     }
-    TI_ERROR_IF(expected >= dispatches.size(),
+    TI_ERROR_IF(expected >= graph.dispatches.size(),
                 "Parallel Graph schedule requires a serial join or "
                 "suffix dispatch after every branch");
     graph.parallel_dispatch_groups = parallel_dispatch_groups_;
