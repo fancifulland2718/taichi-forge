@@ -453,11 +453,45 @@ TEST(CudaSparseAccess, RuntimeViewsCaptureRealKernelsAndReturnManagers) {
   wrong = {};
   cuda::ExecutionDomain::Options options;
   options.capacity = 2;
+  options.gpu_timing = true;
   auto da = std::make_shared<cuda::ExecutionDomain>(owner, options);
   auto db = std::make_shared<cuda::ExecutionDomain>(owner, options);
   auto good = left.prepare_diagnostic_snapshot();
   auto bad = left.prepare_diagnostic_snapshot();
   auto peer = right.prepare_diagnostic_snapshot();
+  struct RecordedOwner final : RuntimeClient {
+    std::function<void()> release;
+    void retire() override {
+      release();
+    }
+  };
+  auto left_owner = std::make_shared<RecordedOwner>();
+  left_owner->release = [&] {
+    failure.reset();
+    a.reset();
+    left.retire();
+  };
+  auto right_owner = std::make_shared<RecordedOwner>();
+  right_owner->release = [&] {
+    b.reset();
+    right.retire();
+  };
+  std::array<std::shared_ptr<cuda::SparseRuntimeView::DiagnosticSnapshot>, 2>
+      left_snapshots{bad, good};
+  std::size_t collections = 0;
+  auto left_instance = da->prepare_owned_instance(
+      left_owner, [](const auto &) {},
+      [&](void *stream, std::size_t slot) {
+        ++collections;
+        left.enqueue_diagnostics(*left_snapshots.at(slot), stream);
+        return left_snapshots.at(slot);
+      });
+  auto right_instance = db->prepare_owned_instance(
+      right_owner, [](const auto &) {},
+      [&](void *stream, std::size_t) {
+        right.enqueue_diagnostics(*peer, stream);
+        return peer;
+      });
   void *peer_graph_done = nullptr;
   {
     auto guard = CUDAContext::get_instance().get_guard();
@@ -475,30 +509,37 @@ TEST(CudaSparseAccess, RuntimeViewsCaptureRealKernelsAndReturnManagers) {
     }
   };
   int submission_index = 0;
-  auto submit = [&](auto &domain, Captured &graph, auto &view,
-                    auto &diagnostic) {
+  auto submit = [&](auto &domain, const auto &instance, Captured &graph) {
     const auto index = std::to_string(submission_index++);
-    return domain->submit({}, {}, [&](void *stream) {
-      const auto begin = std::chrono::steady_clock::now();
-      CUDADriver::get_instance().graph_launch(graph.executable, stream);
-      if (index == "1")
-        CUDADriver::get_instance().event_record(peer_graph_done, stream);
-      const auto launched = std::chrono::steady_clock::now();
-      view.enqueue_diagnostics(*diagnostic, stream);
-      const auto end = std::chrono::steady_clock::now();
-      RecordProperty("graph_enqueue_us_" + index, std::to_string(
-          std::chrono::duration<double, std::micro>(launched - begin).count()));
-      RecordProperty("diagnostic_enqueue_us_" + index, std::to_string(
-          std::chrono::duration<double, std::micro>(end - launched).count()));
-    });
+    return domain->submit_instance(
+        instance, {}, {},
+        [&](void *stream) {
+          const auto begin = std::chrono::steady_clock::now();
+          CUDADriver::get_instance().graph_launch(graph.executable, stream);
+          if (index == "1")
+            CUDADriver::get_instance().event_record(peer_graph_done, stream);
+          const auto launched = std::chrono::steady_clock::now();
+          RecordProperty(
+              "graph_enqueue_us_" + index,
+              std::to_string(
+                  std::chrono::duration<double, std::micro>(launched - begin)
+                      .count()));
+        },
+        {}, {}, {}, true);
   };
 #ifdef TI_WITH_VULKAN
   testing::CudaExternalGate gate;
   auto occupied =
       da->submit({}, {}, [&](void *stream) { gate.enqueue_wait(stream); });
 #endif
-  auto ca = submit(da, *a, left, good);
-  auto cb = submit(db, *b, right, peer);
+  auto ca = submit(da, left_instance, *a);
+#ifdef TI_WITH_VULKAN
+  const auto collected_before_busy = collections;
+  EXPECT_THROW(submit(da, left_instance, *a), cuda::ExecutionDomainBusy);
+  EXPECT_EQ(collections, collected_before_busy);
+  --submission_index;  // The rejected submission did not record the peer event.
+#endif
+  auto cb = submit(db, right_instance, *b);
   const auto peer_begin = std::chrono::steady_clock::now();
   {
     auto guard = CUDAContext::get_instance().get_guard();
@@ -522,30 +563,42 @@ TEST(CudaSparseAccess, RuntimeViewsCaptureRealKernelsAndReturnManagers) {
   ca.wait();
   EXPECT_NO_THROW(good->observe());
   EXPECT_NO_THROW(peer->observe());
-  auto failed = submit(da, *failure, left, bad);
-  failed.wait();
+  auto failed = submit(da, left_instance, *failure);
+  EXPECT_THROW(failed.wait(), TaichiAssertionError);
+  EXPECT_TRUE(failed.result_observation_failed());
+  EXPECT_TRUE(failed.gpu_timing_snapshot().available);
   expect_diagnostic();
-  auto recovered = submit(da, *a, left, good);
+  auto recovered = submit(da, left_instance, *a);
   recovered.wait();
   EXPECT_NO_THROW(good->observe());
   expect_diagnostic();
+  // Reuse the failed ticket's actual mapped slot. Its original exception must
+  // remain immutable even though the snapshot now contains a successful result.
+  auto reused = submit(da, left_instance, *a);
+  reused.wait();
+  EXPECT_NO_THROW(bad->observe());
+  EXPECT_THROW(failed.wait(), TaichiAssertionError);
+  EXPECT_TRUE(da->snapshot().accepting);
   // The peer's diagnostics and the default runtime are untouched.
   EXPECT_NO_THROW(peer->observe());
   executor.check_runtime_error(result);
-  failure.reset();
-  a.reset();
-  b.reset();
-  left.retire_after(recovered);
-  right.retire_after(cb);
+  // Retirement observes an unpolled failing result, but still releases the
+  // proven-complete owner and its instance budget before returning that error.
+  auto last_failure = submit(da, left_instance, *failure);
+  EXPECT_THROW(da->retire_instance(left_instance), TaichiAssertionError);
+  EXPECT_TRUE(da->instance_retired(left_instance));
+  db->retire_instance(right_instance);
+  EXPECT_TRUE(db->instance_retired(right_instance));
   EXPECT_THROW(left.bind(executor.get_llvm_runtime(), {tree("0").tree_id}),
                std::invalid_argument);
   EXPECT_THROW(left.initialize(executor, {tree("0")}, owner),
                std::invalid_argument);
-  expect_diagnostic();
-  EXPECT_EQ(invoke("peek_left", true), 5);
+  EXPECT_THROW(failed.wait(), TaichiAssertionError);
+  EXPECT_THROW(last_failure.wait(), TaichiAssertionError);
+  EXPECT_EQ(invoke("peek_left", true), 6);
   EXPECT_EQ(invoke("peek_right", true), 8);
   invoke("bump_left");
-  EXPECT_EQ(invoke("peek_left", true), 6);
+  EXPECT_EQ(invoke("peek_left", true), 7);
   da->close();
   db->close();
   module.reset();

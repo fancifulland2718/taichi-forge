@@ -126,6 +126,7 @@ class ExecutionInstance {
   const std::uint64_t domain;
   std::shared_ptr<RuntimeClient> client;
   RuntimeCompletion latest;
+  ExecutionDomain::ResultCollector collect_result;
   std::exception_ptr error;
   bool accepting{false};
   bool retiring{false};
@@ -189,9 +190,12 @@ struct ExecutionDomain::State {
     instances.reserve(options.instance_capacity);
   }
 
-  void publish(Pending &slot, StreamGpuTiming timing = nullptr) {
+  void publish(Pending &slot,
+               StreamGpuTiming timing = nullptr,
+               std::shared_ptr<RuntimeCompletionObserver> observer = {}) {
     slot.completion = RuntimeCompletion::from_cuda_stream(
         owner_id, slot.sequence, stream, owner, events, std::move(timing));
+    slot.completion.attach_observer(std::move(observer));
     if (slot.resources) {
       slot.completion.attach_resources(slot.resources);
       slot.resources.reset();
@@ -385,7 +389,10 @@ RuntimeCompletion ExecutionDomain::submit_impl(
     finalized = true;
     if (after_timing)
       after_timing(state.stream);
-    state.publish(slot, timing);
+    auto observer = instance && instance->collect_result
+                        ? instance->collect_result(state.stream, index)
+                        : std::shared_ptr<RuntimeCompletionObserver>{};
+    state.publish(slot, timing, std::move(observer));
     if (instance) {
       instance->latest = slot.completion;
       instance->unsealed_submission = false;
@@ -439,9 +446,13 @@ std::size_t ExecutionDomain::collect_ready(std::size_t budget) {
       if (!completion.valid() || !completion.done())
         break;
     } catch (...) {
-      std::lock_guard<std::mutex> lock(state.mutex);
-      state.report(std::current_exception(), sequence);
-      throw;
+      if (!completion.result_observation_failed()) {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.report(std::current_exception(), sequence);
+        throw;
+      }
+      // The ticket keeps its result error. Device completion and snapshot
+      // freezing are proven, so this slot is reusable and peers stay healthy.
     }
     State::Pending retired;
     {
@@ -520,12 +531,15 @@ void ExecutionDomain::prepare_instance(
 
 std::shared_ptr<ExecutionInstance> ExecutionDomain::prepare_owned_instance(
     const std::shared_ptr<RuntimeClient> &client,
-    const std::function<void(const std::shared_ptr<ExecutionInstance> &)> &prepare) {
+    const std::function<void(const std::shared_ptr<ExecutionInstance> &)>
+        &prepare,
+    ResultCollector collect_result) {
   if (!client || !prepare)
     throw std::invalid_argument(
         "CUDA execution instance requires an owner and preparation");
   auto &state = *state_;
   auto instance = std::make_shared<ExecutionInstance>(state.identity, client);
+  instance->collect_result = std::move(collect_result);
   {
     std::lock_guard<std::mutex> lock(state.mutex);
     state.owner->throw_if_new_submission_disallowed(
@@ -573,6 +587,7 @@ void ExecutionDomain::retire_instance(
   auto &state = *state_;
   RuntimeCompletion prefix;
   std::shared_ptr<RuntimeClient> client;
+  ResultCollector retired_collector;
   {
     std::unique_lock<std::mutex> lock(state.mutex);
     if (!instance || instance->domain != state.identity)
@@ -590,10 +605,17 @@ void ExecutionDomain::retire_instance(
     prefix = instance->latest;
     client = instance->client;
   }
-  std::exception_ptr error;
+  std::exception_ptr error, observation_error;
   try {
-    if (prefix.valid())
-      prefix.wait();
+    if (prefix.valid()) {
+      try {
+        prefix.wait();
+      } catch (...) {
+        if (!prefix.result_observation_failed())
+          throw;
+        observation_error = std::current_exception();
+      }
+    }
     client->retire();
   } catch (...) {
     error = std::current_exception();
@@ -615,6 +637,7 @@ void ExecutionDomain::retire_instance(
     --state.retiring_instances;
     if (!error) {
       instance->client.reset();  // The local owner is released outside the lock.
+      retired_collector = std::move(instance->collect_result);
       instance->latest = {};
       const auto found = std::find(state.instances.begin(), state.instances.end(), instance);
       TI_ASSERT(found != state.instances.end());
@@ -625,6 +648,8 @@ void ExecutionDomain::retire_instance(
   }
   if (error)
     std::rethrow_exception(error);
+  if (observation_error)
+    std::rethrow_exception(observation_error);
 }
 
 bool ExecutionDomain::instance_retired(
@@ -713,6 +738,7 @@ void ExecutionDomain::close() {
       instance->client->retire();
       instance->accepting = false;
       instance->client.reset();
+      instance->collect_result = {};
       instance->latest = {};
       instance->retired.store(true, std::memory_order_release);
     } catch (...) {

@@ -813,6 +813,54 @@ TEST_F(CudaExecutionDependency, FatalIndividualRetirementFaultsRuntime) {
   // The finite failed owner is quarantined; no backend frees run after fault.
 }
 
+TEST_F(CudaExecutionDependency,
+       ResultErrorsReleaseBudgetAndCloseFreezesUnpolledTickets) {
+  struct Observer final : RuntimeCompletionObserver {
+    bool fail{true};
+    mutable int calls{0};
+    void observe() const override {
+      ++calls;
+      if (fail)
+        throw std::invalid_argument("instance diagnostic");
+    }
+  };
+  cuda::ExecutionDomain domain(fault, {1, 0, 1});
+  auto client = std::make_shared<DomainInstance>();
+  auto observer = std::make_shared<Observer>();
+  auto collector = [observer](void *, std::size_t slot) {
+    EXPECT_EQ(slot, 0u);
+    return observer;
+  };
+  auto instance =
+      domain.prepare_owned_instance(client, [](const auto &) {}, collector);
+  auto failed = domain.submit_instance(instance, {}, nullptr, [](void *) {});
+  EXPECT_THROW(domain.retire_instance(instance), std::invalid_argument);
+  EXPECT_TRUE(domain.instance_retired(instance));
+  EXPECT_TRUE(domain.snapshot().accepting);
+  EXPECT_EQ(client->retire_calls.load(), 1);
+  EXPECT_EQ(observer->calls, 1);
+  EXPECT_THROW(failed.validate_cuda_dependency(71, fault),
+               std::invalid_argument);
+  observer->fail = false;
+  instance =
+      domain.prepare_owned_instance(client, [](const auto &) {}, collector);
+  auto good = domain.submit_instance(instance, {}, nullptr, [](void *) {});
+  EXPECT_NO_THROW(good.wait());
+  EXPECT_EQ(observer->calls, 2);
+  EXPECT_THROW(failed.wait(), std::invalid_argument);
+  observer->fail = true;
+  auto last = domain.submit_instance(instance, {}, nullptr, [](void *) {});
+  EXPECT_EQ(observer->calls, 2);
+  domain.close();
+  EXPECT_TRUE(domain.instance_retired(instance));
+  EXPECT_EQ(client->retire_calls.load(), 2);
+  EXPECT_EQ(observer->calls, 3);
+  EXPECT_THROW(last.wait(), std::invalid_argument);
+  observer->fail = false;
+  EXPECT_THROW(last.done(), std::invalid_argument);
+  EXPECT_TRUE(domain.snapshot().closed);
+}
+
 TEST_F(CudaExecutionDependency, RegistryDrainsPeersBeforeProviderDestruction) {
   cuda::ExecutionDomainRegistry registry(fault, 2);
   auto ready_domain = registry.create({1, 0});

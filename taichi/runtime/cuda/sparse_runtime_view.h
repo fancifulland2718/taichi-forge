@@ -34,11 +34,11 @@ class SparseRuntimeView final : public RuntimeClient {
   void *temporaries() const;
   std::size_t bytes() const;
 
-  class DiagnosticSnapshot {
+  class DiagnosticSnapshot : public RuntimeCompletionObserver {
    public:
     ~DiagnosticSnapshot();
     // Only after the exact completion covering enqueue_diagnostics().
-    void observe() const;
+    void observe() const override;
 
    private:
     friend class SparseRuntimeView;

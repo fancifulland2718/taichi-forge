@@ -198,6 +198,7 @@ namespace {
 enum class CompletionStatus : std::uint8_t {
   pending,
   completed,
+  observed_error,
   failed,
   invalidated,
 };
@@ -542,7 +543,8 @@ struct RuntimeCompletion::State {
     if (current == CompletionStatus::completed) {
       return true;
     }
-    if (current == CompletionStatus::failed ||
+    if (current == CompletionStatus::observed_error ||
+        current == CompletionStatus::failed ||
         current == CompletionStatus::invalidated) {
       rethrow_first_error();
     }
@@ -550,13 +552,16 @@ struct RuntimeCompletion::State {
     std::shared_ptr<RuntimeCompletionResources> retired_resources;
     std::shared_lock<std::shared_mutex> backend_lock(backend_mutex);
     std::shared_ptr<CompletionPrimitive> retired_primitive;
+    std::shared_ptr<RuntimeCompletionObserver> retired_observer;
+    std::exception_ptr observation_error;
     {
       std::lock_guard<std::mutex> lock(mutex);
       current = status.load(std::memory_order_relaxed);
       if (current == CompletionStatus::completed) {
         return true;
       }
-      if (current == CompletionStatus::failed ||
+      if (current == CompletionStatus::observed_error ||
+          current == CompletionStatus::failed ||
           current == CompletionStatus::invalidated) {
         rethrow_first_error_locked();
       }
@@ -574,8 +579,7 @@ struct RuntimeCompletion::State {
                                   CompletionStatus::failed);
         throw;
       }
-      freeze_gpu_timings_locked(CompletionStatus::completed);
-      status.store(CompletionStatus::completed, std::memory_order_release);
+      observation_error = finish_result_locked(retired_observer);
       retired_primitive = std::move(primitive);
       retired_resources = std::move(resources);
     }
@@ -583,6 +587,8 @@ struct RuntimeCompletion::State {
     retired_primitive.reset();
     backend_lock.unlock();
     retired_resources.reset();
+    if (observation_error)
+      std::rethrow_exception(observation_error);
     return true;
   }
 
@@ -591,7 +597,8 @@ struct RuntimeCompletion::State {
     if (current == CompletionStatus::completed) {
       return;
     }
-    if (current == CompletionStatus::failed ||
+    if (current == CompletionStatus::observed_error ||
+        current == CompletionStatus::failed ||
         current == CompletionStatus::invalidated) {
       rethrow_first_error();
     }
@@ -600,13 +607,16 @@ struct RuntimeCompletion::State {
     std::shared_lock<std::shared_mutex> backend_lock(backend_mutex);
     std::shared_ptr<CompletionPrimitive> waiting_primitive;
     std::shared_ptr<CompletionPrimitive> retired_primitive;
+    std::shared_ptr<RuntimeCompletionObserver> retired_observer;
+    std::exception_ptr observation_error;
     {
       std::lock_guard<std::mutex> lock(mutex);
       current = status.load(std::memory_order_relaxed);
       if (current == CompletionStatus::completed) {
         return;
       }
-      if (current == CompletionStatus::failed ||
+      if (current == CompletionStatus::observed_error ||
+          current == CompletionStatus::failed ||
           current == CompletionStatus::invalidated) {
         rethrow_first_error_locked();
       }
@@ -636,8 +646,7 @@ struct RuntimeCompletion::State {
         rethrow_first_error_locked();
       }
       if (current == CompletionStatus::pending) {
-        freeze_gpu_timings_locked(CompletionStatus::completed);
-        status.store(CompletionStatus::completed, std::memory_order_release);
+        observation_error = finish_result_locked(retired_observer);
         retired_primitive = std::move(primitive);
         retired_resources = std::move(resources);
       }
@@ -646,6 +655,8 @@ struct RuntimeCompletion::State {
     retired_primitive.reset();
     backend_lock.unlock();
     retired_resources.reset();
+    if (observation_error)
+      std::rethrow_exception(observation_error);
   }
 
   void validate_dependency() const {
@@ -657,7 +668,8 @@ struct RuntimeCompletion::State {
     if (current == CompletionStatus::completed) {
       return;
     }
-    if (current == CompletionStatus::failed ||
+    if (current == CompletionStatus::observed_error ||
+        current == CompletionStatus::failed ||
         current == CompletionStatus::invalidated) {
       rethrow_first_error_locked();
     }
@@ -676,7 +688,8 @@ struct RuntimeCompletion::State {
     if (current == CompletionStatus::completed) {
       return false;
     }
-    if (current == CompletionStatus::failed ||
+    if (current == CompletionStatus::observed_error ||
+        current == CompletionStatus::failed ||
         current == CompletionStatus::invalidated) {
       rethrow_first_error_locked();
     }
@@ -707,12 +720,48 @@ struct RuntimeCompletion::State {
     resources = std::move(value);
   }
 
+  void attach_observer(std::shared_ptr<RuntimeCompletionObserver> value) {
+    if (!value)
+      return;
+    std::lock_guard<std::mutex> lock(mutex);
+    TI_ERROR_IF(
+        status.load(std::memory_order_relaxed) != CompletionStatus::pending,
+        "Cannot attach an observer to a completed submission");
+    TI_ERROR_IF(observer != nullptr,
+                "Runtime completion observer was already attached");
+    observer = std::move(value);
+  }
+
+  std::exception_ptr finish_result_locked(
+      std::shared_ptr<RuntimeCompletionObserver> &retired_observer) noexcept {
+    freeze_gpu_timings_locked(CompletionStatus::completed);
+    retired_observer = std::move(observer);
+    if (retired_observer) {
+      try {
+        retired_observer->observe();
+      } catch (...) {
+        first_error = std::current_exception();
+        try {
+          first_error_text = exception_message(first_error);
+        } catch (...) {
+          // Preserve the exception even if formatting runs out of memory.
+        }
+        status.store(CompletionStatus::observed_error,
+                     std::memory_order_release);
+        return first_error;
+      }
+    }
+    status.store(CompletionStatus::completed, std::memory_order_release);
+    return {};
+  }
+
   void mark_completed() noexcept {
     std::shared_ptr<RuntimeCompletionResources> retired_resources;
     // Program teardown must drain backend readers before destroying its device.
     // Wait/query share this gate, but never hold the state mutex while waiting.
     std::unique_lock<std::shared_mutex> backend_lock(backend_mutex);
     std::shared_ptr<CompletionPrimitive> retired_primitive;
+    std::shared_ptr<RuntimeCompletionObserver> retired_observer;
     {
       std::lock_guard<std::mutex> lock(mutex);
       const auto current = status.load(std::memory_order_relaxed);
@@ -732,10 +781,10 @@ struct RuntimeCompletion::State {
                   current == CompletionStatus::invalidated
               ? current
               : CompletionStatus::completed);
-      if (current != CompletionStatus::failed &&
-          current != CompletionStatus::invalidated) {
-        status.store(CompletionStatus::completed, std::memory_order_release);
-      }
+      if (current == CompletionStatus::pending)
+        finish_result_locked(retired_observer);
+      else
+        retired_observer = std::move(observer);
       retired_primitive = std::move(primitive);
       retired_resources = std::move(resources);
     }
@@ -746,8 +795,9 @@ struct RuntimeCompletion::State {
 
   void invalidate(const std::string &reason) noexcept {
     std::lock_guard<std::mutex> lock(mutex);
-    if (status.load(std::memory_order_relaxed) ==
-        CompletionStatus::completed) {
+    const auto current = status.load(std::memory_order_relaxed);
+    if (current == CompletionStatus::completed ||
+        current == CompletionStatus::observed_error) {
       return;
     }
     if (!first_error) {
@@ -942,6 +992,7 @@ struct RuntimeCompletion::State {
   std::exception_ptr gpu_timing_error;
   std::exception_ptr gpu_region_timing_error;
   std::shared_ptr<RuntimeCompletionResources> resources;
+  std::shared_ptr<RuntimeCompletionObserver> observer;
   std::exception_ptr first_error;
   std::string first_error_text;
 };
@@ -1247,6 +1298,17 @@ void RuntimeCompletion::attach_resources(
     std::shared_ptr<RuntimeCompletionResources> resources) const {
   TI_ERROR_IF(!valid(), "Invalid runtime completion");
   state_->attach(std::move(resources));
+}
+
+void RuntimeCompletion::attach_observer(
+    std::shared_ptr<RuntimeCompletionObserver> observer) const {
+  TI_ERROR_IF(!valid(), "Invalid runtime completion");
+  state_->attach_observer(std::move(observer));
+}
+
+bool RuntimeCompletion::result_observation_failed() const noexcept {
+  return state_ && state_->status.load(std::memory_order_acquire) ==
+                       CompletionStatus::observed_error;
 }
 
 void RuntimeCompletion::mark_completed() const noexcept {

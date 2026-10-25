@@ -227,9 +227,19 @@ std::size_t SparseRuntimeView::bytes() const {
 }
 
 void SparseRuntimeView::retire_after(const RuntimeCompletion &prefix) {
-  if (prefix.valid())
-    prefix.wait();
+  std::exception_ptr observation_error;
+  if (prefix.valid()) {
+    try {
+      prefix.wait();
+    } catch (...) {
+      if (!prefix.result_observation_failed())
+        throw;
+      observation_error = std::current_exception();
+    }
+  }
   retire();
+  if (observation_error)
+    std::rethrow_exception(observation_error);
 }
 
 void SparseRuntimeView::retire() {

@@ -24,6 +24,12 @@ class ExecutionDomainBusy : public std::runtime_error {
 // its domains before destroying execution instances and device storage.
 class ExecutionDomain {
  public:
+  // Cold-installed collector. Enqueues result snapshots on the selected
+  // stream after the timed work and returns the preallocated observer for
+  // this domain slot. The previous ticket is frozen before slot reuse.
+  using ResultCollector =
+      std::function<std::shared_ptr<RuntimeCompletionObserver>(void *,
+                                                               std::size_t)>;
   struct Options {
     std::size_t capacity{2};
     int priority{0};
@@ -96,7 +102,9 @@ class ExecutionDomain {
   // prefix under the same admission lock that excludes retirement.
   std::shared_ptr<ExecutionInstance> prepare_owned_instance(
       const std::shared_ptr<RuntimeClient> &owner,
-      const std::function<void(const std::shared_ptr<ExecutionInstance> &)> &prepare);
+      const std::function<void(const std::shared_ptr<ExecutionInstance> &)>
+          &prepare,
+      ResultCollector collect_result = {});
   RuntimeCompletion submit_instance(
       const std::shared_ptr<ExecutionInstance> &instance,
       const std::vector<RuntimeCompletion> &dependencies,
@@ -113,6 +121,8 @@ class ExecutionDomain {
   // retains its owner and budget, and remains observable on repeated calls.
   // The client's backend/vendor frees may still synchronize other queues;
   // callers must separately qualify those resource-specific teardown paths.
+  // A completed result error is rethrown after successful retirement, without
+  // quarantining its instance or budget. The ticket retains the original error.
   void retire_instance(const std::shared_ptr<ExecutionInstance> &instance);
   bool instance_retired(const std::shared_ptr<ExecutionInstance> &instance) const;
 

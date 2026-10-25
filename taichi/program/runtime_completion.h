@@ -81,6 +81,16 @@ class TI_DLL_EXPORT RuntimeCompletionResources {
       std::uint32_t kind) const noexcept = 0;
 };
 
+// A preallocated, submission-specific result snapshot. Called exactly once
+// after backend completion is proven, before its slot can be reused. This is
+// host-only inspection: no device work, waits, or reentry into completion APIs.
+// Errors belong to the result ticket, not to the backend's health or lifetime.
+class TI_DLL_EXPORT RuntimeCompletionObserver {
+ public:
+  virtual ~RuntimeCompletionObserver() = default;
+  virtual void observe() const = 0;
+};
+
 // Internal, backend-neutral completion token. Metadata is stored inline so a
 // synchronously completed/no-work token reuses one process-wide state without
 // allocating. Pending states are shared because Program and an eventual
@@ -191,6 +201,13 @@ class TI_DLL_EXPORT RuntimeCompletion {
   // Internal Program hooks. Attaching is allowed exactly once while pending.
   void attach_resources(
       std::shared_ptr<RuntimeCompletionResources> resources) const;
+  // Attach before publishing the pending token. Result errors remain sticky
+  // on done()/wait(), while completed operands and backend handles retire.
+  void attach_observer(
+      std::shared_ptr<RuntimeCompletionObserver> observer) const;
+  // No polling. True only for a proven-complete result observation failure;
+  // never for a backend query/wait failure or an abandoned/invalidated token.
+  bool result_observation_failed() const noexcept;
   void mark_completed() const noexcept;
   void invalidate(const std::string &reason) const noexcept;
   void invalidate_and_release(const std::string &reason) const noexcept;

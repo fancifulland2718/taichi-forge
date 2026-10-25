@@ -514,6 +514,101 @@ TEST(RuntimeCompletion, FirstBackendErrorIsSticky) {
   EXPECT_EQ(completion.first_error_message(), "fake completion failure");
 }
 
+class ResultObserver final : public RuntimeCompletionObserver {
+ public:
+  void observe() const override {
+    ++calls;
+    if (fail)
+      throw std::invalid_argument("frozen result error");
+  }
+  mutable int calls{0};
+  bool fail{true};
+};
+
+TEST(RuntimeCompletion,
+     ResultErrorsFreezeBeforeReuseAndReleaseCompletedResources) {
+  for (int mode = 0; mode != 3; ++mode) {
+    auto semaphore = std::make_shared<FakeSemaphore>();
+    auto observer = std::make_shared<ResultObserver>();
+    auto completion = RuntimeCompletion::from_stream_semaphore(Arch::vulkan, 23,
+                                                               9, semaphore);
+    std::atomic<int> released{0};
+    completion.attach_resources(
+        std::make_shared<CountedResources>(&released, 1));
+    completion.attach_observer(observer);
+    EXPECT_FALSE(completion.done());
+    EXPECT_FALSE(completion.result_observation_failed());
+    EXPECT_EQ(observer->calls, 0);
+    if (mode == 0) {
+      semaphore->ready = true;
+      EXPECT_THROW(completion.done(), std::invalid_argument);
+    } else if (mode == 1) {
+      EXPECT_THROW(completion.wait(), std::invalid_argument);
+    } else {
+      completion.mark_completed();
+    }
+    EXPECT_TRUE(completion.result_observation_failed());
+    EXPECT_EQ(released.load(), 1);
+    EXPECT_EQ(completion.retained_resource_count(7), 0u);
+    EXPECT_FALSE(completion.has_backend_work());
+    EXPECT_EQ(observer->calls, 1);
+    observer->fail =
+        false;  // The preallocated slot may now serve another ticket.
+    EXPECT_THROW(completion.done(), std::invalid_argument);
+    EXPECT_THROW(completion.wait(), std::invalid_argument);
+    completion.mark_completed();
+    completion.invalidate_and_release("owner retired");
+    EXPECT_TRUE(completion.result_observation_failed());
+    EXPECT_EQ(completion.first_error_message(), "frozen result error");
+    EXPECT_EQ(observer->calls, 1);
+    auto next = RuntimeCompletion::from_stream_semaphore(Arch::vulkan, 23, 10,
+                                                         semaphore);
+    next.attach_observer(observer);
+    EXPECT_NO_THROW(next.wait());
+    EXPECT_FALSE(next.result_observation_failed());
+    EXPECT_EQ(observer->calls, 2);
+  }
+}
+
+TEST(RuntimeCompletion,
+     BackendFailureOrAbandonmentNeverObservesUnprovenStorage) {
+  for (bool abandon : {false, true}) {
+    auto semaphore = std::make_shared<FakeSemaphore>();
+    auto observer = std::make_shared<ResultObserver>();
+    auto completion = RuntimeCompletion::from_stream_semaphore(Arch::vulkan, 23,
+                                                               11, semaphore);
+    completion.attach_observer(observer);
+    if (abandon) {
+      completion.invalidate_and_release("unproven device");
+    } else {
+      semaphore->fail = true;
+      EXPECT_THROW(completion.wait(), std::runtime_error);
+      completion.mark_completed();
+    }
+    EXPECT_FALSE(completion.result_observation_failed());
+    EXPECT_EQ(observer->calls, 0);
+    EXPECT_THROW(completion.done(), std::runtime_error);
+  }
+}
+
+TEST(RuntimeCompletion, ConcurrentQueryAndWaitObserveTheResultOnce) {
+  auto semaphore = std::make_shared<GatedSemaphore>();
+  auto observer = std::make_shared<ResultObserver>();
+  auto completion =
+      RuntimeCompletion::from_stream_semaphore(Arch::vulkan, 23, 12, semaphore);
+  completion.attach_observer(observer);
+  auto waiter = std::async(std::launch::async, [&] {
+    EXPECT_THROW(completion.wait(), std::invalid_argument);
+  });
+  ASSERT_TRUE(semaphore->await_waiters(1));
+  semaphore->ready.store(true);
+  EXPECT_THROW(completion.done(), std::invalid_argument);
+  semaphore->release();
+  waiter.get();
+  EXPECT_EQ(observer->calls, 1);
+  EXPECT_TRUE(completion.result_observation_failed());
+}
+
 TEST(RuntimeCompletion, ProgramSyncRetiresFaultedResourcesWithoutHidingError) {
   auto semaphore = std::make_shared<FakeSemaphore>();
   semaphore->fail = true;

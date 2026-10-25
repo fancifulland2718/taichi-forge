@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Embedded LLVM runtime views carry a source allocator and private tree directory.
-inline constexpr int kForgeNativeAbiRevision = 204;
+inline constexpr int kForgeNativeAbiRevision = 205;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
