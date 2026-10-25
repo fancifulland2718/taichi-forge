@@ -31,10 +31,11 @@ def _rejection(attempt, reason):
 
 
 def _unregistered_reason(backend, family, node):
-    if backend != "cuda":
+    supported = ("cuda", "vulkan") if family == "range_dispatch" else ("cuda",)
+    if backend not in supported:
         return (
             "unsupported_backend",
-            f"{family} dispatch provider requires CUDA; definition backend is {backend}.",
+            f"{family} dispatch provider supports {supported}; definition backend is {backend}.",
         )
     if family == "graph_memory":
         count = len(
@@ -158,7 +159,7 @@ def dispatch_source_explanation(definition, sources, *, supported_scope, family)
         "scope": "completed_generation_attempts_not_performance_or_materialization_outcomes",
         "status": (
             "unsupported_backend"
-            if definition.backend != "cuda"
+            if definition.backend not in (("cuda", "vulkan") if family == "range_dispatch" else ("cuda",))
             else (
                 "sources_inspected" if observations else "no_eligible_registered_source"
             )

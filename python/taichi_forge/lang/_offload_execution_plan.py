@@ -533,10 +533,12 @@ class _OffloadExecutionPlan:
             # its own identity and all topology/proof checks below still apply.
             compilation_identity = ""
         for spec, manifest in zip(self.materialized_tasks, manifests):
-            if spec.range_dispatch == "device" and (
-                getattr(manifest, "device_range_dispatch_version", 0) != 1
-            ):
-                raise ValueError(f"task {spec.task_index} has no device range dispatch proof")
+            if spec.range_dispatch == "device":
+                from taichi_forge.lang._range_dispatch import device_range_dispatch_rejection
+
+                rejection = device_range_dispatch_rejection(manifest)
+                if rejection is not None:
+                    raise ValueError(f"task {spec.task_index} has no device range dispatch proof: {rejection}")
             if getattr(manifest, "requested_range_dispatch", "fixed") != spec.range_dispatch:
                 raise ValueError(f"task {spec.task_index} materialized different range dispatch")
             if manifest.optimization_spec_id != compilation_identity:

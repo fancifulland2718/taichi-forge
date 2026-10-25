@@ -52,6 +52,7 @@ def test_default_runtime_recipe_families_have_independent_provider_ownership():
         "taichi_forge.graph.recording_partition",
         "taichi_forge.graph.resource_lifetime",
         "taichi_forge.graph.sparse_traversal",
+        "taichi_forge.graph.range_dispatch",
         "taichi_forge.graph.structured_control",
         "taichi_forge.graph.value_fusion",
         "taichi_forge.graph.workspace_concurrency",

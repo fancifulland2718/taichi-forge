@@ -22,7 +22,7 @@ from taichi_forge.lang._offload_execution_plan import (
 
 
 _PROVIDER_NAMESPACE = "taichi_forge.lang.offload_execution_plan"
-_FIRST_STAGE_VERSION = "single-task-perturbation.v1"
+_FIRST_STAGE_VERSION = "single-task-perturbation.v2"
 _REFINED_STAGE_VERSION = "observed-frontier-pairwise.v1"
 _WORKGROUP_SIZES = (64, 128, 256, 512)
 _THREAD_LOCAL_MODES = ("on", "off")
@@ -277,7 +277,11 @@ class CompileIQOffloadExecutionPlanSearch:
                 cls._add_single_axis(recipes, baseline, spec.task_index, "workgroup_size", legal)
                 axis_status["workgroup_size"] = f"{len(legal)} perturbations"
 
-            if manifest.thread_local_bytes > 0:
+            # A TLS allocation alone is not proof of a compiler reduction.
+            # This qualification does not authorize remapping its iterations.
+            reduction = (manifest.range_bounds is not None and
+                         manifest.range_bounds.empty_group_elision == "compiler_tls_reduction")
+            if manifest.thread_local_bytes > 0 and reduction:
                 cls._add_single_axis(
                     recipes,
                     baseline,
@@ -328,6 +332,11 @@ class CompileIQOffloadExecutionPlanSearch:
                 axis_status["grid_residency_waves"] = "dense grid-stride range"
             else:
                 axis_status["grid_residency_waves"] = "requires a dense grid-stride range"
+            from taichi_forge.lang._range_dispatch import device_range_dispatch_rejection
+
+            axis_status["range_dispatch"] = device_range_dispatch_rejection(manifest) or (
+                "qualified for Graph recording only; direct kernel trials retain ordinary launch"
+            )
             eligibility.append((spec.logical_task_id, axis_status))
 
         if len(recipes) > 4096:

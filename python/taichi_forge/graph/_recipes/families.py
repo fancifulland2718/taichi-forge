@@ -443,6 +443,7 @@ def default_graph_recipe_providers():
     from taichi_forge.graph._recipes.dispatch_families import (
         GraphOffloadPhaseFusionRecipeProvider,
         GraphSparseTraversalRecipeProvider,
+        GraphRangeDispatchRecipeProvider,
     )
     from taichi_forge.graph._recipes.graph_memory import GraphMemoryRecipeProvider
     from taichi_forge.graph._recipes.map_fusion import GraphMapFusionRecipeProvider
@@ -465,6 +466,7 @@ def default_graph_recipe_providers():
         GraphMemoryRecipeProvider(),
         GraphOffloadPhaseFusionRecipeProvider(),
         GraphSparseTraversalRecipeProvider(),
+        GraphRangeDispatchRecipeProvider(),
         GraphBranchJoinRecipeProvider(),
         GraphRecordingPartitionRecipeProvider(),
         GraphBindingFrameRecipeProvider(),

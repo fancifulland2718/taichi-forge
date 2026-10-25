@@ -10990,6 +10990,7 @@ def _replay_recipe_cgraph_node(
                 memory_source,
                 offload_source,
                 sparse_source,
+                range_source,
             ) = operation
             contracts = ()
             layout_requirements = ()
@@ -10999,6 +11000,7 @@ def _replay_recipe_cgraph_node(
                     assembly.dispatch_rewriter(memory_source),
                     assembly.dispatch_rewriter(offload_source),
                     assembly.dispatch_rewriter(sparse_source),
+                    assembly.dispatch_rewriter(range_source),
                 )
                 if rewriter is not None
             )
@@ -11262,6 +11264,7 @@ class _GraphSpec:
             graph_memory_sources=self._graph_memory_sources,
             graph_offload_fusion_sources=self._graph_offload_fusion_sources,
             graph_sparse_traversal_sources=self._graph_sparse_traversal_sources,
+            graph_range_dispatch_sources=self._graph_range_dispatch_sources,
             graph_bounded_sources=self._graph_bounded_sources,
             graph_reduction_sources=self._graph_reduction_sources,
             graph_native_algorithm_sources=self._graph_native_algorithm_sources,
@@ -11380,6 +11383,7 @@ class _GraphSpec:
         graph_memory_sources=(),
         graph_offload_fusion_sources=(),
         graph_sparse_traversal_sources=(),
+        graph_range_dispatch_sources=(),
         graph_bounded_sources=(),
         graph_reduction_sources=(),
         graph_native_algorithm_sources=(),
@@ -11497,6 +11501,7 @@ class _GraphSpec:
         self._graph_memory_sources = tuple(graph_memory_sources)
         self._graph_offload_fusion_sources = tuple(graph_offload_fusion_sources)
         self._graph_sparse_traversal_sources = tuple(graph_sparse_traversal_sources)
+        self._graph_range_dispatch_sources = tuple(graph_range_dispatch_sources)
         self._graph_bounded_sources = tuple(graph_bounded_sources)
 
         self._graph_reduction_sources = tuple(graph_reduction_sources)
@@ -16920,6 +16925,8 @@ class GraphBuilder:
         self._graph_memory_sources = []
         self._graph_offload_fusion_sources = []
         self._graph_sparse_traversal_sources = []
+        self._graph_range_dispatch_sources = []
+        self._range_dispatch_task_facts = {}
         self._graph_bounded_sources = []
         self._parallel_dispatch_groups = ()
 
@@ -16987,6 +16994,16 @@ class GraphBuilder:
             kernel_cpp,
             template_args,
         )
+        from taichi_forge.graph._recipes.range_dispatch import GraphRangeDispatchSource
+
+        range_source = (
+            GraphRangeDispatchSource.try_create(
+                kernel_fn, unzipped_args, label, kernel_cpp, template_args, self._range_dispatch_task_facts
+            )
+            if self._capture_recipe_sources else None
+        )
+        if range_source is not None:
+            range_source._recipe_source_key = f"range-dispatch:{len(self._graph_range_dispatch_sources)}"
         contracts, layout_requirements = (), ()
         if source is not None:
             source._recipe_source_key = f"memory:{len(self._graph_memory_sources)}"
@@ -17005,6 +17022,7 @@ class GraphBuilder:
             _recipe_source=source,
             _offload_recipe_source=offload_source,
             _sparse_recipe_source=sparse_source,
+            _range_recipe_source=range_source,
         )
         if contracts or layout_requirements:
             self._pending_ir_nodes[-1] = replace(
@@ -17018,6 +17036,8 @@ class GraphBuilder:
             self._graph_offload_fusion_sources.append(offload_source)
         if sparse_source is not None:
             self._graph_sparse_traversal_sources.append(sparse_source)
+        if range_source is not None:
+            self._graph_range_dispatch_sources.append(range_source)
 
     def reduce(
         self,
@@ -17894,6 +17914,7 @@ class GraphBuilder:
         _recipe_source=None,
         _offload_recipe_source=None,
         _sparse_recipe_source=None,
+        _range_recipe_source=None,
     ):
         self._bind_declared_private_args(unzipped_args)
         self._active_bounded_publication = None
@@ -17919,6 +17940,7 @@ class GraphBuilder:
                     _recipe_source,
                     _offload_recipe_source,
                     _sparse_recipe_source,
+                    _range_recipe_source,
                 )
             )
 
@@ -18388,6 +18410,7 @@ class GraphBuilder:
                 graph_sparse_traversal_sources=tuple(
                     self._graph_sparse_traversal_sources
                 ),
+                graph_range_dispatch_sources=tuple(self._graph_range_dispatch_sources),
                 graph_bounded_sources=tuple(self._graph_bounded_sources),
                 graph_reduction_sources=tuple(self._graph_reduction_sources),
                 graph_native_algorithm_sources=tuple(

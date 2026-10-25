@@ -129,7 +129,36 @@ class GraphSparseTraversalRecipeProvider(GraphRuntimeFragmentProvider):
         )
 
 
+class GraphRangeDispatchRecipeProvider(GraphRuntimeFragmentProvider):
+    descriptor = runtime_family_provider_descriptor(
+        "range_dispatch",
+        capabilities=("compiled-range-controller-v1", "typed-runtime-fragment"),
+        domain_version="compiled-range-controller-v1",
+        semantic_fingerprint="final-range-proof-launch-only-v1",
+    )
+
+    def fragments(self, definition):
+        return _dispatch_choice_fragments(
+            definition, definition._runtime_spec._graph_range_dispatch_sources,
+            "range_dispatch", self.descriptor,
+        )
+
+    def contribute_runtime(self, assembly, selection):
+        source = assembly.find_source(assembly.spec._graph_range_dispatch_sources, selection.source_key)
+        assembly.select_dispatch(source, lambda: (source.materialize(selection.choice_id), (), ()))
+
+    def explain_discovery(self, definition):
+        from taichi_forge.graph._recipes.discovery import dispatch_source_explanation
+
+        return dispatch_source_explanation(
+            definition, definition._runtime_spec._graph_range_dispatch_sources,
+            family="range_dispatch",
+            supported_scope="CUDA/Vulkan compiled dynamic range controllers; no block or productive-iteration remapping",
+        )
+
+
 __all__ = [
     "GraphOffloadPhaseFusionRecipeProvider",
     "GraphSparseTraversalRecipeProvider",
+    "GraphRangeDispatchRecipeProvider",
 ]
