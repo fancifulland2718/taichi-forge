@@ -16084,7 +16084,9 @@ def _metadata_resource_effect(effect, record):
 
 def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
     fallback_nodes = tuple(fallback_nodes)
-    records = getattr(compiled_graph, "_dispatch_metadata", None)
+    records = getattr(compiled_graph, "_dispatch_ir_metadata", None)
+    if records is None:
+        records = getattr(compiled_graph, "_dispatch_metadata", None)
     if records is None or len(records) != len(fallback_nodes):
         return fallback_nodes
     result = []
@@ -16106,10 +16108,6 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
             record.get("logical_kernel_identity") or fallback.logical_kernel_identity
         )
         iteration_domain = _metadata_iteration_domain(record)
-        effects = tuple(
-            _metadata_resource_effect(effect, record)
-            for effect in record.get("effects", ())
-        )
         proven = (
             bool(record.get("available", False))
             and not any(
@@ -16117,8 +16115,16 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
                 for binding in fallback.bindings
             )
             and not bool(record.get("opaque", True))
-            and all(effect is not None for effect in effects)
         )
+        # Opaque/unavailable metadata cannot replace the conservative effects.
+        # Do not construct a second set only to discard it immediately.
+        effects = ()
+        if proven:
+            effects = tuple(
+                _metadata_resource_effect(effect, record)
+                for effect in record.get("effects", ())
+            )
+            proven = all(effect is not None for effect in effects)
         if not proven:
             result.append(
                 DispatchNode(

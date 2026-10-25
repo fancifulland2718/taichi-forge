@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -334,7 +335,8 @@ lang::OffloadedTaskManifest overlay_execution_plan_launch_requests(
 }
 
 py::dict graph_kernel_metadata_to_python(
-    const lang::GraphKernelMetadata &metadata) {
+    const lang::GraphKernelMetadata &metadata,
+    bool include_footprints = true) {
   py::dict item;
   item["version"] = metadata.version;
   item["available"] = metadata.available;
@@ -361,22 +363,115 @@ py::dict graph_kernel_metadata_to_python(
     encoded["snode_id"] = effect.snode_id;
     encoded["is_grad"] = effect.is_grad;
     encoded["access"] = effect.access;
-    py::dict footprint;
-    footprint["pattern"] = effect.footprint.pattern;
-    footprint["iteration_rank"] = effect.footprint.iteration_rank;
-    footprint["affine_coefficients"] =
-        effect.footprint.affine_coefficients;
-    footprint["affine_index_offsets"] =
-        effect.footprint.affine_index_offsets;
-    footprint["affine_offsets"] = effect.footprint.affine_offsets;
-    footprint["halo"] = effect.footprint.halo;
-    footprint["contiguous_axis"] = effect.footprint.contiguous_axis;
-    footprint["reuse_class"] = effect.footprint.reuse_class;
-    encoded["footprint"] = std::move(footprint);
+    if (include_footprints) {
+      py::dict footprint;
+      footprint["pattern"] = effect.footprint.pattern;
+      footprint["iteration_rank"] = effect.footprint.iteration_rank;
+      footprint["affine_coefficients"] =
+          effect.footprint.affine_coefficients;
+      footprint["affine_index_offsets"] =
+          effect.footprint.affine_index_offsets;
+      footprint["affine_offsets"] = effect.footprint.affine_offsets;
+      footprint["halo"] = effect.footprint.halo;
+      footprint["contiguous_axis"] = effect.footprint.contiguous_axis;
+      footprint["reuse_class"] = effect.footprint.reuse_class;
+      encoded["footprint"] = std::move(footprint);
+    }
     effects.append(std::move(encoded));
   }
   item["effects"] = std::move(effects);
   return item;
+}
+
+// Only the cold Graph IR bridge uses these shared views. The diagnostic
+// _dispatch_metadata API continues to return independent mutable snapshots.
+py::object freeze_graph_ir_metadata(py::handle value) {
+  if (py::isinstance<py::dict>(value)) {
+    py::dict frozen;
+    for (const auto &entry : py::reinterpret_borrow<py::dict>(value)) {
+      frozen[entry.first] = freeze_graph_ir_metadata(entry.second);
+    }
+    return py::reinterpret_steal<py::object>(PyDictProxy_New(frozen.ptr()));
+  }
+  if (py::isinstance<py::list>(value)) {
+    const auto items = py::reinterpret_borrow<py::list>(value);
+    py::tuple frozen(items.size());
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      frozen[i] = freeze_graph_ir_metadata(items[i]);
+    }
+    return std::move(frozen);
+  }
+  return py::reinterpret_borrow<py::object>(value);
+}
+
+py::list graph_dispatch_metadata_to_python(const lang::aot::CompiledGraph &graph,
+                                           bool for_ir) {
+  using namespace lang;
+  py::list result;
+  std::unordered_map<const GraphKernelMetadata *, py::dict> metadata_views;
+  auto append = [&](const std::string &kernel_name,
+                    const std::string &dispatch_label,
+                    const std::vector<aot::Arg> &args,
+                    const std::shared_ptr<const GraphKernelMetadata> &metadata,
+                    std::uint64_t logical_dispatch_id,
+                    const std::string &logical_kernel_identity) {
+    static const GraphKernelMetadata unavailable;
+    const auto *key = metadata ? metadata.get() : &unavailable;
+    py::dict item;
+    if (for_ir) {
+      auto found = metadata_views.find(key);
+      if (found == metadata_views.end()) {
+        // The IR consumer does not read footprints. Full diagnostics and
+        // recipe consumers still use the independent, complete snapshot.
+        py::dict shared;
+        for (const auto &entry : graph_kernel_metadata_to_python(*key, false)) {
+          shared[entry.first] = freeze_graph_ir_metadata(entry.second);
+        }
+        found = metadata_views.emplace(key, std::move(shared)).first;
+      }
+      item = py::reinterpret_steal<py::dict>(PyDict_Copy(found->second.ptr()));
+    } else {
+      item = graph_kernel_metadata_to_python(*key);
+    }
+    item["kernel_name"] = kernel_name;
+    item["dispatch_label"] = dispatch_label;
+    item["logical_kernel_identity"] = logical_kernel_identity;
+    item["logical_dispatch_id"] =
+        logical_dispatch_id ==
+                std::numeric_limits<std::uint64_t>::max()
+            ? py::none()
+            : py::cast(logical_dispatch_id);
+    py::list symbolic_args;
+    for (const auto &arg : args) {
+      py::dict encoded;
+      encoded["name"] = arg.name;
+      encoded["tag"] = static_cast<int>(arg.tag);
+      symbolic_args.append(std::move(encoded));
+    }
+    item["symbolic_args"] = for_ir ? freeze_graph_ir_metadata(symbolic_args)
+                                   : py::object(std::move(symbolic_args));
+    if (for_ir) {
+      result.append(py::reinterpret_steal<py::object>(PyDictProxy_New(item.ptr())));
+    } else {
+      result.append(std::move(item));
+    }
+  };
+  for (const auto &dispatch : graph.dispatches) {
+    if (dispatch.source_dispatches.empty()) {
+      append(dispatch.kernel_name, dispatch.dispatch_label,
+             dispatch.symbolic_args,
+             dispatch.graph_metadata,
+             std::numeric_limits<std::uint64_t>::max(), "");
+      continue;
+    }
+    for (const auto &source : dispatch.source_dispatches) {
+      append(source.kernel_name, source.dispatch_label,
+             source.symbolic_args,
+             source.graph_metadata, source.logical_dispatch_id,
+             source.logical_kernel_identity);
+    }
+  }
+  return result;
 }
 
 const char *autodiff_mode_name(AutodiffMode mode) {
@@ -7049,50 +7144,12 @@ void export_lang(py::module &m) {
       .def_property_readonly(
           "_dispatch_metadata",
           [](const aot::CompiledGraph &graph) {
-            py::list result;
-            auto append = [&](const std::string &kernel_name,
-                              const std::string &dispatch_label,
-                              const std::vector<aot::Arg> &args,
-                              const std::shared_ptr<const GraphKernelMetadata> &metadata,
-                              std::uint64_t logical_dispatch_id,
-                              const std::string &logical_kernel_identity) {
-              static const GraphKernelMetadata unavailable;
-              py::dict item = graph_kernel_metadata_to_python(
-                  metadata ? *metadata : unavailable);
-              item["kernel_name"] = kernel_name;
-              item["dispatch_label"] = dispatch_label;
-              item["logical_kernel_identity"] = logical_kernel_identity;
-              item["logical_dispatch_id"] =
-                  logical_dispatch_id ==
-                          std::numeric_limits<std::uint64_t>::max()
-                      ? py::none()
-                      : py::cast(logical_dispatch_id);
-              py::list symbolic_args;
-              for (const auto &arg : args) {
-                py::dict encoded;
-                encoded["name"] = arg.name;
-                encoded["tag"] = static_cast<int>(arg.tag);
-                symbolic_args.append(std::move(encoded));
-              }
-              item["symbolic_args"] = std::move(symbolic_args);
-              result.append(std::move(item));
-            };
-            for (const auto &dispatch : graph.dispatches) {
-              if (dispatch.source_dispatches.empty()) {
-                append(dispatch.kernel_name, dispatch.dispatch_label,
-                       dispatch.symbolic_args,
-                       dispatch.graph_metadata,
-                       std::numeric_limits<std::uint64_t>::max(), "");
-                continue;
-              }
-              for (const auto &source : dispatch.source_dispatches) {
-                append(source.kernel_name, source.dispatch_label,
-                       source.symbolic_args,
-                       source.graph_metadata, source.logical_dispatch_id,
-                       source.logical_kernel_identity);
-              }
-            }
-            return result;
+            return graph_dispatch_metadata_to_python(graph, false);
+          })
+      .def_property_readonly(
+          "_dispatch_ir_metadata",
+          [](const aot::CompiledGraph &graph) {
+            return graph_dispatch_metadata_to_python(graph, true);
           })
       .def_property_readonly(
           "_composer_stats",

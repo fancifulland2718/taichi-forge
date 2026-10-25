@@ -1,8 +1,90 @@
 """Resource closure survives accesses that cannot be pointwise-fused."""
 
 import numpy as np
+import pytest
 import taichi_forge as ti
 from tests import test_utils
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_ir_metadata_shares_readonly_facts_and_preserves_snapshot_isolation():
+    from collections.abc import Mapping
+    from types import SimpleNamespace
+    from taichi_forge.graph._graph import _compiled_dispatch_ir_nodes
+
+    total = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def update(x: ti.types.ndarray(ti.i32, ndim=1), delta: ti.i32):
+        for i in x:
+            x[i] += delta
+            ti.atomic_add(total[None], delta)
+
+    a = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a", ti.i32, ndim=1)
+    b = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b", ti.i32, ndim=1)
+    delta = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "delta", ti.i32)
+    builder = ti.graph.GraphBuilder(_explicit_map_source_groups=())
+    for _ in range(8):
+        builder.dispatch(update, a, delta)
+        builder.dispatch(update, b, delta)
+    graph = builder.compile()
+    compiled = graph._spec.nodes[0].compiled_graph
+    views = compiled._dispatch_ir_metadata
+    snapshots = compiled._dispatch_metadata
+    assert len(views) == len(snapshots) == 16
+    assert len({id(row["effects"]) for row in views}) == 1
+    assert len({id(row["effects"]) for row in snapshots}) == 16
+
+    def normalize(value):
+        if isinstance(value, Mapping):
+            return {key: normalize(item) for key, item in value.items() if key != "footprint"}
+        if isinstance(value, (tuple, list)):
+            return [normalize(item) for item in value]
+        return value
+
+    assert normalize(views) == normalize(snapshots)
+    fallback = graph._spec.pre_optimization_ir_root.children
+    assert _compiled_dispatch_ir_nodes(compiled, fallback) == _compiled_dispatch_ir_nodes(
+        SimpleNamespace(_dispatch_metadata=snapshots), fallback
+    )
+    with pytest.raises(TypeError):
+        views[0]["opaque"] = True
+    with pytest.raises(TypeError):
+        views[0]["effects"][0]["access"] = "read"
+    with pytest.raises(TypeError):
+        views[0]["symbolic_args"][0]["name"] = "changed"
+    snapshots[0]["effects"][0]["access"] = "changed"
+    snapshots[0]["effects"][0]["footprint"]["pattern"] = "changed"
+    assert snapshots[1]["effects"][0]["access"] != "changed"
+    assert compiled._dispatch_metadata[0]["effects"][0]["footprint"]["pattern"] != "changed"
+
+    x, y = ti.ndarray(ti.i32, 4), ti.ndarray(ti.i32, 4)
+    x.fill(0)
+    y.fill(10)
+    graph.run({"a": x, "b": y, "delta": 2})
+    graph.run({"a": y, "b": x, "delta": 3})
+    assert x.to_numpy().tolist() == [40] * 4
+    assert y.to_numpy().tolist() == [50] * 4
+    assert total[None] == 320
+    graph.close()
+
+
+def test_opaque_ir_metadata_does_not_convert_discarded_effects(monkeypatch):
+    from types import SimpleNamespace
+    from taichi_forge.graph import _graph
+    from taichi_forge.graph._ir import DispatchNode, GraphAccess, ResourceEffect
+
+    fallback = DispatchNode(name="opaque", effects=(ResourceEffect("x", GraphAccess.READ_WRITE),))
+
+    def forbidden(*_args):
+        raise AssertionError("opaque metadata must retain conservative effects directly")
+
+    monkeypatch.setattr(_graph, "_metadata_resource_effect", forbidden)
+    compiled = SimpleNamespace(_dispatch_ir_metadata=[{
+        "available": True, "opaque": True, "effects": [{}],
+    }])
+    result, = _graph._compiled_dispatch_ir_nodes(compiled, [fallback])
+    assert result.opaque and result.effects == fallback.effects
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
