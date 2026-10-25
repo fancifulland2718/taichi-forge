@@ -273,10 +273,11 @@ TI_DLL_EXPORT void TI_API_CALL
 ti_release_vulkan_execution_instance_ext(TiVulkanExecutionInstance instance);
 
 // Cold preparation of a qualified fixed plan. Call ti_initialize_prepared_ext
-// before submission. Mutable parameters are replay-only u64 scalars; count=0
-// freezes every scalar. Commands, parameter pools and sampled timestamps stay
-// on the chosen queue. Private offscreen graphics requires a graphics-capable
-// queue family; live writable image, AS and shared sparse contracts remain separate.
+// before submission. Mutable parameters are replay-only i32/u32/i64/u64
+// scalars; count=0 freezes every scalar. Commands, parameter pools and sampled
+// timestamps stay on the chosen queue. Private offscreen graphics requires a
+// graphics-capable queue family; live writable image, AS and shared sparse
+// contracts remain separate.
 TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
 ti_prepare_execution_plan_on_vulkan_domain_ext(
     TiRuntime runtime, TiAotModule module, TiVulkanExecutionDomain domain,

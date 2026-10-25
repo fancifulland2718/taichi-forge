@@ -24,6 +24,7 @@ VULKAN_NAMES = (
     "vulkan_aot_execution_domains",
     "vulkan_jit_graph_execution_domains",
     "vulkan_submission_parameters_u64",
+    "vulkan_submission_parameters_integer",
     "vulkan_completion_gpu_timing",
     "vulkan_execution_instance_retirement",
     "vulkan_execution_domain_while",
@@ -51,6 +52,7 @@ def test_domain_manifest_matches_runtime_only_without_initializing_a_device():
         cuda_api and jit["features"]["vulkan"] and jit["features"]["ggui"]
     )
     assert native["features"]["cuda_submission_parameters_u64"] == cuda_api
+    assert native["features"]["cuda_submission_parameters_integer"] == cuda_api
     assert native["features"]["cuda_completion_gpu_timing"] == cuda_api
     assert native["features"]["cuda_execution_instance_retirement"] == cuda_api
     assert native["features"]["completion_wait_any"] == hasattr(ti._lib.core, "_borrow_aot_runtime")
@@ -86,6 +88,27 @@ print(json.dumps(dict(features=dict(value['features']), abi=value['native_abi_re
     assert observed["features"] == dict(ti.runtime_contract_manifest()["features"])
 
 
+def test_u64_flags_do_not_qualify_integer_submission(monkeypatch):
+    from taichi_forge_runtime import _contracts
+
+    class Query:
+        def __call__(self, pointer, size):
+            native = C.cast(pointer, C.POINTER(_contracts._Bootstrap)).contents
+            native.struct_size = size
+            native.manifest_schema_version = 1
+            native.native_abi_revision = 209
+            native.feature_bitmap = (1 << 17) | (1 << 24)
+            native.compiler_abi = b"u64-only"
+            return 0
+
+    monkeypatch.setattr(_contracts._native, "load_library", lambda: SimpleNamespace(
+        taichi_forge_runtime_bootstrap_v1=Query()))
+    features = _contracts.runtime_contract_manifest()["features"]
+    for backend in ("cuda", "vulkan"):
+        assert features[backend + "_submission_parameters_u64"]
+        assert not features[backend + "_submission_parameters_integer"]
+
+
 @pytest.mark.parametrize("bitmap", [0, (1 << 12) - 1, ((1 << 17) - 1)])
 def test_old_native_bits_do_not_infer_domains_from_version_or_abi(monkeypatch, bitmap):
     from taichi_forge_runtime import _contracts
@@ -106,6 +129,7 @@ def test_old_native_bits_do_not_infer_domains_from_version_or_abi(monkeypatch, b
     manifest = _contracts.runtime_contract_manifest()
     assert manifest["native_abi_revision"] == 87
     assert not manifest["features"]["cuda_submission_parameters_u64"]
+    assert not manifest["features"]["cuda_submission_parameters_integer"]
     assert not manifest["features"]["cuda_completion_gpu_timing"]
     assert not manifest["features"]["completion_wait_any"]
     assert not any(manifest["features"][name] for name in VULKAN_NAMES)

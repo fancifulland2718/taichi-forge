@@ -255,7 +255,7 @@ ti_prepare_execution_plan_on_domain_ext(TiRuntime runtime,
                                         const TiNamedArgument *args,
                                         uint32_t binding_count,
                                         const TiNamedNdArrayBinding *bindings);
-// Cold declaration of replay-only u64 scalar parameters in positional order.
+// Cold declaration of replay-only i32/u32/i64/u64 scalars in positional order.
 // Each independent instance owns preallocated pinned/device argument storage.
 // A parameterized instance accepts one in-flight submission; prepare separate
 // instances for overlap. No new kernel compilation or artifact format is used.

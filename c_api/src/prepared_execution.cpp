@@ -157,6 +157,7 @@ struct PreparedExecution {
   bool requires_default_prefix{true};
   std::vector<DeviceAllocation> preparation_allocations;
   std::vector<SubmissionParameterValue> submission_values;
+  std::vector<std::size_t> submission_widths;
   // Declared before backend recordings so owned buffers are destroyed last.
   std::shared_ptr<ExecutionResourceStorage> resources;
   std::vector<std::shared_ptr<NativeResource>> native_resources;
@@ -1456,11 +1457,16 @@ static TiPreparedExecution prepare_execution_plan_impl(
     const auto argument = arguments.find(name);
     if (argument == arguments.end() ||
         argument->second->type != TI_ARGUMENT_TYPE_SCALAR ||
-        argument->second->value.scalar.type != TI_DATA_TYPE_U64 ||
+        (argument->second->value.scalar.type != TI_DATA_TYPE_U64 &&
+         argument->second->value.scalar.type != TI_DATA_TYPE_I64 &&
+         argument->second->value.scalar.type != TI_DATA_TYPE_U32 &&
+         argument->second->value.scalar.type != TI_DATA_TYPE_I32) ||
         !plan.replay_bindings.count(name) ||
         plan.initialization_bindings.count(name))
       throw MemoryBindingError(
-          "Submission parameters require replay-only u64 scalars: " + name);
+          "Submission parameters require replay-only i32/u32/i64/u64 "
+          "scalars: " +
+          name);
   }
   std::unordered_set<std::string> patched_parameters;
   std::unordered_set<std::string> frozen_metadata;
@@ -1505,6 +1511,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
   prepared->family = family;
   prepared->domain = domain;
   prepared->submission_values.resize(parameter_count);
+  for (uint32_t i = 0; i < parameter_count; ++i)
+    prepared->submission_widths.push_back(
+        data_type_size(capi::ndarray_scalar_type(
+            arguments.at(parameter_names[i])->value.scalar.type)));
   // Reject unmanaged entry paths before private allocation/provider setup.
   // This is a cold validation; submit uses only the frozen epoch closure.
   for (const auto &[name, argument] : arguments)
@@ -2286,13 +2296,16 @@ static TiPreparedExecution prepare_execution_plan_impl(
             continue;
           const auto parameter = parameters.find({static_cast<int>(i)});
           if (parameter == parameters.end() || parameter->second.is_array ||
-              parameter->second.get_dtype() != PrimitiveType::u64)
+              parameter->second.get_dtype() !=
+                  capi::ndarray_scalar_type(
+                      arguments.at(name)->value.scalar.type))
             throw MemoryBindingError(
-                "Submission parameter compiled ABI must be scalar u64: " +
+                "Submission parameter compiled scalar ABI does not match: " +
                 name);
-          patches.push_back(
-              {slot->second, bound->kernel->args_type->get_element_offset(
-                                 {static_cast<int>(i)})});
+          patches.push_back({slot->second,
+                             bound->kernel->args_type->get_element_offset(
+                                 {static_cast<int>(i)}),
+                             prepared->submission_widths.at(slot->second)});
           patched_parameters.insert(name);
         }
         bound->context->append_dispatch_label(kernel->label);
@@ -2682,6 +2695,10 @@ static TiBool try_submit_prepared_impl(TiRuntime runtime,
         "Submission parameter count does not match preparation");
   // This host snapshot has no device effects and is never the DMA source.
   // The instance copies it to its pinned storage only after admission.
+  for (uint32_t i = 0; i < parameter_count; ++i)
+    if (entry.submission_widths[i] == 4 && parameters[i] > UINT32_MAX)
+      throw MemoryBindingError(
+          "32-bit submission parameter requires zero upper 32 bits");
   if (parameter_count)
     std::copy_n(parameters, parameter_count, entry.submission_values.begin());
   if (ready_only) {

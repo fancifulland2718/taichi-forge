@@ -186,6 +186,7 @@ struct FixedExecution::State {
       struct ParameterTarget {
         DevicePtr destination;
         std::size_t slot;
+        std::size_t bytes;
       };
       std::vector<ParameterTarget> parameter_targets;
       std::vector<Slot> slots;
@@ -476,18 +477,25 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Independent Vulkan execution requires fixed device while control");
         if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
-          std::set<std::size_t> offsets;
+          std::map<std::size_t, std::size_t> offsets;
           for (const auto &patch : dispatch->parameters) {
-            if (!dispatch->kernel || patch.slot >= vulkan_binding->parameter_count ||
+            if (!dispatch->kernel ||
+                patch.slot >= vulkan_binding->parameter_count ||
+                (patch.bytes != 4 && patch.bytes != 8) ||
                 patch.argument_offset % 4 ||
                 patch.argument_offset > dispatch->kernel->args_size ||
-                dispatch->kernel->args_size - patch.argument_offset < 8)
-              throw std::invalid_argument("Invalid Vulkan u64 submission parameter binding");
+                dispatch->kernel->args_size - patch.argument_offset <
+                    patch.bytes)
+              throw std::invalid_argument(
+                  "Invalid Vulkan integer submission parameter binding");
             const auto next = offsets.lower_bound(patch.argument_offset);
-            if ((next != offsets.end() && *next - patch.argument_offset < 8) ||
-                (next != offsets.begin() && patch.argument_offset - *std::prev(next) < 8))
+            if ((next != offsets.end() &&
+                 next->first - patch.argument_offset < patch.bytes) ||
+                (next != offsets.begin() &&
+                 patch.argument_offset - std::prev(next)->first <
+                     std::prev(next)->second))
               throw std::invalid_argument("Overlapping Vulkan submission parameter bindings");
-            offsets.insert(patch.argument_offset);
+            offsets.emplace(patch.argument_offset, patch.bytes);
           }
         }
       }
@@ -1425,7 +1433,9 @@ FixedExecution::FixedExecution(
         for (const auto &patch : dispatch_sources[i]->parameters) {
           if (!arguments)
             throw std::invalid_argument("Vulkan parameter target has no argument buffer");
-          payload.parameter_targets.push_back({arguments->get_ptr(patch.argument_offset), patch.slot});
+          payload.parameter_targets.push_back(
+              {arguments->get_ptr(patch.argument_offset), patch.slot,
+               patch.bytes});
         }
       }
       payload.recordings.push_back(std::move(recording));
@@ -1713,14 +1723,20 @@ FixedExecution::FixedExecution(
               upload->memory_barrier();
               for (const auto &patch : payload.parameter_targets) {
                 const auto destination = patch.destination;
-                upload->buffer_transition(destination, 8,
-                    {BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead,
-                     BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite});
-                upload->buffer_copy(destination,
-                    payload.slots[slot].parameters->get_ptr(patch.slot * 8), 8);
-                upload->buffer_transition(destination, 8,
-                    {BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite,
-                     BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead});
+                upload->buffer_transition(destination, patch.bytes,
+                                          {BufferBarrierStage::Compute,
+                                           BufferBarrierAccess::UniformRead,
+                                           BufferBarrierStage::Transfer,
+                                           BufferBarrierAccess::TransferWrite});
+                upload->buffer_copy(
+                    destination,
+                    payload.slots[slot].parameters->get_ptr(patch.slot * 8),
+                    patch.bytes);
+                upload->buffer_transition(destination, patch.bytes,
+                                          {BufferBarrierStage::Transfer,
+                                           BufferBarrierAccess::TransferWrite,
+                                           BufferBarrierStage::Compute,
+                                           BufferBarrierAccess::UniformRead});
               }
               upload->memory_barrier();
               state_->bytes += parameter_bytes;

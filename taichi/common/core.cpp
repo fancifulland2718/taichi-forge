@@ -121,7 +121,8 @@ std::uint64_t get_forge_native_feature_bitmap() {
             kForgeVulkanExecutionDomainPrivateGraphicsAs |
             kForgeVulkanExecutionDomainNativeRayLoans |
             kForgeVulkanExecutionDomainOpacityMicromaps |
-            kForgeVulkanExecutionDomainSparseFields;
+            kForgeVulkanExecutionDomainSparseFields |
+            kForgeVulkanSubmissionIntegerParameters;
 #endif
 #endif
 #if defined(TI_WITH_CUDA) && defined(TI_WITH_VULKAN) && defined(TI_WITH_GGUI)
@@ -131,7 +132,8 @@ std::uint64_t get_forge_native_feature_bitmap() {
   result |= kForgeCudaExecutionDomains | kForgeCudaAotExecutionDomains |
             kForgeCudaExternalStorageExecutionDomains |
             kForgeCudaSubmissionParameters | kForgeCudaCompletionGpuTiming |
-            kForgeCudaExecutionInstanceRetirement;
+            kForgeCudaExecutionInstanceRetirement |
+            kForgeCudaSubmissionIntegerParameters;
 #if defined(TI_WITH_LLVM)
   result |= kForgeCudaJitGraphExecutionDomains |
             kForgeCudaExecutionDomainSparseFields;

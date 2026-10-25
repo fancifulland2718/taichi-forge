@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Complete resource effects are independent of pointwise fusion eligibility.
-inline constexpr int kForgeNativeAbiRevision = 209;
+// Submission parameter patches carry the compiled 32/64-bit scalar width.
+inline constexpr int kForgeNativeAbiRevision = 210;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
@@ -66,6 +66,10 @@ inline constexpr std::uint64_t kForgeVulkanExecutionDomainSparseFields =
     1ull << 39;
 inline constexpr std::uint64_t kForgeCudaExecutionDomainSparseFields = 1ull
                                                                        << 40;
+inline constexpr std::uint64_t kForgeCudaSubmissionIntegerParameters = 1ull
+                                                                       << 41;
+inline constexpr std::uint64_t kForgeVulkanSubmissionIntegerParameters = 1ull
+                                                                         << 42;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

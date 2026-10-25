@@ -244,7 +244,7 @@ const char kCudaParameterUploadPtx[] = R"ptx(
     .param .u64 destination, .param .u64 source, .param .u64 words)
 {
     .reg .pred %p;
-    .reg .b32 %t;
+    .reg .b32 %t, %value;
     .reg .b64 %rd<9>;
     ld.param.u64 %rd0, [destination];
     ld.param.u64 %rd1, [source];
@@ -254,11 +254,11 @@ const char kCudaParameterUploadPtx[] = R"ptx(
 COPY:
     setp.ge.u64 %p, %rd3, %rd2;
     @%p bra DONE;
-    shl.b64 %rd4, %rd3, 3;
+    shl.b64 %rd4, %rd3, 2;
     add.u64 %rd5, %rd1, %rd4;
     add.u64 %rd6, %rd0, %rd4;
-    ld.volatile.global.u64 %rd7, [%rd5];
-    st.global.u64 [%rd6], %rd7;
+    ld.volatile.global.u32 %value, [%rd5];
+    st.global.u32 [%rd6], %value;
     add.u64 %rd3, %rd3, 32;
     bra COPY;
 DONE:

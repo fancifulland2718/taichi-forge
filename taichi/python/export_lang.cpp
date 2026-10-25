@@ -8276,6 +8276,8 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeCudaCanvasExecutionDomains);
     features["cuda_submission_parameters_u64"] =
         bool(bitmap & kForgeCudaSubmissionParameters);
+    features["cuda_submission_parameters_integer"] =
+        bool(bitmap & kForgeCudaSubmissionIntegerParameters);
     features["cuda_completion_gpu_timing"] =
         bool(bitmap & kForgeCudaCompletionGpuTiming);
     features["cuda_execution_instance_retirement"] =
@@ -8288,6 +8290,8 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeVulkanJitGraphExecutionDomains);
     features["vulkan_submission_parameters_u64"] =
         bool(bitmap & kForgeVulkanSubmissionParameters);
+    features["vulkan_submission_parameters_integer"] =
+        bool(bitmap & kForgeVulkanSubmissionIntegerParameters);
     features["vulkan_completion_gpu_timing"] =
         bool(bitmap & kForgeVulkanCompletionGpuTiming);
     features["vulkan_execution_instance_retirement"] =

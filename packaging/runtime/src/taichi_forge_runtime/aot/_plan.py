@@ -716,6 +716,7 @@ class ExecutionPlan:
                 return abi.NamedArgument(_name(name), argument)
 
             native = (abi.NamedArgument * len(arguments))(*[bind(name, value) for name, value in arguments.items()])
+            submission_parameters.configure(native)
             bindings = [
                 binding for name, value in arguments.items()
                 if (binding := _layout_binding(name, value, named=True)) is not None

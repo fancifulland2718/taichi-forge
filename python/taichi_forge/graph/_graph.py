@@ -18914,7 +18914,7 @@ class Graph:
             raise
 
     def prepare(self, arguments, *, execution_domain, mutable_parameters=()):
-        """Prepare one immutable instance of this complete selected CUDA Graph.
+        """Prepare one immutable instance of a qualified CUDA/Vulkan Graph.
 
         Call ``initialize()`` once during setup, then ``submit(wait_for=...)``
         to enqueue exact device dependencies and receive a completion ticket.
@@ -18922,10 +18922,11 @@ class Graph:
         preparation owns independent arguments and private workspace. Shared
         application arrays and Fields require explicit dependencies.
 
-        Declare replay-only ``u64`` scalar names in ``mutable_parameters`` to
+        Declare replay-only ``i32/u32/i64/u64`` names in ``mutable_parameters`` to
         supply them via ``submit(values={...})``. Every declared value is required
-        on every submit. An instance has one parameter frame; use independently
-        prepared instances for overlapping submissions.
+        on every submit. CUDA permits one in-flight use per parameterized
+        instance; Vulkan stages each admitted queue slot separately. Prepare
+        separate instances when independent mutable workspace is required.
         """
         from ._execution_domain import prepare_graph
 

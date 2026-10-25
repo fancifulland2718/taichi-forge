@@ -56,6 +56,8 @@ _FEATURE_BITS = {
     "vulkan_execution_domain_opacity_micromaps": 38,
     "vulkan_execution_domain_sparse_fields": 39,
     "cuda_execution_domain_sparse_fields": 40,
+    "cuda_submission_parameters_integer": 41,
+    "vulkan_submission_parameters_integer": 42,
 }
 
 

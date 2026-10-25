@@ -441,7 +441,7 @@ void FixedGraph::enqueue_parameter_upload(void *stream) {
         static_cast<char *>(state_->arguments) + upload.destination;
     void *source =
         static_cast<char *>(state_->parameter_staging) + upload.source;
-    std::uint64_t words = upload.bytes / sizeof(SubmissionParameterValue);
+    std::uint64_t words = upload.bytes / sizeof(std::uint32_t);
     void *args[] = {&destination, &source, &words};
     driver.launch_kernel(state_->parameter_upload_function, 1, 1, 1, 32, 1, 1,
                          0, stream, args, nullptr);
@@ -950,15 +950,17 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
                     packet.context.arg_buffer, packet.arg_buffer_size);
     }
     for (const auto &patch : dispatch.parameters) {
-      constexpr auto width = sizeof(SubmissionParameterValue);
-      if (!state.independent || domain_ ||
+      const auto width = patch.bytes;
+      constexpr auto slot_width = sizeof(SubmissionParameterValue);
+      if (!state.independent || domain_ || (width != 4 && width != 8) ||
+          patch.argument_offset % 4 ||
           patch.argument_offset > packet.arg_buffer_size ||
           width > packet.arg_buffer_size - patch.argument_offset ||
-          patch.slot >= std::numeric_limits<std::size_t>::max() / width)
+          patch.slot >= std::numeric_limits<std::size_t>::max() / slot_width)
         throw std::invalid_argument("Invalid independent submission parameter");
       state.parameter_count = std::max(state.parameter_count, patch.slot + 1);
       State::ParameterUpload upload{
-          patch.slot * width,
+          patch.slot * slot_width,
           offset + packet.arg_buffer_prefix_size + patch.argument_offset,
           width};
       if (!state.parameter_uploads.empty() &&

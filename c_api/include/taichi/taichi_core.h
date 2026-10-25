@@ -1681,6 +1681,8 @@ ti_try_submit_prepared_ready_ext(TiRuntime runtime,
                                  TiCompletion *completion);
 
 // Values are copied before return; all declared parameters must be supplied.
+// Each uint64 slot holds the scalar's raw low bits (two's complement for signed
+// integers). i32/u32 require zero upper 32 bits; i64/u64 use all 64 bits.
 // Busy consumes no sequence, device upload, dependency or external signal.
 // Accepted completion covers both uploads and execution on the selected stream.
 TI_DLL_EXPORT TiBool TI_API_CALL
