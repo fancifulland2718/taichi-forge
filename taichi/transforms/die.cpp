@@ -106,8 +106,10 @@ class DIE : public IRVisitor {
   }
 
   void visit(OffloadedStmt *stmt) override {
-    // TODO: A hack to make sure end_stmt is registered.
-    // Ideally end_stmt should be its own Block instead.
+    // Direct range bounds are hidden body references, not ordinary operands.
+    if (stmt->begin_stmt) {
+      ++usage_[stmt->begin_stmt].count;
+    }
     if (stmt->end_stmt) {
       ++usage_[stmt->end_stmt].count;
     }

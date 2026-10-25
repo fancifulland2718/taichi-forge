@@ -1,5 +1,6 @@
 ﻿#include "taichi/ir/ir.h"
 #include "taichi/ir/statements.h"
+#include "taichi/ir/range_bound_uses.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/visitors.h"
@@ -680,6 +681,7 @@ class LocalCSE : public BasicStmtVisitor {
     if (eligible(stmt)) {
       auto [it, inserted] = available_.back().insert(stmt);
       if (!inserted) {
+        replace_direct_range_bound_uses(stmt, *it);
         replacements_[stmt] = *it;
         erased_[stmt->parent].insert(stmt);
       }

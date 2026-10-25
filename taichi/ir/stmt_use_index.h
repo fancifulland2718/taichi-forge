@@ -16,8 +16,8 @@ class Block;
 // Moving a statement within the indexed tree does not change its uses. Unknown
 // mutations invalidate the index; rebuild it before the next query. This is not
 // a dominance, alias or liveness analysis, and does not index non-operand
-// fields such as OffloadedStmt::end_stmt. Those retain their pass-specific
-// contracts.
+// fields. replace_uses also updates direct task range-bound references in
+// their owning body; these forward references are not ordinary SSA users.
 class StmtUseIndex {
  public:
   using Users = std::unordered_set<Stmt *>;
@@ -46,6 +46,7 @@ class StmtUseIndex {
 
  private:
   std::unordered_map<Stmt *, Users> uses_;
+  IRNode *scope_{nullptr};
   Block *definition_block_{nullptr};
   bool valid_{false};
 };

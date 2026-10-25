@@ -2,6 +2,8 @@
 
 #include "taichi/analysis/range_for_bounds.h"
 #include "taichi/analysis/host_range_bounds.h"
+#include "taichi/ir/analysis.h"
+#include "taichi/ir/transforms.h"
 #include "taichi/codegen/spirv/compiled_kernel_data.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
@@ -218,25 +220,74 @@ TEST(RangeForBounds, FinalTaskSourcesDoNotInventTemporaryOffsets) {
     EXPECT_EQ(mixed->begin.kind, RangeBoundKind::global_tmp_i32);
     EXPECT_EQ(mixed->begin.value, 16);
     EXPECT_EQ(mixed->end.kind, RangeBoundKind::constant_i32);
+    task.begin_stmt = expression.get();
+    EXPECT_EQ(describe_range_for_bounds(task)->begin.kind, RangeBoundKind::unknown);
     OffloadedStmt serial(OffloadedTaskType::serial, arch, nullptr);
     EXPECT_FALSE(describe_range_for_bounds(serial));
   }
 }
 
-TEST(RangeForBounds, TaskClonePreservesItsOwnedDirectEnd) {
+TEST(RangeForBounds, TaskClonePreservesItsOwnedDirectBounds) {
   for (auto arch : {Arch::cuda, Arch::vulkan}) {
     OffloadedStmt task(OffloadedTaskType::range_for, arch, nullptr);
-    task.const_begin = true;
+    task.begin_stmt = task.body->push_back<ArgLoadStmt>(
+        std::vector<int>{1}, PrimitiveType::i32, false, true, 0);
     task.end_stmt = task.body->push_back<ArgLoadStmt>(
         std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
     auto copy = task.clone();
     auto *cloned = copy->as<OffloadedStmt>();
+    ASSERT_NE(cloned->begin_stmt, nullptr);
+    EXPECT_NE(cloned->begin_stmt, task.begin_stmt);
+    EXPECT_EQ(cloned->begin_stmt->parent, cloned->body.get());
+    EXPECT_EQ(describe_range_for_bounds(*cloned)->begin.kind, RangeBoundKind::unknown);
     ASSERT_NE(cloned->end_stmt, nullptr);
     EXPECT_NE(cloned->end_stmt, task.end_stmt);
     EXPECT_EQ(cloned->end_stmt->parent, cloned->body.get());
     EXPECT_EQ(describe_range_for_bounds(*cloned)->end.kind, RangeBoundKind::unknown);
     task.body->statements.clear();
+    EXPECT_TRUE(cloned->begin_stmt->is<ArgLoadStmt>());
     EXPECT_TRUE(cloned->end_stmt->is<ArgLoadStmt>());
+  }
+}
+
+TEST(RangeForBounds, DirectReferencesSurviveSimplificationAndScopedReplacement) {
+  for (int pass = 0; pass < 5; ++pass) {
+    SCOPED_TRACE(pass);
+    auto root = std::make_unique<Block>();
+    auto *task = root->push_back<OffloadedStmt>(OffloadedTaskType::range_for,
+                                                Arch::cuda, nullptr)->as<OffloadedStmt>();
+    auto *input = task->body->push_back<ArgLoadStmt>(
+        std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+    auto *zero = task->body->push_back<ConstStmt>(TypedConstant(pass >= 3 ? 2 : 0));
+    auto *one = task->body->push_back<ConstStmt>(TypedConstant(1));
+    task->begin_stmt = task->body->push_back<BinaryOpStmt>(
+        BinaryOpType::add, pass == 1 ? static_cast<Stmt *>(one) : input, zero);
+    task->end_stmt = task->begin_stmt;
+    CompileConfig config;
+    irpass::type_check(root.get(), config);
+    if (pass == 0) {
+      EXPECT_TRUE(irpass::alg_simp(root.get(), config));
+      EXPECT_EQ(task->begin_stmt, input);
+    } else if (pass == 1) {
+      EXPECT_TRUE(irpass::constant_fold(root.get()));
+      EXPECT_TRUE(task->begin_stmt->is<ConstStmt>());
+    } else if (pass == 2) {
+      // A subtree replacement cannot change a task bound defined elsewhere.
+      auto separate = std::make_unique<Block>();
+      irpass::replace_all_usages_with(separate.get(), task->begin_stmt, input);
+      EXPECT_NE(task->begin_stmt, input);
+      task->begin_stmt->replace_usages_with(input);
+      EXPECT_EQ(task->begin_stmt, input);
+    } else {
+      task->end_stmt = task->body->push_back<BinaryOpStmt>(BinaryOpType::add, input, zero);
+      irpass::type_check(root.get(), config);
+      config.advanced_optimization = pass == 4;
+      irpass::full_simplify(root.get(), config, {true, false});
+    }
+    EXPECT_EQ(task->begin_stmt, task->end_stmt);
+    EXPECT_FALSE(task->begin_stmt->erased);
+    EXPECT_EQ(task->begin_stmt->parent, task->body.get());
+    EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
   }
 }
 

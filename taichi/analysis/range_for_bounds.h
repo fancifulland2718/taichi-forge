@@ -19,10 +19,11 @@ inline std::optional<RangeForBounds> describe_range_for_bounds(
     TI_ASSERT(offset <= std::numeric_limits<std::int64_t>::max());
     return RangeBound::global_tmp(static_cast<std::int64_t>(offset));
   };
-  result.begin = task.const_begin ? RangeBound::constant(task.begin_value)
-                                  : temporary(task.begin_offset);
-  // SPIR-V can lower argument/shape expressions directly in the range shader.
-  // Their end_offset is not a global temporary address.
+  // Direct argument/shape expressions are not global temporary addresses.
+  if (task.begin_stmt == nullptr) {
+    result.begin = task.const_begin ? RangeBound::constant(task.begin_value)
+                                   : temporary(task.begin_offset);
+  }
   if (task.end_stmt == nullptr) {
     result.end = task.const_end ? RangeBound::constant(task.end_value)
                                : temporary(task.end_offset);

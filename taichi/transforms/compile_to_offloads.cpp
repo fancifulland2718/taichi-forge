@@ -417,7 +417,8 @@ std::string offload_phase_fusion_blocker(
     if (task->task_type != OffloadedStmt::TaskType::range_for) {
       return "source task is not range_for";
     }
-    if (!task->const_begin || !task->const_end || task->end_stmt != nullptr ||
+    if (!task->const_begin || !task->const_end || task->begin_stmt != nullptr ||
+        task->end_stmt != nullptr ||
         task->reversed || task->is_bit_vectorized || task->one_to_one ||
         task->external_shared_staged) {
       return "source task has an unsupported range execution mode";

@@ -219,7 +219,7 @@ bool plain_body(OffloadedStmt *stmt) {
   return stmt->body && !stmt->tls_prologue && !stmt->tls_epilogue &&
          !stmt->bls_prologue && !stmt->bls_epilogue && !stmt->mesh_prologue &&
          !stmt->snode && !stmt->mesh && !stmt->reversed &&
-         !stmt->is_bit_vectorized && !stmt->end_stmt;
+         !stmt->is_bit_vectorized && !stmt->begin_stmt && !stmt->end_stmt;
 }
 
 bool supported_prefix_statement(Stmt *stmt) {
@@ -270,6 +270,9 @@ bool in_body(Stmt *stmt, Block *body) {
 
 void pin_special_references(OffloadedStmt *task,
                             std::unordered_set<Stmt *> &pinned) {
+  if (task->begin_stmt) {
+    pinned.insert(task->begin_stmt);
+  }
   if (task->end_stmt) {
     pinned.insert(task->end_stmt);
   }

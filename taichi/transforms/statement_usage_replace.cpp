@@ -1,5 +1,6 @@
 #include "taichi/ir/ir.h"
 #include "taichi/ir/statements.h"
+#include "taichi/ir/range_bound_uses.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/system/profiler.h"
@@ -62,6 +63,7 @@ class StatementUsageReplace : public IRVisitor {
   }
 
   static void run(IRNode *root, Stmt *old_stmt, Stmt *new_stmt) {
+    replace_direct_range_bound_uses(old_stmt, new_stmt, root);
     StatementUsageReplace replacer(old_stmt, new_stmt);
     if (root != nullptr) {
       // If root is specified, simply traverse the root.

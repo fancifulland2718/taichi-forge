@@ -1,6 +1,7 @@
 #include "taichi/ir/stmt_use_index.h"
 
 #include "taichi/ir/ir.h"
+#include "taichi/ir/range_bound_uses.h"
 #include "taichi/ir/visitors.h"
 
 namespace taichi::lang {
@@ -32,6 +33,7 @@ StmtUseIndex::StmtUseIndex(IRNode *root) {
 
 void StmtUseIndex::rebuild(IRNode *root, Block *definition_block) {
   uses_.clear();
+  scope_ = root;
   definition_block_ = definition_block;
   valid_ = true;
   IndexBuilder builder(*this);
@@ -82,6 +84,7 @@ void StmtUseIndex::replace_uses(Stmt *old_stmt,
   TI_ASSERT(valid_);
   if (old_stmt == new_stmt)
     return;
+  replace_direct_range_bound_uses(old_stmt, new_stmt, scope_);
   auto found = uses_.find(old_stmt);
   if (found == uses_.end())
     return;

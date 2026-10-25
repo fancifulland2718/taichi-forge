@@ -1483,6 +1483,7 @@ class OffloadedStmt : public Stmt {
   bool reversed{false};
   bool is_bit_vectorized{false};
   int num_cpu_threads{1};
+  Stmt *begin_stmt{nullptr};
   Stmt *end_stmt{nullptr};
   std::string range_hint = "";
 

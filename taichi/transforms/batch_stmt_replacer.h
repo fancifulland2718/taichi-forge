@@ -2,6 +2,7 @@
 
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/ir.h"
+#include "taichi/ir/range_bound_uses.h"
 
 namespace taichi::lang {
 
@@ -35,6 +36,7 @@ class BatchStmtReplacer {
       }
     }
     if (value != old_stmt) {
+      replace_direct_range_bound_uses(old_stmt, value, root_);
       auto found = usages_.find(old_stmt);
       if (found != usages_.end()) {
         auto users = std::move(found->second);

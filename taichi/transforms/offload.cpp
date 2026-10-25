@@ -77,7 +77,7 @@ bool demotable_scalar_argument(Stmt *stmt) {
          arg->ret_type->is<PrimitiveType>();
 }
 
-bool demotable_range_end(Stmt *stmt, const CompileConfig &config,
+bool demotable_range_bound(Stmt *stmt, const CompileConfig &config,
                          const StructType *arguments) {
   // Only immutable argument reads and checked integer expressions gain this
   // path. Device reads keep their serial snapshot, and debug arithmetic keeps
@@ -173,6 +173,16 @@ class Offloader {
           offloaded->const_begin = true;
           offloaded->begin_value = val->val.val_int32();
         } else {
+          // A mixed host/device range keeps the existing device-controller
+          // snapshot ABI. Direct lowering is useful when both bounds can avoid
+          // the serial range producer entirely.
+          if (!config.debug && offloaded->host_launch_range &&
+              (arch == Arch::cuda || arch == Arch::vulkan) &&
+              demotable_range_bound(s->begin, config, kernel->args_type)) {
+            auto begin_copy = s->begin->clone();
+            offloaded->begin_stmt = begin_copy.get();
+            offloaded->body->insert(std::move(begin_copy));
+          }
           offloaded_ranges.begin_stmts.insert(
               std::make_pair(offloaded.get(), s->begin));
         }
@@ -183,7 +193,7 @@ class Offloader {
         } else {
           if ((arch == Arch::cuda || arch == Arch::opengl ||
                arch == Arch::vulkan || arch == Arch::gles || arch == Arch::metal) &&
-              demotable_range_end(s->end, config, kernel->args_type)) {
+              demotable_range_bound(s->end, config, kernel->args_type)) {
             // Evaluate immutable bounds directly in the range task.
             auto end_copy = s->end->clone();
             offloaded->end_stmt = end_copy.get();
@@ -492,9 +502,7 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
     current_offloaded_ = stmt;
     if (auto begin = offloaded_ranges_->begin_stmts.find(stmt);
         begin != offloaded_ranges_->begin_stmts.end()) {
-      // A dynamic start is still loaded from global temporary storage, even
-      // when its value could otherwise be cloned into the task body.
-      test_and_allocate(begin->second, true);
+      test_and_allocate(begin->second, stmt->begin_stmt == nullptr);
     }
     if (auto end = offloaded_ranges_->end_stmts.find(stmt);
         end != offloaded_ranges_->end_stmts.end()) {
@@ -535,7 +543,7 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
          config_.arch == Arch::vulkan ||
          config_.arch == Arch::gles || config_.arch == Arch::metal) &&
         !range_bound &&
-        demotable_range_end(
+        demotable_range_bound(
             stmt, config_, current_offloaded_->as<OffloadedStmt>()->kernel_->args_type))
       return;
     // Not yet allocated
@@ -640,14 +648,19 @@ class FixCrossOffloadReferences : public BasicStmtVisitor {
       stmt->body->accept(this);
     if (stmt->task_type == OffloadedStmt::TaskType::range_for) {
       if (!stmt->const_begin) {
-        TI_ASSERT(offloaded_ranges_->begin_stmts.find(stmt) !=
-                  offloaded_ranges_->begin_stmts.end())
-        TI_ASSERT_INFO(local_to_global_offset_.find(
-                           offloaded_ranges_->begin_stmts.find(stmt)->second) !=
-                           local_to_global_offset_.end(),
-                       "Begin fails.")
-        stmt->begin_offset = local_to_global_offset_.at(
-            offloaded_ranges_->begin_stmts.find(stmt)->second);
+        if (stmt->begin_stmt) {
+          stmt->begin_stmt->accept(this);
+          stmt->begin_offset = 0;
+        } else {
+          TI_ASSERT(offloaded_ranges_->begin_stmts.find(stmt) !=
+                    offloaded_ranges_->begin_stmts.end())
+          TI_ASSERT_INFO(local_to_global_offset_.find(
+                             offloaded_ranges_->begin_stmts.find(stmt)->second) !=
+                             local_to_global_offset_.end(),
+                         "Begin fails.")
+          stmt->begin_offset = local_to_global_offset_.at(
+              offloaded_ranges_->begin_stmts.find(stmt)->second);
+        }
       }
       if (!stmt->const_end) {
         if (stmt->end_stmt) {

@@ -48,11 +48,12 @@ combination. Consult the linked API contracts and capability queries for exact s
   is retained. Expressions are normalized at compile time, without launch-time
   expression interpretation or workload size limits.
 - Ordinary CUDA/Vulkan range tasks can read immutable scalar/shape end bounds
-  directly, removing serial tasks used only to transport these values and
-  ordinary by-value scalar inputs. Device-memory snapshots, dynamic-start
-  snapshots, debug arithmetic and effectful prefixes retain their existing
-  execution. CPU scheduling is unchanged. Cloning preserves direct end-bound
-  references within the cloned task.
+  directly. When both bounds are supported host expressions, the start is also
+  evaluated directly, removing serial tasks used only to transport these values.
+  Device-memory and mixed host/device range snapshots, debug arithmetic and
+  effectful prefixes retain their existing execution. CPU scheduling is unchanged.
+  Expression rewrites and task cloning preserve both direct bound references and
+  their ownership within the task body.
 - Range metadata separates workload sources from qualification for a specific transformation.
   CUDA can also elide whole empty groups for verified scalar sum/dot/min/max TLS reductions,
   preserving productive blocks, tail participation and reduction grouping. Unknown TLS,

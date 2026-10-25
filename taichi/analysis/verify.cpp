@@ -115,6 +115,10 @@ class IRVerifier : public BasicStmtVisitor {
                offloaded_task_type_name(stmt->task_type), stmt->name(),
                fmt::ptr(stmt->body.get()));
     }
+    for (auto *bound : {stmt->begin_stmt, stmt->end_stmt}) {
+      TI_ASSERT_INFO(!bound || (bound->parent == stmt->body.get() && !bound->erased),
+                     "Direct range bound must remain in its task body");
+    }
     // A task is compiled into its own function/shader. Its prologues, body
     // and epilogues share a scope, but cannot use another task's SSA values.
     auto enclosing_scopes = std::move(visible_stmts_);

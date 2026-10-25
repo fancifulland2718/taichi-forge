@@ -491,20 +491,20 @@ std::unique_ptr<Stmt> OffloadedStmt::clone() const {
   if (body) {
     new_stmt->body = body->clone();
     new_stmt->body->set_parent_stmt(new_stmt.get());
-    // end_stmt is a hidden reference into the body, not an ordinary operand.
-    // Preserve its identity within the clone instead of losing the direct
-    // argument bound and silently falling back to temporary offset zero.
-    if (end_stmt) {
-      bool found = false;
+    // Direct bounds refer into the body, not to ordinary operands. Remap
+    // both references instead of falling back to temporary offset zero.
+    const auto remap_bound = [&](Stmt *bound) -> Stmt * {
+      if (!bound)
+        return nullptr;
       for (std::size_t i = 0; i < body->statements.size(); ++i) {
-        if (body->statements[i].get() == end_stmt) {
-          new_stmt->end_stmt = new_stmt->body->statements[i].get();
-          found = true;
-          break;
-        }
+        if (body->statements[i].get() == bound)
+          return new_stmt->body->statements[i].get();
       }
-      TI_ASSERT_INFO(found, "Range end expression must be owned by its task body");
-    }
+      TI_ASSERT_INFO(false, "Range expression must be owned by its task body");
+      return nullptr;
+    };
+    new_stmt->begin_stmt = remap_bound(begin_stmt);
+    new_stmt->end_stmt = remap_bound(end_stmt);
   }
   if (bls_epilogue) {
     new_stmt->bls_epilogue = bls_epilogue->clone();

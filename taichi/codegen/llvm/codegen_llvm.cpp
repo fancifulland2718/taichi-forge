@@ -2587,24 +2587,11 @@ void TaskCodeGenLLVM::finalize_offloaded_task_function() {
 
 std::tuple<llvm::Value *, llvm::Value *> TaskCodeGenLLVM::get_range_for_bounds(
     OffloadedStmt *stmt) {
-  llvm::Value *begin, *end;
-  if (stmt->const_begin) {
-    begin = tlctx->get_constant(stmt->begin_value);
-  } else {
-    auto begin_stmt =
-        Stmt::make<GlobalTemporaryStmt>(stmt->begin_offset, PrimitiveType::i32);
-    begin_stmt->accept(this);
-    begin = builder->CreateLoad(tlctx->get_data_type(PrimitiveType::i32),
-                                llvm_val[begin_stmt.get()]);
-  }
-  if (stmt->const_end) {
-    end = tlctx->get_constant(stmt->end_value);
-  } else if (stmt->end_stmt) {
-    // The loop body is emitted in a different LLVM function. Re-emit this
-    // immutable dependency DAG in the dispatch wrapper, without reusing values
-    // defined in the body function. Restore its mapping afterwards.
-    std::unordered_map<Stmt *, llvm::Value *> saved;
-    std::vector<std::pair<Stmt *, bool>> pending{{stmt->end_stmt, false}};
+  // The body is emitted in another function. Emit both immutable bounds in
+  // this wrapper, sharing their dependency DAG, then restore the body mapping.
+  std::unordered_map<Stmt *, llvm::Value *> saved;
+  const auto emit_bound = [&](Stmt *root) {
+    std::vector<std::pair<Stmt *, bool>> pending{{root, false}};
     while (!pending.empty()) {
       auto [node, emit] = pending.back();
       pending.pop_back();
@@ -2620,19 +2607,36 @@ std::tuple<llvm::Value *, llvm::Value *> TaskCodeGenLLVM::get_range_for_bounds(
         node->accept(this);
       }
     }
-    end = llvm_val.at(stmt->end_stmt);
-    for (auto [node, value] : saved) {
-      if (value)
-        llvm_val[node] = value;
-      else
-        llvm_val.erase(node);
-    }
+    return llvm_val.at(root);
+  };
+  llvm::Value *begin, *end;
+  if (stmt->const_begin) {
+    begin = tlctx->get_constant(stmt->begin_value);
+  } else if (stmt->begin_stmt) {
+    begin = emit_bound(stmt->begin_stmt);
+  } else {
+    auto begin_stmt =
+        Stmt::make<GlobalTemporaryStmt>(stmt->begin_offset, PrimitiveType::i32);
+    begin_stmt->accept(this);
+    begin = builder->CreateLoad(tlctx->get_data_type(PrimitiveType::i32),
+                                llvm_val[begin_stmt.get()]);
+  }
+  if (stmt->const_end) {
+    end = tlctx->get_constant(stmt->end_value);
+  } else if (stmt->end_stmt) {
+    end = emit_bound(stmt->end_stmt);
   } else {
     auto end_stmt =
         Stmt::make<GlobalTemporaryStmt>(stmt->end_offset, PrimitiveType::i32);
     end_stmt->accept(this);
     end = builder->CreateLoad(tlctx->get_data_type(PrimitiveType::i32),
                               llvm_val[end_stmt.get()]);
+  }
+  for (auto [node, value] : saved) {
+    if (value)
+      llvm_val[node] = value;
+    else
+      llvm_val.erase(node);
   }
   return std::tuple(begin, end);
 }
