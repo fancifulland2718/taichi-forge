@@ -53,4 +53,8 @@ module.add_field("left", left)
 module.add_field("right", right)
 for kernel in (initialize, bump_left, bump_right, cold_bump_left, peek_left, peek_right):
     module.add_kernel(kernel)
+graph = ti.graph.GraphBuilder()
+graph.dispatch(bump_right)
+graph.dispatch(bump_left)
+module.add_graph("right_then_left", graph.compile())
 module.save(os.environ["TAICHI_CUDA_SPARSE_ACCESS_FIXTURE"])

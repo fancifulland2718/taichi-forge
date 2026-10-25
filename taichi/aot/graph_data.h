@@ -18,6 +18,7 @@
 #include "taichi/program/compile_config.h"
 #include "taichi/program/runtime_resource_registry.h"
 #include "taichi/runtime/cuda/capture_resources.h"
+#include "taichi/runtime/sparse_tree_admission.h"
 #include "taichi/struct/snode_tree.h"
 #define TI_RUNTIME_HOST
 #include "taichi/program/context.h"
@@ -822,6 +823,9 @@ struct CompiledGraphJITCache {
   std::vector<CompiledGraphDispatchRuntimePlan> runtime_arg_plans;
   Program *validated_snode_tree_program{nullptr};
   std::uint64_t validated_snode_tree_epoch{0};
+  bool cuda_sparse_access_prepared{false};
+  Program *cuda_sparse_access_program{nullptr};
+  std::shared_ptr<SparseTreeAdmission::Permit> cuda_sparse_access;
   std::unique_ptr<CompiledGraphCudaState, CompiledGraphCudaStateDeleter>
       cuda_graph_state;
   // CUDA executable instances are driver-heavy and may pin allocation
@@ -864,6 +868,7 @@ struct CompiledGraphJITCache {
   std::mutex run_mutex;
 };
 
+struct CompiledGraphCudaSparseAccess;
 struct TI_DLL_EXPORT CompiledGraph {
   std::vector<CompiledDispatch> dispatches;
   std::unordered_map<std::string, aot::Arg> args;
@@ -1028,6 +1033,15 @@ struct TI_DLL_EXPORT CompiledGraph {
       const CompiledDispatch &dispatch,
       const std::unordered_map<std::string, IValue> &args,
       LaunchContextBuilder &ctx);
+
+ private:
+  // A loaded Graph's physical dispatches are frozen. Copies retain the same
+  // closure; no runtime registrations or permits are serialized.
+  mutable std::shared_ptr<CompiledGraphCudaSparseAccess>
+      aot_cuda_sparse_access_;
+  void run_aot_unchecked(
+      const std::unordered_map<std::string, IValue> &args,
+      const std::unordered_map<std::string, const Ndarray *> &gradients) const;
 };
 
 }  // namespace aot

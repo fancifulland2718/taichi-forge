@@ -192,17 +192,44 @@ class SharedResourceAdmission {
     return OrdinaryScope(control_);
   }
 
-  class Permit {
+  class Permit : public std::enable_shared_from_this<Permit> {
    public:
+    // A whole Graph may have preparation uploads, ordinary fallbacks and
+    // native replay exits. Keep one admission transaction around all of them.
+    // Moving the scope transfers its submission depth; the scope also retains
+    // the permit's allocation owners until after the host gate is released.
+    class SubmissionScope {
+     public:
+      SubmissionScope(const SubmissionScope &) = delete;
+      SubmissionScope &operator=(const SubmissionScope &) = delete;
+      SubmissionScope(SubmissionScope &&) noexcept = default;
+      SubmissionScope &operator=(SubmissionScope &&) = delete;
+      ~SubmissionScope() {
+        if (owner_)
+          --owner_->control_->submitting;
+      }
+
+     private:
+      friend class Permit;
+      explicit SubmissionScope(std::shared_ptr<const Permit> owner)
+          : owner_(std::move(owner)), lock_(*owner_->control_->gate) {
+        owner_->require_allowed();
+        ++owner_->control_->submitting;
+      }
+      std::shared_ptr<const Permit> owner_;
+      std::unique_lock<std::recursive_mutex> lock_;
+    };
+
+    SubmissionScope submission_scope() const {
+      return SubmissionScope(this->shared_from_this());
+    }
+
     // The same host gate must cover check + command append/submit. A separate
     // allowed() test followed by an unlocked submit has a reservation race.
     template <class Submit>
     decltype(auto) submit(Submit &&submit) const {
       std::lock_guard<std::recursive_mutex> lock(*control_->gate);
-      require_open(*control_);
-      if (state_->removed_resources || state_->blocked_resources)
-        throw std::invalid_argument(
-            diagnostic("Prepared recording conflicts with a resource loan"));
+      require_allowed();
       // Constant work with respect to resource count; no resource/owner scan.
       Submitting scope(*control_);
       return std::forward<Submit>(submit)();
@@ -210,6 +237,12 @@ class SharedResourceAdmission {
 
    private:
     friend class SharedResourceAdmission;
+    void require_allowed() const {
+      require_open(*control_);
+      if (state_->removed_resources || state_->blocked_resources)
+        throw std::invalid_argument(
+            diagnostic("Prepared recording conflicts with a resource loan"));
+    }
     Permit(std::shared_ptr<Control> control,
            std::shared_ptr<PermitState> state,
            std::vector<BoundUse> uses)

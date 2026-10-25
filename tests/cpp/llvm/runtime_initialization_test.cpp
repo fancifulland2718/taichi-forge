@@ -13,6 +13,10 @@
 #include "taichi/platform/cuda/detect_cuda.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/cuda/fixed_graph.h"
+#include "taichi/runtime/cuda/binding_frame_replay.h"
+#include "taichi/runtime/fixed_execution.h"
+#include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #endif
@@ -416,6 +420,108 @@ TEST(CudaSparseAccess, RealKernelClosureRejectsConflictsAndRetires) {
   EXPECT_FALSE(executor.has_snode_tree_runtime_state(a.tree_id));
   permit.reset();
   executor.finalize();
+}
+
+TEST(CudaSparseAccess, WholeGraphRejectsBeforePrefixAndRecovers) {
+  const auto *folder = std::getenv("TAICHI_CUDA_SPARSE_ACCESS_FIXTURE");
+  if (!folder || !cuda::FixedGraph::available())
+    GTEST_SKIP() << "Requires the CUDA sparse access AOT fixture";
+  CompileConfig config;
+  config.arch = Arch::cuda;
+  LlvmRuntimeExecutor executor(config, nullptr);
+  uint64 *result = nullptr;
+  executor.materialize_runtime(nullptr, &result);
+  LLVM::AotModuleParams params;
+  params.module_path = folder;
+  params.executor_ = &executor;
+  params.allocation_result_buffer = result;
+  params.kernel_launcher = std::make_unique<cuda::KernelLauncher>(
+      cuda::KernelLauncher::Config{&executor});
+  std::shared_ptr<aot::Module> module =
+      LLVM::make_aot_module(std::move(params));
+  auto invoke = [&](const char *name, bool returns = false) {
+    auto *kernel = module->get_kernel(name);
+    LaunchContextBuilder args(kernel);
+    kernel->launch(args);
+    return returns ? args.get_ret<int>(0) : 0;
+  };
+  invoke("initialize");
+  auto left =
+      dynamic_cast<llvm_aot::FieldImpl &>(
+          *static_cast<LLVM::LlvmAotModule &>(*module).get_snode_tree("0"))
+          .get_snode_tree_cache();
+  const LlvmSparseRuntimeViewTree tree{left.tree_id, 0, left.tree_generation};
+  auto graph = module->get_graph("right_then_left");
+  auto *a =
+      dynamic_cast<llvm_aot::KernelImpl *>(module->get_kernel("bump_left"));
+  auto *b =
+      dynamic_cast<llvm_aot::KernelImpl *>(module->get_kernel("bump_right"));
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  auto &launcher = dynamic_cast<cuda::KernelLauncher &>(a->launcher());
+  LaunchContextBuilder ca(a), cb(b);
+  ca.discard_return_values();
+  cb.discard_return_values();
+  const cuda::FixedGraph::Dispatch da{&launcher, a->handle(), &ca};
+  const cuda::FixedGraph::Dispatch db{&launcher, b->handle(), &cb};
+  cuda::FixedGraph fixed(std::vector<cuda::FixedGraph::Dispatch>{db, da});
+  auto &device =
+      static_cast<cuda::CudaDevice &>(*executor.get_compute_device());
+  auto allocation = device.allocate_memory_unique({sizeof(int)});
+  ASSERT_EQ(allocation.second, RhiResult::success);
+  auto *predicate = device.get_memory_addr(*allocation.first);
+  int zero = 0;
+  {
+    auto context = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().memcpy_host_to_device(predicate, &zero,
+                                                   sizeof(zero));
+  }
+  auto loop = std::make_shared<cuda::FixedGraph::While>();
+  loop->predicate = predicate;
+  loop->max_iterations = 2;
+  loop->condition = {db};
+  loop->body = {da};
+  cuda::FixedGraph control(std::vector<cuda::FixedGraph::Operation>{db, loop});
+  auto host_loop = std::make_shared<FixedExecution::While>();
+  host_loop->predicate = allocation.first->get_ptr(0);
+  host_loop->max_iterations = 2;
+  host_loop->host_control = true;
+  host_loop->condition = {FixedExecution::Dispatch{b, &cb}};
+  host_loop->body = {FixedExecution::Dispatch{a, &ca}};
+  FixedExecution host(Arch::cuda, device, nullptr,
+                      {FixedExecution::Dispatch{b, &cb}, host_loop});
+  auto replay = std::make_shared<cuda::BindingFrameReplay>(72, nullptr);
+  FixedExecution frame(
+      Arch::cuda, device, nullptr,
+      {FixedExecution::Dispatch{b, &cb}, FixedExecution::Dispatch{a, &ca}},
+      nullptr, {}, replay, module);
+
+  auto verify = [&](auto &&run, int right_delta, int left_delta) {
+    const auto before_right = invoke("peek_right", true);
+    const auto before_left = invoke("peek_left", true);
+    auto loan = executor.reserve_cuda_sparse_trees({tree});
+    EXPECT_THROW(run(), std::invalid_argument);
+    EXPECT_EQ(invoke("peek_right", true), before_right);
+    loan.reset();
+    run();
+    EXPECT_EQ(invoke("peek_right", true), before_right + right_delta);
+    EXPECT_EQ(invoke("peek_left", true), before_left + left_delta);
+  };
+  // Cold and warm ordinary Graph, native replay, and a zero-trip body in a
+  // complete host/native control sequence all reject before the right prefix.
+  verify([&] { graph->run({}); }, 1, 1);
+  verify([&] { graph->run({}); }, 1, 1);
+  verify([&] { fixed.run(); }, 1, 1);
+  verify([&] { control.run(); }, 2, 0);
+  verify([&] { host.run(); }, 2, 0);
+  verify([&] { frame.run(); }, 1, 1);
+  auto loan = executor.reserve_cuda_sparse_trees({tree});
+  EXPECT_THROW(
+      cuda::FixedGraph(std::vector<cuda::FixedGraph::Dispatch>{db, da}),
+      std::invalid_argument);
+  loan.reset();
+  executor.synchronize();
+  executor.check_runtime_error(result);
 }
 
 INSTANTIATE_TEST_SUITE_P(Backends,

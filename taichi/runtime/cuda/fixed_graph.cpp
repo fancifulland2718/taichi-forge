@@ -75,6 +75,7 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
   std::vector<std::shared_ptr<CudaGraphCaptureResources>> capture_resources;
   // Remain alive through executable retirement, including parent ownership.
   std::vector<std::shared_ptr<void>> sparse_replay_leases;
+  KernelLauncher::SparseAccess sparse_access;
   std::vector<std::uint8_t> host_arguments;
   bool capturing{false};
   std::atomic<bool> submitted{false};
@@ -812,6 +813,16 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
           "Fixed CUDA control requires native conditional graph support");
     driver_graph_prepare_conditional_setter();
   }
+  std::vector<std::pair<KernelLauncher *, KernelLaunchHandle>>
+      sparse_dispatches;
+  for (const auto *dispatch : dispatches)
+    if (!dispatch->external)
+      sparse_dispatches.emplace_back(dispatch->launcher, dispatch->handle);
+  state.sparse_access =
+      KernelLauncher::prepare_sparse_graph_access(sparse_dispatches);
+  // Reject an already borrowed tree before packet binding/capture. Replay
+  // checks the same complete closure before the first command is submitted.
+  state.sparse_access.submit([] {});
   std::vector<KernelLauncher::GraphLaunchPacket> packets(dispatches.size());
   std::vector<BoundedGraphDispatch> bounded;
   std::uint32_t grid_limit = 0;
@@ -1360,9 +1371,11 @@ void FixedGraph::run() {
   auto &cuda = CUDAContext::get_instance();
   auto guard = cuda.get_guard();
   auto lock = cuda.get_submission_lock_guard();
-  state_->submitted = true;
   try {
-    CUDAContext::get_instance().launch_graph(state_->executable, nullptr);
+    state_->sparse_access.submit([&] {
+      state_->submitted = true;
+      CUDAContext::get_instance().launch_graph(state_->executable, nullptr);
+    });
   } catch (const BackendRuntimeError &error) {
     if (state_->fault_domain)
       state_->fault_domain->report_backend_error(error, 0);

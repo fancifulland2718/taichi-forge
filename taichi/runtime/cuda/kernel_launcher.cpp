@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstring>
 #include <cstdint>
+#include <map>
 #include <unordered_map>
 
 namespace taichi::lang {
@@ -1482,6 +1483,31 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     launcher_ctx->sparse_access->submit(launch);
   else
     launch();
+}
+
+KernelLauncher::SparseAccess KernelLauncher::prepare_sparse_graph_access(
+    const std::vector<std::pair<KernelLauncher *, Handle>> &dispatches) {
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+  std::map<LlvmRuntimeExecutor *, std::vector<int>> trees;
+  for (const auto &[launcher, handle] : dispatches) {
+    if (!launcher)
+      throw std::invalid_argument("CUDA sparse graph has no kernel launcher");
+    std::shared_lock<std::shared_mutex> lock(launcher->registration_mutex());
+    auto found = launcher->contexts_.find(handle.get_launch_id());
+    if (found == launcher->contexts_.end())
+      throw std::invalid_argument(
+          "CUDA sparse graph kernel registration retired");
+    const auto &ids = found->second->snode_tree_ids;
+    if (!ids.empty()) {
+      auto &selected = trees[launcher->get_runtime_executor()];
+      selected.insert(selected.end(), ids.begin(), ids.end());
+    }
+  }
+  SparseAccess result;
+  for (const auto &[executor, ids] : trees)
+    if (auto permit = executor->prepare_cuda_sparse_access(ids))
+      result.permits_.push_back(std::move(permit));
+  return result;
 }
 
 void KernelLauncher::launch_ordinary_context(const Context &selected,

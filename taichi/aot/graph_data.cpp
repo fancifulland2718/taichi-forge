@@ -38,6 +38,8 @@
 #include "taichi/runtime/cuda/range_graph.h"
 #include "taichi/runtime/cuda/parallel_graph.h"
 #include "taichi/runtime/cuda/predicate_graph.h"
+#include "taichi/runtime/program_impls/llvm/llvm_program.h"
+#include "taichi/runtime/llvm/aot_graph_data.h"
 #endif
 
 #if defined(TI_WITH_VULKAN)
@@ -46,6 +48,12 @@
 
 namespace taichi::lang {
 namespace aot {
+
+#if defined(TI_WITH_CUDA)
+struct CompiledGraphCudaSparseAccess {
+  cuda::KernelLauncher::SparseAccess access;
+};
+#endif
 
 struct CompiledGraphKernelInvocation {
   CallableBase callable;
@@ -220,6 +228,43 @@ Program *jit_graph_program(const CompiledGraph &graph) {
   }
   return program;
 }
+
+#if defined(TI_WITH_CUDA)
+std::optional<SparseTreeAdmission::Permit::SubmissionScope>
+enter_cuda_sparse_graph(const CompiledGraph &graph,
+                        Program *program,
+                        CompiledGraphJITCache *cache = nullptr) {
+  if (!program)
+    return {};
+  std::shared_ptr<SparseTreeAdmission::Permit> permit;
+  if (cache && cache->cuda_sparse_access_prepared &&
+      cache->cuda_sparse_access_program == program) {
+    permit = cache->cuda_sparse_access;
+  } else {
+    // The caller already validated this frozen, whole-Graph tree closure
+    // under Program's lifecycle guard. No kernel is recompiled or reselected.
+    std::vector<int> trees;
+    for (const auto &dependency : graph.snode_tree_dependencies)
+      trees.push_back(dependency.tree_id);
+    if (!trees.empty()) {
+      auto *implementation =
+          dynamic_cast<LlvmProgramImpl *>(program->get_program_impl());
+      TI_ASSERT(implementation);
+      permit =
+          implementation->get_runtime_executor()->prepare_cuda_sparse_access(
+              trees);
+    }
+    if (cache) {
+      cache->cuda_sparse_access = permit;
+      cache->cuda_sparse_access_program = program;
+      cache->cuda_sparse_access_prepared = true;
+    }
+  }
+  if (permit)
+    return permit->submission_scope();
+  return {};
+}
+#endif
 
 template <typename T, std::size_t InlineCapacity = 4>
 class InlineUniqueViewList {
@@ -5933,6 +5978,9 @@ void CompiledGraphJITCache::clear_runtime_state() {
   auto clear_locked = [this]() {
     cuda_graph_state.reset();
     cuda_graph_state_alternates.clear();
+    cuda_sparse_access.reset();
+    cuda_sparse_access_prepared = false;
+    cuda_sparse_access_program = nullptr;
     vulkan_graph_state.reset();
     vulkan_inline_stats = {};
     graph_diagnostics_counters_complete = true;
@@ -5952,7 +6000,8 @@ void CompiledGraphJITCache::clear_runtime_state() {
   // owns CUDA state. Probe under run_mutex, which is also the state-creation
   // lock used by jit_run_cached().
   std::unique_lock<std::mutex> run_lock(run_mutex);
-  if (cuda_graph_state == nullptr && cuda_graph_state_alternates.empty()) {
+  if (cuda_graph_state == nullptr && cuda_graph_state_alternates.empty() &&
+      !cuda_sparse_access) {
     clear_locked();
     return;
   }
@@ -5977,6 +6026,9 @@ void CompiledGraphJITCache::retire_snode_tree_runtime_state() {
   auto retire_locked = [this]() {
     cuda_graph_state.reset();
     cuda_graph_state_alternates.clear();
+    cuda_sparse_access.reset();
+    cuda_sparse_access_prepared = false;
+    cuda_sparse_access_program = nullptr;
     vulkan_graph_state.reset();
     vulkan_inline_stats = {};
     graph_diagnostics_counters_complete = true;
@@ -5992,7 +6044,8 @@ void CompiledGraphJITCache::retire_snode_tree_runtime_state() {
 
 #if defined(TI_WITH_CUDA)
   std::unique_lock<std::mutex> run_lock(run_mutex);
-  if (cuda_graph_state == nullptr && cuda_graph_state_alternates.empty()) {
+  if (cuda_graph_state == nullptr && cuda_graph_state_alternates.empty() &&
+      !cuda_sparse_access) {
     retire_locked();
     return;
   }
@@ -6017,6 +6070,46 @@ void CompiledGraph::run(
 }
 
 void CompiledGraph::run(
+    const std::unordered_map<std::string, IValue> &args,
+    const std::unordered_map<std::string, const Ndarray *> &gradients) const {
+#if defined(TI_WITH_CUDA)
+  if (std::any_of(dispatches.begin(), dispatches.end(),
+                  [](const auto &dispatch) {
+                    return dispatch.compiled_kernel &&
+                           dispatch.compiled_kernel->arch == Arch::cuda;
+                  })) {
+    auto lock = CUDAContext::get_instance().get_submission_lock_guard();
+    if (!aot_cuda_sparse_access_) {
+      std::vector<std::pair<cuda::KernelLauncher *, KernelLaunchHandle>>
+          kernels;
+      for (const auto &dispatch : dispatches) {
+        if (!dispatch.compiled_kernel ||
+            dispatch.compiled_kernel->arch != Arch::cuda)
+          continue;
+        auto *kernel =
+            dynamic_cast<llvm_aot::KernelImpl *>(dispatch.compiled_kernel);
+        auto *launcher =
+            kernel ? dynamic_cast<cuda::KernelLauncher *>(&kernel->launcher())
+                   : nullptr;
+        if (!launcher)
+          throw std::invalid_argument(
+              "CUDA AOT Graph requires a CUDA launcher");
+        kernels.emplace_back(launcher, kernel->handle());
+      }
+      auto prepared = std::make_shared<CompiledGraphCudaSparseAccess>();
+      prepared->access =
+          cuda::KernelLauncher::prepare_sparse_graph_access(kernels);
+      aot_cuda_sparse_access_ = std::move(prepared);
+    }
+    aot_cuda_sparse_access_->access.submit(
+        [&] { run_aot_unchecked(args, gradients); });
+    return;
+  }
+#endif
+  run_aot_unchecked(args, gradients);
+}
+
+void CompiledGraph::run_aot_unchecked(
     const std::unordered_map<std::string, IValue> &args,
     const std::unordered_map<std::string, const Ndarray *> &gradients) const {
   for (const auto &entry : args) {
@@ -6134,6 +6227,10 @@ void CompiledGraph::jit_run(
     cuda_submission_lock =
         CUDAContext::get_instance().get_submission_lock_guard();
   }
+  auto sparse_scope =
+      compile_config.arch == Arch::cuda
+          ? enter_cuda_sparse_graph(*this, program)
+          : std::optional<SparseTreeAdmission::Permit::SubmissionScope>{};
 #endif
   for (const auto &dispatch : dispatches) {
     if (dispatch.cuda_capture_command) {
@@ -6293,6 +6390,12 @@ void CompiledGraph::jit_run_cached(
           replay_elapsed_ns(validation_begin);
     }
   }
+#if defined(TI_WITH_CUDA)
+  auto sparse_scope =
+      compile_config.arch == Arch::cuda
+          ? enter_cuda_sparse_graph(*this, program, &cache)
+          : std::optional<SparseTreeAdmission::Permit::SubmissionScope>{};
+#endif
   if (program != nullptr && resource_guard) {
     const auto plan_begin =
         attribute ? ReplayClock::now() : ReplayClock::time_point{};
@@ -6563,6 +6666,7 @@ bool CompiledGraph::jit_run_bounded_cuda_cached(
     cache.validated_snode_tree_program = program;
     cache.validated_snode_tree_epoch = tree_lifecycle_guard.epoch();
   }
+  auto sparse_scope = enter_cuda_sparse_graph(*this, program, &cache);
   if (!try_run_cuda_bounded_graph(
           *this, compile_config, args, cache, *program, *predicate,
           max_iterations, continue_while_nonzero, prefix_dispatch_count,
@@ -6649,6 +6753,7 @@ bool CompiledGraph::jit_run_bounded_cuda_masked_cached(
     cache.validated_snode_tree_program = program;
     cache.validated_snode_tree_epoch = tree_lifecycle_guard.epoch();
   }
+  auto sparse_scope = enter_cuda_sparse_graph(*this, program, &cache);
   if (!try_run_cuda_masked_control_graph(
           *this, compile_config, args, cache, *program, *predicate,
           /*control_type=*/1, max_iterations, continue_while_nonzero,
@@ -6791,6 +6896,7 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_sequence_cached(
     cache.validated_snode_tree_program = program;
     cache.validated_snode_tree_epoch = tree_lifecycle_guard.epoch();
   }
+  auto sparse_scope = enter_cuda_sparse_graph(*this, program, &cache);
   bool submitted =
       route == CompiledGraphNestedCudaRoute::conditional &&
       try_run_cuda_conditional_nested_control_graph(
@@ -7496,6 +7602,7 @@ bool CompiledGraph::jit_run_conditional_cuda_cached(
     cache.validated_snode_tree_program = program;
     cache.validated_snode_tree_epoch = tree_lifecycle_guard.epoch();
   }
+  auto sparse_scope = enter_cuda_sparse_graph(*this, program, &cache);
   if (!try_run_cuda_conditional_graph(
           *this, compile_config, args, cache, *program, *selector,
           branch_dispatch_counts, conditional_type, default_branch,
@@ -7583,6 +7690,7 @@ bool CompiledGraph::jit_run_conditional_cuda_masked_cached(
     cache.validated_snode_tree_program = program;
     cache.validated_snode_tree_epoch = tree_lifecycle_guard.epoch();
   }
+  auto sparse_scope = enter_cuda_sparse_graph(*this, program, &cache);
   if (!try_run_cuda_masked_control_graph(
           *this, compile_config, args, cache, *program, *selector,
           conditional_type, /*max_iterations=*/0,

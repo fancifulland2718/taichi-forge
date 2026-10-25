@@ -9,12 +9,14 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/kernel_launcher.h"
 #include "taichi/runtime/sparse_replay_tracker.h"
+#include "taichi/runtime/sparse_tree_admission.h"
 #define TI_RUNTIME_HOST
 #include "taichi/program/context.h"
 #undef TI_RUNTIME_HOST
@@ -140,6 +142,30 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
  public:
   explicit KernelLauncher(LLVM::KernelLauncher::Config config);
+
+  // One permit per executor for a complete physical sequence. Cold grouping
+  // deduplicates repeated dispatches; submission holds all permits before the
+  // callback can upload parameters or execute its first operation.
+  class SparseAccess {
+   public:
+    template <class Submit>
+    decltype(auto) submit(Submit &&submit) const {
+      using Result = std::invoke_result_t<Submit>;
+      auto enter = [&](auto &self, std::size_t index) -> Result {
+        if (index == permits_.size())
+          return submit();
+        auto scope = permits_[index]->submission_scope();
+        return self(self, index + 1);
+      };
+      return enter(enter, 0);
+    }
+
+   private:
+    friend class KernelLauncher;
+    std::vector<std::shared_ptr<SparseTreeAdmission::Permit>> permits_;
+  };
+  static SparseAccess prepare_sparse_graph_access(
+      const std::vector<std::pair<KernelLauncher *, Handle>> &dispatches);
 
   struct ArtifactQualification {
     std::string entry_point;

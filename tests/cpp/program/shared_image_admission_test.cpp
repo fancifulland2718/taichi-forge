@@ -103,6 +103,26 @@ TEST_F(SharedImageAdmissionTest, OrdinaryChurnPrunesExpiredReverseEdges) {
     EXPECT_NO_THROW(permit->submit([] {}));
 }
 
+TEST_F(SharedImageAdmissionTest, SubmissionScopeRetainsOwnerAndMovesDepth) {
+  auto image = create();
+  auto permit = admission.prepare({pin(image, Access::exclusive)});
+  std::weak_ptr<Admission::Permit> weak = permit;
+  {
+    auto original = permit->submission_scope();
+    auto moved = std::move(original);
+    permit.reset();
+    EXPECT_FALSE(weak.expired());
+    EXPECT_THROW(admission.reserve({pin(image, Access::exclusive)}),
+                 std::invalid_argument);
+  }
+  EXPECT_TRUE(weak.expired());
+  auto loan = admission.reserve({pin(image, Access::exclusive)});
+  permit = admission.prepare({pin(image, Access::exclusive)});
+  EXPECT_THROW(permit->submission_scope(), std::invalid_argument);
+  loan.reset();
+  EXPECT_NO_THROW(permit->submission_scope());
+}
+
 TEST_F(SharedImageAdmissionTest,
        PreparedWriterRestoringReadBoundaryIsBlocked) {
   auto image = create();

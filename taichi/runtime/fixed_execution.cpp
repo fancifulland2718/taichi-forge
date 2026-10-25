@@ -83,6 +83,7 @@ struct FixedExecution::State {
   }
 #endif
 #ifdef TI_WITH_CUDA
+  std::optional<cuda::KernelLauncher::SparseAccess> cuda_sparse_access;
   std::shared_ptr<cuda::ExecutionDomain> cuda_domain;
   std::shared_ptr<cuda::ExecutionInstance> cuda_registration;
   // Declared before recordings so legacy destruction drains before releasing
@@ -439,6 +440,10 @@ FixedExecution::FixedExecution(
       sequence_state ? *sequence_state : NativeRecordingState{};
   std::unordered_set<const void *> active_controls;
   bool has_host_selection = false;
+#ifdef TI_WITH_CUDA
+  std::vector<std::pair<cuda::KernelLauncher *, KernelLaunchHandle>>
+      cuda_sparse_dispatches;
+#endif
   const auto validate_private_resources = [&](const auto &resources,
                                                bool inside_control) {
 #ifdef TI_WITH_VULKAN
@@ -703,7 +708,7 @@ FixedExecution::FixedExecution(
         if (result)
           state_->kernel_results.push_back(result);
 #ifdef TI_WITH_CUDA
-        if (execution_binding) {
+        if (arch == Arch::cuda) {
           auto *kernel = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
           auto *launcher =
               kernel ? dynamic_cast<cuda::KernelLauncher *>(&kernel->launcher())
@@ -711,7 +716,10 @@ FixedExecution::FixedExecution(
           if (!launcher)
             throw std::invalid_argument(
                 "CUDA execution domain requires a CUDA kernel launcher");
-          launcher->validate_execution_domain(kernel->handle());
+          if (execution_binding)
+            launcher->validate_execution_domain(kernel->handle());
+          else
+            cuda_sparse_dispatches.emplace_back(launcher, kernel->handle());
         }
 #endif
         std::set<std::vector<int>> resource_arguments;
@@ -797,6 +805,12 @@ FixedExecution::FixedExecution(
   };
   validate(operations, recording_state, false);
 #ifdef TI_WITH_CUDA
+  if (arch == Arch::cuda && !execution_binding) {
+    state_->cuda_sparse_access.emplace(
+        cuda::KernelLauncher::prepare_sparse_graph_access(
+            cuda_sparse_dispatches));
+    state_->cuda_sparse_access->submit([] {});
+  }
   if (arch == Arch::cuda) {
     std::unordered_set<CudaProviderCompletionResource *> providers;
     const auto identity =
@@ -1992,7 +2006,17 @@ void FixedExecution::run() {
   if (state_->fault_domain)
     state_->fault_domain->throw_if_submission_disallowed("run fixed execution");
   try {
-    run_impl();
+#ifdef TI_WITH_CUDA
+    if (state_->cuda_sparse_access) {
+      auto lock = CUDAContext::get_instance().get_submission_lock_guard();
+      // Cover copies, native prefixes, all control branches and binding-frame
+      // replay as one transaction; a later conflict must execute no prefix.
+      state_->cuda_sparse_access->submit([&] { run_impl(); });
+    } else
+#endif
+    {
+      run_impl();
+    }
   } catch (const BackendRuntimeError &error) {
     if (state_->fault_domain)
       state_->fault_domain->report_backend_error(error, 0);
