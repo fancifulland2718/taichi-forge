@@ -36,8 +36,8 @@ combination. Consult the linked API contracts and capability queries for exact s
 
 ### Upgrading and compilation settings
 
-- The frontend/native private ABI is **206**, persistent execution-plan version **26**, and
-  compiled-cache schema **76**. Update compatible components together; matching Git commits
+- The frontend/native private ABI is **210**, persistent execution-plan version **27**, and
+  compiled-cache schema **77**. Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.
   Old compiled caches are invalidated; distinguish the resulting cold start from warm replay.
@@ -81,12 +81,13 @@ combination. Consult the linked API contracts and capability queries for exact s
   lifetimes. Ray programs retain immutable shader assets for shared cold lowering and
   validate fixed buffer identity per Graph port. Native-only recipes need no placeholder
   kernel; fixed recording ndarrays are live loans, including persistent sort on
-  CUDA/Vulkan. Micromaps, parallel and control-flow combinations still require separate qualification.
+  CUDA/Vulkan. Opacity micromaps use their separately declared domain capability;
+  AS/parallel and AS/control-flow combinations still require separate qualification.
   Graphics domains can
   bind private TLAS resources in vertex/fragment shaders, sharing one submission with
   preceding device refit and subsequent computation. Preparation checks actual queue
-  capabilities and the full AS closure. Cold data uploads and bootstrap
-  still depend on the ordinary queue.
+  capabilities and the full AS closure. Private cold payloads upload on the selected
+  domain. Initialization retains an ordinary-queue prefix when its resource dependencies require one.
 - Python `ti.init()`, including wheel installations, keeps `compile_tier="fast"` and
   `advanced_optimization=False` as defaults. Explicit `balanced/full` enables advanced IR
   optimization unless separately overridden. Kernel/export overrides use the shared request
@@ -261,7 +262,8 @@ combination. Consult the linked API contracts and capability queries for exact s
   retirement. Queue/timeline availability is checked on the chosen device. Selected device while,
   instance-private images and read-only sampling of same-Program managed Textures are also supported.
   Shared Textures currently require flat dispatches and one mip/layer; writes and layout changes are
-  blocked until the last reader retires. Graphics/parallel recipes retain their ordinary routes.
+  blocked until the last reader retires. Qualified offscreen graphics and flat kernel parallel
+  recipes also have independent-domain routes, with explicit resource and control-flow restrictions.
   Qualification includes source-free AOT,
   actual explicit gradients and controlled independent progress on Windows RTX 5090.
   See [execution-domain contracts](cuda_execution_domains.en.md).

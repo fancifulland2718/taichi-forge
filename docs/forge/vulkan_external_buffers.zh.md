@@ -58,7 +58,8 @@ bind offset 0。支持 storage 和 transfer usage，以及按实际设备地址�
 
 C 入口为 `taichi_vulkan.h` 中的 `ti_import_vulkan_external_buffer_ext()`；
 `TiVulkanExternalBufferImportInfo` 和 `TiVulkanExternalReadyGate` 的 schema 均为 1。
-Python/native 配对 ABI 为 168，AOT 执行计划格式不变。
+这些 descriptor schema 与 Python/native 配对 ABI、AOT 执行计划版本分别管理；
+请按[发布说明](release_notes.zh.md)中的当前版本安装配套组件。
 
 ## JIT 分配对象与类型视图
 

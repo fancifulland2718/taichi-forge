@@ -61,7 +61,9 @@ caller-owned on every outcome; callers may close their copies after import.
 
 The C entrypoint is `ti_import_vulkan_external_buffer_ext()` in `taichi_vulkan.h`.
 `TiVulkanExternalBufferImportInfo` and `TiVulkanExternalReadyGate` both use schema
-1. The Python/native pairing ABI is 168; the execution-plan format is unchanged.
+1. These descriptor schemas are separate from the Python/native pairing ABI and
+execution-plan format. Install matching components using the current versions in
+[release notes](release_notes.en.md).
 
 ## JIT allocation and typed views
 

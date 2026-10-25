@@ -34,8 +34,8 @@
 
 ### 升级与编译设置
 
-- frontend 与 native runtime 使用私有 ABI **206**，持久执行计划为 **26**，
-  编译缓存 schema 为 **76**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
+- frontend 与 native runtime 使用私有 ABI **210**，持久执行计划为 **27**，
+  编译缓存 schema 为 **77**。请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。
 - Vulkan 独立域支持有完整树代次证明的稀疏 Field 固定执行，AOT 重建和 JIT 已选
@@ -70,8 +70,9 @@
   ray program 借用原 AS，保留已选代码和源资源寿命。ray program 保留不可变 shader
   资产供共同冷阶段 lowering，并逐 Graph 端口校验固定 buffer 身份。纯 native 方案
   无需占位 kernel；固定 recording ndarray 借用 live storage，已覆盖 CUDA/Vulkan
-  persistent sort。micromap、并行及控制流的组合仍需分别验证。
-  冷数据上传和 bootstrap 仍依赖普通队列，详见执行域合同。
+  persistent sort。opacity micromap 使用单独声明的执行域能力；AS 与并行或控制流
+  的组合仍需分别验证。私有冷数据在所选域上传；初始化仅在资源依赖需要时保留
+  普通队列前缀，详见执行域合同。
 - Python `ti.init()`（包括 wheel 安装）默认保持 `compile_tier="fast"`、
   `advanced_optimization=False`。显式选择 `balanced/full` 且未覆盖高级 IR 优化时默认开启
   后者；kernel/export 的显式设置经共同编译请求解析。JIT 可面向当前设备，AOT 可声明
@@ -121,7 +122,8 @@
   JIT code loan 借用已编译代码，AOT adapter 处理部署闭包。普通调用的执行与提交路径保持。
 - CUDA AOT 保留每个入口选定的 occupancy waves/work-per-thread 启动策略，普通执行与
   Graph 录制共用消费端的冷阶段解析，不再静默回到基线网格。同一代码的不同策略保持
-  独立；当前 task 合同使用 LLVM AOT metadata schema 11，旧 reader 明确拒绝。
+  独立；普通 LLVM 产物使用 schema 11，入口别名或选定设备范围策略使用 schema 12，
+  不支持对应版本的旧 reader 明确拒绝。
 - CPU/CUDA/Vulkan 的执行注册状态归执行 owner，编译代码可共享；在途租约、独立实例、
   reset/close 和进程退出按资源依赖退休，修复借用 runtime 及 Vulkan 退出访问异常。
 - CUDA 独立域按完整 prepared 实例计数，初始化和 replay 共享一个容量名额；部分构造
@@ -206,7 +208,8 @@
   精确 timeline 依赖、逐提交参数、稀疏 GPU 计时与独立实例退休。按所选设备检查队列和
   timeline 条件；另支持已选设备 while、实例私有 image，以及同 Program 托管 Texture
   的跨域只读采样。共享 Texture 当前限普通 dispatch、单 mip/layer；借用期间阻止写入及
-  布局变更，最后一个读实例退休后恢复。graphics/并行仍保留普通路线。Windows RTX 5090 验收
+  布局变更，最后一个读实例退休后恢复。符合合同的离屏 graphics 和单层 kernel 并行
+  方案也支持独立域，仍需满足各自资源与控制流限制。Windows RTX 5090 验收
   包含无 DSL 的独立 AOT、真实显式梯度及受控独立推进。
   详见[执行域合同](cuda_execution_domains.zh.md)。
 - Vulkan Canvas 可选择独立输出域，使用冷准备的 packed-copy 或本地可写显示槽；

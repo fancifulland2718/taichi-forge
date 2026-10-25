@@ -270,11 +270,16 @@ recompiling a kernel; per-instance execution workspace retains its existing poli
 Seed inputs retained for private reconstruction and AS dependencies remain valid
 until instance retirement; closing them early invalidates the instance. Wrapping a public BLAS in a
 private TLAS does not make it private: its loan still needs complete admission.
-Micromaps and AS operations inside control flow remain outside this capability.
-Ordinary synchronous resource creation keeps its contract.
-Cold `initial_data` uploads still use the default queue and `initialize()` waits
-for bootstrap; cold preparation is not fully independent of that queue. Warm
-native queries and updates do not return to it.
+AS operations inside control flow remain outside this capability. Baked opacity
+micromaps use `vulkan_execution_domain_opacity_micromaps` and the additional device
+capability checks described in the [AOT SDK](aot_sdk.en.md). Ordinary synchronous
+resource creation keeps its contract. Private `initial_data` and frozen ArgPacks
+upload on the selected domain. Preparation derives bootstrap dependencies from
+physical storage, Field roots and native resources: public or undescribed inputs
+retain an ordinary-queue prefix; fully described private closures can omit it.
+Existing image/AS loans retain their exact producer dependencies. This is not
+a blanket asynchronous-prepare guarantee. Warm native queries and updates stay
+on the selected domain.
 
 `vulkan_execution_domain_sparse_fields` declares fixed preparation for sparse
 Fields with a complete tree-generation proof. AOT reconstruction and selected JIT
@@ -295,14 +300,18 @@ pointer/bitmasked/dynamic storage, independent and chunked pools, zero/early/bud
 termination, nested loops and explicit gradients; it is not qualification of
 every sparse layout. The CUDA contract is described under ownership below.
 
-Host selection, public parallel recipes and unisolated RNG/runtime-error
-state remain outside this independent Vulkan route. Ordinary Graph execution keeps
-its existing capabilities; CUDA Canvas and external-memory protocols are not
+Flat ordinary-kernel fork/join regions support independent Vulkan compute domains
+through a selected `branch_join_schedule` recipe or a persisted `vulkan_parallel`
+node. Nested parallel/control regions and native branches remain outside that
+contract; see the [AOT SDK](aot_sdk.en.md) for binding and workspace requirements.
+Host selection and unisolated RNG/runtime-error state remain outside this route.
+Ordinary Graph execution keeps its existing capabilities; CUDA Canvas and external-memory protocols are not
 implicitly enabled on Vulkan domains.
 
-Initialization imports the ordinary queue's submitted preparation prefix and
-records instance initialization on the selected queue. Warm submission combines
-dependencies, parameter upload and fixed commands into one `vkQueueSubmit`.
+Initialization imports any required ordinary-queue preparation prefix and
+records instance initialization on the selected queue. For serial fixed recipes,
+warm submission combines dependencies, parameter upload and fixed commands into
+one `vkQueueSubmit`. Parallel recipes retain their branch queues and joined completion.
 Busy admission changes none of these, and instance retirement waits for that
 instance's accepted prefix rather than unrelated default-queue work.
 
@@ -668,9 +677,11 @@ with Runtime("cuda") as runtime:
 ```
 
 `initialize()` is required even without explicit initialization operations. It
-publishes the exact default-stream prefix containing module/storage setup, then
-executes any initializer in the selected domain. It never calls the runtime's
-all-domain wait. Its event and initializer storage remain bounded by the cold
+joins the preparation dependencies required by the selected resource closure,
+including an exact default-stream prefix where needed, then executes any initializer
+in the selected domain. Fully described private closures can omit unrelated default
+work; CUDA still joins allocation initialization where required. It never calls
+the runtime's all-domain wait. Its event and initializer storage remain bounded by the cold
 instance lifetime; completion does not immediately destroy driver objects.
 Initialize all steady-state bindings before starting the application pipeline.
 

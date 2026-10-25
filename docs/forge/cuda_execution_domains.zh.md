@@ -200,10 +200,13 @@ graphics 使用具备图形能力的域。ray-program buffer 必须逐 Graph 端
 可直接准备，保持既有逐实例执行工作区策略。
 
 私有重建所保留的 seed 输入和 AS 依赖须保持有效直至实例退休；提前关闭会使实例失效。
-包装成私有 TLAS 不会把 public BLAS 变为私有资源，其借用仍需完整准入。micromap
-和控制流内的 AS 操作尚不包含在此能力中。普通同步资源创建合同保持不变。
-冷 `initial_data` 上传仍走默认队列，`initialize()` 仍等待 bootstrap；
-这不表示冷准备能完全脱离默认队列，暖态 native 查询与更新无需回到该队列。
+包装成私有 TLAS 不会把 public BLAS 变为私有资源，其借用仍需完整准入。控制流内的
+AS 操作尚不包含在此能力中。烘焙 opacity micromap 使用
+`vulkan_execution_domain_opacity_micromaps`，并需满足 [AOT SDK](aot_sdk.zh.md) 中的设备能力检查。
+普通同步资源创建合同保持不变。私有 `initial_data` 和冻结 ArgPack 在所选域上传；
+准备根据物理存储、Field root 和 native 资源推导 bootstrap 依赖。公共或描述不完整的
+输入保留普通队列前缀，描述完整的私有闭包可省略它；既有 image/AS 借用仍保留精确
+生产者依赖。这不保证任意 provider 都可异步准备。暖态 native 查询与更新保持在所选域。
 
 `vulkan_execution_domain_sparse_fields` 表示固定准备支持有完整树代次证明的稀疏
 Field。AOT 重建与 JIT 已选代码借用共用这一准入；准备一次收集初始化及控制区域的
@@ -216,12 +219,15 @@ Graph 或另一实例对同一树的冲突访问会在提交前被拒绝。不�
 准备仍保留源树的普通队列生产前缀。Windows 已验证 pointer/bitmasked/dynamic、独立
 与 chunked pool、零轮/早停/耗尽/嵌套循环及显式梯度；这不表示任意稀疏布局已获资格。
 
-独立 Vulkan 路线还不接纳 host selection、公共并行 recipe，以及尚未隔离的
-RNG/runtime-error 状态。
+普通 kernel 的单层 fork/join 区域可通过已选 `branch_join_schedule` recipe 或持久化
+`vulkan_parallel` 节点在独立 Vulkan compute 域执行。嵌套并行/控制区域及 native 分支
+仍不在这一合同中；绑定与工作区要求见 [AOT SDK](aot_sdk.zh.md)。
+独立 Vulkan 路线仍不接纳 host selection，以及尚未隔离的 RNG/runtime-error 状态。
 普通 Graph 保持既有能力；CUDA Canvas 和外部内存协议不会因此自动适用于 Vulkan 域。
 
-初始化导入普通队列已提交的准备前缀，并在所选队列执行实例初始化。暖态提交把依赖、
-参数上传和固定命令放进一次 `vkQueueSubmit`；busy 不产生部分设备效果。实例退休只等待
+初始化导入所需的普通队列准备前缀，并在所选队列执行实例初始化。串行固定方案的暖态
+提交把依赖、参数上传和固定命令放进一次 `vkQueueSubmit`；并行方案保留分支队列与汇合
+完成合同。busy 不产生部分设备效果。实例退休只等待
 该实例已接纳的前缀，不等待无关默认队列工作。
 
 Windows 实机资格使用具有 16 条已创建 compute queue 的 RTX 5090，并含双向受控挂起
@@ -507,8 +513,9 @@ with Runtime("cuda") as runtime:
     domain.close()    # 冷阶段破坏性退休
 ```
 
-即使计划没有显式初始化操作，也必须调用 `initialize()`。它发布包含模块和存储准备的
-精确默认队列前缀，再在所选域执行初始化，不调用 runtime 的全域等待。初始化事件和存储
+即使计划没有显式初始化操作，也必须调用 `initialize()`。它汇合所选资源闭包需要的准备
+依赖，必要时包含精确默认队列前缀，再在所选域执行初始化。描述完整的私有闭包可省略
+无关默认队列工作；CUDA 仍会按需汇合分配初始化。它不调用 runtime 的全域等待。初始化事件和存储
 保留到有界实例的冷退休阶段，完成时不立即销毁驱动对象。应用启动流水前应准备并初始化
 所有稳态绑定。
 
