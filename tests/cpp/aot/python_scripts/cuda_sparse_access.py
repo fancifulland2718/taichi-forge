@@ -4,7 +4,7 @@ import os
 
 import taichi_forge as ti
 
-ti.init(arch=ti.cuda, offline_cache=False)
+ti.init(arch=ti.cuda, offline_cache=False, debug=True)
 left = ti.field(ti.i32)
 right = ti.field(ti.i32)
 for value in (left, right):
@@ -48,10 +48,21 @@ def peek_right() -> ti.i32:
     return right[0]
 
 
-module = ti.aot.Module(ti.cuda)
+@ti.kernel
+def fail_left():
+    assert left[0] < 0, "left sparse diagnostic"
+
+
+artifact_format = os.environ.get("TI_TEST_SPARSE_ARTIFACT_FORMAT", "bc")
+caps = (
+    [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
+    if artifact_format == "cubin"
+    else None
+)
+module = ti.aot.Module(ti.cuda, artifact_format=artifact_format, caps=caps)
 module.add_field("left", left)
 module.add_field("right", right)
-for kernel in (initialize, bump_left, bump_right, cold_bump_left, peek_left, peek_right):
+for kernel in (initialize, bump_left, bump_right, cold_bump_left, peek_left, peek_right, fail_left):
     module.add_kernel(kernel)
 graph = ti.graph.GraphBuilder()
 graph.dispatch(bump_right)

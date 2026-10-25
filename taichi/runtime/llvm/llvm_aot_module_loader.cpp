@@ -407,6 +407,12 @@ std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
           ? 0u
           : state_declaration->second;
   const auto kernel_name = std::move(kernel_cache.kernel_key);
+  const auto view_declaration =
+      metadata_.kernel_sparse_runtime_view_abis.find(name);
+  const auto view_abi =
+      view_declaration == metadata_.kernel_sparse_runtime_view_abis.end()
+          ? 0u
+          : view_declaration->second;
   if (is_cuda_aot_artifact_format(metadata_.kernel_format)) {
 #if defined(TI_WITH_CUDA)
     const bool cubin = metadata_.kernel_format == "cubin";
@@ -480,7 +486,7 @@ std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
         data, artifact, bindings,
         gated ? cuda::KernelLaunchABI::graph_gate_v1
               : cuda::KernelLaunchABI::ordinary,
-        context_abi, runtime_state);
+        context_abi, runtime_state, view_abi);
     return std::make_unique<llvm_aot::KernelImpl>(
         launcher, handle, arch(), kernel_name, data);
 #else
@@ -489,6 +495,11 @@ std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
   }
   LLVM::CompiledKernelData compiled{
       arch(), std::move(kernel_cache).take_llvm_ckd_data()};
+  TI_ERROR_IF(
+      LLVM::sparse_runtime_view_abi(
+          *compiled.get_internal_data().compiled_data.module) != view_abi,
+      "AOT LLVM code does not match its sparse runtime view qualification: {}",
+      name);
   TI_ERROR_IF(state_declaration != metadata_.kernel_runtime_state.end() &&
                   LLVM::runtime_state_use(
                       *compiled.get_internal_data().compiled_data.module) !=

@@ -6,6 +6,7 @@
 #include "taichi/runtime/llvm/snode_runtime_state.h"
 #include "taichi/runtime/llvm/sparse_runtime_view.h"
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <set>
 #include <thread>
@@ -14,11 +15,16 @@
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/fixed_graph.h"
+#include "taichi/runtime/cuda/sparse_runtime_view.h"
+#include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/runtime/cuda/binding_frame_replay.h"
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
+#ifdef TI_WITH_VULKAN
+#include "tests/cpp/rhi/common/cuda_external_gate.h"
+#endif
 #endif
 
 namespace taichi::lang {
@@ -339,6 +345,213 @@ TEST_P(LlvmSparseRuntimeView,
 }
 
 #ifdef TI_WITH_CUDA
+TEST(CudaSparseAccess, RuntimeViewsCaptureRealKernelsAndReturnManagers) {
+  const auto *folder = std::getenv("TAICHI_CUDA_SPARSE_ACCESS_FIXTURE");
+  if (!folder || !cuda::FixedGraph::available())
+    GTEST_SKIP() << "Requires the CUDA sparse access AOT fixture";
+  CompileConfig config;
+  config.arch = Arch::cuda;
+  LlvmRuntimeExecutor executor(config, nullptr);
+  uint64 *result = nullptr;
+  executor.materialize_runtime(nullptr, &result);
+  LLVM::AotModuleParams params;
+  params.module_path = folder;
+  params.executor_ = &executor;
+  params.allocation_result_buffer = result;
+  params.kernel_launcher = std::make_unique<cuda::KernelLauncher>(
+      cuda::KernelLauncher::Config{&executor});
+  auto module = LLVM::make_aot_module(std::move(params));
+  auto invoke = [&](const char *name, bool returns = false) {
+    auto *kernel = module->get_kernel(name);
+    LaunchContextBuilder args(kernel);
+    kernel->launch(args);
+    return returns ? args.get_ret<int>(0) : 0;
+  };
+  invoke("initialize");
+  auto tree = [&](const char *name) {
+    const auto &layout =
+        dynamic_cast<llvm_aot::FieldImpl &>(
+            *static_cast<LLVM::LlvmAotModule &>(*module).get_snode_tree(name))
+            .get_snode_tree_cache();
+    return LlvmSparseRuntimeViewTree{layout.tree_id, 0, layout.tree_generation};
+  };
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 7601);
+  cuda::SparseRuntimeView left, right;
+  left.initialize(executor, {tree("0")}, owner);
+  right.initialize(executor, {tree("1")}, owner);
+  EXPECT_NE(left.temporaries(), right.temporaries());
+  EXPECT_GT(left.bytes(), taichi_global_tmp_buffer_size);
+  RecordProperty("view_storage_bytes", std::to_string(left.bytes()));
+  EXPECT_THROW(invoke("bump_left"), std::invalid_argument);
+  EXPECT_THROW(invoke("bump_right"), std::invalid_argument);
+  cuda::SparseRuntimeView conflict;
+  EXPECT_THROW(conflict.initialize(executor, {tree("0")}, owner),
+               std::invalid_argument);
+  conflict.retire();
+  auto stale = tree("1");
+  ++stale.generation;
+  cuda::SparseRuntimeView rejected;
+  EXPECT_THROW(rejected.initialize(executor, {stale}, owner),
+               std::invalid_argument);
+  rejected.retire();
+
+  struct Captured {
+    cuda::KernelLauncher::GraphLaunchPacket packet;
+    void *graph{nullptr};
+    void *executable{nullptr};
+    ~Captured() {
+      auto guard = CUDAContext::get_instance().get_guard();
+      auto &driver = CUDADriver::get_instance();
+      if (executable)
+        driver.graph_exec_destroy(executable);
+      if (graph)
+        driver.graph_destroy(graph);
+    }
+  };
+  auto capture = [&](const char *name, cuda::SparseRuntimeView &view) {
+    auto captured = std::make_unique<Captured>();
+    auto *kernel =
+        dynamic_cast<llvm_aot::KernelImpl *>(module->get_kernel(name));
+    auto &launcher = dynamic_cast<cuda::KernelLauncher &>(kernel->launcher());
+    LaunchContextBuilder args(kernel);
+    args.discard_return_values();
+    EXPECT_TRUE(launcher.prepare_cuda_graph_launch_packet(
+        kernel->handle(), args, captured->packet, true));
+    EXPECT_EQ(captured->packet.arg_buffer_size, 0u);
+    auto *source = captured->packet.context.runtime;
+    launcher.bind_sparse_runtime_view(captured->packet, view);
+    EXPECT_EQ(args.get_context().runtime, source);
+    EXPECT_NE(captured->packet.context.runtime, source);
+    auto guard = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    void *stream = nullptr;
+    driver.stream_create(&stream, CU_STREAM_NON_BLOCKING);
+    {
+      auto lock = CUDAContext::get_instance().get_graph_capture_lock_guard();
+      driver.stream_begin_capture(stream, CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
+      launcher.capture_cuda_graph_launch(captured->packet, stream);
+      driver.stream_end_capture(stream, &captured->graph);
+    }
+    driver.graph_instantiate_with_flags(&captured->executable, captured->graph,
+                                        0);
+    // Match FixedGraph's independent-instance cold upload policy.
+    driver.graph_upload(captured->executable, stream);
+    EXPECT_EQ(driver.stream_synchronize.call_concurrent(stream), CUDA_SUCCESS);
+    driver.stream_destroy(stream);
+    return captured;
+  };
+  auto a = capture("bump_left", left);
+  auto b = capture("bump_right", right);
+  auto failure = capture("fail_left", left);
+  auto *kernel =
+      dynamic_cast<llvm_aot::KernelImpl *>(module->get_kernel("bump_right"));
+  auto &launcher = dynamic_cast<cuda::KernelLauncher &>(kernel->launcher());
+  auto wrong = b->packet;
+  wrong.context.runtime = executor.get_llvm_runtime();
+  EXPECT_THROW(launcher.bind_sparse_runtime_view(wrong, left),
+               std::invalid_argument);
+  wrong = {};
+  cuda::ExecutionDomain::Options options;
+  options.capacity = 2;
+  auto da = std::make_shared<cuda::ExecutionDomain>(owner, options);
+  auto db = std::make_shared<cuda::ExecutionDomain>(owner, options);
+  auto good = left.prepare_diagnostic_snapshot();
+  auto bad = left.prepare_diagnostic_snapshot();
+  auto peer = right.prepare_diagnostic_snapshot();
+  void *peer_graph_done = nullptr;
+  {
+    auto guard = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().event_create(&peer_graph_done, CU_EVENT_DISABLE_TIMING);
+  }
+  RecordProperty("view_with_two_diagnostics_bytes",
+                 std::to_string(left.bytes()));
+  auto expect_diagnostic = [&] {
+    try {
+      bad->observe();
+      ADD_FAILURE() << "Expected the private runtime assertion";
+    } catch (const TaichiAssertionError &error) {
+      EXPECT_NE(std::string(error.what()).find("left sparse diagnostic"),
+                std::string::npos);
+    }
+  };
+  int submission_index = 0;
+  auto submit = [&](auto &domain, Captured &graph, auto &view,
+                    auto &diagnostic) {
+    const auto index = std::to_string(submission_index++);
+    return domain->submit({}, {}, [&](void *stream) {
+      const auto begin = std::chrono::steady_clock::now();
+      CUDADriver::get_instance().graph_launch(graph.executable, stream);
+      if (index == "1")
+        CUDADriver::get_instance().event_record(peer_graph_done, stream);
+      const auto launched = std::chrono::steady_clock::now();
+      view.enqueue_diagnostics(*diagnostic, stream);
+      const auto end = std::chrono::steady_clock::now();
+      RecordProperty("graph_enqueue_us_" + index, std::to_string(
+          std::chrono::duration<double, std::micro>(launched - begin).count()));
+      RecordProperty("diagnostic_enqueue_us_" + index, std::to_string(
+          std::chrono::duration<double, std::micro>(end - launched).count()));
+    });
+  };
+#ifdef TI_WITH_VULKAN
+  testing::CudaExternalGate gate;
+  auto occupied =
+      da->submit({}, {}, [&](void *stream) { gate.enqueue_wait(stream); });
+#endif
+  auto ca = submit(da, *a, left, good);
+  auto cb = submit(db, *b, right, peer);
+  const auto peer_begin = std::chrono::steady_clock::now();
+  {
+    auto guard = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    EXPECT_EQ(driver.event_synchronize.call_concurrent(peer_graph_done), CUDA_SUCCESS);
+    driver.event_destroy(peer_graph_done);
+  }
+  RecordProperty("peer_graph_wait_us", std::to_string(
+      std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - peer_begin).count()));
+#ifdef TI_WITH_VULKAN
+  RecordProperty("gate_pending_after_peer_graph", gate.producer_pending() ? "true" : "false");
+#endif
+  cb.wait();
+#ifdef TI_WITH_VULKAN
+  EXPECT_FALSE(ca.done());
+  EXPECT_TRUE(gate.producer_pending());
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  occupied.wait();
+#endif
+  ca.wait();
+  EXPECT_NO_THROW(good->observe());
+  EXPECT_NO_THROW(peer->observe());
+  auto failed = submit(da, *failure, left, bad);
+  failed.wait();
+  expect_diagnostic();
+  auto recovered = submit(da, *a, left, good);
+  recovered.wait();
+  EXPECT_NO_THROW(good->observe());
+  expect_diagnostic();
+  // The peer's diagnostics and the default runtime are untouched.
+  EXPECT_NO_THROW(peer->observe());
+  executor.check_runtime_error(result);
+  failure.reset();
+  a.reset();
+  b.reset();
+  left.retire_after(recovered);
+  right.retire_after(cb);
+  EXPECT_THROW(left.bind(executor.get_llvm_runtime(), {tree("0").tree_id}),
+               std::invalid_argument);
+  EXPECT_THROW(left.initialize(executor, {tree("0")}, owner),
+               std::invalid_argument);
+  expect_diagnostic();
+  EXPECT_EQ(invoke("peek_left", true), 5);
+  EXPECT_EQ(invoke("peek_right", true), 8);
+  invoke("bump_left");
+  EXPECT_EQ(invoke("peek_left", true), 6);
+  da->close();
+  db->close();
+  module.reset();
+  executor.finalize();
+}
+
 TEST(CudaSparseAccess, RealKernelClosureRejectsConflictsAndRetires) {
   const auto *folder = std::getenv("TAICHI_CUDA_SPARSE_ACCESS_FIXTURE");
   if (!folder || !is_cuda_api_available())

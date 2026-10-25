@@ -24,6 +24,7 @@
 namespace taichi::lang {
 struct CUDAKernelArtifact;
 namespace cuda {
+class SparseRuntimeView;
 
 constexpr std::size_t kMaxOrdinaryLaunchArgRingSize = 8;
 
@@ -134,6 +135,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
     bool uses_bounded_range{false};
     KernelLaunchABI launch_abi{KernelLaunchABI::ordinary};
     unsigned runtime_context_abi{1};
+    unsigned sparse_runtime_view_abi{0};
     std::uint32_t runtime_state{0};
     // Accessed under sparse_list_mutex_, only after a cold lease epoch change.
     mutable std::uint64_t sparse_replay_epoch{0};
@@ -216,6 +218,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
   // Ordinary recordings explicitly bind the executor's existing fallback;
   // this does not allocate, query the device, or transfer workspace ownership.
   void bind_runtime_temporaries(GraphLaunchPacket &packet);
+  void bind_sparse_runtime_view(GraphLaunchPacket &packet,
+                                const SparseRuntimeView &view);
   void validate_execution_domain(Handle handle);
   bool has_field_dependencies(Handle handle);
 
@@ -234,7 +238,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const std::map<int, int> &tree_bindings = {},
       KernelLaunchABI launch_abi = KernelLaunchABI::ordinary,
       unsigned runtime_context_abi = 1,
-      std::uint32_t runtime_state = 0);
+      std::uint32_t runtime_state = 0,
+      unsigned sparse_runtime_view_abi = 0);
   // Register a private variant whose offloaded task entries uniformly test a
   // device gate before executing. The source kernel and ordinary registration
   // remain untouched, so only internal masked CUDA Graph replay pays the

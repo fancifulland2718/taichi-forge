@@ -19,6 +19,7 @@ target_sources(cuda_runtime
     predicate_graph.cpp
     range_graph.cpp
     runtime_module.cpp
+    sparse_runtime_view.cpp
   )
 
 # jit_cuda.cpp uses llvm::legacy::PassManager / PassManagerBuilder,

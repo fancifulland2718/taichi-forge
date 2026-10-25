@@ -90,6 +90,7 @@ struct LlvmAotMetadata {
   // Optional compiler facts; absence means unknown, never domain-safe. These
   // do not change the serialized task layout or the device call ABI.
   std::map<std::string, std::uint32_t> kernel_runtime_state;
+  std::map<std::string, unsigned> kernel_sparse_runtime_view_abis;
   std::string runtime_state_sha256;
   std::map<std::string, std::string> kernel_aliases;
   std::vector<aot::DeviceRangeDispatch> device_range_dispatch;
@@ -106,6 +107,7 @@ struct LlvmAotMetadata {
             kernel_launch_abis,
             launch_abi_sha256,
             kernel_runtime_state,
+            kernel_sparse_runtime_view_abis,
             runtime_state_sha256,
             kernel_aliases,
             device_range_dispatch,
@@ -113,6 +115,10 @@ struct LlvmAotMetadata {
 };
 
 inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
+  for (const auto &[name, abi] : metadata.kernel_sparse_runtime_view_abis)
+    TI_ERROR_IF(
+        abi != 1 || !metadata.kernel_runtime_state.count(name),
+        "AOT sparse runtime views require a qualified kernel inventory");
   TI_ERROR_IF(metadata.kernel_runtime_state.empty()
                   ? !metadata.runtime_state_sha256.empty()
                   : metadata.runtime_state_sha256.size() != 64 ||

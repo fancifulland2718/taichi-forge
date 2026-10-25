@@ -17,6 +17,23 @@ inline constexpr const char *kRuntimeContextABIFlag =
     "taichi.runtime.context_abi";
 inline constexpr const char *kRuntimeStateFlag = "taichi.runtime.state_use";
 
+// Code qualification, independent of RuntimeContext layout and state uses.
+// Version 1 resolves sparse allocation through the source runtime while list
+// managers and diagnostics can belong to an execution-owned runtime view.
+inline constexpr unsigned kSparseRuntimeViewABI = 1;
+inline constexpr const char *kSparseRuntimeViewABIFlag =
+    "taichi.runtime.sparse_view_abi";
+
+inline unsigned sparse_runtime_view_abi(const llvm::Module &module) {
+  const auto *flag = module.getModuleFlag(kSparseRuntimeViewABIFlag);
+  if (!flag)
+    return 0;
+  const auto *value = llvm::mdconst::dyn_extract<llvm::ConstantInt>(flag);
+  TI_ERROR_IF(!value || !value->equalsInt(kSparseRuntimeViewABI),
+              "Unsupported compiled sparse runtime view contract");
+  return kSparseRuntimeViewABI;
+}
+
 inline std::uint32_t runtime_state_use(const llvm::Module &module) {
   const auto *flag = module.getModuleFlag(kRuntimeStateFlag);
   if (!flag)

@@ -68,6 +68,9 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   LLVMModuleOptions::from_config(compile_config)
       .write(*data.compiled_data.module);
   declare_runtime_context_abi(*data.compiled_data.module);
+  if (compile_config.arch == Arch::cuda)
+    data.compiled_data.module->addModuleFlag(
+        llvm::Module::Error, kSparseRuntimeViewABIFlag, kSparseRuntimeViewABI);
   // Dense struct-for may become an ordinary range during final task lowering.
   // Consult emitted task records, not its pre-lowering statement kind. This
   // also covers explicit dense-list mode without another instruction walk.

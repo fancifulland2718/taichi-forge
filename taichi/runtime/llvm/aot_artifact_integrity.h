@@ -39,9 +39,14 @@ inline std::string aot_launch_abi_sha256(const LlvmAotMetadata &metadata) {
 }
 
 inline std::string aot_runtime_state_sha256(const LlvmAotMetadata &metadata) {
-  return aot_artifact_sha256(metadata.abi_sha256 + "\n" +
-                             liong::json::print(liong::json::serialize(
-                                 metadata.kernel_runtime_state)));
+  auto contract =
+      metadata.abi_sha256 + "\n" +
+      liong::json::print(liong::json::serialize(metadata.kernel_runtime_state));
+  if (!metadata.kernel_sparse_runtime_view_abis.empty())
+    contract += "\nsparse_runtime_view\n" +
+                liong::json::print(liong::json::serialize(
+                    metadata.kernel_sparse_runtime_view_abis));
+  return aot_artifact_sha256(contract);
 }
 
 inline std::string aot_kernel_entry_sha256(const LlvmAotMetadata &metadata) {

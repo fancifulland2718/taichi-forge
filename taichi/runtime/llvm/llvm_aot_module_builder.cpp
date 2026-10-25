@@ -218,6 +218,10 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     const auto state = LLVM::runtime_state_use(*kernel.compiled_data.module);
     if (state)
       metadata.kernel_runtime_state.emplace(name, state);
+    const auto view_abi =
+        LLVM::sparse_runtime_view_abi(*kernel.compiled_data.module);
+    if (view_abi)
+      metadata.kernel_sparse_runtime_view_abis.emplace(name, view_abi);
   }
   if (!metadata.kernel_runtime_state.empty()) {
     if (metadata.abi_sha256.empty())

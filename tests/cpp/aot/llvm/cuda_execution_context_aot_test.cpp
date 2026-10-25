@@ -193,6 +193,14 @@ TEST(CudaExecutionContextAot,
   EXPECT_EQ(independent_runtime_state_blocker(runtime_state_known), nullptr);
   EXPECT_NE(independent_runtime_state_blocker(runtime_state_known | (1u << 31)),
             nullptr);
+  EXPECT_EQ(LLVM::sparse_runtime_view_abi(legacy), 0);
+  legacy.addModuleFlag(llvm::Module::Error, LLVM::kSparseRuntimeViewABIFlag,
+                       LLVM::kSparseRuntimeViewABI);
+  EXPECT_EQ(LLVM::sparse_runtime_view_abi(*llvm::CloneModule(legacy)), 1);
+  EXPECT_EQ(LLVM::runtime_context_abi(legacy), 2);
+  unknown.addModuleFlag(llvm::Module::Error, LLVM::kSparseRuntimeViewABIFlag,
+                        99);
+  EXPECT_ANY_THROW(LLVM::sparse_runtime_view_abi(unknown));
 }
 
 TEST(CudaRuntimeStateAot, RejectsSharedStateBeforePreparingAnInstance) {

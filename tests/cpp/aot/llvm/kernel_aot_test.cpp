@@ -433,6 +433,30 @@ TEST(LlvmAotMetadataTest, GatedLaunchAbiExtendsExistingArtifactContracts) {
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(decoded));
 }
 
+TEST(LlvmAotMetadataTest, SparseViewQualificationSharesInventoryIntegrity) {
+  LLVM::LlvmAotMetadata metadata;
+  metadata.abi_sha256 = std::string(64, 'a');
+  metadata.kernel_runtime_state["body"] = 1;
+  metadata.runtime_state_sha256 = LLVM::aot_runtime_state_sha256(metadata);
+  const auto previous = metadata.runtime_state_sha256;
+  metadata.kernel_sparse_runtime_view_abis["body"] = 1;
+  metadata.runtime_state_sha256 = LLVM::aot_runtime_state_sha256(metadata);
+  EXPECT_NE(previous, metadata.runtime_state_sha256);
+  LLVM::LlvmAotMetadata decoded;
+  liong::json::deserialize(liong::json::serialize(metadata), decoded);
+  EXPECT_EQ(decoded.kernel_sparse_runtime_view_abis,
+            metadata.kernel_sparse_runtime_view_abis);
+  EXPECT_EQ(LLVM::aot_runtime_state_sha256(decoded),
+            metadata.runtime_state_sha256);
+  decoded.kernel_sparse_runtime_view_abis["body"] = 99;
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(decoded));
+  EXPECT_NE(LLVM::aot_runtime_state_sha256(decoded),
+            metadata.runtime_state_sha256);
+  decoded = metadata;
+  decoded.kernel_sparse_runtime_view_abis["absent"] = 1;
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(decoded));
+}
+
 TEST(LlvmAotMetadataTest, PersistedTaskPolicyRequiresNewReaderAndExistingAbi) {
   LLVM::LlvmAotMetadata metadata;
   metadata.schema_version = LLVM::kTaskLaunchPolicyAotSchemaVersion;

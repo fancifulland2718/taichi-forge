@@ -6,6 +6,24 @@ void runtime_sparse_view_get_size(uint64 *result) {
   *result = sizeof(LLVMRuntime);
 }
 
+void runtime_sparse_view_snapshot(LLVMRuntime *view,
+                                  LlvmSparseRuntimeDiagnostic *snapshot) {
+  snapshot->code = view->error_code;
+  std::memcpy(snapshot->message, view->error_message_template,
+              sizeof(snapshot->message));
+  std::memcpy(snapshot->arguments, view->error_message_arguments,
+              sizeof(snapshot->arguments));
+#if ARCH_cuda
+  // Snapshots may be mapped host storage. Publish all stores to the system
+  // before the stream's completion event makes this diagnostic observable.
+  asm volatile("membar.sys;");
+#endif
+  // The stream orders this after all readers/writers of the selected view.
+  // Other views and the source runtime have independent diagnostic slots.
+  view->error_code = 0;
+  view->error_message_lock = 0;
+}
+
 void runtime_sparse_view_initialize(LLVMRuntime *source,
                                     LLVMRuntime *view,
                                     LlvmSNodeTreeRuntimeState **directory,

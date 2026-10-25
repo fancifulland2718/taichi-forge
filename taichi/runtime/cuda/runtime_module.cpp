@@ -35,6 +35,7 @@ CUDARuntimeGroup cuda_runtime_group(const std::string &entry) {
       "runtime_element_lists_prepare_backing_pool",
       "runtime_element_lists_finalize_backing_pool",
       "runtime_sparse_view_get_size",
+      "runtime_sparse_view_snapshot",
       "runtime_sparse_view_initialize",
       "runtime_sparse_view_bind",
       "runtime_sparse_view_release"};
