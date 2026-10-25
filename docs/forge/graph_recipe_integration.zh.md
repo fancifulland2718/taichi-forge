@@ -30,8 +30,9 @@ fork 的 `1.1.0b2+taichiforge.1` 系列跟随上游 1.1，要求 Python 3.11–3
 能力协议 revision 7 用源码摘要标识实际执行完整 recipe 的 Python 调度器；
 普通编译器参数搜索使用随包提供的 Amber 引擎。现有 `core_commit` / `core_lock`
 协议字段在 revision 7 中承载调度器版本与源码身份，不再指向未使用的原生 core。
-调度器身份变化后不能复用旧 checkpoint。Forge 仍接受 revision 6 fork，包括旧的
-Python 3.10 发行物；新版 wheel 不宣称支持 Python 3.10。工作量事实、完整物理 recipe
+调度器身份变化后不能复用旧 checkpoint。Forge 统一要求 revision 7，不再回退旧协议；
+兼容应用直接使用，无需选择协议或确认迁移。依赖缺失或不兼容仍明确报错，不静默吞掉异常。
+这不会开启自动调优。新版 wheel 不支持 Python 3.10。工作量事实、完整物理 recipe
 身份、逻辑阶段分页、显式预算和成本报告继续使用原有合同。
 
 Forge 与 fork 使用同一环境；vendor 库和编译器只为所选 provider 配置。

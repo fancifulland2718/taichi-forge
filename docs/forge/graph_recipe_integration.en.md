@@ -36,10 +36,13 @@ The fork's `1.1.0b2+taichiforge.1` line follows upstream 1.1 and requires Python
 scheduler by a source digest. Ordinary compiler-control searches use the bundled
 Amber engine. Existing `core_commit` / `core_lock` protocol fields carry scheduler
 version / source identity in revision 7; they do not identify an unused native
-core. Checkpoints cannot cross a scheduler identity change. Revision 6 forks remain
-accepted, including the older Python 3.10 distribution; new wheels are not claimed
-to support Python 3.10. Workload facts, full physical recipe identities, logical
-stage pages, explicit budgets and cost reports retain their existing contracts.
+core. Checkpoints cannot cross a scheduler identity change. Revision 7 is the
+required protocol; there is no legacy-protocol fallback. Compatible applications
+use it without a protocol selector or migration prompt. Missing or incompatible
+dependencies still raise an actionable error. This does not enable automatic
+tuning. These wheels do not support Python 3.10. Workload facts, full physical
+recipe identities, logical stage pages, explicit budgets and cost reports retain
+their existing contracts.
 
 Use one environment for Forge and the fork. Vendor libraries and compilers are
 needed only for the providers you choose. Rendering additionally needs a

@@ -80,7 +80,7 @@ def test_compileiq_plan_domain_is_complete_opaque_and_baseline_inclusive():
     baseline = search.recipe_manifest(search.baseline_recipe_id)
     task_count = len(baseline["tasks"])
 
-    assert search.capability["protocol_revision"] in (6, 7)
+    assert search.capability["protocol_revision"] == 7
     assert search.capability["package_version"]
     assert search.baseline_recipe_id in search.recipe_ids
     assert 3 <= len(search.recipe_ids) <= 4096

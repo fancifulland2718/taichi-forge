@@ -12,10 +12,6 @@ from typing import ClassVar
 from taichi_forge._compileiq_opaque import (
     CompileIQOpaqueUnavailableError,
     _CompileIQOpaqueRecipeTransport,
-    _EXPECTED_CAPABILITY_ID as _EXPECTED_CAPABILITY_ID,
-    _EXPECTED_CORE_COMMIT as _EXPECTED_CORE_COMMIT,
-    _EXPECTED_CORE_LOCK as _EXPECTED_CORE_LOCK,
-    _EXPECTED_PYTHON_SOURCE_LOCK as _EXPECTED_PYTHON_SOURCE_LOCK,
     _identity,
     _validated_compileiq_capability as _validate_shared_compileiq_capability,
 )

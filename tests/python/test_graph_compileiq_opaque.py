@@ -3,7 +3,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -16,6 +16,7 @@ from taichi_forge.graph import (
     compileiq_recipe_search,
 )
 from tests import test_utils
+from tests.compileiq_fixtures import SOURCE_LOCK, capability as _capability
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -285,63 +286,6 @@ class _TargetContract:
     SCHEMA = "compileiq.taichi-forge-opaque-target-contract.v1"
 
 
-def _capability():
-    return MappingProxyType(
-        {
-            "schema": "compileiq.taichi-forge-recipe-search-capability.v2",
-            "protocol_revision": 6,
-            "fork_build_id": "compileiq-taichi-forge-complete-recipes.v2",
-            "package_version": "1.0.0dev6+taichiforge.report1",
-            "opaque_recipe_domain_schema": "compileiq.opaque-recipe-domain.v1",
-            "opaque_recipe_batch_schema": "compileiq.opaque-recipe-batch.v2",
-            "opaque_dynamic_recipe_domain_schema": (
-                "compileiq.opaque-dynamic-recipe-domain.v2"
-            ),
-            "selection_audit_schema": "compileiq.opaque-recipe-selection.v1",
-            "opaque_target_contract_schema": (
-                "compileiq.taichi-forge-opaque-target-contract.v1"
-            ),
-            "opaque_target_selection": (
-                "uncertainty_aware_pareto_layers_no_scalarization_v2"
-            ),
-            "trial_outcome_schema": "compileiq.taichi-forge-trial-outcome.v2",
-            "search_checkpoint_schema": (
-                "compileiq.taichi-forge-search-checkpoint.v2"
-            ),
-            "evaluation_context_schema": (
-                "compileiq.taichi-forge-evaluation-context.v1"
-            ),
-            "search_finalization_schema": (
-                "compileiq.taichi-forge-search-finalization.v1"
-            ),
-            "search_status_schema": "compileiq.taichi-forge-search-status.v2",
-            "optimization_report_schema": (
-                "compileiq.opaque-optimization-report.v1"
-            ),
-            "optimization_report_renderer": (
-                "json_fact_source_markdown_projection_v1"
-            ),
-            "max_recipe_ids": 4096,
-            "max_field_utf8_bytes": 4096,
-            "max_canonical_bytes": 4 * 1024 * 1024,
-            "provider_recipe_ids_cross_core_boundary": False,
-            "core_verification": (
-                "bundled_manifest_lock_and_platform_hashes_at_search_start_no_override"
-            ),
-            "opaque_domain_binding": "capability_id_core_commit_core_lock",
-            "objective_worker": "forge_main_thread_serial_v1",
-            "opaque_recipe_search": (
-                "dynamic_batch_pareto_racing_main_thread_v2"
-            ),
-            "opaque_recipe_search_v1": "bounded_exhaustive_main_thread_v1",
-            "core_manifest_schema_version": 1,
-            "core_commit": _compileiq_opaque._EXPECTED_CORE_COMMIT,
-            "core_lock": _compileiq_opaque._EXPECTED_CORE_LOCK,
-            "capability_id": _compileiq_opaque._EXPECTED_CAPABILITY_ID,
-        }
-    )
-
-
 def test_importing_public_graph_api_does_not_import_compileiq():
     script = """
 import pathlib
@@ -436,11 +380,10 @@ def test_reviewed_compileiq_distribution_keeps_qualification_out_of_acceptance()
     )
     assert snapshot["python_abi"] == "cp313"
     assert snapshot["execution_engine"] == "forge_complete_recipes_python_v1"
-    assert distribution["compatibility"]["accepted_protocol_revisions"] == (6, 7)
+    assert distribution["compatibility"]["accepted_protocol_revisions"] == (7,)
 
 
-@pytest.mark.parametrize("revision", [6, 7])
-def test_future_compatible_compileiq_build_is_not_commit_or_wheel_locked(tmp_path, revision):
+def test_current_protocol_is_silent_and_compatible_builds_are_not_commit_locked(tmp_path, capsys):
     capability = dict(_capability())
     capability.update(
         {
@@ -451,14 +394,6 @@ def test_future_compatible_compileiq_build_is_not_commit_or_wheel_locked(tmp_pat
             "compatible_additive_fact": "accepted",
         }
     )
-    if revision == 7:
-        capability.update(
-            protocol_revision=7,
-            execution_engine="forge_complete_recipes_python_v1",
-            core_verification="python_scheduler_source_digest_at_search_start",
-            opaque_domain_binding="capability_id_scheduler_source_lock",
-            core_commit="python:1.1.0b2+taichiforge.1",
-        )
     identity_payload = {
         name: value for name, value in capability.items() if name != "capability_id"
     }
@@ -505,32 +440,47 @@ def test_future_compatible_compileiq_build_is_not_commit_or_wheel_locked(tmp_pat
         "compileiq.recipes": recipes,
     }
 
+    capsys.readouterr()
     accepted, _, _, source_lock = (
         _shared_compileiq_opaque._validated_compileiq_capability(
             importer=modules.__getitem__
         )
     )
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
     assert accepted["package_version"] == "1.1.0+taichiforge.report2"
     assert accepted["compatible_additive_fact"] == "accepted"
     assert source_lock.startswith("ciq-python-source-v1:")
-    assert source_lock != _shared_compileiq_opaque._EXPECTED_PYTHON_SOURCE_LOCK
-    if revision == 7:
-        # A digest alone is insufficient: the capability must identify the
-        # implementation that actually evaluates complete recipes.
-        for field, bad in (
-            ("execution_engine", "amber"),
-            ("core_verification", "bundled_manifest_lock_and_platform_hashes_at_search_start_no_override"),
-            ("opaque_domain_binding", "capability_id_core_commit_core_lock"),
+    assert source_lock != SOURCE_LOCK
+    for revision in (3, 6, 8, True, 7.0, "7", None):
+        capability["protocol_revision"] = revision
+        # Older forks also lack execution_engine. Report the protocol upgrade
+        # requirement first rather than a generic missing-field error.
+        engine = capability.pop("execution_engine")
+        with pytest.raises(
+            _shared_compileiq_opaque.CompileIQOpaqueUnavailableError,
+            match="requires CompileIQ recipe protocol revision 7",
         ):
-            saved = capability[field]
-            capability[field] = bad
-            capability["capability_id"] = _shared_compileiq_opaque._identity(
-                _shared_compileiq_opaque._CAPABILITY_ID_PREFIX,
-                {name: value for name, value in capability.items() if name != "capability_id"},
-            )
-            with pytest.raises(_shared_compileiq_opaque.CompileIQOpaqueUnavailableError, match="incompatible"):
-                _shared_compileiq_opaque._validated_compileiq_capability(importer=modules.__getitem__)
-            capability[field] = saved
+            _shared_compileiq_opaque._validated_compileiq_capability(importer=modules.__getitem__)
+        capability["execution_engine"] = engine
+    capability["protocol_revision"] = 7
+
+    # A digest alone is insufficient: identify the implementation that actually
+    # evaluates complete recipes rather than accepting the removed core proof.
+    for field, bad in (
+        ("execution_engine", "amber"),
+        ("core_verification", "bundled_manifest_lock_and_platform_hashes_at_search_start_no_override"),
+        ("opaque_domain_binding", "capability_id_core_commit_core_lock"),
+    ):
+        saved = capability[field]
+        capability[field] = bad
+        capability["capability_id"] = _shared_compileiq_opaque._identity(
+            _shared_compileiq_opaque._CAPABILITY_ID_PREFIX,
+            {name: value for name, value in capability.items() if name != "capability_id"},
+        )
+        with pytest.raises(_shared_compileiq_opaque.CompileIQOpaqueUnavailableError, match="incompatible"):
+            _shared_compileiq_opaque._validated_compileiq_capability(importer=modules.__getitem__)
+        capability[field] = saved
 
 
 @test_utils.test(arch=ti.cpu)

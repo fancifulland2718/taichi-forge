@@ -3,13 +3,12 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 import taichi_forge as ti
-from taichi_forge import _compileiq_opaque as _opaque_transport
 from taichi_forge.algorithms._compileiq_opaque import (
     CompileIQReduceProviderSearch,
     CompileIQReduceProviderSelection,
@@ -18,9 +17,7 @@ from taichi_forge.algorithms._compileiq_opaque import (
 from taichi_forge.algorithms import _compileiq_opaque
 from taichi_forge.lang._compileiq_qualification import _CompileIQWinnerScope
 from tests import test_utils
-
-
-_ROOT = Path(__file__).resolve().parents[2]
+from tests.compileiq_fixtures import SOURCE_LOCK, capability as _capability
 
 
 class _Literal:
@@ -84,39 +81,6 @@ class _Worker:
     PROTOCOL = "forge_main_thread_serial_v1"
 
 
-def _capability():
-    return MappingProxyType(
-        {
-            "schema": "compileiq.taichi-forge-recipe-search-capability.v1",
-            "protocol_revision": 3,
-            "fork_build_id": "compileiq-taichi-forge-opaque-recipes.v1.3",
-            "package_version": "1.0.0dev3+taichiforge.opaque2",
-            "opaque_recipe_domain_schema": "compileiq.opaque-recipe-domain.v1",
-            "selection_audit_schema": "compileiq.opaque-recipe-selection.v1",
-            "opaque_target_contract_schema": (
-                "compileiq.taichi-forge-opaque-target-contract.v1"
-            ),
-            "opaque_target_selection": (
-                "explicit_objectives_constraints_pareto_no_scalarization_v1"
-            ),
-            "max_recipe_ids": 4096,
-            "max_field_utf8_bytes": 4096,
-            "max_canonical_bytes": 4 * 1024 * 1024,
-            "provider_recipe_ids_cross_core_boundary": False,
-            "core_verification": (
-                "bundled_manifest_lock_and_platform_hashes_at_search_start_no_override"
-            ),
-            "opaque_domain_binding": "capability_id_core_commit_core_lock",
-            "objective_worker": "forge_main_thread_serial_v1",
-            "opaque_recipe_search": "bounded_exhaustive_main_thread_v1",
-            "core_manifest_schema_version": 1,
-            "core_commit": _opaque_transport._EXPECTED_CORE_COMMIT,
-            "core_lock": _opaque_transport._EXPECTED_CORE_LOCK,
-            "capability_id": _opaque_transport._EXPECTED_CAPABILITY_ID,
-        }
-    )
-
-
 def _scope(size=4096):
     return {
         "schema": "taichi_forge.algorithms.reduce-provider-scope.v1",
@@ -162,7 +126,7 @@ def _install_reviewed_fork(monkeypatch):
             _capability(),
             _OpaqueRecipeDomain,
             _Worker,
-            _opaque_transport._EXPECTED_PYTHON_SOURCE_LOCK,
+            SOURCE_LOCK,
         ),
     )
 
@@ -203,6 +167,8 @@ def _compileiq_search_audit(search, recipe_ids):
         opaque_recipe_core_provenance={
             "core_commit": search.capability["core_commit"],
             "core_lock": search.capability["core_lock"],
+            "verification": search.capability["core_verification"],
+            "execution_engine": search.capability["execution_engine"],
         },
         opaque_recipe_audit_records=tuple(records),
     )
@@ -214,7 +180,7 @@ import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
-sys.path.insert(0, str(root / "python"))
+sys.path.insert(0, str(root))
 import taichi_forge.algorithms
 
 loaded = [
@@ -225,7 +191,7 @@ loaded = [
 assert not loaded, loaded
 """
     completed = subprocess.run(
-        [sys.executable, "-c", script, str(_ROOT)],
+        [sys.executable, "-c", script, str(Path(ti.__file__).resolve().parent.parent)],
         check=False,
         capture_output=True,
         text=True,
@@ -243,7 +209,7 @@ def test_reduce_provider_search_is_baseline_inclusive_and_opaque(monkeypatch):
     assert search.baseline_recipe_id in search.recipe_ids
     assert len(search.recipe_ids) == 2
     assert search.worker_type is _Worker
-    assert search.python_source_lock == (_opaque_transport._EXPECTED_PYTHON_SOURCE_LOCK)
+    assert search.python_source_lock == SOURCE_LOCK
     tokens = search.search_space.to_search_space()["recipe_id"].vals
     assert tokens == ["ciq-recipe-v1-0000", "ciq-recipe-v1-0001"]
     assert set(tokens).isdisjoint(search.recipe_ids)
