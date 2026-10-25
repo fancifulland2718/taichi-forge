@@ -77,10 +77,12 @@ struct GraphKernelIterationDomain {
 };
 
 struct GraphKernelMetadata {
-  static constexpr std::uint32_t kVersion = 4;
+  static constexpr std::uint32_t kVersion = 5;
 
   std::uint32_t version{kVersion};
   bool available{false};
+  // False means effects identify every accessed resource. It does not prove
+  // a pointwise mapping: elementwise/domain/blocker govern fusion separately.
   bool opaque{true};
   bool elementwise{false};
   bool synchronization{false};

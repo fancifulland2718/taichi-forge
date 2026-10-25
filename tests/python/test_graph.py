@@ -2880,7 +2880,9 @@ def test_compiler_metadata_fails_closed_for_atomic_and_stencil_access():
     assert plan["decision"] == "no_safe_candidates"
     assert graph._debug_info["nodes"] == [{"kind": "cgraph", "dispatch_count": 2}]
     dispatches = ir["pre_optimization_root"]["children"][0]["children"]
-    assert all(dispatch["opaque"] for dispatch in dispatches)
+    # The gather's whole-array dependencies are known even though its access
+    # pattern cannot be fused. The atomic reduction remains a boundary.
+    assert [dispatch["opaque"] for dispatch in dispatches] == [True, False]
     assert [dispatch["logical_dispatch_id"] for dispatch in dispatches] == [
         "dispatch:0",
         "dispatch:1",
@@ -2924,7 +2926,7 @@ def test_compiler_metadata_preserves_bounded_affine_stencil_without_fusing():
     graph = builder.compile()
 
     metadata = graph._spec.nodes[0].compiled_graph._dispatch_metadata[0]
-    assert metadata["version"] == 4
+    assert metadata["version"] == 5
     assert metadata["available"]
     assert not metadata["opaque"]
     assert not metadata["elementwise"]

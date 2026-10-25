@@ -180,7 +180,7 @@ def test_graph_memory_2d_stencil_materializes_true_tiles_and_replays_exactly():
     source_graph = builder.compile()
 
     metadata = source_graph._spec.compiled_graph()._dispatch_metadata[0]
-    assert metadata["version"] == 4
+    assert metadata["version"] == 5
     assert metadata["blocker"] == ""
     assert metadata["iteration_domain"] == {
         "kind": "constant_range",
@@ -621,7 +621,7 @@ def test_graph_memory_static_stencil_accumulator_is_not_a_global_atomic_effect()
     source_graph = builder.compile()
 
     metadata = source_graph._spec.compiled_graph()._dispatch_metadata[0]
-    assert metadata["version"] == 4
+    assert metadata["version"] == 5
     assert metadata["blocker"] == ""
     assert metadata["side_effects"] == []
     source_effect = next(

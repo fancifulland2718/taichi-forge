@@ -16184,7 +16184,6 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
                 for binding in fallback.bindings
             )
             and not bool(record.get("opaque", True))
-            and iteration_domain is not None
             and all(effect is not None for effect in effects)
         )
         if not proven:
@@ -16221,6 +16220,7 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
                 dispatch_label=fallback.dispatch_label,
                 logical_dispatch_id=logical_dispatch_id,
                 logical_kernel_identity=logical_kernel_identity,
+                fusion_blocker=str(record.get("blocker") or ""),
                 memory_disjoint_pairs=fallback.memory_disjoint_pairs,
                 memory_layout_requirements=fallback.memory_layout_requirements,
             )

@@ -1179,6 +1179,8 @@ def _fusion_blocker(node):
         return node.fusion_blocker or "opaque_dispatch"
     if node.synchronization:
         return "synchronization_boundary"
+    if node.fusion_blocker:
+        return node.fusion_blocker
     if not node.elementwise:
         return "not_elementwise"
     if node.iteration_domain is None:

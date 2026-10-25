@@ -8,6 +8,7 @@
 
 #include "taichi/ir/ir.h"
 #include "taichi/ir/statements.h"
+#include "taichi/ir/type_utils.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/program/kernel.h"
 
@@ -308,6 +309,11 @@ class MetadataVisitor final : public BasicStmtVisitor {
     record(stmt->src, "read");
   }
 
+  void visit(RandStmt *) override {
+    // RandStmt is not a global IR store, but consumes backend runtime state.
+    block("random_state", "random");
+  }
+
   void visit(AccelerationStructurePtrStmt *stmt) override {
     auto *argument = stmt->arg_load_stmt->cast<ArgLoadStmt>();
     if (argument == nullptr) {
@@ -340,6 +346,10 @@ class MetadataVisitor final : public BasicStmtVisitor {
     return !blocker_.empty();
   }
 
+  bool effects_complete() const {
+    return effects_complete_;
+  }
+
   const std::string &blocker() const {
     return blocker_;
   }
@@ -356,7 +366,7 @@ class MetadataVisitor final : public BasicStmtVisitor {
     std::int64_t inner_extent = 0;
     for (const auto &[_, summary] : effects_) {
       if (!summary.affine || summary.iteration_rank <= 0) {
-        block("non_pointwise_access", "opaque_access");
+        block_fusion("non_pointwise_access");
         return;
       }
       if (rank == 0) {
@@ -365,7 +375,7 @@ class MetadataVisitor final : public BasicStmtVisitor {
       } else if (summary.iteration_rank != rank ||
                  (rank == 2 &&
                   summary.flattened_inner_extent != inner_extent)) {
-        block("inconsistent_iteration_mapping", "opaque_access");
+        block_fusion("inconsistent_iteration_mapping");
         return;
       }
     }
@@ -375,7 +385,7 @@ class MetadataVisitor final : public BasicStmtVisitor {
     if (domain->kind != "constant_range" || domain->begin != 0 ||
         domain->end <= 0 || inner_extent <= 0 ||
         domain->end % inner_extent != 0) {
-      block("unknown_flattened_ndrange", "opaque_access");
+      block_fusion("unknown_flattened_ndrange");
       return;
     }
     std::vector<std::int64_t> origin;
@@ -384,19 +394,19 @@ class MetadataVisitor final : public BasicStmtVisitor {
         continue;
       }
       if (summary.write_offsets.size() != 1) {
-        block("non_pointwise_output", "opaque_access");
+        block_fusion("non_pointwise_output");
         return;
       }
       const auto &candidate = *summary.write_offsets.begin();
       if (origin.empty()) {
         origin = candidate;
       } else if (origin != candidate) {
-        block("inconsistent_iteration_origin", "opaque_access");
+        block_fusion("inconsistent_iteration_origin");
         return;
       }
     }
     if (origin.size() != 2) {
-      block("missing_iteration_origin", "opaque_access");
+      block_fusion("missing_iteration_origin");
       return;
     }
     logical_origin_ = origin;
@@ -499,10 +509,15 @@ class MetadataVisitor final : public BasicStmtVisitor {
   }
 
  private:
-  void block(const std::string &reason, const std::string &side_effect) {
+  void block_fusion(const std::string &reason) {
     if (blocker_.empty()) {
       blocker_ = reason;
     }
+  }
+
+  void block(const std::string &reason, const std::string &side_effect) {
+    effects_complete_ = false;
+    block_fusion(reason);
     if (!side_effect.empty() &&
         std::find(side_effects_.begin(), side_effects_.end(), side_effect) ==
             side_effects_.end()) {
@@ -585,17 +600,26 @@ class MetadataVisitor final : public BasicStmtVisitor {
   }
 
   void record(Stmt *pointer, const std::string &access) {
+    const bool component_pointer = pointer && pointer->is<MatrixPtrStmt>();
     pointer = pointer_origin(pointer);
     if (auto *external =
             pointer ? pointer->cast<ExternalPtrStmt>() : nullptr) {
       auto *base = external->base_ptr->cast<ArgLoadStmt>();
       std::vector<std::int64_t> offset;
       std::int64_t flattened_inner_extent = 0;
-      if (base == nullptr ||
+      if (base == nullptr) {
+        add_effect({"opaque", {}, -1, -1, false}, "opaque", false);
+        block("unsupported_pointer", "opaque_access");
+        return;
+      }
+      if (loop_ == nullptr ||
           !affine_indices(external->indices, external->ndim, &offset,
                           &flattened_inner_extent)) {
-        add_effect({"opaque", {}, -1, -1, false}, "opaque", false);
-        block("non_pointwise_access", "opaque_access");
+        // A gather or a scalar/rank-two access still has a known whole-array
+        // dependency. Never promote that fact to a pointwise footprint.
+        add_effect({"argument", base->arg_id, -1, -1, external->is_grad},
+                   access, false);
+        block_fusion("non_pointwise_access");
         return;
       }
       add_effect({"argument", base->arg_id, -1, -1, external->is_grad},
@@ -607,18 +631,57 @@ class MetadataVisitor final : public BasicStmtVisitor {
           global->activate &&
           (global->snode == nullptr || !global->snode->is_path_all_dense);
       std::int64_t offset = 0;
-      if (sparse_activation || global->indices.size() != 1 ||
-          !affine_loop_offset(global->indices.front(), loop_, domain_,
-                              &offset)) {
+      if (global->snode == nullptr || !global->snode->is_path_all_dense ||
+          global->snode->is_bit_level || global->is_cell_access ||
+          global->is_bit_vectorized) {
         add_effect({"opaque", {}, -1, -1, false}, "opaque", false);
-        block(sparse_activation ? "sparse_activation" :
-                                  "non_pointwise_access",
+        block(sparse_activation ? "sparse_activation"
+                                : "unsupported_field_storage",
               "opaque_access");
         return;
       }
-      add_effect({"snode", {}, global->snode->get_snode_tree_id(),
-                  global->snode->id, false},
-                 access, true, {offset});
+      std::vector<SNode *> storage_nodes{global->snode};
+      if (component_pointer ||
+          global->ret_type.ptr_removed()->is<TensorType>()) {
+        // AOS lowering replaces a vector's pointer list with its first leaf
+        // plus tensor/byte-offset accesses. Include its physical siblings so
+        // a scalar component access cannot evade the dependency. Do not infer
+        // a dynamic component's exact byte span from its index expression.
+        auto *parent = global->snode->parent;
+        if (parent == nullptr || parent->type != SNodeType::dense ||
+            std::any_of(parent->ch.begin(), parent->ch.end(),
+                        [](const auto &s) {
+                          return s->type != SNodeType::place || s->is_bit_level;
+                        })) {
+          add_effect({"opaque", {}, -1, -1, false}, "opaque", false);
+          block("unsupported_field_storage", "opaque_access");
+          return;
+        }
+        storage_nodes.clear();
+        for (const auto &sibling : parent->ch)
+          storage_nodes.push_back(sibling.get());
+      }
+      const bool affine =
+          loop_ != nullptr && global->indices.size() == 1 &&
+          affine_loop_offset(global->indices.front(), loop_, domain_, &offset);
+      if (!affine) {
+        // Subword stores may share a physical word on some backends. Leaf
+        // identity alone does not establish storage independence there.
+        if (std::any_of(
+                storage_nodes.begin(), storage_nodes.end(),
+                [](const auto *s) { return data_type_size(s->dt) < 4; })) {
+          add_effect({"opaque", {}, -1, -1, false}, "opaque", false);
+          block("unsupported_field_storage", "opaque_access");
+          return;
+        }
+        block_fusion("non_pointwise_access");
+      }
+      for (const auto *storage : storage_nodes)
+        add_effect(
+            {"snode", {}, storage->get_snode_tree_id(), storage->id, false},
+            access, affine,
+            affine ? std::vector<std::int64_t>{offset}
+                   : std::vector<std::int64_t>{});
       return;
     }
     add_effect({"opaque", {}, -1, -1, false}, "opaque", false);
@@ -632,6 +695,7 @@ class MetadataVisitor final : public BasicStmtVisitor {
   std::vector<std::int64_t> logical_origin_;
   std::vector<std::string> side_effects_;
   std::string blocker_;
+  bool effects_complete_{true};
 };
 
 }  // namespace
@@ -663,22 +727,22 @@ GraphKernelMetadata analyze_graph_kernel_metadata(IRNode *root,
     if (statement->is_container_statement() ||
         statement->has_global_side_effect()) {
       result.blocker = "top_level_side_effect";
-      return result;
     }
   }
   if (loop == nullptr) {
     result.blocker = "missing_range_for";
-    return result;
-  }
-  if (loop->strictly_serialized || loop->reversed || loop->is_bit_vectorized) {
+  } else if (loop->strictly_serialized || loop->reversed ||
+             loop->is_bit_vectorized) {
     result.blocker = "unsupported_iteration_mode";
     return result;
   }
 
-  result.iteration_domain = iteration_domain(loop);
-  if (result.iteration_domain.kind == "unknown") {
-    result.blocker = "unknown_iteration_domain";
-    return result;
+  if (loop != nullptr) {
+    result.iteration_domain = iteration_domain(loop);
+    if (result.iteration_domain.kind == "unknown") {
+      result.blocker = "unknown_iteration_domain";
+      return result;
+    }
   }
 
   MetadataVisitor visitor(loop, result.iteration_domain);
@@ -686,12 +750,18 @@ GraphKernelMetadata analyze_graph_kernel_metadata(IRNode *root,
   visitor.finalize(&result.iteration_domain);
   result.effects = visitor.effects();
   result.side_effects = visitor.side_effects();
-  if (visitor.blocked()) {
-    result.blocker = visitor.blocker();
+  if (!visitor.effects_complete()) {
+    if (result.blocker.empty())
+      result.blocker = visitor.blocker();
     result.synchronization = true;
     return result;
   }
   result.opaque = false;
+  if (!result.blocker.empty() || visitor.blocked()) {
+    if (result.blocker.empty())
+      result.blocker = visitor.blocker();
+    return result;
+  }
   result.elementwise = visitor.elementwise();
   result.synchronization = false;
   result.blocker.clear();

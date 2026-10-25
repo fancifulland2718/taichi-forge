@@ -198,7 +198,7 @@ class Kernel;
 // 73 - compiled SPIR-V device-range dispatch qualification.
 // 75 - LLVM sparse views forward allocation through the source cursor and lock.
 // 76 - CUDA modules declare their sparse runtime view code qualification.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 76;
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 77;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still
