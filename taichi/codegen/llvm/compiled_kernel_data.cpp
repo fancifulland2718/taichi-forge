@@ -180,6 +180,11 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
         item.actual_geometry_reason =
             "the Graph payload uses the saturation-capped static grid and "
             "loads its logical range end from a device extent";
+      } else if (task.range_bounds && task.range_bounds->host_launch) {
+        item.actual_grid_size.reset();
+        item.actual_geometry_kind = "host_argument_bound";
+        item.actual_geometry_reason =
+            "the launch bounds the selected grid using immutable host arguments";
       } else {
         item.actual_geometry_kind = "static_direct";
         item.actual_geometry_reason =
@@ -201,7 +206,7 @@ CompiledKernelData::Err CompiledKernelData::check() const {
     return Err::kCompiledKernelDataBroken;
   }
   for (const auto &t : tasks) {
-    if ((t.range_bounds && !t.range_bounds->valid()) ||
+    if ((t.range_bounds && !t.range_bounds->valid(data_.args_size)) ||
         !t.valid_device_range_dispatch_contract()) {
       return Err::kCompiledKernelDataBroken;
     }
@@ -224,7 +229,7 @@ CompiledKernelData::Err CompiledKernelData::load_impl(
     return Err::kParseMetadataFailed;
   }
   for (const auto &task : data_.compiled_data.tasks) {
-    if ((task.range_bounds && !task.range_bounds->valid()) ||
+    if ((task.range_bounds && !task.range_bounds->valid(data_.args_size)) ||
         !task.valid_device_range_dispatch_contract()) {
       return Err::kCompiledKernelDataBroken;
     }

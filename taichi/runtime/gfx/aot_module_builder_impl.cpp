@@ -179,9 +179,7 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
       }
     }
     // Typed range bounds replace the old untagged constant/offset metadata.
-    artifact.metadata_version = std::max(artifact.metadata_version, uint32_t(10));
-    if (!artifact.device_range_dispatch.empty())
-      artifact.metadata_version = std::max(artifact.metadata_version, uint32_t(11));
+    artifact.metadata_version = TaichiAotData::kMetadataVersion;
     std::string json = liong::json::print(liong::json::serialize(artifact));
     aot::write_root_storage_views(root_storage_views_, module_ids, output_dir);
     std::fstream f(output_dir + "/metadata.json",

@@ -65,7 +65,7 @@ class AotModuleImpl : public aot::Module {
               throw std::invalid_argument("Unsupported device range dispatch proof");
             }
             if (ti_aot_data_.metadata_version >= 9 && task.range_for_attribs &&
-                !task.range_for_attribs->valid()) {
+                !task.range_for_attribs->valid(kernel.ctx_attribs.args_bytes())) {
               throw std::invalid_argument("Invalid typed task range bounds");
             }
           }

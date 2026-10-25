@@ -93,6 +93,12 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     item.actual_geometry_kind = "static_direct";
     item.actual_geometry_reason =
         "ordinary direct launch uses the backend-selected geometry";
+    if (task.range_for_attribs && task.range_for_attribs->host_launch) {
+      item.actual_grid_size.reset();
+      item.actual_geometry_kind = "host_argument_bound";
+      item.actual_geometry_reason =
+          "the launch bounds the selected grid using immutable host arguments";
+    }
     item.range_mapping =
         task.task_type == OffloadedTaskType::range_for
             ? (task.one_to_one ? "one_to_one" : "grid_stride")
@@ -119,7 +125,8 @@ CompiledKernelData::Err CompiledKernelData::load_impl(
   for (const auto &task : data_.metadata.kernel_attribs.tasks_attribs) {
     if (!task.valid_device_range_dispatch_contract())
       return Err::kCompiledKernelDataBroken;
-    if (task.range_for_attribs && !task.range_for_attribs->valid()) {
+    if (task.range_for_attribs && !task.range_for_attribs->valid(
+                                    data_.metadata.kernel_attribs.ctx_attribs.args_bytes())) {
       return Err::kCompiledKernelDataBroken;
     }
   }

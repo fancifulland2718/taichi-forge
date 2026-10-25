@@ -436,6 +436,7 @@ std::unique_ptr<Stmt> OffloadedStmt::clone() const {
   new_stmt->const_end = const_end;
   new_stmt->begin_value = begin_value;
   new_stmt->end_value = end_value;
+  new_stmt->host_launch_range = host_launch_range;
   new_stmt->grid_dim = grid_dim;
   new_stmt->block_dim = block_dim;
   new_stmt->source_block_dim_explicit = source_block_dim_explicit;

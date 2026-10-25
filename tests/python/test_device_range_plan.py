@@ -96,7 +96,7 @@ def test_range_plan_keeps_code_shared_and_snapshots_per_task(tmp_path):
         module.archive(str(artifact))
         with zipfile.ZipFile(artifact) as archive:
             metadata = json.loads(archive.read("metadata.json"))
-        assert metadata["metadata_version"] == 11
+        assert metadata["metadata_version"] == 12
         assert len(metadata["kernels"]) == 1, "Launch-only selection duplicated shader payload"
         assert len(metadata["device_range_dispatch"]) == 1
         assert metadata["device_range_dispatch"][0]["tasks"] == list(selected.device_range_tasks)
@@ -158,7 +158,7 @@ def test_selected_range_primal_and_explicit_adjoint_in_borrowed_domain(tmp_path)
     module.archive(str(artifact))
     with zipfile.ZipFile(artifact) as archive:
         metadata = json.loads(archive.read("metadata.json"))
-    assert metadata["metadata_version"] == 11
+    assert metadata["metadata_version"] == 12
     assert len(metadata["device_range_dispatch"]) == 2
     consume(artifact)
     selected.close()

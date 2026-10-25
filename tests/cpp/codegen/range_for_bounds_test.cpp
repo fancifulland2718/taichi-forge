@@ -9,6 +9,75 @@
 namespace taichi::lang {
 namespace {
 
+TEST(HostRangeBounds, ScalarAndShapeWorkloadDoNotImposeACap) {
+  std::int32_t arguments[] = {-3, 126, 3, 43};
+  HostRangeBounds scalar{{1, {0}, false}, {1, {4}, false}};
+  EXPECT_EQ(scalar.grid(8160, 128, arguments, sizeof(arguments)), 2);
+  arguments[1] = -8;
+  EXPECT_EQ(scalar.grid(8160, 128, arguments, sizeof(arguments)), 1);
+  arguments[1] = INT32_MAX;
+  EXPECT_EQ(scalar.grid(8160, 128, arguments, sizeof(arguments)), 8160);
+  HostRangeBounds shape{{0, {}, false}, {1, {8, 12}, true}};
+  EXPECT_EQ(shape.grid(8160, 128, arguments, sizeof(arguments)), 2);
+  arguments[2] = 0;
+  EXPECT_EQ(shape.grid(8160, 128, arguments, sizeof(arguments)), 1);
+  arguments[2] = INT32_MAX;
+  EXPECT_EQ(shape.grid(8160, 128, arguments, sizeof(arguments)), 8160);
+  arguments[2] = -1;
+  EXPECT_EQ(shape.grid(8160, 128, arguments, sizeof(arguments)), 8160);
+}
+
+TEST(HostRangeBounds, InvalidArgumentImageFallsBackWithoutReadingIt) {
+  HostRangeBounds bounds{{0, {}, false}, {1, {4}, true}};
+  EXPECT_FALSE(bounds.valid(7));
+  EXPECT_EQ(bounds.grid(37, 128, nullptr, 8), 37);
+  EXPECT_EQ(bounds.grid(37, 128, nullptr, 0), 37);
+  bounds.end.offsets = {UINT64_MAX};
+  EXPECT_FALSE(bounds.valid(UINT64_MAX));
+  bounds.end.offsets = {1};
+  EXPECT_FALSE(bounds.valid(8));
+  bounds.end = {2, {0}, false};
+  EXPECT_FALSE(bounds.valid(8));
+}
+
+TEST(HostRangeBounds, MutableBoundsRetainEnvelopeButOtherParametersDoNot) {
+  const std::int32_t arguments[] = {7, 64};
+  RangeForBounds bounds{RangeBound::constant(0), RangeBound::global_tmp(0),
+                        HostRangeBounds{{0, {}, false}, {1, {4}, true}}};
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> patches{{0, 4}};
+  EXPECT_EQ(bounds.launch_grid(8160, 128, arguments, sizeof(arguments), &patches), 1);
+  patches = {{4, 4}};
+  EXPECT_EQ(bounds.launch_grid(8160, 128, arguments, sizeof(arguments), &patches), 8160);
+  patches = {{0, 8}};
+  EXPECT_EQ(bounds.launch_grid(8160, 128, arguments, sizeof(arguments), &patches), 8160);
+  patches = {{8, 4}};
+  EXPECT_EQ(bounds.launch_grid(8160, 128, arguments, sizeof(arguments), &patches), 1);
+}
+
+TEST(HostRangeBounds, CodecAndCloneRetainTheFrozenProof) {
+  const HostRangeBounds host{{0, {}, false}, {1, {8, 12}, true}};
+  RangeForBounds bounds{RangeBound::constant(0), RangeBound::global_tmp(4), host};
+  BinaryOutputSerializer output;
+  output.initialize();
+  output(bounds);
+  output.finalize();
+  BinaryInputSerializer input;
+  input.initialize(output.data.data());
+  RangeForBounds decoded;
+  input(decoded);
+  ASSERT_TRUE(decoded.host_launch);
+  EXPECT_TRUE(*decoded.host_launch == host);
+  EXPECT_FALSE(decoded.valid(15));
+  EXPECT_TRUE(decoded.valid(16));
+  RangeForBounds json;
+  liong::json::deserialize(liong::json::serialize(bounds), json, true);
+  EXPECT_EQ(json.host_launch, decoded.host_launch);
+  OffloadedStmt task(OffloadedTaskType::range_for, Arch::cuda, nullptr);
+  task.host_launch_range = host;
+  auto clone = task.clone();
+  EXPECT_EQ(clone->as<OffloadedStmt>()->host_launch_range, task.host_launch_range);
+}
+
 TEST(RangeForBounds, SignedExtentsAndWorkspaceValidation) {
   RangeForBounds negative{RangeBound::constant(-17), RangeBound::constant(-2)};
   ASSERT_TRUE(negative.constant_size());

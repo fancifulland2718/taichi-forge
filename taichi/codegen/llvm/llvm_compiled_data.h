@@ -42,6 +42,14 @@ class OffloadedTask {
   int block_dim{0};
   int grid_dim{0};
   std::optional<RangeForBounds> range_bounds;
+  int launch_grid(const void *arguments, std::uint64_t argument_bytes,
+                  const std::vector<std::pair<std::uint64_t, std::uint64_t>>
+                      *mutable_arguments = nullptr) const {
+    return range_bounds ? range_bounds->launch_grid(
+                              grid_dim, block_dim, arguments, argument_bytes,
+                              mutable_arguments)
+                        : grid_dim;
+  }
   // Final IR qualification, independent of the selected launch policy.
   std::uint32_t device_range_dispatch_version{0};
   bool valid_device_range_dispatch_contract() const {

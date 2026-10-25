@@ -2,6 +2,7 @@
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/analysis.h"
+#include "taichi/analysis/host_range_bounds.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/program/program.h"
 #include "taichi/transforms/sink_serial_integer_prelude.h"
@@ -148,6 +149,10 @@ class Offloader {
             OffloadedStmt::TaskType::range_for, arch, kernel);
         // offloaded->body is an empty block now.
         offloaded->grid_dim = config.saturating_grid_dim;
+        if (kernel && (arch == Arch::cuda || arch == Arch::vulkan)) {
+          offloaded->host_launch_range =
+              describe_host_range_bounds(s->begin, s->end, kernel->args_type);
+        }
         if (s->block_dim == 0) {
           offloaded->block_dim = Program::default_block_dim(config);
         } else {

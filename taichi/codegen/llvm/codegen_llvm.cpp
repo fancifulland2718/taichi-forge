@@ -2488,7 +2488,7 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
     current_task->requested_cuda_max_registers = spec.cuda_max_registers;
     current_task->requested_memory_strategy = spec.memory_strategy;
   }
-  current_task->range_bounds = describe_range_for_bounds(*stmt);
+  current_task->range_bounds = describe_launch_range_for_bounds(*stmt);
   current_task->device_range_dispatch_version =
       compile_config.arch == Arch::cuda && supports_device_range_dispatch(*stmt)
           ? 1u

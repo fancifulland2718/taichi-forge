@@ -536,6 +536,7 @@ void apply_bounded_pointwise_offload_fusion(
       destination->body->set_parent_stmt(destination);
       destination->begin_value = begin;
       destination->end_value = end;
+      destination->host_launch_range.reset();
       destination->grid_dim = grid;
       for (std::size_t member = 1; member < group.size(); ++member) {
         root->extract(source_tasks[group[member]]);

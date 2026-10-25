@@ -369,6 +369,8 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
     tests/cpp/program/test_program.cpp
     tests/cpp/program/kernel_registration_test.cpp
     tests/cpp/ir/ndarray_kernel.cpp
+    tests/cpp/codegen/range_for_bounds_test.cpp
+    tests/cpp/codegen/range_dispatch_test.cpp
     tests/cpp/rhi/common/allocation_registry_test.cpp
     tests/cpp/rhi/common/cpu_device_test.cpp
     tests/cpp/rhi/common/cuda_context_test.cpp

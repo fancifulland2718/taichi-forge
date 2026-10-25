@@ -13,8 +13,12 @@ TEST(DeviceRangeProof, RejectsUnknownBoundsAndPhysicalThreadBehavior) {
     return task;
   };
   auto ordinary = make();
+  ordinary->host_launch_range =
+      HostRangeBounds{{0, {}, false}, {1, {0}, true}};
+  EXPECT_TRUE(describe_launch_range_for_bounds(*ordinary)->host_launch);
   EXPECT_TRUE(supports_device_range_dispatch(*ordinary));
   ordinary->one_to_one = true;
+  EXPECT_FALSE(describe_launch_range_for_bounds(*ordinary)->host_launch);
   EXPECT_FALSE(supports_device_range_dispatch(*ordinary));
   auto unknown = make();
   auto expression = Stmt::make_typed<ConstStmt>(TypedConstant(5));

@@ -46,7 +46,8 @@ struct TaichiAotData {
   // v9 stores signed, typed range bounds shared with LLVM compiled tasks.
   // v10 preserves the final-IR device-range dispatch qualification.
   // v11 persists per-entry range recording selection without duplicating code.
-  static constexpr uint32_t kMetadataVersion = 11;
+  // v12 carries host-argument launch bounds with each qualified task.
+  static constexpr uint32_t kMetadataVersion = 12;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;

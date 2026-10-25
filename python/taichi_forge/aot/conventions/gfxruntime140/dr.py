@@ -118,6 +118,7 @@ class RangeForAttributes:
     def __init__(self, j: Dict[str, Any]) -> None:
         self.begin: RangeBound = RangeBound(j["begin"])
         self.end: RangeBound = RangeBound(j["end"])
+        self.host_launch: Optional[Dict[str, Any]] = j.get("host_launch")
 
 
 @json_data_model

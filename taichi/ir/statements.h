@@ -1,6 +1,7 @@
 #pragma once
 
 #include "taichi/common/ad_stack.h"
+#include "taichi/codegen/range_for_bounds.h"
 #include "taichi/ir/ir.h"
 #include "taichi/ir/offloaded_task_type.h"
 #include "taichi/ir/stmt_op_types.h"
@@ -1449,6 +1450,7 @@ class OffloadedStmt : public Stmt {
   bool const_end{false};
   int32 begin_value{0};
   int32 end_value{0};
+  std::optional<HostRangeBounds> host_launch_range;
   int grid_dim{1};
   int block_dim{1};
   // Records whether the frontend loop owned the block contract before the
@@ -1542,6 +1544,7 @@ class OffloadedStmt : public Stmt {
                      const_end,
                      begin_value,
                      end_value,
+                     host_launch_range,
                      grid_dim,
                      block_dim,
                      source_block_dim_explicit,

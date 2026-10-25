@@ -5479,7 +5479,7 @@ class TaskCodegen : public IRVisitor {
     task_attribs_.task_type = OffloadedTaskType::range_for;
     task_attribs_.one_to_one = stmt->one_to_one;
 
-    task_attribs_.range_for_attribs = describe_range_for_bounds(*stmt);
+    task_attribs_.range_for_attribs = describe_launch_range_for_bounds(*stmt);
     task_attribs_.device_range_dispatch_version =
         supports_device_range_dispatch(*stmt) ? 1 : 0;
 

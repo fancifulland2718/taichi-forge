@@ -73,7 +73,7 @@ def _dense_lists_module(tmp_path):
     with zipfile.ZipFile(artifact) as archive:
         metadata = json.loads(archive.read("aot_metadata.json"))
     assert metadata["resource_binding"] == "list_v1"
-    assert metadata["schema_version"] == 11
+    assert metadata["schema_version"] == 13
     (tmp_path / "producer.json").write_text(
         json.dumps(dict(export_ms=(time.perf_counter() - start) * 1000, bytes=artifact.stat().st_size))
     )

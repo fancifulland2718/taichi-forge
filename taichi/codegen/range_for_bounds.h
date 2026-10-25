@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
+#include <utility>
+#include <vector>
 
 #include "taichi/common/serialization.h"
 
@@ -12,6 +15,95 @@ namespace taichi::lang {
 // Facts about the final physical task, not permission to change its grid.
 // Unknown expressions must never be interpreted as global temporary offset 0.
 enum class RangeBoundKind { unknown, constant_i32, global_tmp_i32 };
+
+// A small, proven expression over the immutable launch-argument image. It is
+// either a constant, one i32 scalar, or a product of ndarray dimensions and a
+// nonnegative constant. No device reads, expression interpreter or shape cache.
+struct HostRangeBound {
+  std::int32_t factor{1};
+  std::vector<std::uint64_t> offsets;
+  bool shape_product{false};
+
+  bool reads(std::uint64_t offset, std::uint64_t bytes) const {
+    // Difference-based overlap avoids overflow for untrusted byte ranges.
+    for (auto input : offsets) {
+      if (bytes && (input >= offset ? input - offset < bytes
+                                   : offset - input < sizeof(std::int32_t)))
+        return true;
+    }
+    return false;
+  }
+
+  bool operator==(const HostRangeBound &other) const {
+    return factor == other.factor && offsets == other.offsets &&
+           shape_product == other.shape_product;
+  }
+
+  bool valid(std::uint64_t argument_bytes) const {
+    if ((!shape_product && !offsets.empty() &&
+         (factor != 1 || offsets.size() != 1)) ||
+        (shape_product && factor < 0))
+      return false;
+    for (auto offset : offsets)
+      if (argument_bytes < sizeof(std::int32_t) ||
+          offset > argument_bytes - sizeof(std::int32_t) ||
+          offset % alignof(std::int32_t))
+        return false;
+    return true;
+  }
+
+  std::optional<std::int32_t> evaluate(const void *arguments,
+                                      std::uint64_t argument_bytes) const {
+    if (!valid(argument_bytes) || (!arguments && !offsets.empty()))
+      return std::nullopt;
+    std::int64_t value = factor;
+    for (auto offset : offsets) {
+      std::int32_t operand;
+      std::memcpy(&operand, static_cast<const char *>(arguments) + offset,
+                  sizeof(operand));
+      if (shape_product && operand < 0)
+        return std::nullopt;
+      value *= operand;
+      // Preserve the backend's original path for overflow instead of making
+      // a different host-side interpretation of the i32 range expression.
+      if (value < std::numeric_limits<std::int32_t>::min() ||
+          value > std::numeric_limits<std::int32_t>::max())
+        return std::nullopt;
+    }
+    return static_cast<std::int32_t>(value);
+  }
+
+  TI_IO_DEF(factor, offsets, shape_product);
+};
+
+struct HostRangeBounds {
+  HostRangeBound begin, end;
+
+  bool operator==(const HostRangeBounds &other) const {
+    return begin == other.begin && end == other.end;
+  }
+
+  bool valid(std::uint64_t argument_bytes) const {
+    return begin.valid(argument_bytes) && end.valid(argument_bytes);
+  }
+
+  int grid(int baseline, int block, const void *arguments,
+           std::uint64_t argument_bytes) const {
+    if (baseline <= 0 || block <= 0)
+      return baseline;
+    const auto first = begin.evaluate(arguments, argument_bytes);
+    const auto last = end.evaluate(arguments, argument_bytes);
+    if (!first || !last)
+      return baseline;
+    const auto count = std::max<std::int64_t>(0, std::int64_t(*last) - *first);
+    // Keep one block for empty ranges: existing kernel/Graph contracts remain
+    // intact. Grid-stride execution still covers arbitrarily larger workloads.
+    return static_cast<int>(std::min<std::int64_t>(
+        baseline, std::max<std::int64_t>(1, (count + block - 1) / block)));
+  }
+
+  TI_IO_DEF(begin, end);
+};
 
 struct RangeBound {
   RangeBoundKind kind{RangeBoundKind::unknown};
@@ -48,9 +140,31 @@ struct RangeBound {
 struct RangeForBounds {
   RangeBound begin;
   RangeBound end;
+  std::optional<HostRangeBounds> host_launch;
 
   bool valid() const {
     return begin.valid() && end.valid();
+  }
+  bool valid(std::uint64_t argument_bytes) const {
+    return valid() && (!host_launch || host_launch->valid(argument_bytes));
+  }
+  int launch_grid(int baseline, int block, const void *arguments,
+                  std::uint64_t argument_bytes,
+                  const std::vector<std::pair<std::uint64_t, std::uint64_t>>
+                      *mutable_arguments = nullptr) const {
+    // A prepared graph cannot resize its launch at each parameter upload. Do
+    // not size it from the initial value of an explicitly mutable bound. Other
+    // mutable arguments do not disable shape-based selection for this task.
+    if (host_launch && mutable_arguments) {
+      for (const auto &[offset, bytes] : *mutable_arguments) {
+        if (host_launch->begin.reads(offset, bytes) ||
+            host_launch->end.reads(offset, bytes))
+          return baseline;
+      }
+    }
+    return host_launch ? host_launch->grid(baseline, block, arguments,
+                                           argument_bytes)
+                       : baseline;
   }
   bool const_range() const {
     return valid() && begin.kind == RangeBoundKind::constant_i32 &&
@@ -63,7 +177,7 @@ struct RangeForBounds {
     return std::max<std::int64_t>(end.value - begin.value, 0);
   }
 
-  TI_IO_DEF(begin, end);
+  TI_IO_DEF(begin, end, host_launch);
 };
 
 }  // namespace taichi::lang
