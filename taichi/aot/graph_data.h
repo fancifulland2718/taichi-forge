@@ -296,7 +296,9 @@ struct GraphSourceDispatchMetadata {
   std::string kernel_name;
   std::string dispatch_label;
   std::vector<Arg> symbolic_args;
-  GraphKernelMetadata graph_metadata;
+  // Alias immutable compiled-payload metadata instead of copying every access
+  // footprint for each occurrence in an expanded Graph.
+  std::shared_ptr<const GraphKernelMetadata> graph_metadata;
   // JIT-only creation-order identity inside one GraphBuilder. Region lineage
   // is attached by the Forge Graph IR so independently compiled CGraph
   // segments cannot accidentally share a tuning identity.
@@ -404,7 +406,7 @@ struct CompiledDispatch {
   // loaded module fields have a module-owned lifecycle rather than Program
   // SNodeTree identities.
   std::vector<SNodeTreeDependency> snode_tree_dependencies;
-  GraphKernelMetadata graph_metadata;
+  std::shared_ptr<const GraphKernelMetadata> graph_metadata;
   // JIT-only lineage lets diagnostics retain the two logical source maps
   // after one physical dispatch replaces them. AOT serialization is unchanged.
   std::vector<GraphSourceDispatchMetadata> source_dispatches;

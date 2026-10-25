@@ -366,6 +366,9 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   set(TAICHI_BACKEND_SAFETY_TESTS_NAME taichi_backend_safety_tests)
   add_executable(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
     tests/cpp/common/threading_test.cpp
+    tests/cpp/program/test_program.cpp
+    tests/cpp/program/kernel_registration_test.cpp
+    tests/cpp/ir/ndarray_kernel.cpp
     tests/cpp/rhi/common/allocation_registry_test.cpp
     tests/cpp/rhi/common/cpu_device_test.cpp
     tests/cpp/rhi/common/cuda_context_test.cpp

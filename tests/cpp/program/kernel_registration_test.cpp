@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 
 #include "taichi/runtime/kernel_execution_handle.h"
+#include "taichi/program/graph_builder.h"
 #include "tests/cpp/program/test_program.h"
 #include "tests/cpp/ir/ndarray_kernel.h"
 #ifdef TI_WITH_VULKAN
@@ -17,6 +18,41 @@
 namespace taichi::lang {
 
 namespace {
+void check_graph_metadata_sharing(Arch arch) {
+  TestProgram test;
+  test.setup(arch);
+  auto *program = test.prog();
+  auto kernel = setup_kernel1(program);
+  aot::Arg input;
+  input.tag = aot::ArgKind::kNdarray;
+  input.name = "first";
+  input.dtype_id = PrimitiveTypeID::i32;
+  input.field_dim = 1;
+  Dispatch first(kernel.get(), {input}, std::nullopt, std::nullopt,
+                 "first", 0);
+  input.name = "second";
+  Dispatch second(kernel.get(), {input}, std::nullopt, std::nullopt,
+                  "second", 1);
+  auto a = first.compile_dispatch();
+  auto b = second.compile_dispatch();
+  ASSERT_NE(a.graph_metadata, nullptr);
+  EXPECT_EQ(a.graph_metadata, b.graph_metadata);
+  EXPECT_EQ(a.graph_metadata, a.source_dispatches[0].graph_metadata);
+  EXPECT_EQ(b.graph_metadata, b.source_dispatches[0].graph_metadata);
+  EXPECT_NE(a.symbolic_args[0].name, b.symbolic_args[0].name);
+  EXPECT_NE(a.source_dispatches[0].logical_dispatch_id,
+            b.source_dispatches[0].logical_dispatch_id);
+  const auto effects = a.graph_metadata->effects.size();
+  // The source lineage itself owns a payload lease. It survives the dispatch,
+  // frontend definition and compilation-cache entry that created it.
+  auto source = a.source_dispatches[0];
+  a = {};
+  b = {};
+  kernel.reset();
+  program->finalize();
+  EXPECT_EQ(source.graph_metadata->effects.size(), effects);
+}
+
 void check_shared_execution_payload(Arch arch) {
   TestProgram test;
   test.setup(arch);
@@ -104,12 +140,23 @@ void check_shared_execution_payload(Arch arch) {
 TEST(KernelRegistrationOwnership, CPUSharedPayload) {
   check_shared_execution_payload(Arch::x64);
 }
+TEST(GraphMetadataOwnership, CPUSharedPayload) {
+  check_graph_metadata_sharing(Arch::x64);
+}
 #ifdef TI_WITH_CUDA
+TEST(GraphMetadataOwnership, CUDASharedPayload) {
+  check_graph_metadata_sharing(Arch::cuda);
+}
 TEST(KernelRegistrationOwnership, CUDASharedPayload) {
   check_shared_execution_payload(Arch::cuda);
 }
 #endif
 #ifdef TI_WITH_VULKAN
+TEST(GraphMetadataOwnership, VulkanSharedPayload) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  check_graph_metadata_sharing(Arch::vulkan);
+}
 TEST(KernelRegistrationOwnership, VulkanSharedPayload) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();

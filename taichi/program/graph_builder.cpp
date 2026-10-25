@@ -667,8 +667,9 @@ aot::CompiledDispatch Dispatch::compile_dispatch() const {
       kernel_->program->compile_config(),
       kernel_->program->get_device_caps(), *kernel_);
   const auto &compiled = handle->compiled();
+  dispatch.graph_metadata = std::shared_ptr<const GraphKernelMetadata>(
+      handle->payload_lease(), &compiled.graph_metadata());
   dispatch.bind_jit_kernel(std::move(handle));
-  dispatch.graph_metadata = compiled.graph_metadata();
   dispatch.compiled_task_count = static_cast<std::uint32_t>(
       std::min<std::size_t>(compiled.task_count(),
                             std::numeric_limits<std::uint32_t>::max()));
@@ -1275,7 +1276,7 @@ std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_maps(
     }
     map_sources.push_back(
         {sources[index]->kernel(), &sources[index]->symbolic_args(),
-         &compiled_sources[index]->graph_metadata});
+         compiled_sources[index]->graph_metadata.get()});
   }
   auto composition = compose_graph_map_kernels(
       sources.front()->kernel()->program->compile_config(), map_sources);
@@ -1291,7 +1292,7 @@ std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_maps(
     source_task_count += source->compiled_task_count;
   }
   if (compiled.compiled_task_count >= source_task_count ||
-      compiled.graph_metadata.opaque || !compiled.graph_metadata.elementwise) {
+      compiled.graph_metadata->opaque || !compiled.graph_metadata->elementwise) {
     return std::nullopt;
   }
   compiled.source_dispatches.clear();

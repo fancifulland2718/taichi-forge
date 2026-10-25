@@ -7031,10 +7031,12 @@ void export_lang(py::module &m) {
             auto append = [&](const std::string &kernel_name,
                               const std::string &dispatch_label,
                               const std::vector<aot::Arg> &args,
-                              const GraphKernelMetadata &metadata,
+                              const std::shared_ptr<const GraphKernelMetadata> &metadata,
                               std::uint64_t logical_dispatch_id,
                               const std::string &logical_kernel_identity) {
-              py::dict item = graph_kernel_metadata_to_python(metadata);
+              static const GraphKernelMetadata unavailable;
+              py::dict item = graph_kernel_metadata_to_python(
+                  metadata ? *metadata : unavailable);
               item["kernel_name"] = kernel_name;
               item["dispatch_label"] = dispatch_label;
               item["logical_kernel_identity"] = logical_kernel_identity;
