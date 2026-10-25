@@ -130,9 +130,10 @@ class CompileIQCompleteGraphRecipeSearch:
             ),
         )
         semantic_payload = {
-            "schema": "taichi_forge.graph.complete-recipe-semantics.v1",
-            "definition": definition.to_dict(),
-            "recipes": tuple(entry.recipe.to_dict() for entry in entries),
+            "schema": "taichi_forge.graph.complete-recipe-semantics.v2",
+            "semantic_graph_id": definition.semantic_graph_id,
+            "generation_domain_id": catalog.generation_domain_id,
+            "provider_registry_id": catalog.provider_registry_id,
         }
         semantic_fingerprint = _identity(
             "forge-complete-graph-semantics-v1:",
@@ -157,6 +158,7 @@ class CompileIQCompleteGraphRecipeSearch:
             ),
             recipe_schema="taichi_forge.complete_graph_recipe.v2",
             search_strategy_id=search_strategy_id,
+            dynamic_only=True,
         )
         self._definition = definition
         self._catalog = catalog
@@ -323,6 +325,9 @@ class CompileIQCompleteGraphRecipeSearch:
         repeat_count=1,
         work_scale=1.0,
         terminal=False,
+        page_group_fingerprint=None,
+        page_index=0,
+        page_final=True,
     ):
         """Build one CompileIQ V2 batch from frozen complete recipes."""
 
@@ -383,7 +388,49 @@ class CompileIQCompleteGraphRecipeSearch:
             terminal=terminal,
             estimated_materialized_bytes=estimates,
             planned_physical_ids=planned_physical_ids,
+            page_group_fingerprint=page_group_fingerprint,
+            page_index=page_index,
+            page_final=page_final,
         )
+
+    def batch_pages(self, *, recipe_ids=None, parent_recipe_ids=None,
+                    stage_index=0, parent_batch=None, page_size=None, **fidelity):
+        """Lazily describe one logical stage using bounded transport frames."""
+        ids = tuple(sorted(self.recipe_ids if recipe_ids is None else recipe_ids))
+        if len(ids) != len(set(ids)) or self.baseline_recipe_id not in ids:
+            raise ValueError("a recipe stage must have unique IDs and its baseline")
+        parents = parent_recipe_ids or {}
+        if parent_recipe_ids is None and parent_batch is not None:
+            parents = {key: (key,) for key in ids if key in parent_batch.recipe_ids}
+        fidelity = {
+            "fidelity_name": "full", "fidelity_ordinal": 0, "repeat_count": 1,
+            "work_scale": 1.0, "terminal": False, **fidelity,
+        }
+        group = _identity("forge-recipe-pages-v1:", {
+            "generation_domain_id": self._catalog.generation_domain_id,
+            "recipe_ids": ids, "parents": parents, "fidelity": fidelity,
+            "stage_index": stage_index,
+            "parent": None if parent_batch is None else parent_batch.batch_fingerprint,
+        })
+        pages = iter(self._transport.recipe_pages(ids, page_size=page_size))
+        current = next(pages)
+        following = next(pages, None)
+        paged = following is not None
+        index = 0
+        while True:
+            batch = self.batch(
+                recipe_ids=current,
+                parent_recipe_ids={key: parents[key] for key in current if key in parents},
+                parent_batch=parent_batch, stage_index=stage_index + index,
+                page_group_fingerprint=group if paged else None,
+                page_index=index, page_final=following is None, **fidelity,
+            )
+            yield batch
+            if following is None:
+                return
+            parent_batch = batch
+            current, following = following, next(pages, None)
+            index += 1
 
     def compileiq_search(
         self,
@@ -440,9 +487,11 @@ class CompileIQCompleteGraphRecipeSearch:
                 )
             stage = checkpoint.stages[-1]
             observed = tuple(stage.evaluated_recipe_ids)
+            current_batches = checkpoint.batches[-getattr(checkpoint.batches[-1], "page_index", 0) - 1:]
+            current_ids = dict.fromkeys(key for batch in current_batches for key in batch.recipe_ids)
             missing = tuple(
                 recipe_id
-                for recipe_id in checkpoint.batches[-1].recipe_ids
+                for recipe_id in current_ids
                 if recipe_id not in observed
             )
             return MappingProxyType(
@@ -618,10 +667,9 @@ class _CompleteGraphRecipeSearchSessionV2:
             workspace_saturation=plans._workspace_saturation,
         )
         self._closed = False
-        self._default_batch = plans.batch(
-            fidelity_name=fidelity_name,
-            repeat_count=repeat_count,
-            terminal=True,
+        self._default_recipe_ids = plans.recipe_ids
+        self._default_fidelity = dict(
+            fidelity_name=fidelity_name, repeat_count=repeat_count, terminal=True,
         )
         if evaluation_context is None:
             evaluation_context = evaluation_context_type(
@@ -951,7 +999,13 @@ class _CompleteGraphRecipeSearchSessionV2:
         )
 
     def start(self):
-        result = self.submit_batch(self._default_batch)
+        from taichi_forge._compileiq_opaque import _submit_recipe_pages
+
+        if self.checkpoint().finalization is not None:
+            return self.result()
+        result = _submit_recipe_pages(self, self._plans.batch_pages(
+            recipe_ids=self._default_recipe_ids, **self._default_fidelity,
+        ))
         stage = result.checkpoint().stages[-1]
         if not stage.complete:
             return result

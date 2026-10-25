@@ -14,6 +14,23 @@ matches your Python/platform. Do not substitute a generic upstream
 `pip install compileiq`. The required protocol/API capabilities determine
 compatibility; a Git commit is provenance, not an installation allowlist.
 
+Automatic paging of large candidate domains requires the fork capability
+`opaque_recipe_paging="logical_stage_pages_v1"`, first implemented in
+`1.0.0dev8+taichiforge.pages1`. The 4096-ID and encoded-byte limits bound each
+transport frame, not the whole Graph candidate domain. Forge constructs page
+descriptions on demand. Comparison, baseline retention, earlier-page winners and
+checkpoint continuity span the entire logical stage. Budget interruption cannot
+mark a page prefix as a complete stage; resume reuses existing measurement keys.
+
+Caller-selected `GraphSearchBudget` and `GraphRecipeSearchStrategy` still bound
+tuning work, not the compilable workload. Paging does not reduce actual trials
+or their code caches; exhaustive search still grows with the candidate count.
+Older compatible forks can process single-frame searches; a missing paging
+capability is reported before submitting trials that require it. Frozen kernel
+plan candidates share a baseline plus compact edits, constructing a full task
+list only when inspected or materialized. These changes affect explicit search
+preparation, not ordinary JIT, Graph replay or AOT consumption.
+
 Use one environment for Forge and the fork. Vendor libraries and compilers are
 needed only for the providers you choose. Rendering additionally needs a
 graphics-enabled runtime; a headless compute build does not provide windows.

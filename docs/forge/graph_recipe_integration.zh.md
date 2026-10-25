@@ -13,6 +13,19 @@ CompileIQ 自动调优默认关闭；普通 JIT、Graph prepare/replay 和 AOT �
 不要用普通上游 `pip install compileiq` 替代。所需协议/API 能力决定兼容性；
 Git commit 用于记录来源，不是安装白名单。
 
+大候选域的自动分页需要 fork 报告
+`opaque_recipe_paging="logical_stage_pages_v1"`（首个实现版本
+`1.0.0dev8+taichiforge.pages1`）。4096 个 ID 和编码字节限制只约束单个传输帧，
+不再作为完整 Graph 候选域的上限。Forge 按页构造描述；同一逻辑阶段跨页比较，
+保留 baseline、前页优胜者和完整的 checkpoint 链。预算中断不会把已完成的前页
+误报成整个阶段完成，恢复时不重复已有 measurement key。
+
+调用方的 `GraphSearchBudget` 和 `GraphRecipeSearchStrategy` 仍决定搜索工作量；
+这不是可计算规模限制。分页不会减少实际试验或其代码缓存，完整搜索仍随候选数增长。
+没有分页能力的旧 fork 仍可处理单帧搜索，需要分页时在提交试验前明确报能力不匹配。
+已冻结的 kernel plan 候选共用基线与紧凑差分，检查或物化某个候选时才构造完整任务列表。
+这些变化仅影响显式搜索的冷阶段，不改变普通 JIT、Graph 重放或 AOT 消费。
+
 Forge 与 fork 使用同一环境；vendor 库和编译器只为所选 provider 配置。
 渲染还需要启用 graphics 的 runtime，headless 计算构建不提供窗口。
 参见[安装说明](index.zh.md#版本与安装)和[硬件依赖](external_hardware_providers.zh.md)。

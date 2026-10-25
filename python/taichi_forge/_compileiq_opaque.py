@@ -366,6 +366,23 @@ def _reviewed_distribution_manifest():
     }
 
 
+def _submit_recipe_pages(search, pages):
+    """Resume a deterministic logical stage, retaining earlier-page evidence."""
+    saved = search.checkpoint()
+    result = search.result()
+    for batch in pages:
+        if batch.stage_index < len(saved.batches):
+            previous = saved.batches[batch.stage_index]
+            if previous.batch_fingerprint != batch.batch_fingerprint:
+                raise ValueError("recipe page differs from the saved generation contract")
+            if saved.stages[batch.stage_index].complete:
+                continue
+        result = search.submit_batch(batch)
+        if not result.checkpoint().stages[-1].complete:
+            return result
+    return result
+
+
 class _CompileIQOpaqueRecipeTransport:
     """Bind one provider-owned recipe set to a compatible modified fork."""
 
@@ -379,6 +396,9 @@ class _CompileIQOpaqueRecipeTransport:
         "_recipe_description",
         "_exhaustive_search_type",
         "_worker_type",
+        "_recipe_ids",
+        "_recipe_id_set",
+        "_dynamic_only",
     )
 
     def __init__(
@@ -397,6 +417,7 @@ class _CompileIQOpaqueRecipeTransport:
         assembly_protocols=("provider_owned_opaque_recipe.v1",),
         recipe_schema="taichi_forge.opaque_recipe.v1",
         search_strategy_id="manual_dynamic_batches.v2",
+        dynamic_only=False,
     ):
         capability, domain_type, worker_type, python_source_lock = capability_components
         recipe_ids = tuple(recipe_ids)
@@ -411,8 +432,9 @@ class _CompileIQOpaqueRecipeTransport:
             raise ValueError("opaque recipe IDs must be nonempty and unique")
         if baseline_recipe_id not in recipe_ids:
             raise ValueError("opaque recipe domain must contain its baseline")
-        if len(recipe_ids) > _MAX_RECIPES:
+        if len(recipe_ids) > _MAX_RECIPES and not dynamic_only:
             raise ValueError("opaque recipe domain exceeds the 4096-recipe limit")
+        static_ids = (baseline_recipe_id,) if dynamic_only else recipe_ids
         for name, value in (
             ("domain_owner", domain_owner),
             ("recipe_description", recipe_description),
@@ -428,7 +450,7 @@ class _CompileIQOpaqueRecipeTransport:
                 compileiq_capability_id=capability["capability_id"],
                 compileiq_core_commit=capability["core_commit"],
                 compileiq_core_lock=capability["core_lock"],
-                recipe_ids=recipe_ids,
+                recipe_ids=static_ids,
             )
         except Exception as error:
             raise ValueError(
@@ -479,7 +501,7 @@ class _CompileIQOpaqueRecipeTransport:
             raise ValueError(
                 "modified CompileIQ did not bind the opaque domain to its exact core"
             )
-        if frozenset(domain.recipe_ids) != frozenset(recipe_ids):
+        if frozenset(domain.recipe_ids) != frozenset(static_ids):
             raise ValueError(
                 "modified CompileIQ changed the opaque recipe identity set"
             )
@@ -515,6 +537,9 @@ class _CompileIQOpaqueRecipeTransport:
             worker_type, "OPAQUE_EXHAUSTIVE_SEARCH_TYPE", None
         )
         self._worker_type = worker_type
+        self._recipe_ids = recipe_ids if dynamic_only else tuple(domain.recipe_ids)
+        self._recipe_id_set = frozenset(recipe_ids)
+        self._dynamic_only = dynamic_only
 
     @property
     def capability(self):
@@ -536,6 +561,9 @@ class _CompileIQOpaqueRecipeTransport:
         target_contract=None,
     ):
         """Create the exact fork's complete finite-domain search."""
+
+        if self._dynamic_only:
+            raise ValueError("this generation domain requires paged V2 search")
 
         exhaustive_search_type = self._exhaustive_search_type
         if exhaustive_search_type is None:
@@ -572,6 +600,9 @@ class _CompileIQOpaqueRecipeTransport:
         terminal=False,
         estimated_materialized_bytes=None,
         planned_physical_ids=None,
+        page_group_fingerprint=None,
+        page_index=0,
+        page_final=True,
     ):
         """Build one exact V2 batch without exposing recipe internals."""
 
@@ -601,7 +632,19 @@ class _CompileIQOpaqueRecipeTransport:
         unexpected_plans = set(planned_physical_ids) - set(recipe_ids)
         if unexpected_parents or unexpected_estimates or unexpected_plans:
             raise ValueError("V2 batch metadata contains an unknown recipe")
+        paging = {}
+        if page_group_fingerprint is not None:
+            if self._capability.get("opaque_recipe_paging") != "logical_stage_pages_v1":
+                raise CompileIQOpaqueUnavailableError(
+                    "recipe paging requires a compatible CompileIQ with logical_stage_pages_v1"
+                )
+            paging = dict(
+                page_group_fingerprint=page_group_fingerprint,
+                page_index=page_index,
+                page_final=page_final,
+            )
         return batch_type(
+            **paging,
             provider_namespace=self._dynamic_domain.provider_namespace,
             domain_version=self._dynamic_domain.domain_version,
             provider_semantic_fingerprint=(
@@ -699,7 +742,42 @@ class _CompileIQOpaqueRecipeTransport:
 
     @property
     def recipe_ids(self):
-        return tuple(self._domain.recipe_ids)
+        return self._recipe_ids
+
+    def recipe_pages(self, recipe_ids=None, *, page_size=None):
+        """Yield baseline-inclusive transport frames without a total-domain cap.
+
+        The reviewed protocol bounds a frame, not the number of frames. Reserve
+        its worst-case escaped header size; count actual encoded ID bytes so
+        long Unicode identifiers also fit the canonical-byte envelope.
+        """
+        if page_size is None:
+            page_size = _MAX_RECIPES
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 2:
+            raise ValueError("page_size must be an integer of at least two")
+        page_size = min(page_size, _MAX_RECIPES)
+        byte_budget = _MAX_CANONICAL_BYTES - (8 * 6 * _MAX_FIELD_UTF8_BYTES + 4096)
+        baseline_bytes = len(_canonical_json(self.baseline_recipe_id).encode("utf-8")) + 1
+        page, size = [self.baseline_recipe_id], baseline_bytes
+        seen = {self.baseline_recipe_id}
+        for recipe_id in self.recipe_ids if recipe_ids is None else recipe_ids:
+            if recipe_id == self.baseline_recipe_id:
+                continue
+            if (
+                not isinstance(recipe_id, str) or not recipe_id
+                or len(recipe_id.encode("utf-8")) > _MAX_FIELD_UTF8_BYTES
+            ):
+                raise ValueError("invalid recipe ID for the bounded transport frame")
+            if recipe_id in seen:
+                raise ValueError("a recipe stage must not repeat a nonbaseline ID")
+            seen.add(recipe_id)
+            encoded = len(_canonical_json(recipe_id).encode("utf-8")) + 1
+            if len(page) >= page_size or size + encoded > byte_budget:
+                yield tuple(page)
+                page, size = [self.baseline_recipe_id], baseline_bytes
+            page.append(recipe_id)
+            size += encoded
+        yield tuple(page)
 
     @property
     def baseline_recipe_id(self):
@@ -721,7 +799,7 @@ class _CompileIQOpaqueRecipeTransport:
         recipe_id = parameters[_RECIPE_ID_KEY]
         if not isinstance(recipe_id, str):
             raise TypeError("CompileIQ recipe_id must be a string")
-        if recipe_id not in self.recipe_ids:
+        if recipe_id not in self._recipe_id_set:
             raise KeyError(
                 f"CompileIQ selected an unknown {self._recipe_description} "
                 f"{recipe_id!r}"
@@ -848,7 +926,11 @@ class _CompileIQOpaqueRecipeTransport:
             "recipe_count": len(self.recipe_ids),
             "search_coverage": "budgeted_partial_frontier_with_lineage",
             "search_mode": "dynamic_batch_pareto_racing_main_thread_v2",
-            "v1_compatibility": "bounded_exhaustive_main_thread_v1",
+            "v1_compatibility": (
+                "not_available_for_generation_domain" if self._dynamic_only
+                else "bounded_exhaustive_main_thread_v1"
+            ),
+            "static_domain_role": "baseline_seed" if self._dynamic_only else "complete_finite_domain",
             "fallback": "disabled",
         }
 

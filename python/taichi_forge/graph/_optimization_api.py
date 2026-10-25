@@ -941,6 +941,11 @@ class _GraphRecipeSearchSession:
             raise ValueError(
                 "initial Graph recipe domain exceeds max_generated_recipes"
             )
+        self._plans = CompileIQCompleteGraphRecipeSearch(
+            definition,
+            catalog=catalog,
+            search_strategy_id=strategy.strategy_id,
+        )
         self._joint_checkpoint = self._normalize_checkpoint(checkpoint)
         self._checkpoint = None
         if self._joint_checkpoint is not None:
@@ -948,11 +953,6 @@ class _GraphRecipeSearchSession:
             self._checkpoint = self._joint_checkpoint.compileiq_checkpoint
             self._rebuild_checkpoint_catalog(self._checkpoint)
             self._validate_checkpoint_generation(self._joint_checkpoint)
-        self._plans = CompileIQCompleteGraphRecipeSearch(
-            definition,
-            catalog=catalog,
-            search_strategy_id=strategy.strategy_id,
-        )
         if self._joint_checkpoint is not None and (
             self._joint_checkpoint.contract.get("compileiq_python_source_lock")
             != self._plans.python_source_lock
@@ -1044,18 +1044,12 @@ class _GraphRecipeSearchSession:
 
     def _refresh_handles(self):
         for entry in self._catalog.entries():
-            self._handles.setdefault(
-                entry.recipe.recipe_id,
-                GraphRecipeHandle._from_recipe(
+            if entry.recipe.recipe_id not in self._handles:
+                self._handles[entry.recipe.recipe_id] = GraphRecipeHandle._from_recipe(
                     self._definition,
                     entry.recipe,
                     self._catalog.provider_set,
-                ),
-            )
-
-    @staticmethod
-    def _batch_recipe_ids(batch):
-        return tuple(item["recipe_id"] for item in batch.get("recipes", ()))
+                )
 
     def _remaining_generation_capacity(self):
         return max(
@@ -1101,74 +1095,43 @@ class _GraphRecipeSearchSession:
             parents[recipe_id] = entry.parent_recipe_ids
         return recipe_ids, parents
 
-    def _validate_checkpoint_batch(
-        self,
-        batch,
-        expected_recipe_ids,
-        expected_parents=None,
-    ):
-        actual_ids = self._batch_recipe_ids(batch)
-        if actual_ids != tuple(
-            sorted(expected_recipe_ids, key=lambda item: item.encode("utf-8"))
-        ):
-            raise ValueError(
-                "Graph recipe checkpoint generation differs from this strategy"
-            )
-        expected_parents = expected_parents or {
-            recipe_id: () for recipe_id in actual_ids
-        }
-        actual_parents = {
-            item["recipe_id"]: tuple(item.get("parent_recipe_ids", ()))
-            for item in batch.get("recipes", ())
-        }
-        normalized_expected_parents = {
-            recipe_id: tuple(sorted(parent_ids, key=lambda item: item.encode("utf-8")))
-            for recipe_id, parent_ids in expected_parents.items()
-        }
-        if actual_parents != normalized_expected_parents:
-            raise ValueError(
-                "Graph recipe checkpoint lineage differs from this strategy"
-            )
-        planned = {
-            item["recipe_id"]: item["planned_physical_id"]
-            for item in batch.get("recipes", ())
-        }
-        if any(
-            planned.get(recipe_id)
-            != self._catalog.entry(recipe_id).recipe.planned_physical_id
-            for recipe_id in actual_ids
-        ):
-            raise ValueError(
-                "Graph recipe checkpoint planned physical identity drifted"
-            )
-
     def _rebuild_checkpoint_catalog(self, checkpoint):
         batches = tuple(checkpoint.get("batches", ()))
         stages = tuple(checkpoint.get("stages", ()))
         if len(stages) != len(batches):
             raise ValueError("Graph recipe checkpoint has inconsistent stage history")
-        if not batches:
-            return
-        initial_ids = tuple(entry.recipe.recipe_id for entry in self._catalog.entries())
-        self._validate_checkpoint_batch(batches[0], initial_ids)
-        if self._execution_mode == "exact" and len(batches) != 1:
-            raise ValueError("exact Graph recipe checkpoint contains extra stages")
-        for index in range(1, len(batches)):
-            previous_survivors = tuple(stages[index - 1].get("survivor_recipe_ids", ()))
-            fidelity = batches[index].get("fidelity", {})
-            if fidelity.get("terminal", False):
-                expected_ids, parents = self._stage_members(previous_survivors)
+        from compileiq.recipes import OpaqueRecipeBatchV2
+
+        index = 0
+        while index < len(batches):
+            first = batches[index]
+            end = index + 1
+            while end < len(batches) and batches[end].get("page_index", 0):
+                end += 1
+            if index == 0:
+                expected_ids, parents = self._plans.recipe_ids, {}
             else:
-                generated = self._generate(previous_survivors)
-                expected_ids, parents = self._stage_members(
-                    previous_survivors,
-                    generated,
-                )
-            self._validate_checkpoint_batch(
-                batches[index],
-                expected_ids,
-                parents,
+                if self._execution_mode == "exact":
+                    raise ValueError("exact Graph recipe checkpoint contains extra stages")
+                previous_survivors = tuple(stages[index - 1].get("survivor_recipe_ids", ()))
+                generated = () if first["fidelity"]["terminal"] else self._generate(previous_survivors)
+                expected_ids, parents = self._stage_members(previous_survivors, generated)
+            fidelity = first["fidelity"]
+            options = dict(
+                recipe_ids=expected_ids, parent_recipe_ids=parents,
+                stage_index=index,
+                parent_batch=None if index == 0 else OpaqueRecipeBatchV2(**batches[index - 1]),
+                fidelity_name=fidelity["name"], fidelity_ordinal=fidelity["ordinal"],
+                repeat_count=fidelity["repeat_count"], work_scale=fidelity["work_scale"],
+                terminal=fidelity["terminal"],
             )
+            expected_pages = iter(self._plans.batch_pages(**options))
+            for saved in batches[index:end]:
+                expected = next(expected_pages, None)
+                if expected is None or expected != OpaqueRecipeBatchV2(**saved):
+                    raise ValueError("Graph recipe checkpoint generation or lineage differs from this strategy")
+            self._resume_stage = options
+            index = end
 
     @property
     def recipes(self):
@@ -1219,7 +1182,7 @@ class _GraphRecipeSearchSession:
         terminal_status = (
             "not_reached"
             if terminal_stage is None
-            else ("complete" if terminal_stage.complete else "partial")
+            else ("complete" if terminal_stage.complete and getattr(checkpoint.batches[-1], "page_final", True) else "partial")
         )
         return search.finalize(
             self._finalization_type()(
@@ -1230,33 +1193,19 @@ class _GraphRecipeSearchSession:
         )
 
     def _run_exact(self, search):
-        checkpoint = search.checkpoint()
-        if checkpoint.finalization is not None:
+        from taichi_forge._compileiq_opaque import _submit_recipe_pages
+
+        if search.checkpoint().finalization is not None:
             return search.result()
-        if not checkpoint.batches:
-            batch = self._plans.batch(
-                recipe_ids=self._plans.recipe_ids,
-                stage_index=0,
-                fidelity_name="terminal-exact",
-                fidelity_ordinal=0,
-                repeat_count=self._budget.repeat_count,
-                terminal=True,
-            )
-            result = search.submit_batch(batch)
-        else:
-            if len(checkpoint.batches) != 1:
-                raise ValueError("exact Graph recipe search has multiple batches")
-            result = search.result()
-            if not checkpoint.stages[-1].complete:
-                result = search.submit_batch(checkpoint.batches[-1])
-        terminal_complete = search.checkpoint().stages[-1].complete
-        if not terminal_complete:
+        result = _submit_recipe_pages(search, self._plans.batch_pages(
+            recipe_ids=self._plans.recipe_ids, stage_index=0,
+            fidelity_name="terminal-exact", fidelity_ordinal=0,
+            repeat_count=self._budget.repeat_count, terminal=True,
+        ))
+        checkpoint = search.checkpoint()
+        if not checkpoint.stages[-1].complete or not getattr(checkpoint.batches[-1], "page_final", True):
             return result
-        return self._finalize(
-            search,
-            generation_status="exhaustive",
-            reason="exact_domain_complete",
-        )
+        return self._finalize(search, generation_status="exhaustive", reason="exact_domain_complete")
 
     @staticmethod
     def _terminal_reason_from_fidelity(name):
@@ -1267,29 +1216,23 @@ class _GraphRecipeSearchSession:
         }.get(name, "strategy_complete")
 
     def _run_staged(self, search):
+        from taichi_forge._compileiq_opaque import _submit_recipe_pages
+
         checkpoint = search.checkpoint()
         if checkpoint.finalization is not None:
             return search.result()
-        if not checkpoint.batches:
-            batch = self._plans.batch(
-                recipe_ids=self._plans.recipe_ids,
-                stage_index=0,
-                fidelity_name="screen",
-                fidelity_ordinal=0,
-                repeat_count=self._budget.repeat_count,
-                terminal=False,
-            )
-            result = search.submit_batch(batch)
-        else:
-            result = search.result()
-            if not checkpoint.stages[-1].complete:
-                result = search.submit_batch(checkpoint.batches[-1])
+        options = self._resume_stage if checkpoint.batches else dict(
+            recipe_ids=self._plans.recipe_ids, stage_index=0,
+            fidelity_name="screen", fidelity_ordinal=0,
+            repeat_count=self._budget.repeat_count, terminal=False,
+        )
+        result = _submit_recipe_pages(search, self._plans.batch_pages(**options))
 
         while True:
             checkpoint = search.checkpoint()
             batch = checkpoint.batches[-1]
             stage = checkpoint.stages[-1]
-            if not stage.complete:
+            if not stage.complete or not getattr(batch, "page_final", True):
                 # Keep budget/time interruptions resumable.  Finalizing here
                 # would correctly describe a partial run but would also freeze
                 # CompileIQ's checkpoint against its missing measurement keys.
@@ -1303,6 +1246,7 @@ class _GraphRecipeSearchSession:
 
             generated_rounds = sum(
                 previous.stage_index > 0 and not previous.fidelity.terminal
+                and getattr(previous, "page_index", 0) == 0
                 for previous in checkpoint.batches
             )
             if generated_rounds >= self._strategy.max_generation_rounds:
@@ -1317,7 +1261,7 @@ class _GraphRecipeSearchSession:
                         stage.survivor_recipe_ids,
                         generated,
                     )
-                    next_batch = self._plans.batch(
+                    next_pages = self._plans.batch_pages(
                         recipe_ids=recipe_ids,
                         stage_index=batch.stage_index + 1,
                         parent_batch=batch,
@@ -1327,12 +1271,12 @@ class _GraphRecipeSearchSession:
                         repeat_count=self._budget.repeat_count,
                         terminal=False,
                     )
-                    result = search.submit_batch(next_batch)
+                    result = _submit_recipe_pages(search, next_pages)
                     continue
                 terminal_name = "terminal-no-new-physical-identity"
 
             recipe_ids, parents = self._stage_members(stage.survivor_recipe_ids)
-            terminal_batch = self._plans.batch(
+            terminal_pages = self._plans.batch_pages(
                 recipe_ids=recipe_ids,
                 stage_index=batch.stage_index + 1,
                 parent_batch=batch,
@@ -1342,7 +1286,7 @@ class _GraphRecipeSearchSession:
                 repeat_count=self._budget.repeat_count,
                 terminal=True,
             )
-            result = search.submit_batch(terminal_batch)
+            result = _submit_recipe_pages(search, terminal_pages)
 
     def _selection_artifact(
         self,
@@ -1531,7 +1475,10 @@ class _GraphRecipeSearchSession:
             compileiq_report.candidates,
             key=lambda item: (item.stage_index, item.candidate_key),
         ):
-            latest_candidates[candidate.recipe_id] = candidate
+            previous = latest_candidates.get(candidate.recipe_id)
+            if (previous is None or previous.fidelity_fingerprint != candidate.fidelity_fingerprint
+                    or candidate.total_observation_count >= previous.total_observation_count):
+                latest_candidates[candidate.recipe_id] = candidate
         baseline_manifest = self.baseline.manifest
         baseline_candidate = latest_candidates.get(self.baseline.recipe_id)
         annotations = []
