@@ -1689,8 +1689,15 @@ static TiPreparedExecution prepare_execution_plan_impl(
       if (const auto *parallel =
               std::get_if<std::shared_ptr<const aot::ExecutionPlan::Parallel>>(
                   &operation)) {
-        if (rt.arch != taichi::Arch::cuda)
+        if ((*parallel)->lowering ==
+            aot::ExecutionPlan::Parallel::Lowering::vulkan) {
+          if (rt.arch != taichi::Arch::vulkan || !domain || !domain->vulkan)
+            throw MemoryBindingError(
+                "AOT Vulkan parallel requires an independent Vulkan execution "
+                "domain");
+        } else if (rt.arch != taichi::Arch::cuda) {
           throw MemoryBindingError("AOT CUDA parallel requires a CUDA runtime");
+        }
         for (const auto &branch : (*parallel)->branches)
           collect_steps(branch);
       }

@@ -27,5 +27,5 @@ def validate_submission_recipe(recipe, operations, binding_strategy=None):
             raise ValueError("Independent Vulkan submission needs prefix, graphics and consumer")
     else:
         raise ValueError("Unsupported submission recipe kind")
-    if any(isinstance(op, dict) and op.get("kind") in ("branch", "while", "cuda_parallel") for op in operations):
+    if any(isinstance(op, dict) and op.get("kind") in ("branch", "while", "cuda_parallel", "vulkan_parallel") for op in operations):
         raise ValueError("Vulkan submission recipes require a flat replay sequence")

@@ -317,13 +317,14 @@ def test_masked_branch_requires_v16_flat_kernels_and_all_path_closure():
     assert json.loads(plan.to_json()) == snapshot
 
 
-def test_cuda_parallel_preserves_branches_bindings_and_version():
+@pytest.mark.parametrize("kind,version", (("cuda_parallel", 9), ("vulkan_parallel", 27)))
+def test_parallel_preserves_branches_bindings_and_version(kind, version):
     branches = [[dict(kind="kernel", entry="advance", arguments=[f"x{i}", "shared"])] for i in range(8)]
     plan = ExecutionPlan(
-        [dict(kind="cuda_parallel", branches=branches), dict(kind="kernel", entry="join", arguments=["y"])]
+        [dict(kind=kind, branches=branches), dict(kind="kernel", entry="join", arguments=["y"])]
     )
     document = json.loads(plan.to_json())
-    assert document["version"] == 9
+    assert document["version"] == version
     restored = ExecutionPlan.from_json(plan.to_json())
     assert json.loads(restored.to_json()) == document
     assert restored.argument_names == tuple(sorted(["shared", "y"] + [f"x{i}" for i in range(8)]))
@@ -334,7 +335,7 @@ def test_cuda_parallel_preserves_branches_bindings_and_version():
         ExecutionPlan.from_json(json.dumps(dict(document, version=_MAX_EXECUTION_PLAN_VERSION))).to_json()
         == plan.to_json()
     )
-    for version in (8, _MAX_EXECUTION_PLAN_VERSION + 1):
+    for version in (version - 1, _MAX_EXECUTION_PLAN_VERSION + 1):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
 
@@ -352,9 +353,25 @@ def test_cuda_parallel_preserves_branches_bindings_and_version():
         [[dict(kind="cuda_parallel", branches=[])]] * 2,
     ],
 )
-def test_cuda_parallel_rejects_incomplete_or_non_kernel_branches(branches):
+@pytest.mark.parametrize("kind", ("cuda_parallel", "vulkan_parallel"))
+def test_parallel_rejects_incomplete_or_non_kernel_branches(branches, kind):
     with pytest.raises(ValueError):
-        ExecutionPlan([dict(kind="cuda_parallel", branches=branches)])
+        ExecutionPlan([dict(kind=kind, branches=branches)])
+
+
+@pytest.mark.parametrize("kind", ("cuda_parallel", "vulkan_parallel"))
+def test_parallel_does_not_lose_topology_through_another_submission_recipe(kind):
+    operation = dict(kind=kind, branches=[
+        [dict(kind="kernel", entry="work", arguments=[name])] for name in ("x", "y")])
+    sequence = [dict(kind="kernel", entry="prefix", arguments=[]), operation,
+                dict(kind="kernel", entry="suffix", arguments=[])]
+    for options in (
+        dict(binding_strategy="cuda_immutable_argument_frames"),
+        dict(submission_recipe=dict(kind="vulkan_segmented", version=1, ends=[3])),
+        dict(submission_recipe=dict(kind="vulkan_independent_graphics", version=1)),
+    ):
+        with pytest.raises(ValueError, match="flat"):
+            ExecutionPlan(sequence, **options)
 
 
 def test_selected_indirect_launch_retains_packet_and_version():

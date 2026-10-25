@@ -246,6 +246,7 @@ TEST(ExecutionPlan, ParallelPreservesBranchesAndBindings) {
       *std::get<std::shared_ptr<const ExecutionPlan::Parallel>>(
           plan.operations[0]);
   ASSERT_EQ(parallel.branches.size(), 2);
+  EXPECT_EQ(parallel.lowering, ExecutionPlan::Parallel::Lowering::cuda);
   EXPECT_EQ(std::get<ExecutionPlan::Kernel>(parallel.branches[1][0]).entry,
             "b");
   EXPECT_EQ(plan.arguments, (std::vector<std::string>{"shared", "x", "y"}));
@@ -267,6 +268,30 @@ TEST(ExecutionPlan, ParallelPreservesBranchesAndBindings) {
                 R"({"version":9,"operations":[{"kind":"cuda_parallel","branches":)") +
             branches + "}]}"),
         std::invalid_argument);
+}
+
+TEST(ExecutionPlan, VulkanParallelPreservesBackendAndRequiresVersion27) {
+  const std::string source = R"({"version":27,"operations":[
+    {"kind":"vulkan_parallel","branches":[
+      [{"kind":"kernel","entry":"a","arguments":["x","shared"]}],
+      [{"kind":"kernel","entry":"b","arguments":["y","shared"]}]]},
+    {"kind":"kernel","entry":"join","arguments":["x","y"]}]})";
+  const auto plan = ExecutionPlan::parse(source);
+  const auto &parallel =
+      *std::get<std::shared_ptr<const ExecutionPlan::Parallel>>(
+          plan.operations[0]);
+  EXPECT_EQ(parallel.lowering, ExecutionPlan::Parallel::Lowering::vulkan);
+  EXPECT_EQ(parallel.branches.size(), 2);
+  EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"shared", "x", "y"}));
+  for (const auto &change : std::vector<std::pair<std::string, std::string>>{
+           {"\"version\":27", "\"version\":26"},
+           {"\"entry\":\"a\"", "\"entry\":\"a\",\"launch\":{}"},
+           {"\"kind\":\"kernel\"", "\"kind\":\"vulkan_parallel\""}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(change.first), change.first.size(),
+                    change.second);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+  }
 }
 
 TEST(ExecutionPlan, SelectedIndirectLaunchRetainsPacketAndVersion) {

@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Embedded LLVM runtime views carry a source allocator and private tree directory.
-inline constexpr int kForgeNativeAbiRevision = 206;
+// Persistent parallel regions preserve their selected backend lowering.
+inline constexpr int kForgeNativeAbiRevision = 207;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

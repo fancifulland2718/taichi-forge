@@ -21,7 +21,7 @@ namespace taichi::lang::aot {
 // handles, backend commands and storage ownership. Binding consumes this only
 // in the cold phase; replay retains no JSON or symbolic argument lookups.
 struct ExecutionPlan {
-  static constexpr std::uint32_t kMaxVersion = 26;
+  static constexpr std::uint32_t kMaxVersion = 27;
   struct Kernel {
     struct BoundedRange {
       bool cuda{false};
@@ -61,9 +61,11 @@ struct ExecutionPlan {
                                  std::shared_ptr<const Branch>,
                                  std::shared_ptr<const While>,
                                  std::shared_ptr<const Parallel>>;
-  // CUDA fork/join; each branch is an ordered, ordinary kernel sequence.
+  // Backend-selected fork/join; branches are ordinary kernel sequences.
   // Surrounding operations retain the prefix and the join/suffix.
   struct Parallel {
+    enum class Lowering { cuda, vulkan };
+    Lowering lowering{Lowering::cuda};
     std::vector<std::vector<Operation>> branches;
   };
   struct Branch {

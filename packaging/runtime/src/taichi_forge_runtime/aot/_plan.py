@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 26
+_MAX_EXECUTION_PLAN_VERSION = 27
 
 
 def _resource_version(resources):
@@ -54,6 +54,8 @@ def _control_version(steps):
                     version = max(version, _control_version(region))
         if isinstance(op, dict) and op.get("kind") == "cuda_parallel":
             version = max(version, 9)
+        if isinstance(op, dict) and op.get("kind") == "vulkan_parallel":
+            version = max(version, 27)
         if isinstance(op, dict) and op.get("kind") == "kernel" and "launch" in op:
             launch = op["launch"]
             bounded = isinstance(launch, dict) and launch.get("kind") in ("cpu_exact", "cuda_logical_exact")
@@ -378,21 +380,21 @@ class ExecutionPlan:
                     if lowering["kind"] == "cuda_masked":
                         validate_flat_kernels([op["condition"], *bodies])
                     continue
-                if kind == "cuda_parallel":
+                if kind in ("cuda_parallel", "vulkan_parallel"):
                     if (
                         set(op) != {"kind", "branches"}
                         or not isinstance(op["branches"], list)
                         or len(op["branches"]) < 2
                     ):
-                        raise ValueError("CUDA parallel requires at least two nonempty kernel branches")
+                        raise ValueError("Parallel requires at least two nonempty kernel branches")
                     for branch in op["branches"]:
                         if not isinstance(branch, list) or not branch:
-                            raise ValueError("CUDA parallel requires nonempty branches")
+                            raise ValueError("Parallel requires nonempty branches")
                         if any(
                             not isinstance(item, dict) or item.get("kind") != "kernel" or "launch" in item
                             for item in branch
                         ):
-                            raise ValueError("CUDA parallel requires ordinary kernel branches")
+                            raise ValueError("Parallel requires ordinary kernel branches")
                         validate_steps(branch)
                     continue
                 if kind == "while":
@@ -542,7 +544,7 @@ class ExecutionPlan:
         if self.binding_strategy is not None:
             for operation in operations:
                 if isinstance(operation, dict) and (
-                    operation.get("kind") in ("branch", "while", "cuda_parallel") or "launch" in operation
+                    operation.get("kind") in ("branch", "while", "cuda_parallel", "vulkan_parallel") or "launch" in operation
                 ):
                     raise ValueError("CUDA binding frames require a flat fixed replay sequence")
         validate_steps(operations)
@@ -647,7 +649,7 @@ class ExecutionPlan:
                 pending.extend(operation["condition"])
                 for region in operation["bodies"]:
                     pending.extend(region)
-            elif kind == "cuda_parallel":
+            elif kind in ("cuda_parallel", "vulkan_parallel"):
                 for region in operation["branches"]:
                     pending.extend(region)
             elif kind == "kernel" and name in operation["arguments"]:
