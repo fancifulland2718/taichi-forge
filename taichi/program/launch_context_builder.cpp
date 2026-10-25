@@ -163,7 +163,7 @@ void LaunchContextBuilder::set_ndarray_ptrs(const std::vector<int> &arg_id,
   auto param_indices = arg_id;
   param_indices.push_back(TypeFactory::DATA_PTR_POS_IN_NDARRAY);
   set_struct_arg(param_indices, data_ptr);
-  if (kernel_->nested_parameters[arg_id].needs_grad) {
+  if (kernel_->nested_parameters.at(arg_id).needs_grad) {
     param_indices.back() = TypeFactory::GRAD_PTR_POS_IN_NDARRAY;
     set_struct_arg(param_indices, grad_ptr);
   }
@@ -366,7 +366,7 @@ void LaunchContextBuilder::set_arg_external_array_with_shape(
     const std::vector<int64> &shape,
     uintptr_t grad_ptr) {
   TI_ASSERT_INFO(
-      kernel_->nested_parameters[arg_id].is_array,
+      kernel_->nested_parameters.at(arg_id).is_array,
       "Assigning external (numpy) array to scalar argument is not allowed.");
 
   TI_ASSERT_INFO(shape.size() <= taichi_max_num_indices,
@@ -480,7 +480,7 @@ void LaunchContextBuilder::set_arg_dense_storage(
     const std::vector<int> &arg_id,
     const storage::DenseStorageDescriptor &descriptor) {
   TI_ASSERT_INFO(
-      kernel_->nested_parameters[arg_id].is_array,
+      kernel_->nested_parameters.at(arg_id).is_array,
       "Assigning a dense storage view to a scalar argument is not allowed.");
   const auto &properties = descriptor.properties();
   const bool safe_positive_affine =

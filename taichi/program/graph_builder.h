@@ -46,6 +46,8 @@ class Dispatch : public Node {
       std::vector<aot::CompiledDispatch> &compiled_dispatches) override;
 
   aot::CompiledDispatch compile_dispatch() const;
+  aot::CompiledDispatch compile_dispatch(
+      aot::CompiledGraphInvocationCache &invocations) const;
 
   Kernel *kernel() const {
     return kernel_;
@@ -124,6 +126,8 @@ class Sequential : public Node {
 
   void compile(
       std::vector<aot::CompiledDispatch> &compiled_dispatches) override;
+  void compile(std::vector<aot::CompiledDispatch> &compiled_dispatches,
+               aot::CompiledGraphInvocationCache &invocations);
 
  private:
   std::vector<Node *> sequence_;

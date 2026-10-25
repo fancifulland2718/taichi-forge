@@ -664,6 +664,12 @@ void validate_cuda_cufft_args(std::uint64_t plan_handle,
 }  // namespace
 
 aot::CompiledDispatch Dispatch::compile_dispatch() const {
+  aot::CompiledGraphInvocationCache invocations;
+  return compile_dispatch(invocations);
+}
+
+aot::CompiledDispatch Dispatch::compile_dispatch(
+    aot::CompiledGraphInvocationCache &invocations) const {
   aot::CompiledDispatch dispatch;
   dispatch.kernel_name = kernel_->get_name();
   if (const auto &plan = kernel_->get_offload_execution_plan(); plan.has_value()) {
@@ -685,7 +691,7 @@ aot::CompiledDispatch Dispatch::compile_dispatch() const {
   const auto &compiled = handle->compiled();
   dispatch.graph_metadata = std::shared_ptr<const GraphKernelMetadata>(
       handle->payload_lease(), &compiled.graph_metadata());
-  dispatch.bind_jit_kernel(std::move(handle));
+  dispatch.bind_jit_kernel(std::move(handle), invocations);
   dispatch.compiled_task_count = static_cast<std::uint32_t>(
       std::min<std::size_t>(compiled.task_count(),
                             std::numeric_limits<std::uint32_t>::max()));
@@ -723,6 +729,13 @@ void Dispatch::compile(
 
 void Sequential::compile(
     std::vector<aot::CompiledDispatch> &compiled_dispatches) {
+  aot::CompiledGraphInvocationCache invocations;
+  compile(compiled_dispatches, invocations);
+}
+
+void Sequential::compile(
+    std::vector<aot::CompiledDispatch> &compiled_dispatches,
+    aot::CompiledGraphInvocationCache &invocations) {
   struct PendingDispatch {
     Dispatch *source{nullptr};
     aot::CompiledDispatch compiled;
@@ -767,10 +780,14 @@ void Sequential::compile(
     auto *dispatch = dynamic_cast<Dispatch *>(n);
     if (dispatch == nullptr) {
       flush_pending();
-      n->compile(compiled_dispatches);
+      if (auto *sequential = dynamic_cast<Sequential *>(n)) {
+        sequential->compile(compiled_dispatches, invocations);
+      } else {
+        n->compile(compiled_dispatches);
+      }
       continue;
     }
-    auto compiled = dispatch->compile_dispatch();
+    auto compiled = dispatch->compile_dispatch(invocations);
     if (dispatch->is_indirect() || dispatch->is_cuda_bounded() ||
         dispatch->is_cpu_bounded()) {
       flush_pending();

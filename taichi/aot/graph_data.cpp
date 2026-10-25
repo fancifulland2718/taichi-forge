@@ -104,6 +104,21 @@ struct CompiledGraphKernelInvocation {
     }
     return context;
   }
+
+  bool matches(const taichi::lang::Kernel &kernel,
+               const std::shared_ptr<KernelExecutionHandle> &handle) const {
+    if (execution_handle != handle) {
+      return false;
+    }
+    const auto &plan = kernel.get_offload_execution_plan();
+    if (plan.has_value() != task_launch_plan.has_value()) {
+      return false;
+    }
+    return !plan ||
+           (plan->execution_identity == task_launch_plan->identity &&
+            plan->launch_content_digest == task_launch_plan->digest &&
+            plan->device_range_tasks == device_range_tasks);
+  }
 };
 
 void CompiledDispatch::bind_jit_kernel(
@@ -111,6 +126,22 @@ void CompiledDispatch::bind_jit_kernel(
   TI_ASSERT(ti_kernel != nullptr && handle != nullptr);
   jit_invocation = std::make_shared<CompiledGraphKernelInvocation>(
       *ti_kernel, std::move(handle));
+  bind_argument_origins(jit_invocation->callable);
+}
+
+void CompiledDispatch::bind_jit_kernel(
+    std::shared_ptr<KernelExecutionHandle> handle,
+    CompiledGraphInvocationCache &invocations) {
+  TI_ASSERT(ti_kernel != nullptr && handle != nullptr);
+  auto &shared = invocations[ti_kernel];
+  // Kernel identity preserves Program/definition and ABI specialization;
+  // the selected handle and frozen plan additionally preserve code/launch
+  // variants. Arguments and binding frames remain dispatch-local.
+  if (!shared || !shared->matches(*ti_kernel, handle)) {
+    shared = std::make_shared<CompiledGraphKernelInvocation>(
+        *ti_kernel, std::move(handle));
+  }
+  jit_invocation = shared;
   bind_argument_origins(jit_invocation->callable);
 }
 

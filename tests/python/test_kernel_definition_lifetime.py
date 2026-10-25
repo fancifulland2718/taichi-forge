@@ -53,6 +53,10 @@ def test_native_graph_and_aot_builder_keep_source_definition():
         native = gen_cpp_kernel(fill, [arg])
         builder = core.GraphBuilder()
         builder.dispatch(native, [arg])
+        sequence = builder.create_sequential()
+        sequence.dispatch(native, [arg])
+        builder.seq().append(sequence)
+        builder.dispatch(native, [arg])
         return builder, weakref.ref(fill._primal)
 
     builder, source = make_builder()
@@ -61,10 +65,16 @@ def test_native_graph_and_aot_builder_keep_source_definition():
     runtime.collect_unused_kernel_definitions(force=True)
     assert runtime.prog._debug_kernel_definition_count() == baseline + 1
     compiled = builder.compile()
+    assert compiled._composer_stats["physical_dispatches"] == 3
+    assert compiled._composer_stats["unique_jit_invocations"] == 1
+    # The sharing table belongs to a compilation, not the builder or Program.
+    again = builder.compile()
+    assert again._composer_stats["unique_jit_invocations"] == 1
+    del again
     del builder
     gc.collect()
     runtime.collect_unused_kernel_definitions(force=True)
-    graph = ti.graph.Graph(_CompiledCGraphNode(compiled, 1, ("out",)))
+    graph = ti.graph.Graph(_CompiledCGraphNode(compiled, 3, ("out",)))
     output = ti.ndarray(ti.i32, 4)
     graph.run({"out": output})
     np.testing.assert_array_equal(output.to_numpy(), [9, 10, 11, 12])
@@ -87,6 +97,40 @@ def test_native_graph_and_aot_builder_keep_source_definition():
     gc.collect()
     runtime.collect_unused_kernel_definitions(force=True)
     assert runtime.prog._debug_kernel_definition_count() == baseline
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_invocation_sharing_keeps_distinct_launch_policies():
+    from taichi_forge.lang._offload_execution_plan import (
+        _OffloadExecutionPlan,
+        _bind_offload_execution_plan,
+    )
+
+    values = ti.ndarray(ti.i32, 64)
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in range(64):
+            out[i] = i * 5 + 11
+
+    baseline = _OffloadExecutionPlan.from_task_manifests(fill.task_manifest(values))
+    task, = (task.task_index for task in baseline.tasks if task.task_kind == "range_for")
+    variants = [
+        _bind_offload_execution_plan(fill, baseline.replace_task(task, range_work_per_thread_target=target))
+        for target in (2, 4)
+    ]
+    symbol = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+    builder = ti.graph.GraphBuilder(_explicit_map_source_groups=())
+    for variant in variants * 2:
+        builder.dispatch(variant, symbol)
+    graph = builder.compile()
+    native = graph._spec.nodes[0].compiled_graph
+    assert native._composer_stats["physical_dispatches"] == 4
+    assert native._composer_stats["unique_jit_invocations"] == 2
+    assert len({row["kernel_name"] for row in native._dispatch_ir_metadata}) == 2
+    graph.run({"out": values})
+    np.testing.assert_array_equal(values.to_numpy(), np.arange(64) * 5 + 11)
+    graph.close()
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

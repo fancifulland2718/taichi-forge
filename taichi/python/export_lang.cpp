@@ -7158,9 +7158,14 @@ void export_lang(py::module &m) {
             std::uint32_t source_dispatches = 0;
             std::uint32_t applied_groups = 0;
             std::uint64_t compiled_tasks = 0;
+            std::unordered_set<const aot::CompiledGraphKernelInvocation *>
+                invocations;
             bool tasks_known = true;
             py::list source_groups;
             for (const auto &dispatch : graph.dispatches) {
+              if (dispatch.jit_invocation) {
+                invocations.insert(dispatch.jit_invocation.get());
+              }
               const auto source_count = static_cast<std::uint32_t>(
                   std::max<std::size_t>(1,
                       dispatch.source_dispatches.size()));
@@ -7187,6 +7192,7 @@ void export_lang(py::module &m) {
             }
             result["source_dispatches"] = source_dispatches;
             result["physical_dispatches"] = graph.dispatches.size();
+            result["unique_jit_invocations"] = invocations.size();
             result["applied_groups"] = applied_groups;
             result["source_groups"] = std::move(source_groups);
             result["compiled_tasks"] =

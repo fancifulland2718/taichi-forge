@@ -376,6 +376,10 @@ class CudaGraphCaptureCommand {
 };
 
 struct CompiledGraphKernelInvocation;
+// Cold, per-compilation interning only. Each retained invocation owns its
+// definition lease and execution handle; no process-global cache is created.
+using CompiledGraphInvocationCache = std::unordered_map<
+    taichi::lang::Kernel *, std::shared_ptr<CompiledGraphKernelInvocation>>;
 
 struct GraphArgumentBinding {
   std::vector<int> logical;
@@ -397,6 +401,8 @@ struct CompiledDispatch {
   // copies; neither frontend IR nor process-local handles enter AOT payloads.
   std::shared_ptr<CompiledGraphKernelInvocation> jit_invocation;
   void bind_jit_kernel(std::shared_ptr<KernelExecutionHandle> handle);
+  void bind_jit_kernel(std::shared_ptr<KernelExecutionHandle> handle,
+                       CompiledGraphInvocationCache &invocations);
   void bind_argument_origins(const CallableBase &callable);
   const std::shared_ptr<KernelExecutionHandle> &jit_execution_handle() const;
   bool jit_belongs_to_program(const Program &program) const;
