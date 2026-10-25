@@ -155,6 +155,7 @@ class GraphSearchBudget:
     deterministic_seed: int = 0
     halving_factor: int = 2
     minimum_survivors: int = 1
+    terminal_repeat_count: int | None = None
 
     def __post_init__(self):
         integer_fields = (
@@ -166,7 +167,12 @@ class GraphSearchBudget:
         for name, value, minimum in integer_fields:
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ValueError(f"Graph search {name} must be at least {minimum}")
-        if self.evaluation_limit < self.repeat_count:
+        terminal = self.terminal_repeat_count
+        if terminal is not None and (
+            isinstance(terminal, bool) or not isinstance(terminal, int) or terminal < self.repeat_count
+        ):
+            raise ValueError("Graph search terminal_repeat_count must be at least repeat_count")
+        if self.evaluation_limit < self.effective_terminal_repeat_count:
             raise ValueError(
                 "Graph search evaluation_limit must cover one complete recipe"
             )
@@ -194,6 +200,10 @@ class GraphSearchBudget:
     def recipe_capacity(self):
         return max(1, self.evaluation_limit // self.repeat_count)
 
+    @property
+    def effective_terminal_repeat_count(self):
+        return self.repeat_count if self.terminal_repeat_count is None else self.terminal_repeat_count
+
     def to_dict(self):
         return {
             "evaluation_limit": self.evaluation_limit,
@@ -203,6 +213,7 @@ class GraphSearchBudget:
             "deterministic_seed": self.deterministic_seed,
             "halving_factor": self.halving_factor,
             "minimum_survivors": self.minimum_survivors,
+            "terminal_repeat_count": self.terminal_repeat_count,
         }
 
     def _compileiq_budget(self):
@@ -985,6 +996,10 @@ class _GraphRecipeSearchSession:
             "target_contract_id": self._target.target_contract_id,
             "workload_context_id": self._workload_context_id,
             "evaluation_contract_id": self._evaluation_contract_id,
+            "measurement_repeats": {
+                "screen": self._budget.repeat_count,
+                "terminal": self._budget.effective_terminal_repeat_count,
+            },
             "backend_environment_id": self._backend_environment_id,
             "reuse_scope": self._reuse_scope,
             "forge_compile_provenance": (self._definition.compile_provenance.to_dict()),
@@ -1025,6 +1040,7 @@ class _GraphRecipeSearchSession:
             "target_contract_id",
             "workload_context_id",
             "evaluation_contract_id",
+            "measurement_repeats",
             "backend_environment_id",
             "reuse_scope",
             "forge_compile_provenance",
@@ -1203,7 +1219,7 @@ class _GraphRecipeSearchSession:
         result = _submit_recipe_pages(search, self._plans.batch_pages(
             recipe_ids=self._plans.recipe_ids, stage_index=0,
             fidelity_name="terminal-exact", fidelity_ordinal=0,
-            repeat_count=self._budget.repeat_count, terminal=True,
+            repeat_count=self._budget.effective_terminal_repeat_count, terminal=True,
         ))
         checkpoint = search.checkpoint()
         if not checkpoint.stages[-1].complete or not getattr(checkpoint.batches[-1], "page_final", True):
@@ -1286,7 +1302,7 @@ class _GraphRecipeSearchSession:
                 parent_recipe_ids=parents,
                 fidelity_name=terminal_name,
                 fidelity_ordinal=batch.fidelity.ordinal + 1,
-                repeat_count=self._budget.repeat_count,
+                repeat_count=self._budget.effective_terminal_repeat_count,
                 terminal=True,
             )
             result = _submit_recipe_pages(search, terminal_pages)

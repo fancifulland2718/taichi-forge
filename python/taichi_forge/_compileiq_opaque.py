@@ -12,26 +12,25 @@ from types import MappingProxyType
 _CAPABILITY_SCHEMA = "compileiq.taichi-forge-recipe-search-capability.v2"
 _PROTOCOL_REVISION = 7
 _FORK_BUILD_ID = "compileiq-taichi-forge-complete-recipes.v2"
-_PACKAGE_VERSION = "1.1.0b2+taichiforge.1"
+_PACKAGE_VERSION = "1.1.0b2+taichiforge.2"
 _REVIEWED_FORK_REPOSITORY = "https://github.com/fancifulland2718/CompileIQ"
 _REVIEWED_FORK_REF = "refs/heads/codex/forge-1.1-integration"
-_REVIEWED_FORK_COMMIT = "09d6a68f1e11d9a0f2bedf446c0bd7d2e03283c0"
+_REVIEWED_FORK_COMMIT = "050b692c391d6ed8767e5699e89d819221ab1e0f"
 _REVIEWED_WHEEL_PLATFORM = "win32/amd64"
 _REVIEWED_WHEEL_FILENAME = (
-    "compileiq-1.1.0b2+taichiforge.1-cp313-cp313-win_amd64.whl"
+    "compileiq-1.1.0b2+taichiforge.2-cp313-cp313-win_amd64.whl"
 )
 _REVIEWED_WHEEL_SHA256 = (
-    "e7878888d83176a90ed0bc65bfab421a52596ef72efd1e03e2c5b7894101e66b"
+    "571a5cf2be78f62514ac558a30b44df5dccb23787153af0f09890a7f55a22866"
 )
 _REVIEWED_WHEEL_CORE_LOCK = (
-    "sha256:fb43fc217c4cc955f6ab50d91f9f5c3008324c0cfc79e3fc22b7b0a9e1f0395b"
+    "sha256:bb10078defeae4dbae2215af7e1565a4a7493d43691606a6297a079eb61a95bf"
 )
 _REVIEWED_WHEEL_CAPABILITY_ID = (
-    "ciq-forge-cap-v2:419b6cb9a85eca617a0af57ba0e4a351cdcba1f1e60b518bfb20690f344cb4f8"
+    "ciq-forge-cap-v2:22959f35d39c610abf0162465bcae0d8e82670c865dacbf9e6e4bf1905120d6d"
 )
 _REVIEWED_PYTHON_SOURCE_LOCK = (
-    "ciq-python-source-v1:"
-    "eac6355d168201a4416bec58dfa8f6355263965ca6f839a53fe9cbb932919dc4"
+    "ciq-python-source-v1:37fda4b9e55f1c582214aa3033bb6bea51d8ffb0671fbf2472ff995e514ddc05"
 )
 _DOMAIN_SCHEMA = "compileiq.opaque-recipe-domain.v1"
 _BATCH_SCHEMA = "compileiq.opaque-recipe-batch.v2"

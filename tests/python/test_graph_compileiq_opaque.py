@@ -373,10 +373,10 @@ def test_reviewed_compileiq_distribution_keeps_qualification_out_of_acceptance()
     assert snapshot["commit"] == _shared_compileiq_opaque._REVIEWED_FORK_COMMIT
     assert snapshot["wheel_platform"] == "win32/amd64"
     assert snapshot["wheel_sha256"] == (
-        "e7878888d83176a90ed0bc65bfab421a52596ef72efd1e03e2c5b7894101e66b"
+        "571a5cf2be78f62514ac558a30b44df5dccb23787153af0f09890a7f55a22866"
     )
     assert snapshot["core_lock"] == (
-        "sha256:fb43fc217c4cc955f6ab50d91f9f5c3008324c0cfc79e3fc22b7b0a9e1f0395b"
+        "sha256:bb10078defeae4dbae2215af7e1565a4a7493d43691606a6297a079eb61a95bf"
     )
     assert snapshot["python_abi"] == "cp313"
     assert snapshot["execution_engine"] == "forge_complete_recipes_python_v1"

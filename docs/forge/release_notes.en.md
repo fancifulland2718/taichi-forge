@@ -87,6 +87,11 @@ See the [release procedure](../design/pypi_release.en.md).
   explicit trial budget; cross-session resume requires a portable evaluation context.
   Catalogs, measurements and compiled caches still grow with search work. Paging does not
   imply constant memory or fewer trials. See the [search contract](graph_recipe_integration.en.md).
+- Explicit Graph search generates survivor combinations incrementally within the caller's
+  budget and accepts `terminal_repeat_count` for stronger final measurements. The companion
+  fork interleaves forward/reverse observation rounds and preserves uncertainty/Pareto layers
+  at the halving boundary. These improve search quality and preparation cost; application
+  speedups still require independent validation. Autotuning remains off by default.
 - The frontend/native private ABI is **220**, persistent execution-plan version **27**, and
   compiled-cache schema **85**; LLVM AOT metadata is **19/20**, GFX metadata **15**.
   Update compatible components together; matching Git commits

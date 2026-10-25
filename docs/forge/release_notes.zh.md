@@ -70,6 +70,9 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
   的 `logical_stage_pages_v1` 能力。大域 kernel 搜索要求显式试验预算，跨 session 恢复
   要求可移植评价上下文。目录、测量记录和实际编译缓存仍随搜索增长；分页不代表恒定
   内存，也不减少实际试验次数。详见[搜索合同](graph_recipe_integration.zh.md)。
+- 显式 Graph 搜索按用户预算增量生成幸存组合，可用 `terminal_repeat_count` 增加终测次数。
+  配套 fork 按正反顺序交错观测，在淘汰边界完整保留不确定/Pareto 层。这改善搜索质量和
+  准备成本；应用运行收益仍需独立验证，默认仍关闭自动调优。
 - frontend 与 native runtime 使用私有 ABI **220**，持久执行计划为 **27**，
   编译缓存 schema 为 **85**；LLVM AOT metadata 为 **19/20**、GFX metadata 为 **15**。
   请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。

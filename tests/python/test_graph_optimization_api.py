@@ -115,6 +115,15 @@ def test_graph_optimization_public_contract_rejects_ambiguous_inputs():
         ti.graph.GraphSearchBudget(1, repeat_count=2)
     with pytest.raises(ValueError, match="materialized_memory_limit_bytes"):
         ti.graph.GraphSearchBudget(1, materialized_memory_limit_bytes=-1)
+    for terminal in (0, True, 1, 1.5):
+        with pytest.raises(ValueError, match="terminal_repeat_count"):
+            ti.graph.GraphSearchBudget(8, repeat_count=2, terminal_repeat_count=terminal)
+    with pytest.raises(ValueError, match="cover one complete recipe"):
+        ti.graph.GraphSearchBudget(2, terminal_repeat_count=4)
+    budget = ti.graph.GraphSearchBudget(8, repeat_count=2, terminal_repeat_count=4)
+    assert budget.effective_terminal_repeat_count == 4
+    assert ti.graph.GraphSearchBudget(**budget.to_dict()) == budget
+    assert ti.graph.GraphSearchBudget(8, repeat_count=2).effective_terminal_repeat_count == 2
     with pytest.raises(ValueError, match="strategy mode"):
         ti.graph.GraphRecipeSearchStrategy(mode="guess")
     with pytest.raises(ValueError, match="cannot exceed"):
@@ -236,7 +245,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert decision.selection in decision.pareto_frontier
     assert all("materialized_memory_bytes" in result["metrics"] for result in report.results)
     assert report.compileiq_capability["schema"] == ("compileiq.taichi-forge-recipe-search-capability.v2")
-    assert report.compileiq_provenance["verification"] == ("bundled_manifest_lock_at_search_start")
+    assert report.compileiq_provenance["verification"] == ("python_scheduler_source_digest_at_search_start")
     assert report.compileiq_report.schema_id == ("compileiq.opaque-optimization-report.v1")
     assert report.compileiq_report.detail == "summary"
     assert report.compileiq_report.checkpoint.embedded is False

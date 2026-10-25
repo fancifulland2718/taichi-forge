@@ -26,7 +26,7 @@ Git commit 用于记录来源，不是安装白名单。
 已冻结的 kernel plan 候选共用基线与紧凑差分，检查或物化某个候选时才构造完整任务列表。
 这些变化仅影响显式搜索的冷阶段，不改变普通 JIT、Graph 重放或 AOT 消费。
 
-fork 的 `1.1.0b2+taichiforge.1` 系列跟随上游 1.1，要求 Python 3.11–3.14。
+fork 的 `1.1.0b2+taichiforge.2` 系列跟随上游 1.1，要求 Python 3.11–3.14。
 能力协议 revision 7 用源码摘要标识实际执行完整 recipe 的 Python 调度器；
 普通编译器参数搜索使用随包提供的 Amber 引擎。现有 `core_commit` / `core_lock`
 协议字段在 revision 7 中承载调度器版本与源码身份，不再指向未使用的原生 core。
@@ -130,7 +130,7 @@ decision = definition.search_recipes(
     engine="compileiq",
     providers=providers,
     target=target,
-    budget=ti.graph.GraphSearchBudget(evaluation_limit=48, repeat_count=3),
+    budget=ti.graph.GraphSearchBudget(evaluation_limit=48, repeat_count=2, terminal_repeat_count=4),
     **contracts,
 ).run(evaluator)
 
@@ -158,6 +158,22 @@ evaluator 只返回声明过的命名指标，结果无效时抛出错误。
 请与 `ti.graph.default_recipe_providers()` 合并。搜索和恢复使用同一集合。
 vendor operation 按其公共合同在 freeze 前准备。
 
+## 初筛与终测
+
+`repeat_count` 控制初筛；可用 `terminal_repeat_count` 单独增加终测次数，exact 搜索也使用
+终测次数。省略时沿用 `repeat_count`，显式值不得小于初筛次数。总测量预算包含 baseline
+和重新采集的终测样本。终测中断仍可恢复；增加预算不改变测量合同，修改初筛或终测次数
+则需新建搜索。
+
+fork 按正反顺序逐轮交错测量，并完整保留幸存边界上无法区分的 Pareto 层。
+偶数重复次数可平衡单页内的线性时间漂移，不等于统计显著性，也不消除冷启动、非线性漂移
+或跨页偏差。每次测量前恢复相同输入状态、预热并等待完整执行完成；部署前应独立复测
+最终候选与 baseline，同时按完整应用步数报告搜索成本和摊销。默认仍不启动自动调优。
+
+Forge 增量轮换合并、追加和邻居路线，达到用户给定的生成预算即停止，不再先构造完整
+组合空间。这改变了有限预算下的候选顺序，旧生成 checkpoint 需要重新搜索。
+如果所有提议均不兼容，证明没有新候选仍可能遍历整个提议空间，不能据此宣称穷举总能很快。
+
 ## 续跑搜索与恢复选择
 
 checkpoint 用于继续测量，selection 用于恢复执行选择，两者不是同一文件。
@@ -169,7 +185,7 @@ continued = definition.search_recipes(
     engine="compileiq",
     providers=providers,
     target=target,
-    budget=ti.graph.GraphSearchBudget(evaluation_limit=96, repeat_count=3),
+    budget=ti.graph.GraphSearchBudget(evaluation_limit=96, repeat_count=2, terminal_repeat_count=4),
     checkpoint=checkpoint,
     **contracts,
 ).run(evaluator)

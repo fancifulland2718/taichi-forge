@@ -108,7 +108,7 @@ def test_graph_pages_resume_whole_stage_and_keep_earlier_winner(monkeypatch, mod
         evaluation_contract=ti.graph.GraphEvaluationContract({"metric": "synthetic-ranking-after-exact-oracle"}),
         backend_environment=ti.graph.GraphBackendEnvironment({"fixture": "current-test-device"}),
     )
-    session = definition.search_recipes(budget=ti.graph.GraphSearchBudget(2), **options)
+    session = definition.search_recipes(budget=ti.graph.GraphSearchBudget(2, terminal_repeat_count=2), **options)
     assert len(session.recipes) >= 3
     first_candidate = sorted(key.recipe_id for key in session.recipes if key.recipe_id != session.baseline.recipe_id)[0]
     calls = []
@@ -125,8 +125,14 @@ def test_graph_pages_resume_whole_stage_and_keep_earlier_winner(monkeypatch, mod
     assert partial.selection is None
     assert len(calls) == 2
     saved = partial.checkpoint
+    with pytest.raises(ValueError, match="measurement_repeats"):
+        definition.search_recipes(
+            budget=ti.graph.GraphSearchBudget(40, terminal_repeat_count=4),
+            checkpoint=saved,
+            **options,
+        )
     resumed = definition.search_recipes(
-        budget=ti.graph.GraphSearchBudget(20),
+        budget=ti.graph.GraphSearchBudget(40, terminal_repeat_count=2),
         checkpoint=saved,
         **options,
     ).run(evaluate)
@@ -137,7 +143,10 @@ def test_graph_pages_resume_whole_stage_and_keep_earlier_winner(monkeypatch, mod
     keys = [record["request"]["measurement_key"] for record in checkpoint["records"]]
     assert len(keys) == len(set(keys)) == len(calls)
     if mode == "exact_if_bounded":
-        assert len(calls) == len(session.recipes)
+        assert len(calls) == 2 * len(session.recipes)
+    else:
+        assert checkpoint["batches"][0]["fidelity"]["repeat_count"] == 1
+    assert checkpoint["batches"][-1]["fidelity"]["repeat_count"] == 2
     assert len(checkpoint["batches"]) > 1
     assert resumed.report.compileiq_report.baseline_comparison
 

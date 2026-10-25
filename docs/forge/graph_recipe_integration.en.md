@@ -31,7 +31,7 @@ plan candidates share a baseline plus compact edits, constructing a full task
 list only when inspected or materialized. These changes affect explicit search
 preparation, not ordinary JIT, Graph replay or AOT consumption.
 
-The fork's `1.1.0b2+taichiforge.1` line follows upstream 1.1 and requires Python
+The fork's `1.1.0b2+taichiforge.2` line follows upstream 1.1 and requires Python
 3.11–3.14. Its capability revision 7 identifies the actual complete-recipe Python
 scheduler by a source digest. Ordinary compiler-control searches use the bundled
 Amber engine. Existing `core_commit` / `core_lock` protocol fields carry scheduler
@@ -166,7 +166,7 @@ decision = definition.search_recipes(
     engine="compileiq",
     providers=providers,
     target=target,
-    budget=ti.graph.GraphSearchBudget(evaluation_limit=48, repeat_count=3),
+    budget=ti.graph.GraphSearchBudget(evaluation_limit=48, repeat_count=2, terminal_repeat_count=4),
     **contracts,
 ).run(evaluator)
 
@@ -196,6 +196,30 @@ set and also need built-ins, combine it with `ti.graph.default_recipe_providers(
 Use the same set for search and restoration. Prepare vendor operations before
 freezing as described by their public operation contract.
 
+## Screening and terminal measurements
+
+`repeat_count` controls screening; `terminal_repeat_count` optionally increases
+terminal measurements (including exact search). If omitted, both use
+`repeat_count`. Terminal repeats must be at least the screening count. Work
+budgets count all observations, including the baseline and fresh terminal
+measurements. A partial terminal stage remains resumable; changing either repeat
+policy requires a new search, while increasing the work budget does not.
+
+The fork interleaves candidates in forward/reverse rounds and retains the whole
+uncertain Pareto layer at the survivor cutoff. Even repeat counts balance linear
+page-local time drift; they do not guarantee statistical significance or remove
+cold starts, nonlinear drift or inter-page bias. Restore the same workload before
+each trial, warm up, measure full completion, and independently compare the final
+candidate with baseline before deployment. Report search cost and amortization
+in complete application steps. Search remains explicitly opt-in.
+
+Forge generates survivor merges, additions and neighbors incrementally, stopping
+when the caller's generated-recipe budget is filled. It alternates generation
+routes rather than building the whole combination space first. This changes
+bounded candidate order, so old generation checkpoints require a new search.
+If every proposal is incompatible, proving there are no new recipes may still
+visit the whole proposed space; this is not an exhaustive-search speed guarantee.
+
 ## Resume search or restore a selection
 
 A checkpoint continues measurements; a selection restores an execution choice.
@@ -208,7 +232,7 @@ continued = definition.search_recipes(
     engine="compileiq",
     providers=providers,
     target=target,
-    budget=ti.graph.GraphSearchBudget(evaluation_limit=96, repeat_count=3),
+    budget=ti.graph.GraphSearchBudget(evaluation_limit=96, repeat_count=2, terminal_repeat_count=4),
     checkpoint=checkpoint,
     **contracts,
 ).run(evaluator)
