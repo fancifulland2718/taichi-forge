@@ -161,8 +161,8 @@ def _cost_markdown(annotations):
         "These are explicitly mapped caller measurements, not search-wrapper wall time. Reporting a cost does not "
         "make it an objective. Profiles are never added together: host, device and end-to-end scopes stay separate.",
         "",
-        "| Recipe / profile | Scope / unit | Setup median | First median | Steady median | Break-even executions |",
-        "| --- | --- | ---: | ---: | ---: | --- |",
+        "| Recipe / profile | Scope / unit | Setup median | First median | Steady median | Extra cold / steady units | Break-even executions |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- |",
     ]
 
     def cell(value):
@@ -190,6 +190,7 @@ def _cost_markdown(annotations):
                             f"{annotation['recipe_id']} / {name}",
                             f"{profile['scope']} / {profile['unit']}",
                             *costs,
+                            estimate.get("extra_cold_equivalent_steady_executions", "unavailable"),
                             result,
                         ),
                     )
@@ -203,7 +204,9 @@ def _cost_markdown(annotations):
             "The first execution replaces one steady execution; setup and first must be non-overlapping costs "
             "in the declared unit/scope. No positive steady saving means no amortization claim. Observed-range bounds "
             "in JSON are arithmetic over sample extrema, not statistical confidence intervals; overlap, single "
-            "observations, missing data and incomparable stage/fidelity are explicit. Adoption remains workload-owned.",
+            "observations, missing data and incomparable stage/fidelity are explicit. Extra cold / steady units "
+            "divide the extra cold cost by a whole candidate steady interval, not by the saving. "
+            "Measurement sources are retained per metric in JSON. Adoption remains workload-owned.",
         ]
     )
     return lines

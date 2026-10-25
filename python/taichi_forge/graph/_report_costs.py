@@ -162,6 +162,13 @@ def _break_even(profile, candidate, baseline, costs, baseline_costs):
         result["status"] = "arithmetic_out_of_range"
         return result
     result.update(steady_saving_per_execution=saving, initial_cost_delta=premium, unit=profile["unit"])
+    # Time-equivalent execution units are not a break-even count: the latter
+    # divides by the saving, not by the candidate's whole steady interval.
+    steady = costs["steady"]["median"]
+    equivalent = max(0.0, premium) / steady if steady > 0 else None
+    result["extra_cold_equivalent_steady_executions"] = (
+        equivalent if equivalent is not None and math.isfinite(equivalent) else None
+    )
     if saving <= 0:
         result["status"] = "no_positive_steady_saving"
         return result
@@ -171,6 +178,7 @@ def _break_even(profile, candidate, baseline, costs, baseline_costs):
         return result
     result["status"] = "model_estimate"
     result["median_estimate_executions"] = 1 + math.ceil(ratio)
+    result["additional_warm_executions"] = math.ceil(ratio)
     lower_saving = baseline_costs["steady"]["observed_min"] - costs["steady"]["observed_max"]
     upper_premium = sum(
         costs[phase]["observed_max"] - baseline_costs[phase]["observed_min"] for phase in ("setup", "first")
@@ -186,7 +194,9 @@ def _break_even(profile, candidate, baseline, costs, baseline_costs):
     return result
 
 
-def _cost_evidence(candidate, baseline, profiles, observations):
+def _cost_evidence(candidate, baseline, profiles, observations, metric_definitions=None):
+    from taichi_forge.graph._report_measurements import _measurement_definitions
+
     result = {}
     for name, profile in profiles.items():
         costs = _summaries(candidate, observations.get(candidate.recipe_id, ()), profile)
@@ -198,6 +208,141 @@ def _cost_evidence(candidate, baseline, profiles, observations):
             "unit": profile["unit"],
             "phases": costs,
             "baseline_phases": baseline_costs,
+            "measurement_definitions": _measurement_definitions(
+                (profile[phase] for phase in _PHASES if phase in profile), metric_definitions or {}
+            ),
             "break_even": _break_even(profile, candidate, baseline, costs, baseline_costs),
         }
     return result
+
+
+def _search_cost_ledger(
+    records,
+    *,
+    selected_recipe_id,
+    construction_seconds,
+    run_seconds,
+    prior_record_count,
+    generated_recipe_count,
+    annotations,
+):
+    """Account for all recorded trials without charging overlapping timers twice.
+
+    Invocation wall time includes failed/unselected trials and search overhead.
+    Historical trial boundaries survive resume, but old construction/search wall
+    intervals are not invented from those partial timers.
+    """
+    from taichi_forge.graph._trial_observations import _trial_boundaries
+
+    boundaries = _trial_boundaries(records)
+    by_recipe = {}
+    for record in records:
+        recipe_id = record["request"]["recipe_id"]
+        item = by_recipe.setdefault(recipe_id, {"record_count": 0, "failed_count": 0})
+        item["record_count"] += 1
+        item["failed_count"] += int(record["outcome"]["failure"] is not None)
+    for recipe_id, item in by_recipe.items():
+        trials = boundaries.get(recipe_id, ())
+        item["selected"] = recipe_id == selected_recipe_id
+        item["boundary_count"] = len(trials)
+        item["missing_boundary_count"] = item["record_count"] - len(trials)
+        item["host_phase_seconds"] = {}
+        for phase in ("materialization", "evaluator", "execution_snapshot", "post_evaluator_observation", "cleanup"):
+            values = [trial.get("host_wall_seconds", {}).get(phase) for trial in trials]
+            measured = [
+                float(value)
+                for value in values
+                if isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value >= 0
+            ]
+            try:
+                subtotal = math.fsum(measured) if measured else None
+            except OverflowError:
+                subtotal = None
+            item["host_phase_seconds"][phase] = {
+                "observed_subtotal": subtotal,
+                "measured_count": len(measured),
+                "unmeasured_record_count": item["record_count"] - len(measured),
+            }
+    invocation_seconds = construction_seconds + run_seconds
+    equivalents = {}
+    selected = next((item for item in annotations if item["recipe_id"] == selected_recipe_id), None)
+    for name, profile in ({} if selected is None else selected.get("cost_profiles", {})).items():
+        steady = profile["phases"]["steady"]
+        denominator = (
+            None
+            if steady is None
+            else steady["median"] * {"s": 1, "ms": 1e-3, "us": 1e-6, "ns": 1e-9}[profile["unit"]]
+        )
+        ratio = None if denominator is None or denominator <= 0 else invocation_seconds / denominator
+        available = ratio is not None and math.isfinite(ratio)
+        equivalents[name] = {
+            "status": "arithmetic_time_equivalent" if available else "steady_measurement_unavailable_or_zero",
+            "executions": ratio if available else None,
+            "runtime_scope": profile["scope"],
+            "cost_scope": "current_invocation_host_wall",
+            "is_break_even": False,
+        }
+    return {
+        "schema": "forge_search_cost_ledger.v1",
+        "source": "host_perf_counter_and_recorded_trial_boundaries",
+        "unit": "s",
+        "invocation": {
+            "construction_seconds": construction_seconds,
+            "run_seconds": run_seconds,
+            "total_seconds": invocation_seconds,
+            "scope": "session_construction_and_run_including_search_context_close",
+            "excludes": [
+                "source_graph_construction",
+                "caller_idle_between_construction_and_run",
+                "final_report_rendering",
+            ],
+        },
+        "history": {
+            "record_count": len(records),
+            "prior_record_count": prior_record_count,
+            "current_record_count": len(records) - prior_record_count,
+            "failed_count": sum(item["failed_count"] for item in by_recipe.values()),
+            "measured_recipe_count": len(by_recipe),
+            "generated_recipe_count": generated_recipe_count,
+            "whole_search_host_seconds": invocation_seconds if prior_record_count == 0 else None,
+            "wall_coverage": "current_invocation_only" if prior_record_count else "single_invocation",
+        },
+        "trials_by_recipe": by_recipe,
+        "equivalent_selected_steady_executions": equivalents,
+        "aggregation_rule": "trial timers and caller costs overlap invocation wall; never add them to it",
+        "qualification": "observational_not_an_objective_or_production_speedup_claim",
+    }
+
+
+def _search_cost_markdown(ledger):
+    if not ledger:
+        return []
+    invocation, history = ledger["invocation"], ledger["history"]
+    lines = [
+        "",
+        "## Search cost ledger",
+        "",
+        f"Current invocation: {invocation['total_seconds']:.6g} s host wall "
+        f"(construction {invocation['construction_seconds']:.6g} s; run {invocation['run_seconds']:.6g} s). "
+        f"Recorded trials: {history['record_count']}; failed: {history['failed_count']}; "
+        f"prior/resumed: {history['prior_record_count']}.",
+        "",
+        "This includes measured rejected/unselected candidates. Per-trial timers and caller costs "
+        "are overlapping views, not extra costs to add. Source Graph construction, caller idle time "
+        "and final report rendering are excluded. Historical whole-search wall time is unavailable "
+        "after resume; recorded historical phase subtotals remain in JSON.",
+    ]
+    if ledger["equivalent_selected_steady_executions"]:
+        lines.append("")
+    for name, equivalent in ledger["equivalent_selected_steady_executions"].items():
+        count = equivalent["executions"]
+        label = str(name).replace("\n", " ").replace("\r", " ")
+        lines.append(
+            f"- {label}: "
+            + ("unavailable" if count is None else f"{count:.6g} selected steady execution units")
+            + " of current search wall time; not a break-even count."
+        )
+    return lines

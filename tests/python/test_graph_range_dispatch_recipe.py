@@ -126,6 +126,15 @@ def test_explicit_range_search_runs_complete_graphs():
     assert result.status == "selected", result.report.results
     assert result.report.search_complete
     assert sorted(observed) == [False, True]
+    ledger = result.report.search_cost_ledger
+    assert ledger["history"]["record_count"] == 2
+    assert ledger["history"]["generated_recipe_count"] == 2
+    assert ledger["history"]["whole_search_host_seconds"] > 0
+    assert len(ledger["trials_by_recipe"]) == 2
+    assert sum(item["selected"] for item in ledger["trials_by_recipe"].values()) == 1
+    restored = ti.graph.GraphOptimizationReportV2.from_json(result.report.to_json())
+    assert restored.search_cost_ledger == ledger
+    assert "Search cost ledger" in restored.to_markdown()
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

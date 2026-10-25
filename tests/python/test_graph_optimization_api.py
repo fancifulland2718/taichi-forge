@@ -444,6 +444,11 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         backend_environment=backend_environment,
     )
     resumed = resumed_session.run(resumed_evaluator)
+    ledger = resumed.report.search_cost_ledger
+    assert ledger["history"]["prior_record_count"] == len(partial.report.checkpoint.compileiq_checkpoint["records"])
+    assert ledger["history"]["whole_search_host_seconds"] is None
+    assert ledger["history"]["current_record_count"] == len(resumed_observed)
+    assert ledger["equivalent_selected_steady_executions"]["contract_fixture"]["executions"] > 0
     assert resumed.selection is not None
     assert resumed.report.search_complete
     assert resumed.report.termination_reason == "no_new_physical_identity"

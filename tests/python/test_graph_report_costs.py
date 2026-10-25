@@ -13,7 +13,11 @@ from taichi_forge.graph._report_costs import (
     _separate_cost_metrics,
 )
 from taichi_forge.graph._reuse import GraphEvaluationContract
-from taichi_forge.graph._report_measurements import _metric_definitions, _measurement_definitions, _measurement_markdown
+from taichi_forge.graph._report_measurements import (
+    _metric_definitions,
+    _measurement_definitions,
+    _measurement_markdown,
+)
 
 
 _PROFILE = {
@@ -61,7 +65,9 @@ def test_metric_definitions_preserve_scope_and_do_not_infer_device_time_from_nam
 
 
 def _candidate(name="candidate", **changes):
-    return SimpleNamespace(recipe_id=name, stage_index=2, fidelity_name="full", complete=True, feasible=True, **changes)
+    return SimpleNamespace(
+        recipe_id=name, stage_index=2, fidelity_name="full", complete=True, feasible=True, **changes
+    )
 
 
 def _samples(values, *, stage=2, fidelity="full", failed=False):
@@ -134,9 +140,74 @@ def test_break_even_counts_first_execution_once_and_keeps_extrema_separate_from_
     assert not result["single_observation"]
     assert not result["observed_steady_ranges_overlap"]
     assert evidence["baseline_phases"]["steady"]["median"] == 11
+    assert result["extra_cold_equivalent_steady_executions"] == 5
+    assert result["additional_warm_executions"] == 6
     # At six executions candidate is still slower; at seven they tie.
     assert 31 + 2 + 5 * 6 > 1 + 2 + 5 * 11
     assert 31 + 2 + 6 * 6 == 1 + 2 + 6 * 11
+
+
+def test_cost_sources_are_projected_without_inferring_a_clock_or_adding_objectives():
+    definitions = {"prepare": {"source": "perf_counter", "scope": "cold", "unit": "ms", "interval": "prepare"}}
+    evidence = _cost_evidence(_candidate(), None, {"wall": _PROFILE}, {}, definitions)["wall"]
+    assert evidence["measurement_definitions"]["prepare"]["declaration"] == definitions["prepare"]
+    assert evidence["measurement_definitions"]["steady_ms"]["status"] == "undeclared"
+    assert evidence["phases"]["steady"] is None
+
+
+def test_search_ledger_keeps_failed_unselected_and_prior_trials_without_summing_overlaps():
+    from taichi_forge.graph._report_costs import _search_cost_ledger, _search_cost_markdown
+    from taichi_forge.graph._trial_observations import _PROVENANCE_KEY
+
+    def record(recipe, index, failed, timings):
+        return {
+            "request": dict(
+                recipe_id=recipe,
+                measurement_key=str(index),
+                observation_index=index,
+                stage_index=0,
+                fidelity_name="full",
+            ),
+            "outcome": dict(
+                failure={} if failed else None,
+                cleanup={"status": "complete"},
+                provenance={} if timings is None else {_PROVENANCE_KEY: json.dumps({"host_wall_seconds": timings})},
+            ),
+        }
+
+    records = [
+        record("baseline", 0, False, {"materialization": 0.5, "evaluator": 1.0}),
+        record("rejected", 1, True, {"materialization": 0.75}),
+        record("winner", 2, False, {"materialization": 0.25, "evaluator": 0.25}),
+        record("legacy", 3, True, None),
+    ]
+    annotation = {
+        "recipe_id": "winner",
+        "cost_profiles": {
+            "wall": {"scope": "one_complete_graph_replay", "unit": "ms", "phases": {"steady": {"median": 2.0}}}
+        },
+    }
+    options = dict(
+        selected_recipe_id="winner",
+        construction_seconds=1.0,
+        run_seconds=3.0,
+        generated_recipe_count=5,
+        annotations=[annotation],
+    )
+    ledger = _search_cost_ledger(records, prior_record_count=0, **options)
+    assert ledger["invocation"]["total_seconds"] == 4.0
+    assert ledger["history"]["whole_search_host_seconds"] == 4.0
+    assert ledger["history"]["failed_count"] == 2
+    assert ledger["history"]["generated_recipe_count"] == 5
+    assert ledger["trials_by_recipe"]["rejected"]["host_phase_seconds"]["evaluator"]["observed_subtotal"] is None
+    assert ledger["trials_by_recipe"]["legacy"]["missing_boundary_count"] == 1
+    assert not ledger["trials_by_recipe"]["baseline"]["selected"]
+    assert ledger["equivalent_selected_steady_executions"]["wall"]["executions"] == 2000
+    assert not ledger["equivalent_selected_steady_executions"]["wall"]["is_break_even"]
+    resumed = _search_cost_ledger(records, prior_record_count=2, **options)
+    assert resumed["history"]["whole_search_host_seconds"] is None
+    assert resumed["history"]["current_record_count"] == 2
+    assert "not extra costs to add" in "\n".join(_search_cost_markdown(resumed))
 
 
 @pytest.mark.parametrize(

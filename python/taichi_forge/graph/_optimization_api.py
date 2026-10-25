@@ -11,6 +11,7 @@ import json
 import math
 import sys
 import uuid
+from time import perf_counter
 from dataclasses import dataclass, field
 
 from taichi_forge.graph._reuse import (
@@ -483,6 +484,11 @@ class GraphOptimizationReportV2:
         return tuple(json.loads(self._recipe_annotations_json))
 
     @property
+    def search_cost_ledger(self):
+        """Whole-search observations; absent for reports made before this field."""
+        return json.loads(self._reuse_json).get("search_cost_ledger")
+
+    @property
     def reuse(self):
         return json.loads(self._reuse_json)
 
@@ -738,6 +744,9 @@ class GraphOptimizationReportV2:
         lines.extend(_boundary_markdown(self.recipe_annotations))
         lines.extend(_measurement_markdown(self.recipe_annotations))
         lines.extend(_cost_markdown(self.recipe_annotations))
+        from taichi_forge.graph._report_costs import _search_cost_markdown
+
+        lines.extend(_search_cost_markdown(self.search_cost_ledger))
         lines.extend(_context_markdown(self.context, self.recipe_annotations))
         lines.extend(_provider_preparation_markdown(self.recipe_annotations))
         if any(item.get("environment_observations") for item in self.recipe_annotations):
@@ -840,6 +849,7 @@ class _GraphRecipeSearchSession:
         providers,
         available_capabilities,
     ):
+        construction_started = perf_counter()
         if engine != "compileiq":
             raise ValueError("Graph recipe search engine must be compileiq")
         if target is None:
@@ -953,6 +963,7 @@ class _GraphRecipeSearchSession:
         self._handles = {}
         self._refresh_handles()
         self._used = False
+        self._construction_host_seconds = perf_counter() - construction_started
 
     @staticmethod
     def _normalize_checkpoint(checkpoint):
@@ -1596,7 +1607,9 @@ class _GraphRecipeSearchSession:
                     "provider_claims": tuple(provider_claims),
                     "frozen_fragments": _frozen_fragments(recipe),
                     "cost_observations": tuple(costs.get(recipe_id, ())),
-                    "cost_profiles": _cost_evidence(candidate, baseline_candidate, self._cost_profiles, costs),
+                    "cost_profiles": _cost_evidence(
+                        candidate, baseline_candidate, self._cost_profiles, costs, self._metric_definitions
+                    ),
                     "provider_declared_applicability": tuple(declared_applicability),
                     "provider_declared_limitations": tuple(declared_limitations),
                 }
@@ -1618,8 +1631,9 @@ class _GraphRecipeSearchSession:
         if not callable(evaluator):
             raise TypeError("Graph recipe evaluator must be callable")
         self._used = True
+        run_started = perf_counter()
 
-        from taichi_forge.graph._report_costs import _separate_cost_metrics
+        from taichi_forge.graph._report_costs import _separate_cost_metrics, _search_cost_ledger
         from taichi_forge.graph._report_context import _search_context
 
         target_names = frozenset(self._target._compileiq_contract().metric_names)
@@ -1657,6 +1671,7 @@ class _GraphRecipeSearchSession:
             status = result.status.model_dump(by_alias=True)
             compileiq_report = result.report(detail="full")
 
+        run_seconds = perf_counter() - run_started
         checkpoint = GraphRecipeSearchCheckpointV1.create(
             contract=self._checkpoint_contract(
                 capability=capability,
@@ -1695,6 +1710,16 @@ class _GraphRecipeSearchSession:
             )
         )
         outcome_status, next_action = self._outcome_state(selected, status)
+        annotations = self._recipe_annotations(compileiq_report, compileiq_checkpoint)
+        search_costs = _search_cost_ledger(
+            compileiq_checkpoint["records"],
+            selected_recipe_id=None if selected is None else selected.recipe_id,
+            construction_seconds=self._construction_host_seconds,
+            run_seconds=run_seconds,
+            prior_record_count=0 if self._checkpoint is None else len(self._checkpoint["records"]),
+            generated_recipe_count=len(self._catalog.entries()),
+            annotations=annotations,
+        )
         report = GraphOptimizationReportV2(
             semantic_graph_id=self._definition.semantic_graph_id,
             target=self._target,
@@ -1718,10 +1743,11 @@ class _GraphRecipeSearchSession:
                 )
             ),
             _tradeoffs_json=_canonical_json(self._pareto_tradeoffs(frontier, selected_result)),
-            _recipe_annotations_json=_canonical_json(self._recipe_annotations(compileiq_report, compileiq_checkpoint)),
+            _recipe_annotations_json=_canonical_json(annotations),
             _reuse_json=_canonical_json(
                 {
                     "scope": self._reuse_scope,
+                    "search_cost_ledger": search_costs,
                     "checkpoint_id": checkpoint.checkpoint_id,
                     "selection_artifact_id": (None if selection_artifact is None else selection_artifact.artifact_id),
                     "workload_context_id": self._workload_context_id,
