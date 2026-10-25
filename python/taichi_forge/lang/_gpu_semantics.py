@@ -13,6 +13,7 @@ from typing import Any, Optional, Tuple
 
 from taichi_forge.lang.task_manifest import (
     HostRangeBound,
+    HostRangeInstruction,
     HostRangeBounds,
     RangeBound,
     RangeForBounds,
@@ -20,7 +21,7 @@ from taichi_forge.lang.task_manifest import (
 
 
 _GPU_SEMANTICS_SCHEMA_NAME = "taichi-forge-gpu-semantics"
-_GPU_SEMANTICS_SCHEMA_VERSION = 2
+_GPU_SEMANTICS_SCHEMA_VERSION = 3
 
 
 class _GpuBackend(str, Enum):
@@ -186,7 +187,7 @@ def _schema_type(cls):
 
 # Reuse the compiled task's immutable domain types instead of interpreting
 # bounds again in the tuning schema. These types hold no runtime objects.
-for _range_type in (HostRangeBound, HostRangeBounds, RangeBound, RangeForBounds):
+for _range_type in (HostRangeInstruction, HostRangeBound, HostRangeBounds, RangeBound, RangeForBounds):
     _schema_type(_range_type)
 
 

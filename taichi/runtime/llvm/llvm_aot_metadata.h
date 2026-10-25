@@ -29,10 +29,10 @@ inline constexpr std::uint32_t kTaskLaunchPolicyAotSchemaVersion = 9;
 // either runtime attempts to decode metadata.tcb.
 inline constexpr std::uint32_t kTypedRangeBoundsAotSchemaVersion = 10;
 // Adds the final-IR range-dispatch proof to each serialized LLVM task.
-// v17 separates known workload bounds from empty-group transformation proof.
-inline constexpr std::uint32_t kDeviceRangeProofAotSchemaVersion = 17;
+// v19 adds checked composite host-range programs to the workload description.
+inline constexpr std::uint32_t kDeviceRangeProofAotSchemaVersion = 19;
 // Entry aliases and selected range policies reference shared code metadata.
-inline constexpr std::uint32_t kKernelEntryPolicyAotSchemaVersion = 18;
+inline constexpr std::uint32_t kKernelEntryPolicyAotSchemaVersion = 20;
 
 inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";

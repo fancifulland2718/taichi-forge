@@ -45,8 +45,10 @@ combination. Consult the linked API contracts and capability queries for exact s
   Prepared instances retain the original grid for bounds that depend on mutable
   submission parameters; unrelated updates do not disable shape-based selection.
   Every intermediate integer operation must fit i32; otherwise the existing grid
-  is retained. Expressions are normalized at compile time, without launch-time
-  expression interpretation or workload size limits.
+  is retained. The common affine path is normalized at compile time. Composite
+  bounds also support `min`/`max` and positive compile-time integer division, using
+  a checked DAG that preserves signed rounding and original arithmetic order.
+  Shared subexpressions are described once; workload and expression depth are not capped.
 - Ordinary CUDA/Vulkan range tasks can read immutable scalar/shape end bounds
   directly. When both bounds are supported host expressions, the start is also
   evaluated directly, removing serial tasks used only to transport these values.
@@ -66,8 +68,8 @@ combination. Consult the linked API contracts and capability queries for exact s
   [Search reports](graph_recipe_integration.en.md) add whole-search accounting, measurement
   sources and cold-cost execution equivalents, separately from break-even counts. Failed and
   unselected trials are included; missing historical wall time after resume stays unknown.
-- The frontend/native private ABI is **217**, persistent execution-plan version **27**, and
-  compiled-cache schema **82**; LLVM AOT metadata is **17/18**, GFX metadata **14**.
+- The frontend/native private ABI is **219**, persistent execution-plan version **27**, and
+  compiled-cache schema **84**; LLVM AOT metadata is **19/20**, GFX metadata **15**.
   Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.

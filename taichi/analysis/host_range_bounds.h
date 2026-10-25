@@ -1,5 +1,7 @@
 #pragma once
 
+#include <unordered_map>
+
 #include "taichi/codegen/range_for_bounds.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/type_factory.h"
@@ -42,7 +44,7 @@ inline bool compose_host_range_affine(HostRangeBound &bound,
 
 // Capture provenance before cross-offload promotion turns argument expressions
 // into global-temporary loads. Argument layouts have already been finalized.
-inline std::optional<HostRangeBound> describe_host_range_bound(
+inline std::optional<HostRangeBound> describe_host_range_affine(
     Stmt *stmt, const StructType *arguments) {
   if (!stmt || stmt->ret_type != PrimitiveType::i32 || !arguments)
     return std::nullopt;
@@ -65,7 +67,9 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
       return std::nullopt;
     result.offsets.push_back(arguments->get_element_offset(arg->arg_id));
   } else if (auto *binary = stmt->cast<BinaryOpStmt>()) {
-    if (binary->is_bit_vectorized)
+    if (binary->is_bit_vectorized ||
+        (binary->op_type != BinaryOpType::add &&
+         binary->op_type != BinaryOpType::sub && binary->op_type != BinaryOpType::mul))
       return std::nullopt;
     auto *constant = binary->rhs->cast<ConstStmt>();
     auto *variable = binary->lhs;
@@ -76,7 +80,7 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
       constant_left = true;
     }
     if (constant && constant->ret_type == PrimitiveType::i32) {
-      auto input = describe_host_range_bound(variable, arguments);
+      auto input = describe_host_range_affine(variable, arguments);
       if (!input)
         return std::nullopt;
       const std::int64_t c = constant->val.val_int32();
@@ -107,8 +111,8 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
     }
     if (binary->op_type != BinaryOpType::mul)
       return std::nullopt;
-    auto left = describe_host_range_bound(binary->lhs, arguments);
-    auto right = describe_host_range_bound(binary->rhs, arguments);
+    auto left = describe_host_range_affine(binary->lhs, arguments);
+    auto right = describe_host_range_affine(binary->rhs, arguments);
     if (!left || !right)
       return std::nullopt;
     // Keep arbitrary scalar products out of this contract. Flatten only the
@@ -132,11 +136,97 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
   return result;
 }
 
+inline std::optional<HostRangeBound> describe_host_range_bound(
+    Stmt *root, const StructType *arguments) {
+  if (auto affine = describe_host_range_affine(root, arguments))
+    return affine;
+  if (!root || !arguments)
+    return std::nullopt;
+  HostRangeBound result;
+  std::unordered_map<Stmt *, std::size_t> indices;
+  std::vector<bool> shape_products;
+  std::vector<std::pair<Stmt *, bool>> pending{{root, false}};
+  while (!pending.empty()) {
+    auto [stmt, emit] = pending.back();
+    pending.pop_back();
+    if (indices.count(stmt))
+      continue;
+    if (stmt->ret_type != PrimitiveType::i32)
+      return std::nullopt;
+    HostRangeInstruction node;
+    bool shape_product = false;
+    if (auto *constant = stmt->cast<ConstStmt>()) {
+      node.immediate = constant->val.val_int32();
+      shape_product = node.immediate >= 0;
+    } else if (auto *shape = stmt->cast<ExternalTensorShapeAlongAxisStmt>()) {
+      if (shape->arg_id.size() != 1)
+        return std::nullopt;
+      auto path = shape->arg_id;
+      path.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
+      path.push_back(shape->axis);
+      node.op = HostRangeOp::shape_i32;
+      node.offset = arguments->get_element_offset(path);
+      shape_product = true;
+    } else if (auto *arg = stmt->cast<ArgLoadStmt>()) {
+      if (arg->is_ptr || !arg->create_load || arg->arg_depth != 0 ||
+          arg->arg_id.size() != 1)
+        return std::nullopt;
+      node.op = HostRangeOp::argument_i32;
+      node.offset = arguments->get_element_offset(arg->arg_id);
+    } else if (auto *binary = stmt->cast<BinaryOpStmt>()) {
+      if (binary->is_bit_vectorized)
+        return std::nullopt;
+      bool division = false;
+      switch (binary->op_type) {
+        case BinaryOpType::add: node.op = HostRangeOp::add; break;
+        case BinaryOpType::sub: node.op = HostRangeOp::subtract; break;
+        case BinaryOpType::mul: node.op = HostRangeOp::multiply; break;
+        case BinaryOpType::min: node.op = HostRangeOp::minimum; break;
+        case BinaryOpType::max: node.op = HostRangeOp::maximum; break;
+        case BinaryOpType::div: node.op = HostRangeOp::divide; division = true; break;
+        case BinaryOpType::floordiv: node.op = HostRangeOp::floor_divide; division = true; break;
+        default: return std::nullopt;
+      }
+      if (division) {
+        auto *divisor = binary->rhs->cast<ConstStmt>();
+        if (!divisor || divisor->ret_type != PrimitiveType::i32 ||
+            divisor->val.val_int32() <= 0)
+          return std::nullopt;
+        node.immediate = divisor->val.val_int32();
+      }
+      if (!emit) {
+        pending.emplace_back(stmt, true);
+        if (!division)
+          pending.emplace_back(binary->rhs, false);
+        pending.emplace_back(binary->lhs, false);
+        continue;
+      }
+      node.lhs = indices.at(binary->lhs);
+      if (!division)
+        node.rhs = indices.at(binary->rhs);
+      if (node.op == HostRangeOp::multiply) {
+        shape_product = shape_products[node.lhs] && shape_products[node.rhs];
+        // Preserve the existing multiplication scope: constants or dimension
+        // products. This is not an arbitrary host expression interpreter.
+        if (!shape_product && !binary->lhs->is<ConstStmt>() &&
+            !binary->rhs->is<ConstStmt>())
+          return std::nullopt;
+      }
+    } else {
+      return std::nullopt;
+    }
+    indices.emplace(stmt, result.program.size());
+    result.program.push_back(node);
+    shape_products.push_back(shape_product);
+  }
+  return result;
+}
+
 inline std::optional<HostRangeBounds> describe_host_range_bounds(
     Stmt *begin, Stmt *end, const StructType *arguments) {
   auto first = describe_host_range_bound(begin, arguments);
   auto last = describe_host_range_bound(end, arguments);
-  if (!first || !last || (first->offsets.empty() && last->offsets.empty()))
+  if (!first || !last || (!first->has_inputs() && !last->has_inputs()))
     return std::nullopt;  // Constant ranges already have codegen grid selection.
   return HostRangeBounds{std::move(*first), std::move(*last)};
 }

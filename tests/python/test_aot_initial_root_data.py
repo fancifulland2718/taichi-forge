@@ -141,7 +141,7 @@ def export_and_check(tmp_path, artifact_format=None, *, automatic=False):
         document = json.loads(archive.read(metadata_name))
         # Vulkan ndarray arguments use the descriptor-relative offset contract;
         # the initial-root-data contract alone only required metadata 3.
-        assert document["metadata_version" if arch == "vulkan" else "schema_version"] == (14 if arch == "vulkan" else 17)
+        assert document["metadata_version" if arch == "vulkan" else "schema_version"] == (15 if arch == "vulkan" else 19)
         entries = document["initial_root_data"]
         assert {entry["tree_id"] for entry in entries} == {0, 1}
         assert len([name for name in archive.namelist() if name.startswith("data/")]) == 2

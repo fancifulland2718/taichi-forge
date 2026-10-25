@@ -2513,11 +2513,17 @@ change the physical range relative to the source loop. Two constant bounds
 produce `constant_range_size` using a 64-bit difference, with empty or reversed
 intervals reporting zero. Reporting adds no device readback or synchronization.
 Host-bound selection also covers constant addition, subtraction and multiplication
-over supported scalar/shape bounds. A normalized affine transform and input
-interval preserve intermediate i32 overflow checks; unsupported expressions or
-out-of-interval values retain the original grid.
-The current task layout uses LLVM AOT schema 15 (16 for entry aliases or selected
-range policies), GFX metadata 13, JIT cache schema 80 and native ABI 215.
+over supported scalar/shape bounds. This common affine path uses a normalized
+transform and input interval. Composite bounds also support `min`/`max`, addition,
+subtraction and division by a positive compile-time integer. Their frozen DAG
+checks each original i32 arithmetic step, including signed floor division; a
+later clamp cannot hide an earlier overflow. Unsupported or overflowing bounds
+retain the original grid. The descriptor never reads device memory. CPU keeps
+its existing scheduler; CUDA/Vulkan can also eliminate the serial transport of
+immutable begin/end expressions. Mutable prepared parameters retain the compiled
+envelope when they overlap any bound input.
+The current task layout uses LLVM AOT schema 19 (20 for entry aliases or selected
+range policies), GFX metadata 15, JIT cache schema 84 and native ABI 219.
 Re-export older candidate artifacts and use a paired frontend
 and runtime package.
 

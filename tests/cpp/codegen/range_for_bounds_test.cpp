@@ -112,6 +112,96 @@ TEST(HostRangeBounds, MutableBoundsRetainEnvelopeButOtherParametersDoNot) {
   EXPECT_EQ(bounds.launch_grid(8160, 128, arguments, sizeof(arguments), &patches), 1);
 }
 
+TEST(HostRangeBounds, CompositeProgramsCheckArithmeticAndMutableInputs) {
+  HostRangeBound bound;
+  bound.program = {{HostRangeOp::argument_i32},
+                   {HostRangeOp::floor_divide, 3, 0},
+                   {HostRangeOp::constant_i32, -4},
+                   {HostRangeOp::maximum, 0, 1, 2}};
+  std::int32_t value = -7;
+  EXPECT_EQ(bound.evaluate(&value, 4), -3);
+  bound.program[1].op = HostRangeOp::divide;
+  EXPECT_EQ(bound.evaluate(&value, 4), -2);
+  EXPECT_TRUE(bound.reads(0, 1));
+  EXPECT_TRUE(bound.reads(3, 1));
+  EXPECT_FALSE(bound.reads(4, 1));
+  EXPECT_FALSE(bound.reads(UINT64_MAX, 4));
+  EXPECT_FALSE(bound.evaluate(nullptr, 4));
+  EXPECT_FALSE(bound.evaluate(&value, 3));
+  bound.program = {{HostRangeOp::argument_i32},
+                   {HostRangeOp::constant_i32, 1},
+                   {HostRangeOp::add, 0, 0, 1},
+                   {HostRangeOp::constant_i32, 65},
+                   {HostRangeOp::minimum, 0, 2, 3}};
+  value = INT32_MAX;
+  EXPECT_FALSE(bound.evaluate(&value, 4));  // Clamp cannot conceal overflow.
+  value = 66;
+  EXPECT_EQ(bound.evaluate(&value, 4), 65);
+  RangeForBounds range{RangeBound::constant(0), RangeBound{},
+                       HostRangeBounds{{0, {}, false}, bound},
+                       EmptyRangeGroupProof::independent_iterations};
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> patches{{0, 4}};
+  EXPECT_EQ(range.launch_grid(37, 128, &value, 4), 1);
+  EXPECT_EQ(range.launch_grid(37, 128, &value, 4, &patches), 37);
+  RangeForBounds decoded;
+  liong::json::deserialize(liong::json::serialize(range), decoded, true);
+  EXPECT_EQ(range.host_launch, decoded.host_launch);
+  BinaryOutputSerializer output;
+  output.initialize();
+  output(range);
+  output.finalize();
+  BinaryInputSerializer input;
+  input.initialize(output.data.data());
+  input(decoded);
+  EXPECT_EQ(range.host_launch, decoded.host_launch);
+}
+
+TEST(HostRangeBounds, CompositeProgramsRejectMalformedNodesWithoutACap) {
+  HostRangeBound bound;
+  bound.program = {{HostRangeOp::argument_i32}};
+  for (int i = 0; i < 128; ++i)
+    bound.program.push_back({HostRangeOp::floor_divide, 1, std::uint64_t(i)});
+  std::int32_t value = -123;
+  EXPECT_EQ(bound.evaluate(&value, 4), value);
+  for (int invalid = 0; invalid < 5; ++invalid) {
+    auto bad = bound;
+    if (invalid == 0) bad.program.back().lhs = bad.program.size();
+    if (invalid == 1) bad.program.back().immediate = 0;
+    if (invalid == 2) bad.program.back().op = static_cast<HostRangeOp>(999);
+    if (invalid == 3) bad.program[0].offset = UINT64_MAX;
+    if (invalid == 4) bad.bias = 1;
+    EXPECT_FALSE(bad.valid(4));
+    EXPECT_FALSE(bad.evaluate(&value, 4));
+  }
+  bound.program = {{HostRangeOp::shape_i32}};
+  EXPECT_FALSE(bound.evaluate(&value, 4));
+}
+
+TEST(HostRangeBounds, DescriptionSharesCompositeDagNodes) {
+  const auto *arguments = TypeFactory::get_instance()
+      .get_struct_type({{PrimitiveType::i32, "n"}})->as<StructType>();
+  Block body;
+  auto *n = body.push_back<ArgLoadStmt>(
+      std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+  auto *limit = body.push_back<ConstStmt>(TypedConstant(65));
+  Stmt *expression = body.push_back<BinaryOpStmt>(BinaryOpType::min, n, limit);
+  for (int i = 0; i < 24; ++i)
+    expression = body.push_back<BinaryOpStmt>(BinaryOpType::max, expression, expression);
+  irpass::type_check(&body, CompileConfig{});
+  const auto bound = describe_host_range_bound(expression, arguments);
+  ASSERT_TRUE(bound);
+  EXPECT_EQ(bound->program.size(), 27);  // Shared nodes are not expanded twice.
+  std::int32_t value = 75;
+  EXPECT_EQ(bound->evaluate(&value, 4), 65);
+  const auto affine = describe_host_range_bound(n, arguments);
+  ASSERT_TRUE(affine);
+  EXPECT_TRUE(affine->program.empty());
+  auto *divisor = body.push_back<ConstStmt>(TypedConstant(0));
+  auto *division = body.push_back<BinaryOpStmt>(BinaryOpType::floordiv, expression, divisor);
+  division->ret_type = PrimitiveType::i32;
+  EXPECT_FALSE(describe_host_range_bound(division, arguments));
+}
+
 TEST(HostRangeBounds, CodecAndCloneRetainTheFrozenProof) {
   HostRangeBounds host{{0, {}, false}, {1, {8, 12}, true}};
   ASSERT_TRUE(compose_host_range_affine(host.end, 3, -1));

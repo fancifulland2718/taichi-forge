@@ -13,6 +13,17 @@ class RangeBound:
 
 
 @dataclass(frozen=True)
+class HostRangeInstruction:
+    """One checked i32 DAG node; indices refer only to preceding nodes."""
+
+    op: int
+    immediate: int
+    lhs: int
+    rhs: int
+    offset: int
+
+
+@dataclass(frozen=True)
 class HostRangeBound:
     """Checked i32 expression over argument byte offsets, not a bound value."""
 
@@ -23,9 +34,14 @@ class HostRangeBound:
     bias: int
     input_min: int
     input_max: int
+    program: tuple = ()
 
     def __post_init__(self):
         object.__setattr__(self, "offsets", tuple(self.offsets))
+        object.__setattr__(self, "program", tuple(
+            node if isinstance(node, HostRangeInstruction) else HostRangeInstruction(**node)
+            for node in self.program
+        ))
 
 
 @dataclass(frozen=True)
@@ -175,5 +191,5 @@ class GraphTaskManifest(OffloadedTaskManifest):
 
 __all__ = [
     "GraphTaskManifest", "OffloadedTaskManifest", "RangeBound", "RangeForBounds",
-    "HostRangeBound", "HostRangeBounds",
+    "HostRangeInstruction", "HostRangeBound", "HostRangeBounds",
 ]

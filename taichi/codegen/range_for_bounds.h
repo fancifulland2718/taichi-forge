@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "taichi/common/serialization.h"
+#include "taichi/codegen/host_range_program.h"
 
 namespace taichi::lang {
 
@@ -59,19 +60,32 @@ inline const char *empty_range_group_proof_name(EmptyRangeGroupProof proof) {
 // either a constant, one i32 scalar, or a product of ndarray dimensions and a
 // nonnegative constant, followed by a normalized affine transform. The input
 // interval preserves every intermediate i32 overflow check without replaying
-// the source expression at launch. No device reads or expression bytecode.
+// the source expression at launch. Composite bounds use a frozen DAG instead;
+// the common affine path remains independent of that evaluator.
 struct HostRangeBound {
   std::int32_t factor{1};
   std::vector<std::uint64_t> offsets;
   bool shape_product{false};
   std::int32_t scale{1}, bias{0};
   std::int32_t input_min{INT32_MIN}, input_max{INT32_MAX};
+  std::vector<HostRangeInstruction> program;
+
+  bool has_inputs() const {
+    return !offsets.empty() || std::any_of(program.begin(), program.end(),
+                                         [](const auto &node) { return node.is_input(); });
+  }
 
   bool reads(std::uint64_t offset, std::uint64_t bytes) const {
     // Difference-based overlap avoids overflow for untrusted byte ranges.
     for (auto input : offsets) {
       if (bytes && (input >= offset ? input - offset < bytes
                                    : offset - input < sizeof(std::int32_t)))
+        return true;
+    }
+    for (const auto &node : program) {
+      if (node.is_input() && bytes &&
+          (node.offset >= offset ? node.offset - offset < bytes
+                                 : offset - node.offset < sizeof(std::int32_t)))
         return true;
     }
     return false;
@@ -81,10 +95,15 @@ struct HostRangeBound {
     return factor == other.factor && offsets == other.offsets &&
            shape_product == other.shape_product && scale == other.scale &&
            bias == other.bias && input_min == other.input_min &&
-           input_max == other.input_max;
+           input_max == other.input_max && program == other.program;
   }
 
   bool valid(std::uint64_t argument_bytes) const {
+    if (!program.empty()) {
+      return factor == 1 && offsets.empty() && !shape_product && scale == 1 &&
+             bias == 0 && input_min == INT32_MIN && input_max == INT32_MAX &&
+             valid_host_range_program(program, argument_bytes);
+    }
     if ((!shape_product && !offsets.empty() &&
          (factor != 1 || offsets.size() != 1)) ||
         (shape_product && factor < 0) || input_min > input_max)
@@ -106,6 +125,8 @@ struct HostRangeBound {
                                       std::uint64_t argument_bytes) const {
     if (!valid(argument_bytes) || (!arguments && !offsets.empty()))
       return std::nullopt;
+    if (!program.empty())
+      return evaluate_host_range_program(program, arguments, argument_bytes);
     std::int64_t value = factor;
     for (auto offset : offsets) {
       std::int32_t operand;
@@ -125,7 +146,7 @@ struct HostRangeBound {
     return static_cast<std::int32_t>(value * scale + bias);
   }
 
-  TI_IO_DEF(factor, offsets, shape_product, scale, bias, input_min, input_max);
+  TI_IO_DEF(factor, offsets, shape_product, scale, bias, input_min, input_max, program);
 };
 
 struct HostRangeBounds {

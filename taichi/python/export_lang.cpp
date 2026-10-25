@@ -298,6 +298,17 @@ py::dict offloaded_task_manifest_to_python(
         result["bias"] = value.bias;
         result["input_min"] = value.input_min;
         result["input_max"] = value.input_max;
+        py::list program;
+        for (const auto &node : value.program) {
+          py::dict instruction;
+          instruction["op"] = static_cast<int>(node.op);
+          instruction["immediate"] = node.immediate;
+          instruction["lhs"] = node.lhs;
+          instruction["rhs"] = node.rhs;
+          instruction["offset"] = node.offset;
+          program.append(instruction);
+        }
+        result["program"] = program;
         return result;
       };
       py::dict host;

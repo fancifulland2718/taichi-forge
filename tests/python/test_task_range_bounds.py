@@ -120,7 +120,7 @@ def test_shape_expression_and_aot_share_bound_facts(tmp_path):
         from taichi_forge.aot.conventions.gfxruntime140 import dr, sr
 
         data = json.loads((tmp_path / "metadata.json").read_text())
-        assert data["metadata_version"] == 14
+        assert data["metadata_version"] == 15
         tasks = [t for k in data["kernels"] for t in k["tasks_attribs"] if t["range_for_attribs"]]
         assert tasks
         assert tasks[0]["range_for_attribs"]["end"] == {"kind": 0, "value": 0}

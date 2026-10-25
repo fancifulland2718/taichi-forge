@@ -112,7 +112,7 @@ def test_saved_cuda_gate_code_and_launch_contract(artifact_format, tmp_path):
     costs["save_ms"] = (time.perf_counter() - begin) * 1000
     costs["artifact_bytes"] = sum(p.stat().st_size for p in directory.rglob("*") if p.is_file())
     metadata = json.loads((directory / "aot_metadata.json").read_text(encoding="utf-8"))
-    assert metadata["schema_version"] == 17
+    assert metadata["schema_version"] == 19
     assert metadata["kernel_format"] == artifact_format
     assert {item["key"]: item["value"] for item in metadata["kernel_launch_abis"]} == {
         "forward": "runtime_context_v2",

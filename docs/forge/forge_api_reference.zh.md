@@ -2064,10 +2064,13 @@ CUDA/Vulkan 可由 host 参数确定工作量的普通 range task 报告
 安全缩小 grid；CPU 调度器降级后的范围也不一定等于用户源码范围。两端为常量时，
 `constant_range_size` 用 64 位差值计算，反向或空区间为零。描述不增加设备读回或运行时同步。
 host 边界选择也覆盖受支持 scalar/shape 边界与常量的加、减、乘。
-编译时归一化的仿射变换和输入区间保留每个中间步骤的 i32 溢出检查；
-不支持的表达式或超出该区间的值沿用原 grid。
-当前 task 布局采用 LLVM AOT schema 15（含入口别名或选定范围策略时为 16）、
-GFX metadata 13 和 JIT cache schema 80；原生 ABI 为 215。
+常见仿射路径使用编译时归一化的变换和输入区间。组合边界还支持 `min/max`、
+加减和正编译期整数除法；冻结的 DAG 逐步检查原有 i32 运算，包括负数向下取整，
+后续钳制不能掩盖之前的溢出。不支持或发生溢出的边界沿用原 grid，描述求值不读取
+设备内存。CPU 保留现有调度；CUDA/Vulkan 还可消除不可变起止表达式的串行传递。
+prepared 参数可变且与任一边界输入重叠时，保留编译时的启动容量。
+当前 task 布局采用 LLVM AOT schema 19（含入口别名或选定范围策略时为 20）、
+GFX metadata 15 和 JIT cache schema 84；原生 ABI 为 219。
 旧候选产物需要重新导出并使用配对的前端/runtime 包。
 
 CUDA 选中的设备范围 task 策略现可进入普通平直 `Graph.run()` 录制与借用域的

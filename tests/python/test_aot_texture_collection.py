@@ -59,7 +59,7 @@ def test_aot_texture_collection_consumption_and_downstream_gradients(tmp_path):
     folder = tmp_path / "collection"
     module.save(str(folder))
     metadata = json.loads((folder / "metadata.json").read_text())
-    assert metadata["metadata_version"] == 14
+    assert metadata["metadata_version"] == 15
     kernel = next(k for k in metadata["kernels"] if k["name"] == "sample")
     parameter = next(a["value"] for a in kernel["ctx_attribs"]["arg_attribs_vec_"] if a["key"] == [0])
     assert parameter["element_shape"] == [3] and parameter["field_dim"] == 1

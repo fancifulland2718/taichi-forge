@@ -40,7 +40,7 @@ def main():
     destination = Path(os.environ["TAICHI_VULKAN_RANGE_AOT_DIR"])
     module.save(str(destination))
     document = json.loads((destination / "metadata.json").read_text())
-    assert document["metadata_version"] == 14
+    assert document["metadata_version"] == 15
     for kernel in document["kernels"]:
         qualified = [t for t in kernel["tasks_attribs"]
                      if t["device_range_dispatch_version"] == 1]
