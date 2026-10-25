@@ -56,6 +56,45 @@ class NativeDefinition:
     def parameter_dict(self):
         return _parameters(self.parameters)
 
+    def to_dict(self):
+        return dict(provider=self.provider, operation=self.operation,
+                    version=self.version, parameters=self.parameter_dict())
+
+
+@dataclass(frozen=True)
+class NativeWorkload:
+    """Frozen logical work, not permission to alter a native implementation.
+
+    Dimensions describe logical items, not padded storage, launch geometry or
+    device-observed occupancy. Ownership/capture/workspace remain in the existing
+    recording contract. An empty no-op declaration alone never elides a node.
+    """
+
+    dimensions: tuple
+    item: str
+    scheduling_owner: str
+    empty_policy: str
+
+    def __post_init__(self):
+        dimensions = tuple(self.dimensions)
+        if any(type(value) is not int or value < 0 for value in dimensions):
+            raise ValueError("Native workload dimensions must be nonnegative integers")
+        if not isinstance(self.item, str) or not self.item or "\0" in self.item:
+            raise ValueError("Native workload items require a nonempty name")
+        if self.scheduling_owner not in ("forge", "provider"):
+            raise ValueError("Native scheduling belongs to Forge or its provider")
+        if self.empty_policy not in ("no_op", "rejected", "unknown"):
+            raise ValueError("Native workload empty policy is unsupported")
+        if self.empty_policy == "rejected" and 0 in dimensions:
+            raise ValueError("This native operation does not accept empty work")
+        object.__setattr__(self, "dimensions", dimensions)
+
+    def to_dict(self):
+        return dict(dimensions=list(self.dimensions), logical_items=math.prod(self.dimensions),
+                    item=self.item, binding_time="frozen_definition",
+                    scheduling_owner=self.scheduling_owner, empty_policy=self.empty_policy,
+                    transformation_permissions=[])
+
 
 @dataclass(frozen=True)
 class NativeArrayBinding:
@@ -145,8 +184,11 @@ class NativeOperationBinding:
     definition: NativeDefinition
     arrays: tuple
     resources: tuple = ()
+    workload: NativeWorkload | None = None
 
     def __post_init__(self):
+        if self.workload is not None and not isinstance(self.workload, NativeWorkload):
+            raise TypeError("Native workload evidence requires a NativeWorkload")
         object.__setattr__(self, "arrays", tuple(self.arrays))
         object.__setattr__(self, "resources", tuple(self.resources))
         ports = [item.port for item in self.arrays] + [port for port, _ in self.resources]
@@ -197,3 +239,23 @@ class NativeOperationBinding:
             parameters=definition.parameter_dict(),
             version=definition.version,
         )
+
+    def source_contract(self):
+        """Cold Graph/search observation from the same definitions as export.
+
+        This is not a reconstruction format or a second capability registry.
+        Missing evidence stays unknown; runtime execution never calls this.
+        """
+        if self.workload is None:
+            return None
+        return {
+            "schema": "taichi-forge.native-workload.v1",
+            "source": "normalized_definition_not_measured",
+            "operation": self.definition.to_dict(),
+            "workload": self.workload.to_dict(),
+            "resources": {
+                port: ({"reference": resource.name} if isinstance(resource, NativeResourceReference)
+                       else resource.definition.to_dict())
+                for port, resource in self.resources
+            },
+        }

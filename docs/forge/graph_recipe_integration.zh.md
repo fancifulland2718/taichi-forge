@@ -499,3 +499,15 @@ JSON 保留原始成本观测（含失败 trial）与派生摘要，Markdown 由
 总耗时和 cleanup wall time 是独立诊断，不替代调用者的 first/steady 测量。两处资源快照分别位于物化后与
 evaluator 结束后，不能观测所有中间分配或内存池 reservation。报告不在 steady Graph replay 中增加探测、
 同步或校验，也不会在 runtime `auto` 中自动启用某个 recipe。
+
+原生 source 观察复用创建与 AOT 导出使用的冻结定义。CPU/CUDA/Vulkan prepared sort
+及 CUDA cuFFT recording 会在 `native_source_contracts` 中提供
+`taichi-forge.native-workload.v1` 合同：排序报告记录数，FFT 报告逻辑变换点数，不包含
+复数存储通道或布局 padding。这些数量不是实测成本或 GPU 启动几何。合同区分 Forge
+与外部 provider 的调度归属，并记录空逻辑工作的无操作或拒绝语义；它不授予调度变换
+权限，也不会仅因数量为零就移除操作。未声明的其他操作仍保持未知。
+
+观察在 prepare/Graph 构造时冻结，重放保持现有 handle、capture 路线、workspace
+政策和退休顺序。persistent sort recording 共享描述、保留私有 workspace；AOT 继续
+根据已有操作定义重建资源。报告不会重新配置 cuFFT 内部 kernel，不新增 provider
+注册表，也不启用自动调优。

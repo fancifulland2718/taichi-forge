@@ -67,6 +67,9 @@ class _Recording(BackendCommandRecording):
         self._binding.lower(context)
         return ()
 
+    def _graph_source_contract(self):
+        return self._binding.source_contract()
+
     def _as_graph_native_node(self):
         return native_recording_node(
             self, runtime_bindings=(), fixed_bindings=self._fixed,

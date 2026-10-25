@@ -627,3 +627,19 @@ first/steady measurements. The two resource snapshots bracket materialization an
 the evaluator; they cannot detect every intermediate allocation or pool reservation.
 Reporting adds no probe, synchronization or validation to steady Graph replay and
 does not enable a recipe in runtime `auto`.
+
+Native source observations reuse the frozen definitions used by creation and AOT
+export. Prepared sort on CPU/CUDA/Vulkan and CUDA cuFFT recordings provide a
+`taichi-forge.native-workload.v1` source contract in `native_source_contracts`.
+Sort reports records; FFT reports logical transform points, excluding complex
+storage lanes and padding. These counts are not measured costs or GPU geometry.
+The contract records whether scheduling belongs to Forge or the external provider,
+and whether empty logical work is a no-op or rejected. It grants no scheduling
+transformation and never removes an operation merely because its count is zero.
+Other operations without a declaration remain unknown.
+
+This observation is frozen during preparation/Graph construction. Replay retains
+the original handles, capture route, workspace policy and retirement. Persistent
+sort recordings share the description while retaining their private workspace;
+AOT reconstructs resources using its existing operation definitions. The report
+does not reconfigure cuFFT internals, add a provider registry or enable autotuning.

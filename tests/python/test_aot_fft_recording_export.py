@@ -30,6 +30,11 @@ def test_cufft_creation_recording_and_export_share_frozen_definition(tmp_path, m
     assert plan.input_shape == plan.output_shape == (2, 8, 2)
     assert plan.inverse_scale == 1 / 8
     recording = plan.record(input="signal", output="spectrum")
+    contract = recording._graph_source_contract()
+    assert contract["workload"]["dimensions"] == [2, 8]
+    assert contract["workload"]["logical_items"] == 16  # Not 32 packed float lanes.
+    assert contract["workload"]["scheduling_owner"] == "provider"
+    assert contract["workload"]["transformation_permissions"] == []
     assert recording.direction == "forward"
     assert recording.binding_names == ("signal", "spectrum")
     assert tuple((effect.resource, effect.access) for effect in recording.resource_effects) == (
@@ -48,6 +53,7 @@ def test_cufft_creation_recording_and_export_share_frozen_definition(tmp_path, m
     with monkeypatch.context() as patch:
         patch.setattr(NativeDefinition, "parameter_dict", no_description_conversion)
         patch.setattr(NativeOperationBinding, "lower", no_description_conversion)
+        patch.setattr(NativeOperationBinding, "source_contract", no_description_conversion)
         plan.execute(source, output)
         recording.execute(dict(signal=source, spectrum=output))
     assert fft.cache_statistics() == before
@@ -56,6 +62,10 @@ def test_cufft_creation_recording_and_export_share_frozen_definition(tmp_path, m
     builder = ti.graph.GraphBuilder()
     builder.append_native(recording)
     graph = builder.compile()
+    sources = [json.loads(action.source_contract_json)
+               for stage in graph.definition._runtime_spec.pipeline_definition
+               for action in stage.get("native_actions", ()) if action.source_contract_json]
+    assert sources == [contract]
     graph.run(dict(signal=source, spectrum=output))
     module = ti.aot.Module()
     exported = module.add_execution_plan("fft", graph)
@@ -64,6 +74,7 @@ def test_cufft_creation_recording_and_export_share_frozen_definition(tmp_path, m
     assert resource["parameters"]["dimensions"] == [8]
     assert resource["parameters"]["batch_count"] == 2
     assert resource["parameters"]["transform"] == "c2c"
+    assert resource["parameters"] == contract["resources"]["plan"]["parameters"]
     assert document["operations"][0]["bindings"] == dict(plan=resource["name"], input="signal", output="spectrum")
     artifact = tmp_path / "fft.tcm"
     module.archive(str(artifact))

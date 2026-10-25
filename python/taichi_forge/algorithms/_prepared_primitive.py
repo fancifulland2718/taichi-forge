@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from dataclasses import replace
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.algorithms import _autodiff
@@ -54,6 +55,7 @@ class _PreparedNativePlan:
         )
         return {
             **self._description,
+            **({"workload": self._workload.to_dict()} if getattr(self, "_workload", None) is not None else {}),
             "physical_plan_id": self._physical_id,
             "closed": self._command is None,
             "binding_policy": "fixed_dense_storage",
@@ -115,7 +117,9 @@ class PreparedSortPlan(_PreparedNativePlan):
 
     def __init__(self, keys, values=None, *, nan_policy="last"):
         from taichi_forge.graph._ir import GraphAccess
-        from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
+        from taichi_forge.graph._native_definition import (
+            NativeArrayBinding, NativeDefinition, NativeOperationBinding, NativeWorkload,
+        )
 
         if nan_policy not in ("last", "bitwise"):
             raise ValueError("Prepared sort nan_policy must be 'last' or 'bitwise'")
@@ -143,6 +147,10 @@ class PreparedSortPlan(_PreparedNativePlan):
             None if values is None else descriptions[1].descriptor,
             0 if definition.parameters["nan_policy"] == "last" else 1,
         )
+        self._workload = NativeWorkload(
+            (int(descriptions[0].descriptor.index_shape[0]),), "sort_record", "forge", "no_op"
+        )
+        native_binding = replace(native_binding, workload=self._workload)
         self._definition, self._native_binding = definition, native_binding
         self._program = program
         self._owners = owners
@@ -155,7 +163,7 @@ class PreparedSortPlan(_PreparedNativePlan):
         self._description = {
             "kind": "stable_sort" if self._backend == "cpu" else "stable_radix_sort",
             "backend": self._backend,
-            "count": int(descriptions[0].descriptor.index_shape[0]),
+            "count": self._workload.dimensions[0],
             "key_dtype": str(descriptions[0].descriptor.scalar_type),
             "value_dtype": None if values is None else str(descriptions[1].descriptor.scalar_type),
             "value_element_shape": [] if values is None else list(descriptions[1].descriptor.element_shape),
@@ -224,6 +232,10 @@ def _native_recording(plan):
 
             export_prepared(self._plan, context)
             return ()
+
+        def _graph_source_contract(self):
+            self._plan._validate_lifetime()
+            return self._plan._native_binding.source_contract()
 
         def _as_graph_native_node(self):
             return native_recording_node(

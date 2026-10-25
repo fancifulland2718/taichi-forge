@@ -223,6 +223,12 @@ class _CufftPlanDefinition:
             ),
         )
 
+    def workload(self):
+        from taichi_forge.graph._native_definition import NativeWorkload
+
+        # Logical transform points exclude complex lanes and layout padding.
+        return NativeWorkload((self.batch_count, *self.dimensions), "fft_point", "provider", "rejected")
+
 
 class _CufftCaptureRecipe(_CudaGraphCaptureRecipe):
     kind = "cufft_fixed_plan"
@@ -291,6 +297,7 @@ class CufftRecording(BackendCommandRecording):
                 if plan._native_resource_definition is not None
                 else ()
             ),
+            workload=plan._definition.workload(),
         )
         super().__init__(
             backend="cuda",
@@ -360,6 +367,9 @@ class CufftRecording(BackendCommandRecording):
 
     def memory_report(self):
         return self.plan.memory_report()
+
+    def _graph_source_contract(self):
+        return self._definition.source_contract()
 
     def _as_graph_native_node(self):
         return native_recording_node(
