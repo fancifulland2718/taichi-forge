@@ -26,6 +26,8 @@ def validate_release_set(
     runtime_version = runtime_version or expected_version
     runtime_wheels = sorted(wheel_dir.glob("taichi_forge_runtime-*.whl"))
     shim_wheels = sorted(wheel_dir.glob("taichi_forge-[0-9]*.whl"))
+    if set(wheel_dir.glob("*.whl")) != set(runtime_wheels + shim_wheels):
+        raise RuntimeError("Release set contains an unexpected wheel project")
     runtime_count = 0 if project == "shim" else 2
     shim_count = 0 if project == "runtime" else 10
     if len(runtime_wheels) != runtime_count:

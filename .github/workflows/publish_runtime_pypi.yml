@@ -1,7 +1,7 @@
-name: Build and publish runtime wheels
+name: Build runtime wheels
 
-# Builds platform-native taichi-forge-runtime wheels. Manual runs can publish
-# this project independently; reusable calls are non-publishing validation.
+# Builds platform-native taichi-forge-runtime wheels without publication.
+# release.yml coordinates the complete GitHub/PyPI release.
 
 on:
   workflow_call:
@@ -23,20 +23,11 @@ on:
         default: ""
 
       platform:
-        description: "Runtime artifacts to build; publication requires all"
+        description: "Runtime artifacts to build; release.yml requires all"
         required: false
         type: choice
         default: all
         options: [all, windows, linux]
-      publish:
-        description: "Publish the runtime wheels independently"
-        type: boolean
-        default: false
-      target:
-        description: "Runtime publication index"
-        type: choice
-        options: [testpypi, pypi]
-        default: testpypi
 
 permissions:
   contents: read
@@ -52,6 +43,7 @@ env:
   # 8.5, preserving the oldest qualified OptiX 8.1 / R555 runtime floor.
   CUDA_TOOLKIT_VERSION: "12.5.1"
   LLVM20_WIN_URL: ${{ vars.LLVM20_WIN_URL }}
+  LLVM20_LINUX_URL: ${{ vars.LLVM20_LINUX_URL || vars.LLVM20_LINUX_MANYLINUX_URL }}
   LLVM20_LINUX_MANYLINUX_URL: ${{ vars.LLVM20_LINUX_MANYLINUX_URL }}
   LLVM20_WIN_SHA256: ${{ vars.LLVM20_WIN_SHA256 }}
   LLVM20_LINUX_SHA256: ${{ vars.LLVM20_LINUX_SHA256 }}
@@ -67,9 +59,7 @@ jobs:
       - id: set
         env:
           REQUEST_VERSION: ${{ inputs.version }}
-          REQUEST_PUBLISH: ${{ inputs.publish }}
           PLATFORM: ${{ inputs.platform }}
-          TARGET: ${{ inputs.target || 'testpypi' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -77,10 +67,6 @@ jobs:
             all|windows|linux) ;;
             *) echo "Unsupported runtime platform" >&2; exit 1 ;;
           esac
-          case "$TARGET" in pypi|testpypi) ;; *) echo "Invalid package index"; exit 1 ;; esac
-          if [[ "$REQUEST_PUBLISH" == true && "$PLATFORM" != all ]]; then
-            echo "Runtime publication requires both platforms"; exit 1
-          fi
           if [[ -n "$REQUEST_VERSION" ]]; then
             ver="$REQUEST_VERSION"
           else
@@ -270,11 +256,14 @@ jobs:
             --wheel-dir wheelhouse-runtime --platform manylinux \
             --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu
 
+      - name: Record actual build inputs
+        run: python -m scripts.record_release_build --platform linux --output wheelhouse-runtime/build-info-linux.json
+
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wheel-linux-runtime
-          path: wheelhouse-runtime/*.whl
+          path: wheelhouse-runtime/*
           if-no-files-found: error
 
   build_windows_runtime:
@@ -470,54 +459,16 @@ jobs:
             --wheel-dir dist-runtime --platform windows `
             --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu
 
+      - name: Record actual build inputs
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          python -m scripts.record_release_build --platform windows --output dist-runtime/build-info-windows.json
+
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wheel-windows-runtime
-          path: dist-runtime/*.whl
+          path: dist-runtime/*
           if-no-files-found: error
-
-  publish_runtime:
-    name: Publish runtime to PyPI
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
-    needs: [resolve_version, build_linux_runtime, build_windows_runtime]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    environment:
-      name: ${{ inputs.target }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.13"
-      - name: Install publication check dependencies
-        run: python -m pip install "packaging==26.0"
-      - name: Download runtime wheels
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: wheel-*-runtime
-          merge-multiple: true
-          path: dist
-      - name: Validate runtime publication set
-        run: |
-          python -m scripts.validate_release_wheel_set --wheel-dir dist \
-            --version "${{ needs.resolve_version.outputs.version }}" --project runtime
-      - name: Prepare missing wheels for resumable upload
-        id: upload
-        run: |
-          python scripts/check_pypi_version_available.py --repository "${{ inputs.target }}" \
-            --wheel-dir dist --upload-dir upload
-          echo "count=$(find upload -name '*.whl' | wc -l)" >> "$GITHUB_OUTPUT"
-      - name: Publish runtime to TestPyPI
-        if: inputs.target == 'testpypi' && steps.upload.outputs.count != '0'
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          packages-dir: upload
-      - name: Publish runtime to PyPI
-        if: inputs.target == 'pypi' && steps.upload.outputs.count != '0'
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
-        with:
-          packages-dir: upload

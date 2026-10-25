@@ -96,6 +96,7 @@ def main() -> int:
     parser.add_argument("--version", type=Version)
     parser.add_argument("--wheel-dir", type=Path)
     parser.add_argument("--upload-dir", type=Path)
+    parser.add_argument("--require-published", action="store_true", help="Fail if any candidate wheel is absent from the index")
     parser.add_argument("projects", nargs="*")
     args = parser.parse_args()
 
@@ -106,7 +107,9 @@ def main() -> int:
     if args.wheel_dir is not None or args.upload_dir is not None:
         if args.wheel_dir is None or args.upload_dir is None or args.version or args.projects:
             parser.error("Use --wheel-dir and --upload-dir together, without --version/projects")
-        prepare_upload(args.wheel_dir, args.upload_dir, base)
+        count = prepare_upload(args.wheel_dir, args.upload_dir, base)
+        if args.require_published and count:
+            raise SystemExit(f"{count} candidate wheel(s) are not yet published")
         return 0
     if args.version is None or not args.projects:
         parser.error("Availability inspection requires --version and projects")
