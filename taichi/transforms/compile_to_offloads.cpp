@@ -941,7 +941,8 @@ void offload_to_executable(IRNode *ir,
                            bool determine_ad_stack_size,
                            bool lower_global_access,
                            bool make_thread_local,
-                           bool make_block_local) {
+                           bool make_block_local,
+                           std::size_t first_task_index) {
   TI_AUTO_PROF;
   TI_COMPILE_PROFILER("cpp.ir.offload_to_executable");
 
@@ -1147,15 +1148,22 @@ void offload_to_executable(IRNode *ir,
 
   // Resolve only the ordinary default, after TLS/BLS and dense-loop lowering
   // expose the final safety facts, and before either backend emits code and
-  // launch metadata. Explicit policies and custom global defaults keep their
-  // geometry. The same compiler path serves JIT, Graph and AOT.
+  // launch metadata. Only an owned block axis prevents default selection;
+  // compile-tier/register/TLS requests do not own unrelated launch geometry.
+  // Final TLS/BLS proofs still reject unsafe changes. The same compiler path
+  // serves JIT, Graph and AOT; frozen compiled dispatches are never rewritten.
   if ((config.arch == Arch::cuda || config.arch == Arch::vulkan) &&
       config.default_gpu_block_dim == CompileConfig{}.default_gpu_block_dim &&
-      !kernel->get_task_launch_policy() &&
-      !kernel->get_offload_execution_plan() &&
-      !kernel->get_kernel_optimization_spec()) {
+      !kernel->get_task_launch_policy()) {
     TI_COMPILE_PROFILER("cpp.ir.exec.select_default_gpu_block_size");
+    auto task_index = first_task_index;
     const auto select = [&](OffloadedStmt *task) {
+      const auto index = task_index++;
+      if (offload_plan) {
+        TI_ASSERT(index < offload_plan->tasks.size());
+        if (offload_plan->tasks[index].workgroup_size != 0)
+          return;  // This physical task has an explicit block contract.
+      }
       task->block_dim = select_default_gpu_block_size(
           *task, config.gpu_compute_unit_count, config.gpu_subgroup_size);
     };

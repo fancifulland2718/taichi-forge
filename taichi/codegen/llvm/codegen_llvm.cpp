@@ -3476,7 +3476,8 @@ LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
         /*make_thread_local=*/make_thread_local,
         /*make_block_local=*/
         is_extension_supported(config.arch, Extension::bls) &&
-            config.make_block_local);
+            config.make_block_local,
+        /*first_task_index=*/task_codegen_id);
   };
 
   offload_to_executable(ir, compile_config, kernel);

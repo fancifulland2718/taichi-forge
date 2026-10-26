@@ -136,3 +136,57 @@ def test_static_default_primal_and_reverse():
     square.grad()
     np.testing.assert_array_equal(y.to_numpy(), values ** 2)
     np.testing.assert_array_equal(x.grad.to_numpy(), 2 * values)
+
+
+@pytest.mark.parametrize("tier", ["fast", "full"])
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_static_default_composes_with_non_block_optimization(tier):
+    from taichi_forge.lang._kernel_optimization import (
+        _IrOptimizationOptions, _KernelOptimizationSpec,
+        _bind_kernel_optimization_spec,
+    )
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(ti.i32, 2)):
+        for I in ti.grouped(ti.ndrange(3, 5)):
+            out[I] = I[0] * 5 + I[1]
+
+    out = ti.ndarray(ti.i32, (3, 5))
+    ordinary_block = range_tasks(fill, out)[0].selected_block_size
+    # A tier override owns no block axis. CUDA also permits a TLS control;
+    # Vulkan intentionally rejects that backend-specific option.
+    thread_local = "off" if ti.lang.impl.current_cfg().arch == ti.cuda else "auto"
+    selected = _bind_kernel_optimization_spec(fill, _KernelOptimizationSpec(
+        ir=_IrOptimizationOptions(thread_local=thread_local, compile_tier=tier)))
+    selected(out)
+    assert selected.report(out).tasks[0].selected_block_size == ordinary_block
+    np.testing.assert_array_equal(out.to_numpy(), np.arange(15).reshape(3, 5))
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_static_default_offload_plan_owns_each_block_separately():
+    from taichi_forge.lang._offload_execution_plan import (
+        _OffloadExecutionPlan, _bind_offload_execution_plan,
+    )
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(ti.i32, 1)):
+        for i in range(17):
+            out[i] = i * 3
+        for i in range(17):
+            out[i] += 1
+
+    out = ti.ndarray(ti.i32, 17)
+    manifests = tuple(fill.task_manifest(out))
+    assert [task.task_type for task in manifests] == ["range_for", "range_for"]
+    base = _OffloadExecutionPlan.from_task_manifests(manifests)
+    # Both directions exercise the LLVM per-task codegen ordinal: the
+    # unspecified task inherits the compiler default, never its neighbor.
+    for explicit_index in (0, 1):
+        plan = base.replace_task(explicit_index, workgroup_size=256)
+        selected = _bind_offload_execution_plan(fill, plan)
+        selected(out)
+        actual = selected.task_manifest(out)
+        assert actual[explicit_index].selected_block_size == 256
+        assert actual[1 - explicit_index].selected_block_size == manifests[1 - explicit_index].selected_block_size
+        np.testing.assert_array_equal(out.to_numpy(), np.arange(17) * 3 + 1)

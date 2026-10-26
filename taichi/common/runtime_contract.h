@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // CompileConfig carries cold GPU launch-selection hints.
-inline constexpr int kForgeNativeAbiRevision = 222;
+inline constexpr int kForgeNativeAbiRevision = 223;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

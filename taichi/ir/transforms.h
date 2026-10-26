@@ -239,7 +239,8 @@ void offload_to_executable(IRNode *ir,
                            bool determine_ad_stack_size,
                            bool lower_global_access,
                            bool make_thread_local,
-                           bool make_block_local);
+                           bool make_block_local,
+                           std::size_t first_task_index = 0);
 // compile_to_executable fully covers compile_to_offloads, and also does
 // additional optimizations so that |ir| can be directly fed into codegen.
 void compile_to_executable(IRNode *ir,
