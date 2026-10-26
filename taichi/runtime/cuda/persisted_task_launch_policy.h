@@ -2,7 +2,7 @@
 
 #include <optional>
 
-#include "external/picosha2/picosha2.h"
+#include "external/PicoSHA2/picosha2.h"
 #include "taichi/codegen/llvm/llvm_compiled_data.h"
 #include "taichi/program/launch_context_builder.h"
 

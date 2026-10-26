@@ -12,7 +12,7 @@
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/runtime/vulkan_shader_bindings.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
-#include "external/spirv-reflect/spirv_reflect.h"
+#include "external/SPIRV-Reflect/spirv_reflect.h"
 #endif
 
 namespace taichi::lang {
