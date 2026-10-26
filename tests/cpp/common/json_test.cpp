@@ -1,8 +1,52 @@
 #include "gtest/gtest.h"
 #include "taichi/common/json.h"
 #include <limits>
+#include <utility>
 
 namespace liong::json {
+TEST(Json, InitializesScalarStorageForCopyAndMove) {
+  const JsonValue values[] = {
+      JsonValue(),
+      JsonValue(nullptr),
+      JsonValue(true),
+      JsonValue(-7),
+      JsonValue(42u),
+      JsonValue(std::numeric_limits<int64_t>::min()),
+      JsonValue(1.25f),
+      JsonValue(-2.5),
+      JsonValue("text"),
+      JsonValue(std::string("owned")),
+      JsonValue(JsonObject{{"nested", JsonValue(3)}}),
+      JsonValue(JsonArray{JsonValue(nullptr), JsonValue(false)})};
+  for (const auto &value : values) {
+    const auto encoded = print(value);
+    SCOPED_TRACE(encoded);
+    auto check = [&](const JsonValue &candidate) {
+      EXPECT_EQ(candidate.ty, value.ty);
+      EXPECT_EQ(print(candidate), encoded);
+      if (candidate.ty != L_JSON_BOOLEAN) {
+        EXPECT_FALSE(candidate.b);
+      }
+      if (candidate.ty != L_JSON_INT) {
+        EXPECT_EQ(candidate.num_int, 0);
+      }
+      if (candidate.ty != L_JSON_FLOAT) {
+        EXPECT_DOUBLE_EQ(candidate.num_float, 0.0);
+      }
+    };
+    check(value);
+    JsonValue copied(value);
+    check(copied);
+    JsonValue moved(std::move(copied));
+    check(moved);
+    JsonValue assigned(true);
+    assigned = value;
+    check(assigned);
+    assigned = std::move(moved);
+    check(assigned);
+  }
+}
+
 TEST(Json, PreservesFloatingValuesDuringParsingAndRoundtrip) {
   for (bool complete : {false, true}) {
     auto read = [=](const std::string &text) {

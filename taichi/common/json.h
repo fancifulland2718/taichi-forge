@@ -122,9 +122,10 @@ struct JsonObject {
 // Represent a abstract value in JSON representation.
 struct JsonValue {
   JsonType ty;
-  bool b;
-  int64_t num_int;
-  double num_float;
+  // Defaulted copy/move operations also copy the inactive scalar members.
+  bool b{false};
+  int64_t num_int{0};
+  double num_float{0.0};
   std::string str;
   JsonObject obj;
   JsonArray arr;
