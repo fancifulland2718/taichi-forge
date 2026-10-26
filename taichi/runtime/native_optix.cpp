@@ -438,7 +438,7 @@ struct ContextLease {
 class CudaOptixContext final : public OptixContextResource {
  public:
   explicit CudaOptixContext(NativePreparationContext &context)
-      : device_(context.device), fault(context.fault_domain) {
+      : fault(context.fault_domain), device_(context.device) {
     lease = std::make_unique<ContextLease>();
     lease->runtime = context.providers.runtime(definition);
     lease->api = execution_api(*lease->runtime);
