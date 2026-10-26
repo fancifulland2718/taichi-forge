@@ -46,6 +46,8 @@ install.components = ["runtime"]
 # Validate the independent provider toolchains before the expensive runtime.
 build.targets = ["taichi_forge_optix_providers", "taichi_forge_cudss_providers", "taichi_forge_optional_runtime_providers", "taichi_forge_vkfft_providers", "taichi_runtime"]
 wheel.exclude = [
+  "opt_doc/**",
+  "**/opt_doc/**",
   "**/__pycache__/**",
   "**/*.pyc",
   "**/*.pyo",

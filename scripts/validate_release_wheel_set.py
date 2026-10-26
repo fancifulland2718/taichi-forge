@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from pathlib import Path
+from zipfile import ZipFile
 
 from packaging.utils import parse_wheel_filename
 from packaging.version import Version
@@ -28,6 +29,13 @@ def validate_release_set(
     shim_wheels = sorted(wheel_dir.glob("taichi_forge-[0-9]*.whl"))
     if set(wheel_dir.glob("*.whl")) != set(runtime_wheels + shim_wheels):
         raise RuntimeError("Release set contains an unexpected wheel project")
+    for wheel in runtime_wheels + shim_wheels:
+        with ZipFile(wheel) as archive:
+            for name in archive.namelist():
+                if "opt_doc" in name.replace("\\", "/").casefold().split("/"):
+                    raise RuntimeError(
+                        f"Internal planning directory in release wheel: {wheel.name}: {name}"
+                    )
     runtime_count = 0 if project == "shim" else 2
     shim_count = 0 if project == "runtime" else 10
     if len(runtime_wheels) != runtime_count:

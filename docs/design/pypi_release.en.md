@@ -24,6 +24,9 @@ verify the index files first, then publish identical wheel bytes and public asse
 Sources come from committed Git objects and pinned submodules, excluding untracked/ignored
 files, root `internal/`, `opt_doc/` and temporary directories. Required vendor-internal
 headers and licenses remain included. GitHub's automatic source ZIP lacks submodules.
+Both wheels explicitly exclude `opt_doc`; release-set validation rejects wheels
+containing that directory. Git archives also exclude root internal planning and
+local evidence through `.gitattributes` `export-ignore` rules.
 PyPI receives wheels only; the full-source archive follows the build guide, not a
 pip-installable sdist that configures native SDKs. Users install compilers, SDKs and
 external libraries; proprietary SDKs/runtimes are not repackaged. LLVM download and

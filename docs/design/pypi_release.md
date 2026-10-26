@@ -22,6 +22,8 @@
 
 完整源码从 Git 对象及固定子模块生成，不使用未提交/忽略文件，根目录 `internal/`、
 `opt_doc/` 和临时目录不打包。供应商源码内必要的内部头文件保留，许可证随源码保留。
+两个 wheel 显式排除 `opt_doc`，发行集合检查发现该目录即拒绝发布；Git 归档另通过
+`.gitattributes` 的 `export-ignore` 排除根目录内部规划和本地证据。
 GitHub 自动 Source code ZIP 缺少子模块，不能替代完整源码包。PyPI 仅发布 wheel；
 完整源码按构建文档使用，不是可由 pip 自动配置平台 SDK 的 sdist。编译器、SDK、
 外部库由用户安装，商业 SDK/runtime 不重新打包。LLVM 公网下载及源码构建脚本公开。

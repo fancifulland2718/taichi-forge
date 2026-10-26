@@ -71,6 +71,8 @@ install.components = ["python"]
 build.targets = ["taichi_python"]
 wheel.packages = ["python/taichi_forge"]
 wheel.exclude = [
+  "opt_doc/**",
+  "**/opt_doc/**",
   # Keep the default Python wheel focused on import/runtime use. The C API is a
   # separate native distribution concern and is large enough to dominate PyPI
   # storage when multiplied by the Python/platform wheel matrix.

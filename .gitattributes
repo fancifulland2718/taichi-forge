@@ -3,3 +3,11 @@
 python/taichi_forge/tools/_host_build.py text eol=lf
 python/taichi_forge/tools/_compiled_host.py text eol=lf
 python/taichi_forge/tools/_native_host.py text eol=lf
+
+# Internal planning and local evidence are not release source attachments.
+/opt_doc export-ignore
+/internal export-ignore
+/temp_outputs export-ignore
+/.codex export-ignore
+/.agents export-ignore
+/.agent export-ignore

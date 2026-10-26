@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 import tarfile
+import zipfile
 
 import pytest
 
@@ -98,6 +99,30 @@ def test_source_missing_submodule_fails_before_publishing(source, tmp_path):
     (source / "external/library/.git").rename(source / "external/library/git-hidden")
     with pytest.raises(ValueError, match="Initialize the pinned submodule"):
         artifacts.source_archive(source, run(source, "rev-parse", "HEAD"), tmp_path / "bad.tar.gz", "0.7.0")
+
+
+def test_standard_git_archive_excludes_internal_plans(source, tmp_path):
+    (source / ".gitattributes").write_bytes((ROOT / ".gitattributes").read_bytes())
+    revision = commit(source)
+    output = tmp_path / "standard.tar"
+    run(source, "archive", "--format=tar", f"--output={output}", revision)
+    with tarfile.open(output) as archive:
+        names = archive.getnames()
+    assert "docs/guide.md" in names
+    assert not any(n.split("/")[0] in artifacts.PRIVATE_ROOTS for n in names)
+
+
+@pytest.mark.parametrize("project", ["taichi_forge", "taichi_forge_runtime"])
+@pytest.mark.parametrize("member", ["opt_doc/plan.md", "package/OPT_DOC/nested/plan.md"])
+def test_release_wheels_reject_internal_plans_before_publication(tmp_path, project, member):
+    from packaging.version import Version
+    from scripts.validate_release_wheel_set import validate_release_set
+
+    wheel = tmp_path / f"{project}-0.7.0-py3-none-win_amd64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(member, "internal plan")
+    with pytest.raises(RuntimeError, match="Internal planning directory"):
+        validate_release_set(tmp_path, Version("0.7.0"))
 
 
 def test_release_notes_have_both_languages_and_pinned_links(source):
