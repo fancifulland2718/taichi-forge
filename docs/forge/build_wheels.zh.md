@@ -55,6 +55,8 @@ python -I -m build --wheel --no-isolation
 
 关键点：
 
+- 主包 CI 在独立虚拟环境中构建并检查每个 shim。本地复现也使用新的 `venv`，不加
+  `--system-site-packages`，避免 `pipx` 等预装工具与发布版本约束冲突或使 `pip check` 失败。
 - 构建前安装 `packaging/constraints/release-build.txt`。发行 runtime/shim 使用同一锁定的
   pybind11 generation 和文件中按 Python 区分的 NumPy 约束，不再使用旧 pybind11 2.x 指令。
   project metadata 另行声明支持的版本范围。

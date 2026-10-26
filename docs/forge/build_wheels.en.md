@@ -64,6 +64,9 @@ python -I -m build --wheel --no-isolation
 
 Important details:
 
+- Main-package CI builds and validates each shim in its own virtual environment.
+  Use a fresh `venv` locally as well, without `--system-site-packages`, so runner
+  tools such as `pipx` do not conflict with release pins or fail `pip check`.
 - Install `packaging/constraints/release-build.txt` before building. Release
   runtime and shim jobs use the same pinned pybind11 generation and the
   file's Python-specific NumPy constraints; do not substitute old pybind11 2.x

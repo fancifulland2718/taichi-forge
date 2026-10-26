@@ -304,8 +304,17 @@ jobs:
           python -m zipfile -e /tmp/llvm20.zip dist/taichi-llvm-20
           echo "LLVM_DIR=$GITHUB_WORKSPACE/dist/taichi-llvm-20/lib/cmake/llvm" >> "$GITHUB_ENV"
 
+      - name: Create isolated shim environment
+        # Hosted interpreters may contain tools such as pipx whose dependencies
+        # conflict with the release pins. Keep build and wheel checks isolated.
+        run: |
+          python -m venv "$RUNNER_TEMP/forge-shim-venv"
+          echo "VIRTUAL_ENV=$RUNNER_TEMP/forge-shim-venv" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/forge-shim-venv/bin" >> "$GITHUB_PATH"
+
       - name: Install python build deps
         run: |
+          python -c "import site, sys; assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE; print(sys.executable)"
           python -m pip install "pip==26.2.1"
           # numpy is imported by cmake/PythonNumpyPybind11.cmake at configure
           # time to resolve the numpy include dir.
@@ -568,11 +577,23 @@ jobs:
           Expand-Archive -Path $env:TEMP/llvm20.zip -DestinationPath dist/taichi-llvm-20
           "LLVM_DIR=$(Resolve-Path dist/taichi-llvm-20/lib/cmake/llvm)" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
 
+      - name: Create isolated shim environment
+        # Do not let runner-preinstalled packages participate in pip check.
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          $shimVenv = Join-Path $env:RUNNER_TEMP 'forge-shim-venv'
+          python -m venv $shimVenv
+          "VIRTUAL_ENV=$shimVenv" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "$shimVenv\Scripts" | Out-File -Append $env:GITHUB_PATH -Encoding utf8
+
       - name: Install python build deps
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $ErrorActionPreference = 'Stop'
+          python -c "import site, sys; assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE; print(sys.executable)"
           python -m pip install "pip==26.2.1"
           # cmake<4 matches the VS2026-bundled CMake 3.x used by the local
           # Windows build. CMake 4 breaks vendored external/SPIRV-Tools.
