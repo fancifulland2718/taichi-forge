@@ -927,6 +927,27 @@ def test_ndarray_scalar_fill_vulkan_reset_with_live_ndarray():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_ndarray_native_scalar_fill_preserves_bits():
+    floating = ti.ndarray(ti.f32, shape=17)
+    signed = ti.ndarray(ti.i32, shape=17)
+    # Include signed zero and non-finite values: numeric equality alone cannot
+    # verify the bit-preserving conversion used by the native fill binding.
+    for bits in (0x80000000, 0x3FA00000, 0xC0500000, 0x7F800000, 0xFF800000, 0x7FC00000):
+        value = float(np.array(bits, dtype=np.uint32).view(np.float32))
+        compiled = impl.get_runtime().get_num_compiled_functions()
+        floating.fill(value)
+        assert impl.get_runtime().get_num_compiled_functions() == compiled
+        np.testing.assert_array_equal(
+            floating.to_numpy().view(np.uint32), np.full(17, bits, dtype=np.uint32)
+        )
+    for value in (-(1 << 31), -1, (1 << 31) - 1):
+        compiled = impl.get_runtime().get_num_compiled_functions()
+        signed.fill(value)
+        assert impl.get_runtime().get_num_compiled_functions() == compiled
+        np.testing.assert_array_equal(signed.to_numpy(), np.full(17, value, dtype=np.int32))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_ndarray_native_zero_fill():
     n = 17
 

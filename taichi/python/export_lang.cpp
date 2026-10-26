@@ -3258,14 +3258,16 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("fill_float",
            [](Program *program, Ndarray *ndarray, float val) {
-             program->fill_ndarray_fast_u32(ndarray,
-                                            reinterpret_cast<uint32_t &>(val));
+             uint32_t bits;
+             static_assert(sizeof(bits) == sizeof(val));
+             std::memcpy(&bits, &val, sizeof(bits));
+             program->fill_ndarray_fast_u32(ndarray, bits);
            },
            py::call_guard<py::gil_scoped_release>())
       .def("fill_int",
            [](Program *program, Ndarray *ndarray, int32_t val) {
              program->fill_ndarray_fast_u32(ndarray,
-                                            reinterpret_cast<int32_t &>(val));
+                                           static_cast<uint32_t>(val));
            },
            py::call_guard<py::gil_scoped_release>())
       .def("fill_uint",
