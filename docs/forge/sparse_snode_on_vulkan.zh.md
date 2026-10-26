@@ -23,6 +23,9 @@
 
 `pointer`、`bitmasked`、`dynamic`、`hash` 不需要额外开关——只要 `ti.init(arch=ti.vulkan)` 即可使用。`hash` 仍是实验路径，第一次使用会发出警告；如需禁用，传入 `hash_snode_experimental=False`。`quant_array` / `bit_struct` 仍是独立实验路径，需要显式开启。
 
+0.7.0 不再在 Vulkan 初始化时输出通用的 sparse SNode 实验性警告。
+`vulkan_sparse_experimental` 保留为已有能力开关；具体结构、操作和设备的支持范围仍以本页说明为准。
+
 ```python
 import taichi_forge as ti
 ti.init(arch=ti.vulkan)

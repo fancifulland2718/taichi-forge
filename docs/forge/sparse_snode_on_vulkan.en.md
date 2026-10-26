@@ -23,6 +23,9 @@ Supported ops on Vulkan: `activate`, `deactivate`, `is_active`, `length`, `appen
 
 No extra switch is required for `pointer`, `bitmasked`, `dynamic`, or `hash` — `ti.init(arch=ti.vulkan)` is enough. `hash` remains experimental and warns on first use; pass `hash_snode_experimental=False` to disable it. `quant_array` / `bit_struct` remains a separate experimental path and requires its own explicit gate.
 
+0.7.0 no longer emits the generic experimental sparse SNode warning during Vulkan initialization.
+`vulkan_sparse_experimental` remains the existing capability switch; the structure, operation and device limits described here still apply.
+
 ```python
 import taichi_forge as ti
 ti.init(arch=ti.vulkan)
