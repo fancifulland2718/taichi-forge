@@ -69,6 +69,19 @@ adapter（ABI 118，要求 R590+ 驱动），8.1/9.0 adapter 已移除。
 Forge 原生条件 Graph 的 **Driver API 12.8+** 要求独立检查，核心 runtime 使用动态符号、
 自有 ABI 声明及内嵌 PTX，不依赖这次安装的 SDK 版本启用这些功能。
 
+## 发布说明的写法
+
+参考 [NVIDIA Warp 的发布说明](https://github.com/NVIDIA/warp/releases/tag/v1.17.0)，
+先用一段概括本版，再列出少量用户可感知的重点，最后说明升级动作和依赖变化。
+每项说明“改变了什么、对使用者有什么影响”；API 名称只在帮助定位用法时保留。
+性能数字需要可复现的适用范围，不将局部收益写成普遍加速。
+
+`docs/forge/release_notes.zh.md` 与 `.en.md` 保持相同信息和顺序；实现细节、完整修复列表
+放在单独的 changelog 或 API 文档中，通过链接访问。摘要不堆叠 commit、内部工作包或
+临时验收状态。ABI/格式编号仍集中在摘要的升级部分，避免多处维护。
+`release_artifacts.py` 直接提取两份文件的当前版本段落作为 GitHub Release 正文，并固定文档
+链接到发布源码；完整 changelog 随公开文档附件提供。
+
 ## 准备与发布顺序
 
 1. 更新 `version.txt`、CMake 版本、native header、runtime 依赖和两份

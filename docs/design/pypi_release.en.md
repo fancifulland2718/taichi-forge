@@ -79,6 +79,22 @@ Forge's native conditional Graphs separately require **Driver API 12.8+**: core
 runtime uses dynamically loaded symbols, its own ABI declarations and embedded
 PTX, so this SDK pin does not disable those features.
 
+## Writing release notes
+
+Follow the structure of [NVIDIA Warp's release notes](https://github.com/NVIDIA/warp/releases/tag/v1.17.0):
+one overview paragraph, a short set of user-facing highlights, then upgrade actions
+and dependency changes. Explain what changed and why it matters; include API names
+when they help readers find the feature. Scope performance figures to reproducible
+workloads rather than implying a universal speedup.
+
+Keep `docs/forge/release_notes.zh.md` and `.en.md` aligned in content and order.
+Link implementation details and exhaustive fixes from a separate changelog or API page;
+omit commit inventories, internal work packages and temporary qualification status.
+Keep ABI/format revisions in the summary's upgrade section as their single reference.
+`release_artifacts.py` extracts each file's current version section for the GitHub
+Release body and pins documentation links to the release source. The public docs
+attachment includes the full changelog.
+
 ## Prepare and publish in order
 
 1. Update `version.txt`, CMake versions, native header, runtime dependency and both
