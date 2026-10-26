@@ -83,7 +83,7 @@ vk_debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
       if (!vk_ignore_validation_warning(msg_name))
         TI_ERROR("{}", msg_buf);
     } else {
-      RHI_LOG_ERROR("{}", msg_buf);
+      RHI_LOG_ERROR(msg_buf);
     }
   }
 
