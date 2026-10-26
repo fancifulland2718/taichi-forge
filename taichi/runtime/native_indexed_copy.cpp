@@ -215,7 +215,7 @@ void register_indexed_copy_operation(NativeOperationRegistry &registry) {
         op.dst_items = count("dst_items");
         const auto dtype = operation_json::name(p["dtype"]);
         bool found = false;
-        for (const auto type : copy_types())
+        for (const auto &type : copy_types())
           if (type->to_string() == dtype) {
             op.dtype = type;
             found = true;

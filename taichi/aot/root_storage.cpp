@@ -12,7 +12,7 @@ namespace {
 constexpr const char *kFilename = "root_storage.json";
 
 DataType scalar_type(const std::string &dtype) {
-  for (const auto type : {PrimitiveType::i8, PrimitiveType::u8,
+  for (const auto &type : {PrimitiveType::i8, PrimitiveType::u8,
                           PrimitiveType::i16, PrimitiveType::u16, PrimitiveType::f16,
                           PrimitiveType::i32, PrimitiveType::u32, PrimitiveType::f32,
                           PrimitiveType::i64, PrimitiveType::u64, PrimitiveType::f64})
