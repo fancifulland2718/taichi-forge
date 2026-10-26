@@ -32,6 +32,9 @@ class _MaterializedManifest:
     requested_grid_residency_waves: object
     requested_range_work_per_thread_target: int
     requested_memory_strategy: str
+    backend: str = "cuda"
+    device_range_dispatch_version: int = 0
+    range_bounds: object = None
 
 
 def _manifests():
@@ -48,7 +51,7 @@ def _materialized_manifests(plan):
             logical_task_id=task.logical_task_id,
             task_index=task.task_index,
             task_type=task.task_kind,
-            optimization_spec_id=plan.compilation_identity,
+            optimization_spec_id="" if plan.range_dispatch_only else plan.compilation_identity,
             selected_block_size=task.workgroup_size,
             requested_thread_local_mode=task.thread_local,
             requested_cuda_min_blocks_per_sm=task.cuda_min_blocks_per_sm,
@@ -228,8 +231,10 @@ def test_offload_execution_plan_caches_identity_and_validates_cached_topology(
         raise AssertionError("immutable offload identity was recomputed")
 
     monkeypatch.setattr(offload_execution_plan, "_identity", unexpected_identity)
+    monkeypatch.setattr(offload_execution_plan, "replace", unexpected_identity)
     for _ in range(100):
         assert (plan.identity, plan.compilation_identity) == expected
+        assert plan.range_dispatch_only and plan.workgroup_and_range_dispatch_only
         assert plan.validate_materialization(materialized)
 
     malformed = list(materialized)

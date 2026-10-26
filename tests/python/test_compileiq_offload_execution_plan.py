@@ -9,6 +9,57 @@ from taichi_forge.lang._compileiq_offload_execution_plan import (
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_per_task_workgroup_keeps_source_owned_neighbor_and_dense_field(tmp_path):
+    field = ti.field(ti.i32, 257)
+    values = ti.ndarray(ti.i32, 258)
+
+    @ti.kernel
+    def step(out: ti.types.ndarray(ti.i32, 1)):
+        ti.loop_config(block_dim=128)
+        for i in range(257):
+            out[i + 1] = i * 2
+        for i in field:
+            field[i] = out[i + 1] + 7
+        out[0] = field[256]
+
+    search = compileiq_offload_execution_plan_search(step, values)
+    baseline = tuple(step.task_manifest(values))
+    ranges = [t for t in baseline if t.task_type == "range_for"]
+    assert len(ranges) == 2 and ranges[0].source_block_size_explicit
+    assert not any(
+        edit["field"] == "workgroup_size" and edit["task_index"] == ranges[0].task_index
+        for recipe_id in search.recipe_ids for edit in search.recipe_manifest(recipe_id)["edits"]
+    )
+    recipe_id, block = _find_single_edit(search, task_index=ranges[1].task_index,
+                                        field="workgroup_size", value=64)
+    params = _parameters(search, recipe_id)
+    report = search.materialize(params, values)
+    assert report.tasks[ranges[0].task_index].selected_block_size == 128
+    assert report.tasks[ranges[1].task_index].selected_block_size == block
+    bound = search.bind(params)
+    bound(values)
+    np.testing.assert_array_equal(field.to_numpy(), np.arange(257) * 2 + 7)
+    assert values.to_numpy()[0] == 519
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(bound, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1))
+    graph = builder.compile()
+    module = ti.aot.Module()
+    module.add_execution_plan("step", graph, snapshot_state=True)
+    archive = tmp_path / "per-task.tcm"
+    module.archive(str(archive))
+    with ti.aot.borrow_runtime() as runtime, runtime.load_module(archive) as loaded:
+        target = runtime.ndarray("i32", (258,))
+        try:
+            with loaded.prepare_execution("step", dict(out=target)) as call:
+                call()
+            np.testing.assert_array_equal(np.frombuffer(target.read(), np.int32),
+                                          np.concatenate(([519], np.arange(257) * 2)))
+        finally:
+            target.close()
+    graph.close()
+
+
 def _parameters(search, recipe_id):
     return {
         "domain_fingerprint": search.domain_fingerprint,
@@ -61,7 +112,7 @@ def _complete_compileiq_audit(search, *, omit=()):
     )
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_compileiq_plan_domain_is_complete_opaque_and_baseline_inclusive():
     count = 1 << 14
     values = ti.ndarray(ti.i32, shape=count)
@@ -78,6 +129,10 @@ def test_compileiq_plan_domain_is_complete_opaque_and_baseline_inclusive():
     search = compileiq_offload_execution_plan_search(mixed, values)
     manifest = search.manifest()
     baseline = search.recipe_manifest(search.baseline_recipe_id)
+    if ti.lang.impl.current_cfg().arch == ti.vulkan:
+        assert all(edit["field"] == "workgroup_size"
+                   for recipe_id in search.recipe_ids
+                   for edit in search.recipe_manifest(recipe_id)["edits"])
     task_count = len(baseline["tasks"])
 
     assert search.capability["protocol_revision"] == 7
@@ -230,7 +285,7 @@ def test_plan_qualification_keeps_negative_evidence_without_admission():
     assert positive.scope_id == negative.scope_id
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_modified_compileiq_exhausts_and_materializes_full_plan_domain():
     count = 1 << 12
     values = ti.ndarray(ti.i32, shape=count)
@@ -274,7 +329,7 @@ def test_modified_compileiq_exhausts_and_materializes_full_plan_domain():
     np.testing.assert_array_equal(values.to_numpy(), np.arange(count, dtype=np.int32) * 7 + 3)
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_offload_paged_search_materializes_and_resumes_exact_plans(monkeypatch):
     import pytest
     from compileiq.forge_support import ForgeOpaqueEvaluationContextV1
@@ -295,10 +350,11 @@ def test_offload_paged_search_materializes_and_resumes_exact_plans(monkeypatch):
     plans = compileiq_offload_execution_plan_search(kernel, array)
     # Keep representative launch edits; no large compilation matrix is needed.
     selected = {plans.baseline_recipe_id: plans._recipes[plans.baseline_recipe_id]}
+    axis = "grid_residency_waves" if ti.lang.impl.current_cfg().arch == ti.cuda else "workgroup_size"
     selected.update(
         (key, recipe)
         for key, recipe in plans._recipes.items()
-        if len(recipe.edits) == 1 and recipe.edits[0].field == "grid_residency_waves"
+        if len(recipe.edits) == 1 and recipe.edits[0].field == axis
     )
     plans._initialize(
         kernel=kernel,
@@ -315,7 +371,7 @@ def test_offload_paged_search_materializes_and_resumes_exact_plans(monkeypatch):
         reuse_scope="portable",
         workload_context_id="65-integer-map",
         evaluation_contract_id="exact-oracle-synthetic-score",
-        backend_environment_id="test-cuda-device",
+        backend_environment_id="test-" + str(ti.lang.impl.current_cfg().arch),
     )
     winner = sorted(key for key in plans.recipe_ids if key != plans.baseline_recipe_id)[0]
     calls = []

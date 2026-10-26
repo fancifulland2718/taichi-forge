@@ -7,6 +7,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Linker/Linker.h"
 #include "taichi/analysis/offline_cache_util.h"
+#include "taichi/analysis/dense_struct_for.h"
 #include "taichi/analysis/range_for_bounds.h"
 #include "taichi/analysis/range_dispatch.h"
 #include "taichi/ir/snode_hash_utils.h"
@@ -3450,7 +3451,8 @@ LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
       const auto *task =
           ir->as<Block>()->statements.front()->as<OffloadedStmt>();
       const auto &spec = kernel->offload_task_optimization_spec(
-          task_codegen_id, task->task_type);
+          task_codegen_id,
+          task_type_after_dense_demotion(*task, config.demote_dense_struct_fors));
       if (spec.thread_local_mode ==
           Kernel::TaskLaunchThreadLocalMode::enabled) {
         make_thread_local = true;

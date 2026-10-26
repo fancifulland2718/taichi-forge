@@ -228,15 +228,17 @@ class _TaskOptimizationSpec:
 
     @property
     def is_baseline(self):
+        return self.workgroup_size is None and self.range_dispatch == "fixed" and self._has_only_range_controls
+
+    @property
+    def _has_only_range_controls(self):
         return (
-            self.workgroup_size is None
-            and self.thread_local == "auto"
+            self.thread_local == "auto"
             and self.cuda_min_blocks_per_sm == 2
             and self.cuda_max_registers is None
             and self.grid_residency_waves is None
             and self.range_work_per_thread_target == 1
             and self.sparse_list_policy == "saturating"
-            and self.range_dispatch == "fixed"
             and self.memory_strategy == "direct"
             and not self.memory_source_arg_indices
             and not self.memory_domain_shape
@@ -351,6 +353,10 @@ class _OffloadExecutionPlan:
             compilation_payload["topology_transform"] = topology
         # The plan and every task are frozen, so all derived launch identities
         # and topology facts are immutable for the plan's lifetime.
+        range_controls = not fusion_groups and all(task._has_only_range_controls for task in tasks)
+        object.__setattr__(self, "_workgroup_and_range_dispatch_only", range_controls)
+        object.__setattr__(self, "_range_dispatch_only", range_controls and
+                           all(task.workgroup_size is None for task in tasks))
         object.__setattr__(
             self,
             "_is_baseline",
@@ -515,9 +521,11 @@ class _OffloadExecutionPlan:
 
     @property
     def range_dispatch_only(self):
-        return not self.fusion_groups and all(
-            replace(task, range_dispatch="fixed").is_baseline for task in self.tasks
-        )
+        return self._range_dispatch_only
+
+    @property
+    def workgroup_and_range_dispatch_only(self):
+        return self._workgroup_and_range_dispatch_only
 
     def validate_materialization(self, manifests):
         manifests = tuple(manifests)

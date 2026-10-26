@@ -1,6 +1,7 @@
 ﻿#include "taichi/ir/ir.h"
 #include "taichi/analysis/graph_kernel_metadata.h"
 #include "taichi/analysis/default_gpu_block_size.h"
+#include "taichi/analysis/dense_struct_for.h"
 #include "taichi/common/exceptions.h"
 #include "taichi/ir/frontend_ir.h"
 #include "taichi/system/profiler.h"
@@ -597,12 +598,11 @@ void apply_offload_execution_plan(IRNode *ir,
   if (config.arch == Arch::vulkan) {
     TI_ERROR_IF(!plan->fusion_groups.empty(), "Vulkan task plans do not support fusion");
     for (const auto &spec : plan->source_tasks) {
-      TI_ERROR_IF(spec.workgroup_size != 0 ||
-                      spec.thread_local_mode != Kernel::TaskLaunchThreadLocalMode::automatic ||
+      TI_ERROR_IF(spec.thread_local_mode != Kernel::TaskLaunchThreadLocalMode::automatic ||
                       spec.cuda_min_blocks_per_sm != 2 || spec.cuda_max_registers != -1 ||
                       spec.grid_residency_waves != 0 || spec.range_work_per_thread_target != 1 ||
                       spec.sparse_list_policy != "saturating" || spec.memory_strategy != "direct",
-                  "Vulkan task plans only support range dispatch selection");
+                  "Vulkan task plans only support workgroup and range dispatch selection");
     }
   }
   TI_ERROR_IF(!ir->is<Block>(),
@@ -621,7 +621,12 @@ void apply_offload_execution_plan(IRNode *ir,
   for (std::size_t index = 0; index < tasks.size(); ++index) {
     auto *task = tasks[index];
     const auto &spec = plan->source_tasks[index];
-    const auto actual_kind = OffloadedStmt::task_type_name(task->task_type);
+    const auto physical_type =
+        task_type_after_dense_demotion(*task, config.demote_dense_struct_fors);
+    const auto actual_kind = OffloadedStmt::task_type_name(physical_type);
+    // Plans describe final physical tasks. All-dense struct-fors are still
+    // present here, before offload_to_executable performs their established
+    // one-task-to-one-task range demotion. Match only that proven transition.
     TI_ERROR_IF(spec.task_index != index || spec.task_kind != actual_kind,
                 "offload execution plan source topology mismatch at task {}: "
                 "expected {}, got {}",
@@ -630,7 +635,7 @@ void apply_offload_execution_plan(IRNode *ir,
         spec.workgroup_size == task->block_dim) {
       continue;
     }
-    TI_ERROR_IF(task->task_type != OffloadedStmt::TaskType::range_for,
+    TI_ERROR_IF(physical_type != OffloadedStmt::TaskType::range_for,
                 "offload execution plan workgroup control applies only to "
                 "range_for tasks");
     TI_ERROR_IF(task->source_block_dim_explicit,

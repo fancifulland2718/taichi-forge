@@ -84,6 +84,15 @@ templates need no ndarray conversion. CPU retains its existing candidates and
 scheduler. Derivative dispatches retain their original artifacts; this does not
 qualify tuning derivative kernels.
 
+For kernels containing multiple ordinary ranges, `ndrange` loops or dense Field
+loops lowered to ranges, workgroup candidates intersect the legal values of every
+physical task and retain serial prefixes/suffixes in order. Experimental complete
+offload-plan search also supports per-task workgroups on CUDA/Vulkan: source-owned
+blocks stay fixed while other qualified tasks can vary independently. Vulkan
+candidates respect actual device workgroup limits; CUDA-specific register, TLS and
+residency controls are not exposed on Vulkan. Search remains explicit and off by
+default. More candidates can increase compilation and retained artifact costs during tuning.
+
 Discovery emits requests without compiling alternatives. Trial materialization
 compiles and verifies the final manifest. Native checks still enforce source-owned
 blocks, shared-memory/thread-sensitive semantics, device constraints and serial

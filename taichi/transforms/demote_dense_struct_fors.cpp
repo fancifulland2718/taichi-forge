@@ -1,4 +1,5 @@
 #include "taichi/ir/ir.h"
+#include "taichi/analysis/dense_struct_for.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/visitors.h"
@@ -112,8 +113,7 @@ void convert_to_range_for(OffloadedStmt *offloaded) {
 }
 
 bool maybe_convert(OffloadedStmt *stmt) {
-  if ((stmt->task_type == TaskType::struct_for) &&
-      stmt->snode->is_path_all_dense) {
+  if (is_demotable_dense_struct_for(*stmt)) {
     convert_to_range_for(stmt);
     return true;
   }

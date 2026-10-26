@@ -1,4 +1,4 @@
-"""Opaque CompileIQ search domains for complete CUDA offload plans."""
+"""Opaque CompileIQ search domains for complete CUDA/Vulkan offload plans."""
 
 from __future__ import annotations
 
@@ -22,9 +22,9 @@ from taichi_forge.lang._offload_execution_plan import (
 
 
 _PROVIDER_NAMESPACE = "taichi_forge.lang.offload_execution_plan"
-_FIRST_STAGE_VERSION = "single-task-perturbation.v3"
+_FIRST_STAGE_VERSION = "single-task-perturbation.v4"
 _REFINED_STAGE_VERSION = "observed-frontier-pairwise.v2"
-_WORKGROUP_SIZES = (64, 128, 256, 512)
+_WORKGROUP_SIZES = (32, 64, 128, 256, 512, 1024)
 _THREAD_LOCAL_MODES = ("on", "off")
 _CUDA_MIN_BLOCKS_PER_SM = (1, 4)
 _CUDA_MAX_REGISTERS = (24, 48)
@@ -223,16 +223,24 @@ class CompileIQOffloadExecutionPlanSearch:
     )
 
     def __init__(self, kernel, *sample_args):
+        from taichi_forge.lang import impl
+        from taichi_forge.lang._gpu_semantics_tuning import _effective_workgroup_limit
+
         capability_components = _validated_compileiq_capability()
         manifests = tuple(kernel.task_manifest(*sample_args))
         self._validate_baseline_manifests(manifests)
         baseline = _OffloadExecutionPlan.from_task_manifests(manifests)
-        recipes, eligibility = self._first_stage_recipes(baseline, manifests)
+        max_threads = _effective_workgroup_limit(impl.current_cfg().max_block_dim)
+        workgroup_sizes = tuple(
+            value for value in _WORKGROUP_SIZES
+            if value <= max_threads
+        )
+        recipes, eligibility = self._first_stage_recipes(baseline, manifests, workgroup_sizes)
         stage_manifest = {
             "generation": "baseline_plus_all_legal_single_task_perturbations",
             "candidate_limit": None,
             "axes": {
-                "workgroup_size": _WORKGROUP_SIZES,
+                "workgroup_size": workgroup_sizes,
                 "thread_local": ("auto", *_THREAD_LOCAL_MODES),
                 "cuda_min_blocks_per_sm": (2, *_CUDA_MIN_BLOCKS_PER_SM),
                 "cuda_max_registers": (None, *_CUDA_MAX_REGISTERS),
@@ -246,6 +254,8 @@ class CompileIQOffloadExecutionPlanSearch:
                 ),
             },
         }
+        if manifests[0].backend == "vulkan":
+            stage_manifest["axes"] = {"workgroup_size": workgroup_sizes}
         self._initialize(
             kernel=kernel,
             sample_args=sample_args,
@@ -261,13 +271,14 @@ class CompileIQOffloadExecutionPlanSearch:
     def _validate_baseline_manifests(manifests):
         if not manifests:
             raise ValueError("offload plan search requires at least one physical task")
-        if any(task.backend != "cuda" for task in manifests):
-            raise ValueError("offload plan search requires a native CUDA kernel")
+        if (manifests[0].backend not in ("cuda", "vulkan") or
+                any(task.backend != manifests[0].backend for task in manifests)):
+            raise ValueError("offload plan search requires one native CUDA or Vulkan backend")
         if tuple(task.task_index for task in manifests) != tuple(range(len(manifests))):
             raise ValueError("baseline task manifests are not in physical order")
 
     @classmethod
-    def _first_stage_recipes(cls, baseline, manifests):
+    def _first_stage_recipes(cls, baseline, manifests, workgroup_sizes=_WORKGROUP_SIZES):
         recipes = {baseline.recipe_id: _PlanRecipe(baseline)}
         eligibility = []
         for spec, manifest in zip(baseline.tasks, manifests):
@@ -286,9 +297,14 @@ class CompileIQOffloadExecutionPlanSearch:
             elif not no_shared:
                 axis_status["workgroup_size"] = "shared-memory task retains its materialized block contract"
             else:
-                legal = tuple(value for value in _WORKGROUP_SIZES if value != manifest.selected_block_size)
+                legal = tuple(value for value in workgroup_sizes if value != manifest.selected_block_size)
                 cls._add_single_axis(recipes, baseline, spec.task_index, "workgroup_size", legal)
                 axis_status["workgroup_size"] = f"{len(legal)} perturbations"
+
+            if manifest.backend == "vulkan":
+                axis_status["backend_controls"] = "CUDA-specific axes are not supported on Vulkan"
+                eligibility.append((spec.logical_task_id, axis_status))
+                continue
 
             # A TLS allocation alone is not proof of a compiler reduction.
             # This qualification does not authorize remapping its iterations.

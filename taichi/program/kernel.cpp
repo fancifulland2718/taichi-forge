@@ -600,20 +600,20 @@ void Kernel::set_offload_execution_plan(
                  task.workgroup_size),
         "shared_staged_2d requires exact two-dimensional domain, origin, and "
         "tile metadata with one logical output per thread");
-    const bool nonbaseline =
-        task.workgroup_size != 0 ||
+    const bool backend_specific =
         task.thread_local_mode != TaskLaunchThreadLocalMode::automatic ||
         task.cuda_min_blocks_per_sm != 2 || task.cuda_max_registers != -1 ||
         task.grid_residency_waves != 0 ||
         task.range_work_per_thread_target != 1 ||
         task.memory_strategy != "direct" ||
         task.sparse_list_policy != "saturating";
+    const bool nonbaseline = task.workgroup_size != 0 || backend_specific;
     plan.range_dispatch_only &= !nonbaseline;
     TI_ERROR_IF(task.device_range_dispatch && (nonbaseline || task.task_kind != "range_for"),
                 "Device range dispatch requires a baseline range_for task");
     // Admission must also hold on a compiled-cache hit, when IR passes do not run.
-    TI_ERROR_IF(plan_arch == Arch::vulkan && nonbaseline,
-                "Vulkan task plans only support range dispatch selection");
+    TI_ERROR_IF(plan_arch == Arch::vulkan && backend_specific,
+                "Vulkan task plans only support workgroup and range dispatch selection");
     TI_ERROR_IF(task.device_range_dispatch && plan_arch != Arch::vulkan &&
                     plan_arch != Arch::cuda,
                 "Device range dispatch recording requires CUDA or Vulkan");

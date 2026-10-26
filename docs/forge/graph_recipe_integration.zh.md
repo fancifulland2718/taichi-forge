@@ -62,6 +62,12 @@ primal dispatch，CUDA/Vulkan 可试测 `full` compile tier 和合法 range 的 
 CUDA 还可试测已有的 launch-bounds 配置。捕获 Field 与显式 template 不要求转换为 ndarray。
 CPU 保持原候选和调度；梯度 dispatch 保持原编译产物，不据此宣称梯度 kernel 也可调优。
 
+一个 kernel 含多个普通 range、`ndrange` 或可降为 range 的 dense Field 循环时，
+workgroup 候选取每个物理 task 合法值的交集，串行前后段保持原序。实验性完整 offload-plan
+搜索还支持 CUDA/Vulkan 逐 task workgroup：源码拥有 block 的 task 保留，其他合格 task 可单独选择。
+Vulkan 候选受实际设备 workgroup 限制；CUDA 专属寄存器、TLS、驻留等轴不用于 Vulkan。
+这些都是显式搜索能力，普通执行默认不试跑或搜索；增加候选会增加用户主动调优的编译和存储成本。
+
 发现阶段只生成请求描述。候选实际物化时才编译，并核验最终 manifest；源码指定的 block、
 共享内存/线程相关语义、设备限制和串行前后段仍服从原生编译器校验。请求可能被拒绝，
 失败会进入报告，不会作为有效测速结果。`full` 不会重置用户显式选择的 LLVM/SPIR-V
