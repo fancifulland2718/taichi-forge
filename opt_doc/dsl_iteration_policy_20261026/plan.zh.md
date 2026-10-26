@@ -1,9 +1,23 @@
 # DSL 遍历构造的默认选择与 CompileIQ 覆盖规划
 
-日期：2026-10-26。状态：规划完成，尚未实施本轮生产改动。
+日期：2026-10-26。状态：按下列用户修订进入目标执行；原始宽范围清单保留作后续参考。
 源码基线：Forge `master@dceb13ae7`，0.7.0，私有 ABI 222，cache schema 88，ExecutionPlan 27。
 本轮用户所指对象是 `ti.ndrange`、`ti.grouped` 等 DSL 构造及使用它们的 kernel，
 不是把主要范围扩大到外部库和 native 算法。以 Windows CPU/CUDA/Vulkan 为验证目标，串行推进。
+
+## 当前执行边界（用户修订）
+
+用户明确本轮主要做**编译期的廉价运行时优化**，不改运行时循环或调度器。实际执行按以下顺序：
+
+1. 编译期默认选择与无冲突配置组合；保留显式 block、资源约束和已冻结的物理产物。
+2. 检查并补齐 ndrange/grouped、dense Field/ndarray、内联/内部 helper 的共同编译覆盖；
+   编译事实不足时明确保留，不冻结动态初值，不在线试跑。
+3. CPU/CUDA/Vulkan 代表性正确性、前反向、Graph/AOT、编译及暖态成本验收，分批提交。
+
+下文 D3 的新 CompileIQ 搜索轴、D4 的 CPU runtime 调度/循环改造，以及后续复杂变换均不在
+本次目标中。现有 CompileIQ 配置仍须可组合且行为正确，默认不搜索。可在编译器内优化代码和
+选择合法配置，但不改变源循环语义、static 展开约定、运行时提交或线程池管理。
+本次进展见本目录 `progress.zh.md`，不以原规划的宽范围估算作为本次完成口径。
 
 ## 1. 目标和既有工作的关系
 
@@ -40,7 +54,7 @@ helper 写出的等价计算，经过共同 lowering 后，能使用一致的默
 | `_gpu_semantics_tuning.py`、`graph/_recipes/kernel_configuration.py` | CUDA/Vulkan 共同配置候选已存在；workgroup 主要要求一个 range | 把合法 axis 下沉到逐 task；多 task 合成为完整方案，保持串行前后段和依赖 |
 | `_compileiq_offload_execution_plan.py` | 完整逐 task 搜索入口目前要求 CUDA | 将可共用轴用于 Vulkan；CUDA 特有 register/residency/TLS 轴不能伪装为 Vulkan 支持 |
 | `apply_offload_execution_plan()` | Vulkan 当前仅允许 range-dispatch 类方案 | Vulkan 扩展 workgroup 必须连同 SPIR-V LocalSize、manifest 和 cache/AOT 接线，不只放开 Python 判断 |
-| CPU codegen/runtime | 普通 range 使用 chunk 内逐元素 callback；bounded range 已有生成连续循环路径 | 评估共享适用的连续循环 lowering、grain/worker 选择；CPU 不套 GPU block |
+| CPU codegen/runtime | 完整链路核实：默认先由 `make_cpu_multithreaded_range_for` 编译期分块并生成连续内循环；bounded range 另有自己的路径 | 之前仅看最终 codegen 的回调得出的覆盖判断不完整；本次保留已有编译期分块和 runtime，不重复实施 |
 | `cpu_block_dim_adaptive` | 检索到声明、默认值、Python setter 和绑定，未找到调度消费点 | 以定向行为测试核实并修正合同，不把配置名存在当作已有自适应 |
 
 本节是当前源码审查，不是本轮新 GPU 性能测量。现有测试仅证明其已列出的具体覆盖。

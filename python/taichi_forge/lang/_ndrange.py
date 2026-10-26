@@ -100,29 +100,16 @@ def ndrange(*args) -> Iterable:
             ...
             1 4
 
-        But you do can use a single index i to loop over these 2-D indices, in this case
-        the indices are returned as a 1-D array `(0, 1, ..., 9)`:
+        A kernel ndrange loop needs one loop variable per dimension. Use
+        ti.grouped to collect all coordinates in one vector variable:
 
             >>> @ti.kernel
-            >>> def loop_2d_as_1d():
-            >>>     for i in ti.ndrange(2, 5):
-            >>>         print(i)
-            will print 0 1 2 3 4 5 6 7 8 9
+            >>> def loop_2d_grouped():
+            >>>     for I in ti.grouped(ti.ndrange(2, 5)):
+            >>>         print(I[0], I[1])
 
-        In general, you can use any `1 <= k <= n` iterators to loop over a set of n-D
-        indices. For `k=n` all the indices are n-dimensional, and they are returned in
-        lexical order, but for `k<n` iterators the last n-k+1 dimensions will be collapsed into
-        a 1-D array of consecutive integers `(0, 1, 2, ...)` whose length equals the
-        total number of indices in the last n-k+1 dimensions:
-
-            >>> @ti.kernel
-            >>> def loop_3d_as_2d():
-            >>>     # use two iterators to loop over a set of 3-D indices
-            >>>     # the last two dimensions for 4, 5 will collapse into
-            >>>     # the array [0, 1, 2, ..., 19]
-            >>>     for i, j in ti.ndrange(3, 4, 5):
-            >>>         print(i, j)
-            will print 0 0, 0 1, ..., 0 19, ..., 2 19.
+        For a flat index use range(2 * 5), then decode row and column with
+        i // 5 and i % 5. Parallel execution does not guarantee print order.
 
         A typical usage of `ndrange` is when you want to loop over a tensor and process
         its entries in parallel. You should avoid writing nested `for` loops here since

@@ -22,7 +22,7 @@ points, see [Forge API reference](forge_api_reference.en.md).
 
 ## Default block selection for ordinary GPU kernels
 
-CUDA/Vulkan select blocks for statically known ordinary ranges during compilation,
+CUDA/Vulkan select blocks for constant or source-bounded ordinary ranges during compilation,
 without enabling CompileIQ. Starting from the existing default, the compiler
 halves the block down to subgroup width only while all workgroups still fit in
 one compute-unit wave. This is a static heuristic, not measured occupancy or a
@@ -34,12 +34,20 @@ guarantee of optimal performance. With 128 compute units and 32-lane subgroups,
   subgroup properties and available `VK_NV_shader_sm_builtins` or
   `VK_AMD_shader_core_properties2` property queries. These optional extensions
   supply performance hints, not shader features or deployment requirements.
-- Unknown unit counts allow only single-block trimming. Dynamic scalar/ndarray
-  extents are not guessed from the first invocation and do not acquire extra
-  shape specializations. Host-range grid clipping remains independent.
-- Explicit `ti.loop_config(block_dim=...)`, task policies, selected optimization
-  plans and non-default global `default_gpu_block_dim` values remain unchanged.
-  CPU scheduling is unchanged.
+- `ti.ndrange`, `ti.grouped`, dense Field loops lowered to ranges, inlined code and
+  DSL helpers share final-task analysis. Existing source bounds such as `min/max`
+  can prove a dynamic upper bound at compile time: `ti.ndrange(ti.min(n, 64), 64)`
+  has at most 4096 iterations, while its actual count still follows `n`.
+  Any possible intermediate i32 overflow prevents this inference, even before a later clamp.
+- Unknown unit counts allow only trimming ranges whose upper bound fits one block.
+  Unknown scalar/ndarray extents retain their block and are not guessed from the first
+  invocation or given extra shape specializations. Host-range grid clipping remains
+  independent; this selection changes no runtime loops, argument evaluation or submissions.
+- Explicit `ti.loop_config(block_dim=...)`, task policies and non-default global
+  `default_gpu_block_dim` values remain unchanged. Kernel optimization specs without
+  a block request still use default selection. Complete task plans preserve each
+  task's explicit workgroup while allowing defaults for unspecified tasks. Frozen
+  code is not rewritten, and CPU scheduling is unchanged.
 - Shared memory, barriers, physical-thread indexing, random numbers, unknown
   calls, TLS/BLS and atomic reductions retain their block sizes. Empty-group
   elision alone does not establish safety for changing block size.

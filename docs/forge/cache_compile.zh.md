@@ -20,7 +20,7 @@ Forge 将可安全复用的前端信息与各后端编译产物分离。目标�
 
 ## 普通 GPU kernel 的默认 block 选择
 
-CUDA/Vulkan 在编译期为静态已知的普通 range 循环选择 block，不需要开启 CompileIQ。
+CUDA/Vulkan 在编译期为常量范围或源码可证明上界的普通 range 循环选择 block，不需要开启 CompileIQ。
 编译器从原有默认值开始，尝试按二分缩小到子组宽度；仅当更小的 block 仍能把全部
 工作组铺在一轮计算单元上时才采用。它是静态启发式，不是 occupancy 测量或最优性保证。
 例如设备有 128 个计算单元、子组宽度为 32 时，4096 次独立迭代可以从
@@ -29,10 +29,16 @@ CUDA/Vulkan 在编译期为静态已知的普通 range 循环选择 block，不�
 - CUDA 复用初始化阶段已查询的 SM 数量；Vulkan 使用已有子组属性，以及可用的
   `VK_NV_shader_sm_builtins` / `VK_AMD_shader_core_properties2` 属性查询。
   这些可选扩展只提供性能提示，不成为 shader 或部署包的功能要求。
-- 计算单元数量未知时，只缩小单个 block 内的静态短循环。动态 scalar/ndarray shape
-  不按首次参数值猜测大小，不新增 shape 特化。已有 host range 的 grid 裁剪仍独立工作。
-- 显式 `ti.loop_config(block_dim=...)`、任务策略、已选择的优化方案和非默认全局
-  `default_gpu_block_dim` 保留设置。CPU 调度保持不变。
+- `ti.ndrange`、`ti.grouped`、降为 range 的 dense Field、内联及内部 helper 中的循环
+  共用最终 task 分析。源码已有 `min/max` 等边界时，可在编译期计算动态范围的上界；
+  例如 `ti.ndrange(ti.min(n, 64), 64)` 最多有 4096 次迭代，实际次数仍由 `n` 决定。
+  任何可能的中间 i32 溢出都会阻止这项推导，后续裁剪不能掩盖溢出。
+- 计算单元数量未知时，只缩小上界可放进单个 block 的短循环。未知动态 scalar/ndarray
+  shape 保留 block，不按首次参数值猜测大小，不新增 shape 特化。已有 host range 的
+  grid 裁剪仍独立工作；本项不更改运行时循环、参数求值或提交。
+- 显式 `ti.loop_config(block_dim=...)`、任务策略和非默认全局 `default_gpu_block_dim`
+  保留设置。kernel 优化配置未指定 block 时继续使用默认选择；完整逐 task 方案仅保留
+  对应 task 的显式 workgroup，未指定的 task 仍可选择。已冻结代码不被改写，CPU 调度不变。
 - 共享内存、屏障、物理线程索引、随机数、未知调用、TLS/BLS 和原子归约等保持原 block。
   “可删空工作组”本身不足以证明“可改 block”；后者有额外检查。
 - JIT/Graph 使用当前设备的冷阶段提示。普通 portable AOT 清除生产设备的计算单元
