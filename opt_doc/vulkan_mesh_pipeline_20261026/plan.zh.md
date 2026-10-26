@@ -57,19 +57,27 @@ SPIRV-Tools 实现；不承诺任意表达式都被完全化简，不替代真�
 验证结果见 [S2 记录](progress.zh.md#s2-显式冷阶段特化)。私有 ABI 224→225；
 cache schema、ExecutionPlan 与 graphics provider 格式均不变。
 
-## S3：缓存与生命周期审查（实施中，按实际缺口处理）
+## S3：缓存与生命周期审查（首轮修复已完成）
 
 现有 VulkanPipeline 已有 render-pass/dynamic-rendering 变体缓存和 VkPipelineCache。
 优先检查重复构建、失败清理、驱动身份约束及退休边界，避免再造缓存管理器。
 驱动 cache 不作为跨 GPU 可移植 AOT 内容；AOT 保留 shader 与可重建的管线定义。
 审查发现 graphics 构造异常未清理已创建的原始 shader module；独立修复并注入失败验证，
-不与 S2 接口合并提交。
+不与 S2 接口合并提交。layout 和普通/dynamic graphics pipeline 的驱动失败也改为在
+发布前抛出后端错误，避免依赖 assert 中止或在禁用 assert 后缓存无效句柄。重复失败后
+可正常准备，成功后继续复用已有变体；ABI225 及所有持久格式不变。
 
-## S4：代表性渲染验证（证据驱动）
+后续独立项：dynamic-rendering 缓存键目前还包含 load/clear/final-layout 等 pass 事实。
+可研究只按实际 pipeline 兼容性归一，但须单独覆盖附件格式/深度差异、并发首次创建和
+资源退休，并确认暖态查询不增加分配。本轮未修改该键，也未完成整个 RHI 的失败路径审计。
+
+## S4：代表性渲染验证（基础回归完成，真实变体选优后续推进）
 
 使用中小规模、互相重叠少的正确性/生命周期夹具，然后按实际渲染瓶颈决定是否增加
 预编译变体。分别记录冷准备成本和暖态执行，不预设收益，不照搬某厂商线程数建议。
 CompileIQ 如需接入，只测量已具备语义与资源合同的可选实现，保持默认关闭。
+本轮完成直接/Graph/AOT 数值夹具与固定全屏图形探针；显式特化不会自动改造现有 compute
+渲染算法。真实材质/meshlet 候选尚未选优，不能把能力补齐或无图像差异当作应用加速。
 
 ## 依据
 

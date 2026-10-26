@@ -337,6 +337,10 @@ See the [release procedure](../design/pypi_release.en.md).
 
 ### Autodiff and backend correctness
 
+- Vulkan graphics construction now releases shader modules after partial failure.
+  Pipeline layout and graphics pipeline creation errors are reported before an
+  invalid variant can enter the cache; later valid preparation can retry. The
+  change adds no draw/replay checks.
 - `SpirvShader.specialize()` explicitly freezes scalar specialization constants
   into a new immutable shader at preparation time. Reflection, pipeline identity
   and AOT export consume the same effective bytes, including descriptor-array

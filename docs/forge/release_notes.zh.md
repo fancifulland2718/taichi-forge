@@ -252,6 +252,9 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
 
 ### 自动微分与后端正确性
 
+- 修复 Vulkan 图形管线部分构造失败时的 shader module 泄漏；pipeline layout 和图形
+  pipeline 创建失败在无效变体进入缓存前明确报错，后续合法准备可以重试。
+  不增加 draw/replay 检查。
 - `SpirvShader.specialize()` 可在准备阶段显式冻结标量特化常量，生成新的不可变 shader；
   reflection、pipeline 身份和 AOT 导出共用有效字节，包括特化后的 descriptor 数组长度。
   使用内置 SPIRV-Tools 并按 Vulkan 1.3 验证，不增加 draw/replay 工作或自动变体搜索。

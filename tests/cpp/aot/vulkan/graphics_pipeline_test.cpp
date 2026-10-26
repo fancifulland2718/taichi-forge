@@ -5,6 +5,7 @@
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/rhi/vulkan/vulkan_mesh_shader.h"
+#include "taichi/rhi/backend_error.h"
 #include "external/SPIRV-Headers/include/spirv/unified1/spirv.hpp"
 #include "taichi/program/program.h"
 #include "taichi/program/ndarray.h"
@@ -95,6 +96,149 @@ const uint32_t mixed_fragment[] =
 #include "tests/cpp/aot/vulkan/shaders/graphics_storage_mixed.frag.spv.h"
     ;
 }  // namespace
+
+namespace {
+// Instrument only this test device's dispatch table. Production tables remain
+// immutable; no process-global Vulkan loader or GPU allocation policy changes.
+struct GraphicsFailureProbe {
+  explicit GraphicsFailureProbe(VulkanDevice &device)
+      : table(const_cast<VolkDeviceTable &>(device.vk_device().functions())),
+        create_module(table.vkCreateShaderModule),
+        destroy_module(table.vkDestroyShaderModule),
+        create_layout(table.vkCreatePipelineLayout),
+        create_graphics(table.vkCreateGraphicsPipelines) {
+    active = this;
+    table.vkCreateShaderModule = tracked_create_module;
+    table.vkDestroyShaderModule = tracked_destroy_module;
+    table.vkCreatePipelineLayout = tracked_create_layout;
+    table.vkCreateGraphicsPipelines = tracked_create_graphics;
+  }
+  ~GraphicsFailureProbe() {
+    table.vkCreateShaderModule = create_module;
+    table.vkDestroyShaderModule = destroy_module;
+    table.vkCreatePipelineLayout = create_layout;
+    table.vkCreateGraphicsPipelines = create_graphics;
+    active = nullptr;
+  }
+  static VKAPI_ATTR VkResult VKAPI_CALL tracked_create_module(
+      VkDevice device, const VkShaderModuleCreateInfo *info,
+      const VkAllocationCallbacks *alloc, VkShaderModule *result) {
+    auto &probe = *active;
+    if (++probe.module_calls == probe.fail_module_call) {
+      *result = VK_NULL_HANDLE;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    auto status = probe.create_module(device, info, alloc, result);
+    if (status == VK_SUCCESS)
+      ++probe.created;
+    return status;
+  }
+  static VKAPI_ATTR void VKAPI_CALL tracked_destroy_module(
+      VkDevice device, VkShaderModule module, const VkAllocationCallbacks *alloc) {
+    if (module)
+      ++active->destroyed;
+    active->destroy_module(device, module, alloc);
+  }
+  static VKAPI_ATTR VkResult VKAPI_CALL tracked_create_layout(
+      VkDevice device, const VkPipelineLayoutCreateInfo *info,
+      const VkAllocationCallbacks *alloc, VkPipelineLayout *result) {
+    if (active->fail_layout) {
+      *result = VK_NULL_HANDLE;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    return active->create_layout(device, info, alloc, result);
+  }
+  static VKAPI_ATTR VkResult VKAPI_CALL tracked_create_graphics(
+      VkDevice device, VkPipelineCache cache, uint32_t count,
+      const VkGraphicsPipelineCreateInfo *info,
+      const VkAllocationCallbacks *alloc, VkPipeline *result) {
+    ++active->graphics_calls;
+    if (active->fail_graphics) {
+      std::fill(result, result + count, VK_NULL_HANDLE);
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    return active->create_graphics(device, cache, count, info, alloc, result);
+  }
+  VolkDeviceTable &table;
+  PFN_vkCreateShaderModule create_module;
+  PFN_vkDestroyShaderModule destroy_module;
+  PFN_vkCreatePipelineLayout create_layout;
+  PFN_vkCreateGraphicsPipelines create_graphics;
+  int module_calls{0}, created{0}, destroyed{0}, graphics_calls{0};
+  int fail_module_call{-1};
+  bool fail_layout{false}, fail_graphics{false};
+  static thread_local GraphicsFailureProbe *active;
+};
+thread_local GraphicsFailureProbe *GraphicsFailureProbe::active = nullptr;
+
+std::unique_ptr<Pipeline> failure_probe_pipeline(VulkanDevice &device,
+                                                const RasterParams &raster = {}) {
+  return device.create_raster_pipeline(
+      {{PipelineSourceType::spirv_binary, vertex, sizeof(vertex), PipelineStageType::vertex},
+       {PipelineSourceType::spirv_binary, fragment, sizeof(fragment), PipelineStageType::fragment}},
+      raster, {{0, 20, false}},
+      {{0, 0, BufferFormat::rg32f, 0}, {1, 0, BufferFormat::rgb32f, 8}},
+      "failure_probe");
+}
+}  // namespace
+
+TEST(VulkanGraphicsPipeline, ConstructionFailureReleasesCreatedShaderModules) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP();
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  GraphicsFailureProbe probe(device);
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    probe.fail_module_call = probe.module_calls + 2;
+    EXPECT_THROW(failure_probe_pipeline(device), std::runtime_error);
+    EXPECT_EQ(probe.created, probe.destroyed);
+  }
+  probe.fail_module_call = -1;
+  probe.fail_layout = true;
+  EXPECT_THROW(failure_probe_pipeline(device), BackendRuntimeError);
+  EXPECT_EQ(probe.created, probe.destroyed);
+  probe.fail_layout = false;
+  RasterParams invalid;
+  invalid.depth.bias_constant = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_ANY_THROW(failure_probe_pipeline(device, invalid));
+  EXPECT_EQ(probe.created, probe.destroyed);
+  auto good = failure_probe_pipeline(device);
+  EXPECT_EQ(probe.created - probe.destroyed, 2);
+  good.reset();
+  EXPECT_EQ(probe.created, probe.destroyed);
+}
+
+TEST(VulkanGraphicsPipeline, FailedVariantsAreNotCachedAndRetryUsesDriver) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP();
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  GraphicsFailureProbe probe(device);
+  auto owner = failure_probe_pipeline(device);
+  auto &pipeline = *static_cast<VulkanPipeline *>(owner.get());
+  VulkanRenderPassDesc desc;
+  desc.color_attachments.push_back({VK_FORMAT_R8G8B8A8_UNORM, true});
+  auto renderpass = device.get_renderpass(desc);
+  for (bool dynamic : {false, true}) {
+    if (dynamic && !device.vk_caps().dynamic_rendering)
+      continue;
+    auto create = [&]() {
+      return dynamic ? pipeline.graphics_pipeline_dynamic(desc)
+                     : pipeline.graphics_pipeline(desc, renderpass);
+    };
+    const auto before = probe.graphics_calls;
+    probe.fail_graphics = true;
+    EXPECT_THROW(create(), BackendRuntimeError);
+    probe.fail_graphics = false;
+    auto first = create();
+    ASSERT_NE(first->pipeline, VK_NULL_HANDLE);
+    EXPECT_EQ(probe.graphics_calls, before + 2);
+    EXPECT_EQ(create(), first);
+    EXPECT_EQ(probe.graphics_calls, before + 2);
+  }
+  owner.reset();
+  EXPECT_EQ(probe.created, probe.destroyed);
+}
 
 TEST(VulkanGraphicsPipeline, StorageWritesRequireEnabledStageFeatures) {
   if (!is_vulkan_api_available())

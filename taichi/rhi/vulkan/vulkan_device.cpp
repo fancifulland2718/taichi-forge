@@ -300,10 +300,22 @@ VulkanPipeline::VulkanPipeline(
       std::make_unique<GraphicsPipelineTemplate>();
   bind_point_ = VK_PIPELINE_BIND_POINT_GRAPHICS;
 
-  create_descriptor_set_layout(params);
-  create_shader_stages(params);
-  create_pipeline_layout();
-  create_graphics_pipeline(raster_params, vertex_inputs, vertex_attrs);
+  try {
+    create_descriptor_set_layout(params);
+    create_shader_stages(params);
+    create_pipeline_layout();
+    create_graphics_pipeline(raster_params, vertex_inputs, vertex_attrs);
+  } catch (...) {
+    // The destructor is not called when construction fails. Keep shader
+    // modules on success for later render-pass variants, but release every
+    // module already created if any stage or template preparation throws.
+    for (auto module : shader_modules_) {
+      device_.functions().vkDestroyShaderModule(device_, module,
+                                                kNoVkAllocCallbacks);
+    }
+    shader_modules_.clear();
+    throw;
+  }
 }
 
 void VulkanPipeline::validate_color_attachment_types(const std::vector<int> &types) const {

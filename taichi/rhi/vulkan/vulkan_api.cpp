@@ -290,7 +290,11 @@ IVkPipelineLayout create_pipeline_layout(
 
   VkResult res = device.functions().vkCreatePipelineLayout(
       device, &info, nullptr, &obj->layout);
-  BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create pipeline layout");
+  RHI_THROW_UNLESS(
+      res == VK_SUCCESS,
+      taichi::lang::BackendRuntimeError(
+          taichi::Arch::vulkan, res, "vkCreatePipelineLayout",
+          "vkCreatePipelineLayout returned VkResult " + std::to_string(res)));
 
   return obj;
 }
@@ -394,7 +398,11 @@ IVkPipeline create_graphics_pipeline(const DeviceHandle &device,
   VkResult res = device.functions().vkCreateGraphicsPipelines(
       device, cache ? cache->cache : VK_NULL_HANDLE, 1, create_info, nullptr,
       &obj->pipeline);
-  BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create graphics pipeline");
+  RHI_THROW_UNLESS(
+      res == VK_SUCCESS,
+      taichi::lang::BackendRuntimeError(
+          taichi::Arch::vulkan, res, "vkCreateGraphicsPipelines",
+          "vkCreateGraphicsPipelines returned VkResult " + std::to_string(res)));
 
   return obj;
 }
@@ -430,7 +438,11 @@ IVkPipeline create_graphics_pipeline_dynamic(
   VkResult res = device.functions().vkCreateGraphicsPipelines(
       device, cache ? cache->cache : VK_NULL_HANDLE, 1, create_info, nullptr,
       &obj->pipeline);
-  BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create graphics pipeline");
+  RHI_THROW_UNLESS(
+      res == VK_SUCCESS,
+      taichi::lang::BackendRuntimeError(
+          taichi::Arch::vulkan, res, "vkCreateGraphicsPipelines",
+          "vkCreateGraphicsPipelines returned VkResult " + std::to_string(res)));
 
   return obj;
 }

@@ -72,3 +72,31 @@ Windows / RTX 5090 / driver 610.88，小型 native 图形探针：
 S2 native DLL SHA256：`a1d12e2711e2efbb3d9b85be3fe216539c634ada360ca30195e05db1fe31bde8`。
 日志与原始采样保留于本地忽略目录 `temp_outputs/vulkan-specialization-20261026/`。
 本轮未替换正式安装、未发布 wheel，未测试 Linux/其他 GPU。
+
+## S3 构造失败清理与缓存发布
+
+生产修复包含两部分，均在冷创建阶段：
+
+1. graphics 构造函数抛出时，显式释放已创建的 shader module；成功时继续保留模块，
+   供后续兼容 render-pass 变体使用。正常提交与在途资源退休顺序不变。
+2. `vkCreatePipelineLayout` 和两种 `vkCreateGraphicsPipelines` 包装在失败时抛出
+   `BackendRuntimeError`。缓存只接收成功结果，不再依赖 assert 处理驱动失败。
+   不替调用者吞掉资源不足错误；资源条件恢复后仍可正常重试，不添加人为限制。
+
+原生测试对本地独立设备的 dispatch table 注入失败并透传其余真实 driver 调用。
+每次第 2 个 shader 创建失败，核对成功创建数等于销毁数；继续覆盖 layout 失败、
+模板校验失败、恢复创建、ordinary/dynamic 两种 variant 失败重试与成功命中缓存。
+测试结束恢复原 table，生产代码不新增 hook 或计数器。
+
+旧 RHI 对照实际显示连续 3 个 module 创建而销毁数为 0，随后 layout 失败触发 assert
+中止。新 RHI 的 6 项原生用例通过，包括以上 2 项新测试、2 项既有 cache snapshot
+测试和 2 项普通图形准备/绑定测试；20 项 Python 图形/AOT 小回归重新通过，覆盖
+CPU/CUDA 能力隔离。未以 RSS 波动代替句柄泄漏证明。
+
+注意原生测试直接链接 RHI 对象，单独切换 DLL 搜索路径不是旧实现对照；已分别重建
+基线与修复对象确认上述结果。日志 `lifecycle-baseline.log`、`lifecycle-final.log`、
+`tests-lifecycle-final.log` 在前述本地忽略目录。
+
+最终 DLL SHA256：`582cdcdfce456e7680a3e7f540c05dd2645ded10efff60b4d4bbbaa817b9dafe`。
+ABI225、cache/plan/provider 格式保持。没有新增 draw/replay 工作、测试框架运行时依赖
+或跨设备共享 cache。本次不声称已审计所有 Vulkan 对象创建失败路径。
