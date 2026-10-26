@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// VulkanCapabilities carries per-axis mesh/task local workgroup limits.
-inline constexpr int kForgeNativeAbiRevision = 224;
+// The shim can call the native cold SPIR-V specialization helper.
+inline constexpr int kForgeNativeAbiRevision = 225;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

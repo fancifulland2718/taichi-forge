@@ -15,6 +15,7 @@ target_sources(${VULKAN_RHI}
     vulkan_loader.cpp
     vulkan_memory_allocator.cpp
     vulkan_mesh_shader.cpp
+    shader_specialization.cpp
     vulkan_pipeline_diagnostics.cpp
     vulkan_ray_pipeline.cpp
     ${TI_SPIRV_REFLECT_SOURCE}
@@ -32,6 +33,9 @@ target_sources(${VULKAN_RHI}
 target_include_directories(${VULKAN_RHI}
   PRIVATE
     ${PROJECT_SOURCE_DIR}
+    # Typed specialization admission uses the pinned optimizer IR and its
+    # generated grammar headers; inherit their actual build directories.
+    $<TARGET_PROPERTY:SPIRV-Tools-opt,INCLUDE_DIRECTORIES>
   )
 
 # By specifying SYSTEM, we suppressed the warnings from third-party headers.
@@ -46,4 +50,4 @@ target_include_directories(${VULKAN_RHI} SYSTEM
     ${PROJECT_SOURCE_DIR}/external/spdlog/include
   )
 
-target_link_libraries(${VULKAN_RHI} PRIVATE SPIRV-Tools-static)
+target_link_libraries(${VULKAN_RHI} PRIVATE SPIRV-Tools-opt SPIRV-Tools-static)

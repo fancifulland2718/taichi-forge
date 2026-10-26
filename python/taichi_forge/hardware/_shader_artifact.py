@@ -5,8 +5,10 @@ separate formats. No compiler, driver, or provider is loaded by this module.
 """
 
 from dataclasses import asdict, dataclass, field
+from collections.abc import Mapping
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import struct
@@ -103,6 +105,8 @@ class SpirvShader:
     build: ShaderBuildInfo = field(default_factory=ShaderBuildInfo)
     code_sha256: str = field(init=False)
     artifact_id: str = field(init=False)
+    specialized_from: str | None = field(default=None, init=False)
+    specialization_values: tuple = field(default=(), init=False, repr=False)
 
     def __post_init__(self):
         code = _binary(self.code, "SPIR-V")
@@ -121,13 +125,55 @@ class SpirvShader:
         return cls(Path(path).read_bytes(), stage, entry_point, build or ShaderBuildInfo())
 
     def to_dict(self):
-        return {
+        facts = {
             "format": "spirv",
             "code_sha256": self.code_sha256,
             "stage": self.stage,
             "entry_point": self.entry_point,
             "build": asdict(self.build),
         }
+        if self.specialized_from is not None:
+            facts["specialization"] = {
+                "source_code_sha256": self.specialized_from,
+                "values": [list(item) for item in self.specialization_values],
+                "target": "vulkan1.3",
+            }
+        return facts
+
+    def specialize(self, constants):
+        """Freeze scalar SpecId values into a new Vulkan <=1.3 SPIR-V artifact.
+
+        ``constants`` maps uint32 IDs to bool/int/finite float values. The shader
+        declaration determines each value's type and width. Unspecified constants
+        freeze to their defaults. Retain this original shader to make variants;
+        the returned artifact no longer exposes those specialization IDs.
+        This explicit cold transform uses bundled SPIRV-Tools, without a GPU,
+        shader compiler process, pipeline creation or changes to this object.
+        """
+        if not isinstance(constants, Mapping):
+            raise TypeError("specialization constants must be a mapping")
+        values = {}
+        for constant_id, value in constants.items():
+            if type(constant_id) is not int or not 0 <= constant_id <= 0xFFFFFFFF:
+                raise ValueError("specialization constant IDs must be uint32 integers")
+            if type(value) is bool:
+                values[constant_id] = "true" if value else "false"
+            elif type(value) is int:
+                values[constant_id] = str(value)
+            elif type(value) is float and math.isfinite(value):
+                values[constant_id] = repr(value)
+            else:
+                raise TypeError("specialization values must be bool, int or finite float")
+        from taichi_forge._lib import core
+
+        transform = getattr(core, "specialize_spirv_shader", None)
+        if transform is None:
+            raise RuntimeError("This runtime lacks SPIR-V specialization support")
+        result = SpirvShader(transform(self.code, values), self.stage, self.entry_point, self.build)
+        object.__setattr__(result, "specialized_from", self.code_sha256)
+        object.__setattr__(result, "specialization_values", tuple(sorted(values.items())))
+        object.__setattr__(result, "artifact_id", "spirv:" + _digest(result.to_dict()))
+        return result
 
     def _export_aot_resource(self, context):
         return context.host_blob_resource(self.code)

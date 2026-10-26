@@ -470,6 +470,18 @@ build=graphics.ShaderBuildInfo(...))`。光栅接口要求匹配 vertex/fragment
 `pipeline.shader_artifacts()` 返回独立的来源事实。相同字节和 pipeline 状态不会因来源标签、
 文件路径或资源分配变化而改变执行身份。
 
+需要固定变体时显式调用 `variant = shader.specialize({0: 32, 1: True})`，键是 shader
+标量的 `SpecId`。值接受 Python bool、int、有限 float；实际类型和位宽取自 shader 声明。
+未知 ID、类型不符或越界值明确报错。内置 SPIRV-Tools 将传入值和其余默认值冻结到新的
+不可变 shader 中，折叠已支持的常量表达式，并按 Vulkan 1.3 验证输入和结果；不需要 GPU
+或外部 shader 编译器。请保留原始 shader 来生成其他变体：结果中已冻结的 ID 不再可调。
+原有编译来源保留，`to_dict()` 另记录直接源字节哈希和传入值。
+
+将结果交给现有管线构造器即可。reflection、线程尺寸检查、执行身份和 AOT 都消费有效
+字节，包含特化后的 descriptor 数组长度。AOT 直接装载这些字节，不重复特化，也不携带
+另一份数值覆盖。普通创建和重放不会自动调用此变换；逐帧动态数据仍使用 buffer/descriptor。
+设备 feature/资源限制另行检查；特化不证明 shader 访问安全或两个变体图像等价。
+
 `graphics.VulkanMeshPipeline(mesh_spirv, fragment_spirv, task_spirv=None, ...)`
 使用可选的 `VK_EXT_mesh_shader`，Vulkan 1.3 core 本身不保证此能力。选择路线前查询
 `graphics.mesh_shader_capabilities()`。`max_mesh_group_size_x/y/z` 和

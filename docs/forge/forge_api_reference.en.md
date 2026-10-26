@@ -591,6 +591,26 @@ remain `None`. `pipeline.shader_artifacts()` returns detached source facts.
 Identical code and pipeline state retain the same execution identity even when
 build labels differ; neither file paths nor allocations identify a program.
 
+To build a fixed variant explicitly, use `variant = shader.specialize({0: 32,
+1: True})`, where keys are the shader's scalar `SpecId` values. Accepted values
+are Python bool, int, or finite float; the declaration supplies the type and
+width. Unknown IDs and incompatible/out-of-range values raise an error. Bundled
+SPIRV-Tools freezes the supplied values and remaining defaults into a new
+immutable shader, folds supported constant expressions, and validates source
+and result for Vulkan 1.3. This cold operation requires no GPU or external shader
+compiler. Keep the original shader to create other variants: frozen IDs are no
+longer adjustable in the result. Build provenance is retained; `to_dict()` also
+records the immediate source hash and supplied values.
+
+Pass the result to existing pipeline constructors. Reflection, local-size
+checks, execution identity and AOT all consume its effective bytes, including
+specialized descriptor-array lengths. AOT loads those bytes without repeating
+specialization or carrying a separate value override. Ordinary construction and
+replay never trigger this transform automatically. Dynamic per-frame data still
+belongs in buffers/descriptors. Vulkan device features and resource limits are
+checked separately; specialization does not prove shader access safety or that
+two variants produce equivalent images.
+
 `graphics.VulkanMeshPipeline(mesh_spirv, fragment_spirv, task_spirv=None, ...)`
 uses optional `VK_EXT_mesh_shader` support, independently of Vulkan 1.3 core
 support. Query `graphics.mesh_shader_capabilities()` before choosing this path.

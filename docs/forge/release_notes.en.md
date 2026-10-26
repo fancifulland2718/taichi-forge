@@ -337,6 +337,11 @@ See the [release procedure](../design/pypi_release.en.md).
 
 ### Autodiff and backend correctness
 
+- `SpirvShader.specialize()` explicitly freezes scalar specialization constants
+  into a new immutable shader at preparation time. Reflection, pipeline identity
+  and AOT export consume the same effective bytes, including descriptor-array
+  lengths. It uses bundled SPIRV-Tools with Vulkan 1.3 validation and adds no
+  draw/replay work or automatic variant search.
 - Vulkan mesh/task pipeline creation checks known local workgroup sizes and
   declared mesh output counts against device limits, shared by JIT and AOT.
   Capability queries now include per-axis local sizes. The path uses Vulkan

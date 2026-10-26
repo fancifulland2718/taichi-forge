@@ -40,6 +40,7 @@
 
 #ifdef TI_WITH_VULKAN
 #include "taichi/rhi/vulkan/vulkan_loader.h"
+#include "taichi/rhi/vulkan/shader_specialization.h"
 #endif
 
 #ifdef TI_WITH_OPENGL
@@ -518,6 +519,22 @@ void print_all_units() {
 }
 
 void export_misc(py::module &m) {
+#ifdef TI_WITH_VULKAN
+  m.def("specialize_spirv_shader", [](py::bytes source,
+                                      const std::unordered_map<uint32_t, std::string> &values) {
+    const std::string bytes = source;
+    if (bytes.size() % sizeof(uint32_t))
+      throw std::invalid_argument("SPIR-V specialization requires complete words");
+    std::vector<uint32_t> input(bytes.size() / sizeof(uint32_t));
+    std::memcpy(input.data(), bytes.data(), bytes.size());
+    std::vector<uint32_t> output;
+    {
+      py::gil_scoped_release release;
+      output = lang::vulkan::specialize_spirv_shader(input, values);
+    }
+    return py::bytes(reinterpret_cast<const char *>(output.data()), output.size() * sizeof(uint32_t));
+  });
+#endif
 #if defined(TI_WITH_CUDA)
   m.def("probe_cuda_external_library", &probe_cuda_external_library,
         py::arg("provider_id"), py::arg("library_path") = "");

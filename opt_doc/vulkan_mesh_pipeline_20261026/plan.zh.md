@@ -32,24 +32,38 @@ LocalSize，仍由驱动/验证层检查。共享内存、payload、输出内存
 AOT standalone/borrowed 重建及下游数值梯度；CPU/CUDA 不误报 Vulkan 能力。
 内部 VulkanCapabilities 布局变化配套更新私有 ABI 223→224；产物格式不变。
 
-结果见 [验证记录](progress.zh.md)。其余 S2–S4 尚未实施，不计作本切片交付。
+结果见 [验证记录](progress.zh.md)。S2 的后续实施见下文；S3–S4 不计作 S1 交付。
 
-## S2：标准 shader specialization（后续独立提交）
+## S2：标准 shader specialization（已完成，独立提交）
 
-先定义固定、类型明确的 specialization 常量值，再让普通创建、稳定 pipeline 身份、
-native resource 描述和 AOT 重建消费同一份值。入口沿用 SpirvShader / 现有图形管线。
-以 VkSpecializationInfo 和 Vulkan 1.3 内的特化机制为准，不能只改 Python 参数或缓存键。
-S1 的设备检查必须消费有效特化值；未知表达式不能使用未特化默认值误判。
-不在 draw/replay 中转换参数；频繁动态数据继续用 buffer/descriptor。
+具体切片采用 `SpirvShader.specialize({SpecId: scalar})`：调用者显式在冷阶段生成新的
+不可变 SPIR-V，原对象不变；常量类型与位宽从 shader 声明取得。未知 ID、类型不符和
+越界值明确拒绝。使用现有 SPIRV-Tools 的设置、冻结、表达式折叠 pass，输入和输出按
+Vulkan 1.3 环境验证。不增加 shader 编译器子进程或设备初始化。
+
+相较原先设想的 `VkSpecializationInfo` 逐层透传，本切片选择提前冻结。原因是常量也会
+改变 descriptor 数组和 LocalSizeId：必须让 reflection、S1 校验和实际代码依据同一份
+有效产物。既有 shader 字节、pipeline 身份、native host blob 和 AOT 重建路径已能完整
+承载结果，不再增加第二份需要同步的持久参数。AOT 消费端不重新特化，格式不变。
+此方式与标准 Vulkan 特化语义一致，但本批不添加驱动侧 VkSpecializationInfo 接口。
+
+未传入的常量冻结为声明默认值。以后改值从原始 shader 建立新变体；频繁动态值继续用
+buffer/descriptor。普通创建、draw/replay 不调用变换。声明和折叠仍由已固定版本的
+SPIRV-Tools 实现；不承诺任意表达式都被完全化简，不替代真实设备 feature/limits 检查。
 
 完成证据：不同值的实际着色结果、相同值身份复用、不同值隔离、JIT/AOT 一致，
 关闭一个实例不影响另一个；不会为普通特化额外生成 Graph recipe。
 
-## S3：缓存与生命周期审查（按实际缺口处理）
+验证结果见 [S2 记录](progress.zh.md#s2-显式冷阶段特化)。私有 ABI 224→225；
+cache schema、ExecutionPlan 与 graphics provider 格式均不变。
+
+## S3：缓存与生命周期审查（实施中，按实际缺口处理）
 
 现有 VulkanPipeline 已有 render-pass/dynamic-rendering 变体缓存和 VkPipelineCache。
 优先检查重复构建、失败清理、驱动身份约束及退休边界，避免再造缓存管理器。
 驱动 cache 不作为跨 GPU 可移植 AOT 内容；AOT 保留 shader 与可重建的管线定义。
+审查发现 graphics 构造异常未清理已创建的原始 shader module；独立修复并注入失败验证，
+不与 S2 接口合并提交。
 
 ## S4：代表性渲染验证（证据驱动）
 

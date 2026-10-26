@@ -21,7 +21,7 @@ def test_aot_graphics_mesh_backend_isolation():
         assert not runtime.native_operation_capabilities("vulkan_graphics_pass_direct", version=4)
 
 
-@pytest.mark.parametrize("task,recipe", [(False, "ordinary"), (True, "selected")])
+@pytest.mark.parametrize("task,recipe", [(False, "ordinary"), (True, "selected"), (False, "specialized")])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_aot_graphics_mesh_export_and_gradients(tmp_path, task, recipe):
     if not ti.hardware.graphics.is_mesh_shader_available(task_shader=task):
@@ -54,8 +54,13 @@ def test_aot_graphics_mesh_export_and_gradients(tmp_path, task, recipe):
     started = time.perf_counter()
     graphics, arg, kind = ti.hardware.graphics, ti.graph.Arg, ti.graph.ArgKind
     assets = Path(__file__).parent / "assets"
+    mesh_shader = (assets / "aot_graphics_color.mesh.spv").read_bytes()
+    if recipe == "specialized":
+        mesh_shader = graphics.SpirvShader.from_file(
+            assets / "hardware_specialization.mesh.spv", stage="mesh"
+        ).specialize({0: 1, 1: True})
     pipeline = graphics.VulkanMeshPipeline(
-        (assets / "aot_graphics_color.mesh.spv").read_bytes(),
+        mesh_shader,
         _spirv_header("2_triangle.frag.spv.h"),
         task_spirv=(assets / "hardware_graphics_mesh.task.spv").read_bytes() if task else None,
         shader_buffer_bindings=(graphics.ShaderBufferBinding(0, 0, "storage"),),

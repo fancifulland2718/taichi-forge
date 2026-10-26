@@ -40,3 +40,35 @@ staging 的旧 git 版本标签不是此次源码身份；以基线、补丁及�
 
 下一步 S2 独立处理标准 specialization 值、有效值校验、pipeline identity 和 AOT
 重建；S3 再检查缓存/退休，不重新建立一套渲染调度器。
+
+## S2 显式冷阶段特化
+
+基线 `327e7d52b`，版本 0.7.0，私有 ABI 225。使用 `SpirvShader.specialize()`
+显式冻结标量 SpecId。输入、结果按 Vulkan 1.3 验证；应用仍选择合法且语义适合的变体。
+未传常量取声明默认值，原 shader 保持不变。产物只包含有效代码，不引入第二套 AOT
+override 格式，也没有默认搜索或逐帧转换。
+
+- 20 项针对性 Python 用例覆盖标量类型/值拒绝、源对象不变、不同值着色、相同代码身份、
+  descriptor 数组表达式、mesh 有效尺寸、CPU/CUDA 能力隔离，以及 ordinary/selected/
+  specialized 三种 AOT 独立和借用加载。另单独确认关闭同内容实例后另一份 Graph 仍可用。
+- 首轮 19 passed / 1 failed：测试误要求删除全部 OpSpecConstantOp。固定版本上游 pass
+  会保留已固定输入的浮点 Select；实际图像正确且无 SpecId。改为检查无可覆写标量/ID，
+  相关 12 项重跑通过。没有为满足错误断言增加优化 pass。
+- 新增 fragment、数组 fragment、mesh 夹具均保留源码，输出目标 Vulkan 1.3。
+- cache schema 91、ExecutionPlan 27、GFX 格式 16 不变。JIT/AOT 使用同一份有效字节，
+  AOT 消费端不运行特化器。仅 producer shim 新增原生入口，要求 ABI225 配套安装。
+
+Windows / RTX 5090 / driver 610.88，小型 native 图形探针：
+
+| 项目 | 实测 | 解释 |
+| --- | --- | --- |
+| 808 B fragment 显式特化 | 首次 0.864 ms；后续 31 次中位 0.198 ms | 冷准备成本；不推广为大型 shader 成本 |
+| 有效 SPIR-V | 728 B | 删除可覆写值并折叠可处理表达式；未运行完整优化流水线 |
+| 640×480 同图像 Graph 批量重放 | 原始 0.0464–0.0488 ms；冻结 0.0432–0.0469 ms | ABBA、每进程段 31×32 帧，host 提交加最终同步；不是 GPU 时间戳或应用收益 |
+
+该探针仅证明固定值路径可执行且没有显著重放负担；不据此宣布普遍渲染加速。
+更大的材质/meshlet 变体需要应用证明图像和资源语义后才值得选优。
+
+S2 native DLL SHA256：`a1d12e2711e2efbb3d9b85be3fe216539c634ada360ca30195e05db1fe31bde8`。
+日志与原始采样保留于本地忽略目录 `temp_outputs/vulkan-specialization-20261026/`。
+本轮未替换正式安装、未发布 wheel，未测试 Linux/其他 GPU。
