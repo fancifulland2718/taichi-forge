@@ -105,19 +105,10 @@ def test_configuration_keeps_source_block_and_template_owner():
     )
     definition = builder.freeze()
     source = definition._runtime_spec._graph_kernel_configuration_sources[0]
-    # LLVM exposes source-owned geometry in the manifest. Older SPIR-V
-    # metadata does not, so the native compiler must still reject the request.
-    if ti.lang.impl.current_cfg().arch == ti.cuda:
-        assert all(spec.backend.workgroup_size is None for _, spec in source.choices())
-    else:
-        block_choices = tuple(
-            manifest
-            for manifest, spec in source.choices()
-            if spec.backend.workgroup_size is not None
-        )
-        if block_choices:
-            with pytest.raises(Exception, match="explicit ti.loop_config"):
-                source.materialize(block_choices[0].recipe_id)
+    assert any(
+        task.source_block_size_explicit for task in source.facts.snapshot.manifests
+    )
+    assert all(spec.backend.workgroup_size is None for _, spec in source.choices())
     catalog = definition.recipe_catalog(providers=PROVIDERS)
     fragment = choose(definition, catalog, lambda spec: spec.ir.compile_tier == "full")
     entry = catalog.compose((fragment.fragment_id,), stage="tier")

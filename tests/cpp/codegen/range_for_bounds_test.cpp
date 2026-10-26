@@ -415,18 +415,21 @@ TEST(RangeForBounds, BackendManifestsProjectTheSameCompiledFacts) {
   spirv::TaskAttributes task;
   task.task_type = OffloadedTaskType::range_for;
   task.range_for_attribs = bounds;
+  task.source_block_dim_explicit = true;
   data.metadata.kernel_attribs.tasks_attribs.push_back(task);
   spirv::CompiledKernelData vulkan(Arch::vulkan, std::move(data));
   auto manifest = vulkan.task_manifest();
   ASSERT_EQ(manifest.size(), 1);
   EXPECT_EQ(*manifest[0].constant_range_size, 13);
   EXPECT_EQ(manifest[0].range_bounds->begin.value, -9);
+  EXPECT_TRUE(manifest[0].source_block_size_explicit);
   std::ostringstream encoded;
   ASSERT_EQ(vulkan.dump(encoded), CompiledKernelData::Err::kNoError);
   spirv::CompiledKernelData decoded;
   std::istringstream input(encoded.str());
   ASSERT_EQ(decoded.load(input), CompiledKernelData::Err::kNoError);
   EXPECT_EQ(decoded.task_manifest()[0].range_bounds->begin.value, -9);
+  EXPECT_TRUE(decoded.task_manifest()[0].source_block_size_explicit);
 #ifdef TI_WITH_LLVM
   for (auto arch : {Arch::x64, Arch::cuda}) {
     LLVM::CompiledKernelData::InternalData llvm_data;

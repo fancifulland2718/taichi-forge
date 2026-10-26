@@ -79,6 +79,7 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     }
     item.requested_grid_size = positive_geometry(task.requested_grid_dim);
     item.requested_block_size = positive_geometry(task.requested_block_dim);
+    item.source_block_size_explicit = task.source_block_dim_explicit;
     item.selected_block_size =
         positive_geometry(task.advisory_num_threads_per_group);
     if (task.advisory_total_num_threads > 0 &&

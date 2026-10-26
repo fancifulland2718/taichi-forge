@@ -455,6 +455,8 @@ class TaskCodegen : public IRVisitor {
     ir_->debug_name(spv::OpName, kernel_function_, "main");
     task_attribs_.requested_grid_dim = task_ir_->grid_dim;
     task_attribs_.requested_block_dim = task_ir_->block_dim;
+    task_attribs_.source_block_dim_explicit =
+        task_ir_->source_block_dim_explicit;
     task_attribs_.static_shared_array_bytes = task_ir_->bls_size;
 
     if (task_ir_->task_type == OffloadedTaskType::serial) {

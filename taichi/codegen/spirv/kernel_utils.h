@@ -168,6 +168,7 @@ struct TaskAttributes {
   std::string task_id;
   int requested_grid_dim{0};
   int requested_block_dim{0};
+  bool source_block_dim_explicit{false};
   int static_shared_array_bytes{0};
   // Total number of threads to launch (i.e. threads per grid). Note that this
   // is only advisory, because eventually this number is also determined by the
@@ -222,6 +223,7 @@ struct TaskAttributes {
   TI_IO_DEF(name,
             requested_grid_dim,
             requested_block_dim,
+            source_block_dim_explicit,
             static_shared_array_bytes,
             advisory_total_num_threads,
             advisory_num_threads_per_group,
