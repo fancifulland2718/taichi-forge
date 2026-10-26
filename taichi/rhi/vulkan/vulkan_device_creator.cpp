@@ -1045,8 +1045,24 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     physical_device_properties.pNext = &subgroup_properties;
 
+    // Property-only hints: do not enable shader SM/core builtins or require
+    // these optional extensions in generated shaders/AOT artifacts.
+    VkPhysicalDeviceShaderSMBuiltinsPropertiesNV sm_properties{};
+    sm_properties.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV;
+    VkPhysicalDeviceShaderCoreProperties2AMD core_properties{};
+    core_properties.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_2_AMD;
+    if (has_device_extension(VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME))
+      subgroup_properties.pNext = &sm_properties;
+    else if (has_device_extension(VK_AMD_SHADER_CORE_PROPERTIES_2_EXTENSION_NAME))
+      subgroup_properties.pNext = &core_properties;
+
     query_physical_device_properties2(&physical_device_properties);
     ti_device_->vk_caps().subgroup_size = subgroup_properties.subgroupSize;
+    ti_device_->vk_caps().compute_unit_count =
+        sm_properties.shaderSMCount ? sm_properties.shaderSMCount
+                                    : core_properties.activeComputeUnitCount;
 
     // Shader intrinsics are emitted in compute stages only.
     const auto compute_operations =

@@ -18,6 +18,33 @@ Forge 将可安全复用的前端信息与各后端编译产物分离。目标�
 | `@ti.kernel(opt_level="fast"\|"balanced"\|"full")` | 单个 kernel 的 compile-tier 覆盖。 |
 | `ti.init(compile_tier=...)` | Program 级 compile-tier 选择。 |
 
+## 普通 GPU kernel 的默认 block 选择
+
+CUDA/Vulkan 在编译期为静态已知的普通 range 循环选择 block，不需要开启 CompileIQ。
+编译器从原有默认值开始，尝试按二分缩小到子组宽度；仅当更小的 block 仍能把全部
+工作组铺在一轮计算单元上时才采用。它是静态启发式，不是 occupancy 测量或最优性保证。
+例如设备有 128 个计算单元、子组宽度为 32 时，4096 次独立迭代可以从
+32 个 128 线程工作组变成 128 个 32 线程工作组。较大范围不因此缩小或截断。
+
+- CUDA 复用初始化阶段已查询的 SM 数量；Vulkan 使用已有子组属性，以及可用的
+  `VK_NV_shader_sm_builtins` / `VK_AMD_shader_core_properties2` 属性查询。
+  这些可选扩展只提供性能提示，不成为 shader 或部署包的功能要求。
+- 计算单元数量未知时，只缩小单个 block 内的静态短循环。动态 scalar/ndarray shape
+  不按首次参数值猜测大小，不新增 shape 特化。已有 host range 的 grid 裁剪仍独立工作。
+- 显式 `ti.loop_config(block_dim=...)`、任务策略、已选择的优化方案和非默认全局
+  `default_gpu_block_dim` 保留设置。CPU 调度保持不变。
+- 共享内存、屏障、物理线程索引、随机数、未知调用、TLS/BLS 和原子归约等保持原 block。
+  “可删空工作组”本身不足以证明“可改 block”；后者有额外检查。
+- JIT/Graph 使用当前设备的冷阶段提示。普通 portable AOT 清除生产设备的计算单元
+  数量和子组提示，使用保守的可移植选择；显式任务方案仍由其自身几何配置控制。
+  两种入口共用选择器，但不同有效编译请求可以产生不同几何。
+- 选择结果同时进入后端代码和 task metadata。配置提示纳入编译缓存身份，旧缓存
+  通过 schema 更新失效；不增加多版本候选产物，重放不查询设备、不重新决策。
+
+可通过 `kernel.task_manifest(...)` 查看实际 block。编译阶段可用
+`ti.compile_profile()` 中的 `cpp.ir.exec.select_default_gpu_block_size` 观察成本。
+这项默认策略不读取 CompileIQ 调优记录，也不启用自动搜索。
+
 ## 缓存复用规则
 
 Forge 只复用在当前 program、arch、dtype、shape、layout 和 compile configuration 下安全的

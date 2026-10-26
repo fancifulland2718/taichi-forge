@@ -20,6 +20,41 @@ points, see [Forge API reference](forge_api_reference.en.md).
 | `@ti.kernel(opt_level="fast"\|"balanced"\|"full")` | Per-kernel compile-tier override. |
 | `ti.init(compile_tier=...)` | Program-level compile-tier selection. |
 
+## Default block selection for ordinary GPU kernels
+
+CUDA/Vulkan select blocks for statically known ordinary ranges during compilation,
+without enabling CompileIQ. Starting from the existing default, the compiler
+halves the block down to subgroup width only while all workgroups still fit in
+one compute-unit wave. This is a static heuristic, not measured occupancy or a
+guarantee of optimal performance. With 128 compute units and 32-lane subgroups,
+4096 independent iterations can use 128 groups of 32 instead of 32 groups of
+128. Larger workloads are never truncated or rejected.
+
+- CUDA reuses the SM count already queried at initialization. Vulkan uses its
+  subgroup properties and available `VK_NV_shader_sm_builtins` or
+  `VK_AMD_shader_core_properties2` property queries. These optional extensions
+  supply performance hints, not shader features or deployment requirements.
+- Unknown unit counts allow only single-block trimming. Dynamic scalar/ndarray
+  extents are not guessed from the first invocation and do not acquire extra
+  shape specializations. Host-range grid clipping remains independent.
+- Explicit `ti.loop_config(block_dim=...)`, task policies, selected optimization
+  plans and non-default global `default_gpu_block_dim` values remain unchanged.
+  CPU scheduling is unchanged.
+- Shared memory, barriers, physical-thread indexing, random numbers, unknown
+  calls, TLS/BLS and atomic reductions retain their block sizes. Empty-group
+  elision alone does not establish safety for changing block size.
+- JIT/Graph use current-device cold hints. Ordinary portable AOT clears the
+  producer's compute-unit and subgroup hints and uses conservative portable
+  selection; explicit task plans retain their own geometry. Both adapters use
+  the same selector, but different effective requests may select different sizes.
+- The result controls both emitted code and task metadata. Hints participate in
+  cache identity and a schema bump invalidates old entries. No candidate artifact
+  variants are generated; replay neither queries devices nor repeats selection.
+
+Inspect actual sizes with `kernel.task_manifest(...)`. The compile profiler
+reports `cpp.ir.exec.select_default_gpu_block_size`. This default rule neither
+reads CompileIQ tuning records nor enables automatic search.
+
 ## Cache Reuse Rules
 
 Forge only reuses data that is safe under the current program, arch, dtype,

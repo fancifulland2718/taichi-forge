@@ -72,6 +72,13 @@ KernelCompileRequest resolve_kernel_compile_request(
     CompilePurpose purpose,
     const KernelCompileOptions &export_options) {
   CompileConfig config = base_config;
+  if (purpose == CompilePurpose::aot) {
+    // A portable target has no declared SM/CU count. Do not specialize its
+    // default geometry to the producer; explicitly selected task plans still
+    // carry their own geometry. Code remains valid on any admitted target.
+    config.gpu_compute_unit_count = 0;
+    config.gpu_subgroup_size = 32;
+  }
   CompileRequestProvenance provenance{purpose,
                                       kernel_tier
                                           ? CompileTierSource::kernel_override

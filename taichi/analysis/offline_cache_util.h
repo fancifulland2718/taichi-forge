@@ -202,7 +202,9 @@ class Kernel;
 // 80 - immutable CUDA/Vulkan range ends no longer need a serial snapshot.
 // 87 - Retain checked products of host expressions (including clamped ndrange
 // spans), so old kernels without the range contract cannot mask launch elision.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 87;
+// 88 - Include cold GPU geometry hints and select default blocks for proven
+//      independent static ranges before emitting code and launch metadata.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 88;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

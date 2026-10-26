@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 
 #include "taichi/analysis/range_for_bounds.h"
+#include "taichi/analysis/default_gpu_block_size.h"
 #include "taichi/analysis/host_range_bounds.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/transforms.h"
@@ -11,6 +12,98 @@
 
 namespace taichi::lang {
 namespace {
+
+TEST(DefaultGpuBlockSize, ShrinksOnlyKnownSingleBlockRanges) {
+  for (auto arch : {Arch::cuda, Arch::vulkan}) {
+    OffloadedStmt task(OffloadedTaskType::range_for, arch, nullptr);
+    task.block_dim = 128;
+    task.const_begin = task.const_end = true;
+    task.begin_value = -7;
+    for (const auto &[count, expected] :
+         std::vector<std::pair<int, int>>{{1, 32}, {17, 32}, {32, 32},
+                                         {33, 64}, {64, 64}, {65, 128},
+                                         {129, 128}, {1000000, 128},
+                                         {0, 128}, {-1, 128}}) {
+      task.end_value = task.begin_value + count;
+      EXPECT_EQ(select_default_gpu_block_size(task), expected);
+      EXPECT_EQ(task.block_dim, 128);  // Pure selection, no payload mutation.
+    }
+    task.begin_value = INT32_MIN;
+    task.end_value = INT32_MAX;
+    EXPECT_EQ(select_default_gpu_block_size(task), 128);
+    task.end_value = task.begin_value + 17;
+    EXPECT_EQ(select_default_gpu_block_size(task), 32);
+    task.const_end = false;
+    EXPECT_EQ(select_default_gpu_block_size(task), 128);
+    task.const_end = true;
+    task.source_block_dim_explicit = true;
+    EXPECT_EQ(select_default_gpu_block_size(task), 128);
+    task.source_block_dim_explicit = false;
+    task.device = Arch::x64;
+    EXPECT_EQ(select_default_gpu_block_size(task), 128);
+  }
+}
+
+TEST(DefaultGpuBlockSize, PreservesCollectivesAndPhysicalThreadContracts) {
+  for (int behavior = 0; behavior < 7; ++behavior) {
+    OffloadedStmt task(OffloadedTaskType::range_for, Arch::cuda, nullptr);
+    task.block_dim = 128;
+    task.const_begin = task.const_end = true;
+    task.begin_value = 0;
+    task.end_value = 17;
+    switch (behavior) {
+      case 0:
+        task.body->push_back<GlobalThreadIndexStmt>();
+        break;
+      case 1:
+        task.body->push_back<InternalFuncStmt>("unknown", std::vector<Stmt *>{});
+        break;
+      case 2:
+        task.body->push_back<AllocaStmt>(std::vector<int>{128},
+                                        PrimitiveType::i32, true);
+        break;
+      case 3: {
+        auto *ptr = task.body->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
+        auto *one = task.body->push_back<ConstStmt>(TypedConstant(1));
+        task.body->push_back<AtomicOpStmt>(AtomicOpType::add, ptr, one);
+        break;
+      }
+      case 4:
+        task.tls_prologue = std::make_unique<Block>();
+        break;
+      case 5:
+        task.one_to_one = true;
+        break;
+      case 6:
+        task.body->push_back<RandStmt>(PrimitiveType::f32);
+        break;
+    }
+    EXPECT_EQ(select_default_gpu_block_size(task), 128) << behavior;
+  }
+}
+
+TEST(DefaultGpuBlockSize, SpreadsStaticWorkWithoutAddingSchedulingWaves) {
+  for (auto arch : {Arch::cuda, Arch::vulkan}) {
+    OffloadedStmt task(OffloadedTaskType::range_for, arch, nullptr);
+    task.block_dim = 128;
+    task.const_begin = task.const_end = true;
+    task.begin_value = 0;
+    for (const auto &[count, expected] :
+         std::vector<std::pair<int, int>>{{512, 32}, {1024, 32}, {1025, 64},
+                                         {2048, 64}, {2049, 128},
+                                         {1000000, 128}}) {
+      task.end_value = count;
+      EXPECT_EQ(select_default_gpu_block_size(task, 32, 32), expected);
+      EXPECT_EQ(select_default_gpu_block_size(task, 0, 32), 128);
+    }
+    task.end_value = 512;
+    EXPECT_EQ(select_default_gpu_block_size(task, 32, 64), 64);
+    EXPECT_EQ(select_default_gpu_block_size(task, 32, 128), 128);
+    EXPECT_EQ(select_default_gpu_block_size(task, 32, 48), 128);
+    task.source_block_dim_explicit = true;
+    EXPECT_EQ(select_default_gpu_block_size(task, 32, 32), 128);
+  }
+}
 
 TEST(HostRangeBounds, ScalarAndShapeWorkloadDoNotImposeACap) {
   std::int32_t arguments[] = {-3, 126, 3, 43};

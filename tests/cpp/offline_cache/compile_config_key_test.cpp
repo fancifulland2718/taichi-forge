@@ -49,6 +49,12 @@ TEST(OfflineCache, FingerprintsIrChangingCompileConfigInputs) {
   });
   expect_distinct_key(spirv,
                       [](CompileConfig &config) { config.max_block_dim /= 2; });
+  expect_distinct_key(spirv, [](CompileConfig &config) {
+    config.gpu_compute_unit_count = 170;
+  });
+  expect_distinct_key(spirv, [](CompileConfig &config) {
+    config.gpu_subgroup_size = 64;
+  });
 }
 
 TEST(OfflineCache, FrozenCudaTargetsHaveNoImplicitProducerOrProviderInput) {

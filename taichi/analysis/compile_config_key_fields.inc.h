@@ -50,6 +50,8 @@
     CACHE_FIELD(make_cpu_multithreading_loop);
   } else if (arch_is_gpu(config.arch)) {
     CACHE_FIELD(default_gpu_block_dim);
+    CACHE_FIELD(gpu_compute_unit_count);
+    CACHE_FIELD(gpu_subgroup_size);
     CACHE_FIELD(gpu_max_reg);
     CACHE_FIELD(saturating_grid_dim);
     CACHE_FIELD(max_block_dim);

@@ -160,6 +160,9 @@ void VulkanProgramImpl::materialize_runtime(KernelProfilerBase *profiler,
 #endif
 
   embedded_device_ = std::make_unique<VulkanDeviceCreator>(evd_params);
+  const auto &device_hints = embedded_device_->device()->vk_caps();
+  config->gpu_compute_unit_count = device_hints.compute_unit_count;
+  config->gpu_subgroup_size = device_hints.subgroup_size;
   if (config->vulkan_dispatch_cache) {
     embedded_device_->device()->set_descriptor_set_cache_enabled(true);
     embedded_device_->device()->set_descriptor_set_cache_options(

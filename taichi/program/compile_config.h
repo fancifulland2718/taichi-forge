@@ -466,6 +466,10 @@ struct CompileConfig {
   int default_cpu_block_dim;
   bool cpu_block_dim_adaptive;
   int default_gpu_block_dim;
+  // Cold device facts used only to choose ordinary default launch geometry.
+  // Zero units means unknown; these are tuning hints, never deployment minima.
+  uint32_t gpu_compute_unit_count{0};
+  uint32_t gpu_subgroup_size{32};
   int gpu_max_reg;
   int ad_stack_size{0};  // 0 = adaptive
   // The default size when the Taichi compiler is unable to automatically

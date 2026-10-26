@@ -1,5 +1,6 @@
 ﻿#include "taichi/ir/ir.h"
 #include "taichi/analysis/graph_kernel_metadata.h"
+#include "taichi/analysis/default_gpu_block_size.h"
 #include "taichi/common/exceptions.h"
 #include "taichi/ir/frontend_ir.h"
 #include "taichi/system/profiler.h"
@@ -1141,6 +1142,29 @@ void offload_to_executable(IRNode *ir,
           ir, config,
           {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
       print("Scalarized");
+    }
+  }
+
+  // Resolve only the ordinary default, after TLS/BLS and dense-loop lowering
+  // expose the final safety facts, and before either backend emits code and
+  // launch metadata. Explicit policies and custom global defaults keep their
+  // geometry. The same compiler path serves JIT, Graph and AOT.
+  if ((config.arch == Arch::cuda || config.arch == Arch::vulkan) &&
+      config.default_gpu_block_dim == CompileConfig{}.default_gpu_block_dim &&
+      !kernel->get_task_launch_policy() &&
+      !kernel->get_offload_execution_plan() &&
+      !kernel->get_kernel_optimization_spec()) {
+    TI_COMPILE_PROFILER("cpp.ir.exec.select_default_gpu_block_size");
+    const auto select = [&](OffloadedStmt *task) {
+      task->block_dim = select_default_gpu_block_size(
+          *task, config.gpu_compute_unit_count, config.gpu_subgroup_size);
+    };
+    if (auto *task = ir->cast<OffloadedStmt>()) {
+      select(task);  // LLVM lowers one task at a time.
+    } else if (auto *block = ir->cast<Block>()) {
+      for (const auto &statement : block->statements)
+        if (auto *task = statement->cast<OffloadedStmt>())
+          select(task);
     }
   }
 

@@ -131,6 +131,8 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
     int num_SMs{1};
     CUDADriver::get_instance().device_get_attribute(
         &num_SMs, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, nullptr);
+    config.gpu_compute_unit_count = std::max(num_SMs, 0);
+    config.gpu_subgroup_size = 32;
     int query_max_block_dim{1024};
     CUDADriver::get_instance().device_get_attribute(
         &query_max_block_dim, CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X, nullptr);

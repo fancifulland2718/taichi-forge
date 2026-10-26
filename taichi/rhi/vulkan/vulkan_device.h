@@ -1038,6 +1038,7 @@ struct VulkanCapabilities {
   std::uint32_t max_mesh_output_vertices{0};
   std::uint32_t max_mesh_output_primitives{0};
   std::uint32_t subgroup_size{0};
+  std::uint32_t compute_unit_count{0};
   VkShaderStageFlags cooperative_matrix_supported_stages{0};
   std::vector<VulkanCooperativeMatrixProperty> cooperative_matrix_properties;
 

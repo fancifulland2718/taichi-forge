@@ -42,6 +42,14 @@ See the [release procedure](../design/pypi_release.en.md).
 
 ### Upgrading and compilation settings
 
+- Ordinary CUDA/Vulkan loops now select default block sizes at compile time.
+  For statically known ranges without thread-group dependencies, compute-unit
+  count and subgroup width can reduce idle lanes and spread underfilled work.
+  There are no trial launches, kernel occupancy queries, per-submit decisions
+  or extra candidate artifacts. Dynamic ranges, explicit block/task policies,
+  reductions and shared-memory tasks retain their geometry. Unknown unit counts
+  allow only single-block trimming; portable AOT does not inherit the producer's
+  compute-unit count. See the [compile guide](cache_compile.en.md).
 - Ordinary CUDA/Vulkan grid-stride kernels can reduce idle blocks from host-known
   ndarray shapes, shape products or `i32` range bounds with constant addition,
   subtraction and multiplication (for example `3 * n - 1`), retaining the
@@ -104,7 +112,7 @@ See the [release procedure](../design/pypi_release.en.md).
 - Vulkan task manifests, caches and AOT metadata retain explicit source block ownership,
   allowing discovery to exclude conflicting workgroup requests before compiling them.
   Ordinary execution geometry and semantics remain unchanged.
-- The frontend/native private ABI is **221**, persistent execution-plan version **27**, and
+- The frontend/native private ABI is **222**, persistent execution-plan version **27**, and
   compiled-cache schema **87**; LLVM AOT metadata is **19/20**, GFX metadata **16**.
   Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats

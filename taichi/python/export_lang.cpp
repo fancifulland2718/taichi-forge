@@ -1137,6 +1137,8 @@ void export_lang(py::module &m) {
                      &CompileConfig::cpu_block_dim_adaptive)
       .def_readwrite("default_gpu_block_dim",
                      &CompileConfig::default_gpu_block_dim)
+      .def_readonly("gpu_compute_unit_count", &CompileConfig::gpu_compute_unit_count)
+      .def_readonly("gpu_subgroup_size", &CompileConfig::gpu_subgroup_size)
       .def_readwrite("gpu_max_reg", &CompileConfig::gpu_max_reg)
       .def_readwrite("saturating_grid_dim", &CompileConfig::saturating_grid_dim)
       .def_readwrite("max_block_dim", &CompileConfig::max_block_dim)

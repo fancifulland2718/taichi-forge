@@ -74,6 +74,26 @@ TEST(KernelCompileRequest, PreservesLegacyFullTierNormalization) {
   }
 }
 
+TEST(KernelCompileRequest, PortableAotDoesNotBorrowProducerLaunchHints) {
+  for (auto arch : {Arch::cuda, Arch::vulkan}) {
+    CompileConfig base;
+    base.arch = arch;
+    base.gpu_compute_unit_count = 170;
+    base.gpu_subgroup_size = 64;
+    DeviceCapabilityConfig caps;
+    if (arch == Arch::cuda)
+      caps.set(DeviceCapability::cuda_compute_capability, 80);
+    const auto jit = resolve_kernel_compile_request(base, caps);
+    const auto aot = resolve_kernel_compile_request(base, caps, {}, CompilePurpose::aot);
+    EXPECT_EQ(jit.config().gpu_compute_unit_count, 170);
+    EXPECT_EQ(jit.config().gpu_subgroup_size, 64);
+    EXPECT_EQ(aot.config().gpu_compute_unit_count, 0);
+    EXPECT_EQ(aot.config().gpu_subgroup_size, 32);
+    EXPECT_EQ(base.gpu_compute_unit_count, 170);
+    EXPECT_EQ(base.gpu_subgroup_size, 64);
+  }
+}
+
 TEST(KernelCompileRequest, PurposeAndEquivalentOriginsDoNotChangeCodeIdentity) {
   CompileConfig base;
   base.arch = Arch::vulkan;
