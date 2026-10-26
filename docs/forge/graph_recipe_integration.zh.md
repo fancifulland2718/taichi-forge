@@ -55,6 +55,30 @@ TLS 归约在边界为常量/设备快照时也可进入 device-range 候选；c
 需要与省去的空 block 成本一起测量，不会自动采用。CPU 保留既有 scheduler。
 controller 仅适用于 Graph recording，普通 kernel 直接测速不提供该轴。
 
+### Kernel 配置候选
+
+`kernel_configuration` family 将已有 GPU 优化维度接入完整 Graph 搜索。对于保留源描述的
+primal dispatch，CUDA/Vulkan 可试测 `full` compile tier 和合法 range 的 workgroup 大小；
+CUDA 还可试测已有的 launch-bounds 配置。捕获 Field 与显式 template 不要求转换为 ndarray。
+CPU 保持原候选和调度；梯度 dispatch 保持原编译产物，不据此宣称梯度 kernel 也可调优。
+
+发现阶段只生成请求描述。候选实际物化时才编译，并核验最终 manifest；源码指定的 block、
+共享内存/线程相关语义、设备限制和串行前后段仍服从原生编译器校验。请求可能被拒绝，
+失败会进入报告，不会作为有效测速结果。`full` 不会重置用户显式选择的 LLVM/SPIR-V
+选项，因此它并不等于把所有优化都打开，也不保证更快。
+物化还会比较已有的优化前源码 IR；若重新捕获的 Python 常量改变了语义，候选会被拒绝。
+修改这些常量后应重建 definition，原已编译 baseline 仍可执行。
+
+同一已编译特化在 Graph 中多次出现时，共享一次配置选择及候选编译；各次参数绑定与次序
+保持独立。此轮不按每次调用的动态规模分别调参。survivor 邻域可进一步组合 tier、workgroup
+及适用的 launch bounds，不提前枚举全部乘积。其他不重叠区域仍使用现有 recipe composer。
+稳定 key 可恢复生成的组合；跨 session 仍须满足完整的工作量、评价、环境和 provider 身份合同。
+
+已选 Graph 沿现有 AOT 路径导出实际代码，不在消费端重新搜索。CUDA/Vulkan 小型验收覆盖
+原反向 dispatch 与已调优 primal 的共同导出、独立/借用 runtime、失败重试及 checkpoint 恢复。
+这不是任意控制流、provider 或布局的全面资格声明。应保留独立复测，分别报告搜索/物化时间、
+完整运行窗口和摊销步数；搜索中胜出但复测回退的方案不应替换应用基线。
+
 以下可运行示例使用 CUDA，演示 provider 与搜索 API，不是应用基准或加速承诺。
 
 ## 可运行示例与结果处理

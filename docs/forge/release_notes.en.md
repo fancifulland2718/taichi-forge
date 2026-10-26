@@ -92,8 +92,17 @@ See the [release procedure](../design/pypi_release.en.md).
   fork interleaves forward/reverse observation rounds and preserves uncertainty/Pareto layers
   at the halving boundary. These improve search quality and preparation cost; application
   speedups still require independent validation. Autotuning remains off by default.
-- The frontend/native private ABI is **220**, persistent execution-plan version **27**, and
-  compiled-cache schema **85**; LLVM AOT metadata is **19/20**, GFX metadata **15**.
+- Complete Graph search adds lazily compiled kernel configuration candidates: tier and
+  legal workgroup choices on CUDA/Vulkan, plus CUDA launch bounds. Repeated specializations
+  share candidate code while retaining each binding. Survivor neighborhoods compose and
+  restore controls; selected code uses existing AOT export with original derivative dispatches.
+  Changed source semantics are rejected during deferred materialization. Automatic tuning
+  remains disabled.
+- Vulkan task manifests, caches and AOT metadata retain explicit source block ownership,
+  allowing discovery to exclude conflicting workgroup requests before compiling them.
+  Ordinary execution geometry and semantics remain unchanged.
+- The frontend/native private ABI is **221**, persistent execution-plan version **27**, and
+  compiled-cache schema **86**; LLVM AOT metadata is **19/20**, GFX metadata **16**.
   Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.

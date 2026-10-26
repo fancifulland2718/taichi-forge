@@ -73,8 +73,14 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
 - 显式 Graph 搜索按用户预算增量生成幸存组合，可用 `terminal_repeat_count` 增加终测次数。
   配套 fork 按正反顺序交错观测，在淘汰边界完整保留不确定/Pareto 层。这改善搜索质量和
   准备成本；应用运行收益仍需独立验证，默认仍关闭自动调优。
-- frontend 与 native runtime 使用私有 ABI **220**，持久执行计划为 **27**，
-  编译缓存 schema 为 **85**；LLVM AOT metadata 为 **19/20**、GFX metadata 为 **15**。
+- 完整 Graph 搜索新增延迟编译的 kernel 配置候选：CUDA/Vulkan 的 tier 与合法 workgroup，
+  以及 CUDA launch bounds。重复特化共享候选代码，保留每次绑定；survivor 邻域支持组合与
+  稳定恢复。已选代码继续使用现有 AOT 导出，原梯度 dispatch 保持；延迟物化会拒绝改变的
+  源码语义，默认仍不自动调优。
+- Vulkan task manifest、缓存及 AOT metadata 保留源码显式 block 标记，配置发现阶段即可
+  排除不应改写的 workgroup 请求，避免先编译再拒绝；普通执行的 block 和语义不变。
+- frontend 与 native runtime 使用私有 ABI **221**，持久执行计划为 **27**，
+  编译缓存 schema 为 **86**；LLVM AOT metadata 为 **19/20**、GFX metadata 为 **16**。
   请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。

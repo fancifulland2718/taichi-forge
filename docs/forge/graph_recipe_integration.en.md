@@ -74,6 +74,42 @@ measure its cost against the empty blocks it removes. It is not selected automat
 CPU keeps its scheduler. Controllers require Graph recording and are excluded
 from direct-kernel timing trials.
 
+### Kernel configuration candidates
+
+The `kernel_configuration` family connects existing GPU tuning dimensions to
+complete Graph search. Primal dispatches with retained source descriptions can
+try the `full` compile tier and legal range workgroup sizes on CUDA/Vulkan;
+CUDA also exposes existing launch-bounds choices. Captured Fields and explicit
+templates need no ndarray conversion. CPU retains its existing candidates and
+scheduler. Derivative dispatches retain their original artifacts; this does not
+qualify tuning derivative kernels.
+
+Discovery emits requests without compiling alternatives. Trial materialization
+compiles and verifies the final manifest. Native checks still enforce source-owned
+blocks, shared-memory/thread-sensitive semantics, device constraints and serial
+prefixes/suffixes. Rejected requests are reported as failures, never valid timing
+samples. The `full` tier does not reset explicit LLVM/SPIR-V options, so it neither
+enables every optimization nor guarantees better performance.
+Materialization also checks the retained pre-optimization source IR. A variant
+that recaptures changed Python constants is rejected; rebuild the definition
+after changing those constants. The original compiled baseline remains usable.
+
+Repeated occurrences of one compiled specialization share a configuration and
+candidate compilation while retaining their individual bindings and order. This
+stage does not tune each call's dynamic size separately. Survivor neighborhoods
+can combine tier, workgroup and applicable launch bounds without enumerating a
+Cartesian product upfront. Disjoint regions still use the existing recipe composer.
+Stable keys restore generated combinations; cross-session reuse still requires
+matching workload, evaluation, environment and provider identities.
+
+Selected Graphs export their actual code through the existing AOT path without
+searching at deployment. Small CUDA/Vulkan qualifications cover combined export
+of tuned primals and original reverse dispatches, standalone/borrowed runtimes,
+failure retries and checkpoint resume. This is not blanket qualification for all
+control flow, providers or layouts. Independently remeasure winners and report
+search/materialization cost, complete runtime windows and break-even steps. A
+search winner that regresses in holdout measurements should not replace baseline.
+
 The executable example below uses CUDA. It is a demonstration of the provider
 and search API, not an application benchmark or a promise of acceleration.
 
