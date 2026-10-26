@@ -57,7 +57,9 @@ URLs and SHA256 digests. Source recipes: [Windows](../../.github/workflows/build
 1. Update `version.txt`, CMake versions, native header, runtime dependency and both
    `docs/forge/release_notes.*.md` files; commit the changes. ABI/format revisions are
    maintained separately. Both existing entry points check public ABI/format
-   documentation before building or reusing wheels; a mismatch stops publication.
+   documentation and Git path casing for repository-qualified includes before
+   building or reusing wheels; a mismatch stops publication. The path check also
+   runs on Windows but does not replace a Linux build.
    Packages may publish independently; explicitly select
    `runtime_version` when reusing a compatible runtime. Never rename an old wheel.
 2. Build, validate and publish runtime with its existing workflow: `platform=all`,

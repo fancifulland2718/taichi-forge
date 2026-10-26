@@ -119,8 +119,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install packaging==26.0 pytest==9.1.1
-      - name: Check documented native contracts / 校验公开合同
-        run: python -m pytest -q tests/release/test_documented_contracts.py
+      - name: Check source release contracts / 校验源码发行合同
+        run: python -m pytest -q tests/release/test_documented_contracts.py tests/release/test_source_include_paths.py
       - name: Select validated runtime candidate
         id: candidate
         if: ${{ inputs.platform == 'all' }}
