@@ -265,7 +265,7 @@ jobs:
 
           sdk_root="$RUNNER_TEMP/vulkan-sdk"
           sdk_archive="$RUNNER_TEMP/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
-          curl -fsSL \
+          curl -fsSL --retry 4 --retry-all-errors --connect-timeout 30 --max-time 900 \
             "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz" \
             -o "$sdk_archive"
           echo "92d698f12a968b024e2b593037830262785b2b734553683457719d4da7c5b0d6  $sdk_archive" | sha256sum -c -
@@ -298,7 +298,7 @@ jobs:
             exit 1
           fi
           mkdir -p dist
-          curl -fsSL "$LLVM20_LINUX_URL" -o /tmp/llvm20.zip
+          curl -fsSL --retry 4 --retry-all-errors --connect-timeout 30 --max-time 900 "$LLVM20_LINUX_URL" -o /tmp/llvm20.zip
           echo "${LLVM20_LINUX_SHA256,,}  /tmp/llvm20.zip" | sha256sum -c -
           mkdir -p dist/taichi-llvm-20
           python -m zipfile -e /tmp/llvm20.zip dist/taichi-llvm-20
@@ -535,7 +535,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $version = "1.4.304.1"
           $installer = "$env:TEMP\VulkanSDK.exe"
-          Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
+          curl.exe --fail --location --retry 4 --retry-all-errors --connect-timeout 30 --max-time 900 "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" --output $installer
           $expectedHash = "19cc78a4ba59fcd9339d83958e09662f8396a320e4a3e73660ed382627952bfb"
           $actualHash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
           if ($actualHash -ne $expectedHash) {
@@ -560,7 +560,7 @@ jobs:
             throw "LLVM20_WIN_SHA256 must be configured as a 64-character repository variable."
           }
           New-Item -ItemType Directory -Force -Path dist/taichi-llvm-20 | Out-Null
-          Invoke-WebRequest -Uri $url -OutFile $env:TEMP/llvm20.zip
+          curl.exe --fail --location --retry 4 --retry-all-errors --connect-timeout 30 --max-time 900 "$url" --output "$env:TEMP/llvm20.zip"
           $actualHash = (Get-FileHash -Algorithm SHA256 $env:TEMP/llvm20.zip).Hash.ToLowerInvariant()
           if ($actualHash -ne $expectedHash) {
             throw "LLVM 20 SHA256 mismatch: expected=$expectedHash actual=$actualHash"
