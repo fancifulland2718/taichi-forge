@@ -259,3 +259,57 @@ def test_configuration_search_resumes_and_retries_failed_materialization(monkeyp
     assert len(keys) == len(set(keys)) == len(observations)
     with definition.materialize(completed.selection, providers=PROVIDERS) as selected:
         evaluate(selected.executor, completed.selection)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False, compile_tier="fast")
+def test_configuration_neighbors_combine_controls_and_restore_without_history():
+    @ti.kernel
+    def write(out: ti.types.ndarray(ti.i32, 1)):
+        for i in range(out.shape[0]):
+            out[i] = 2 * i + 5
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        write, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+    )
+    definition = builder.freeze()
+    catalog = definition.recipe_catalog(providers=PROVIDERS)
+    tier = choose(definition, catalog, lambda spec: spec.ir.compile_tier == "full")
+    tier_entry = catalog.compose((tier.fragment_id,), stage="tier")
+    source = definition._runtime_spec._graph_kernel_configuration_sources[0]
+    before = len(write._primal.compiled_kernels)
+    generated = catalog.build_survivor_stage(
+        (tier_entry.recipe.recipe_id,),
+        seed_fragment_ids=tuple(item.fragment_id for item in catalog.fragments),
+        candidate_limit=32,
+    )
+    selected = None
+    for entry in generated:
+        if len(entry.recipe.fragments) == 1:
+            fragment = entry.recipe.fragments[0]
+            choice = fragment.provider_metadata["family_selection"]["choice_id"]
+            _, spec = source.resolve(choice)
+            if (
+                spec.ir.compile_tier == "full"
+                and spec.backend.workgroup_size is not None
+            ):
+                selected = entry
+                break
+    assert selected is not None
+    assert len(write._primal.compiled_kernels) == before
+    fragment = selected.recipe.fragments[0]
+    # Fresh discovery and key resolution, without retaining generated variants.
+    source._choices = None
+    fresh = GraphKernelConfigurationRecipeProvider()
+    restored = fresh.resolve(definition, fragment.fragment_key)
+    assert restored.to_dict() == fragment.to_dict()
+    with pytest.raises(ValueError, match="unavailable"):
+        source.resolve(
+            fragment.provider_metadata["family_selection"]["choice_id"] + "0"
+        )
+    out = ti.ndarray(ti.i32, 65)
+    with definition.materialization_context(providers=PROVIDERS) as context:
+        materialized = context.materialize(selected.recipe)
+        materialized.executor.run(dict(out=out))
+        np.testing.assert_array_equal(out.to_numpy(), np.arange(65) * 2 + 5)
+        assert len(write._primal.compiled_kernels) == before + 1

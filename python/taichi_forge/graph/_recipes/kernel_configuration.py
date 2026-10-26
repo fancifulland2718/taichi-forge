@@ -5,7 +5,7 @@ the whole-Graph assembler retains each occurrence's original argument binding.
 No alternative is compiled by discovery or by ordinary Graph execution.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 
@@ -143,37 +143,92 @@ class GraphKernelConfigurationSource:
                 for value in values(_CUDA_MIN_BLOCKS_DIMENSION)
                 if value != 2
             )
-        choices = []
-        for spec in specs:
-            payload = {
-                "schema": "graph-kernel-configuration-v1",
-                "baseline_tasks": tuple(task.logical_task_id for task in tasks),
-                "backend": tasks[0].backend,
-                "optimization_spec": json.loads(spec.stable_payload),
-                # This describes a requested configuration. Actual tasks and
-                # resource facts are observed after materialization, never
-                # copied from the baseline and presented as measured results.
-                "strategy": "compile-kernel-configuration",
-            }
-            encoded = json.dumps(
-                payload, sort_keys=True, separators=(",", ":"), allow_nan=False
-            )
-            manifest = _ConfigurationManifest(
-                "kernel-config:" + hashlib.sha256(encoded.encode()).hexdigest(), encoded
-            )
-            choices.append((manifest, spec))
-        self._choices = tuple(choices)
+        self._choices = tuple((self.manifest(spec), spec) for spec in specs)
         return self._choices
+
+    def manifest(self, spec):
+        tasks = self.facts.snapshot.manifests
+        payload = {
+            "schema": "graph-kernel-configuration-v2",
+            "baseline_tasks": tuple(task.logical_task_id for task in tasks),
+            "backend": tasks[0].backend,
+            "optimization_spec": json.loads(spec.stable_payload),
+            # Requested configuration; final task/resource facts are observed
+            # after compilation rather than copied from baseline measurements.
+            "strategy": "compile-kernel-configuration",
+        }
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        key = ":".join(
+            (
+                "kernel-config",
+                hashlib.sha256(encoded.encode()).hexdigest(),
+                spec.ir.compile_tier,
+                str(spec.backend.workgroup_size or 0),
+                str(spec.backend.cuda_min_blocks_per_sm),
+            )
+        )
+        return _ConfigurationManifest(key, encoded)
+
+    def resolve(self, choice_id):
+        # A stable key carries the supported controls, so restoring a generated
+        # neighbor needs neither search history nor a Cartesian product table.
+        try:
+            prefix, _, tier, block, minimum = choice_id.split(":")
+            if prefix != "kernel-config":
+                raise ValueError("invalid configuration prefix")
+            block, minimum = int(block), int(minimum)
+            singles = tuple(spec for _, spec in self.choices())
+            if (
+                tier not in {"inherit", *(spec.ir.compile_tier for spec in singles)}
+                or block
+                not in {0, *(spec.backend.workgroup_size or 0 for spec in singles)}
+                or minimum
+                not in {2, *(spec.backend.cuda_min_blocks_per_sm for spec in singles)}
+            ):
+                raise ValueError("configuration outside qualified dimensions")
+            spec = _KernelOptimizationSpec(
+                ir=_IrOptimizationOptions(compile_tier=tier),
+                backend=_BackendCodegenOptions(
+                    workgroup_size=block or None, cuda_min_blocks_per_sm=minimum
+                ),
+                launch=_LaunchOptions(block_mode="require" if block else "auto"),
+            )
+            manifest = self.manifest(spec)
+            if spec.is_baseline or manifest.recipe_id != choice_id:
+                raise ValueError("configuration identity differs")
+            return manifest, spec
+        except (TypeError, ValueError) as error:
+            raise ValueError("kernel configuration recipe is unavailable") from error
+
+    def neighbors(self, spec):
+        for _, delta in self.choices():
+            if delta.ir.compile_tier != "inherit":
+                neighbor = replace(spec, ir=delta.ir)
+            elif delta.backend.workgroup_size is not None:
+                neighbor = replace(
+                    spec,
+                    backend=replace(
+                        spec.backend, workgroup_size=delta.backend.workgroup_size
+                    ),
+                    launch=delta.launch,
+                )
+            else:
+                neighbor = replace(
+                    spec,
+                    backend=replace(
+                        spec.backend,
+                        cuda_min_blocks_per_sm=delta.backend.cuda_min_blocks_per_sm,
+                    ),
+                )
+            if neighbor != spec:
+                yield self.manifest(neighbor)
 
     def materialize(self, choice_id):
         from taichi_forge.graph._graph import gen_cpp_kernel, _kernel_task_manifests
 
-        matches = tuple(
-            spec for manifest, spec in self.choices() if manifest.recipe_id == choice_id
-        )
-        if len(matches) != 1:
-            raise ValueError("kernel configuration recipe is unavailable")
-        spec = matches[0]
+        _, spec = self.resolve(choice_id)
         kernel_cpp = gen_cpp_kernel(
             self.kernel_fn,
             self.args,
@@ -232,8 +287,8 @@ class GraphKernelConfigurationRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
         "kernel_configuration",
         capabilities=("lazy-kernel-configuration-v1", "typed-runtime-fragment"),
-        domain_version="shared-specialization-configuration-v1",
-        semantic_fingerprint="compiled-primal-configuration-v1",
+        domain_version="shared-specialization-configuration-v2",
+        semantic_fingerprint="compiled-primal-configuration-neighbors-v2",
     )
 
     def fragments(self, definition):
@@ -248,6 +303,39 @@ class GraphKernelConfigurationRecipeProvider(GraphRuntimeFragmentProvider):
             )
             for sources, coverage in _source_groups(definition)
             for manifest, _ in sources[0].choices()
+        )
+
+    def _resolve_group(self, definition, fragment_key):
+        for sources, coverage in _source_groups(definition):
+            prefix = f"kernel_configuration:{sources[0]._recipe_source_key}:"
+            if fragment_key.startswith(prefix):
+                manifest, spec = sources[0].resolve(fragment_key[len(prefix) :])
+                return sources, coverage, manifest, spec
+        raise KeyError("kernel configuration source group is unavailable")
+
+    def resolve(self, definition, fragment_key):
+        sources, coverage, manifest, _ = self._resolve_group(definition, fragment_key)
+        return _choice_fragment(
+            definition,
+            "kernel_configuration",
+            sources[0]._recipe_source_key,
+            coverage,
+            manifest,
+            provider_descriptor=self.descriptor,
+        )
+
+    def expand(self, definition, fragment_key):
+        sources, coverage, _, spec = self._resolve_group(definition, fragment_key)
+        return tuple(
+            _choice_fragment(
+                definition,
+                "kernel_configuration",
+                sources[0]._recipe_source_key,
+                coverage,
+                manifest,
+                provider_descriptor=self.descriptor,
+            )
+            for manifest in sources[0].neighbors(spec)
         )
 
     def contribute_runtime(self, assembly, selection):
