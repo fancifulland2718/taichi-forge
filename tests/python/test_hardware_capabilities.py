@@ -75,7 +75,7 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
     assert all(
         operation.schema_version == ti.hardware.HARDWARE_CAPABILITY_SCHEMA_VERSION == 4 for operation in operations
     )
-    assert ti.algorithms.PRIMITIVE_CAPABILITY_SCHEMA_VERSION == 2
+    assert ti.algorithms.PRIMITIVE_CAPABILITY_SCHEMA_VERSION == 3
     assert ti.hardware.DEPENDENCY_TIERS == (
         "core",
         "lazy_external",
