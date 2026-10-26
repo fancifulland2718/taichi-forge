@@ -25,8 +25,9 @@ mark a page prefix as a complete stage; resume reuses existing measurement keys.
 Caller-selected `GraphSearchBudget` and `GraphRecipeSearchStrategy` still bound
 tuning work, not the compilable workload. Paging does not reduce actual trials
 or their code caches; exhaustive search still grows with the candidate count.
-Older compatible forks can process single-frame searches; a missing paging
-capability is reported before submitting trials that require it. Frozen kernel
+Forks satisfying the required revision 7 protocol can process single-frame
+searches without paging; a missing paging capability is reported before
+submitting trials that require it. Revision 6 forks are not accepted. Frozen kernel
 plan candidates share a baseline plus compact edits, constructing a full task
 list only when inspected or materialized. These changes affect explicit search
 preparation, not ordinary JIT, Graph replay or AOT consumption.

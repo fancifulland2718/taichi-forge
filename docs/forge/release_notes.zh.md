@@ -100,7 +100,7 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
   降为 range 的早期计划准入与最终任务身份共用同一判定，保持源码 block 和既有梯度路径。
 - Vulkan task manifest、缓存及 AOT metadata 保留源码显式 block 标记，配置发现阶段即可
   排除不应改写的 workgroup 请求，避免先编译再拒绝；普通执行的 block 和语义不变。
-- frontend 与 native runtime 使用私有 ABI **223**，持久执行计划为 **27**，
+- frontend 与 native runtime 使用私有 ABI **226**，持久执行计划为 **27**，
   编译缓存 schema 为 **91**；LLVM AOT metadata 为 **19/20**、GFX metadata 为 **16**。
   请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。

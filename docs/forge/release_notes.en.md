@@ -133,7 +133,7 @@ See the [release procedure](../design/pypi_release.en.md).
 - Vulkan task manifests, caches and AOT metadata retain explicit source block ownership,
   allowing discovery to exclude conflicting workgroup requests before compiling them.
   Ordinary execution geometry and semantics remain unchanged.
-- The frontend/native private ABI is **223**, persistent execution-plan version **27**, and
+- The frontend/native private ABI is **226**, persistent execution-plan version **27**, and
   compiled-cache schema **91**; LLVM AOT metadata is **19/20**, GFX metadata **16**.
   Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats

@@ -129,3 +129,7 @@ mesh-only 普通 / task+mesh 已选方案的 AOT 导出、独立/借用加载、
 冷阶段 shader LocalSize/输出声明诊断可独立后续安排，详见计划，未在本轮实施。
 
 本批不发布 wheel，不验证 Linux/AMDGPU 设备，不开启默认 CompileIQ 搜索。
+
+2026-10-27 更新：上述 LocalSize/输出声明的后续诊断已由独立图形管线批次完成，
+并增加显式特化、失败清理和兼容管线复用。当前结果见
+[图形管线验证记录](../vulkan_mesh_pipeline_20261026/progress.zh.md)，不再按本历史快照列为待做。
