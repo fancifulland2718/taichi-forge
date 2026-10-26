@@ -24,7 +24,7 @@ retained-provider API，而 discovery probe 始终不执行算法。
 | cuFFT | 已注册 provider | 用户 CUDA 环境 | `ti.hardware.probe("cufft")` | 显式 plan 或 root Graph；不能在 kernel 内调用 |
 | VkFFT 1.3.4 | 可选 ABI1 Vulkan JIT adapter | 当前 runtime 构建配置包含，旧产物可能没有 | `ti.hardware.probe("vkfft")` 或显式路径 | 固定存储计划/root Graph；匹配扩展支持显式 batch 与完整 Graph secondary recipe |
 | cuDSS 0.8.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户提供 vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
-| OptiX ABI 93/105/118 | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户/driver 提供 vendor runtime | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
+| OptiX ABI 118 | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户/driver 提供 vendor runtime | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
 | Vulkan driver/ICD | 后端驱动依赖 | OS/GPU driver 安装 | `ti.init(arch=ti.vulkan)` 加 capability query | kernel 与已公开 native Vulkan API |
 | cuSPARSELt 0.8.x-0.9.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.tensor.CusparseLtProvider` / `ti.linalg.record_sparse_matmul` | retained FP16 2:4 capture 与完整 shared-A matmul recipe；无 kernel intrinsic 或自动 rewrite |
 | cuTENSOR 2.0.x-2.7.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.tensor.CutensorProvider` / `ti.linalg.record_contraction` | retained root Graph capture 与完整 contraction 数据流；无 kernel intrinsic 或隐式 auto rewrite |
@@ -543,20 +543,15 @@ preparation/selection 复用只保存 JSON 事实，不保存 CSR 数据或 vend
 
 ### OptiX runtime provider
 
-每个平台的 `taichi-forge-runtime` wheel 都携带三份 Forge 自有的薄 adapter，分别用固定的
-NVIDIA 官方 header 构建：ABI 93（OptiX 8.1）、ABI 105（OptiX 9.0）和 ABI 118
-（OptiX 9.1）。三者共用 Forge provider C ABI 1，并位于同一个 wheel 中。用户不需要安装
-OptiX SDK、CUDA Toolkit，也不需要重编 Forge。wheel 仍不包含 `nvoptix.dll` 或
-`libnvoptix.so.1`，也不会产生 CUDA/OptiX 版本化 wheel 变体。
+Windows 和 Linux 的 `taichi-forge-runtime` wheel 仅携带一份 Forge 自有 adapter，
+使用固定的 NVIDIA 官方 OptiX 9.1 头文件构建（SDK ABI 118、Forge provider C ABI 1）。
+0.7.0 移除 OptiX 8.1/9.0 adapter 及对应 ABI 回退。用户需要提供 OptiX runtime 的
+NVIDIA R590+ 驱动，无需安装 OptiX SDK、CUDA Toolkit 或重编 Forge。wheel 不包含
+`nvoptix.dll`、`libnvoptix.so.1`，也不产生 CUDA/OptiX 版本化变体。
 
-vendor runtime 通常由 NVIDIA display driver 提供。ABI 93、105、118 的最低 driver branch
-分别为 R555、R570、R590。Forge 从最新到最旧尝试 adapter，保留 installed runtime 接受的
-第一项。较新 ABI 不受支持是允许回退的明确条件；context 或 scene 创建之后的执行错误不能
-触发静默换实现。
-
-adapter 内嵌由发布流程固定的 CUDA 12.5.x 编译器生成的 `compute_75` PTX 8.5。这个依赖只
-存在于构建期，不进入 wheel，也不要求用户安装 CUDA Toolkit。构建过程会审计 PTX 上限，
-防止未来发布编译器静默抬高 ABI 93 / R555 的 driver 下限。
+adapter 内嵌 CUDA Toolkit 12.8.x（发布安装器固定为 12.8.1）生成的 `compute_75`
+PTX 8.7。构建阶段检查 PTX 版本和 target；这是生产工具链策略，不是消费端 Toolkit
+依赖。runtime 不兼容时明确报错，不回退到已移除的 SDK ABI，也不在执行出错后换实现。
 
 runtime 发现顺序如下：
 
@@ -750,7 +745,7 @@ mask 的约束保留。第一版在录制期明确拒绝面过滤与已导入 op
 固定 PTX 由 Forge 构建进 adapter；应用继续自行提供 OptiX runtime，无需编译 PTX。
 
 2026-09-26 本地验证覆盖独立双三角形参考、共享 GAS、变换绕序、alpha 组合及 Graph
-生命周期：Windows、RTX 5090（驱动 610.62）、OptiX SDK ABI 93/105/118。该范围不包含
+生命周期：Windows、RTX 5090（驱动 610.62）、OptiX SDK ABI 118。该范围不包含
 GeoPhys 实际资产、Ubuntu 或其他设备。`benchmarks/optix_face_filter.py` 分别测量暖态
 typed、compact 与完整 Graph，记录 host 时间、CUDA event stream 窗口及规则存储成本，
 不据此声明应用加速。

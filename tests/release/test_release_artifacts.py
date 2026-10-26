@@ -241,7 +241,7 @@ def test_actual_build_record_captures_compiler_and_constraints(source, tmp_path,
     compiler.write_text('set(CMAKE_CXX_COMPILER_ID "MSVC")\nset(CMAKE_CXX_COMPILER_VERSION "19.44")\n')
     monkeypatch.setenv("LLVM20_WIN_URL", "https://example.org/llvm.zip")
     monkeypatch.setenv("LLVM20_WIN_SHA256", "b" * 64)
-    monkeypatch.setenv("CUDA_TOOLKIT_VERSION", "12.5.1")
+    monkeypatch.setenv("CUDA_TOOLKIT_VERSION", "12.8.1")
     monkeypatch.setattr(record_release_build.importlib.metadata, "version", lambda name: "1.0")
     output = tmp_path / "build-info-windows.json"
     record_release_build.record(source, "windows", output)

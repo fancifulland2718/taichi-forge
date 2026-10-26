@@ -29,6 +29,11 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.7.0 (unreleased)
 
+OptiX packaging now uses only the 9.1 adapter (ABI 118, NVIDIA R590+ driver).
+The 8.1/9.0 adapters and fallback are removed. Release builds use CUDA Toolkit
+12.8.1 and embed PTX 8.7; consumers still do not need a CUDA Toolkit installation.
+The runtime wheel remains Python-independent (`py3-none-<platform>`).
+
 This release focuses on compilation improvements and correctness fixes, with broader AOT
 deployment coverage and shared JIT/AOT contracts. These notes describe the resulting behavior;
 publication status is shown on GitHub Releases and PyPI. Support is limited to the qualified

@@ -141,9 +141,7 @@ TiForgeOptixResult create(TiForgeOptixContext context,
         desc->parameter_size ? desc->parameter_name : nullptr;
     options.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE;
     options.allowOpacityMicromaps = program->allow_micromaps;
-#if OPTIX_ABI_VERSION == 118
     options.pipelineLaunchParamsSizeInBytes = desc->parameter_size;
-#endif
     program->modules.resize(desc->module_count);
     char log[8192]{};
     for (uint32_t i = 0; i < desc->module_count; ++i) {

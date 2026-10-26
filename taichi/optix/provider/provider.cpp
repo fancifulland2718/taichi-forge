@@ -29,9 +29,8 @@
 #include "device_program_3_ptx.h"
 #include "instance_transform_pack_ptx.h"
 
-#if OPTIX_ABI_VERSION != 93 && OPTIX_ABI_VERSION != 105 && \
-    OPTIX_ABI_VERSION != 118
-#error "Forge OptiX provider supports only SDK ABI 93, 105, and 118"
+#if OPTIX_ABI_VERSION != 118
+#error "Forge OptiX provider supports only SDK ABI 118 (OptiX 9.1)"
 #endif
 
 namespace taichi::optix_provider {
@@ -422,12 +421,10 @@ TiForgeOptixResult create_pipeline(Context *owner,
   pipeline_options.numAttributeValues = 2;
   pipeline_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
   pipeline_options.pipelineLaunchParamsVariableName = "params";
-#if OPTIX_ABI_VERSION == 118
   pipeline_options.pipelineLaunchParamsSizeInBytes =
       variant == 4 ? sizeof(FaceLaunchParams)
       : alpha      ? sizeof(AlphaLaunchParams)
                    : sizeof(LaunchParams);
-#endif
 
   char log[8192]{};
   std::size_t log_size = sizeof(log);

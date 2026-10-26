@@ -54,6 +54,7 @@ def _write_runtime_wheel(
     export_manifest_schema: int = 2,
     requirements: tuple[str, ...] = (),
     include_optix_providers: bool = True,
+    extra_optix_abi: int | None = None,
     include_cudss_provider: bool = True,
     include_optional_runtime_providers: bool = True,
     include_cusolverdn_provider: bool = True,
@@ -87,7 +88,10 @@ def _write_runtime_wheel(
                 zf.writestr(name, "# lightweight consumer\n")
         if include_optix_providers and Version(version) >= Version("0.6.3") and platform != "macos":
             provider_dir = "taichi_forge_runtime/_lib/hardware_providers"
-            for optix_abi in (93, 105, 118):
+            optix_abis = (118,) if Version(version).release >= (0, 7, 0) else (93, 105, 118)
+            if extra_optix_abi is not None:
+                optix_abis += (extra_optix_abi,)
+            for optix_abi in optix_abis:
                 if platform == "windows":
                     provider_name = "taichi_forge_optix_provider_abi1_" f"optix{optix_abi}.dll"
                 else:
@@ -902,12 +906,13 @@ def test_runtime_wheel_rejects_mandatory_provider_python_dependencies(tmp_path):
         ("manylinux", "manylinux_2_35_x86_64"),
     ),
 )
-def test_runtime_wheel_requires_complete_bundled_optix_adapter_set(tmp_path, platform, tag):
-    wheel = tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{tag}.whl"
+@pytest.mark.parametrize("version", ("0.6.3", "0.7.0rc1", "0.7.0"))
+def test_runtime_wheel_requires_complete_bundled_optix_adapter_set(tmp_path, platform, tag, version):
+    wheel = tmp_path / f"taichi_forge_runtime-{version}-py3-none-{tag}.whl"
     _write_runtime_wheel(
         wheel,
         platform=platform,
-        version="0.6.3",
+        version=version,
         cuda_major=13,
         dependency_class="driver-only",
         include_optix_providers=False,
@@ -915,6 +920,21 @@ def test_runtime_wheel_requires_complete_bundled_optix_adapter_set(tmp_path, pla
 
     with pytest.raises(RuntimeError, match="adapter set is incomplete"):
         validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
+
+
+@pytest.mark.parametrize("platform,tag", (("windows", "win_amd64"), ("manylinux", "manylinux_2_35_x86_64")))
+@pytest.mark.parametrize("extra_abi", (None, 93, 105))
+def test_current_runtime_wheel_rejects_retired_optix_adapters(tmp_path, platform, tag, extra_abi):
+    wheel = tmp_path / f"taichi_forge_runtime-0.7.0-py3-none-{tag}.whl"
+    _write_runtime_wheel(
+        wheel, platform=platform, version="0.7.0", cuda_major=12,
+        dependency_class="driver-only", extra_optix_abi=extra_abi,
+    )
+    if extra_abi is None:
+        validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
+    else:
+        with pytest.raises(RuntimeError, match="adapter set is incomplete or ambiguous"):
+            validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
 
 
 @pytest.mark.parametrize(
@@ -1478,7 +1498,7 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert workflow.count("TI_WITH_PYTHON:BOOL=ON") == 4
     assert workflow.count("TI_WITH_CUDA_TOOLKIT:BOOL=OFF") == 4
     assert workflow.count("TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF") == 4
-    assert 'CUDA_TOOLKIT_VERSION: "12.5.1"' in workflow
+    assert 'CUDA_TOOLKIT_VERSION: "12.8.1"' in workflow
     assert workflow.count("Jimver/cuda-toolkit") == 2
     # An empty component list installs the full toolkit/driver suite. Only
     # producer-side compiler and SDK inputs belong in these driver-only jobs.
@@ -1756,7 +1776,7 @@ def test_strict_wheel_audits_shipped_runtime_adapters_and_grafted_libraries(monk
     else:
         validate_runtime_wheel.inspect_runtime_wheel(wheel, strict_binary=True)
         expected = (
-            validate_runtime_wheel._expected_optix_provider_members(platform)
+            validate_runtime_wheel._expected_optix_provider_members(platform, "0.6.3")
             | validate_runtime_wheel._expected_cudss_provider_members(platform)
             | adapters
         )
@@ -1784,7 +1804,7 @@ def test_driver_import_exception_is_scoped_to_shipped_optix_adapter(
         if platform == "windows"
         else "taichi_forge_runtime/_lib/runtime_native/libtaichi_runtime.so"
     )
-    optix = min(validate_runtime_wheel._expected_optix_provider_members(platform))
+    optix = min(validate_runtime_wheel._expected_optix_provider_members(platform, "0.7.0"))
     member = {
         "optix": optix,
         "runtime": runtime,
@@ -1809,10 +1829,10 @@ def test_driver_import_exception_is_scoped_to_shipped_optix_adapter(
         zf.writestr(member, b"binary content replaced by the import reader")
     with ZipFile(tmp_path / "dependency-scope.whl") as zf:
         if allowed:
-            validate_runtime_wheel._strict_wheel_dependencies(zf, [member], platform, runtime, None)
+            validate_runtime_wheel._strict_wheel_dependencies(zf, [member], platform, runtime, None, "0.7.0")
         else:
             with pytest.raises(RuntimeError, match="implicit vendor or CPython dependencies"):
-                validate_runtime_wheel._strict_wheel_dependencies(zf, [member], platform, runtime, None)
+                validate_runtime_wheel._strict_wheel_dependencies(zf, [member], platform, runtime, None, "0.7.0")
 
 
 @pytest.mark.parametrize("adapter_depends_on_cudart", (False, True))

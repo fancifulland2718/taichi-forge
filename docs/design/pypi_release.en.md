@@ -58,25 +58,23 @@ objects to determine native exports but does not link those Python binding objec
 into runtime. Final binary audits reject CPython dependencies; only the main-package
 shim uses the CPython 3.10–3.14 matrix.
 
-OptiX PTX generation still needs CUDA 12.5.1 build tools: `TI_WITH_CUDA_TOOLKIT=OFF`
+OptiX PTX generation still needs CUDA 12.8.1 build tools: `TI_WITH_CUDA_TOOLKIT=OFF`
 does not remove the producer's NVCC requirement. Installation is limited to `nvcc`
 and `cudart`, `thrust` on Windows, and `nvcc`, `cudart-dev`, `driver-dev`, `cccl` on
 Linux, for the compiler, headers and driver import/stub libraries. CCCL headers
-(the `thrust` Windows 12.5 installer component) supply `nv/target`, included by
+(the `thrust` Windows 12.8 installer component) supply `nv/target`, included by
 OptiX 9.1 through `cuda_fp16.h`, and must remain installed. The jobs do not install the full
 driver/tool suite or bundle cudart/other vendor runtimes into release wheels.
 An empty Windows component list invokes the unrestricted silent installer; an output
 ending at `-s` alone does not prove a deadlock. The pinned action's `log-file-suffix`
 only handles Linux logs and does not provide a Windows installation log.
 
-The 12.5.1 pin is Forge's PTX compatibility policy, not OptiX's maximum supported
-CUDA version. As of 2026-10-27, the latest official
-[OptiX 9.1.0](https://github.com/NVIDIA/optix-dev/releases/tag/v9.1.0) is already in
-the pinned adapter set; ABI 118 is tried first and requires an R590+ driver.
-The [OptiX 9.1 programming guide](https://raytracing-docs.nvidia.com/optix9/guide/optix_guide.251118.LTR.pdf)
-also describes compilation with CUDA 13.0+. Keeping CUDA 12.5 PTX preserves the
-existing ABI 93 / R555 route. An NVCC upgrade requires checking emitted PTX and
-driver requirements together, rather than only changing a workflow version.
+The 12.8.1 installer pin selects the CUDA 12.8 toolchain supported by the existing
+action; it emits PTX 8.7. CMake rejects other Toolkit minor versions for release
+adapters. As of 2026-10-27, the latest official
+[OptiX 9.1.0](https://github.com/NVIDIA/optix-dev/releases/tag/v9.1.0) is the only
+bundled adapter (ABI 118, R590+ driver). The 8.1/9.0 adapters are removed.
+This pin is Forge's build policy, not OptiX's maximum supported CUDA version.
 Forge's native conditional Graphs separately require **Driver API 12.8+**: core
 runtime uses dynamically loaded symbols, its own ABI declarations and embedded
 PTX, so this SDK pin does not disable those features.

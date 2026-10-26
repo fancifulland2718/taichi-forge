@@ -126,7 +126,7 @@ asset 的兼容版本，不是 driver 或 Toolkit 版本探测。发布验证应
 当前源码中的标准 CUDA runtime 和 native primitive provider 只依赖 Forge 动态加载的
 Driver API。安装和使用该 core 不需要用户侧 CUDA Toolkit、CUB、CUDART、CUPTI 或 CUDA
 版本化 Python 包。完整 runtime wheel 的构建要求不同：既有 bundled OptiX adapter 使用
-CUDA Toolkit 12.5.1 编译 PTX，cuDSS adapter 使用 `packaging/constraints/cudss-build.txt`
+CUDA Toolkit 12.8.1 编译 PTX，cuDSS adapter 使用 `packaging/constraints/cudss-build.txt`
 提供的 build-only header；Toolkit 和这些 vendor runtime 均不成为 wheel payload。
 发行仍然只为 Windows、Linux 各发布一个
 `taichi-forge-runtime` wheel；distribution、依赖、extra 和 wheel tag 均不带
@@ -263,7 +263,7 @@ export BASE_CMAKE_ARGS="-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_W
 python scripts/sync_runtime_dependency.py
 ```
 
-按 runtime workflow 安装 CUDA Toolkit 12.5.1 并让 `nvcc` 可被发现，用于既有 bundled PTX
+按 runtime workflow 安装 CUDA Toolkit 12.8.1 并让 `nvcc` 可被发现，用于既有 bundled PTX
 构建。这是构建机要求，不是最终用户的 Toolkit 依赖。平台 runtime wheel 只需要构建一次：
 
 ```bash
@@ -313,7 +313,7 @@ Ubuntu 22.04 使用 glibc 2.35。若需要更低 manylinux tag，应改在对应
 - MSVC x64 developer environment。
 - Ninja。
 - Vulkan SDK `1.4.304.1`。
-- CUDA Toolkit `12.5.1` 和兼容的 PTX host compiler，用于 bundled OptiX 产物。workflow 仅为
+- CUDA Toolkit `12.8.1` 和兼容的 PTX host compiler，用于 bundled OptiX 产物。workflow 仅为
   PTX 命令显式选择已安装的 MSVC v142，native runtime/shim 保持各自的 MSVC toolset。
 - 来自 `LLVM20_WIN_URL` 的预构建 LLVM 20，或本地 LLVM 20 构建。
 
@@ -334,7 +334,7 @@ $baseCmakeArgs = "-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CU
 python scripts\sync_runtime_dependency.py
 ```
 
-先把 `$ptxHost` 设为供 CUDA 12.5 PTX 预处理使用的兼容 `cl.exe` 绝对路径，而非未支持的更新
+先把 `$ptxHost` 设为供 CUDA 12.8 PTX 预处理使用的兼容 `cl.exe` 绝对路径，而非未支持的更新
 编译器。平台 runtime wheel 只需要构建一次：
 
 ```powershell

@@ -56,7 +56,7 @@ FORBIDDEN_VENDOR_RUNTIME = re.compile(
     r")",
     re.IGNORECASE,
 )
-OPTIX_PROVIDER_ABIS = (93, 105, 118)
+OPTIX_PROVIDER_ABIS = (118,)
 CUDSS_PROVIDER_HEADER_VERSIONS = (80,)
 OPTIONAL_RUNTIME_PROVIDERS = {
     "cusparselt": (
@@ -155,13 +155,15 @@ def _validate_vkfft_payload(zf: ZipFile, names: list[str], platform: str, requir
     return {expected}
 
 
-def _expected_optix_provider_members(platform: str) -> set[str]:
+def _expected_optix_provider_members(platform: str, version: str) -> set[str]:
     if platform == "macos":
         return set()
+    # Published 0.6.x wheels keep their original manifest; new releases ship 9.1 only.
+    abis = OPTIX_PROVIDER_ABIS if Version(version).release >= (0, 7, 0) else (93, 105, 118)
     prefix = f"{PACKAGE}/_lib/hardware_providers/"
     if platform == "windows":
-        return {f"{prefix}taichi_forge_optix_provider_abi1_optix{abi}.dll" for abi in OPTIX_PROVIDER_ABIS}
-    return {f"{prefix}libtaichi_forge_optix_provider_abi1_optix{abi}.so" for abi in OPTIX_PROVIDER_ABIS}
+        return {f"{prefix}taichi_forge_optix_provider_abi1_optix{abi}.dll" for abi in abis}
+    return {f"{prefix}libtaichi_forge_optix_provider_abi1_optix{abi}.so" for abi in abis}
 
 
 def _expected_cudss_provider_members(platform: str) -> set[str]:
@@ -552,7 +554,7 @@ def _shared_binary_member(name: str, platform: str) -> bool:
 
 
 def _strict_wheel_dependencies(
-    zf: ZipFile, names: list[str], platform: str, runtime: str, cuda_major: int | None
+    zf: ZipFile, names: list[str], platform: str, runtime: str, cuda_major: int | None, version: str
 ) -> None:
     if platform == "macos":
         # CUDA/provider dependency policy is scoped to Windows and ELF wheels.
@@ -568,7 +570,7 @@ def _strict_wheel_dependencies(
                 binary,
                 platform,
                 allowed_cudart_major=cuda_major if member == runtime else None,
-                allowed_cuda_driver=member in _expected_optix_provider_members(platform),
+                allowed_cuda_driver=member in _expected_optix_provider_members(platform, version),
             )
 
 
@@ -631,7 +633,7 @@ def inspect_runtime_wheel(
                 if name.startswith(provider_prefix) and "taichi_forge_optix_provider" in Path(name).name
             ]
             actual_optix_providers = set(optix_provider_entries)
-            expected_optix_providers = _expected_optix_provider_members(platform)
+            expected_optix_providers = _expected_optix_provider_members(platform, version)
             if (
                 len(optix_provider_entries) != len(actual_optix_providers)
                 or actual_optix_providers != expected_optix_providers
@@ -818,7 +820,7 @@ def inspect_runtime_wheel(
                 },
                 platform,
             )
-            _strict_wheel_dependencies(zf, names, platform, native_runtimes[0], cuda_major)
+            _strict_wheel_dependencies(zf, names, platform, native_runtimes[0], cuda_major, version)
         if platform == "windows":
             import_library = f"{PACKAGE}/_lib/runtime_native/taichi_runtime.lib"
             if names.count(import_library) != 1:

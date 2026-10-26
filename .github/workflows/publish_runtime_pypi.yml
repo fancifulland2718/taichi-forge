@@ -66,11 +66,10 @@ env:
   TI_SKIP_VERSION_CHECK: "ON"
   TI_CI: "1"
   # Producer SDK for the bundled providers, not the consumer's CUDA API level.
-  # OptiX device code is PTX-JITed by the display driver. CUDA 12.5 emits PTX
-  # 8.5, preserving the oldest qualified OptiX 8.1 / R555 runtime floor while
-  # also building the latest OptiX 9.1 adapter. Conditional Graphs use dynamic
+  # OptiX device code is PTX-JITed by the display driver. CUDA 12.8 emits PTX
+  # 8.7 for the single OptiX 9.1 / R590 adapter. Conditional Graphs use dynamic
   # Driver API 12.8+ symbols and toolkit-independent PTX in the core runtime.
-  CUDA_TOOLKIT_VERSION: "12.5.1"
+  CUDA_TOOLKIT_VERSION: "12.8.1"
   LLVM20_WIN_URL: ${{ vars.LLVM20_WIN_URL }}
   LLVM20_LINUX_URL: ${{ vars.LLVM20_LINUX_URL || vars.LLVM20_LINUX_MANYLINUX_URL }}
   LLVM20_LINUX_MANYLINUX_URL: ${{ vars.LLVM20_LINUX_MANYLINUX_URL }}
@@ -174,7 +173,7 @@ jobs:
         with:
           cuda: ${{ env.CUDA_TOOLKIT_VERSION }}
           method: network
-          # Empty means the full cuda-12-5 metapackage, including drivers.
+          # Empty means the full cuda-12-8 metapackage, including drivers.
           # Providers need PTX compilation, headers and the driver link stub.
           # OptiX 9.1 includes cuda_fp16.h, which requires CCCL's nv/target.
           sub-packages: '["nvcc", "cudart-dev", "driver-dev", "cccl"]'
@@ -368,11 +367,11 @@ jobs:
         with:
           cuda: ${{ env.CUDA_TOOLKIT_VERSION }}
           method: network
-          # The action appends _12.5 to these Windows component names.
+          # The action appends _12.8 to these Windows component names.
           # Do not run the unrestricted silent installer (drivers, Nsight,
           # VS integration, etc.). cudart supplies headers and import libs;
           # it is a build input, not a runtime-wheel dependency.
-          # CUDA 12.5 calls its CCCL/nv/target header component "thrust".
+          # CUDA 12.8 calls its CCCL/nv/target header component "thrust".
           sub-packages: '["nvcc", "cudart", "thrust"]'
 
       - name: Setup MSVC dev cmd
@@ -449,12 +448,13 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $ErrorActionPreference = 'Stop'
-          # CUDA 12.5 supports MSVC 192x/193x, not the runner's current 194x.
-          # Use the installed v142 toolset only for PTX preprocessing; native
+          # CUDA 12.8 host_config.h accepts 1910 <= _MSC_VER < 1950.
+          # Select the newest compatible installed toolset for PTX only;
           # runtime/shim compilation retains the current MSVC environment.
-          $ptxToolset = Get-ChildItem -LiteralPath "$env:VCINSTALLDIR\Tools\MSVC" -Directory -Filter "14.29.*" |
-            Sort-Object Name -Descending | Select-Object -First 1
-          if (-not $ptxToolset) { throw "CUDA 12.5 PTX compilation requires the runner's MSVC v142 toolset." }
+          $ptxToolset = Get-ChildItem -LiteralPath "$env:VCINSTALLDIR\Tools\MSVC" -Directory -Filter "14.*" |
+            Where-Object { ([version]$_.Name).Minor -ge 10 -and ([version]$_.Name).Minor -lt 50 } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $ptxToolset) { throw "CUDA 12.8 PTX compilation requires an installed MSVC 14.1x-14.4x toolset." }
           $ptxHost = Join-Path $ptxToolset.FullName "bin\Hostx64\x64\cl.exe"
           if (-not (Test-Path -LiteralPath $ptxHost)) { throw "PTX host compiler not found: $ptxHost" }
           $ptxHost = $ptxHost.Replace('\', '/')

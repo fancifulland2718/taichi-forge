@@ -3,10 +3,6 @@ option(TI_BUILD_BUNDLED_OPTIX_PROVIDERS
 include(${CMAKE_CURRENT_LIST_DIR}/TaichiProviderSdk.cmake)
 option(TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT
        "Allow non-release CUDA Toolkit versions for local adapter builds" OFF)
-set(TI_OPTIX_ROOT_93 "" CACHE PATH
-    "Optional OptiX ABI 93 header root for a bundled-provider build")
-set(TI_OPTIX_ROOT_105 "" CACHE PATH
-    "Optional OptiX ABI 105 header root for a bundled-provider build")
 set(TI_OPTIX_ROOT_118 "" CACHE PATH
     "Optional OptiX ABI 118 header root for a bundled-provider build")
 
@@ -28,13 +24,13 @@ find_package(CUDAToolkit REQUIRED)
 if(NOT CUDAToolkit_NVCC_EXECUTABLE)
     message(FATAL_ERROR "The OptiX provider build requires nvcc for its PTX artifact")
 endif()
-set(_ti_optix_expected_ptx_version "8.5")
+set(_ti_optix_expected_ptx_version "8.7")
 if(NOT TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT AND
-   (CUDAToolkit_VERSION VERSION_LESS "12.5" OR
-    NOT CUDAToolkit_VERSION VERSION_LESS "12.6"))
+   (CUDAToolkit_VERSION VERSION_LESS "12.8" OR
+    NOT CUDAToolkit_VERSION VERSION_LESS "12.9"))
     message(FATAL_ERROR
-        "Bundled OptiX providers require CUDA Toolkit 12.5.x so their PTX 8.5 "
-        "does not raise the qualified OptiX 8.1 / R555 runtime floor; found "
+        "Bundled OptiX providers require CUDA Toolkit 12.8.x for PTX 8.7 "
+        "with the OptiX 9.1 / R590 runtime contract; found "
         "CUDA ${CUDAToolkit_VERSION}")
 endif()
 if(TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT)
@@ -44,7 +40,7 @@ if(TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT)
         "this output must not enter a release wheel")
 endif()
 
-set(_ti_optix_supported_abis 93 105 118)
+set(_ti_optix_supported_abis 118)
 
 function(_ti_validate_optix_root root expected_abi out_abi)
     if(NOT EXISTS "${root}/include/optix.h" OR
@@ -60,7 +56,7 @@ function(_ti_validate_optix_root root expected_abi out_abi)
     if(_supported_index EQUAL -1)
         message(FATAL_ERROR
             "Unsupported OptiX header ABI ${_header_abi}; Forge supports "
-            "ABI 93 (OptiX 8.1), ABI 105 (OptiX 9.0), and ABI 118 (OptiX 9.1)")
+            "ABI 118 (OptiX 9.1)")
     endif()
     if(NOT "${expected_abi}" STREQUAL "any" AND
        NOT "${_header_abi}" STREQUAL "${expected_abi}")
@@ -214,15 +210,8 @@ function(_ti_resolve_optix_headers abi version commit out_root)
     set(${out_root} "${_source_dir}" PARENT_SCOPE)
 endfunction()
 
-# Full immutable commit IDs keep the release build reproducible while all
-# three adapters remain files in the same platform runtime wheel.
-_ti_resolve_optix_headers(
-    93 8.1.0 50021ea0af6d41609a97777ceebbdf1e1d34efe7 _root_93)
-_ti_resolve_optix_headers(
-    105 9.0.0 fff65c2a7c592f1ea5f1661ad7d2381cf965f9bd _root_105)
+# The immutable commit pins the single OptiX adapter in the runtime wheel.
 _ti_resolve_optix_headers(
     118 9.1.0 f1f6dd803f3159992d248178f6e09421c6eb8b6d _root_118)
 
-_ti_add_optix_provider(taichi_forge_optix_provider_93 "${_root_93}")
-_ti_add_optix_provider(taichi_forge_optix_provider_105 "${_root_105}")
 _ti_add_optix_provider(taichi_forge_optix_provider_118 "${_root_118}")

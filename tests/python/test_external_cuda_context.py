@@ -92,13 +92,13 @@ def test_external_cuda_scopes_restore_context_on_success_and_failure(mode):
 def test_optix_context_failure_and_fallback_restore_context(monkeypatch):
     libraries = {
         "new.dll": _FakeOptixLibrary(optix_abi=118, context_result=_optix._OPTIX_UNAVAILABLE),
-        "fallback.dll": _FakeOptixLibrary(optix_abi=105),
+        "fallback.dll": _FakeOptixLibrary(optix_abi=118),
     }
     monkeypatch.setattr(_optix, "_bundled_provider_candidates", lambda: tuple(libraries))
     monkeypatch.setattr(_optix, "_load_library", lambda path: libraries[Path(path).name])
     with _ambient_context("foreign") as (current, ambient, _):
         provider = ti.hardware.ray.load_optix_provider()
-        assert provider.identity["optix_abi_version"] == 105
+        assert provider.identity["optix_abi_version"] == 118
         assert current() == ambient
         provider.close()
         assert current() == ambient

@@ -225,7 +225,7 @@ def ray_optional_operations(_operation):
             update_policy="rebuild",
             requirements=(
                 "Forge runtime wheel with bundled OptiX provider ABI 1 adapters",
-                "OptiX driver runtime compatible with ABI 93, 105, or 118",
+                "OptiX driver runtime compatible with ABI 118 (OptiX 9.1)",
                 "active Taichi CUDA context and CUDA device storage",
             ),
             public_api="ti.hardware.ray.OptixProvider.triangle_scene",
@@ -288,7 +288,7 @@ def ray_optional_operations(_operation):
             update_policy="rebind",
             requirements=(
                 "bundled Forge OptiX provider ABI 1",
-                "installed driver runtime accepting OPTIX_ABI_VERSION 93, 105, or 118",
+                "installed driver runtime accepting OPTIX_ABI_VERSION 118 (OptiX 9.1)",
                 "fixed Forge f32x8 ray and f32x4 closest-hit storage ABI",
                 "compact program-owned ndarray, dense field or view; typed indices require the optional ABI-1 suffix",
             ),

@@ -187,8 +187,7 @@ adapter；消费端需要 Vulkan loader/driver 和平台 C/C++ runtime，不需�
 DLL、Vulkan SDK 或外部 shader 编译器。清单记录这些依赖及全部许可文件。已验证的
 Windows 组件约 5 MB，保持可选，默认安装不包含它。
 
-OptiX 为 ABI 93、105、118 提供独立组件，SDK 可只携带部署环境所需的一个 adapter。
-沿用已有的固定 OptiX 头文件和 CUDA Toolkit 构建配置，选择匹配组件安装：
+OptiX 9.1 提供 ABI 118 组件，使用固定头文件和 CUDA Toolkit 12.8.x 构建，显式安装：
 
 ```sh
 cmake -S . -B BUILD -DTI_BUILD_BUNDLED_OPTIX_PROVIDERS=ON
@@ -196,13 +195,10 @@ cmake --build BUILD --target taichi_forge_optix_provider_118
 cmake --install BUILD --prefix SDK --component TaichiSDKProvider_optix_abi118
 ```
 
-选择其他变体时，将 target 和组件名中的 `118` 同时替换为 `93` 或 `105`。
-组件包含公共/OptiX C ABI 头文件、内嵌设备 PTX 及对应许可声明；驱动提供的 OptiX/CUDA
-库仍是外部依赖，消费端不需要 OptiX SDK 头文件或 nvcc。清单分别为 `optix_abi93.json`、
-`optix_abi105.json`、`optix_abi118.json`，`provider_id` 保持 `optix`，另有 `variant`
-字段；许可目录也按变体区分。多组件共存不会覆盖彼此清单或基础 SDK 清单。已验证的
-Windows 单组件约221KiB，现有runtime wheel的adapter选择方式不变。安装不会自动选择
-adapter；请将实际路径传给 `runtime.configure_provider`。
+组件包含公共及 OptiX C ABI 头文件、内嵌 PTX 和许可声明；驱动提供的 OptiX/CUDA
+库仍为外部依赖，消费端不需要 SDK 头文件或 nvcc。清单为 `optix_abi118.json`，
+`provider_id="optix"`、`variant="abi118"`，不会覆盖基础 SDK 清单。0.7.0 不再构建
+ABI 93、105 组件。将安装后的 adapter 路径传给 `runtime.configure_provider` 进行选择。
 
 普通单变体组件安装 adapter
 到 Windows 的 `bin/hardware_providers` 或 Linux 的 `lib/hardware_providers`，
@@ -528,7 +524,7 @@ OMM 实例不能声明 `opaque=True`，面过滤与 OMM 的组合仍明确拒绝
 "opacity_micromap": baked_asset}` 指定与原 GAS 指纹一致的不可变 `OptixOpacityMicromap`，
 或在准备时校验的公共资产名称。不额外让 JIT GAS 常驻烘焙字节，也不读回设备分配。
 Windows CUDA 的独立/借用消费小夹具已覆盖两态/四态、索引/预定义状态、refit、命中/miss、
-alpha 回退、program launch、退休和下游 DSL 梯度，adapter 为 93/105/118。
+alpha 回退、program launch、退休和下游 DSL 梯度，adapter 为 118。
 
 可选 `optix/program` v1 资源复用相同 context 和 adapter 重建不可变可编程管线。
 绑定 `context` 和 `module_0` 至 `module_{module_count-1}`；module 为不含 NUL 的
@@ -568,7 +564,7 @@ packet；修改固定标量或资源绑定须创建另一 launch。`optix/launch
 继续由已有 owner 管理。图像需要初始像素或计划内无条件先行的上传。
 
 Program 摘要编码见 [`native_optix_program.cpp`](../../taichi/runtime/native_optix_program.cpp)。
-ABI 93/105/118 adapter 已验证显式计划的实例 hit/miss、SBT 间接 buffer/texture、refit、
+ABI 118 adapter 已验证显式计划的实例 hit/miss、SBT 间接 buffer/texture、refit、
 标量重绑定、无 producer 消费、在途退休和下游 DSL 梯度。不提供用户 shader 求导，
 也不代表完整 driver 管线驻留测量。
 原生设备 payload 统计包含参数/SBT 存储；adapter 另外保留一份 pinned host 副本。
@@ -598,7 +594,7 @@ groups 与 SBT payload 来自冻结 recording，不读取设备参数。相同 p
 `resource_bindings[program]` 可改为公共 program 名；公共 scene/image 保持原有合同。
 通过 resource-alias 约束校验 program 与 scene 共享的 context，不能把公共依赖同时私有
 重建。混合公共和私有子资源时，应把共同 context 也绑定为公共资源。导出器重建 prepared
-launch，暂不接受公共 launch 句柄。ABI 93/105/118 已验证普通 Graph 公私导出、重复录制、
+launch，暂不接受公共 launch 句柄。ABI 118 已验证普通 Graph 公私导出、重复录制、
 context 不匹配、refit/图像更新、生产端关闭后的消费退休和下游梯度；未扩展 CUDA capture、
 selected recipe 的资格；micromap scene 重建遵循上文的 baked asset 合同。
 

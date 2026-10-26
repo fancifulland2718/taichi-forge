@@ -146,7 +146,7 @@ Current source builds the standard CUDA runtime and native primitive providers
 against Forge's dynamically loaded Driver API. Installing and using that core
 does not require a user-side CUDA Toolkit, CUB, CUDART, CUPTI, or CUDA-versioned
 Python package. Building the complete runtime wheel is different: its existing
-bundled OptiX adapters compile PTX with CUDA Toolkit 12.5.1, and its cuDSS adapter
+bundled OptiX adapters compile PTX with CUDA Toolkit 12.8.1, and its cuDSS adapter
 uses the build-only headers from `packaging/constraints/cudss-build.txt`.
 Neither the Toolkit nor those vendor runtimes become wheel payloads. A release
 still publishes exactly one
@@ -304,7 +304,7 @@ export BASE_CMAKE_ARGS="-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_W
 python scripts/sync_runtime_dependency.py
 ```
 
-Install CUDA Toolkit 12.5.1 for the existing bundled PTX build and make `nvcc`
+Install CUDA Toolkit 12.8.1 for the existing bundled PTX build and make `nvcc`
 discoverable, as in the runtime workflow. This is a build-machine requirement,
 not an end-user Toolkit dependency. Build the platform runtime wheel once:
 
@@ -360,7 +360,7 @@ Required tools:
 - MSVC x64 developer environment.
 - Ninja.
 - Vulkan SDK `1.4.304.1`.
-- CUDA Toolkit `12.5.1` and a compatible PTX host compiler for the bundled
+- CUDA Toolkit `12.8.1` and a compatible PTX host compiler for the bundled
   OptiX artifacts. The workflow explicitly selects installed MSVC v142 for
   this PTX command; native runtime/shim compilation keeps its own MSVC toolset.
 - Prebuilt LLVM 20 archive from `LLVM20_WIN_URL`, or a local LLVM 20 build.
@@ -383,7 +383,7 @@ python scripts\sync_runtime_dependency.py
 ```
 
 Set `$ptxHost` to the absolute path of the compatible `cl.exe` selected for
-CUDA 12.5 PTX preprocessing (not an unsupported newer compiler). Build the
+CUDA 12.8 PTX preprocessing (not an unsupported newer compiler). Build the
 platform runtime wheel once:
 
 ```powershell

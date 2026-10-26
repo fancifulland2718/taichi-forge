@@ -21,7 +21,7 @@ class _FakeOptixLibrary:
     def __init__(
         self,
         *,
-        optix_abi=93,
+        optix_abi=118,
         query_result=0,
         context_result=0,
         runtime_probe_result=0,
@@ -172,7 +172,7 @@ def test_optix_legacy_api_prefix_remains_compatible():
 
 @pytest.mark.parametrize(
     ("optix_abi", "provider_version"),
-    ((93, "8.1.0"), (105, "9.0.0"), (118, "9.1.0")),
+    ((118, "9.1.0"),),
 )
 def test_optix_probe_is_runtime_only_and_abi_versioned(
     monkeypatch, optix_abi, provider_version
@@ -195,7 +195,7 @@ def test_optix_probe_is_runtime_only_and_abi_versioned(
     assert fake.calls["create_context"] == 0
 
 
-@pytest.mark.parametrize("optix_abi", (92, 106, 117, 119))
+@pytest.mark.parametrize("optix_abi", (92, 93, 105, 106, 117, 119))
 def test_optix_probe_rejects_unqualified_sdk_abi_without_initializing(
     monkeypatch, optix_abi
 ):
@@ -260,7 +260,7 @@ def test_optix_library_path_is_always_the_vendor_runtime(monkeypatch):
     assert provider_source == "forge_runtime_wheel"
 
 
-def test_optix_probe_selects_newest_driver_compatible_bundled_adapter(monkeypatch):
+def test_optix_probe_does_not_fall_back_to_retired_sdk_abis(monkeypatch):
     abi118 = _FakeOptixLibrary(optix_abi=118, runtime_probe_result=4)
     abi105 = _FakeOptixLibrary(optix_abi=105)
     abi93 = _FakeOptixLibrary(optix_abi=93)
@@ -278,15 +278,13 @@ def test_optix_probe_selects_newest_driver_compatible_bundled_adapter(monkeypatc
     )
     report = _optix.probe_provider("vendor/nvoptix.dll")
 
-    assert report["discovery"] == "present"
-    assert report["native_facts"]["optix_abi_version"] == 105
-    assert report["native_facts"]["vendor_runtime_abi_compatible"] is True
-    assert len(report["native_facts"]["rejected_newer_candidates"]) == 1
+    assert report["discovery"] == "incompatible"
+    assert report["unavailable_reason"] == "no_compatible_optix_provider"
     expected = _optix._runtime_library_argument(
         str(Path("vendor/nvoptix.dll").resolve())
     )
     assert abi118.calls["probe_runtime"] == [expected]
-    assert abi105.calls["probe_runtime"] == [expected]
+    assert abi105.calls["probe_runtime"] == []
     assert abi93.calls["probe_runtime"] == []
 
 
@@ -305,12 +303,12 @@ def test_optix_adapters_are_one_pinned_runtime_wheel_component():
     )
 
     assert '"Build the pinned OptiX provider set for the runtime wheel" OFF' in cmake
-    assert "set(_ti_optix_supported_abis 93 105 118)" in cmake
+    assert "set(_ti_optix_supported_abis 118)" in cmake
     assert "install(TARGETS ${target_name}" in cmake
     assert "COMPONENT runtime" in cmake
     assert "taichi_forge_optix_provider_abi1_optix${_header_abi}" in cmake
-    assert "50021ea0af6d41609a97777ceebbdf1e1d34efe7" in cmake
-    assert "fff65c2a7c592f1ea5f1661ad7d2381cf965f9bd" in cmake
+    assert "TI_OPTIX_ROOT_93" not in cmake
+    assert "TI_OPTIX_ROOT_105" not in cmake
     assert "f1f6dd803f3159992d248178f6e09421c6eb8b6d" in cmake
     runtime_build_targets = next(
         line
@@ -322,15 +320,15 @@ def test_optix_adapters_are_one_pinned_runtime_wheel_component():
     assert 'TI_BUILD_BUNDLED_OPTIX_PROVIDERS = "ON"' in runtime_project
     assert 'TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT = "OFF"' in runtime_project
     assert "TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT" in cmake
-    assert 'set(_ti_optix_expected_ptx_version "8.5")' in cmake
+    assert 'set(_ti_optix_expected_ptx_version "8.7")' in cmake
     assert "--gpu-architecture=compute_75" in cmake
     assert '"-DEXPECTED_PTX_TARGET=sm_75"' in cmake
     assert "TI_FORGE_OPTIX_PROVIDER_ABI_VERSION 1u" in abi
     assert "taichi_forge_optix_provider_set_runtime_library" not in abi
     assert "taichi_forge_optix_provider_probe_runtime" not in abi
     assert "#include <optix" not in abi.lower()
-    assert _optix.SUPPORTED_OPTIX_ABIS == (93, 105, 118)
-    assert "OPTIX_ABI_VERSION == 118" in provider
+    assert _optix.SUPPORTED_OPTIX_ABIS == (118,)
+    assert "OPTIX_ABI_VERSION != 118" in provider
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -349,7 +347,7 @@ def test_optix_provider_load_failure_has_explicit_phase(monkeypatch):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_optix_load_falls_back_only_when_newer_runtime_abi_is_unavailable(
+def test_optix_load_does_not_create_context_with_retired_sdk_abi(
     monkeypatch,
 ):
     monkeypatch.delenv("TAICHI_FORGE_OPTIX_LIBRARY", raising=False)
@@ -367,20 +365,17 @@ def test_optix_load_falls_back_only_when_newer_runtime_abi_is_unavailable(
         lambda path: libraries[Path(path).name],
     )
 
-    provider = ti.hardware.ray.load_optix_provider()
-
-    assert provider.identity["optix_abi_version"] == 105
-    assert provider.identity["provider_source"] == "forge_runtime_wheel"
+    with pytest.raises(RuntimeError, match="outside Forge's bundled adapter range"):
+        ti.hardware.ray.load_optix_provider()
     assert abi118.calls["create_context"] == 1
-    assert abi105.calls["create_context"] == 1
+    assert abi105.calls["create_context"] == 0
     assert abi118.calls["create_context_runtime_path"] == [None]
-    assert abi105.calls["create_context_runtime_path"] == [None]
-    provider.close()
+    assert abi105.calls["create_context_runtime_path"] == []
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_fake_optix_provider_scene_graph_lifetime_and_memory(monkeypatch):
-    fake = _FakeOptixLibrary(optix_abi=93)
+    fake = _FakeOptixLibrary()
     monkeypatch.setattr(
         _optix, "_bundled_provider_candidates", lambda: ("fake-adapter.dll",)
     )

@@ -473,7 +473,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
 
     optix = ti.hardware.capability("ray.query.batch.optix")
     assert optix.implementation_status == "existing_public"
-    assert "OPTIX_ABI_VERSION 93, 105, or 118" in optix.requirements[1]
+    assert "OPTIX_ABI_VERSION 118 (OptiX 9.1)" in optix.requirements[1]
     assert "failure-isolated" in optix.notes[1]
     assert any("No kernel-inline route" in note for note in optix.notes)
 

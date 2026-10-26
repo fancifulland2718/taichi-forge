@@ -17,14 +17,14 @@ def _resolved(operation_id):
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_optix_required_features_filter_before_context_creation(monkeypatch):
-    old, new = _FakeOptixLibrary(optix_abi=118), _FakeOptixLibrary(optix_abi=105)
+    old, new = _FakeOptixLibrary(optix_abi=118), _FakeOptixLibrary(optix_abi=118)
     new._api.info.features |= 1 << 14
     libraries = {"old.dll": old, "program.dll": new}
     monkeypatch.delenv("TAICHI_FORGE_OPTIX_LIBRARY", raising=False)
     monkeypatch.setattr(_optix, "_bundled_provider_candidates", lambda: tuple(libraries))
     monkeypatch.setattr(_optix, "_load_library", lambda path: libraries[Path(path).name])
     with ti.hardware.ray.load_optix_provider(required_features=("program",)) as provider:
-        assert provider.identity["optix_abi_version"] == 105
+        assert provider.identity["optix_abi_version"] == 118
         assert provider.required_features == ("program",)
         assert _resolved("ray.program.optix").selection == "eligible"
     assert old.calls["create_context"] == 0

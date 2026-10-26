@@ -233,9 +233,8 @@ Vulkan SDK or external shader compiler. Its manifest records these requirements
 and all installed license files. The qualified Windows component is about 5 MB;
 it remains optional and is not included by a default install.
 
-OptiX provides separate components for ABI 93, 105 and 118, so an SDK can ship
-only the adapter required by its deployment. Build with the existing pinned
-OptiX headers and CUDA Toolkit configuration, then select the matching component:
+OptiX 9.1 provides the ABI 118 component, built with the pinned headers and
+CUDA Toolkit 12.8.x. Install it explicitly:
 
 ```sh
 cmake -S . -B BUILD -DTI_BUILD_BUNDLED_OPTIX_PROVIDERS=ON
@@ -243,16 +242,12 @@ cmake --build BUILD --target taichi_forge_optix_provider_118
 cmake --install BUILD --prefix SDK --component TaichiSDKProvider_optix_abi118
 ```
 
-Use `93` or `105` in both the target and component name for those variants. Each
-component includes the common and OptiX C ABI headers, embedded device PTX and
-matching license notices; the driver-provided OptiX/CUDA libraries remain external.
-Consumers need neither OptiX SDK headers nor nvcc. Manifests are named
-`optix_abi93.json`, `optix_abi105.json` and `optix_abi118.json`, with `provider_id`
-remaining `optix` and a separate `variant` field. License directories are also
-variant-specific. Components can coexist without replacing each other's inventory
-or the base SDK manifest. Qualified Windows payloads are about 221 KiB each;
-the existing runtime-wheel adapter selection is unchanged. Installing a component
-does not select it automatically: pass its path to `runtime.configure_provider`.
+The component includes the common and OptiX C ABI headers, embedded PTX and
+license notices. Driver-provided OptiX/CUDA libraries remain external; consumers
+need neither SDK headers nor nvcc. Its manifest is `optix_abi118.json`, with
+`provider_id="optix"` and `variant="abi118"`. It does not replace the base SDK
+manifest. The 0.7.0 build no longer produces ABI 93 or 105 components. Pass the
+installed adapter path to `runtime.configure_provider` to select it.
 
 Each ordinary component
 installs an adapter into `bin/hardware_providers` on Windows or
@@ -670,7 +665,7 @@ matching the source GAS fingerprint, or a public asset name checked at preparati
 The exporter does not retain baked bytes in the JIT GAS or read back its device
 allocation. Small standalone/borrowed CUDA tests cover two/four-state, indexed
 and predefined-state inputs, refit, hit/miss writeback, alpha fallback, program
-launches, retirement and downstream DSL gradients with adapters 93/105/118.
+launches, retirement and downstream DSL gradients with adapters 118.
 
 The optional `optix/program` v1 resource reconstructs an immutable programmable
 pipeline through the same context and adapter. Bind `context` and `module_0`
@@ -722,7 +717,7 @@ Images require initial pixels or an unconditional preceding upload in the plan.
 
 The program digest encoding is defined in
 [`native_optix_program.cpp`](../../taichi/runtime/native_optix_program.cpp).
-Explicit plans are qualified with adapter ABI variants 93/105/118 for instance
+Explicit plans are qualified with adapter ABI variants 118 for instance
 hit/miss, indirect SBT buffers/textures, refit, scalar rebinding, source-independent
 consumption, pending retirement and downstream DSL gradients. This does not
 differentiate user shaders or establish total driver pipeline residency. Reported native device payload
@@ -758,7 +753,7 @@ Public scenes and images use their existing contracts. Shared program/scene
 contexts are checked through resource-alias constraints; a public dependency
 cannot also be reconstructed privately. Bind the shared context publicly when
 mixing public and private children. The exporter reconstructs prepared launches;
-it does not currently accept public launch handles. ABI 93/105/118 tests cover
+it does not currently accept public launch handles. ABI 118 tests cover
 ordinary private/public Graph exports, repeated recordings, context mismatch,
 refit/image updates, retirement after producer closure and downstream gradients.
 This does not expand CUDA capture/selected-recipe admission. Micromap scene

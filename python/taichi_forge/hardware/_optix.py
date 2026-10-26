@@ -47,7 +47,7 @@ from taichi_forge.types.primitive_types import f32, i32, u32
 PROVIDER_ABI_VERSION = 1
 PROVIDER_ABI_NAME = "taichi-forge-optix-provider-c-abi1"
 PROVIDER_QUERY_SYMBOL = "taichi_forge_optix_provider_query"
-SUPPORTED_OPTIX_ABIS = (93, 105, 118)
+SUPPORTED_OPTIX_ABIS = (118,)
 
 _SUCCESS = 0
 _OPTIX_UNAVAILABLE = 4

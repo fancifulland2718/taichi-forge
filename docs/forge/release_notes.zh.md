@@ -28,6 +28,10 @@
 
 ## 0.7.0（待发布）
 
+OptiX 随包 adapter 统一为 9.1（ABI 118，需要 NVIDIA R590+ 驱动），移除 8.1/9.0
+及对应回退。发布构建使用 CUDA Toolkit 12.8.1，内嵌 PTX 8.7；消费端仍不需要安装
+CUDA Toolkit。runtime wheel 继续采用与 Python 版本无关的 `py3-none-<platform>` 格式。
+
 本版聚焦编译改进与杂项修复，同时扩大 AOT 部署覆盖，并收拢 JIT/AOT 的共同合同。
 下面按最终行为归纳变化；发布状态以 GitHub Release 与 PyPI 为准。具体后端、provider
 和布局组合的支持范围，以链接中的 API 合同及能力查询为准。

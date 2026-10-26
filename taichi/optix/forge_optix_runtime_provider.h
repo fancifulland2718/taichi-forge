@@ -16,7 +16,7 @@ extern "C" {
 
 #define TI_FORGE_OPTIX_RUNTIME_PROVIDER_QUERY_SYMBOL \
   "taichi_forge_optix_runtime_provider_query"
-#define TI_FORGE_OPTIX_RUNTIME_VERSION_FAMILY "8.1,9.0,9.1"
+#define TI_FORGE_OPTIX_RUNTIME_VERSION_FAMILY "9.1"
 
 // Common sessions retain the existing adapter's vendor-library lease. They do
 // not create CUDA/OptiX contexts, pipelines or scenes. Each domain resource must
