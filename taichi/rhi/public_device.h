@@ -489,9 +489,11 @@ class RHI_DLL_EXPORT CommandList {
   /**
    * Bind a pipeline to the command list.
    * Doing so resets all bound resources.
+   * Lazy backend preparation may throw before the pipeline is bound. Discard
+   * an unfinished command list on failure; no submission is implied.
    * @params[in] pipeline The pipeline to be bound
    */
-  virtual void bind_pipeline(Pipeline *p) noexcept = 0;
+  virtual void bind_pipeline(Pipeline *p) = 0;
 
   /**
    * Bind a ShaderResourceSet to a set index.

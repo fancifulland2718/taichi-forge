@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <thread>
 
 using namespace taichi::lang;
 using namespace taichi::lang::vulkan;
@@ -238,6 +239,117 @@ TEST(VulkanGraphicsPipeline, FailedVariantsAreNotCachedAndRetryUsesDriver) {
   }
   owner.reset();
   EXPECT_EQ(probe.created, probe.destroyed);
+}
+
+TEST(VulkanGraphicsPipeline, RenderPassVariantsShareOnlyCompatibleFormats) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP();
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  GraphicsFailureProbe probe(device);
+  auto owner = failure_probe_pipeline(device);
+  auto &pipeline = *static_cast<VulkanPipeline *>(owner.get());
+  VulkanRenderPassDesc desc;
+  desc.color_attachments = {{VK_FORMAT_R8G8B8A8_UNORM, true}};
+  auto create = [&]() {
+    return pipeline.graphics_pipeline(desc, device.get_renderpass(desc));
+  };
+  auto original = create();
+  desc.color_attachments[0].second = false;
+  desc.clear_depth = true;
+  desc.color_final_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  EXPECT_EQ(create(), original);
+  EXPECT_EQ(probe.graphics_calls, 1);
+  desc.color_attachments[0].first = VK_FORMAT_B8G8R8A8_UNORM;
+  EXPECT_NE(create(), original);
+  desc.depth_attachment = VK_FORMAT_D32_SFLOAT;
+  EXPECT_NE(create(), original);
+  EXPECT_EQ(probe.graphics_calls, 3);
+  // The actual VkPipeline/layout owns its lifetime beyond the template/cache.
+  owner.reset();
+  EXPECT_EQ(probe.created, probe.destroyed);
+  EXPECT_NE(original->pipeline, VK_NULL_HANDLE);
+  original.reset();
+
+  // Format order and count stay significant, even without creating a driver
+  // pipeline whose shader does not have matching outputs.
+  GraphicsPipelineFormatsEqual equal;
+  GraphicsPipelineFormatsHasher hash;
+  desc.color_attachments = {{VK_FORMAT_R8G8B8A8_UNORM, false},
+                            {VK_FORMAT_R32_SFLOAT, false}};
+  auto other = desc;
+  other.color_attachments[1].second = true;
+  EXPECT_TRUE(equal(desc, other));
+  EXPECT_EQ(hash(desc), hash(other));
+  std::swap(other.color_attachments[0], other.color_attachments[1]);
+  EXPECT_FALSE(equal(desc, other));
+  other.color_attachments.pop_back();
+  EXPECT_FALSE(equal(desc, other));
+}
+
+TEST(VulkanGraphicsPipeline, CommandBindingPropagatesFailureAndCanBeRebuilt) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP();
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  const bool supports_dynamic = device.vk_caps().dynamic_rendering;
+  GraphicsFailureProbe probe(device);
+  ImageParams image;
+  image.dimension = ImageDimension::d2D;
+  image.format = BufferFormat::rgba8;
+  image.x = image.y = 8;
+  image.z = 1;
+  image.usage = ImageAllocUsage::Attachment;
+  auto target = device.create_image_unique(image);
+  auto targets = prepare_vulkan_graphics_pass_targets(
+      device, {{*target}}, kDeviceNullAllocation, false, 0);
+  auto *stream = device.get_graphics_stream();
+  for (bool dynamic : {false, true}) {
+    if (dynamic && !supports_dynamic)
+      continue;
+    device.vk_caps().dynamic_rendering = dynamic;
+    auto owner = failure_probe_pipeline(device);
+    auto [commands, result] = stream->new_command_list_unique();
+    ASSERT_EQ(result, RhiResult::success);
+    begin_vulkan_graphics_pass(commands.get(), targets);
+    probe.fail_graphics = true;
+    EXPECT_THROW(commands->bind_pipeline(owner.get()), BackendRuntimeError);
+    commands.reset();  // an unfinished pass must also be safe to discard
+    probe.fail_graphics = false;
+    std::tie(commands, result) = stream->new_command_list_unique();
+    ASSERT_EQ(result, RhiResult::success);
+    commands->image_transition(*target, ImageLayout::undefined,
+                               ImageLayout::color_attachment);
+    begin_vulkan_graphics_pass(commands.get(), targets);
+    EXPECT_NO_THROW(commands->bind_pipeline(owner.get()));
+    commands->end_renderpass();
+    EXPECT_NO_THROW(stream->submit_synced(commands.get()));
+  }
+  device.vk_caps().dynamic_rendering = supports_dynamic;
+}
+
+TEST(VulkanGraphicsPipeline, ConcurrentCompatibleVariantsPublishOnce) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP();
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  auto owner = failure_probe_pipeline(device);
+  auto &pipeline = *static_cast<VulkanPipeline *>(owner.get());
+  std::array<vkapi::IVkPipeline, 4> results;
+  std::vector<std::thread> threads;
+  for (size_t i = 0; i < results.size(); ++i) {
+    threads.emplace_back([&, i] {
+      VulkanRenderPassDesc desc;
+      desc.color_attachments = {{VK_FORMAT_R8G8B8A8_UNORM, bool(i % 2)}};
+      desc.color_final_layout = i % 2 ? VK_IMAGE_LAYOUT_GENERAL
+                                     : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      results[i] = pipeline.graphics_pipeline(desc, device.get_renderpass(desc));
+    });
+  }
+  for (auto &thread : threads)
+    thread.join();
+  for (const auto &result : results)
+    EXPECT_EQ(result, results[0]);
 }
 
 TEST(VulkanGraphicsPipeline, StorageWritesRequireEnabledStageFeatures) {

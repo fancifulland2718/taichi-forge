@@ -390,15 +390,16 @@ vkapi::IVkPipeline VulkanPipeline::graphics_pipeline(
     const VulkanRenderPassDesc &renderpass_desc,
     vkapi::IVkRenderPass renderpass) {
   std::lock_guard<std::mutex> lock(graphics_pipeline_mutex_);
-  if (graphics_pipeline_.find(renderpass) != graphics_pipeline_.end()) {
-    return graphics_pipeline_.at(renderpass);
+  if (auto found = graphics_pipeline_.find(renderpass_desc);
+      found != graphics_pipeline_.end()) {
+    return found->second;
   }
 
   vkapi::IVkPipeline pipeline = vkapi::create_graphics_pipeline(
       device_, &graphics_pipeline_template_->pipeline_info, renderpass,
       pipeline_layout_, cache_);
 
-  graphics_pipeline_[renderpass] = pipeline;
+  graphics_pipeline_[renderpass_desc] = pipeline;
 
   return pipeline;
 }
@@ -406,9 +407,9 @@ vkapi::IVkPipeline VulkanPipeline::graphics_pipeline(
 vkapi::IVkPipeline VulkanPipeline::graphics_pipeline_dynamic(
     const VulkanRenderPassDesc &renderpass_desc) {
   std::lock_guard<std::mutex> lock(graphics_pipeline_mutex_);
-  if (graphics_pipeline_dynamic_.find(renderpass_desc) !=
-      graphics_pipeline_dynamic_.end()) {
-    return graphics_pipeline_dynamic_.at(renderpass_desc);
+  if (auto found = graphics_pipeline_dynamic_.find(renderpass_desc);
+      found != graphics_pipeline_dynamic_.end()) {
+    return found->second;
   }
 
   std::vector<VkFormat> color_attachment_formats;
@@ -1538,7 +1539,7 @@ VulkanCommandList::~VulkanCommandList() {
   }
 }
 
-void VulkanCommandList::bind_pipeline(Pipeline *p) noexcept {
+void VulkanCommandList::bind_pipeline(Pipeline *p) {
   auto pipeline = static_cast<VulkanPipeline *>(p);
 
   if (current_pipeline_ == pipeline)

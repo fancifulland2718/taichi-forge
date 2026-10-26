@@ -252,6 +252,11 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
 
 ### 自动微分与后端正确性
 
+- 同一 Vulkan 管线内，兼容 render pass 复用 load/clear 和最终 layout 不同的
+  pass 变体；仍区分格式顺序、附件数量和深度格式。暖态图形缓存命中只查询一次，
+  不分配归一化键，不改变 pass 命令。
+- 命令绑定允许传播延迟准备 Vulkan 管线时的错误，不再在 `noexcept` 边界终止进程；
+  未提交的录制可丢弃，资源条件恢复后重新建立。
 - 修复 Vulkan 图形管线部分构造失败时的 shader module 泄漏；pipeline layout 和图形
   pipeline 创建失败在无效变体进入缓存前明确报错，后续合法准备可以重试。
   不增加 draw/replay 检查。

@@ -98,6 +98,33 @@ struct RenderPassDescHasher {
   }
 };
 
+// get_renderpass fixes one subpass, one sample and its attachment references.
+// For those passes, formats determine pipeline compatibility; load/clear and
+// initial/final layouts do not. Keep the full key for render-pass objects.
+struct GraphicsPipelineFormatsHasher {
+  std::size_t operator()(const VulkanRenderPassDesc &desc) const {
+    size_t hash = std::hash<uint32_t>()(desc.depth_attachment);
+    rhi_impl::hash_combine(hash, desc.color_attachments.size());
+    for (const auto &attachment : desc.color_attachments)
+      rhi_impl::hash_combine(hash, std::hash<uint32_t>()(attachment.first));
+    return hash;
+  }
+};
+
+struct GraphicsPipelineFormatsEqual {
+  bool operator()(const VulkanRenderPassDesc &left,
+                  const VulkanRenderPassDesc &right) const {
+    if (left.depth_attachment != right.depth_attachment ||
+        left.color_attachments.size() != right.color_attachments.size())
+      return false;
+    for (size_t i = 0; i < left.color_attachments.size(); ++i) {
+      if (left.color_attachments[i].first != right.color_attachments[i].first)
+        return false;
+    }
+    return true;
+  }
+};
+
 struct VulkanFramebufferDesc {
   std::vector<vkapi::IVkImageView> attachments{};
   uint32_t width{0};
@@ -528,7 +555,8 @@ class VulkanPipeline : public Pipeline {
 
   std::unique_ptr<GraphicsPipelineTemplate> graphics_pipeline_template_;
   std::mutex graphics_pipeline_mutex_;
-  std::unordered_map<vkapi::IVkRenderPass, vkapi::IVkPipeline>
+  std::unordered_map<VulkanRenderPassDesc, vkapi::IVkPipeline,
+                     GraphicsPipelineFormatsHasher, GraphicsPipelineFormatsEqual>
       graphics_pipeline_;
 
   // For KHR_dynamic_rendering
@@ -555,7 +583,7 @@ class VulkanCommandList : public CommandList {
                     vkapi::IVkCommandBuffer buffer);
   ~VulkanCommandList() override;
 
-  void bind_pipeline(Pipeline *p) noexcept final;
+  void bind_pipeline(Pipeline *p) final;
   RhiResult bind_shader_resources(ShaderResourceSet *res,
                                   int set_index = 0) noexcept final;
   RhiResult bind_raster_resources(RasterResources *res) noexcept final;

@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// The shim can call the native cold SPIR-V specialization helper.
-inline constexpr int kForgeNativeAbiRevision = 225;
+// Graphics variant compatibility and throwing RHI command binding contract.
+inline constexpr int kForgeNativeAbiRevision = 226;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

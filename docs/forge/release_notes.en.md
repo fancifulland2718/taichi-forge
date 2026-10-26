@@ -337,6 +337,13 @@ See the [release procedure](../design/pypi_release.en.md).
 
 ### Autodiff and backend correctness
 
+- Within each Vulkan pipeline, compatible render passes reuse variants across attachment load/clear
+  and final-layout changes when formats match. Format order, attachment count
+  and depth format remain distinct. Warm graphics cache hits use one lookup,
+  without allocating a normalized key or changing pass commands.
+- Command binding propagates lazy Vulkan pipeline preparation errors instead
+  of terminating at a `noexcept` boundary; unfinished recording can be discarded
+  and rebuilt after the resource condition is resolved.
 - Vulkan graphics construction now releases shader modules after partial failure.
   Pipeline layout and graphics pipeline creation errors are reported before an
   invalid variant can enter the cache; later valid preparation can retry. The

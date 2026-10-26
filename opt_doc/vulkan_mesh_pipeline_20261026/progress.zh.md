@@ -85,7 +85,8 @@ S2 native DLL SHA256：`a1d12e2711e2efbb3d9b85be3fe216539c634ada360ca30195e05db1
 
 原生测试对本地独立设备的 dispatch table 注入失败并透传其余真实 driver 调用。
 每次第 2 个 shader 创建失败，核对成功创建数等于销毁数；继续覆盖 layout 失败、
-模板校验失败、恢复创建、ordinary/dynamic 两种 variant 失败重试与成功命中缓存。
+模板校验失败、恢复创建、variant 失败重试与成功命中缓存。测试包含 ordinary/dynamic
+分支，但仅运行已启用的模式；本机内建设备未启用 dynamic rendering，实际覆盖 ordinary。
 测试结束恢复原 table，生产代码不新增 hook 或计数器。
 
 旧 RHI 对照实际显示连续 3 个 module 创建而销毁数为 0，随后 layout 失败触发 assert
@@ -97,6 +98,39 @@ CPU/CUDA 能力隔离。未以 RSS 波动代替句柄泄漏证明。
 基线与修复对象确认上述结果。日志 `lifecycle-baseline.log`、`lifecycle-final.log`、
 `tests-lifecycle-final.log` 在前述本地忽略目录。
 
-最终 DLL SHA256：`582cdcdfce456e7680a3e7f540c05dd2645ded10efff60b4d4bbbaa817b9dafe`。
+该切片 DLL SHA256：`582cdcdfce456e7680a3e7f540c05dd2645ded10efff60b4d4bbbaa817b9dafe`。
 ABI225、cache/plan/provider 格式保持。没有新增 draw/replay 工作、测试框架运行时依赖
 或跨设备共享 cache。本次不声称已审计所有 Vulkan 对象创建失败路径。
+
+## S3 后续：兼容管线复用与真实录制错误传播
+
+2026-10-27，基于 `3991f6dd2`。普通 render-pass 路径完成以下生产修改：
+
+- 同一管线中，只因 clear/load 或最终 layout 不同的兼容 pass 共用一个 VkPipeline。
+  当前工厂固定单 subpass、sample count=1、附件引用顺序，且没有 input/resolve、
+  dependency 或 multiview；因此用颜色格式顺序/数量和深度格式确定兼容类。
+  实际 render-pass/framebuffer 仍保留完整状态；不同 shader/state 所有者不合并。
+- 专用 hash/equality 直接读取已有描述，暖态命中只查询一次，不分配归一化 vector。
+  并发首次创建使用已有锁，只发布一个结果。扩展工厂其他兼容事实时须同步扩展键。
+- 原先修复的后端错误还会撞到 `CommandList::bind_pipeline()` 的 `noexcept`。
+  现已移除基类及 Vulkan 覆盖的该约束，使真实录制可以捕获失败、丢弃未提交命令并重建。
+  其他后端保留现有实现；提交及退休顺序不变。
+
+最终隔离构建的 9 项原生测试全部通过（无整个用例跳过）：兼容 pass 的 driver 创建
+计数保持 1，改变颜色及深度格式后总计 3；四个并发兼容请求返回同一管线。实际 command
+binding 注入创建失败后成功丢弃、重录制并提交。原有缓存快照、输入限制和资源绑定也通过。
+22 项 Python 用例覆盖特化、shader artifact、mesh/AOT 重建、load/depth 和 prepared
+clear-depth 语义，均通过。CPU/CUDA 仅覆盖图形能力隔离，不能称为新增图形后端支持。
+
+内建设备创建器未启用 dynamic rendering；本轮保留该状态与原完整 cache key，未宣称
+其设备执行已验证。两个 cache 均消除了重复 find/at。测试只针对选定路径，不代表整个
+RHI 的资源不足、设备丢失或所有构造失败都已完成审计。
+
+私有 ABI225→226，cache91 / ExecutionPlan27 / GFX16 不变。最终 runtime DLL 为
+61,502,976 B，比本轮起始基线增加 55,296 B（54 KiB）；SHA256：
+`b369faf3cefb28cd8ea42fa66d5a7c488035f5ae9e5d78f1b811e41a294566ba`。
+日志为 `native226-compatible.log`、`python226.log`。staging 内置 git 字符串不是当前
+源码版本依据，应按上述基线、补丁和哈希识别。未替换正式安装或发布 wheel。
+
+本轮收益是减少兼容管线重复准备和修复失败处理；未添加逐帧搜索，不据此承诺整体帧率
+提升。更大材质/meshlet 变体的实际收益仍需后续具体工作负载验证，CompileIQ 默认关闭。

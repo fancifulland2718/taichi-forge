@@ -57,7 +57,7 @@ SPIRV-Tools 实现；不承诺任意表达式都被完全化简，不替代真�
 验证结果见 [S2 记录](progress.zh.md#s2-显式冷阶段特化)。私有 ABI 224→225；
 cache schema、ExecutionPlan 与 graphics provider 格式均不变。
 
-## S3：缓存与生命周期审查（首轮修复已完成）
+## S3：缓存与生命周期审查（本轮切片已完成）
 
 现有 VulkanPipeline 已有 render-pass/dynamic-rendering 变体缓存和 VkPipelineCache。
 优先检查重复构建、失败清理、驱动身份约束及退休边界，避免再造缓存管理器。
@@ -67,9 +67,18 @@ cache schema、ExecutionPlan 与 graphics provider 格式均不变。
 发布前抛出后端错误，避免依赖 assert 中止或在禁用 assert 后缓存无效句柄。重复失败后
 可正常准备，成功后继续复用已有变体；ABI225 及所有持久格式不变。
 
-后续独立项：dynamic-rendering 缓存键目前还包含 load/clear/final-layout 等 pass 事实。
-可研究只按实际 pipeline 兼容性归一，但须单独覆盖附件格式/深度差异、并发首次创建和
-资源退休，并确认暖态查询不增加分配。本轮未修改该键，也未完成整个 RHI 的失败路径审计。
+后续独立切片已完成：普通 graphics 管线缓存按当前 render-pass 工厂的兼容类归一，忽略
+load/clear/initial/final-layout，保留格式顺序、数量和深度格式。使用专用 hash/equality，
+暖态不复制 vector 或分配键；实际 render-pass/framebuffer 对象仍按完整状态建立。
+两个图形 cache 的命中都改为单次查询。验证附件差异、并发首次创建、资源退休。
+当前工厂固定一个 subpass、sample count=1，无 input/resolve/dependency/multiview，
+按固定顺序绑定附件；若工厂扩展这些事实，需要扩展兼容键。管线对象之间不跨 shader/state 合并。
+资格测试发现内建设备创建器的 dynamic rendering feature 尚未启用；保留该状态与其
+原有 cache key，本轮不将其算作实机覆盖，也不为测试强行启用。
+真实录制已去掉 RHI `bind_pipeline` 基类及 Vulkan 覆盖的 `noexcept`，使准备错误
+可以交给现有调用者处理，未完成的命令列表可丢弃并重新录制；其他后端保留既有实现。
+内部 map/绑定合同调整配套私有 ABI226，持久格式不变。未完成整个 RHI 的失败路径审计。
+最终 9 项原生与 22 项 Python 图形/AOT 回归通过，具体范围见验证记录。
 
 ## S4：代表性渲染验证（基础回归完成，真实变体选优后续推进）
 
@@ -84,5 +93,6 @@ CompileIQ 如需接入，只测量已具备语义与资源合同的可选实现�
 - [VK_EXT_mesh_shader](https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_mesh_shader.html)
 - [Mesh shader properties](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceMeshShaderPropertiesEXT.html)
 - [Vulkan SPIR-V environment](https://docs.vulkan.org/spec/latest/appendices/spirvenv.html)
+- [Render pass compatibility](https://docs.vulkan.org/spec/latest/chapters/renderpass.html#renderpass-compatibility)
 
 引用 latest 页面只用于查询该既有扩展的合同；不据此引入 Vulkan 1.4+ 的功能。
