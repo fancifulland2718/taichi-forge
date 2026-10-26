@@ -415,6 +415,23 @@ def test_tuning_dimension_qualifies_only_exact_shared_memory_workgroup():
     assert "resource-aware coarsening" in range_work.status.reason
 
 
+@pytest.mark.parametrize("backend", ["cuda", "vulkan"])
+def test_multi_range_workgroup_intersects_every_task_contract(backend):
+    raw = _raw_snapshot(backend, task_count=2)
+    raw["tasks"][0]["static_shared_bytes"] = 0
+    # The second task owns shared storage at its exact compiled size.
+    def dimension():
+        return _dimension_by_name(
+            _derive_gpu_tuning_dimensions(_build_resident_gpu_semantics(raw), max_threads=256),
+            _WORKGROUP_DIMENSION,
+        )
+    assert dimension().legal_values == (64,)
+    raw["tasks"][1]["static_shared_bytes"] = 0
+    assert dimension().legal_values == (64, 128, 256)
+    raw["tasks"][1]["range_mapping"] = "one_to_one"
+    assert dimension().legal_values == ()
+
+
 def test_resident_snapshot_rejects_cpu_and_unbound_derivative():
     with pytest.raises(RuntimeError, match="only on CUDA and Vulkan"):
         _build_resident_gpu_semantics(_raw_snapshot("x64"))

@@ -91,6 +91,7 @@ class GraphKernelConfigurationSource:
             _WORKGROUP_DIMENSION,
             _derive_gpu_tuning_dimensions,
             _dimension_by_name,
+            _effective_workgroup_limit,
         )
 
         semantics = _build_resident_gpu_semantics(
@@ -100,7 +101,7 @@ class GraphKernelConfigurationSource:
         )
         dimensions = _derive_gpu_tuning_dimensions(
             semantics,
-            max_threads=self.max_block,
+            max_threads=_effective_workgroup_limit(self.max_block),
             canonical_workgroup_sizes=(32, 64, 128, 256, 512, 1024),
         )
 
@@ -121,7 +122,7 @@ class GraphKernelConfigurationSource:
                 _KernelOptimizationSpec(ir=_IrOptimizationOptions(compile_tier="full"))
             )
         ranges = tuple(task for task in tasks if task.task_type == "range_for")
-        if len(ranges) == 1 and not any(
+        if ranges and not any(
             task.source_block_size_explicit
             or task.static_shared_bytes
             or task.dynamic_shared_bytes
@@ -133,7 +134,7 @@ class GraphKernelConfigurationSource:
                     launch=_LaunchOptions(block_mode="require"),
                 )
                 for block in values(_WORKGROUP_DIMENSION)
-                if block != ranges[0].selected_block_size
+                if any(block != task.selected_block_size for task in ranges)
             )
         if tasks[0].backend == "cuda" and ranges:
             specs.extend(

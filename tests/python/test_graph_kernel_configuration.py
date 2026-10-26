@@ -14,6 +14,52 @@ from tests import test_utils
 PROVIDERS = (GraphRuntimeAssemblyProvider(), GraphKernelConfigurationRecipeProvider())
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False, compile_tier="fast")
+def test_multi_task_workgroup_keeps_order_dense_lowering_and_aot(tmp_path):
+    field = ti.field(ti.i32, (17, 19))
+
+    @ti.kernel
+    def step(out: ti.types.ndarray(ti.i32, 1), offset: ti.i32):
+        out[0] = offset + 7
+        for I in ti.grouped(field):
+            field[I] = I[0] * 19 + I[1] + out[0]
+        for i, j in ti.ndrange(17, 19):
+            out[1 + i * 19 + j] = field[i, j] * 3
+        out[0] += 2
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(step, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1),
+                     ti.graph.Arg(ti.graph.ArgKind.SCALAR, "offset", ti.i32))
+    definition = builder.freeze()
+    catalog = definition.recipe_catalog(providers=PROVIDERS)
+    fragment = choose(definition, catalog, lambda spec: spec.backend.workgroup_size == 64)
+    entry = catalog.compose((fragment.fragment_id,), stage="multi-range")
+    source = definition._runtime_spec._graph_kernel_configuration_sources[0]
+    before = tuple(t.selected_block_size for t in source.facts.snapshot.manifests)
+    with definition.materialization_context(providers=PROVIDERS) as context:
+        selected = context.materialize(entry.recipe)
+        tasks = selected.executor.task_manifest()
+        ranges = tuple(t for t in tasks if t.task_type == "range_for")
+        assert len(ranges) == 2 and all(t.selected_block_size == 64 for t in ranges)
+        out = ti.ndarray(ti.i32, 324)
+        selected.executor.run(dict(out=out, offset=5))
+        expected = np.concatenate(([14], (np.arange(323) + 12) * 3)).astype(np.int32)
+        np.testing.assert_array_equal(out.to_numpy(), expected)
+        module = ti.aot.Module()
+        module.add_execution_plan("step", selected.executor, snapshot_state=True)
+        archive = tmp_path / "multi.tcm"
+        module.archive(str(archive))
+        with ti.aot.borrow_runtime() as runtime, runtime.load_module(archive) as loaded:
+            target = runtime.ndarray("i32", (324,))
+            try:
+                with loaded.prepare_execution("step", dict(out=target, offset=5)) as call:
+                    call()
+                np.testing.assert_array_equal(np.frombuffer(target.read(), np.int32), expected)
+            finally:
+                target.close()
+        assert tuple(t.selected_block_size for t in source.facts.snapshot.manifests) == before
+
+
 def choose(definition, catalog, predicate):
     source = definition._runtime_spec._graph_kernel_configuration_sources[0]
     choice = next(

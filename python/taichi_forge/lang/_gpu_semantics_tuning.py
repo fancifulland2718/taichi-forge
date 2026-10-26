@@ -1,5 +1,6 @@
 """Derive bounded tuning legality from typed GPU execution semantics."""
 
+from dataclasses import replace
 import hashlib
 import json
 
@@ -36,6 +37,20 @@ _RANGE_WORK_PER_THREAD_DIMENSION = "range_work_per_thread_target"
 _RESIDENCY_DIMENSION = "cuda_grid_residency_waves"
 
 
+def _effective_workgroup_limit(configured_limit):
+    """Resolve the current device limit only during explicit candidate discovery."""
+    from taichi_forge._lib import core
+    from taichi_forge.lang import impl
+
+    limit = int(configured_limit) or 1024
+    if impl.current_cfg().arch == core.vulkan:
+        raw = impl.get_runtime().prog._vulkan_runtime_diagnostics()
+        device = json.loads(raw["device_json"])
+        limit = min(limit, int(device["max_workgroup_invocations"]),
+                    int(device["max_workgroup_size_x"]))
+    return limit
+
+
 def _resolved_proven_fact(resolved, reason):
     for fact in (
         resolved.actual,
@@ -63,6 +78,10 @@ def _derive_workgroup_resource_envelope(snapshot, max_threads):
     launch_by_id = {launch.launch_id: launch for launch in snapshot.launches}
     artifact = artifact_by_id[dispatch.artifact_id]
     launch = launch_by_id[dispatch.launch_id]
+    return _task_workgroup_resource_envelope(snapshot, max_threads, dispatch, artifact, launch)
+
+
+def _task_workgroup_resource_envelope(snapshot, max_threads, dispatch, artifact, launch):
     extension = artifact.extension
     registers = getattr(extension, "registers_per_thread", None)
     local_memory = getattr(extension, "local_memory_bytes_per_thread", None)
@@ -213,22 +232,28 @@ def _workgroup_dimension(
     max_threads,
     canonical_workgroup_sizes,
     require_safe_serial_setup,
+    *,
+    _range_dispatch=None,
+    _resource_index=None,
 ):
-    ranges = tuple(
+    ranges = (_range_dispatch,) if _range_dispatch is not None else tuple(
         dispatch
         for dispatch in snapshot.dispatches
         if dispatch.task_kind == "range_for"
     )
-    safe_shape = len(ranges) == 1 and (
+    safe_shape = bool(ranges) and (
         not require_safe_serial_setup
         or all(
             dispatch.task_kind in ("serial", "range_for")
             for dispatch in snapshot.dispatches
         )
     )
-    artifact_by_id = {
-        artifact.artifact_id: artifact for artifact in snapshot.artifacts
-    }
+    if _resource_index is None:
+        _resource_index = (
+            {artifact.artifact_id: artifact for artifact in snapshot.artifacts},
+            {launch.launch_id: launch for launch in snapshot.launches},
+        )
+    artifact_by_id, launch_by_id = _resource_index
     range_artifact = artifact_by_id[ranges[0].artifact_id] if ranges else None
     controller, binding_time = (
         _workgroup_controller(range_artifact)
@@ -260,8 +285,39 @@ def _workgroup_dimension(
         return _blocked_dimension(
             **base,
             status=_status_unsupported(
-                "requires one range task plus safe serial setup"
+                "requires range tasks plus safe serial setup"
             ),
+        )
+    if len(ranges) > 1:
+        # A kernel-wide request must be legal for every physical range. Reuse
+        # each artifact's existing resource proof rather than treating the
+        # first task's mapping or shared-memory usage as representative.
+        dimensions = tuple(
+            _workgroup_dimension(
+                snapshot,
+                max_threads,
+                canonical_workgroup_sizes,
+                False,  # The full task sequence was checked above.
+                _range_dispatch=dispatch,
+                _resource_index=_resource_index,
+            )
+            for dispatch in ranges
+        )
+        for dimension in dimensions:
+            if dimension.status.availability != _GpuAvailability.PROVEN:
+                return dimension
+        legal = tuple(
+            value for value in dimensions[0].legal_values
+            if all(value in dimension.legal_values for dimension in dimensions[1:])
+        )
+        if not legal:
+            return _blocked_dimension(
+                **base,
+                status=_status_unsupported("range tasks have no common legal workgroup size"),
+            )
+        return replace(
+            dimensions[0], legal_values=legal,
+            status=_status_proven("intersection_of_resident_range_workgroup_contracts"),
         )
     range_mapping = ranges[0].range_mapping
     if range_mapping.availability != _GpuAvailability.PROVEN:
@@ -276,7 +332,10 @@ def _workgroup_dimension(
                 "workgroup tuning requires proven grid-stride coverage"
             ),
         )
-    envelope = _derive_workgroup_resource_envelope(snapshot, max_threads)
+    envelope = _task_workgroup_resource_envelope(
+        snapshot, max_threads, ranges[0], range_artifact,
+        launch_by_id[ranges[0].launch_id],
+    )
     static_bytes = envelope.static_workgroup_memory_bytes
     dynamic_bytes = envelope.dynamic_workgroup_memory_bytes
     if (
