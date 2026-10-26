@@ -942,12 +942,10 @@ void register_vulkan_ray_operations(NativeOperationRegistry &registry) {
         operation_json::fields(p, {"vertex_count", "triangle_count", "opaque"});
         const auto vertices = count(p["vertex_count"]);
         const auto triangles = count(p["triangle_count"]);
-        const auto opaque =
-            p.obj.inner.count("opaque")
-                ? std::optional<bool>(
-                      operation_json::optional_bool(p, "opaque"))
-                : std::nullopt;
-        return [vertices, triangles, opaque](const NativeOperationBindings &b) {
+        const bool has_opaque = p.obj.inner.count("opaque") != 0;
+        const bool opaque = operation_json::optional_bool(p, "opaque");
+        return [vertices, triangles, has_opaque,
+                opaque](const NativeOperationBindings &b) {
           BlasDescription d;
           d.vertex_count = vertices;
           d.triangle_count = triangles;
@@ -955,7 +953,7 @@ void register_vulkan_ray_operations(NativeOperationRegistry &registry) {
           d.indices = b.at("indices").array();
           if (b.count("opacity_micromap"))
             d.micromap = b.at("opacity_micromap").resource<MicromapAccess>();
-          d.opaque = opaque.value_or(!d.micromap);
+          d.opaque = has_opaque ? opaque : !d.micromap;
           return d;
         };
       },
