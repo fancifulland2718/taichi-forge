@@ -359,8 +359,9 @@ class PreparedMicromap final
   }
   std::optional<NativePreparationDependencies> preparation_dependencies()
       const override {
-    return ready_ ? std::optional<NativePreparationDependencies>{{}}
-                  : std::nullopt;
+    if (!ready_)
+      return std::nullopt;
+    return NativePreparationDependencies{};
   }
   size_t triangle_count() const override {
     return triangle_count_;
