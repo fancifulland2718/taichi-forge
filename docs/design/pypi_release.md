@@ -49,6 +49,7 @@ URL 使用公开 HTTPS，摘要为 SHA256。源码构建脚本：[Windows](../..
 
 1. 更新 `version.txt`、CMake 版本、native header、runtime 依赖和两份
    `docs/forge/release_notes.*.md`，提交修改。ABI/格式编号独立维护。
+   两个原入口在构建或复用 wheel 前运行公开 ABI/格式文档检查；不匹配时停止，不发布。
    两包可以独立发布；复用兼容 runtime 时显式设置 `runtime_version`，不重命名旧 wheel。
 2. 用原 runtime workflow 构建、验证并发布 runtime：`platform=all`、`publish=true`、
    `target=pypi`。`publish=false` 仅构建验证；`platform=windows` 用于单平台诊断，不能发布。

@@ -252,6 +252,11 @@ def test_existing_publishers_keep_oidc_and_new_workflow_only_publishes_github():
     assert "--require-published" in github_text
     for name, job, project in (("publish_pypi.yml", "publish_shim", "shim"), ("publish_runtime_pypi.yml", "publish_runtime", "runtime")):
         workflow = yaml.safe_load((ROOT / ".github/workflows" / name).read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["resolve_version"]["steps"]
+        gate = next(i for i, step in enumerate(steps)
+                    if step.get("run") == "python -m pytest -q tests/release/test_documented_contracts.py")
+        assert "if" not in steps[gate]
+        assert gate < next(i for i, step in enumerate(steps) if step.get("id") == "candidate")
         publisher = workflow["jobs"][job]
         assert publisher["permissions"]["id-token"] == "write"
         uploads = [step for step in publisher["steps"] if "gh-action-pypi-publish" in step.get("uses", "")]
