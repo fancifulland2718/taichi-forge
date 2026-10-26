@@ -591,6 +591,20 @@ remain `None`. `pipeline.shader_artifacts()` returns detached source facts.
 Identical code and pipeline state retain the same execution identity even when
 build labels differ; neither file paths nor allocations identify a program.
 
+`graphics.VulkanMeshPipeline(mesh_spirv, fragment_spirv, task_spirv=None, ...)`
+uses optional `VK_EXT_mesh_shader` support, independently of Vulkan 1.3 core
+support. Query `graphics.mesh_shader_capabilities()` before choosing this path.
+`max_mesh_group_size_x/y/z` and `max_task_group_size_x/y/z` limit threads per
+workgroup; `max_*_group_count_x/y/z` limit dispatched groups (`MeshDraw`). They
+are different quantities. Pipeline creation checks known local sizes, invocation
+products, and declared mesh output vertex/primitive counts against the device,
+using the same path for JIT and AOT reconstruction. WorkgroupSize constants take
+precedence over LocalSize/LocalSizeId. Literal 32-bit constants and specialization
+defaults are checked; unresolved constant expressions, shared/payload/output
+memory totals, and dynamic shader accesses still require shader validation.
+This admission does not rewrite shaders or add draw/replay checks. It requires
+no Vulkan core functionality newer than 1.3; mesh/task features remain optional.
+
 For explicit local compilation, a source checkout provides
 `scripts/compile_hardware_shader.py`. For example:
 

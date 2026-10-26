@@ -1653,12 +1653,16 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
             mesh_properties.maxTaskWorkGroupTotalCount;
         mesh_caps.max_task_work_group_invocations =
             mesh_properties.maxTaskWorkGroupInvocations;
+        std::copy_n(mesh_properties.maxTaskWorkGroupSize, 3,
+                    mesh_caps.max_task_work_group_size.begin());
         std::copy_n(mesh_properties.maxMeshWorkGroupCount, 3,
                     mesh_caps.max_mesh_work_group_count.begin());
         mesh_caps.max_mesh_work_group_total_count =
             mesh_properties.maxMeshWorkGroupTotalCount;
         mesh_caps.max_mesh_work_group_invocations =
             mesh_properties.maxMeshWorkGroupInvocations;
+        std::copy_n(mesh_properties.maxMeshWorkGroupSize, 3,
+                    mesh_caps.max_mesh_work_group_size.begin());
         mesh_caps.max_mesh_output_vertices =
             mesh_properties.maxMeshOutputVertices;
         mesh_caps.max_mesh_output_primitives =

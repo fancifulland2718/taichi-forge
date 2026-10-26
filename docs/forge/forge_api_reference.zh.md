@@ -470,6 +470,16 @@ build=graphics.ShaderBuildInfo(...))`。光栅接口要求匹配 vertex/fragment
 `pipeline.shader_artifacts()` 返回独立的来源事实。相同字节和 pipeline 状态不会因来源标签、
 文件路径或资源分配变化而改变执行身份。
 
+`graphics.VulkanMeshPipeline(mesh_spirv, fragment_spirv, task_spirv=None, ...)`
+使用可选的 `VK_EXT_mesh_shader`，Vulkan 1.3 core 本身不保证此能力。选择路线前查询
+`graphics.mesh_shader_capabilities()`。`max_mesh_group_size_x/y/z` 和
+`max_task_group_size_x/y/z` 是每组线程尺寸；`max_*_group_count_x/y/z` 是绘制的组数
+（`MeshDraw`），两者不同。管线创建时对已知的线程尺寸、线程总数、声明的 mesh 顶点/图元
+数量进行设备限制检查，JIT 和 AOT 重建共用此路径。WorkgroupSize 常量优先于
+LocalSize/LocalSizeId；检查覆盖可直接确定的 32 位常量和特化默认值。无法求值的常量
+表达式、共享/payload/输出内存总量及动态访问仍需 shader 验证。本次准入不改写 shader，
+不增加 draw/replay 检查，不要求 Vulkan 1.3 之后的 core 功能；mesh/task feature 仍须单独满足。
+
 源码仓库提供可选工具 `scripts/compile_hardware_shader.py`，例如：
 
 ```text

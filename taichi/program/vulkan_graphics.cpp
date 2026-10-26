@@ -488,11 +488,17 @@ Program::vulkan_mesh_shader_capabilities() const {
       {"max_task_group_count_z", 0},
       {"max_task_group_total_count", 0},
       {"max_task_group_invocations", 0},
+      {"max_task_group_size_x", 0},
+      {"max_task_group_size_y", 0},
+      {"max_task_group_size_z", 0},
       {"max_mesh_group_count_x", 0},
       {"max_mesh_group_count_y", 0},
       {"max_mesh_group_count_z", 0},
       {"max_mesh_group_total_count", 0},
       {"max_mesh_group_invocations", 0},
+      {"max_mesh_group_size_x", 0},
+      {"max_mesh_group_size_y", 0},
+      {"max_mesh_group_size_z", 0},
       {"max_mesh_output_vertices", 0},
       {"max_mesh_output_primitives", 0},
   };
@@ -514,6 +520,9 @@ Program::vulkan_mesh_shader_capabilities() const {
       caps.max_task_work_group_total_count;
   result["max_task_group_invocations"] =
       caps.max_task_work_group_invocations;
+  result["max_task_group_size_x"] = caps.max_task_work_group_size[0];
+  result["max_task_group_size_y"] = caps.max_task_work_group_size[1];
+  result["max_task_group_size_z"] = caps.max_task_work_group_size[2];
   result["max_mesh_group_count_x"] = caps.max_mesh_work_group_count[0];
   result["max_mesh_group_count_y"] = caps.max_mesh_work_group_count[1];
   result["max_mesh_group_count_z"] = caps.max_mesh_work_group_count[2];
@@ -521,6 +530,9 @@ Program::vulkan_mesh_shader_capabilities() const {
       caps.max_mesh_work_group_total_count;
   result["max_mesh_group_invocations"] =
       caps.max_mesh_work_group_invocations;
+  result["max_mesh_group_size_x"] = caps.max_mesh_work_group_size[0];
+  result["max_mesh_group_size_y"] = caps.max_mesh_work_group_size[1];
+  result["max_mesh_group_size_z"] = caps.max_mesh_work_group_size[2];
   result["max_mesh_output_vertices"] = caps.max_mesh_output_vertices;
   result["max_mesh_output_primitives"] = caps.max_mesh_output_primitives;
   return result;
@@ -1464,11 +1476,17 @@ Program::vulkan_mesh_shader_capabilities() const {
           {"max_task_group_count_z", 0},
           {"max_task_group_total_count", 0},
           {"max_task_group_invocations", 0},
+          {"max_task_group_size_x", 0},
+          {"max_task_group_size_y", 0},
+          {"max_task_group_size_z", 0},
           {"max_mesh_group_count_x", 0},
           {"max_mesh_group_count_y", 0},
           {"max_mesh_group_count_z", 0},
           {"max_mesh_group_total_count", 0},
           {"max_mesh_group_invocations", 0},
+          {"max_mesh_group_size_x", 0},
+          {"max_mesh_group_size_y", 0},
+          {"max_mesh_group_size_z", 0},
           {"max_mesh_output_vertices", 0},
           {"max_mesh_output_primitives", 0}};
 }

@@ -252,6 +252,9 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
 
 ### 自动微分与后端正确性
 
+- Vulkan mesh/task 管线创建按设备限制校验已知的局部线程尺寸和声明的 mesh 输出数量，
+  JIT/AOT 共用；能力查询补齐每轴局部尺寸。路径使用 Vulkan 1.3 及以前的 core 功能
+  与可选的 `VK_EXT_mesh_shader`。校验边界见 [API 参考](forge_api_reference.zh.md)。
 - 移除 Vulkan sparse SNode 通用实验性启动警告；保留实际能力、容量及独立 Hash 诊断。
 - Vulkan C API 图像导入显式转换传入的 `VkImageLayout`，不再强转为数值含义不同的
   内部枚举。首次 transition 保留外部真实布局；内部无法精确表示的布局在分配 view

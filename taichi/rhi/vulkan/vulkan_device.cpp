@@ -25,6 +25,7 @@
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_timeline.h"
 #include "taichi/rhi/vulkan/vulkan_pipeline_diagnostics.h"
+#include "taichi/rhi/vulkan/vulkan_mesh_shader.h"
 #include "taichi/rhi/vulkan/vulkan_present_policy.h"
 #include "taichi/system/profiler.h"
 #include "taichi/rhi/common/spirv_capability.h"
@@ -453,6 +454,9 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
     RHI_THROW_UNLESS(entry && static_cast<VkShaderStageFlagBits>(entry->shader_stage) == code_view.stage,
                      std::invalid_argument("SPIR-V entry point is missing or has the wrong shader stage"));
     SpvReflectResult result;
+
+    validate_mesh_shader_limits(code_view.data, code_view.size, entry->id,
+                                code_view.stage, ti_device_.vk_caps());
 
     if (bind_point_ == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR ||
         bind_point_ == VK_PIPELINE_BIND_POINT_GRAPHICS) {

@@ -14,6 +14,7 @@ target_sources(${VULKAN_RHI}
     vulkan_external_buffer.cpp
     vulkan_loader.cpp
     vulkan_memory_allocator.cpp
+    vulkan_mesh_shader.cpp
     vulkan_pipeline_diagnostics.cpp
     vulkan_ray_pipeline.cpp
     ${TI_SPIRV_REFLECT_SOURCE}

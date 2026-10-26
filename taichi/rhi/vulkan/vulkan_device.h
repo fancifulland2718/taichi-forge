@@ -1032,9 +1032,11 @@ struct VulkanCapabilities {
   std::array<std::uint32_t, 3> max_task_work_group_count{0, 0, 0};
   std::uint32_t max_task_work_group_total_count{0};
   std::uint32_t max_task_work_group_invocations{0};
+  std::array<std::uint32_t, 3> max_task_work_group_size{0, 0, 0};
   std::array<std::uint32_t, 3> max_mesh_work_group_count{0, 0, 0};
   std::uint32_t max_mesh_work_group_total_count{0};
   std::uint32_t max_mesh_work_group_invocations{0};
+  std::array<std::uint32_t, 3> max_mesh_work_group_size{0, 0, 0};
   std::uint32_t max_mesh_output_vertices{0};
   std::uint32_t max_mesh_output_primitives{0};
   std::uint32_t subgroup_size{0};

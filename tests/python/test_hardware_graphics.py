@@ -555,11 +555,17 @@ def test_vulkan_mesh_shader_feature_report_keeps_task_and_limits_independent():
         "max_task_group_count_z",
         "max_task_group_total_count",
         "max_task_group_invocations",
+        "max_task_group_size_x",
+        "max_task_group_size_y",
+        "max_task_group_size_z",
         "max_mesh_group_count_x",
         "max_mesh_group_count_y",
         "max_mesh_group_count_z",
         "max_mesh_group_total_count",
         "max_mesh_group_invocations",
+        "max_mesh_group_size_x",
+        "max_mesh_group_size_y",
+        "max_mesh_group_size_z",
         "max_mesh_output_vertices",
         "max_mesh_output_primitives",
     }
@@ -568,11 +574,13 @@ def test_vulkan_mesh_shader_feature_report_keeps_task_and_limits_independent():
         assert capabilities["max_mesh_group_count_y"] > 0
         assert capabilities["max_mesh_group_count_z"] > 0
         assert capabilities["max_mesh_group_total_count"] > 0
+        assert all(capabilities[f"max_mesh_group_size_{axis}"] > 0 for axis in "xyz")
         assert capabilities["max_mesh_output_vertices"] >= 3
         assert capabilities["max_mesh_output_primitives"] >= 1
     if capabilities["task_shader"]:
         assert capabilities["mesh_shader"]
         assert capabilities["max_task_group_total_count"] > 0
+        assert all(capabilities[f"max_task_group_size_{axis}"] > 0 for axis in "xyz")
 
     operation = next(
         item
@@ -630,6 +638,51 @@ def test_vulkan_mesh_shader_executes_directly_and_through_graph():
     operation = telemetry.operations["raster.mesh_tasks.vulkan"]
     assert operation.executed >= 2
     assert operation.executed_backend_commands >= 2
+
+
+@pytest.mark.parametrize("stage", ("mesh", "task"))
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_mesh_local_size_is_rejected_before_pipeline_registration(stage):
+    if not ti.hardware.graphics.is_mesh_shader_available(task_shader=stage == "task"):
+        pytest.skip("Required mesh/task feature is unavailable")
+    shader_dir = Path(__file__).parent / "assets"
+    code = (shader_dir / f"hardware_graphics_mesh.{stage}.spv").read_bytes()
+    words = list(struct.unpack(f"<{len(code) // 4}I", code))
+    limit = ti.hardware.graphics.mesh_shader_capabilities()[f"max_{stage}_group_size_x"]
+    assert 0 < limit < 0xFFFFFFFF
+    # Override only WorkgroupSize.x with a new constant. Keep LocalSize=1;
+    # this detects accidentally validating the shadowed execution mode.
+    offset, unsigned_type, builtin = 5, None, None
+    while offset < len(words):
+        count, op = words[offset] >> 16, words[offset] & 0xFFFF
+        if op == 21 and words[offset + 2 : offset + 4] == [32, 0]:  # OpTypeInt
+            unsigned_type = words[offset + 1]
+        if op == 71 and words[offset + 2 : offset + 4] == [11, 25]:  # BuiltIn WorkgroupSize
+            builtin = words[offset + 1]
+        if op == 44 and words[offset + 2] == builtin:  # OpConstantComposite
+            assert unsigned_type is not None
+            new_id = words[3]
+            words[3] += 1
+            words[offset + 3] = new_id
+            words[offset:offset] = [(4 << 16) | 43, unsigned_type, new_id, limit + 1]
+            break
+        offset += count
+    else:
+        pytest.fail("Fixture has no WorkgroupSize composite")
+    invalid = struct.pack(f"<{len(words)}I", *words)
+    program = impl.get_runtime().prog
+    before = program._debug_vulkan_graphics_pipeline_count()
+    for _ in range(3):
+        with pytest.raises((RuntimeError, ValueError), match=f"{stage.capitalize()} shader local_size_x"):
+            ti.hardware.graphics.VulkanMeshPipeline(
+                invalid if stage == "mesh" else (shader_dir / "hardware_graphics_mesh.mesh.spv").read_bytes(),
+                _spirv_header("2_triangle.frag.spv.h"),
+                task_spirv=invalid if stage == "task" else None,
+            )
+    assert program._debug_vulkan_graphics_pipeline_count() == before
+    # Failed preparation must not poison the next valid pipeline.
+    with _mesh_triangle_pipeline(task_shader=stage == "task"):
+        pass
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

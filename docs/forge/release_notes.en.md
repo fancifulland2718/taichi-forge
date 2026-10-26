@@ -337,6 +337,11 @@ See the [release procedure](../design/pypi_release.en.md).
 
 ### Autodiff and backend correctness
 
+- Vulkan mesh/task pipeline creation checks known local workgroup sizes and
+  declared mesh output counts against device limits, shared by JIT and AOT.
+  Capability queries now include per-axis local sizes. The path uses Vulkan
+  1.3 or earlier core functionality plus optional `VK_EXT_mesh_shader`.
+  See the [API reference](forge_api_reference.en.md) for validation boundaries.
 - The generic experimental Vulkan sparse SNode startup warning is removed. Actual capability,
   capacity and independent Hash diagnostics remain.
 - Vulkan C API image import translates the supplied `VkImageLayout` explicitly

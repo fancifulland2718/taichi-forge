@@ -4,6 +4,8 @@
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
+#include "taichi/rhi/vulkan/vulkan_mesh_shader.h"
+#include "external/SPIRV-Headers/include/spirv/unified1/spirv.hpp"
 #include "taichi/program/program.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/texture.h"
@@ -158,6 +160,84 @@ TEST(VulkanGraphicsPipeline, MeshAdmissionUsesIndependentOverflowSafeLimits) {
   // host arithmetic check only; no oversized dispatch or allocation occurs.
   EXPECT_FALSE(caps.mesh_group_count_valid(1u << 22, 1u << 22, 1u << 20, false));
   EXPECT_TRUE(caps.mesh_group_count_valid(UINT32_MAX, 1, 1, false));
+}
+
+TEST(VulkanGraphicsPipeline, MeshShaderDeclarationsRespectDeviceLimits) {
+  VulkanCapabilities caps;
+  caps.mesh_shader = caps.task_shader = true;
+  caps.max_mesh_work_group_size = {8, 4, 2};
+  caps.max_mesh_work_group_invocations = 16;
+  caps.max_task_work_group_size = {2, 2, 1};
+  caps.max_task_work_group_invocations = 2;
+  caps.max_mesh_output_vertices = 3;
+  caps.max_mesh_output_primitives = 1;
+  // Declaration-only fixtures exercise cold admission, not driver validation.
+  const auto declarations = [](std::array<uint32_t, 3> size) {
+    return std::vector<uint32_t>{spv::MagicNumber, 0x00010600, 0, 10, 0,
+        (6u << 16) | spv::OpExecutionMode, 1, spv::ExecutionModeLocalSize,
+        size[0], size[1], size[2],
+        (4u << 16) | spv::OpExecutionMode, 1, spv::ExecutionModeOutputVertices, 3,
+        (4u << 16) | spv::OpExecutionMode, 1, spv::ExecutionModeOutputPrimitivesNV, 1};
+  };
+  const auto validate = [&](const std::vector<uint32_t> &code, bool task = false) {
+    validate_mesh_shader_limits(code.data(), code.size() * 4, 1,
+        task ? VK_SHADER_STAGE_TASK_BIT_EXT : VK_SHADER_STAGE_MESH_BIT_EXT, caps);
+  };
+  EXPECT_NO_THROW(validate(declarations({8, 2, 1})));
+  EXPECT_THROW(validate(declarations({9, 1, 1})), std::invalid_argument);
+  EXPECT_THROW(validate(declarations({1, 5, 1})), std::invalid_argument);
+  EXPECT_THROW(validate(declarations({1, 1, 3})), std::invalid_argument);
+  EXPECT_THROW(validate(declarations({8, 4, 1})), std::invalid_argument);
+  EXPECT_THROW(validate(declarations({0, 1, 1})), std::invalid_argument);
+  EXPECT_NO_THROW(validate(declarations({2, 1, 1}), true));
+  EXPECT_THROW(validate(declarations({2, 2, 1}), true), std::invalid_argument);
+  auto code = declarations({1, 1, 1});
+  caps.max_mesh_output_vertices = 2;
+  EXPECT_THROW(validate(code), std::invalid_argument);
+  EXPECT_NO_THROW(validate(code, true));  // mesh output limits do not constrain task
+  caps.max_mesh_output_vertices = 3;
+  caps.max_mesh_output_primitives = 0;
+  EXPECT_THROW(validate(code), std::invalid_argument);
+  caps.max_mesh_output_primitives = 1;
+  code.insert(code.end(), {(6u << 16) | spv::OpExecutionMode, 2,
+      spv::ExecutionModeLocalSize, UINT32_MAX, UINT32_MAX, UINT32_MAX});
+  EXPECT_NO_THROW(validate(code));  // only the selected entry point
+  caps.max_mesh_work_group_size = {UINT32_MAX, UINT32_MAX, UINT32_MAX};
+  caps.max_mesh_work_group_invocations = UINT32_MAX;
+  EXPECT_THROW(validate(declarations({1u << 22, 1u << 22, 1u << 20})), std::invalid_argument);
+  EXPECT_NO_THROW(validate(declarations({UINT32_MAX, 1, 1})));
+  code.push_back(0);  // malformed instruction cannot make the scan loop forever
+  EXPECT_THROW(validate(code), std::invalid_argument);
+}
+
+TEST(VulkanGraphicsPipeline, MeshWorkgroupDefaultsAndBuiltinPrecedence) {
+  VulkanCapabilities caps;
+  caps.mesh_shader = true;
+  caps.max_mesh_work_group_size = {4, 4, 4};
+  caps.max_mesh_work_group_invocations = 4;
+  const auto validate = [&](const std::vector<uint32_t> &code) {
+    validate_mesh_shader_limits(code.data(), code.size() * 4, 1,
+        VK_SHADER_STAGE_MESH_BIT_EXT, caps);
+  };
+  std::vector<uint32_t> code{
+      spv::MagicNumber, 0x00010600, 0, 10, 0,
+      (6u << 16) | spv::OpExecutionModeId, 1, spv::ExecutionModeLocalSizeId, 4, 5, 5,
+      (4u << 16) | spv::OpTypeInt, 2, 32, 0,
+      (4u << 16) | spv::OpSpecConstant, 2, 4, 4,
+      (4u << 16) | spv::OpConstant, 2, 5, 1};
+  EXPECT_NO_THROW(validate(code));
+  caps.max_mesh_work_group_invocations = 3;
+  EXPECT_THROW(validate(code), std::invalid_argument);
+  // Builtin size (1,1,1) shadows the otherwise oversized LocalSizeId (4,1,1).
+  code.insert(code.end(), {
+      (4u << 16) | spv::OpDecorate, 6, spv::DecorationBuiltIn, spv::BuiltInWorkgroupSize,
+      (6u << 16) | spv::OpSpecConstantComposite, 3, 6, 5, 5, 5});
+  EXPECT_NO_THROW(validate(code));
+  // Unknown constant expressions must not fall back to the shadowed mode.
+  code.back() = 9;
+  EXPECT_NO_THROW(validate(code));
+  caps.mesh_shader = false;
+  EXPECT_THROW(validate(code), std::invalid_argument);
 }
 
 TEST(VulkanGraphicsPipeline, StorageCapacityUsesMergedLayoutAndActualFlags) {
