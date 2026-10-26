@@ -190,13 +190,15 @@ def test_publisher_provenance_requires_original_workflow_and_success(monkeypatch
 def test_github_draft_resume_and_finalization_never_replace_assets(bundle, monkeypatch):
     output, revision = bundle
     body = (output / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-    release = {"id": 12, "body": body, "name": "Taichi Forge 0.7.0 / 发布说明", "prerelease": False, "draft": True}
+    release = {"id": 12, "tag_name": "forge-v0.7.0", "body": body, "name": "Taichi Forge 0.7.0 / 发布说明", "prerelease": False, "draft": True}
     stored = {}
     calls = []
     def fake_gh(*args):
         calls.append(args)
         if args[0] == "api" and "/commits/" in args[1]:
             return revision
+        if args[0] == "api" and "/releases?" in args[1]:
+            return json.dumps([[], [release]])
         if args[0] == "api" and "/assets?" in args[1]:
             return json.dumps([list(stored.values())])
         if args[:2] == ("release", "upload"):
@@ -206,7 +208,6 @@ def test_github_draft_resume_and_finalization_never_replace_assets(bundle, monke
             release["draft"] = False
         return ""
     monkeypatch.setattr(github, "gh", fake_gh)
-    monkeypatch.setattr(github.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0, json.dumps(release), ""))
     github.synchronize(output, "owner/repo", revision, "0.7.0", publish=False)
     first_uploads = len([c for c in calls if c[:2] == ("release", "upload")])
     assert first_uploads == len(list(output.iterdir()))

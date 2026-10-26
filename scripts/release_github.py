@@ -141,24 +141,35 @@ def resolve_sources(directory: Path, repository: str, shim_run_id: str, version:
     raise ValueError("No retained runtime publication record matches the PyPI wheels; restore the original publication artifact")
 
 
+def find_release(repository: str, tag: str) -> dict | None:
+    # The by-tag endpoint only returns published releases. The authenticated
+    # list also includes drafts, which must remain discoverable during staging
+    # and retries after an interrupted upload.
+    pages = json.loads(gh("api", f"repos/{repository}/releases?per_page=100", "--paginate", "--slurp"))
+    matches = [release for page in pages for release in page if release["tag_name"] == tag]
+    if len(matches) > 1:
+        raise ValueError(f"Multiple releases identify tag {tag}; resolve the duplicate drafts")
+    return matches[0] if matches else None
+
+
 def synchronize(directory: Path, repository: str, commit: str, version: str, *, publish: bool) -> None:
     verify_bundle(directory, commit, version)
     tag = f"forge-v{version}"
     remote_commit = gh("api", f"repos/{repository}/commits/{tag}", "--jq", ".sha").strip()
     if remote_commit != commit:
         raise ValueError("Remote tag does not identify the release source")
-    result = subprocess.run(["gh", "api", f"repos/{repository}/releases/tags/{tag}"], capture_output=True, text=True, encoding="utf-8")
-    if result.returncode:
-        if "HTTP 404" not in result.stderr or publish:
-            raise RuntimeError(result.stderr)
+    release = find_release(repository, tag)
+    if release is None:
+        if publish:
+            raise ValueError("Stage the release and its assets before publishing")
         command = ["release", "create", tag, "--repo", repository, "--verify-tag", "--draft",
                    "--title", f"Taichi Forge {version} / 发布说明", "--notes-file", str(directory / "RELEASE_NOTES.md")]
         if Version(version).is_prerelease:
             command.append("--prerelease")
         gh(*command)
-        release = json.loads(gh("api", f"repos/{repository}/releases/tags/{tag}"))
-    else:
-        release = json.loads(result.stdout)
+        release = find_release(repository, tag)
+        if release is None:
+            raise RuntimeError(f"Created release draft is not visible for tag {tag}")
     expected_body = (directory / "RELEASE_NOTES.md").read_text(encoding="utf-8").strip()
     if (release["body"].strip() != expected_body
             or release["name"] != f"Taichi Forge {version} / 发布说明"
