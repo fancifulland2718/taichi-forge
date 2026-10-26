@@ -1,6 +1,6 @@
 # DSL 遍历构造的默认选择与 CompileIQ 覆盖规划
 
-日期：2026-10-26。状态：按下列用户修订进入目标执行；原始宽范围清单保留作后续参考。
+日期：2026-10-26。状态：已完成下列用户修订后的编译期范围；原始宽范围清单保留作后续参考。
 源码基线：Forge `master@dceb13ae7`，0.7.0，私有 ABI 222，cache schema 88，ExecutionPlan 27。
 本轮用户所指对象是 `ti.ndrange`、`ti.grouped` 等 DSL 构造及使用它们的 kernel，
 不是把主要范围扩大到外部库和 native 算法。以 Windows CPU/CUDA/Vulkan 为验证目标，串行推进。
@@ -13,6 +13,8 @@
 2. 检查并补齐 ndrange/grouped、dense Field/ndarray、内联/内部 helper 的共同编译覆盖；
    编译事实不足时明确保留，不冻结动态初值，不在线试跑。
 3. CPU/CUDA/Vulkan 代表性正确性、前反向、Graph/AOT、编译及暖态成本验收，分批提交。
+4. 用户追加：合法显式 block 不因多task或性能猜测被拒绝/覆盖；支持逐循环所有权，
+   对可证明的闲置线程事实提供冷阶段建议。事实不足或仅启发式偏好不同不报警。
 
 下文 D3 的新 CompileIQ 搜索轴、D4 的 CPU runtime 调度/循环改造，以及后续复杂变换均不在
 本次目标中。现有 CompileIQ 配置仍须可组合且行为正确，默认不搜索。可在编译器内优化代码和
@@ -48,9 +50,9 @@ helper 写出的等价计算，经过共同 lowering 后，能使用一致的默
 | `transforms/lower_ast.cpp` 的 external_tensor 分支 | ndarray/RW texture 遍历按 shape 乘积展平 | 与手写 ndrange 共用范围/合法性；不在首次调用冻结动态 shape |
 | `transforms/demote_dense_struct_fors.cpp` | all-dense Field struct-for 转为静态 range | 候选资格应接受经过证明的最终 task，而非仅接受源码普通 range；未发生 demotion 的路径明确保留 |
 | `analysis/host_range_bounds.h`、`tests/python/test_host_ndrange.py` | 动态多维 host 范围已覆盖 JIT、Graph、AOT、可变参数及一类反向梯度 | 这是现有能力；新增 grouped/Field/内部 helper 交集，不重复声称接通 ndrange |
-| `analysis/default_gpu_block_size.h` | 静态范围结合设备提示缩小默认 block，未知/大范围保留原值 | 统一默认资格与原因，复用可证明范围；不声称已实现动态 block 搜索或最优 occupancy |
-| `transforms/compile_to_offloads.cpp` 的默认选择入口 | 任一 kernel optimization/offload plan 会整体跳过选择 | 按 task/调度轴确认决策权；无 block 请求不应自动等于禁止默认 block 选择 |
-| `apply_task_launch_policy()` | 只接受一个顶层 frontend range，拒绝 Field、ndarray/mesh frontend 循环 | 完整内部 task plan 使用最终 task 证明；保留现有公共显式 policy 的兼容行为，不粗暴删除检查 |
+| `analysis/default_gpu_block_size.h` | 原静态选择已扩展到源码可证明上界；未知/大范围保留原值 | 不声称已实现动态 block 搜索或最优 occupancy |
+| `transforms/compile_to_offloads.cpp` 的默认选择入口 | 已改为逐 task 检查 block 所有权，无关 kernel 配置不再整体跳过 | 保留最终安全证明与冻结代码 |
+| `apply_task_launch_policy()` | 本轮追加支持多个 range、ndarray 和可降为range的dense Field；逐循环保留源码优先级 | 只取消拓扑/性能层面的过窄准入；同步、shared storage、硬件及显式冲突检查保留 |
 | `_gpu_semantics_tuning.py`、`graph/_recipes/kernel_configuration.py` | CUDA/Vulkan 共同配置候选已存在；workgroup 主要要求一个 range | 把合法 axis 下沉到逐 task；多 task 合成为完整方案，保持串行前后段和依赖 |
 | `_compileiq_offload_execution_plan.py` | 完整逐 task 搜索入口目前要求 CUDA | 将可共用轴用于 Vulkan；CUDA 特有 register/residency/TLS 轴不能伪装为 Vulkan 支持 |
 | `apply_offload_execution_plan()` | Vulkan 当前仅允许 range-dispatch 类方案 | Vulkan 扩展 workgroup 必须连同 SPIR-V LocalSize、manifest 和 cache/AOT 接线，不只放开 Python 判断 |

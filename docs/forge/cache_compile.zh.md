@@ -39,6 +39,9 @@ CUDA/Vulkan 在编译期为常量范围或源码可证明上界的普通 range �
 - 显式 `ti.loop_config(block_dim=...)`、任务策略和非默认全局 `default_gpu_block_dim`
   保留设置。kernel 优化配置未指定 block 时继续使用默认选择；完整逐 task 方案仅保留
   对应 task 的显式 workgroup，未指定的 task 仍可选择。已冻结代码不被改写，CPU 调度不变。
+- 保留显式 block 不会关闭已有的空工作组裁剪或其他不改变其分组合同的编译优化。
+  仅对能证明大量闲置线程的独立短循环输出冷阶段建议；不会因为启发式偏好不同就覆盖
+  配置或声称严重性能问题。dense Field 降为 range 时也保留显式 block，不再按元素数裁小。
 - 共享内存、屏障、物理线程索引、随机数、未知调用、TLS/BLS 和原子归约等保持原 block。
   “可删空工作组”本身不足以证明“可改 block”；后者有额外检查。
 - JIT/Graph 使用当前设备的冷阶段提示。普通 portable AOT 清除生产设备的计算单元

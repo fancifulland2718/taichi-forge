@@ -46,6 +46,9 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
   显式 block/任务策略、归约和共享内存等保留原配置。无关编译配置不再关闭默认选择，
   完整 task 方案逐 task 保留显式 workgroup。没有计算单元信息时仅裁剪单块
   短循环；portable AOT 不继承生产设备的计算单元数量。详见[编译与缓存](cache_compile.zh.md)。
+- 显式 `TaskLaunchPolicy` 支持多个普通 range、ndarray 和可降为 range 的 dense Field
+  循环，逐循环保留源码优先级及串行依赖。dense range 不再按元素数裁小显式 block。
+  对可证明闲置线程的短循环给出编译期建议，保留配置，不将性能猜测转成拒绝或自动覆盖。
 - CUDA/Vulkan 普通 grid-stride kernel 可根据 host 参数中已知的 ndarray shape、
   shape 乘积或 `i32` 边界与常量的加减乘（如 `3 * n - 1`）减少空 block，
   保留原 block 大小与饱和 grid 上界。编译时归一化表达式并保留每个中间步骤的
@@ -89,7 +92,7 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
 - Vulkan task manifest、缓存及 AOT metadata 保留源码显式 block 标记，配置发现阶段即可
   排除不应改写的 workgroup 请求，避免先编译再拒绝；普通执行的 block 和语义不变。
 - frontend 与 native runtime 使用私有 ABI **223**，持久执行计划为 **27**，
-  编译缓存 schema 为 **90**；LLVM AOT metadata 为 **19/20**、GFX metadata 为 **16**。
+  编译缓存 schema 为 **91**；LLVM AOT metadata 为 **19/20**、GFX metadata 为 **16**。
   请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。

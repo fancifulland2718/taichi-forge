@@ -48,6 +48,12 @@ guarantee of optimal performance. With 128 compute units and 32-lane subgroups,
   a block request still use default selection. Complete task plans preserve each
   task's explicit workgroup while allowing defaults for unspecified tasks. Frozen
   code is not rewritten, and CPU scheduling is unchanged.
+- Explicit blocks still benefit from existing empty-group elision and compiler
+  optimizations that preserve their grouping contract. Only proven idle lanes
+  in independent short loops produce cold-stage advice; a heuristic preference
+  neither overrides the configuration nor proves a severe performance problem.
+  Dense Field loops lowered to ranges retain explicit blocks instead of clipping
+  them to the element count.
 - Shared memory, barriers, physical-thread indexing, random numbers, unknown
   calls, TLS/BLS and atomic reductions retain their block sizes. Empty-group
   elision alone does not establish safety for changing block size.

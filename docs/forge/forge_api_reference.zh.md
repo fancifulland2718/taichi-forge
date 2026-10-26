@@ -2101,7 +2101,7 @@ kernel 标签，但不会自动开启固定重放中的逐 kernel 计时。
 [Vulkan 诊断](vulkan_diagnostics.md)。
 
 `kernel.with_launch_policy(policy)` 为 direct JIT kernel 创建可复用视图，不改变该 kernel
-的普通调用。首个受支持切片可在 CUDA/Vulkan 上控制恰好一个顶层 parallel range task 的
+的普通调用。CUDA/Vulkan 可对一个或多个合格的顶层 parallel range task 请求统一
 block 大小：
 
 ```python
@@ -2127,12 +2127,19 @@ register/local-memory 分配需要已 materialize 的 native function，SPIR-V r
 driver 拥有；无提交 report 会把这些字段保留为 `None` 并说明原因，而不会为了填数启动
 profiler 查询。
 
-该合同有意窄于原始 CUDA/Vulkan launch API：不开放可能截断语义工作量的 grid，并且当前
-只支持恰含一个安全 parallel range task 的 primal direct-JIT kernel。Graph、AOT、自动微分、
-multi-range kernel、struct/ndarray/mesh iteration 与用户可见 serial side effect 尚不支持。
+该合同有意窄于原始 CUDA/Vulkan launch API：不开放可能截断语义工作量的 grid。primal
+direct-JIT kernel 可包含多个普通 range、ndarray 或可降为 range 的 dense Field 循环；
+同一请求应用到各个循环，串行前段、任务间依赖及收尾保持原顺序。`hint` 逐循环保留源码
+显式 block，`require` 检查每个循环；混合结果及冲突原因在各 task 的 report 中分别报告。
+直接 policy wrapper 的 Graph/AOT/自动微分接入，以及 sparse/mesh 遍历不在此合同内。
 如果 policy 实际改变 block，含 `SharedArray`、block barrier 或其他 block-sensitive intrinsic
 的 kernel 会 fail closed；源码本来就声明相同 block 的 `require` 不改变 geometry，因此仍然
 有效。
+
+编译期 `[block-advice]` 只对可证明的独立短循环给出建议，例如所有工作最多占一个子组、
+但显式 block 预留了更多闲置线程。提示包含 kernel/task 和建议值，仍使用用户配置；
+它不是实测加速结论，也不因 multi-task 或启发式偏好不同就报警。建议不在暖态重复输出，
+缓存命中不保证重新生成。CPU 不使用这类 GPU block 建议。可用既有日志级别控制输出。
 
 CPU 的 `hint` 报告 `fallback_auto` 并使用正常 worker scheduler；`require` 会失败，不伪造
 GPU geometry。冷 CUDA/Vulkan policy specialization 必须在 Python 主线程准备；从 worker

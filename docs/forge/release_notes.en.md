@@ -53,6 +53,11 @@ See the [release procedure](../design/pypi_release.en.md).
   plans preserve explicit workgroup ownership per task. Unknown unit counts
   allow only single-block trimming; portable AOT does not inherit the producer's
   compute-unit count. See the [compile guide](cache_compile.en.md).
+- Explicit `TaskLaunchPolicy` supports multiple ordinary range, ndarray and
+  demotable dense Field loops, preserving per-loop source ownership and serial
+  dependencies. Dense ranges no longer clip explicit blocks to element counts.
+  Compile-time advice for proven idle lanes retains the user's configuration;
+  performance guesses neither reject nor override it.
 - Ordinary CUDA/Vulkan grid-stride kernels can reduce idle blocks from host-known
   ndarray shapes, shape products or `i32` range bounds with constant addition,
   subtraction and multiplication (for example `3 * n - 1`), retaining the
@@ -116,7 +121,7 @@ See the [release procedure](../design/pypi_release.en.md).
   allowing discovery to exclude conflicting workgroup requests before compiling them.
   Ordinary execution geometry and semantics remain unchanged.
 - The frontend/native private ABI is **223**, persistent execution-plan version **27**, and
-  compiled-cache schema **90**; LLVM AOT metadata is **19/20**, GFX metadata **16**.
+  compiled-cache schema **91**; LLVM AOT metadata is **19/20**, GFX metadata **16**.
   Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.

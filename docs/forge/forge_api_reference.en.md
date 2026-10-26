@@ -2567,9 +2567,8 @@ For actual JIT shader export, optional pre-pipeline SPIR-V validation and
 independent pipeline-cache controls, see [Vulkan diagnostics](vulkan_diagnostics.md).
 
 `kernel.with_launch_policy(policy)` creates a reusable view of a direct JIT
-kernel without changing ordinary calls to that kernel. The first qualified
-CUDA/Vulkan slice controls the block size of exactly one top-level parallel
-range task:
+kernel without changing ordinary calls to that kernel. On CUDA/Vulkan it requests
+a uniform block size for one or more eligible top-level parallel range tasks:
 
 ```python
 tuned = update.with_launch_policy(
@@ -2599,14 +2598,25 @@ driver owned; the no-submit report leaves those fields as `None` and explains
 why instead of launching a profiler query.
 
 This contract is deliberately narrower than a raw CUDA/Vulkan launch API. It
-does not expose grid truncation and currently supports only primal direct-JIT
-kernels with one safe parallel range task. Graph, AOT, automatic
-differentiation, multi-range kernels, struct/ndarray/mesh iteration, and
-user-visible serial side effects remain unsupported. If the policy actually
+does not expose grid truncation. Primal direct-JIT kernels may contain multiple
+ordinary range, ndarray or demotable dense Field loops; the uniform request
+applies to each, preserving serial prefixes, task dependencies and epilogues.
+Hints preserve source-owned blocks per loop; requirements check every loop.
+Mixed selections and rejection reasons are reported per task. Direct policy
+wrapper integration with Graph/AOT/autodiff, and sparse/mesh traversal, remain
+outside this contract. If the policy actually
 changes the block size, kernels using `SharedArray`, block barriers, or other
 block-sensitive intrinsics fail closed. A source-owned block declaration that
 already equals a `require` remains valid because the policy does not change its
 geometry.
+
+Compile-time `[block-advice]` messages concern proven independent short loops,
+such as work that fits within one subgroup while the explicit block reserves
+additional idle lanes. They identify the kernel/task and suggest a value while
+retaining the user's configuration. They do not claim measured speedups, and
+neither multiple tasks nor a different heuristic preference alone triggers a
+warning. Warm execution does not repeat the advice; cache hits need not recreate
+it. CPU has no GPU block advice. Existing log levels control its visibility.
 
 On CPU, `hint` reports `fallback_auto` and uses the normal worker scheduler;
 `require` fails rather than inventing GPU geometry. A cold CUDA/Vulkan policy
