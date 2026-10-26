@@ -446,6 +446,7 @@ def default_graph_recipe_providers():
         GraphRangeDispatchRecipeProvider,
     )
     from taichi_forge.graph._recipes.graph_memory import GraphMemoryRecipeProvider
+    from taichi_forge.graph._recipes.kernel_configuration import GraphKernelConfigurationRecipeProvider
     from taichi_forge.graph._recipes.map_fusion import GraphMapFusionRecipeProvider
     from taichi_forge.graph._recipes.resource_lifetime import GraphResourceLifetimeRecipeProvider
     from taichi_forge.graph._recipes.value_fusion import GraphValueFusionRecipeProvider
@@ -467,6 +468,7 @@ def default_graph_recipe_providers():
         GraphOffloadPhaseFusionRecipeProvider(),
         GraphSparseTraversalRecipeProvider(),
         GraphRangeDispatchRecipeProvider(),
+        GraphKernelConfigurationRecipeProvider(),
         GraphBranchJoinRecipeProvider(),
         GraphRecordingPartitionRecipeProvider(),
         GraphBindingFrameRecipeProvider(),

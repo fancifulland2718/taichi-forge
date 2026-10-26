@@ -10982,26 +10982,12 @@ def _replay_recipe_cgraph_node(
     for operation in node.recipe_operations:
         kind = operation[0]
         if kind == "dispatch":
-            (
-                _,
-                kernel_cpp,
-                args,
-                label,
-                memory_source,
-                offload_source,
-                sparse_source,
-                range_source,
-            ) = operation
+            _, kernel_cpp, args, label, *recipe_sources = operation
             contracts = ()
             layout_requirements = ()
             rewriters = tuple(
                 rewriter
-                for rewriter in (
-                    assembly.dispatch_rewriter(memory_source),
-                    assembly.dispatch_rewriter(offload_source),
-                    assembly.dispatch_rewriter(sparse_source),
-                    assembly.dispatch_rewriter(range_source),
-                )
+                for rewriter in map(assembly.dispatch_rewriter, recipe_sources)
                 if rewriter is not None
             )
             if len(rewriters) > 1:
@@ -11265,6 +11251,7 @@ class _GraphSpec:
             graph_offload_fusion_sources=self._graph_offload_fusion_sources,
             graph_sparse_traversal_sources=self._graph_sparse_traversal_sources,
             graph_range_dispatch_sources=self._graph_range_dispatch_sources,
+            graph_kernel_configuration_sources=self._graph_kernel_configuration_sources,
             graph_bounded_sources=self._graph_bounded_sources,
             graph_reduction_sources=self._graph_reduction_sources,
             graph_native_algorithm_sources=self._graph_native_algorithm_sources,
@@ -11384,6 +11371,7 @@ class _GraphSpec:
         graph_offload_fusion_sources=(),
         graph_sparse_traversal_sources=(),
         graph_range_dispatch_sources=(),
+        graph_kernel_configuration_sources=(),
         graph_bounded_sources=(),
         graph_reduction_sources=(),
         graph_native_algorithm_sources=(),
@@ -11502,6 +11490,7 @@ class _GraphSpec:
         self._graph_offload_fusion_sources = tuple(graph_offload_fusion_sources)
         self._graph_sparse_traversal_sources = tuple(graph_sparse_traversal_sources)
         self._graph_range_dispatch_sources = tuple(graph_range_dispatch_sources)
+        self._graph_kernel_configuration_sources = tuple(graph_kernel_configuration_sources)
         self._graph_bounded_sources = tuple(graph_bounded_sources)
 
         self._graph_reduction_sources = tuple(graph_reduction_sources)
@@ -14185,6 +14174,7 @@ def gen_cpp_kernel(
     task_launch_policy=None,
     range_one_to_one=False,
     allow_graph_memory_recipe=False,
+    kernel_optimization_spec=None,
 ):
     execution_plan = None
     if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
@@ -14226,7 +14216,7 @@ def gen_cpp_kernel(
         kernel, symbolic_args=args, template_args=template_args
     )
     if execution_plan is not None:
-        if task_launch_policy is not None or range_one_to_one:
+        if task_launch_policy is not None or range_one_to_one or kernel_optimization_spec is not None:
             raise TaichiCompilationError(
                 "Graph task-indexed execution plans cannot be combined with "
                 "legacy launch-policy or one-to-one lowering controls"
@@ -14235,6 +14225,21 @@ def gen_cpp_kernel(
             execution_plan, *injected_args
         )
         kernel._validate_offload_execution_plan_specialization(key, execution_plan)
+    elif kernel_optimization_spec is not None:
+        from taichi_forge.lang.task_launch import TaskLaunchPolicy
+
+        if task_launch_policy is not None or range_one_to_one:
+            raise TaichiCompilationError("Graph kernel configuration owns its launch policy")
+        spec = kernel_optimization_spec
+        if spec.backend.workgroup_size is None:
+            key = kernel._ensure_compiled_with_kernel_optimization_spec(spec, *injected_args)
+            kernel._validate_kernel_optimization_specialization(key)
+        else:
+            policy = TaskLaunchPolicy.block(spec.backend.workgroup_size, mode=spec.launch.block_mode)
+            key = kernel._ensure_compiled_with_task_launch_policy(
+                policy, *injected_args, optimization_spec=spec,
+            )
+            kernel._validate_task_launch_policy_specialization(key, policy)
     elif (task_launch_policy is None or task_launch_policy.mode == "auto") and not (
         range_one_to_one
     ):
@@ -16920,6 +16925,7 @@ class GraphBuilder:
         self._graph_offload_fusion_sources = []
         self._graph_sparse_traversal_sources = []
         self._graph_range_dispatch_sources = []
+        self._graph_kernel_configuration_sources = []
         self._recipe_task_facts = {}
         self._graph_bounded_sources = []
         self._parallel_dispatch_groups = ()
@@ -17009,6 +17015,18 @@ class GraphBuilder:
         )
         if range_source is not None:
             range_source._recipe_source_key = f"range-dispatch:{len(self._graph_range_dispatch_sources)}"
+        from taichi_forge.graph._recipes.kernel_configuration import GraphKernelConfigurationSource
+
+        configuration_source = (
+            GraphKernelConfigurationSource.try_create(
+                kernel_fn, args, kernel_cpp, template_args, task_facts
+            )
+            if self._capture_recipe_sources else None
+        )
+        if configuration_source is not None:
+            configuration_source._recipe_source_key = (
+                f"kernel-configuration:{len(self._graph_kernel_configuration_sources)}"
+            )
         contracts, layout_requirements = (), ()
         if source is not None:
             source._recipe_source_key = f"memory:{len(self._graph_memory_sources)}"
@@ -17028,6 +17046,7 @@ class GraphBuilder:
             _offload_recipe_source=offload_source,
             _sparse_recipe_source=sparse_source,
             _range_recipe_source=range_source,
+            _configuration_recipe_source=configuration_source,
         )
         if contracts or layout_requirements:
             self._pending_ir_nodes[-1] = replace(
@@ -17043,6 +17062,8 @@ class GraphBuilder:
             self._graph_sparse_traversal_sources.append(sparse_source)
         if range_source is not None:
             self._graph_range_dispatch_sources.append(range_source)
+        if configuration_source is not None:
+            self._graph_kernel_configuration_sources.append(configuration_source)
 
     def reduce(
         self,
@@ -17920,6 +17941,7 @@ class GraphBuilder:
         _offload_recipe_source=None,
         _sparse_recipe_source=None,
         _range_recipe_source=None,
+        _configuration_recipe_source=None,
     ):
         self._bind_declared_private_args(unzipped_args)
         self._active_bounded_publication = None
@@ -17946,6 +17968,7 @@ class GraphBuilder:
                     _offload_recipe_source,
                     _sparse_recipe_source,
                     _range_recipe_source,
+                    _configuration_recipe_source,
                 )
             )
 
@@ -18416,6 +18439,7 @@ class GraphBuilder:
                     self._graph_sparse_traversal_sources
                 ),
                 graph_range_dispatch_sources=tuple(self._graph_range_dispatch_sources),
+                graph_kernel_configuration_sources=tuple(self._graph_kernel_configuration_sources),
                 graph_bounded_sources=tuple(self._graph_bounded_sources),
                 graph_reduction_sources=tuple(self._graph_reduction_sources),
                 graph_native_algorithm_sources=tuple(
