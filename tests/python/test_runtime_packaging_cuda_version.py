@@ -1480,6 +1480,17 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert workflow.count("TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF") == 4
     assert 'CUDA_TOOLKIT_VERSION: "12.5.1"' in workflow
     assert workflow.count("Jimver/cuda-toolkit") == 2
+    # An empty component list installs the full toolkit/driver suite. Only
+    # producer-side compiler and SDK inputs belong in these driver-only jobs.
+    linux = workflow.split("  build_linux_runtime:\n", 1)[1].split("  build_windows_runtime:\n", 1)[0]
+    windows = workflow.split("  build_windows_runtime:\n", 1)[1].split("  validate_wheel_set:\n", 1)[0]
+    for job, expected in (
+        (linux, {"nvcc", "cudart-dev", "driver-dev", "cccl"}),
+        (windows, {"nvcc", "cudart", "thrust"}),
+    ):
+        selected = re.search(r"sub-packages: '([^']+)'", job)
+        assert selected is not None
+        assert set(json.loads(selected.group(1))) == expected
     assert workflow.count("nvcc -V") == 2
     assert workflow.count("TI_BUILD_BUNDLED_OPTIX_PROVIDERS:BOOL=ON") == 2
     assert workflow.count("TI_BUILD_BUNDLED_CUDSS_PROVIDER:BOOL=ON") == 2

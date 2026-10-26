@@ -65,8 +65,11 @@ concurrency:
 env:
   TI_SKIP_VERSION_CHECK: "ON"
   TI_CI: "1"
+  # Producer SDK for the bundled providers, not the consumer's CUDA API level.
   # OptiX device code is PTX-JITed by the display driver. CUDA 12.5 emits PTX
-  # 8.5, preserving the oldest qualified OptiX 8.1 / R555 runtime floor.
+  # 8.5, preserving the oldest qualified OptiX 8.1 / R555 runtime floor while
+  # also building the latest OptiX 9.1 adapter. Conditional Graphs use dynamic
+  # Driver API 12.8+ symbols and toolkit-independent PTX in the core runtime.
   CUDA_TOOLKIT_VERSION: "12.5.1"
   LLVM20_WIN_URL: ${{ vars.LLVM20_WIN_URL }}
   LLVM20_LINUX_URL: ${{ vars.LLVM20_LINUX_URL || vars.LLVM20_LINUX_MANYLINUX_URL }}
@@ -171,6 +174,10 @@ jobs:
         with:
           cuda: ${{ env.CUDA_TOOLKIT_VERSION }}
           method: network
+          # Empty means the full cuda-12-5 metapackage, including drivers.
+          # Providers need PTX compilation, headers and the driver link stub.
+          # OptiX 9.1 includes cuda_fp16.h, which requires CCCL's nv/target.
+          sub-packages: '["nvcc", "cudart-dev", "driver-dev", "cccl"]'
           log-file-suffix: linux-runtime-optix.txt
 
       - name: Install system deps
@@ -361,7 +368,12 @@ jobs:
         with:
           cuda: ${{ env.CUDA_TOOLKIT_VERSION }}
           method: network
-          log-file-suffix: windows-runtime-optix.txt
+          # The action appends _12.5 to these Windows component names.
+          # Do not run the unrestricted silent installer (drivers, Nsight,
+          # VS integration, etc.). cudart supplies headers and import libs;
+          # it is a build input, not a runtime-wheel dependency.
+          # CUDA 12.5 calls its CCCL/nv/target header component "thrust".
+          sub-packages: '["nvcc", "cudart", "thrust"]'
 
       - name: Setup MSVC dev cmd
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1

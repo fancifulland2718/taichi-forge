@@ -47,6 +47,29 @@ GitHub 自动 Source code ZIP 缺少子模块，不能替代完整源码包。Py
 URL 使用公开 HTTPS，摘要为 SHA256。源码构建脚本：[Windows](../../.github/workflows/build_llvm20_windows.yml)、
 [Linux](../../.github/workflows/build_llvm20_linux.yml)。实际下载摘要与编译配置由构建 job 记录。
 
+runtime 每个平台只构建一次，wheel 标签为 `py3-none-<platform>`，不按 CPython
+版本拆分。工作流中的 Python 3.13 是构建工具宿主；构建时扫描 shim 对象以确定原生
+导出符号，不将这些 Python 绑定对象链接进 runtime。最终二进制审计拒绝 CPython
+依赖；只有主包 shim 使用 CPython 3.10–3.14 矩阵。
+
+OptiX PTX 生成仍需 CUDA 12.5.1 构建工具，`TI_WITH_CUDA_TOOLKIT=OFF` 不代表
+生产端不需要 NVCC。工作流限制安装组件：Windows 为 `nvcc`、`cudart`、`thrust`，Linux 为
+`nvcc`、`cudart-dev`、`driver-dev`、`cccl`，用于编译、头文件及 driver import/stub 链接。
+CCCL 头文件（Windows 12.5 安装组件名为 `thrust`）提供 OptiX 9.1 的 `cuda_fp16.h`
+间接包含的 `nv/target`，不能省掉。
+不安装完整驱动/工具套件，也不因此把 cudart 或其他供应商 runtime 放入发行 wheel。
+Windows action 的空组件列表会调用全量静默安装器；仅有 `-s` 输出不能证明发生死锁。
+该版本 action 的 `log-file-suffix` 只处理 Linux 日志，不能当作 Windows 安装日志。
+
+这里的 12.5.1 固定值是 Forge 的 PTX 兼容策略，不是 OptiX 的最高支持版本。
+截至 2026-10-27，官方最新 [OptiX 9.1.0](https://github.com/NVIDIA/optix-dev/releases/tag/v9.1.0)
+已包含在固定 adapter 集合中，并优先尝试 ABI 118；其运行端要求 R590+。
+[OptiX 9.1 编程指南](https://raytracing-docs.nvidia.com/optix9/guide/optix_guide.251118.LTR.pdf)
+也说明了使用 CUDA 13.0+ 的编译方式。保留 12.5 PTX 是为了现有 ABI 93 / R555 路线；
+升级 NVCC 时应一起重新验证生成的 PTX 和 driver 下限，不能只改工作流版本号。
+Forge 原生条件 Graph 的 **Driver API 12.8+** 要求独立检查，核心 runtime 使用动态符号、
+自有 ABI 声明及内嵌 PTX，不依赖这次安装的 SDK 版本启用这些功能。
+
 ## 准备与发布顺序
 
 1. 更新 `version.txt`、CMake 版本、native header、runtime 依赖和两份
