@@ -55,6 +55,9 @@ See the [release procedure](../design/pypi_release.en.md).
   bounds also support `min`/`max` and positive compile-time integer division, using
   a checked DAG that preserves signed rounding and original arithmetic order.
   Shared subexpressions are described once; workload and expression depth are not capped.
+  Products of checked host expressions also cover `ti.ndrange` clamped dimensions
+  and nonzero starts. Every intermediate product must fit i32, even when a later
+  clamp or multiplication by zero would hide the overflow.
 - Ordinary CUDA/Vulkan range tasks can read immutable scalar/shape end bounds
   directly. When both bounds are supported host expressions, the start is also
   evaluated directly, removing serial tasks used only to transport these values.
@@ -102,7 +105,7 @@ See the [release procedure](../design/pypi_release.en.md).
   allowing discovery to exclude conflicting workgroup requests before compiling them.
   Ordinary execution geometry and semantics remain unchanged.
 - The frontend/native private ABI is **221**, persistent execution-plan version **27**, and
-  compiled-cache schema **86**; LLVM AOT metadata is **19/20**, GFX metadata **16**.
+  compiled-cache schema **87**; LLVM AOT metadata is **19/20**, GFX metadata **16**.
   Update compatible components together; matching Git commits
   are not required for ABI-compatible components. Intermediate development ABIs/plan formats
   have no compatibility bridge: re-export and validate deployment packages with matching tools.

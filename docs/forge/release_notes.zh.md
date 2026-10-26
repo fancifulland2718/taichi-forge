@@ -45,6 +45,8 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
   i32 溢出保护；不满足保护条件时沿用原 grid，不限制用户工作量。
   组合边界还支持 `min/max` 和正编译期整数除法，按原运算顺序检查溢出与负数取整；
   共享子表达式只描述一次，不设表达式层数上限。
+  `ti.ndrange` 的裁剪维度、非零起点及多个 host 整数表达式的乘积也使用同一合同；
+  每个中间乘积仍检查 i32 溢出，后续裁剪或乘零不会掩盖它。
   不测速、不读回设备计数、不新增编译特化；不能证明安全的任务保持原调度。
   Graph 在录制时确定几何，普通参数更新跨越 grid 边界时重新录制；prepared 实例
   中依赖逐提交可变参数的边界保留原 grid，无关参数更新不阻止 shape 选参。CPU 调度不变。
@@ -80,7 +82,7 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
 - Vulkan task manifest、缓存及 AOT metadata 保留源码显式 block 标记，配置发现阶段即可
   排除不应改写的 workgroup 请求，避免先编译再拒绝；普通执行的 block 和语义不变。
 - frontend 与 native runtime 使用私有 ABI **221**，持久执行计划为 **27**，
-  编译缓存 schema 为 **86**；LLVM AOT metadata 为 **19/20**、GFX metadata 为 **16**。
+  编译缓存 schema 为 **87**；LLVM AOT metadata 为 **19/20**、GFX metadata 为 **16**。
   请配对更新组件；相同 ABI 的兼容组件不要求 Git commit 相同。
   开发期间的中间 ABI/计划格式不提供兼容桥；部署包应使用匹配工具重新导出并验证。
   旧编译缓存失效后会重新编译，首次启动不能与暖缓存执行混为一谈。

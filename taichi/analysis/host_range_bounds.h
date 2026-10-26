@@ -144,7 +144,6 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
     return std::nullopt;
   HostRangeBound result;
   std::unordered_map<Stmt *, std::size_t> indices;
-  std::vector<bool> shape_products;
   std::vector<std::pair<Stmt *, bool>> pending{{root, false}};
   while (!pending.empty()) {
     auto [stmt, emit] = pending.back();
@@ -154,10 +153,8 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
     if (stmt->ret_type != PrimitiveType::i32)
       return std::nullopt;
     HostRangeInstruction node;
-    bool shape_product = false;
     if (auto *constant = stmt->cast<ConstStmt>()) {
       node.immediate = constant->val.val_int32();
-      shape_product = node.immediate >= 0;
     } else if (auto *shape = stmt->cast<ExternalTensorShapeAlongAxisStmt>()) {
       if (shape->arg_id.size() != 1)
         return std::nullopt;
@@ -166,7 +163,6 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
       path.push_back(shape->axis);
       node.op = HostRangeOp::shape_i32;
       node.offset = arguments->get_element_offset(path);
-      shape_product = true;
     } else if (auto *arg = stmt->cast<ArgLoadStmt>()) {
       if (arg->is_ptr || !arg->create_load || arg->arg_depth != 0 ||
           arg->arg_id.size() != 1)
@@ -204,20 +200,15 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
       node.lhs = indices.at(binary->lhs);
       if (!division)
         node.rhs = indices.at(binary->rhs);
-      if (node.op == HostRangeOp::multiply) {
-        shape_product = shape_products[node.lhs] && shape_products[node.rhs];
-        // Preserve the existing multiplication scope: constants or dimension
-        // products. This is not an arbitrary host expression interpreter.
-        if (!shape_product && !binary->lhs->is<ConstStmt>() &&
-            !binary->rhs->is<ConstStmt>())
-          return std::nullopt;
-      }
+      // Every operand is already a pure, typed host expression. Keep products
+      // of these expressions too: ndrange multiplies clamped dimension spans,
+      // not just bare ndarray shapes. The evaluator checks each original i32
+      // operation before later clamps or zero factors can hide an overflow.
     } else {
       return std::nullopt;
     }
     indices.emplace(stmt, result.program.size());
     result.program.push_back(node);
-    shape_products.push_back(shape_product);
   }
   return result;
 }

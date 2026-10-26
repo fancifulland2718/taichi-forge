@@ -200,7 +200,9 @@ class Kernel;
 // 76 - CUDA modules declare their sparse runtime view code qualification.
 // 79 - normalized affine host launch bounds and checked input intervals.
 // 80 - immutable CUDA/Vulkan range ends no longer need a serial snapshot.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 86;
+// 87 - Retain checked products of host expressions (including clamped ndrange
+// spans), so old kernels without the range contract cannot mask launch elision.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 87;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

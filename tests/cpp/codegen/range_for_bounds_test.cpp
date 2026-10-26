@@ -202,6 +202,42 @@ TEST(HostRangeBounds, DescriptionSharesCompositeDagNodes) {
   EXPECT_FALSE(describe_host_range_bound(division, arguments));
 }
 
+TEST(HostRangeBounds, ClampedProductsKeepIntermediateOverflowGuards) {
+  const auto *arguments = TypeFactory::get_instance()
+      .get_struct_type({{PrimitiveType::i32, "width"},
+                        {PrimitiveType::i32, "height"}})->as<StructType>();
+  Block body;
+  auto *width = body.push_back<ArgLoadStmt>(
+      std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+  auto *height = body.push_back<ArgLoadStmt>(
+      std::vector<int>{1}, PrimitiveType::i32, false, true, 0);
+  auto *zero = body.push_back<ConstStmt>(TypedConstant(0));
+  auto *w = body.push_back<BinaryOpStmt>(BinaryOpType::max, width, zero);
+  auto *h = body.push_back<BinaryOpStmt>(BinaryOpType::max, height, zero);
+  auto *product = body.push_back<BinaryOpStmt>(BinaryOpType::mul, w, h);
+  auto *limit = body.push_back<ConstStmt>(TypedConstant(65));
+  auto *clamped = body.push_back<BinaryOpStmt>(BinaryOpType::min, product, limit);
+  auto *hidden = body.push_back<BinaryOpStmt>(BinaryOpType::mul, product, zero);
+  irpass::type_check(&body, CompileConfig{});
+  const auto bound = describe_host_range_bound(product, arguments);
+  const auto clipped = describe_host_range_bound(clamped, arguments);
+  const auto cancelled = describe_host_range_bound(hidden, arguments);
+  ASSERT_TRUE(bound);
+  ASSERT_TRUE(clipped);
+  ASSERT_TRUE(cancelled);
+  std::int32_t values[]{320, 240};
+  EXPECT_EQ(bound->evaluate(values, sizeof(values)), 76800);
+  values[0] = -3;
+  EXPECT_EQ(bound->evaluate(values, sizeof(values)), 0);
+  values[0] = values[1] = 50000;
+  EXPECT_FALSE(bound->evaluate(values, sizeof(values)));
+  EXPECT_FALSE(clipped->evaluate(values, sizeof(values)));
+  EXPECT_FALSE(cancelled->evaluate(values, sizeof(values)));
+  values[0] = INT32_MAX;
+  values[1] = 1;
+  EXPECT_EQ(bound->evaluate(values, sizeof(values)), INT32_MAX);
+}
+
 TEST(HostRangeBounds, CodecAndCloneRetainTheFrozenProof) {
   HostRangeBounds host{{0, {}, false}, {1, {8, 12}, true}};
   ASSERT_TRUE(compose_host_range_affine(host.end, 3, -1));
