@@ -230,6 +230,38 @@ const char *operator_backend_execution_path_name(
   return "unknown";
 }
 
+OperatorBackendExecutionPath operator_backend_execution_path_from_graph(
+    aot::CompiledGraphExecutionPath path) {
+  switch (path) {
+    case aot::CompiledGraphExecutionPath::none:
+      return OperatorBackendExecutionPath::unavailable;
+    case aot::CompiledGraphExecutionPath::ordinary_fallback:
+      return OperatorBackendExecutionPath::ordinary_graph_fallback;
+    case aot::CompiledGraphExecutionPath::cuda_capture:
+    case aot::CompiledGraphExecutionPath::cuda_masked_capture:
+    case aot::CompiledGraphExecutionPath::cuda_device_update_nested_capture:
+    case aot::CompiledGraphExecutionPath::cuda_conditional_nested_capture:
+      return OperatorBackendExecutionPath::cuda_capture;
+    case aot::CompiledGraphExecutionPath::cuda_exact_replay:
+    case aot::CompiledGraphExecutionPath::cuda_masked_replay:
+    case aot::CompiledGraphExecutionPath::cuda_device_update_nested_replay:
+    case aot::CompiledGraphExecutionPath::cuda_conditional_nested_replay:
+      return OperatorBackendExecutionPath::cuda_exact_replay;
+    case aot::CompiledGraphExecutionPath::cuda_patched_replay:
+    case aot::CompiledGraphExecutionPath::cuda_masked_patched_replay:
+    case aot::CompiledGraphExecutionPath::
+        cuda_device_update_nested_patched_replay:
+    case aot::CompiledGraphExecutionPath::cuda_conditional_nested_patched_replay:
+      return OperatorBackendExecutionPath::cuda_patched_replay;
+    case aot::CompiledGraphExecutionPath::vulkan_record:
+      return OperatorBackendExecutionPath::vulkan_record;
+    case aot::CompiledGraphExecutionPath::vulkan_replay:
+    case aot::CompiledGraphExecutionPath::vulkan_patched_replay:
+      return OperatorBackendExecutionPath::vulkan_replay;
+  }
+  TI_UNREACHABLE;
+}
+
 OperatorMathematicalTraits make_spd_operator_traits(
     OperatorTraitProvenance provenance,
     OperatorDependencyMask validity_scope) {
@@ -4489,42 +4521,6 @@ struct GraphActionExecutionState {
   std::atomic<std::uint64_t> capture_submissions{0};
 };
 
-OperatorBackendExecutionPath graph_action_backend_path(
-    aot::CompiledGraphExecutionPath path) {
-  switch (path) {
-    case aot::CompiledGraphExecutionPath::ordinary_fallback:
-      return OperatorBackendExecutionPath::ordinary_graph_fallback;
-    case aot::CompiledGraphExecutionPath::cuda_capture:
-      return OperatorBackendExecutionPath::cuda_capture;
-    case aot::CompiledGraphExecutionPath::cuda_exact_replay:
-      return OperatorBackendExecutionPath::cuda_exact_replay;
-    case aot::CompiledGraphExecutionPath::cuda_patched_replay:
-      return OperatorBackendExecutionPath::cuda_patched_replay;
-    case aot::CompiledGraphExecutionPath::cuda_masked_capture:
-      return OperatorBackendExecutionPath::cuda_capture;
-    case aot::CompiledGraphExecutionPath::cuda_masked_replay:
-      return OperatorBackendExecutionPath::cuda_exact_replay;
-    case aot::CompiledGraphExecutionPath::cuda_masked_patched_replay:
-      return OperatorBackendExecutionPath::cuda_patched_replay;
-    case aot::CompiledGraphExecutionPath::cuda_device_update_nested_capture:
-      return OperatorBackendExecutionPath::cuda_capture;
-    case aot::CompiledGraphExecutionPath::cuda_device_update_nested_replay:
-      return OperatorBackendExecutionPath::cuda_exact_replay;
-    case aot::CompiledGraphExecutionPath::
-        cuda_device_update_nested_patched_replay:
-      return OperatorBackendExecutionPath::cuda_patched_replay;
-    case aot::CompiledGraphExecutionPath::vulkan_record:
-      return OperatorBackendExecutionPath::vulkan_record;
-    case aot::CompiledGraphExecutionPath::vulkan_replay:
-      return OperatorBackendExecutionPath::vulkan_replay;
-    case aot::CompiledGraphExecutionPath::vulkan_patched_replay:
-      return OperatorBackendExecutionPath::vulkan_replay;
-    case aot::CompiledGraphExecutionPath::none:
-      return OperatorBackendExecutionPath::unavailable;
-  }
-  TI_UNREACHABLE;
-}
-
 struct GraphActionGeneration {
   GraphActionGeneration(
       Program *program,
@@ -4816,7 +4812,7 @@ class CompiledGraphActionProvider {
       const auto snapshot = cache->debug_graph_stats();
       if (snapshot.stats.last_path != aot::CompiledGraphExecutionPath::none) {
         result.last_backend_path =
-            graph_action_backend_path(snapshot.stats.last_path);
+            operator_backend_execution_path_from_graph(snapshot.stats.last_path);
       }
       result.backend_captures +=
           snapshot.stats.captures + snapshot.stats.records;

@@ -19,6 +19,7 @@ namespace taichi::lang {
 
 namespace aot {
 struct CompiledGraph;
+enum class CompiledGraphExecutionPath : std::uint8_t;
 }
 
 class Ndarray;
@@ -71,6 +72,11 @@ enum class OperatorBackendExecutionPath : std::uint8_t {
 
 const char *operator_backend_execution_path_name(
     OperatorBackendExecutionPath path);
+
+// Both graph actions and compiled-graph operators use the same diagnostic
+// categories, independent of the graph's concrete capture/control recipe.
+OperatorBackendExecutionPath operator_backend_execution_path_from_graph(
+    aot::CompiledGraphExecutionPath path);
 
 struct OperatorSpaceDesc {
   DataType scalar_type{PrimitiveType::unknown};

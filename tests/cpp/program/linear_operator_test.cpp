@@ -3,8 +3,10 @@
 #include <array>
 #include <atomic>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#include "taichi/aot/graph_data.h"
 #include "taichi/program/linear_operator.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
@@ -51,6 +53,37 @@ OperatorAction make_scale_action(OperatorResourceStamp stamp, float scale) {
         target[0] = scale * source[0];
         target[1] = scale * source[1];
       });
+}
+
+TEST(LinearOperator, GraphBackendPathPreservesCaptureAndReplayCategories) {
+  using GraphPath = aot::CompiledGraphExecutionPath;
+  using OperatorPath = OperatorBackendExecutionPath;
+  const std::pair<GraphPath, OperatorPath> cases[] = {
+      {GraphPath::none, OperatorPath::unavailable},
+      {GraphPath::ordinary_fallback, OperatorPath::ordinary_graph_fallback},
+      {GraphPath::cuda_capture, OperatorPath::cuda_capture},
+      {GraphPath::cuda_exact_replay, OperatorPath::cuda_exact_replay},
+      {GraphPath::cuda_patched_replay, OperatorPath::cuda_patched_replay},
+      {GraphPath::cuda_masked_capture, OperatorPath::cuda_capture},
+      {GraphPath::cuda_masked_replay, OperatorPath::cuda_exact_replay},
+      {GraphPath::cuda_masked_patched_replay, OperatorPath::cuda_patched_replay},
+      {GraphPath::cuda_device_update_nested_capture, OperatorPath::cuda_capture},
+      {GraphPath::cuda_device_update_nested_replay,
+       OperatorPath::cuda_exact_replay},
+      {GraphPath::cuda_device_update_nested_patched_replay,
+       OperatorPath::cuda_patched_replay},
+      {GraphPath::cuda_conditional_nested_capture, OperatorPath::cuda_capture},
+      {GraphPath::cuda_conditional_nested_replay, OperatorPath::cuda_exact_replay},
+      {GraphPath::cuda_conditional_nested_patched_replay,
+       OperatorPath::cuda_patched_replay},
+      {GraphPath::vulkan_record, OperatorPath::vulkan_record},
+      {GraphPath::vulkan_replay, OperatorPath::vulkan_replay},
+      {GraphPath::vulkan_patched_replay, OperatorPath::vulkan_replay}};
+  for (const auto &item : cases) {
+    SCOPED_TRACE(static_cast<int>(item.first));
+    EXPECT_EQ(operator_backend_execution_path_from_graph(item.first),
+              item.second);
+  }
 }
 
 TEST(LinearOperator, BindingPinsLeaseBeforeReadingResourceStamp) {

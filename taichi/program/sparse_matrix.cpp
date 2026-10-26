@@ -1030,46 +1030,6 @@ struct CompiledGraphLinearOperator::ExecutionState {
   std::atomic<std::uint64_t> capture_submissions{0};
 };
 
-namespace {
-
-OperatorBackendExecutionPath operator_backend_path(
-    aot::CompiledGraphExecutionPath path) {
-  switch (path) {
-    case aot::CompiledGraphExecutionPath::ordinary_fallback:
-      return OperatorBackendExecutionPath::ordinary_graph_fallback;
-    case aot::CompiledGraphExecutionPath::cuda_capture:
-      return OperatorBackendExecutionPath::cuda_capture;
-    case aot::CompiledGraphExecutionPath::cuda_exact_replay:
-      return OperatorBackendExecutionPath::cuda_exact_replay;
-    case aot::CompiledGraphExecutionPath::cuda_patched_replay:
-      return OperatorBackendExecutionPath::cuda_patched_replay;
-    case aot::CompiledGraphExecutionPath::cuda_masked_capture:
-      return OperatorBackendExecutionPath::cuda_capture;
-    case aot::CompiledGraphExecutionPath::cuda_masked_replay:
-      return OperatorBackendExecutionPath::cuda_exact_replay;
-    case aot::CompiledGraphExecutionPath::cuda_masked_patched_replay:
-      return OperatorBackendExecutionPath::cuda_patched_replay;
-    case aot::CompiledGraphExecutionPath::cuda_device_update_nested_capture:
-      return OperatorBackendExecutionPath::cuda_capture;
-    case aot::CompiledGraphExecutionPath::cuda_device_update_nested_replay:
-      return OperatorBackendExecutionPath::cuda_exact_replay;
-    case aot::CompiledGraphExecutionPath::
-        cuda_device_update_nested_patched_replay:
-      return OperatorBackendExecutionPath::cuda_patched_replay;
-    case aot::CompiledGraphExecutionPath::vulkan_record:
-      return OperatorBackendExecutionPath::vulkan_record;
-    case aot::CompiledGraphExecutionPath::vulkan_replay:
-      return OperatorBackendExecutionPath::vulkan_replay;
-    case aot::CompiledGraphExecutionPath::vulkan_patched_replay:
-      return OperatorBackendExecutionPath::vulkan_replay;
-    case aot::CompiledGraphExecutionPath::none:
-      return OperatorBackendExecutionPath::unavailable;
-  }
-  TI_UNREACHABLE;
-}
-
-}  // namespace
-
 void CompiledGraphLinearOperator::apply_with_execution(
     Program *program,
     const OperatorVectorView &input,
@@ -1238,8 +1198,8 @@ OperatorBinding CompiledGraphLinearOperator::make_operator_binding(
               OperatorBackendExecutionPath::explicit_sequence;
         } else if (state->cache) {
           const auto snapshot = state->cache->debug_graph_stats();
-          result.last_backend_path =
-              operator_backend_path(snapshot.stats.last_path);
+          result.last_backend_path = operator_backend_execution_path_from_graph(
+              snapshot.stats.last_path);
           result.backend_captures =
               snapshot.stats.captures + snapshot.stats.records;
           result.backend_replays = snapshot.stats.exact_replays +
