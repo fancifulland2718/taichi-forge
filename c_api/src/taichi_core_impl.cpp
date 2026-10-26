@@ -983,8 +983,7 @@ TiAotModule ti_load_aot_module(TiRuntime runtime, const char *module_path) {
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   TI_CAPI_ARGUMENT_NULL_RV(module_path);
 
-  // (penguinliong) Should call `create_aot_module` directly after all backends
-  // adapted to it.
+  // Preserve backend dispatch for LLVM's filesystem-based AOT loader.
   TiAotModule aot_module = ((Runtime *)runtime)->load_aot_module(module_path);
 
   // The backend records the specific failure (for example an unmet device

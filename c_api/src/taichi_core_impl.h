@@ -243,8 +243,9 @@ class Runtime {
 
   virtual taichi::lang::Device &get() = 0;
 
-  [[deprecated("create_aot_module")]] virtual TiAotModule load_aot_module(
-      const char *module_path) {
+  // Required backend hook: LLVM loads from a filesystem path; GFX uses the
+  // default VirtualDir adapter below. create_aot_module cannot replace both.
+  virtual TiAotModule load_aot_module(const char *module_path) {
     auto dir = taichi::io::VirtualDir::open(module_path);
     if (!dir) {
       ti_set_last_error(TI_ERROR_CORRUPTED_DATA, module_path);
