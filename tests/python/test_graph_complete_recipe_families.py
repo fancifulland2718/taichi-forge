@@ -285,10 +285,11 @@ def test_complete_recipe_owns_sparse_listgen_grid_for_migrating_active_set():
         ),
         budget=ti.graph.GraphSearchBudget(evaluation_limit=2),
     )
-    assert len(session.recipes) == 2
-    assert any(
+    # Other independently legal families (including multi-task workgroups)
+    # may coexist. This recipe family must contribute exactly one variant.
+    assert sum(
         handle.manifest.families == ("sparse_traversal",) for handle in session.recipes
-    )
+    ) == 1
 
     prog = ti.lang.impl.get_runtime().prog
     with definition.materialization_context() as context:
