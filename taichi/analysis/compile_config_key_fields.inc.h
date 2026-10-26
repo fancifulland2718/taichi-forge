@@ -48,6 +48,9 @@
     CACHE_FIELD(default_cpu_block_dim);
     CACHE_FIELD(cpu_max_num_threads);
     CACHE_FIELD(make_cpu_multithreading_loop);
+    if (config.make_cpu_multithreading_loop) {
+      CACHE_VALUE(std::string("cpu-static-productive-chunks-v1"));
+    }
   } else if (arch_is_gpu(config.arch)) {
     CACHE_FIELD(default_gpu_block_dim);
     CACHE_FIELD(gpu_compute_unit_count);

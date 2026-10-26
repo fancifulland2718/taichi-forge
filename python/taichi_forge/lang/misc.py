@@ -702,11 +702,11 @@ def _block_dim(dim):
 
 
 def _block_dim_adaptive(block_dim_adaptive):
-    """Enable/Disable backends set block_dim adaptively."""
-    if get_runtime().prog.config().arch != cpu:
-        _logging.warn("Adaptive block_dim is supported on CPU backend only")
-    else:
-        get_runtime().prog.config().cpu_block_dim_adaptive = block_dim_adaptive
+    """Diagnose the legacy no-op without mutating global compilation state."""
+    _logging.warn(
+        "loop_config(block_dim_adaptive=False) has no effect and is deprecated. "
+        "Use parallelize/serialize for CPU worker control or block_dim for GPU blocks."
+    )
 
 
 def _bit_vectorize():
@@ -728,7 +728,7 @@ def loop_config(
         block_dim (int): The number of threads in a block on GPU
         serialize (bool): Whether to let the for loop execute serially, `serialize=True` equals to `parallelize=1`
         parallelize (int): The number of threads to use on CPU
-        block_dim_adaptive (bool): Whether to allow backends set block_dim adaptively, enabled by default
+        block_dim_adaptive (bool): Legacy no-op; passing False emits a compile-time deprecation warning.
         bit_vectorize (bool): Whether to enable bit vectorization of struct fors on quant_arrays.
 
     Examples::

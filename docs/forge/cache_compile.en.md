@@ -69,6 +69,15 @@ Inspect actual sizes with `kernel.task_manifest(...)`. The compile profiler
 reports `cpp.ir.exec.select_default_gpu_block_size`. This default rule neither
 reads CompileIQ tuning records nor enables automatic search.
 
+CPU execution keeps the existing thread pool and contiguous inner loops. For
+static ranges with proven safe partition arithmetic, the compiler removes empty
+trailing chunks while preserving productive chunks, `parallelize` requests and
+`serialize` semantics. Dynamic bounds are not specialized to the first call.
+`parallelize` controls available workers; it does not guarantee work for each worker.
+The legacy `loop_config(block_dim_adaptive=False)` option has no consumer. It now
+emits a compile-time deprecation warning instead of mutating unused global state.
+Use `parallelize/serialize` on CPU and `block_dim` on GPU.
+
 ## Cache Reuse Rules
 
 Forge only reuses data that is safe under the current program, arch, dtype,

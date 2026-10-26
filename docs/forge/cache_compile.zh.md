@@ -54,6 +54,12 @@ CUDA/Vulkan 在编译期为常量范围或源码可证明上界的普通 range �
 `ti.compile_profile()` 中的 `cpp.ir.exec.select_default_gpu_block_size` 观察成本。
 这项默认策略不读取 CompileIQ 调优记录，也不启用自动搜索。
 
+CPU 仍使用原有线程池和连续内循环。对于分块算术可证明安全的静态范围，编译器裁掉
+尾部空 chunk，保留有工作 chunk 的原有划分、`parallelize` 请求和 `serialize` 语义。
+动态边界不按首次调用特化。`parallelize` 控制可用 worker 数，不保证每个 worker 都有工作。
+旧参数 `loop_config(block_dim_adaptive=False)` 没有实际消费者，现于编译时提示已弃用，
+不再修改无效的全局状态；CPU 用 `parallelize/serialize`，GPU 用 `block_dim`。
+
 ## 缓存复用规则
 
 Forge 只复用在当前 program、arch、dtype、shape、layout 和 compile configuration 下安全的

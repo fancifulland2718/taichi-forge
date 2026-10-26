@@ -464,7 +464,7 @@ struct CompileConfig {
   DataType default_up;
   std::string extra_flags;
   int default_cpu_block_dim;
-  bool cpu_block_dim_adaptive;
+  bool cpu_block_dim_adaptive;  // Legacy no-op; retained for configuration ABI.
   int default_gpu_block_dim;
   // Cold device facts used only to choose ordinary default launch geometry.
   // Zero units means unknown; these are tuning hints, never deployment minima.

@@ -4,6 +4,9 @@
 #include "taichi/ir/visitors.h"
 #include "taichi/transforms/utils.h"
 
+#include <algorithm>
+#include <limits>
+
 namespace taichi::lang {
 
 namespace {
@@ -28,13 +31,14 @@ using TaskType = OffloadedStmt::TaskType;
  *
  *   @ti.kernel
  *   def foo():
- *     for __thread_id in range(8):
- *       block_begin = __thread_id * 128
- *       block_end = min(block_begin + 128, 1024)
+ *     for __chunk in range(2):
+ *       block_begin = __chunk * 512
+ *       block_end = min(block_begin + 512, 1024)
  *       for i in range(block_begin, block_end):
  *           a[i] = i
  *
- * where 8 is the number of threads available on the CPU.
+ * for a CPU configuration with 8 threads. The existing minimum chunk size
+ * is 512. Statically empty trailing chunks need not reach the scheduler.
  *
  * This pass is only applied to range-for loops that are offloaded to
  * CPUs. The number of threads is determined by the config option
@@ -45,6 +49,38 @@ using TaskType = OffloadedStmt::TaskType;
  * loop. This pass especially accelerates simple single level loops, e.g.
  * memcpy and vecadd, even when the loop bounds are determined at runtime.
  */
+
+int static_chunk_count(const OffloadedStmt *task, int num_threads) {
+  if (!task->const_begin || !task->const_end || num_threads <= 0) {
+    return num_threads;
+  }
+  // An empty body iteration does not imply an empty auxiliary block. Preserve
+  // independently supplied xlogues (normal TLS lowering happens after us).
+  for (const auto *block : {task->tls_prologue.get(), task->tls_epilogue.get(),
+                            task->bls_prologue.get(), task->bls_epilogue.get()}) {
+    if (block && block->size() != 0) {
+      return num_threads;
+    }
+  }
+  const int64_t extent =
+      int64_t(task->end_value) - int64_t(task->begin_value);
+  const int64_t rounded = extent + num_threads - 1;
+  // The existing generated partition uses i32 arithmetic. Only trim it when
+  // that arithmetic is proven representable; never change the productive
+  // partition or infer bounds from the first runtime call.
+  const auto lo = std::numeric_limits<int32_t>::min();
+  const auto hi = std::numeric_limits<int32_t>::max();
+  if (extent < lo || extent > hi || rounded < lo ||
+      extent + num_threads > hi) {
+    return num_threads;
+  }
+  const int64_t chunk = std::max<int64_t>(512, rounded / num_threads);
+  if (chunk * num_threads > hi ||
+      int64_t(task->begin_value) + chunk * num_threads > hi) {
+    return num_threads;
+  }
+  return extent <= 0 ? 0 : int((extent + chunk - 1) / chunk);
+}
 
 class MakeCPUMultithreadedRangeFor : public BasicStmtVisitor {
  public:
@@ -71,6 +107,8 @@ class MakeCPUMultithreadedRangeFor : public BasicStmtVisitor {
       return;
     }
 
+    const int num_chunks =
+        static_chunk_count(offloaded, config.cpu_max_num_threads);
     auto offloaded_body = std::make_unique<Block>();
     auto one = offloaded_body->insert(
         Stmt::make_typed<ConstStmt>(TypedConstant(PrimitiveType::i32, 1)));
@@ -141,12 +179,13 @@ class MakeCPUMultithreadedRangeFor : public BasicStmtVisitor {
     irpass::replace_all_usages_with(inner_loop, offloaded, inner_loop);
 
     // Update the offloaded stmt.
-    // The statement now iterates over max CPU thread numbers.
+    // Keep the original productive partition and worker request. Only the
+    // number of chunks changes when trailing chunks are provably empty.
     // Therefore it has constant begin and end values.
     offloaded->const_begin = true;
     offloaded->const_end = true;
     offloaded->begin_value = 0;
-    offloaded->end_value = config.cpu_max_num_threads;
+    offloaded->end_value = num_chunks;
     offloaded->body = std::move(offloaded_body);
     offloaded->body->set_parent_stmt(offloaded);
     offloaded->block_dim = 1;
