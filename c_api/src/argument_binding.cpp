@@ -1189,8 +1189,9 @@ std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
         ndarrays.emplace_back(taichi::lang::Ndarray(devalloc, dtype, shape));
         auto grad = gradient_args.find(arg.name);
         if (grad != gradient_args.end()) {
-          gradient_arrays.emplace_back(
-              devmem2devalloc(runtime2, grad->second->memory), dtype, shape);
+          auto gradient_allocation =
+              devmem2devalloc(runtime2, grad->second->memory);
+          gradient_arrays.emplace_back(gradient_allocation, dtype, shape);
           gradient_views.emplace(arg.name, &gradient_arrays.back());
         }
         arg_map.emplace(std::make_pair(
