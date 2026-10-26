@@ -204,7 +204,10 @@ class Kernel;
 // spans), so old kernels without the range contract cannot mask launch elision.
 // 88 - Include cold GPU geometry hints and select default blocks for proven
 //      independent static ranges before emitting code and launch metadata.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 90;
+// 89 - Compose defaults with unowned task axes and unrelated compile options.
+// 90 - Use proven source range envelopes without runtime specialization.
+// 91 - Preserve explicit demoted dense-loop blocks and admit uniform multi-range policies.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 91;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

@@ -2859,23 +2859,24 @@ class Kernel:
         raw = self.runtime.prog._kernel_task_manifest(kernel_cpp)
         tasks = tuple(OffloadedTaskManifest._from_core(item) for item in raw)
         range_tasks = tuple(task for task in tasks if task.task_type == "range_for")
-        if len(range_tasks) != 1:
+        if not range_tasks:
             raise TaichiRuntimeError(
-                "TaskLaunchPolicy specialization did not produce exactly one "
+                "TaskLaunchPolicy specialization did not produce a "
                 "parallel range task"
             )
-        selected = range_tasks[0].selected_block_size
-        if selected is None:
-            _, backend_kind = self._task_launch_backend_kind()
-            if backend_kind != "cpu" or policy.mode != "auto":
+        for task in range_tasks:
+            selected = task.selected_block_size
+            if selected is None:
+                _, backend_kind = self._task_launch_backend_kind()
+                if backend_kind != "cpu" or policy.mode != "auto":
+                    raise TaichiRuntimeError(
+                        "TaskLaunchPolicy backend did not expose a selected block size"
+                    )
+            if policy.mode == "require" and selected != policy.block_dim:
                 raise TaichiRuntimeError(
-                    "TaskLaunchPolicy backend did not expose a selected block size"
+                    f"TaskLaunchPolicy require(block_dim={policy.block_dim}) was not "
+                    f"satisfied for task {task.task_id}; backend selected {selected}"
                 )
-        if policy.mode == "require" and selected != policy.block_dim:
-            raise TaichiRuntimeError(
-                f"TaskLaunchPolicy require(block_dim={policy.block_dim}) was not "
-                f"satisfied; backend selected {selected}"
-            )
         self._task_launch_policy_manifests[key] = tasks
         return tasks
 
@@ -3063,8 +3064,7 @@ class Kernel:
         )
         tasks = self._validate_task_launch_policy_specialization(key, policy)
         range_tasks = tuple(task for task in tasks if task.task_type == "range_for")
-        selected = range_tasks[0].selected_block_size
-        applied = selected == policy.block_dim
+        applied = all(task.selected_block_size == policy.block_dim for task in range_tasks)
         status = "applied" if applied else "hint_not_applied"
         return TaskLaunchReport(
             policy=policy,

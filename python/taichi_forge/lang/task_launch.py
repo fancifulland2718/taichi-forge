@@ -1,4 +1,4 @@
-"""Constrained launch policy for direct JIT range kernels."""
+"""Explicit launch policy for direct JIT range kernels."""
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -14,6 +14,9 @@ class TaskLaunchPolicy:
     kernel. ``require`` fails before device submission unless the selected
     CUDA/Vulkan block size exactly matches the request. CPU has no equivalent
     GPU block contract: a hint falls back to ``auto`` and a requirement fails.
+    A uniform request covers every eligible parallel range, ndarray or demoted
+    dense Field loop. Multi-loop suitability is advisory; source ownership and
+    block-sensitive correctness checks still apply.
     """
 
     block_dim: Optional[int] = None
@@ -130,9 +133,9 @@ def _task_launch_resource_reports(tasks, policy, status, config):
             candidates = tuple(sorted(value for value in values if 1 <= value <= limit))
 
         rejected = ()
-        if policy.block_dim is not None and status in (
-            "fallback_auto",
-            "hint_not_applied",
+        if policy.block_dim is not None and is_range and (
+            status == "fallback_auto" or
+            (status == "hint_not_applied" and task.selected_block_size != policy.block_dim)
         ):
             if status == "fallback_auto":
                 rejection_reason = "CPU worker scheduling has no GPU block contract"
@@ -153,7 +156,7 @@ def _task_launch_resource_reports(tasks, policy, status, config):
             selection_reason = "CPU runtime worker scheduler"
         elif policy.mode == "auto":
             selection_reason = "compiler/backend default"
-        elif status == "applied":
+        elif task.selected_block_size == policy.block_dim:
             selection_reason = "requested block selected"
         else:
             selection_reason = "source or backend constraint selected the block"

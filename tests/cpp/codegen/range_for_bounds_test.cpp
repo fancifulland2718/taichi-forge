@@ -38,6 +38,9 @@ TEST(DefaultGpuBlockSize, ShrinksOnlyKnownSingleBlockRanges) {
     task.const_end = true;
     task.source_block_dim_explicit = true;
     EXPECT_EQ(select_default_gpu_block_size(task), 128);
+    EXPECT_EQ(select_default_gpu_block_size(task, 0, 32, false), 32);
+    EXPECT_EQ(task.block_dim, 128);  // Advice never applies the suggestion.
+    EXPECT_TRUE(task.source_block_dim_explicit);
     task.source_block_dim_explicit = false;
     task.device = Arch::x64;
     EXPECT_EQ(select_default_gpu_block_size(task), 128);
@@ -79,6 +82,8 @@ TEST(DefaultGpuBlockSize, PreservesCollectivesAndPhysicalThreadContracts) {
         break;
     }
     EXPECT_EQ(select_default_gpu_block_size(task), 128) << behavior;
+    task.source_block_dim_explicit = true;
+    EXPECT_EQ(select_default_gpu_block_size(task, 0, 32, false), 128) << behavior;
   }
 }
 

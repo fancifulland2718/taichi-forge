@@ -121,28 +121,28 @@ TaskLaunchPolicyApplication apply_task_launch_policy(
     }
   }
   TI_ERROR_IF(
-      parallel_loops.size() != 1,
-      "TaskLaunchPolicy requires exactly one top-level parallel range-for; "
-      "found {} parallel loops",
-      parallel_loops.size());
-
-  auto *loop = parallel_loops.front();
-  TI_ERROR_IF(
-      loop->snode != nullptr || loop->external_tensor || loop->mesh != nullptr,
-      "TaskLaunchPolicy currently supports only a range-for task; "
-      "struct-for, ndarray iteration, and mesh-for remain read-only");
+      parallel_loops.empty(),
+      "TaskLaunchPolicy requires at least one top-level parallel range-for");
 
   TaskLaunchPolicyApplication result;
   result.active = true;
-  if (policy->injected_block_dim) {
-    loop->block_dim = policy->block_dim;
-    result.changed_block_dim = true;
-  } else if (loop->block_dim == policy->block_dim) {
-    result.changed_block_dim = false;
-  } else if (policy->mode == Kernel::TaskLaunchPolicyMode::require) {
-    TI_ERROR("TaskLaunchPolicy require(block_dim={}) conflicts with the "
-             "kernel's explicit ti.loop_config(block_dim={})",
-             policy->block_dim, loop->block_dim);
+  for (auto *loop : parallel_loops) {
+    TI_ERROR_IF(
+        loop->mesh != nullptr ||
+            (loop->snode != nullptr &&
+             !(config.demote_dense_struct_fors && loop->snode->is_path_all_dense)),
+        "TaskLaunchPolicy supports range, ndarray and demotable dense Field "
+        "loops; sparse and mesh traversal retain their own geometry");
+    // The source contract belongs to each loop, not a kernel-wide AST flag.
+    if (loop->block_dim == 0) {
+      loop->block_dim = policy->block_dim;
+      result.changed_block_dim = true;
+    } else if (loop->block_dim != policy->block_dim &&
+               policy->mode == Kernel::TaskLaunchPolicyMode::require) {
+      TI_ERROR("TaskLaunchPolicy require(block_dim={}) conflicts with the "
+               "kernel's explicit ti.loop_config(block_dim={})",
+               policy->block_dim, loop->block_dim);
+    }
   }
   // A hint never overrides an explicit source-level loop_config. This keeps
   // SharedArray indexing and block-collective assumptions owned by the kernel.
@@ -186,37 +186,6 @@ class BlockSensitiveOperationFinder final : public BasicStmtVisitor {
 
  private:
   std::string reason_;
-};
-
-class SerialPreambleSafetyChecker final : public BasicStmtVisitor {
- public:
-  SerialPreambleSafetyChecker() {
-    allow_undefined_visitor = true;
-    invoke_default_visitor = true;
-  }
-
-  using BasicStmtVisitor::visit;
-
-  void visit(GlobalStoreStmt *stmt) override {
-    if (!stmt->dest->is<GlobalTemporaryStmt>()) {
-      safe_ = false;
-    }
-  }
-
-  void visit(Stmt *stmt) override {
-    if (stmt->has_global_side_effect()) {
-      safe_ = false;
-    }
-  }
-
-  static bool run(Block *body) {
-    SerialPreambleSafetyChecker checker;
-    body->accept(&checker);
-    return checker.safe_;
-  }
-
- private:
-  bool safe_{true};
 };
 
 Stmt *offload_phase_pointer_origin(Stmt *stmt) {
@@ -597,17 +566,18 @@ void validate_task_launch_policy_offloads(
     task_types +=
         fmt::format("{}[{}]", OffloadedStmt::task_type_name(task->task_type),
                     task->body->statements.size());
-    if (task->task_type == OffloadedStmt::TaskType::range_for) {
+    if (task->task_type == OffloadedStmt::TaskType::range_for ||
+        (task->task_type == OffloadedStmt::TaskType::struct_for &&
+         task->snode->is_path_all_dense)) {
       range_tasks += 1;
-    } else if (task->task_type != OffloadedStmt::TaskType::serial ||
-               !SerialPreambleSafetyChecker::run(task->body.get())) {
+    } else if (task->task_type != OffloadedStmt::TaskType::serial) {
       safe_task_shape = false;
     }
   }
   TI_ERROR_IF(
-      range_tasks != 1 || !safe_task_shape,
-      "TaskLaunchPolicy requires one physical parallel range task plus only "
-      "compiler-generated serial bound setup; the compiled kernel produced "
+      range_tasks == 0 || !safe_task_shape,
+      "TaskLaunchPolicy requires parallel range tasks and unchanged serial "
+      "tasks; the compiled kernel produced "
       "{} offloaded task(s): {}",
       tasks.size(), task_types);
 }
@@ -1152,18 +1122,44 @@ void offload_to_executable(IRNode *ir,
   // compile-tier/register/TLS requests do not own unrelated launch geometry.
   // Final TLS/BLS proofs still reject unsafe changes. The same compiler path
   // serves JIT, Graph and AOT; frozen compiled dispatches are never rewritten.
-  if ((config.arch == Arch::cuda || config.arch == Arch::vulkan) &&
-      config.default_gpu_block_dim == CompileConfig{}.default_gpu_block_dim &&
-      !kernel->get_task_launch_policy()) {
+  if (config.arch == Arch::cuda || config.arch == Arch::vulkan) {
     TI_COMPILE_PROFILER("cpp.ir.exec.select_default_gpu_block_size");
     auto task_index = first_task_index;
     const auto select = [&](OffloadedStmt *task) {
       const auto index = task_index++;
+      const char *owner = task->source_block_dim_explicit ? "source loop/launch policy" : nullptr;
       if (offload_plan) {
         TI_ASSERT(index < offload_plan->tasks.size());
         if (offload_plan->tasks[index].workgroup_size != 0)
-          return;  // This physical task has an explicit block contract.
+          owner = "task execution plan";
       }
+      if (!owner && config.default_gpu_block_dim != CompileConfig{}.default_gpu_block_dim)
+        owner = "global default_gpu_block_dim";
+      if (owner) {
+        // A different heuristic preference is not itself a problem. Advise
+        // only when all possible work fits one subgroup but the explicit
+        // block reserves more lanes. No inferred occupancy/performance claim.
+        const auto bound = proven_range_iteration_upper_bound(*task);
+        const auto subgroup = config.gpu_subgroup_size ? config.gpu_subgroup_size : 32;
+        if (!bound || *bound <= 0 || *bound > subgroup || task->block_dim <= subgroup)
+          return;
+        const int suggested = select_default_gpu_block_size(
+            *task, config.gpu_compute_unit_count, config.gpu_subgroup_size,
+            /*respect_source_block=*/false);
+        if (suggested != task->block_dim) {
+          TI_WARN("[block-advice] Kernel '{}' task {}: keeping block_dim={} "
+                  "from {}. At most {} independent iterations fit one "
+                  "{}-lane subgroup; this block reserves additional idle lanes. "
+                  "Consider {} after measurement. This is a heuristic, not a "
+                  "measured speedup. For multi-task kernels, inspect each "
+                  "loop's workload separately.",
+                  kernel->get_name(), index, task->block_dim, owner, *bound,
+                  subgroup, suggested);
+        }
+        return;
+      }
+      if (kernel->get_task_launch_policy())
+        return;
       task->block_dim = select_default_gpu_block_size(
           *task, config.gpu_compute_unit_count, config.gpu_subgroup_size);
     };

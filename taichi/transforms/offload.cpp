@@ -363,6 +363,10 @@ class Offloader {
       // adaptive
       offloaded_struct_for->block_dim =
           std::min(snode_num_elements, (int64)config.default_gpu_block_dim);
+    } else if (demotable && (arch == Arch::cuda || arch == Arch::vulkan)) {
+      // The resulting range kernel guards its tail. Container size is not a
+      // hardware block limit; retain explicit geometry and diagnose it later.
+      offloaded_struct_for->block_dim = for_stmt->block_dim;
     } else {
       if (for_stmt->block_dim > snode_num_elements) {
         TI_WARN(

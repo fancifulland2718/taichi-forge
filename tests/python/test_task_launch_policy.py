@@ -1083,9 +1083,13 @@ def test_task_launch_policy_preserves_source_block_and_rejects_unsafe_changes():
             out[i] += 1
 
     before = program._runtime_statistics_snapshot()["submission"]
-    with pytest.raises(RuntimeError, match="exactly one top-level"):
-        two_ranges.with_launch_policy(ti.TaskLaunchPolicy.block(64)).report(values)
+    multiple = two_ranges.with_launch_policy(ti.TaskLaunchPolicy.block(64, mode="require"))
+    report = multiple.report(values)
+    assert report.status == "applied"
+    assert [task.selected_block_size for task in report.tasks if task.task_type == "range_for"] == [64, 64]
     assert program._runtime_statistics_snapshot()["submission"] == before
+    multiple(values)
+    np.testing.assert_array_equal(values.to_numpy(), np.arange(256, dtype=np.int32) + 1)
 
 
 @pytest.mark.run_in_serial
