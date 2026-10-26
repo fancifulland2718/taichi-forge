@@ -236,6 +236,10 @@ class GraphKernelConfigurationSource:
             kernel_optimization_spec=spec,
         )
         tasks = _kernel_task_manifests(kernel_cpp)
+        if not kernel_cpp._same_source_ir_as(self.baseline_kernel_cpp):
+            raise ValueError(
+                "kernel configuration source changed after Graph freeze; rebuild the definition"
+            )
         if not tasks or any(
             task.optimization_spec_id != spec.compilation_identity for task in tasks
         ):

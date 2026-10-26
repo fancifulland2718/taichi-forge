@@ -7779,6 +7779,15 @@ void export_lang(py::module &m) {
       .def("set_compile_tier_override",
            &Kernel::set_compile_tier_override)
       .def("set_task_launch_policy", &Kernel::set_task_launch_policy)
+      .def("_same_source_ir_as", [](const Kernel &kernel, const Kernel &other) {
+        // Compare the existing pre-optimization cache bodies, not code-shaping
+        // config or task topology. A late variant must not silently recapture
+        // changed Python constants under an already frozen Graph definition.
+        return kernel.has_cached_offline_cache_body() &&
+               other.has_cached_offline_cache_body() &&
+               kernel.get_cached_offline_cache_body() ==
+                   other.get_cached_offline_cache_body();
+      })
       .def("set_kernel_optimization_spec",
            &Kernel::set_kernel_optimization_spec)
       .def("set_offload_execution_plan",

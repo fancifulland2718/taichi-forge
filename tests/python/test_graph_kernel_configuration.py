@@ -304,3 +304,28 @@ def test_configuration_neighbors_combine_controls_and_restore_without_history():
         materialized.executor.run(dict(out=out))
         np.testing.assert_array_equal(out.to_numpy(), np.arange(65) * 2 + 5)
         assert len(write._primal.compiled_kernels) == before + 1
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False, compile_tier="fast")
+def test_configuration_rejects_recaptured_host_constants():
+    config = {"value": 3}
+    result = ti.field(ti.i32, shape=65)
+
+    @ti.kernel
+    def write():
+        for i in range(65):
+            result[i] = config["value"]
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(write)
+    definition = builder.freeze()
+    catalog = definition.recipe_catalog(providers=PROVIDERS)
+    fragment = choose(definition, catalog, lambda spec: spec.ir.compile_tier == "full")
+    entry = catalog.compose((fragment.fragment_id,), stage="source-check")
+    config["value"] = 7
+    with definition.materialization_context(providers=PROVIDERS) as context:
+        with pytest.raises(Exception, match="source changed after Graph freeze"):
+            context.materialize(entry.recipe)
+        baseline = context.materialize(catalog.baseline.recipe)
+        baseline.executor.run({})
+        np.testing.assert_array_equal(result.to_numpy(), np.full(65, 3))
