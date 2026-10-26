@@ -13,7 +13,7 @@
 动态、设备限界、已有辅助块和无法证明 i32 分块算术安全的情况保留原路径。
 编译 cache 增加 CPU 专属 pass 版本标识；无持久字段布局或 ABI 改动。
 
-`parallelize` 是 worker 请求，分块数可以更多以供原调度器分配；不把这两个概念强制合并。
+提交 `96e4142e2`。`parallelize` 是 worker 请求，分块数可以更多以供原调度器分配；不把这两个概念强制合并。
 另确认 `block_dim_adaptive` 无消费者：保留配置 ABI，废弃无效的 Python 全局写入并提示用户。
 
 验证：9 项原生边界/cache 测试；15 项 Python（新 CPU 调度/归约/Graph/AOT、既有
@@ -38,6 +38,8 @@ CPU telemetry、三后端 DSL 及前反向）通过。旧 adaptive 参数诊断�
 源码 staging 基于上一轮安装包叠加本批补丁，版本 stamp 未作为新发布 wheel 身份；未发布。
 
 ## F2：多 task / Vulkan 显式调优
+
+提交 `5f31086ba`、`ca50b591a`，分别为多 task 资格与 Vulkan/物理计划合同。
 
 - 完整 Graph 的 workgroup 候选取各 range 的独立资源合同交集；索引只建一次，避免随 task
   数量反复扫描全部 artifact。合法性不足仍拒绝，非 range、源码 block 和 shared 规则保留。
@@ -69,6 +71,61 @@ CUDA12.83ms、Vulkan24.31ms。指标是 host 批提交到完成的完整窗口�
 验证使用匹配 ABI223 的 CP313 shim、已安装 reviewed CompileIQ fork 与本批 native/Python。
 runtime DLL SHA256 `ad4dae45b748141a0e5b5752fa337feba1f635f64b508d6f6b17e11c9fd83944`。
 
-## 待执行
+## F3：普通稀疏 listgen 容量调度
 
-F3 稀疏容量/冗余；F4 最终归档。mesh 来源与不修改范围见计划。
+提交 `5d1cd6d6e`。
+
+原有 opt-in 仅连乘严格祖先的元素容量，存在两个问题：非根实际按父容器切片分配 CTA，
+旧上界仍可能过大；根 listgen 按输出切片分配线程，Hash 另有 bucket/active-slot 扫描，
+不能把所有根任务都当成只有一个 CTA 的工作。共享 `llvm_listgen_grid_bound` 与实际
+helper 的两种映射对齐，乘法先饱和避免容量溢出。Hash/未证明布局返回无资格，保留饱和路径。
+
+`listgen_static_grid_dim=True` 成为默认；显式 False 保留对照。已有 grid-stride 循环、
+block 大小和 list reuse 不变，未用初始激活数或池容量 hint 限制将来拓扑。CPU 与 Vulkan
+继续原路径；AMDGPU 共用 LLVM 推导，但未做设备验证。没有额外候选、workspace、持久字段
+或 ABI 更新，cache 身份单独记录新的容量规则。默认已采用边界的 Graph 不重复提供同义候选。
+
+验证：7 项原生切片/溢出/未知布局/cache 检查；9 项新旧 sparse Graph/AD 检查通过。
+覆盖根 131,073 cells、非根 2,051 parent cells 的跨切片分配，CPU/CUDA/Vulkan 空拓扑、
+迁移与清空后的前向、反向以及 forward AD。CPU/CUDA sparse AOT 关闭重载、CUDA 多层
+固定执行、Vulkan 稀疏固定执行与列表增长、CUDA Hash 二维子节点共 5 项通过。
+Vulkan storage-image metadata 对照另 1 项通过。AOT 使用独立与借用 runtime，检查
+显式梯度和退休；未扩大为所有稀疏/梯度组合资格。
+
+回归顺带修正两类旧断言，分别独立提交：`43f763f95` 让 sparse recipe 只核对自身族贡献，
+不固定整个 catalog 大小；`b656dd6bb` 对齐既有 GFX writer v16，7 个测试文件中的 v15 期望改为 v16。
+没有修改持久格式；版本断言修正后的两项 Vulkan 验证通过，其余同类只作静态对齐。
+
+性能：最终规则使用同一 candidate DLL，禁用 profiler/offline cache，四个独立进程
+A/B/B/A；每路径预热10次，5×40步完整提交到完成，churn 包含 deactivate/activate。
+
+| 场景 | 饱和策略 μs/步，两进程 | 切片策略 μs/步，两进程 | listgen grid |
+| --- | --- | --- | --- |
+| 64-cell bitmask，稳定 | 35.53 / 34.16 | 36.04 / 35.22 | 4080 → 1 |
+| 同上，每步重建 | 88.02 / 84.67 | 98.14 / 87.88 | 4080 → 1 |
+| pointer257 × dense64，稳定 | 35.59 / 34.77 | 36.22 / 35.14 | 4080,4080 → 1,1 |
+| 同上，每步重建 | 399.51 / 392.49 | 129.35 / 128.33 | 4080,4080 → 1,1 |
+| 65,536-cell bitmask，稳定 | 45.95 / 32.80 | 36.96 / 46.34 | 4080 → 1 |
+| 同上，每步重建 | 99.13 / 97.12 | 95.49 / 98.70 | 4080 → 1 |
+
+嵌套 pointer 重建两进程中位值从396.00降至128.84μs，减少67.46%，约3.07倍吞吐；
+不是整体应用加速。其他项未证明稳定改善，小对象主机窗口有几μs波动与个别较慢样本。
+默认策略的依据是按运行时映射排除无工作 CTA，未减少任何可并行的实际切片。
+首次 activate+Graph 编译/加载/执行为饱和60.41–132.85ms、切片58.95–126.21ms，
+无可靠编译增减证据，不能据此计算确定回本步数；暖态节省约267μs/步供后续实际负载折算。
+原有粗容量选项的 profiler 诊断 ABBA 单独保留，不能与最终无 profiler 主机窗口混算。
+
+CPU/Vulkan 同脚本控制运行均数值通过（配置不改变其调度），不宣称它们由本补丁提速。
+脚本 `measure_sparse.py`；原始 `slices-*.json`/日志在临时验证目录。
+最终 runtime DLL SHA256 `54036be419516bf313dfbfbc947f8b8e5694e8e8452c8596b21692723d89154f`。
+
+## F4：Mesh 审查与归档
+
+继承的 Taichi 拓扑 mesh 不修改。Forge Vulkan mesh/task 管线维持调用方 shader 与冻结
+pipeline 合同；普通 compute block 选择不能改写其 LocalSize 或 draw group 语义。
+4 项实际 Vulkan 检查通过：能力分离、direct/Graph 输出与超设备 group 拒绝，以及
+mesh-only 普通 / task+mesh 已选方案的 AOT 导出、独立/借用加载、后续显式梯度。
+两个8×8产物分别15,499/16,051 bytes，生产阶段67.84/47.54ms；仅为小型验收证据，无基线提速结论。
+冷阶段 shader LocalSize/输出声明诊断可独立后续安排，详见计划，未在本轮实施。
+
+本批不发布 wheel，不验证 Linux/AMDGPU 设备，不开启默认 CompileIQ 搜索。

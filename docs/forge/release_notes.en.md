@@ -42,6 +42,14 @@ See the [release procedure](../design/pypi_release.en.md).
 
 ### Upgrading and compilation settings
 
+- CPU compilation removes statically empty trailing range chunks while retaining productive
+  partitions, explicit `parallelize` worker requests and the existing scheduler. Dynamic or
+  unproven ranges are unchanged. The unused `block_dim_adaptive=False` setting now produces a
+  compile-time deprecation notice instead of an ineffective global configuration write.
+- LLVM GPU sparse listgen defaults to declared-capacity scheduling matched to its root/nonroot
+  slice mapping, removing idle CTAs without freezing later topology to the first active set.
+  Unproven layouts, including Hash, retain their previous scheduling. CPU/Vulkan keep their
+  own implementations. See [listgen options and validation boundaries](forge_options.en.md#27-sparse-struct-for--listgen-optimisations).
 - Ordinary CUDA/Vulkan loops now select default block sizes at compile time.
   For constant or source-bounded ranges without thread-group dependencies, compute-unit
   count and subgroup width can reduce idle lanes and spread underfilled work.
@@ -95,11 +103,11 @@ See the [release procedure](../design/pypi_release.en.md).
   [Search reports](graph_recipe_integration.en.md) add whole-search accounting, measurement
   sources and cold-cost execution equivalents, separately from break-even counts. Failed and
   unselected trials are included; missing historical wall time after resume stays unknown.
-- Explicit CUDA offload-plan search retains a shared baseline and immutable edits instead
+- Explicit CUDA/Vulkan offload-plan search retains a shared baseline and immutable edits instead
   of a full task plan for every candidate. Inspection or binding constructs the selected
   plan; prepared execution is unchanged. The compact search manifest is version 2, with
   versioned candidate identities distinct from the unchanged execution/code identities.
-- Complete Graph and experimental CUDA offload-plan searches support candidate paging,
+- Complete Graph and experimental CUDA/Vulkan offload-plan searches support candidate paging,
   comparisons across pages and resumption after a budget interruption. The 4096-ID limit
   bounds one transport frame, not the full candidate domain. Paging requires the companion
   CompileIQ fork's `logical_stage_pages_v1` capability. Large kernel searches require an
@@ -117,6 +125,11 @@ See the [release procedure](../design/pypi_release.en.md).
   restore controls; selected code uses existing AOT export with original derivative dispatches.
   Changed source semantics are rejected during deferred materialization. Automatic tuning
   remains disabled.
+- Legal workgroup discovery covers multiple range tasks with serial prefixes/suffixes by
+  intersecting each task's resource qualification. Experimental per-task plans also support
+  Vulkan workgroups without exposing CUDA-only controls. Early plan admission and final-task
+  identity share the same dense-Field-to-range proof, preserving source blocks and existing
+  derivative paths.
 - Vulkan task manifests, caches and AOT metadata retain explicit source block ownership,
   allowing discovery to exclude conflicting workgroup requests before compiling them.
   Ordinary execution geometry and semantics remain unchanged.
@@ -324,6 +337,8 @@ See the [release procedure](../design/pypi_release.en.md).
 
 ### Autodiff and backend correctness
 
+- The generic experimental Vulkan sparse SNode startup warning is removed. Actual capability,
+  capacity and independent Hash diagnostics remain.
 - Vulkan C API image import translates the supplied `VkImageLayout` explicitly
   instead of casting it to a different internal enum. The first transition now
   preserves the external layout; layouts without an exact internal representation

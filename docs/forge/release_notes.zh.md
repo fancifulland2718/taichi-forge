@@ -39,6 +39,12 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
 
 ### 升级与编译设置
 
+- CPU 编译期去掉静态 range 的空尾分块，保留有效分块、显式 `parallelize` worker 请求和
+  原调度器；动态或无法证明安全的范围不变。无消费者的 `block_dim_adaptive=False`
+  改为编译期废弃提示，不再产生无效的全局配置写入。
+- LLVM GPU 稀疏 listgen 默认按实际根/非根切片映射和声明容量减少空 CTA；不按初次
+  激活数限制后续拓扑，Hash 等未证明布局保留原调度。CPU/Vulkan 沿用各自实现。
+  详见 [listgen 选项与验证边界](forge_options.zh.md#27-sparse-struct-for--listgen-优化)。
 - CUDA/Vulkan 的普通循环增加编译期默认 block 选择：对常量或源码可证明上界、无线程分组依赖的
   范围，结合设备计算单元数量与子组宽度，减少闲置线程并改善未充分铺开的并行工作。
   `ti.ndrange`、`ti.grouped` 和降为 range 的 dense Field 等共用最终 task 分析。
@@ -74,10 +80,10 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
   recording 执行的候选。**CompileIQ 自动调优默认关闭**，普通 JIT/Graph/AOT 不会自动搜索。
   [搜索报告](graph_recipe_integration.zh.md)新增完整搜索成本账、观测来源及冷成本等效执行次数，
   与回本次数分开；失败/未选中试验计入搜索，续跑中缺失的历史墙钟时间保持未知。
-- 显式 CUDA offload-plan 搜索共用基线并保留不可变修改，不再为每个候选常驻完整任务计划；
+- 显式 CUDA/Vulkan offload-plan 搜索共用基线并保留不可变修改，不再为每个候选常驻完整任务计划；
   查看或绑定时才构造所选计划，已准备执行的重放不变。紧凑搜索 manifest 升为版本 2，
   候选描述身份单独版本化，原有执行计划及代码身份保持不变。
-- 完整 Graph 与实验性 CUDA offload-plan 搜索支持候选分页、跨页比较及预算中断后续跑。
+- 完整 Graph 与实验性 CUDA/Vulkan offload-plan 搜索支持候选分页、跨页比较及预算中断后续跑。
   原 4096-ID 限制仅约束单个传输帧，不再限制总候选域；分页需要配套 CompileIQ fork
   的 `logical_stage_pages_v1` 能力。大域 kernel 搜索要求显式试验预算，跨 session 恢复
   要求可移植评价上下文。目录、测量记录和实际编译缓存仍随搜索增长；分页不代表恒定
@@ -89,6 +95,9 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
   以及 CUDA launch bounds。重复特化共享候选代码，保留每次绑定；survivor 邻域支持组合与
   稳定恢复。已选代码继续使用现有 AOT 导出，原梯度 dispatch 保持；延迟物化会拒绝改变的
   源码语义，默认仍不自动调优。
+- 合法 workgroup 发现覆盖多个 range task 与串行前后段，取各 task 资源资格的交集；
+  实验性逐 task 计划也支持 Vulkan workgroup，CUDA 专用选项不会混入。dense Field
+  降为 range 的早期计划准入与最终任务身份共用同一判定，保持源码 block 和既有梯度路径。
 - Vulkan task manifest、缓存及 AOT metadata 保留源码显式 block 标记，配置发现阶段即可
   排除不应改写的 workgroup 请求，避免先编译再拒绝；普通执行的 block 和语义不变。
 - frontend 与 native runtime 使用私有 ABI **223**，持久执行计划为 **27**，
@@ -243,6 +252,7 @@ PyPI 发布 `taichi-forge-runtime` 与 `taichi-forge` 的 wheel；随后 GitHub 
 
 ### 自动微分与后端正确性
 
+- 移除 Vulkan sparse SNode 通用实验性启动警告；保留实际能力、容量及独立 Hash 诊断。
 - Vulkan C API 图像导入显式转换传入的 `VkImageLayout`，不再强转为数值含义不同的
   内部枚举。首次 transition 保留外部真实布局；内部无法精确表示的布局在分配 view
   前明确拒绝。导入不自动转移队列所有权，也不等待外部生产者。
