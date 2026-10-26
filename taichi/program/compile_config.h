@@ -380,18 +380,14 @@ struct CompileConfig {
   // (active lanes) to 1 per subgroup. Default false (opt-in). Output
   // SPIR-V differs and is keyed into the offline cache hash.
   bool spirv_listgen_subgroup_ballot{false};
-  // §16.13 (S3, 2026-05-05): when ON, CUDA / AMDGPU listgen kernels
-  // launch with a grid_dim derived from the static upper bound on
-  // num_parent_elements (= product of num_cells_per_container of all
-  // strict ancestors of the listed SNode, root excluded), capped by the
-  // hardware-saturating value. This eliminates idle blocks on shallow
-  // sparse trees (e.g. root.bitmasked(...) where parent_list size is 1)
-  // without affecting correctness (grid-stride loop in
-  // element_listgen_nonroot covers any underestimate). Vulkan already
-  // computes the equivalent quantity via
-  // task_attribs_.advisory_total_num_threads, so this flag is a no-op
-  // for the SPIR-V backend. Default false (opt-in).
-  bool listgen_static_grid_dim{false};
+  // CUDA / AMDGPU listgen uses the declared parent-container count times
+  // slices per container, capped by the hardware-saturating launch width.
+  // This removes idle blocks without changing the runtime grid-stride loop
+  // or limiting logical work. Root listgen instead
+  // distributes output slices across threads. Hash uses a different mapping
+  // and retains the saturating launch. CPU/SPIR-V ignore this flag; Vulkan
+  // derives its dispatch size from its own scan capacity. Default true.
+  bool listgen_static_grid_dim{true};
   // VS-1 (2026-05): Vulkan/GFX listgen scratch buffer sizing.
   // Default false preserves the legacy single 32 MiB allocation. When true
   // and vulkan_listgen_buffer_MB == 0, GfxRuntime grows the shared

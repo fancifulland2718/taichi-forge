@@ -16,6 +16,7 @@
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/analysis/offline_cache_util.h"
 #include "taichi/analysis/gather_snode_tree_dependencies.h"
+#include "taichi/analysis/listgen_launch.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/codegen/codegen_utils.h"
@@ -1008,32 +1009,10 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
             &num_SMs, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, nullptr);
         const int saturating = num_SMs * query_max_block_per_sm;
         int chosen = saturating;
-        size_t parent_list_max = 1;
-        if (stmt->snode != nullptr) {
-          for (auto *sn = stmt->snode->parent;
-               sn != nullptr && sn->type != SNodeType::root;
-               sn = sn->parent) {
-            parent_list_max *= (size_t)sn->num_cells_per_container;
-            if (parent_list_max >= (size_t)saturating) {
-              parent_list_max = (size_t)saturating;
-              break;
-            }
-          }
-          current_task->sparse_list_parent_grid_bound =
-              std::max(1, std::min(saturating, (int)parent_list_max));
-        }
-        // §16.13 (S3, 2026-05-05): when the opt-in flag is set, derive a
-        // static upper bound on the number of parent_list elements (i.e.
-        // the i-axis count of element_listgen_nonroot's outer loop, see
-        // taichi/runtime/llvm/runtime_module/runtime.cpp) and cap the
-        // grid_dim to it. The bound is the product of
-        // num_cells_per_container of every strict ancestor of stmt->snode
-        // (root excluded). Underestimating is safe because the runtime
-        // loop is grid-stride: any extra parent elements get serviced by
-        // existing blocks. On a typical sparse tree
-        // `root.bitmasked(64).f32`, parent_list has exactly 1 entry, so
-        // saturating to thousands of blocks wastes >99% of launched
-        // threads on dispatch overhead and atomic contention.
+        current_task->sparse_list_parent_grid_bound = llvm_listgen_grid_bound(
+            stmt->snode, stmt->block_dim, saturating);
+        // Match the selected root/nonroot helper's slicing contract. Unknown
+        // mappings (including Hash) keep the hardware-saturating launch.
         if (compile_config.listgen_static_grid_dim &&
             current_task->sparse_list_parent_grid_bound > 0) {
           chosen = current_task->sparse_list_parent_grid_bound;

@@ -27,6 +27,10 @@
   CACHE_FIELD(spirv_skip_intermediate_listgen);
   CACHE_FIELD(spirv_listgen_subgroup_ballot);
   CACHE_FIELD(listgen_static_grid_dim);
+  if (config.arch == Arch::cuda || config.arch == Arch::amdgpu) {
+    // The bound is also consumed by explicit Graph recipes with the flag off.
+    CACHE_VALUE(std::string("llvm-listgen-slices-v2"));
+  }
   CACHE_FIELD(advanced_optimization);
   CACHE_FIELD(constant_folding);
   CACHE_FIELD(kernel_profiler);

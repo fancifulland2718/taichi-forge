@@ -95,9 +95,10 @@ class OffloadedTask {
   // Also identifies a struct-for's owning tree; this does not enable reuse.
   int sparse_list_snode_id{-1};
   int sparse_list_parent_snode_id{-1};
-  // Static CTA upper bound for this listgen task, derived from the maximum
-  // number of resident parent-list elements and capped by the ordinary
-  // hardware-saturating grid. Zero means that no exact bound was published.
+  // Static CTA upper bound for this listgen task, derived from the
+  // runtime slice mapping and capped by the ordinary hardware-saturating
+  // grid. Root tasks distribute output slices across threads; other tasks
+  // distribute parent-list slices across blocks. Zero means unproven.
   int sparse_list_parent_grid_bound{0};
   bool may_mutate_sparse_topology{false};
   int sparse_mutation_snode_id{kSparseMutationNone};

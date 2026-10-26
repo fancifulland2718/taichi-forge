@@ -24,8 +24,8 @@ CompileConfig::CompileConfig() {
   spirv_skip_intermediate_listgen = true;
   // §16.12 (S2): default OFF; opt-in via ti.init(spirv_listgen_subgroup_ballot=True).
   spirv_listgen_subgroup_ballot = false;
-  // §16.13 (S3): default OFF; opt-in via ti.init(listgen_static_grid_dim=True).
-  listgen_static_grid_dim = false;
+  // Elide listgen blocks beyond the declared sliced-container capacity.
+  listgen_static_grid_dim = true;
   // VS-2: default OFF; opt-in via ti.init(vulkan_dispatch_cache=True).
   vulkan_dispatch_cache = false;
   // VS-3: default ON after the 3-run VS-1/VS-2/VS-3 Vulkan matrix.

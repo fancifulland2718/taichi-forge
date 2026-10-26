@@ -92,12 +92,14 @@ By default Forge derives the CUDA sparse SNode pool from the materialized SNode 
 
 ### 2.7 Sparse struct-for / listgen optimisations
 
-Both flags default OFF and are bit-identical to the legacy path when off. Enabling them changes generated kernel code (CUDA grid_dim or SPIR-V atomics), and the change is keyed into the offline cache hash.
+`listgen_static_grid_dim` defaults ON; `spirv_listgen_subgroup_ballot` remains OFF. The options and listgen scheduling revision participate in offline-cache identity. Previously exported AOT artifacts retain their own physical scheduling.
 
 | Kwarg | Default | Purpose |
 |---|---|---|
 | `spirv_listgen_subgroup_ballot` | `False` | Vulkan/SPIR-V only. Aggregates per-thread `OpAtomicIAdd` into one subgroup-ballot atomic per active subgroup inside the listgen kernel. Reduces atomic contention on dense-active sparse struct-for. Requires the device to support subgroup ballot (the Vulkan adapter advertises this in standard SPIR-V capabilities); otherwise the flag has no effect. |
-| `listgen_static_grid_dim` | `False` | CUDA / AMDGPU only. Launches sparse-listgen kernels with a `grid_dim` derived from the static upper bound on parent-element count (= product of `num_cells_per_container` of strict ancestors of the listed SNode, root excluded), capped by the hardware-saturating value. Eliminates idle blocks on shallow sparse trees. The Vulkan backend already computes the equivalent quantity via task attribs, so this flag is a no-op there. Correctness is preserved by the existing grid-stride loop in `element_listgen_nonroot`. |
+| `listgen_static_grid_dim` | `True` | CUDA / AMDGPU LLVM listgen selects its grid from declared container capacities and runtime slicing: root listgen assigns output slices to threads, while nonroot listgen assigns parent-container slices to blocks, up to the hardware-saturating launch width. It neither specializes to the first active set nor limits logical work. Unproven layouts, including Hash, retain saturating launches. Explicit `False` keeps saturation for comparison. CPU ignores this option; Vulkan uses its own scan capacity and listgen reuse path. |
+
+Device validation in this round covers Windows CPU/CUDA/Vulkan. AMDGPU shares the LLVM capacity rule but has not received device performance validation. Stable topology can reuse its lists, so smaller listgen grids do not guarantee a warm-path speedup.
 
 ### 2.8 Hash SNode
 

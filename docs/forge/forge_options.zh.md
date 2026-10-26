@@ -92,12 +92,14 @@ Forge 默认从已物化的 SNode 树推导 CUDA sparse SNode pool，并在同�
 
 ### 2.7 Sparse struct-for / listgen 优化
 
-两个 flag 均默认关闭，关闭时产出与 legacy 路径字节一致。启用后会改变 kernel 代码（CUDA grid_dim 或 SPIR-V 原子操作），变化已纳入 offline cache hash。
+`listgen_static_grid_dim` 默认开启；`spirv_listgen_subgroup_ballot` 仍默认关闭。配置及 listgen 调度规则版本纳入 offline cache 身份，已导出的 AOT 保留自身物理调度。
 
 | 参数 | 默认 | 用途 |
 |---|---|---|
 | `spirv_listgen_subgroup_ballot` | `False` | 仅 Vulkan/SPIR-V。在 listgen kernel 内将逐线程 `OpAtomicIAdd` 聚合为每活跃 subgroup 一次 ballot 原子操作，降低 dense-active sparse struct-for 的原子争用。需设备支持 subgroup ballot（标准 SPIR-V 能力，Vulkan adapter 上报），否则该 flag 无效。 |
-| `listgen_static_grid_dim` | `False` | 仅 CUDA / AMDGPU。sparse-listgen kernel 使用静态上限推出的 `grid_dim`（= 被列 SNode 严格祖先的 `num_cells_per_container` 乘积，不含 root），并以硬件饱和值封顶。消除浅稀疏树上的空闲 block。Vulkan 已通过 task attribs 计算等价量，该 flag 在 SPIR-V 后端为空操作。正确性由 `element_listgen_nonroot` 现有 grid-stride 循环保证。 |
+| `listgen_static_grid_dim` | `True` | CUDA / AMDGPU 的 LLVM listgen 按声明的容器容量和运行时切片布局选择 grid：根 listgen 按输出切片分配线程，非根按父容器切片分配 block，以硬件饱和值限制发射宽度。不会用首次激活数固化后续遍历，也不限制逻辑工作量；Hash 等未证明的布局保持原饱和策略。显式 `False` 保留饱和调度用于对照。CPU 不使用此选项；Vulkan 使用自己的扫描容量及 listgen 复用路径。 |
+
+本轮实际验证为 Windows CPU/CUDA/Vulkan；AMDGPU 共享 LLVM 容量规则，未作设备性能验证。稳定拓扑可直接复用列表，缩减 listgen grid 不保证其暖态提速。
 
 ### 2.8 Hash SNode
 

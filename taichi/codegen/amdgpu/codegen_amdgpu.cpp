@@ -1,4 +1,5 @@
 #include "taichi/codegen/amdgpu/codegen_amdgpu.h"
+#include "taichi/analysis/listgen_launch.h"
 
 #include <vector>
 #include <set>
@@ -398,21 +399,9 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
             &num_SMs, HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, 0);
         const int saturating = num_SMs * query_max_block_per_sm;
         int chosen = saturating;
-        size_t parent_list_max = 1;
-        if (stmt->snode != nullptr) {
-          for (auto *sn = stmt->snode->parent;
-               sn != nullptr && sn->type != SNodeType::root;
-               sn = sn->parent) {
-            parent_list_max *= (size_t)sn->num_cells_per_container;
-            if (parent_list_max >= (size_t)saturating) {
-              parent_list_max = (size_t)saturating;
-              break;
-            }
-          }
-          current_task->sparse_list_parent_grid_bound =
-              std::max(1, std::min(saturating, (int)parent_list_max));
-        }
-        // §16.13 (S3): mirror codegen_cuda.cpp listgen static grid_dim.
+        current_task->sparse_list_parent_grid_bound = llvm_listgen_grid_bound(
+            stmt->snode, stmt->block_dim, saturating);
+        // The LLVM runtime uses the same sliced-container mapping as CUDA.
         if (compile_config.listgen_static_grid_dim &&
             current_task->sparse_list_parent_grid_bound > 0) {
           chosen = current_task->sparse_list_parent_grid_bound;
