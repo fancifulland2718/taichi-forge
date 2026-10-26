@@ -2,6 +2,8 @@
 
 [English](index.en.md)
 
+先看 [0.7.0 简明参考](reference.zh.md)：安装配套、JIT/Graph/AOT 选择、性能设置与升级注意事项。
+
 ## 版本与安装
 
 这些文档适用于 **Taichi Forge 0.7.0（待发布）**，版本变化与升级说明见

@@ -10,17 +10,24 @@ see [AOT deployment profiles](aot_deployment_profiles.en.md).
 ## Component pairing and versions
 
 Frontend, Python bridge and native runtime must have matching private ABI
-revisions. The current revision is **147**, defined in
+revisions. The current revision is listed in the
+[release upgrade guidance](release_notes.en.md#upgrading-and-compilation-settings) and defined in
 [`runtime_contract.h`](../../taichi/common/runtime_contract.h) and
 [`_contract_constants.py`](../../python/taichi_forge/_contract_constants.py).
-Use components from the same matched build; development revisions within
+Use components satisfying the declared dependencies and matching private ABI;
+identical Git commits are not required. Development revisions within
 0.6.3–0.7.0 are not compatibility targets. Requirements below refer to this
 current pairing, not a historical per-feature ABI revision.
 
-Native operation schema versions, ExecutionPlan versions (currently up to 26)
+Native operation schema versions, ExecutionPlan versions
 and external provider ABIs are separate contracts. Their numbers do not select
 the Forge private ABI. Package qualification records retain the revisions and
 sizes measured at the time; they are not current installation requirements.
+
+The current ExecutionPlan ceiling and artifact versions are also listed in the
+release notes and [`execution_plan.h`](../../taichi/aot/execution_plan.h).
+Per-feature plan/schema numbers below describe formats, not a requirement to
+install old components. Start with the [concise reference](reference.en.md).
 
 ## SDK build and installation
 
@@ -879,7 +886,7 @@ are `product(shape) * channels * channel_bytes`, separate from reported query
 workspace, which does not include image residency. Alpha recordings can export
 through the image reconstruction contract below.
 
-With matching private ABI83 components, explicit execution-plan kernels on CUDA or Vulkan
+With matching current private ABI components, explicit execution-plan kernels on CUDA or Vulkan
 may bind sampled `Texture` arguments directly to `image/sampled` resource names:
 
 ```python
@@ -982,12 +989,11 @@ as required by the [Vulkan copy contract](https://docs.vulkan.org/refpages/lates
 This qualifies 2D depth sampling and uploads, including complete mip chains.
 Explicit raster plans can render to AOT-owned attachments as described below.
 
-GFX AOT exports containing `rw_texture` arguments require metadata v4 and
-paired ABI90 components. Argument metadata preserves the exact format and mip
-level, including kernels that only inspect the image shape. Ordinary exports
-keep their earlier metadata version. Old SPIR-V offline-cache entries missing
-the new argument field are rejected by strict cache decoding and recompiled;
-CPU/CUDA cache formats are unchanged.
+GFX AOT exports containing `rw_texture` arguments use the current matched
+metadata and private ABI. Argument metadata preserves the exact format and mip
+level, including kernels that only inspect the image shape. See the release
+notes for current format numbers. Old SPIR-V offline-cache entries missing
+required argument fields are rejected by strict decoding and recompiled.
 
 `image/sampled` accepts an optional `sampler` object with the fields of
 `ti.hardware.sampling.SamplerConfig`: `min_filter`, `mag_filter`, `mip_filter`,
@@ -1346,7 +1352,7 @@ them. Existing Vulkan storage allocations retain their implicit indirect usage
 for GPU-produced dispatch packets. The default remains `("storage",)`. This declaration
 does not add synchronization or inspect index contents. Plan-private ndarray
 resources accept the same `usage` list with execution format v18 and paired
-ABI88 components. Omitted usage keeps the previous storage allocation and
+current private ABI components. Omitted usage keeps the previous storage allocation and
 does not raise the plan version. `ndarray_view` inherits its parent's actual
 usages and cannot redeclare them. Archived `initial_data` works with vertex,
 index and uniform buffers, allowing fixed drawing data to remain private.
@@ -1421,14 +1427,14 @@ descriptors and different-device owners are rejected before execution.
 Graph export selects pass version 2 when AS descriptors occur without arrays. Supply each
 source `InstanceTLAS` under its Graph name in `source_bindings`; use the same
 explicit BLAS/TLAS seeds or public resource mapping as compute ray queries.
-Refit and raster consumers share the reconstructed scene. Paired private ABI91
+Refit and raster consumers share the reconstructed scene. Paired current private ABI
 components are required for the shared shader-stage contract. Windows checks
 cover simultaneous vertex/fragment queries, device transform refit with
 hit/miss/hit output, private/public scenes, actual downstream kernel gradients
 and owner retirement. External ray queries and rasterization remain outside AD.
 
 `vulkan_graphics/pass_direct` version 3 adds fixed storage-buffer descriptor
-arrays, with paired ABI92 components. Query
+arrays, with paired current private ABI components. Query
 `native_operation_capabilities("vulkan_graphics_pass_direct", version=3)` for
 schema availability; preparation also checks device descriptor-indexing/count
 limits and the reflected shader interface. Pipeline resources remain version 1.
@@ -1628,7 +1634,7 @@ continue to require their documented reconstruction inputs. Windows ordinary and
 selected CUDA/Vulkan checks cover standalone creation, borrowed JIT Texture
 imports, aliases, downstream gradients, CUDA siblings and resource retirement.
 
-Matching ABI83 components also expose runtime-owned native resources, shared
+Matching current private ABI components also expose runtime-owned native resources, shared
 across modules and plans through the existing factory catalog:
 
 ```python
@@ -1875,7 +1881,7 @@ checks cover JIT→AOT→JIT ordering, explicit gradients, tensors, two borrower
 source-wrapper GC and in-flight reset. This adds shared storage, not provider
 operation coverage.
 
-With paired ABI83 components, CUDA/Vulkan borrowers can also call
+With paired current private ABI components, CUDA/Vulkan borrowers can also call
 `image = runtime.import_texture(jit_texture)`. It returns the same public
 `NativeResource` type used by execution plans and sampled kernel bindings,
 retaining the Program's generation-qualified Texture lease. No image storage,
@@ -2475,7 +2481,7 @@ defaults are unchanged. CPU/Vulkan reject this lowering; provider bodies and
 nested control are outside this slice. IF/SWITCH, empty cases, default/no-op,
 signed selectors, actual `kernel.grad`, standalone/borrowed consumers and in-flight
 retirement are verified. Branches share code entries and replay does not parse
-descriptions. A v16 consumer and matching ABI83 components are required.
+descriptions. A v16 consumer and matching current private ABI components are required.
 `add_execution_plan(name, graph, gradients=...)` also exports IF/SWITCH selected
 for `cuda_masked_bounded_graph` under `native_required`, preserving physical
 boundaries, conditions and prefix/suffix operations. It deduplicates code by
@@ -2577,7 +2583,7 @@ control storage grows with encoded budgets. Small Windows CUDA tests cover two
 ordered inner loops, zero budgets, early exit/exhaustion, an actual suffix
 `kernel.grad`, standalone/borrowed consumption, two bindings and predicate,
 module and owner retirement. Gradients require explicit binding; this does not
-differentiate control flow. A v13 consumer is required; private ABI71 remains.
+differentiate control flow. A v13 consumer is required; components must match the current private ABI.
 `add_execution_plan(name, graph)` also exports a materialized nested Graph whose
 submission route is frozen to `device_update`, including a frozen baseline recipe.
 It saves the selected physical kernel sequence, initial/body/tail boundaries,
@@ -2597,7 +2603,7 @@ rejects an ABI mismatch, including for zero budgets. It generates neither kernel
 code nor device-update nodes, and does not silently change the selected route.
 Each prepared instance owns its gate storage until submitted work retires.
 Static code is shared across plans; captured command storage grows with budgets.
-This requires a v14 consumer and matching private ABI83 components.
+This requires a v14 consumer and matching current private ABI components.
 `add_execution_plan(name, graph)` exports a materialized nested Graph frozen to
 `masked`, preserving its physical dispatch boundaries and generating only the
 required body variants. Code is deduplicated by source specialization and launch
@@ -2617,7 +2623,7 @@ A nonempty initial condition runs once even for a zero budget and uses ordinary
 entries. Static code does not grow with the budget, but recorded commands do.
 Preparation retains the same binding, gradient and retirement contracts and
 rejects non-CUDA runtimes, native provider bodies and launch overrides. This
-format requires a v15 consumer and matching ABI83 components.
+format requires a v15 consumer and matching current private ABI components.
 `add_execution_plan(name, graph)` also exports materialized flat Graphs selected
 for `cuda_masked_bounded_graph`. It preserves the selected physical body and tail
 condition, generates only their gated variants, and shares code across plans.
@@ -2812,7 +2818,7 @@ gradients can consume the reordered records.
 Installed Windows CPU/CUDA/Vulkan qualification covers matrix f32, vector i64
 and 8×8 i32 Field payloads, cold/warm export, standalone/borrowed consumers,
 parent Graphs, mutable inputs, downstream gradients and retirement. Vulkan
-synchronization validation passes. This frontend change reuses the ABI125
+synchronization validation passes. This frontend change reuses the current private ABI
 runtime and adds no application code payload; prepared sort retains its
 backend workspace.
 
@@ -3129,7 +3135,7 @@ recording. Equality means the same registered resource handle, not equal content
 or a coincident device address; reuse an owner when aliasing is required. Named
 links share the existing retirement graph and are stored in compact sorted
 vectors. Warm replay performs no path traversal. Use a v17 reader and paired
-private ABI83 components; v1–v16 plans keep their original requirements.
+current private ABI components; v1–v16 plans keep their original requirements.
 
 Preparation validates these requirements before recording commands or creating
 provider state. Failures execute no user kernels. Fixed replay performs no new
@@ -3602,7 +3608,7 @@ algorithm `workspace_bytes` and exclude allocator/driver overhead. Small Windows
 primal computation, explicit reverse gradients and these ownership transitions.
 
 `prepared.info["native_resource_bytes"]` separately reports known device
-payload owned by private native resources (paired ABI89 components). Managed
+payload owned by private native resources (paired current private ABI components). Managed
 CUDA/Vulkan images report packed texel bytes, including all mip levels. This
 does not change the array-only `resource_bytes` or provider `workspace_bytes`
 counters. Public/borrowed resources, host shader code/descriptors, allocation
@@ -3753,7 +3759,7 @@ state, standalone/borrowed executors and in-flight retirement. Explicit reverse
 kernels for a downstream floating-point computation work; this does not supply
 an automatic adjoint for the native transform or arbitrary tensor-component operations.
 
-This extension requires paired private ABI121 components and root metadata
+This extension requires paired current private ABI components and root metadata
 format 2; execution plans remain at v24. Re-export earlier 0.7.0 development
 artifacts with format 1 root catalogs; no intermediate-format converter is provided.
 
@@ -4992,8 +4998,7 @@ several names reference it. It loads on the first query and caches subsequent
 lookups. Named layouts share the existing module-owned handles and retirement
 contract and cannot cross runtimes. Trailing content, NUL and duplicate JSON
 object keys are rejected; a failed read does not cache a partial catalog.
-This extension requires matching private
-ABI116 components; the execution-plan format is unchanged. Publishing a layout
+This extension requires matching current private ABI components; the execution-plan format is unchanged. Publishing a layout
 does not itself enable native member-view operations or private captured
 structure-array export.
 
@@ -5004,7 +5009,7 @@ has a 512-byte catalog and adds 326 bytes to the compressed TCM over an empty
 module, with no executable artifact. These sizes describe that small fixture.
 
 Explicit execution plans can allocate typed private parents and project their
-members with plan version 23 and matching private ABI120 components:
+members with plan version 23 and matching current private ABI components:
 
 ```python
 resources = [
@@ -5022,7 +5027,7 @@ Members allocate no storage; they retain their parent and preserve record
 stride, member offset and scalar type. Shape-only references do not allocate
 the parent.
 
-Plan version 25 and paired private ABI122 components can also select one scalar
+Plan version 25 and paired current private ABI components can also select one scalar
 lane of a vector/matrix leaf:
 
 ```python
@@ -5367,7 +5372,7 @@ The context appends one temporary-storage pointer, propagated through
 `real_func`; a null pointer retains the runtime's ordered temporary storage.
 BC carries the matching module flag, while PTX/cubin carry the checked launch
 declaration. Old readers reject unknown layouts before launching code. This
-requires matching private ABI106 components and does not itself expose
+requires matching current private ABI components and does not itself expose
 independent streams or make every prepared execution concurrently reusable.
 Windows CUDA tests interleave ordinary and gated instances of a saved kernel
 in a separate native runtime, with independent argument and temporary storage,

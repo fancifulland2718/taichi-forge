@@ -2,6 +2,9 @@
 
 [中文](index.zh.md)
 
+Start with the [0.7.0 concise reference](reference.en.md): installation, JIT/Graph/AOT choices,
+performance settings and upgrade guidance.
+
 ## Versions and installation
 
 These pages document **Taichi Forge 0.7.0 (unreleased)**. See the
