@@ -1,6 +1,7 @@
 #pragma once
 
 #include "taichi/analysis/range_dispatch.h"
+#include "taichi/analysis/host_range_interval.h"
 
 namespace taichi::lang {
 
@@ -15,13 +16,24 @@ inline int select_default_gpu_block_size(OffloadedStmt &task,
   const auto granularity = subgroup_size ? subgroup_size : 32;
   if ((task.device != Arch::cuda && task.device != Arch::vulkan) ||
       task.task_type != OffloadedTaskType::range_for ||
-      task.source_block_dim_explicit || !task.const_begin || !task.const_end ||
+      task.source_block_dim_explicit ||
       original <= 0 || static_cast<uint32_t>(original) <= granularity ||
       (granularity & (granularity - 1)) != 0 ||
       (original & (original - 1)) != 0)
     return original;
 
-  const auto count = std::int64_t(task.end_value) - task.begin_value;
+  std::int64_t count;
+  if (task.const_begin && task.const_end) {
+    count = std::int64_t(task.end_value) - task.begin_value;
+  } else if (task.host_launch_range) {
+    const auto begin = static_host_range_interval(task.host_launch_range->begin);
+    const auto end = static_host_range_interval(task.host_launch_range->end);
+    if (!begin || !end)
+      return original;
+    count = end->upper - begin->lower;  // Upper bound, not the actual workload.
+  } else {
+    return original;
+  }
   if (count <= 0)
     return original;
 

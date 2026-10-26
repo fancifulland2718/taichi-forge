@@ -105,6 +105,72 @@ TEST(DefaultGpuBlockSize, SpreadsStaticWorkWithoutAddingSchedulingWaves) {
   }
 }
 
+TEST(HostRangeInterval, ClampedDimensionsAndSignedDivision) {
+  HostRangeBound bound;
+  bound.program = {
+      {HostRangeOp::argument_i32}, {HostRangeOp::constant_i32, 17},
+      {HostRangeOp::minimum, 0, 0, 1}, {HostRangeOp::constant_i32, 0},
+      {HostRangeOp::maximum, 0, 2, 3}, {HostRangeOp::constant_i32, 19},
+      {HostRangeOp::multiply, 0, 4, 5}};
+  const auto interval = static_host_range_interval(bound);
+  ASSERT_TRUE(interval);
+  EXPECT_EQ(interval->lower, 0);
+  EXPECT_EQ(interval->upper, 323);
+  OffloadedStmt task(OffloadedTaskType::range_for, Arch::cuda, nullptr);
+  task.block_dim = 128;
+  task.const_begin = true;
+  task.begin_value = 0;
+  task.host_launch_range = HostRangeBounds{{0, {}, false}, bound};
+  EXPECT_EQ(select_default_gpu_block_size(task, 32), 32);
+  EXPECT_EQ(select_default_gpu_block_size(task), 128);  // Portable target.
+  EXPECT_FALSE(task.const_end);  // Do not turn an upper bound into a constant.
+  bound.program.resize(3);
+  bound.program.push_back({HostRangeOp::floor_divide, 3, 2});
+  const auto divided = static_host_range_interval(bound);
+  ASSERT_TRUE(divided);
+  EXPECT_EQ(divided->lower, -715827883);
+  EXPECT_EQ(divided->upper, 5);
+}
+
+TEST(HostRangeInterval, DoesNotAssumeGuardedInputsOrHideOverflow) {
+  HostRangeBound affine{1, {0}, false};
+  affine.scale = 2;
+  affine.input_min = INT32_MIN / 2;
+  affine.input_max = INT32_MAX / 2;
+  EXPECT_TRUE(affine.valid(4));
+  EXPECT_FALSE(static_host_range_interval(affine));
+  HostRangeBound bound;
+  bound.program = {
+      {HostRangeOp::argument_i32}, {HostRangeOp::constant_i32, 2},
+      {HostRangeOp::multiply, 0, 0, 1}, {HostRangeOp::constant_i32, 17},
+      {HostRangeOp::minimum, 0, 2, 3}};
+  EXPECT_FALSE(static_host_range_interval(bound));
+  bound.program.back() = {HostRangeOp::multiply, 0, 2, 3};
+  bound.program[3].immediate = 0;
+  EXPECT_FALSE(static_host_range_interval(bound));
+  bound.program[2].lhs = 20;
+  EXPECT_FALSE(static_host_range_interval(bound));
+  HostRangeBound shape{1, {0}, true};
+  const auto interval = static_host_range_interval(shape);
+  ASSERT_TRUE(interval);
+  EXPECT_EQ(interval->lower, 0);
+  EXPECT_EQ(interval->upper, INT32_MAX);
+  shape.offsets.push_back(4);
+  EXPECT_FALSE(static_host_range_interval(shape));  // Product may overflow.
+}
+
+TEST(HostRangeInterval, LongProgramsAreNotCapped) {
+  HostRangeBound bound;
+  bound.program = {{HostRangeOp::argument_i32}, {HostRangeOp::constant_i32, 17}};
+  bound.program.push_back({HostRangeOp::minimum, 0, 0, 1});
+  for (int i = 0; i < 64; ++i)
+    bound.program.push_back({HostRangeOp::minimum, 0, bound.program.size() - 1, 1});
+  const auto interval = static_host_range_interval(bound);
+  ASSERT_TRUE(interval);
+  EXPECT_EQ(interval->lower, INT32_MIN);
+  EXPECT_EQ(interval->upper, 17);
+}
+
 TEST(HostRangeBounds, ScalarAndShapeWorkloadDoNotImposeACap) {
   std::int32_t arguments[] = {-3, 126, 3, 43};
   HostRangeBounds scalar{{1, {0}, false}, {1, {4}, false}};
