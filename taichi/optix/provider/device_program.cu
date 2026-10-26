@@ -38,13 +38,13 @@ extern "C" __global__ void forge_pack_instance_transforms(
 // this wire layout at four-byte alignment; no packing allocation is required.
 struct PackedFloat4 {
   float x, y, z, w;
-  __device__ PackedFloat4() = default;
+  PackedFloat4() = default;
   __device__ PackedFloat4(float4 v) : x(v.x), y(v.y), z(v.z), w(v.w) {
   }
 };
 struct PackedUint4 {
   unsigned int x, y, z, w;
-  __device__ PackedUint4() = default;
+  PackedUint4() = default;
   __device__ PackedUint4(uint4 v) : x(v.x), y(v.y), z(v.z), w(v.w) {
   }
 };
@@ -95,7 +95,9 @@ static_assert(sizeof(LaunchParams) == 48, "Alpha launch wire layout changed");
 #endif
 #endif
 
-extern "C" __constant__ LaunchParams params;
+extern "C" {
+__constant__ LaunchParams params;
+}
 
 extern "C" __global__ void __miss__forge_batch_ray() {
 #if TI_FORGE_OPTIX_TYPED >= 2

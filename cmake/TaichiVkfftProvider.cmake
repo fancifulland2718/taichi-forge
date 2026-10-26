@@ -73,7 +73,11 @@ target_compile_features(taichi_forge_vkfft_provider PRIVATE cxx_std_17)
 target_compile_definitions(taichi_forge_vkfft_provider PRIVATE
                           TI_FORGE_VKFFT_PROVIDER_BUILD)
 target_include_directories(taichi_forge_vkfft_provider PRIVATE
-    "${CMAKE_CURRENT_LIST_DIR}/.." "${TI_VKFFT_ROOT}/vkFFT"
+    "${CMAKE_CURRENT_LIST_DIR}/..")
+# VkFFT is header-only. Treat its headers and the matched compiler headers as
+# external code, while retaining normal warnings for the Forge adapter itself.
+target_include_directories(taichi_forge_vkfft_provider SYSTEM PRIVATE
+    "${TI_VKFFT_ROOT}/vkFFT"
     "${TI_VKFFT_GLSLANG_INCLUDE}" "${_ti_vkfft_glslang_include_root}")
 target_link_libraries(taichi_forge_vkfft_provider PRIVATE Vulkan::Vulkan
     "${TI_VKFFT_GLSLANG_STATIC}" "${TI_VKFFT_SPIRV_OPT_STATIC}"
