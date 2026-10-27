@@ -2311,7 +2311,7 @@ void IRBuilder::init_random_function(Value global_tmp_) {
   debug_name(spv::OpName, rand_y_, "_rand_y");
   debug_name(spv::OpName, rand_z_, "_rand_z");
   debug_name(spv::OpName, rand_w_, "_rand_w");
-  SType gtmp_type = get_pointer_type(t_uint32_, spv::StorageClassStorageBuffer);
+  SType gtmp_type = get_pointer_type(t_uint32_, global_tmp_.stype.storage_class);
   Value rand_gtmp_ = new_value(gtmp_type, ValueKind::kVariablePtr);
   debug_name(spv::OpName, rand_gtmp_, "rand_gtmp");
 
@@ -2340,7 +2340,6 @@ void IRBuilder::init_random_function(Value global_tmp_) {
   Value _362436069u = uint_immediate_number(t_uint32_, 362436069u);
   Value _521288629u = uint_immediate_number(t_uint32_, 521288629u);
   Value _88675123u = uint_immediate_number(t_uint32_, 88675123u);
-  Value _1 = int_immediate_number(t_uint32_, 1);
   Value _1024 = int_immediate_number(t_uint32_, 1024);
 
   // init_rand_ segment (inline to main)
@@ -2357,10 +2356,13 @@ void IRBuilder::init_random_function(Value global_tmp_) {
                uint_immediate_number(t_uint32_, 0))
       .commit(&func_header_);
   Value tmp1 = load_var(tmp0, t_uint32_);
-  Value tmp2_ = load_var(rand_gtmp_, t_uint32_);
   Value tmp2 = new_value(t_uint32_, ValueKind::kNormal);
-  ib_.begin(spv::OpBitcast)
-      .add_seq(t_uint32_, tmp2, tmp2_)
+  // Claim the counter value atomically. A separate load followed by an
+  // increment races with other invocations, even when invocation IDs are
+  // also mixed into the seed. Relaxed device scope is sufficient: this
+  // counter does not publish any other memory.
+  ib_.begin(spv::OpAtomicIIncrement)
+      .add_seq(t_uint32_, tmp2, rand_gtmp_, const_i32_one_, const_i32_zero_)
       .commit(&func_header_);
   Value tmp3 = new_value(t_uint32_, ValueKind::kNormal);
   ib_.begin(spv::OpIAdd)
@@ -2390,37 +2392,6 @@ void IRBuilder::init_random_function(Value global_tmp_) {
   store_var(rand_y_, _362436069u);
   store_var(rand_z_, _521288629u);
   store_var(rand_w_, _88675123u);
-
-  // enum spv::Op add_op = spv::OpIAdd;
-  bool use_atomic_increment = false;
-
-// use atomic increment for DX API to avoid error X3694
-#ifdef TI_WITH_DX11
-  if (arch_ == Arch::dx11) {
-    use_atomic_increment = true;
-  }
-#endif
-
-  if (use_atomic_increment) {
-    Value tmp9 = new_value(t_uint32_, ValueKind::kNormal);
-    ib_.begin(spv::Op::OpAtomicIIncrement)
-        .add_seq(t_uint32_, tmp9, rand_gtmp_,
-                 /*scope_id*/ const_i32_one_,
-                 /*semantics*/ const_i32_zero_)
-        .commit(&func_header_);
-  } else {
-    // Yes, this is not an atomic operation, but just fine since no matter
-    // how RAND_STATE changes, `gl_GlobalInvocationID.x` can still help
-    // us to set different seeds for different threads.
-    // Discussion:
-    // https://github.com/taichi-dev/taichi/pull/912#discussion_r419021918
-    Value tmp9 = load_var(rand_gtmp_, t_uint32_);
-    Value tmp10 = new_value(t_uint32_, ValueKind::kNormal);
-    ib_.begin(spv::Op::OpIAdd)
-        .add_seq(t_uint32_, tmp10, tmp9, _1)
-        .commit(&func_header_);
-    store_var(rand_gtmp_, tmp10);
-  }
 
   init_rand_ = true;
 }
