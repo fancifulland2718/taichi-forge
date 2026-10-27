@@ -40,8 +40,9 @@ def test_native_compile_requests_do_not_reuse_another_config():
     assert calculate(3) == 23
 
 
+@pytest.mark.parametrize("cap_source", ["frontend_default", "direct_assignment"])
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
-def test_precompile_key_query_resolves_kernel_override_and_full_cap():
+def test_precompile_key_query_resolves_kernel_override_and_full_cap(cap_source):
     @ti.kernel(opt_level="full")
     def calculate(x: ti.i32) -> ti.i32:
         return x + 1
@@ -53,18 +54,26 @@ def test_precompile_key_query_resolves_kernel_override_and_full_cap():
     try:
         config.compile_tier = "fast"
         config.full_simplify_global_iter_cap = 1
+        if cap_source == "frontend_default":
+            core._set_compile_option_source(config, "full_simplify_global_iter_cap", cap_source)
         specialization = calculate._primal.ensure_compiled(3)
         kernel = calculate._primal.compiled_kernels[specialization]
         queried = program._kernel_cache_key_no_compile(kernel)
-        # This is the same effective request: the kernel already overrides
-        # the tier and legacy full normalization maps the default cap to 0.
+        # The kernel overrides the base tier; changing only that tier leaves
+        # the effective request unchanged, including an explicit cap of one.
         config.compile_tier = "full"
-        config.full_simplify_global_iter_cap = 0
         assert program._kernel_cache_key_no_compile(kernel) == queried
         assert program._kernel_gpu_semantics_snapshot(kernel)["kernel_identity"] == queried
+        # Only a default cap expands to a full fixed point. A direct assignment
+        # is an explicit budget and must remain distinct from an unlimited cap.
+        config.full_simplify_global_iter_cap = 0
+        unlimited = program._kernel_cache_key_no_compile(kernel)
+        assert (unlimited == queried) == (cap_source == "frontend_default")
+        assert program._kernel_gpu_semantics_snapshot(kernel)["kernel_identity"] == unlimited
         config.full_simplify_global_iter_cap = 3
         changed = program._kernel_cache_key_no_compile(kernel)
         assert changed != queried
+        assert changed != unlimited
         assert program._kernel_gpu_semantics_snapshot(kernel)["kernel_identity"] == changed
     finally:
         config.compile_tier = original_tier
