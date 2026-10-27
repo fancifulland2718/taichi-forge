@@ -207,7 +207,8 @@ class Kernel;
 // 89 - Compose defaults with unowned task axes and unrelated compile options.
 // 90 - Use proven source range envelopes without runtime specialization.
 // 91 - Preserve explicit demoted dense-loop blocks and admit uniform multi-range policies.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 91;
+// 92 - CPU fast-tier LLVM uses O1 instead of O0.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 92;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

@@ -65,7 +65,7 @@ TEST(LLVMModuleOptions, O0PromotesPrivateSlotsAfterInlining) {
 }
 
 TEST(LLVMModuleOptions, KernelOptionsSurviveCloneAndOfflineCache) {
-  for (auto arch : {Arch::cuda, Arch::amdgpu}) {
+  for (auto arch : {Arch::x64, Arch::arm64, Arch::cuda, Arch::amdgpu}) {
     for (const std::string tier : {"fast", "full"}) {
       SCOPED_TRACE(tier);
       CompileConfig kernel;
@@ -106,6 +106,45 @@ TEST(LLVMModuleOptions, RuntimeAndLegacyModulesUseProgramOptions) {
   config.compile_tier = "balanced";
   config.llvm_opt_level = 2;
   EXPECT_EQ(LLVMModuleOptions::read(module, config).opt_level, 2);
+}
+
+TEST(LLVMModuleOptions, CpuFastTierEliminatesPrivateAggregateTraffic) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto module = llvm::parseAssemblyString(R"(
+    define float @entry(float %x, float %y, i1 %choose) {
+      %slot = alloca [2 x float]
+      %first = getelementptr [2 x float], ptr %slot, i64 0, i64 0
+      %second = getelementptr [2 x float], ptr %slot, i64 0, i64 1
+      store float %x, ptr %first
+      store float %y, ptr %second
+      br i1 %choose, label %a, label %b
+    a:
+      %va = load float, ptr %first
+      ret float %va
+    b:
+      %vb = load float, ptr %second
+      ret float %vb
+    }
+  )", error, context);
+  ASSERT_NE(module, nullptr);
+  CompileConfig config;
+  config.arch = Arch::x64;
+  config.compile_tier = "fast";
+  LLVMOptPipelineOptions options;
+  options.opt_level = llvm_opt_level_from_int(
+      LLVMModuleOptions::from_config(config).opt_level);
+  run_module_opt_pipeline(*module, nullptr, options);
+  EXPECT_FALSE(llvm::verifyModule(*module));
+  for (auto &block : *module->getFunction("entry")) {
+    for (auto &inst : block) {
+      EXPECT_FALSE(llvm::isa<llvm::AllocaInst>(inst));
+      EXPECT_FALSE(inst.mayReadOrWriteMemory());
+    }
+  }
+  config.compile_tier = "balanced";
+  config.llvm_opt_level = 0;
+  EXPECT_EQ(LLVMModuleOptions::from_config(config).opt_level, 0);
 }
 
 }  // namespace taichi::lang

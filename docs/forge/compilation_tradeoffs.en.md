@@ -30,7 +30,7 @@ setting can be a win for a short CLI tool or an interactive edit-run loop.
 | --- | --- | --- | --- |
 | `offline_cache=True` | Matching backend and compile configuration | Avoids recompiling unchanged artifacts in later processes | First run still compiles; changed source, shape, layout, backend, or keyed configuration causes a miss |
 | `ti.compile_kernels(...)` | Selected specializations | Moves compilation before the hot loop | Does not make compilation cheaper; requires representative arguments |
-| `compile_tier='fast'` | Python `ti.init()` default, or one kernel through `@ti.kernel(opt_level='fast')` | Uses LLVM O0 on CPU, an O1 safety floor on CUDA/AMDGPU, and skips SPIR-V optimization | Can reduce kernel throughput and change floating-point rounding; benchmark the steady workload |
+| `compile_tier='fast'` | Python `ti.init()` default, or one kernel through `@ti.kernel(opt_level='fast')` | Uses LLVM O1 on CPU to retain basic runtime optimization, an O1 safety floor on CUDA/AMDGPU, and skips SPIR-V optimization | Can reduce kernel throughput and change floating-point rounding; benchmark the steady workload |
 | `compile_tier='balanced'` | Explicit Program or per-kernel selection | Production-oriented compromise; LLVM/SPIR-V retain their configured optimization levels | More cold work than `fast` |
 | `compile_tier='full'` | Program or selected kernels | Lets Forge global IR simplification run to fixed point when the default cap is unchanged | Highest compile cost; use only where measured runtime wins justify it |
 | `advanced_optimization=False` | Broad Taichi IR pipeline | Can dramatically shorten pathological IR simplification and helps isolate optimizer failures | Disables advanced LICM, whole-kernel CSE and CFG optimization as a group; basic simplification and fast LLVM local CSE remain |
@@ -41,6 +41,18 @@ setting can be a win for a short CLI tool or an interactive edit-run loop.
 and other code-generating options are included in Forge offline-cache identity.
 Changing them should compile or load a separate artifact rather than reuse an
 incompatible one.
+
+CPU `fast` now uses O1 instead of O0. This adds some cold compilation work
+to remove repeated address and aggregate operations from simulation loops;
+it does not enable advanced Taichi IR optimization. To diagnose LLVM O0
+explicitly, use `compile_tier='balanced', advanced_optimization=False,
+llvm_opt_level=0`. Old offline-cache entries are invalidated by the compiler
+schema change. CUDA, AMDGPU and SPIR-V optimization levels are unchanged.
+
+O1 trades compilation work for runtime optimization; it does not make every
+kernel faster. Measure representative improvements and regressions, cold JIT,
+and actual application duration. The explicit O0 configuration above remains
+available for diagnosis.
 
 For CUDA and AMDGPU, the effective kernel LLVM level and fast-math setting now
 travel with the compiled module through cloning, offline caching and delayed

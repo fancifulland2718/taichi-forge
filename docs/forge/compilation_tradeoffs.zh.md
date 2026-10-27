@@ -26,7 +26,7 @@
 | --- | --- | --- | --- |
 | `offline_cache=True` | 相同后端与编译配置 | 后续进程可免去未改变产物的重复编译 | 首次运行仍需编译；源码、shape、layout、后端或进入 key 的配置变化都会 miss |
 | `ti.compile_kernels(...)` | 指定 specialization | 把编译移到热循环前 | 不会减少编译工作量；参数必须有代表性 |
-| `compile_tier='fast'` | Python `ti.init()` 默认，或 `@ti.kernel(opt_level='fast')` 指定的单 kernel | CPU 使用 LLVM O0，CUDA/AMDGPU 使用保证正确 lowering 的 O1 下限，SPIR-V 跳过 optimizer | 可能降低 kernel 吞吐并改变浮点舍入；必须测稳态工作负载 |
+| `compile_tier='fast'` | Python `ti.init()` 默认，或 `@ti.kernel(opt_level='fast')` 指定的单 kernel | CPU 使用 LLVM O1 保留基本运行期优化，CUDA/AMDGPU 使用保证正确 lowering 的 O1 下限，SPIR-V 跳过 optimizer | 可能降低 kernel 吞吐并改变浮点舍入；必须测稳态工作负载 |
 | `compile_tier='balanced'` | 显式选择的 Program 或单 kernel | 面向生产的折中；LLVM/SPIR-V 保持配置的优化级别 | 冷编译工作多于 `fast` |
 | `compile_tier='full'` | Program 或指定 kernel | 默认 global IR cap 未显式改动时，允许全局简化迭代到 fixed point | 编译代价最高；只用于已证明有运行期收益的热点 |
 | `advanced_optimization=False` | 大范围 Taichi IR pipeline | 可显著缩短病态 IR 简化，也可隔离 optimizer 故障 | 成组关闭高级 LICM、whole-kernel CSE 和 CFG 优化；基础简化与 fast LLVM 局部 CSE 仍保留 |
@@ -36,6 +36,15 @@
 `compile_tier`、`advanced_optimization`、debug 状态、后端 optimizer level 等会改变
 代码的配置已经进入 Forge offline-cache identity。切换它们应生成或加载独立产物，而
 不是复用不兼容 cache。
+
+CPU `fast` 现在由 O0 改为 O1，增加部分冷编译工作，消除仿真循环中反复执行的地址和
+聚合对象操作；不同时开启高级 Taichi IR 优化。需要单独诊断 LLVM O0 时，可使用
+`compile_tier='balanced', advanced_optimization=False, llvm_opt_level=0`。
+编译器 schema 更新会使旧 offline-cache 条目失效；CUDA、AMDGPU 和 SPIR-V 的优化
+等级保持不变。
+
+O1 是运行与编译成本的权衡，不保证每个 kernel 都更快。局部场景也可能回退；
+部署前同时测量正反例、冷 JIT 和实际运行时长，保留上述 O0 配置用于定位。
 
 CUDA 和 AMDGPU 的逐 kernel LLVM 等级及 fast-math 设置现在随编译模块保存，覆盖克隆、
 offline cache 和延迟 JIT 注册。kernel 的 `opt_level='fast'` 或 `'full'` 会传到 GPU

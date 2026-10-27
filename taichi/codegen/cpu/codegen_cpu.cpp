@@ -2,6 +2,7 @@
 
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/runtime/llvm/llvm_opt_pipeline.h"
+#include "taichi/runtime/llvm/llvm_module_options.h"
 #include "taichi/common/core.h"
 #include "taichi/util/io.h"
 #include "taichi/util/lang_util.h"
@@ -503,8 +504,8 @@ void KernelCodeGenCPU::optimize_module(llvm::Module *module) {
   {
     TI_PROFILER("llvm_module_opt_pipeline");
     LLVMOptPipelineOptions opts;
-    opts.opt_level = llvm_opt_level_from_int(effective_llvm_opt_level(
-        compile_config.llvm_opt_level, compile_config.compile_tier));
+    opts.opt_level = llvm_opt_level_from_int(
+        LLVMModuleOptions::from_config(compile_config).opt_level);
     opts.loop_vectorize = true;
     opts.slp_vectorize = true;
     opts.run_post_gep_passes = true;

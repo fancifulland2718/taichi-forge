@@ -39,20 +39,16 @@ inline llvm::OptimizationLevel llvm_opt_level_from_int(int level) {
 /// `spv_opt_level` 0 in that tier (see `kernel_compiler.cpp`), and
 /// this mirrors that policy for CPU / CUDA / AMDGPU / DX12.
 ///
-/// `min_level` is a backend-specific floor: CPU and DX12 tolerate
-/// LLVM O0 fine, but NVPTX (CUDA) and AMDGCN codegen both rely on
+/// `min_level` is a backend-specific floor: CPU uses O1 to avoid repeated
+/// unoptimized address/aggregate work; DX12 retains O0. NVPTX (CUDA) and
+/// AMDGCN codegen both rely on
 /// mid-level legalization passes (e.g. StackSave/StackRestore lowering,
 /// addrspace canonicalization) that are skipped at O0 — those backends
 /// must pass `min_level=1` to stay correct under `tier=fast`.
 ///
-/// Trade-off (measured on 16-kernel CPU cold compile, commit `ca2e062c8`):
-///   - CPU `tier=fast` + O0: **~21% faster** cold compile, bit-exact
-///     on simple arithmetic kernels; up to 2e-7 relative drift on
-///     reassoc-sensitive accumulation kernels (well within Taichi's
-///     1e-5 cross-backend numerical bar from P2 protocol).
-///   - CUDA `tier=fast` + O1 floor: ~5-8% compile win (estimated),
-///     avoids NVPTX codegen fatal errors at O0.
-///   - Other tiers: returns `level` unchanged (default 3 = O3).
+/// Callers select the floor through LLVMModuleOptions, except DX12's
+/// separate pipeline. Other tiers return `level` unchanged (default O3),
+/// including explicitly selected O0 for compiler diagnostics.
 inline int effective_llvm_opt_level(int level,
                                     const std::string &tier,
                                     int min_level = 0) {

@@ -16,8 +16,13 @@ struct LLVMModuleOptions {
   bool fast_math;
 
   static LLVMModuleOptions from_config(const CompileConfig &config) {
-    const int floor =
-        config.arch == Arch::cuda || config.arch == Arch::amdgpu ? 1 : 0;
+    // CPU O0 leaves substantial address/aggregate work in simulation loops.
+    // O1 retains the fast tier's small compile budget without paying that
+    // cost on every step. CUDA/AMDGPU need the same floor for legalization.
+    const int floor = arch_is_cpu(config.arch) || config.arch == Arch::cuda ||
+                              config.arch == Arch::amdgpu
+                          ? 1
+                          : 0;
     return {effective_llvm_opt_level(config.llvm_opt_level, config.compile_tier,
                                      floor),
             config.fast_math};
