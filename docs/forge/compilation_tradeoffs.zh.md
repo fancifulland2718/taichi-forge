@@ -51,6 +51,12 @@ CFG 数据流清理和代数简化，避免把冗余控制状态变成 AD 栈操
 内存读写转发，遵守 `fast_math`，并可由 `cfg_optimization=False` 关闭；前向模式和
 非嵌套循环不进入此路径。它不等于开启完整的高级优化，也不保证所有 AD 工作负载加速。
 
+在 CPU/CUDA 的 AD 记录之外，把独立的 Python `ti.Matrix` 值整体赋给零维、同质 f32/f64 矩阵字段
+（`field[None] = value`）会复用数组传输，避免为每个分量保留一个标量写入内核。
+混合类型、主机访问别名和 AD 上下文仍使用原逐元素路径。Vulkan 也保留标量赋值：实测批量
+路径虽然减少编译产物，却增加主机内存。大矩阵的静态展开代价仍存在；
+这一改动减少的是主机整体赋值产生的编译产物，不改变仿真内核的矩阵运算。
+
 CUDA 和 AMDGPU 的逐 kernel LLVM 等级及 fast-math 设置现在随编译模块保存，覆盖克隆、
 offline cache 和延迟 JIT 注册。kernel 的 `opt_level='fast'` 或 `'full'` 会传到 GPU
 LLVM optimizer，不再被 Program 档位覆盖。kernel 档位仍继承 Program 的

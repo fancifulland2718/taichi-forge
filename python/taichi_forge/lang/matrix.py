@@ -1689,6 +1689,33 @@ class MatrixField(Field):
 
     @python_scope
     def __setitem__(self, key, value):
+        # A scalar-shaped matrix is one complete field value. Reuse the bulk
+        # transfer instead of compiling one SNode writer per component. Keep
+        # host-access aliases, mixed dtypes and AD recording on the established
+        # element-wise path. Limit this to CPU/CUDA: bulk transfer retained
+        # more host memory than scalar writers in Vulkan measurements.
+        runtime = impl.get_runtime()
+        if (
+            key is None
+            and isinstance(value, Matrix)
+            and not value.is_host_access
+            and value.n == self.n
+            and value.m == self.m
+            and value.ndim == self.ndim
+            and value.entries.dtype.kind in "fiu"
+            and runtime.target_tape is None
+            and runtime.fwd_mode_manager is None
+            and impl.current_cfg().arch in (ti_python_core.x64, ti_python_core.arm64, ti_python_core.cuda)
+            and self.shape == ()
+            and self.dtype in (primitive_types.f32, primitive_types.f64)
+            and all(var.ptr.snode().data_type() == self.dtype for var in self.vars)
+        ):
+            # Host scalar writers convert Python values through double before
+            # narrowing to the field dtype. Preserve that rounding for large
+            # integer values as well as floating-point input.
+            values = np.asarray(value.to_list(), dtype=np.float64)
+            self.from_numpy(values.astype(to_numpy_type(self.dtype), copy=False))
+            return
         self._initialize_host_accessors()
         self[key]._set_entries(value)
 

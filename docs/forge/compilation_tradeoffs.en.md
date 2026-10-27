@@ -63,6 +63,16 @@ forwarding, respects `fast_math`, and can be disabled with
 path. It does not enable the full advanced pipeline or promise faster execution
 for every AD workload.
 
+On CPU/CUDA outside AD recording, assigning a standalone Python `ti.Matrix` value to a
+zero-dimensional homogeneous f32/f64 matrix field (`field[None] = value`)
+reuses array transfer instead of retaining one scalar writer kernel per
+component. Mixed dtypes, host-access aliases and AD contexts retain the
+element-wise path. Vulkan also retains scalar assignment: the measured bulk
+path increased host memory despite reducing compilation artifacts.
+Large matrices still incur static expansion; this change
+reduces artifacts from whole-value host assignment, without changing matrix
+arithmetic inside simulation kernels.
+
 For CUDA and AMDGPU, the effective kernel LLVM level and fast-math setting now
 travel with the compiled module through cloning, offline caching and delayed
 JIT registration. A kernel's `opt_level='fast'` or `'full'` therefore reaches the
