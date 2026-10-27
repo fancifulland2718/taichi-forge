@@ -2349,7 +2349,7 @@ void IRBuilder::init_random_function(Value global_tmp_) {
   Value counter_index = int_immediate_number(t_uint32_, kRandomCounterWord);
 
   // init_rand_ segment (inline to main)
-  // ad-hoc: hope no kernel will use more than 1024 gtmp variables...
+  // The offloader reserves this word outside compiler-owned temporaries.
   ib_.begin(spv::OpAccessChain)
       .add_seq(gtmp_type, rand_gtmp_, global_tmp_, const_i32_zero_, counter_index)
       .commit(&func_header_);

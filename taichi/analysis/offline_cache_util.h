@@ -212,7 +212,8 @@ class Kernel;
 // 94 - Simplify conditional reads before Vulkan reverse autodiff.
 // 95 - Claim SPIR-V random counter values with one atomic operation.
 // 96 - Keep random floating-point values strictly below one.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 96;
+// 97 - Reserve SPIR-V RNG state outside compiler-owned global temporaries.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 97;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

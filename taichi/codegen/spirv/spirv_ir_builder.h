@@ -5,6 +5,7 @@
 #include <unordered_set>
 
 #include <spirv/unified1/spirv.hpp>
+#include "taichi/inc/spirv_global_tmp_layout.h"
 #include "taichi/util/lang_util.h"
 #include "taichi/ir/type.h"
 #include "taichi/codegen/spirv/snode_struct_compiler.h"
@@ -13,9 +14,6 @@
 
 namespace taichi::lang {
 namespace spirv {
-
-// Word index in the global temporary buffer, shared with GFX initialization.
-inline constexpr uint32_t kRandomCounterWord = 1024;
 
 template <bool stop, std::size_t I, typename F>
 struct for_each_dispatcher {

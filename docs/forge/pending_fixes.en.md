@@ -19,6 +19,7 @@ the fixes below. The release column will be updated when the next version is ass
 | F070-7 | 0.7.0 | SPIR-V random initialization reads and updates a shared counter without atomic synchronization. Claim each counter value with one device-scope atomic increment and invalidate old shader caches. This fixes the shared-state race; seed configuration is a separate issue. | Next release, TBD |
 | F070-8 | 0.7.0 | Vulkan ignores `random_seed`. Initialize the shared RNG counter from runtime configuration, including independent fixed Graph workspaces; cached shaders remain seed-independent. | Next release, TBD |
 | F070-9 | 0.7.0 | SPIR-V f32/f16 and LLVM f16 random draws can round to 1.0, violating `[0, 1)`. Generate only the destination's significant bits before scaling; invalidate old compiled artifacts. | Next release, TBD |
+| F070-10 | 0.7.0 | Cross-task temporaries can overlap the SPIR-V RNG counter, so even a kernel without random draws can corrupt the random stream. Reserve the historical RNG word in temporary allocation, preserving contiguous tensors and scalar alignment; invalidate old compiled artifacts. | Next release, TBD |
 
 F070-2 configuration candidates apply to CUDA/Vulkan primal kernels. CPU retains
 its existing execution path; gradient kernels are not configuration candidates
@@ -37,9 +38,10 @@ Fix commits and focused regressions:
 
 - F070-7: `82e3e4075`; SPIR-V 1.0/1.3/1.5 validation and a regression requiring one atomic claim with no plain counter reads/writes. A Vulkan resident shader confirms the accesses; focused SDF/Cornell runs show no gross throughput regression. CPU/CUDA RNG is unchanged. Parallel draw order is not guaranteed.
 - F070-8: `845702fe9`; serial JIT and bound Graph regressions cover distinct seeds, reset reproducibility, advancement across launches and reuse of identical offline-cache code. AOT runtimes without an explicit seed retain zero initialization; no seed is baked into exported shaders. This does not guarantee reproducible parallel draw ordering or independent streams across workspaces.
-- F070-9: committed with this entry as `Keep random floating-point values below one`; an inverse-derived seed produces UINT32_MAX on the first draw, deterministically reproducing four rounding failures. Six CPU/CUDA/Vulkan dtype checks, three existing distribution checks, two seed/cache/Graph checks and SPIR-V validation pass. Integer streams and LLVM f32/f64 conversion remain unchanged; affected floating-point streams change.
+- F070-9: `9ce09cbe6`; an inverse-derived seed produces UINT32_MAX on the first draw, deterministically reproducing four rounding failures. Six CPU/CUDA/Vulkan dtype checks, three existing distribution checks, two seed/cache/Graph checks and SPIR-V validation pass. Integer streams and LLVM f32/f64 conversion remain unchanged; affected floating-point streams change.
+- F070-10: committed with this entry as `Reserve SPIR-V random state in global temporary allocation`; a 1032-element cross-task integer array changes the next random draw before the fix. JIT and bound Graph regressions require exactly the same integer stream with or without that unrelated kernel. Seed/cache/Graph and floating-point boundary checks also pass. The counter stays at byte 4096 for existing shader/runtime layout compatibility; old AOT artifacts must be re-exported to gain the allocator fix. The existing 1 MiB buffer is unchanged; a tensor crossing the reserved word moves wholly past it. CPU/CUDA temporary allocation is unchanged.
 
-F070-3 through F070-9 describe source changes, not the behavior of the published
+F070-3 through F070-10 describe source changes, not the behavior of the published
 0.7.0 wheel. See [compilation trade-offs](compilation_tradeoffs.en.md) for their
 scope and diagnostic controls. These changes do not guarantee a universal speedup
 or bitwise equality across backends.
