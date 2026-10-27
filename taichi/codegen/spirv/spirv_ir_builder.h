@@ -687,7 +687,7 @@ class IRBuilder {
   // Shared by native integer operations and integer CAS fallbacks.
   void require_int64_atomics(bool shared = false);
   Value rand_u32(Value global_tmp_);
-  Value rand_f32(Value global_tmp_);
+  Value rand_f32(Value global_tmp_, int significand_bits = 24);
   Value rand_i32(Value global_tmp_);
   Value subgroup_shuffle(spv::Op op, Value value, Value index);
 

@@ -268,10 +268,14 @@ void TaskCodeGenLLVM::visit(AllocaStmt *stmt) {
 
 void TaskCodeGenLLVM::visit(RandStmt *stmt) {
   if (stmt->ret_type->is_primitive(PrimitiveTypeID::f16)) {
-    // Promoting to f32 since there's no rand_f16 support in runtime.cpp.
-    auto val_f32 = call("rand_f32", get_context());
-    llvm_val[stmt] =
-        builder->CreateFPTrunc(val_f32, llvm::Type::getHalfTy(*llvm_context));
+    // Generate 11 significant bits directly; rounding a full f32 draw to
+    // half can produce 1.0, outside random()'s half-open interval.
+    auto bits = builder->CreateLShr(call("rand_u32", get_context()),
+                                   builder->getInt32(21));
+    auto half_type = llvm::Type::getHalfTy(*llvm_context);
+    auto value = builder->CreateUIToFP(bits, half_type);
+    llvm_val[stmt] = builder->CreateFMul(
+        value, llvm::ConstantFP::get(half_type, 1.0 / 2048.0));
   } else {
     llvm_val[stmt] = call(
         fmt::format("rand_{}", data_type_name(stmt->ret_type)), get_context());

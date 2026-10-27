@@ -211,7 +211,8 @@ class Kernel;
 // 93 - Clean local state in nested reverse loops before autodiff.
 // 94 - Simplify conditional reads before Vulkan reverse autodiff.
 // 95 - Claim SPIR-V random counter values with one atomic operation.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 95;
+// 96 - Keep random floating-point values strictly below one.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 96;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

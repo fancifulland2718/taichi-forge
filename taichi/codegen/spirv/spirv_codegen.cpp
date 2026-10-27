@@ -3314,7 +3314,7 @@ class TaskCodegen : public IRVisitor {
     } else if (stmt->element_type()->is_primitive(PrimitiveTypeID::f32)) {
       val = ir_->rand_f32(global_tmp);
     } else if (stmt->element_type()->is_primitive(PrimitiveTypeID::f16)) {
-      auto highp_val = ir_->rand_f32(global_tmp);
+      auto highp_val = ir_->rand_f32(global_tmp, 11);
       val = ir_->cast(ir_->f16_type(), highp_val);
     } else {
       TI_ERROR("rand only support 32-bit type");

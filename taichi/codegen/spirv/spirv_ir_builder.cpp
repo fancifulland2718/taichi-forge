@@ -2194,15 +2194,21 @@ Value IRBuilder::rand_u32(Value global_tmp_) {
   return val;
 }
 
-Value IRBuilder::rand_f32(Value global_tmp_) {
+Value IRBuilder::rand_f32(Value global_tmp_, int significand_bits) {
   if (!init_rand_) {
     init_random_function(global_tmp_);
   }
 
-  Value _1_4294967296f = float_immediate_number(t_fp32_, 1.0f / 4294967296.0f);
-  Value tmp0 = rand_u32(global_tmp_);
+  TI_ASSERT(significand_bits == 11 || significand_bits == 24);
+  // Keep only bits that the destination can represent exactly. Converting
+  // UINT32_MAX directly to f32, or rounding f32 to f16, can otherwise yield 1.
+  Value scale =
+      float_immediate_number(t_fp32_, 1.0f / (1u << significand_bits));
+  Value tmp0 = make_value(
+      spv::OpShiftRightLogical, t_uint32_, rand_u32(global_tmp_),
+      uint_immediate_number(t_uint32_, 32 - significand_bits));
   Value tmp1 = cast(t_fp32_, tmp0);
-  Value val = mul(tmp1, _1_4294967296f);
+  Value val = mul(tmp1, scale);
 
   return val;
 }
