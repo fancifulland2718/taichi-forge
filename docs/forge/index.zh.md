@@ -6,9 +6,9 @@
 
 ## 版本与安装
 
-这些文档适用于 **Taichi Forge 0.7.0（待发布）**，版本变化与升级说明见
-[发布说明](release_notes.zh.md)。下面的安装命令选择最新已发布包，不会选择此待发布源码。
-使用已发布版本时，请查阅对应 release tag 的文档。
+这些文档以 **Taichi Forge 0.7.0** 为基础，版本变化与升级说明见
+[发布说明](release_notes.zh.md)。尚未进入发行包的修复单列于[待发布修复](pending_fixes.zh.md)。
+下面的安装命令选择最新已发布包；固定版本的用法请查阅对应 release tag 的文档。
 
 ```bash
 python -m pip install -U taichi-forge

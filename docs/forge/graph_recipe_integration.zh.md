@@ -58,6 +58,8 @@ controller 仅适用于 Graph recording，普通 kernel 直接测速不提供该
 
 ### Kernel 配置候选
 
+0.7.0 在交错调用和结构化区域中的已知问题及待发布修复见 [F070-2](pending_fixes.zh.md)。
+
 `kernel_configuration` family 将已有 GPU 优化维度接入完整 Graph 搜索。对于保留源描述的
 primal dispatch，CUDA/Vulkan 可试测 `full` compile tier 和合法 range 的 workgroup 大小；
 CUDA 还可试测已有的 launch-bounds 配置。捕获 Field 与显式 template 不要求转换为 ndarray。

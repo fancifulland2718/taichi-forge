@@ -77,6 +77,8 @@ from direct-kernel timing trials.
 
 ### Kernel configuration candidates
 
+For 0.7.0 issues with interleaved calls and structured regions, see the pending [F070-2 fix](pending_fixes.en.md).
+
 The `kernel_configuration` family connects existing GPU tuning dimensions to
 complete Graph search. Primal dispatches with retained source descriptions can
 try the `full` compile tier and legal range workgroup sizes on CUDA/Vulkan;

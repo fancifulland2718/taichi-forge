@@ -82,6 +82,11 @@ Forge 原生条件 Graph 的 **Driver API 12.8+** 要求独立检查，核心 ru
 `release_artifacts.py` 直接提取两份文件的当前版本段落作为 GitHub Release 正文，并固定文档
 链接到发布源码；完整 changelog 随公开文档附件提供。
 
+源码修复与已发布行为通过[待发布修复](../forge/pending_fixes.zh.md)及
+[英文版](../forge/pending_fixes.en.md)区分。准备版本时核对修复提交并填写计划版本；
+GitHub Release 和对应包发布后，再把相关条目移入“已发布修复”，填写实际版本并链接
+发行说明。两种语言和文档首页状态同步更新；不得把尚未发布的修复归入旧版本。
+
 ## 准备与发布顺序
 
 1. 更新 `version.txt`、CMake 版本、native header、runtime 依赖和两份

@@ -9,7 +9,7 @@ Use the documentation at your release tag for version-specific API details.
 
 | Version | Main additions |
 | --- | --- |
-| [0.7.0](#070) | Unreleased; compilation improvements, AOT coverage and backend/autodiff fixes |
+| [0.7.0](#070) | Compilation improvements, AOT coverage and backend/autodiff fixes |
 | [0.6.3](#063) | Complete Graph recipes, hardware rendering, reusable operations and basic ROCm/HIP |
 | [0.6.2](#062) | Execution plans, dynamic work, Graph storage and solver improvements |
 | [0.6.1](#061) | Task policies/labels, device worklists, SNode lifecycle and Graph telemetry |
@@ -25,9 +25,12 @@ Use the documentation at your release tag for version-specific API details.
 | [0.1.0](#010)–[0.1.3](#013) | Forge package/import identity and toolchain |
 
 <a id="unreleased"></a>
+
+Source fixes not yet included in a package are listed in [Fixes awaiting release](pending_fixes.en.md).
+
 <a id="070"></a>
 
-## 0.7.0 (unreleased)
+## 0.7.0
 
 0.7.0 reduces compilation work and memory overhead for large kernels and Graphs,
 expands AOT deployment, and fixes autodiff and backend execution issues.
