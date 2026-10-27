@@ -53,3 +53,52 @@ def test_reverse_nested_loop_bounds(bounds, capacity, tier, advanced):
                 evaluate.grad(begin, end)
             np.testing.assert_allclose(loss[None], weight * np.dot(values, values), rtol=1e-6)
             np.testing.assert_allclose(x.grad.to_numpy(), 2 * weight * values, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("cfg_enabled", [False, True])
+@pytest.mark.parametrize("fast_math", [False, True])
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda],
+    require=ti.extension.adstack,
+    compile_tier="fast",
+    advanced_optimization=False,
+    offline_cache=False,
+)
+def test_fast_reverse_nested_branch_recurrence(cfg_enabled, fast_math):
+    ti.cfg.cfg_optimization = cfg_enabled
+    ti.cfg.fast_math = fast_math
+    n = 8
+    x = ti.field(ti.f32, shape=n, needs_grad=True)
+    y = ti.field(ti.f32, shape=n, needs_grad=True)
+
+    @ti.kernel
+    def evaluate(end: ti.i32):
+        for i in range(n):
+            state = x[i]
+            for j in range(end):
+                scale = 0.75
+                if (i + j) % 2 == 0:
+                    scale = 1.125
+                state = scale * state + 0.125 * x[(i + 1) % n]
+            y[i] = state * state
+
+    # Independent f64 recurrence followed by an analytic square derivative.
+    # Cover loop-carried values, branch assignments, cross-element atomic
+    # accumulation and reuse with empty loop bounds.
+    for end in [6, 3, 0]:
+        values = np.linspace(-0.7, 0.9, n, dtype=np.float32)
+        seeds = np.array([1, -2, 0.5, -1, 2, 0.25, -0.5, 1], dtype=np.float32)
+        matrix = np.eye(n)
+        for i in range(n):
+            for j in range(end):
+                matrix[i] *= 1.125 if (i + j) % 2 == 0 else 0.75
+                matrix[i, (i + 1) % n] += 0.125
+        state = matrix @ values.astype(np.float64)
+        expected = matrix.T @ (2 * state * seeds)
+        x.from_numpy(values)
+        x.grad.fill(0)
+        y.grad.from_numpy(seeds)
+        evaluate(end)
+        evaluate.grad(end)
+        np.testing.assert_allclose(y.to_numpy(), state**2, rtol=2e-6, atol=1e-7)
+        np.testing.assert_allclose(x.grad.to_numpy(), expected, rtol=3e-6, atol=1e-7)

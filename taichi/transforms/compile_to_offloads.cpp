@@ -826,6 +826,34 @@ void compile_to_offloads(IRNode *ir,
       irpass::full_simplify(
           ir, config,
           {false, /*autodiff_enabled*/ true, kernel->get_name(), verbose});
+      // Nested reverse loops turn surviving local control state into AD
+      // stacks. Clean that state before differentiation even in the fast
+      // tier. Use the CFG's local-only mode so global AD accesses remain
+      // intact; do not enable the full advanced optimization pipeline.
+      if (!config.advanced_optimization && config.cfg_optimization &&
+          autodiff_mode == AutodiffMode::kReverse &&
+          irpass::analysis::any_statement(ir, [](Stmt *stmt) {
+            // any_statement visits non-container statements. Inspect a local
+            // allocation's ancestors instead of querying loop containers.
+            if (!stmt->is<AllocaStmt>())
+              return false;
+            int loops = 0;
+            for (auto *block = stmt->parent; block && block->parent_stmt();
+                 block = block->parent_stmt()->parent) {
+              auto *parent = block->parent_stmt();
+              if ((parent->is<RangeForStmt>() ||
+                   parent->is<StructForStmt>()) &&
+                  ++loops == 2)
+                return true;
+            }
+            return false;
+          })) {
+        irpass::cfg_optimization(ir, true, true,
+                                !config.real_matrix_scalarize &&
+                                    !config.force_scalarize_matrix);
+        irpass::alg_simp(ir, config);
+        irpass::die(ir);
+      }
       irpass::auto_diff(ir, config, autodiff_mode, ad_use_stack);
       // TODO: Be carefull with the full_simplify when do high-order autodiff
       irpass::full_simplify(

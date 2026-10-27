@@ -29,7 +29,7 @@
 | `compile_tier='fast'` | Python `ti.init()` 默认，或 `@ti.kernel(opt_level='fast')` 指定的单 kernel | CPU 使用 LLVM O1 保留基本运行期优化，CUDA/AMDGPU 使用保证正确 lowering 的 O1 下限，SPIR-V 跳过 optimizer | 可能降低 kernel 吞吐并改变浮点舍入；必须测稳态工作负载 |
 | `compile_tier='balanced'` | 显式选择的 Program 或单 kernel | 面向生产的折中；LLVM/SPIR-V 保持配置的优化级别 | 冷编译工作多于 `fast` |
 | `compile_tier='full'` | Program 或指定 kernel | 默认 global IR cap 未显式改动时，允许全局简化迭代到 fixed point | 编译代价最高；只用于已证明有运行期收益的热点 |
-| `advanced_optimization=False` | 大范围 Taichi IR pipeline | 可显著缩短病态 IR 简化，也可隔离 optimizer 故障 | 成组关闭高级 LICM、whole-kernel CSE 和 CFG 优化；基础简化与 fast LLVM 局部 CSE 仍保留 |
+| `advanced_optimization=False` | 大范围 Taichi IR pipeline | 可显著缩短病态 IR 简化，也可隔离 optimizer 故障 | 成组关闭高级 LICM、whole-kernel CSE 和全局 CFG 优化；基础简化、嵌套反向 AD 的局部清理与 fast LLVM 局部 CSE 仍保留 |
 | `debug=True` 及越界/AD validation | Program | 更强诊断与安全检查 | 改变生成代码和运行成本；debug 与 release 必须分开测量 |
 | `kernel_profiler=True` | 运行期测量 | 把设备时间归因到 kernel | profiler 可能增加同步或 instrumentation；不能不加说明地把 profiler-on 数字当发布延迟 |
 
@@ -45,6 +45,11 @@ CPU `fast` 现在由 O0 改为 O1，增加部分冷编译工作，消除仿真�
 
 O1 是运行与编译成本的权衡，不保证每个 kernel 都更快。局部场景也可能回退；
 部署前同时测量正反例、冷 JIT 和实际运行时长，保留上述 O0 配置用于定位。
+
+关闭高级 IR 优化时，含局部变量的嵌套反向 AD 循环仍在生成伴随前执行一次局部
+CFG 数据流清理和代数简化，避免把冗余控制状态变成 AD 栈操作。该步骤不启用全局
+内存读写转发，遵守 `fast_math`，并可由 `cfg_optimization=False` 关闭；前向模式和
+非嵌套循环不进入此路径。它不等于开启完整的高级优化，也不保证所有 AD 工作负载加速。
 
 CUDA 和 AMDGPU 的逐 kernel LLVM 等级及 fast-math 设置现在随编译模块保存，覆盖克隆、
 offline cache 和延迟 JIT 注册。kernel 的 `opt_level='fast'` 或 `'full'` 会传到 GPU

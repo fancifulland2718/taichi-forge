@@ -33,7 +33,7 @@ setting can be a win for a short CLI tool or an interactive edit-run loop.
 | `compile_tier='fast'` | Python `ti.init()` default, or one kernel through `@ti.kernel(opt_level='fast')` | Uses LLVM O1 on CPU to retain basic runtime optimization, an O1 safety floor on CUDA/AMDGPU, and skips SPIR-V optimization | Can reduce kernel throughput and change floating-point rounding; benchmark the steady workload |
 | `compile_tier='balanced'` | Explicit Program or per-kernel selection | Production-oriented compromise; LLVM/SPIR-V retain their configured optimization levels | More cold work than `fast` |
 | `compile_tier='full'` | Program or selected kernels | Lets Forge global IR simplification run to fixed point when the default cap is unchanged | Highest compile cost; use only where measured runtime wins justify it |
-| `advanced_optimization=False` | Broad Taichi IR pipeline | Can dramatically shorten pathological IR simplification and helps isolate optimizer failures | Disables advanced LICM, whole-kernel CSE and CFG optimization as a group; basic simplification and fast LLVM local CSE remain |
+| `advanced_optimization=False` | Broad Taichi IR pipeline | Can dramatically shorten pathological IR simplification and helps isolate optimizer failures | Disables advanced LICM, whole-kernel CSE and global CFG optimization as a group; basic simplification, local cleanup for nested reverse AD, and fast LLVM local CSE remain |
 | `debug=True` and bounds/AD validation | Program | Better diagnostics and safety checks | Changes generated code and runtime cost; keep separate debug and release measurements |
 | `kernel_profiler=True` | Runtime measurement | Attributes device time to kernels | Profiling can add synchronization or instrumentation overhead; do not use profiler-on numbers as release latency without qualification |
 
@@ -53,6 +53,15 @@ O1 trades compilation work for runtime optimization; it does not make every
 kernel faster. Measure representative improvements and regressions, cold JIT,
 and actual application duration. The explicit O0 configuration above remains
 available for diagnosis.
+
+With advanced IR optimization disabled, nested reverse-mode loops containing
+local variables still receive one local CFG dataflow cleanup and algebraic
+simplification before differentiation. This avoids turning redundant control
+state into AD stack operations. The cleanup does not enable global-memory
+forwarding, respects `fast_math`, and can be disabled with
+`cfg_optimization=False`. Forward mode and non-nested loops do not take this
+path. It does not enable the full advanced pipeline or promise faster execution
+for every AD workload.
 
 For CUDA and AMDGPU, the effective kernel LLVM level and fast-math setting now
 travel with the compiled module through cloning, offline caching and delayed
