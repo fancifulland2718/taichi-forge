@@ -292,8 +292,8 @@ class GraphKernelConfigurationRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
         "kernel_configuration",
         capabilities=("lazy-kernel-configuration-v1", "typed-runtime-fragment"),
-        domain_version="shared-specialization-configuration-v2",
-        semantic_fingerprint="compiled-primal-configuration-neighbors-v2",
+        domain_version="shared-specialization-configuration-v3",
+        semantic_fingerprint="in-place-primal-configuration-neighbors-v3",
     )
 
     def fragments(self, definition):
@@ -305,6 +305,7 @@ class GraphKernelConfigurationRecipeProvider(GraphRuntimeFragmentProvider):
                 coverage,
                 manifest,
                 provider_descriptor=self.descriptor,
+                application_kind="dispatch_configuration",
             )
             for sources, coverage in _source_groups(definition)
             for manifest, _ in sources[0].choices()
@@ -327,6 +328,7 @@ class GraphKernelConfigurationRecipeProvider(GraphRuntimeFragmentProvider):
             coverage,
             manifest,
             provider_descriptor=self.descriptor,
+            application_kind="dispatch_configuration",
         )
 
     def expand(self, definition, fragment_key):
@@ -339,6 +341,7 @@ class GraphKernelConfigurationRecipeProvider(GraphRuntimeFragmentProvider):
                 coverage,
                 manifest,
                 provider_descriptor=self.descriptor,
+                application_kind="dispatch_configuration",
             )
             for manifest in sources[0].neighbors(spec)
         )

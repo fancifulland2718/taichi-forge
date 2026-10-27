@@ -294,6 +294,7 @@ class GraphRecipeFragment:
     submission: GraphFragmentSubmissionRequirement
     backend_requirements: tuple[str, ...]
     capability_requirements: tuple[str, ...]
+    application_kind: str = "region_replacement"
     _provider_metadata_json: str = field(default="{}", repr=False)
 
     @classmethod
@@ -315,7 +316,10 @@ class GraphRecipeFragment:
         assembly_protocol=RUNTIME_GRAPH_ASSEMBLY_V1,
         assembly_provider_namespace=None,
         provider_metadata=None,
+        application_kind="region_replacement",
     ):
+        if application_kind not in ("region_replacement", "dispatch_configuration"):
+            raise ValueError("Unknown Graph fragment application kind")
         _required_text(provider_namespace, "Graph fragment provider namespace")
         _required_text(provider_version, "Graph fragment provider version")
         _required_text(
@@ -410,6 +414,7 @@ class GraphRecipeFragment:
             "capability_requirements": capability_requirements,
             "assembly_protocol": assembly_protocol,
             "assembly_provider_namespace": assembly_provider_namespace,
+            **({"application_kind": application_kind} if application_kind != "region_replacement" else {}),
         }
         planned_physical_id = f"fragment-physical:{_digest(physical_payload)}"
         identity_payload = {
@@ -449,6 +454,7 @@ class GraphRecipeFragment:
             submission=submission,
             backend_requirements=backend_requirements,
             capability_requirements=capability_requirements,
+            application_kind=application_kind,
             _provider_metadata_json=provider_metadata_json,
         )
 
@@ -479,4 +485,5 @@ class GraphRecipeFragment:
             "backend_requirements": self.backend_requirements,
             "capability_requirements": self.capability_requirements,
             "provider_metadata": self.provider_metadata,
+            **({"application_kind": self.application_kind} if self.application_kind != "region_replacement" else {}),
         }

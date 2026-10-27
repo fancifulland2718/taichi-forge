@@ -190,6 +190,27 @@ class GraphRecipeComposer:
                 "fragment semantic region contract does not match the definition"
             )
         covered = set(fragment.coverage_region_ids)
+        if fragment.application_kind not in ("region_replacement", "dispatch_configuration"):
+            raise GraphRecipeCompositionError("unknown fragment application kind")
+        configures_dispatches = fragment.application_kind == "dispatch_configuration"
+        if configures_dispatches:
+            # A shared code choice applies separately at every original dispatch.
+            # It cannot replace control flow, install a new task DAG, or change
+            # resource ownership/submission. The runtime keeps each binding.
+            if any(self._regions[region_id].kind != "dispatch" for region_id in covered):
+                raise GraphRecipeCompositionError("dispatch configuration must cover only dispatch leaves")
+            if (
+                fragment.assembly_protocol != RUNTIME_GRAPH_ASSEMBLY_V1
+                or len(fragment.tasks) != 1
+                or fragment.resources
+                or any(task.depends_on or task.effects or task.bindings or task.temporaries for task in fragment.tasks)
+                or fragment.submission.queue != "default"
+                or fragment.submission.barrier_before
+                or fragment.submission.barrier_after
+                or fragment.submission.exclusive_submission
+                or fragment.submission.executor_kind
+            ):
+                raise GraphRecipeCompositionError("dispatch configuration cannot replace tasks, resources or submission")
         for region_id in fragment.coverage_region_ids:
             path = self._regions[region_id].path
             descendants = {
@@ -210,13 +231,13 @@ class GraphRecipeComposer:
             raise GraphRecipeCompositionError(
                 "fragment coverage must contain an executable source region"
             )
-        if source_indices and source_indices != tuple(
+        if not configures_dispatches and source_indices and source_indices != tuple(
             range(source_indices[0], source_indices[-1] + 1)
         ):
             raise GraphRecipeCompositionError(
                 "one fragment cannot skip an intermediate executable region"
             )
-        if len(source_indices) > 1:
+        if not configures_dispatches and len(source_indices) > 1:
             source_paths = tuple(
                 self._regions[self.definition.sources[index].region_id].path
                 for index in source_indices
@@ -430,14 +451,17 @@ class GraphRecipeComposer:
                     )
                 )
                 continue
-            if fragment.fragment_id in emitted_fragments:
-                continue
-            emitted_fragments.add(fragment.fragment_id)
-            source_region_ids = tuple(
-                candidate.region_id
-                for candidate in self.definition.sources
-                if candidate.region_id in fragment.coverage_region_ids
-            )
+            if fragment.application_kind == "dispatch_configuration":
+                source_region_ids = (source.region_id,)
+            else:
+                if fragment.fragment_id in emitted_fragments:
+                    continue
+                emitted_fragments.add(fragment.fragment_id)
+                source_region_ids = tuple(
+                    candidate.region_id
+                    for candidate in self.definition.sources
+                    if candidate.region_id in fragment.coverage_region_ids
+                )
             steps.append(
                 GraphRecipeExecutionStep(
                     step_index=len(steps),

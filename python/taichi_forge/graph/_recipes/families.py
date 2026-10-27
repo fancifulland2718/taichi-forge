@@ -183,6 +183,7 @@ def _fragment(
     provider_descriptor=None,
     executor_kind="",
     compatible_executor_kinds=(),
+    application_kind="region_replacement",
 ):
     provider_descriptor = (
         _RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR
@@ -219,6 +220,7 @@ def _fragment(
         assembly_protocol=RUNTIME_GRAPH_ASSEMBLY_V1,
         assembly_provider_namespace=(_RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR.namespace),
         provider_metadata={"family_selection": selection.to_dict()},
+        application_kind=application_kind,
     )
 
 
@@ -231,6 +233,7 @@ def _choice_fragment(
     *,
     materialization_choice=None,
     provider_descriptor=None,
+    application_kind="region_replacement",
 ):
     payload = manifest.to_dict()
     exclusive = bool(
@@ -250,6 +253,7 @@ def _choice_fragment(
         exclusive_submission=exclusive
         or any(item.exclusive_submission for item in resources),
         provider_descriptor=provider_descriptor,
+        application_kind=application_kind,
     )
 
 

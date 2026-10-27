@@ -123,6 +123,7 @@ def _fragment(
     capabilities=(),
     assembly_protocol=None,
     assembly_provider_namespace=None,
+    application_kind="region_replacement",
 ):
     sources = tuple(definition.sources[index] for index in source_indices)
     tasks = tasks or (_task(f"task_{route}", route),)
@@ -139,6 +140,7 @@ def _fragment(
         submission=submission,
         backend_requirements=backends,
         capability_requirements=capabilities,
+        application_kind=application_kind,
         **(
             {}
             if assembly_protocol is None
@@ -317,6 +319,28 @@ def test_cross_region_fragment_composes_with_independent_resource_and_submission
     assert recipe.declared_transient_resource_bytes == 128
     assert recipe.exclusive_submission
     assert tuple(len(step.region_ids) for step in recipe.execution_steps) == (2, 1)
+
+
+def test_dispatch_configuration_preserves_interleaved_execution_positions():
+    definition = _definition()
+    fragment = _fragment(definition, (0, 2), "configuration", application_kind="dispatch_configuration")
+    recipe = GraphRecipeComposer(definition).compose((fragment,))
+    assert tuple(step.region_ids for step in recipe.execution_steps) == tuple(
+        (source.region_id,) for source in definition.sources
+    )
+    assert tuple(step.source for step in recipe.execution_steps) == ("fragment", "baseline", "fragment")
+    assert tuple(step.depends_on for step in recipe.execution_steps) == ((), (0,), (1,))
+    assert fragment.to_dict()["application_kind"] == "dispatch_configuration"
+    assert fragment.planned_physical_id != _fragment(definition, (0, 2), "configuration").planned_physical_id
+
+    for overrides in (
+        {"tasks": (_task("a", "a"), _task("b", "b", depends_on=("a",)))},
+        {"resources": (GraphFragmentResourceRequirement("scratch", "workspace", bytes=4),)},
+        {"submission": GraphFragmentSubmissionRequirement(barrier_before=True)},
+    ):
+        invalid = _fragment(definition, (0, 2), "invalid", application_kind="dispatch_configuration", **overrides)
+        with pytest.raises(GraphRecipeCompositionError, match="cannot replace"):
+            GraphRecipeComposer(definition).compose((invalid,))
 
 
 def test_composer_rejects_only_structural_and_physical_incompatibilities():

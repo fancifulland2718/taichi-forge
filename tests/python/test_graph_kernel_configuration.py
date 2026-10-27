@@ -14,6 +14,55 @@ from tests import test_utils
 PROVIDERS = (GraphRuntimeAssemblyProvider(), GraphKernelConfigurationRecipeProvider())
 
 
+@pytest.mark.parametrize("choice", ["tier", "workgroup"])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, compile_tier="fast")
+def test_interleaved_configuration_preserves_order_and_distinct_bindings(choice):
+    @ti.kernel
+    def add(out: ti.types.ndarray(ti.i32, 1), offset: ti.i32):
+        for i in out:
+            out[i] += i + offset
+
+    @ti.kernel
+    def scale(source: ti.types.ndarray(ti.i32, 1), target: ti.types.ndarray(ti.i32, 1)):
+        for i in source:
+            target[i] = 3 * source[i]
+
+    builder = ti.graph.GraphBuilder()
+    left = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "left", ti.i32, ndim=1)
+    right = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "right", ti.i32, ndim=1)
+    builder.dispatch(add, left, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "first", ti.i32))
+    builder.dispatch(scale, left, right)
+    builder.dispatch(add, right, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "last", ti.i32))
+    definition = builder.freeze()
+    before = len(add._primal.compiled_kernels)
+    catalog = definition.recipe_catalog(providers=PROVIDERS)
+    assert len(add._primal.compiled_kernels) == before
+    fragment = None
+    if ti.lang.impl.current_cfg().arch != ti.cpu:
+        fragment = choose(definition, catalog, lambda spec: (
+            spec.ir.compile_tier == "full" if choice == "tier" else spec.backend.workgroup_size is not None
+        ))
+        assert len(fragment.coverage_region_ids) == 2
+        recipe = catalog.compose((fragment.fragment_id,), stage="interleaved").recipe
+        assert tuple(step.source for step in recipe.execution_steps) == ("fragment", "baseline", "fragment")
+    else:
+        assert not catalog.fragments
+        recipe = catalog.baseline.recipe
+    arrays = {name: ti.ndarray(ti.i32, 65) for name in ("left", "right")}
+    with definition.materialization_context(providers=PROVIDERS) as context:
+        baseline = context.materialize(catalog.baseline.recipe)
+        selected = context.materialize(recipe)
+        if fragment is not None:
+            assert len(add._primal.compiled_kernels) == before + 1
+            assert selected.materialized_physical_id != baseline.materialized_physical_id
+        for graph in (selected.executor, baseline.executor):
+            arrays["left"].fill(0)
+            arrays["right"].fill(0)
+            graph.run(dict(**arrays, first=7, last=11))
+            np.testing.assert_array_equal(arrays["left"].to_numpy(), np.arange(65) + 7)
+            np.testing.assert_array_equal(arrays["right"].to_numpy(), np.arange(65) * 4 + 32)
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False, compile_tier="fast")
 def test_multi_task_workgroup_keeps_order_dense_lowering_and_aot(tmp_path):
     field = ti.field(ti.i32, (17, 19))
