@@ -21,6 +21,7 @@ the fixes below. The release column will be updated when the next version is ass
 | F070-9 | 0.7.0 | SPIR-V f32/f16 and LLVM f16 random draws can round to 1.0, violating `[0, 1)`. Generate only the destination's significant bits before scaling; invalidate old compiled artifacts. | Next release, TBD |
 | F070-10 | 0.7.0 | Cross-task temporaries can overlap the SPIR-V RNG counter, so even a kernel without random draws can corrupt the random stream. Reserve the historical RNG word in temporary allocation, preserving contiguous tensors and scalar alignment; invalidate old compiled artifacts. | Next release, TBD |
 | F070-11 | 0.7.0 | CPU/CUDA whole-value assignment to a packed scalar matrix still compiles a transfer helper after F070-5. Use the existing native packed host copy first, retaining the earlier fallback and host rounding. | Next release, TBD |
+| F070-12 | 0.7.0 | The first host read or write creates both accessor kernel definitions, retaining an unused counterpart for fields accessed in only one direction. Create each accessor on demand and retire whichever definitions exist with the SNode tree. | Next release, TBD |
 
 F070-2 configuration candidates apply to CUDA/Vulkan primal kernels. CPU retains
 its existing execution path; gradient kernels are not configuration candidates
@@ -44,7 +45,9 @@ Fix commits and focused regressions:
 
 - F070-11: committed with this entry as `Avoid transfer kernel compilation for packed scalar matrices`; CPU/CUDA matrix and vector assignments require no new executable or host accessor. Existing rounding, f64, alias and Tape checks remain. Vulkan keeps scalar assignment: a native-copy candidate still increased LBM resident host memory, so it is not enabled.
 
-F070-3 through F070-11 describe source changes, not the behavior of the published
+- F070-12: committed with this entry as `Create SNode accessor kernels only when used`; 24 CPU/CUDA/Vulkan checks cover float, signed/unsigned integer access, repeated access, switching direction, and destruction/recreation with only one accessor present. An old-package read-only reproducer creates two definitions instead of one. This reduces unused definitions, not the number of compiled writers or Vulkan device initialization allocations.
+
+F070-3 through F070-12 describe source changes, not the behavior of the published
 0.7.0 wheel. See [compilation trade-offs](compilation_tradeoffs.en.md) for their
 scope and diagnostic controls. These changes do not guarantee a universal speedup
 or bitwise equality across backends.

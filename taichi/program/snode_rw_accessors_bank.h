@@ -27,8 +27,7 @@ class SNodeRwAccessorsBank {
   class Accessors {
    public:
     explicit Accessors(const SNode *snode,
-                       const RwKernels &kernels,
-                       Program *prog);
+                       SNodeRwAccessorsBank *bank);
 
     // for float and double
     void write_float(const std::vector<int> &I, float64 val);
@@ -42,9 +41,8 @@ class SNodeRwAccessorsBank {
 
    private:
     const SNode *snode_;
+    SNodeRwAccessorsBank *bank_;
     Program *prog_;
-    Kernel *reader_;
-    Kernel *writer_;
   };
 
   explicit SNodeRwAccessorsBank(Program *program) : program_(program) {
@@ -64,6 +62,7 @@ class SNodeRwAccessorsBank {
   }
 
  private:
+  Kernel *get_kernel(const SNode *snode, bool write);
   Program *const program_;
   std::unordered_map<const SNode *, RwKernels> snode_to_kernels_;
 };
