@@ -209,7 +209,7 @@ class Kernel;
 // 91 - Preserve explicit demoted dense-loop blocks and admit uniform multi-range policies.
 // 92 - CPU fast-tier LLVM uses O1 instead of O0.
 // 93 - Clean local state in nested reverse loops before autodiff.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 93;
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 94;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

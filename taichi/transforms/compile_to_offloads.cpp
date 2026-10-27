@@ -828,8 +828,8 @@ void compile_to_offloads(IRNode *ir,
           {false, /*autodiff_enabled*/ true, kernel->get_name(), verbose});
       // Nested reverse loops turn surviving local control state into AD
       // stacks. Clean that state before differentiation even in the fast
-      // tier. Use the CFG's local-only mode so global AD accesses remain
-      // intact; do not enable the full advanced optimization pipeline.
+      // tier. Vulkan also benefits from simplifying repeated conditional
+      // field reads before they become separate gradient atomic updates.
       if (!config.advanced_optimization && config.cfg_optimization &&
           autodiff_mode == AutodiffMode::kReverse &&
           irpass::analysis::any_statement(ir, [](Stmt *stmt) {
@@ -848,6 +848,16 @@ void compile_to_offloads(IRNode *ir,
             }
             return false;
           })) {
+        if (config.arch == Arch::vulkan) {
+          // Keep this preparation bounded to one global pass batch and to
+          // this pre-AD phase. Retain the AD memory guards and fast_math;
+          // primal kernels and later lowering keep the requested tier.
+          auto pre_ad_config = config;
+          pre_ad_config.advanced_optimization = true;
+          pre_ad_config.full_simplify_global_iter_cap = 1;
+          irpass::full_simplify(ir, pre_ad_config,
+                              {false, true, kernel->get_name(), verbose});
+        }
         irpass::cfg_optimization(ir, true, true,
                                 !config.real_matrix_scalarize &&
                                     !config.force_scalarize_matrix);

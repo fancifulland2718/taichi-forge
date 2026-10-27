@@ -5,7 +5,8 @@
 > Scope: current source documentation. Check [version and installation guidance](index.en.md#versions-and-installation) for your installed release.
 
 The CPU O1 policy, nested reverse-AD cleanup and CPU/CUDA scalar-shaped Matrix
-assignment changes below are [pending source fixes F070-3–F070-5](pending_fixes.en.md),
+assignment changes below, including the Vulkan pre-AD preparation, are
+[pending source fixes F070-3–F070-6](pending_fixes.en.md),
 not behavior included in the published 0.7.0 packages.
 
 This guide explains how to shorten Taichi Forge cold compilation without
@@ -37,7 +38,7 @@ setting can be a win for a short CLI tool or an interactive edit-run loop.
 | `compile_tier='fast'` | Python `ti.init()` default, or one kernel through `@ti.kernel(opt_level='fast')` | Uses LLVM O1 on CPU to retain basic runtime optimization, an O1 safety floor on CUDA/AMDGPU, and skips SPIR-V optimization | Can reduce kernel throughput and change floating-point rounding; benchmark the steady workload |
 | `compile_tier='balanced'` | Explicit Program or per-kernel selection | Production-oriented compromise; LLVM/SPIR-V retain their configured optimization levels | More cold work than `fast` |
 | `compile_tier='full'` | Program or selected kernels | Lets Forge global IR simplification run to fixed point when the default cap is unchanged | Highest compile cost; use only where measured runtime wins justify it |
-| `advanced_optimization=False` | Broad Taichi IR pipeline | Can dramatically shorten pathological IR simplification and helps isolate optimizer failures | Disables advanced LICM, whole-kernel CSE and global CFG optimization as a group; basic simplification, local cleanup for nested reverse AD, and fast LLVM local CSE remain |
+| `advanced_optimization=False` | Broad Taichi IR pipeline | Can dramatically shorten pathological IR simplification and helps isolate optimizer failures | Disables the general advanced pipeline; basic simplification, bounded preparation for nested reverse AD, and fast LLVM local CSE remain |
 | `debug=True` and bounds/AD validation | Program | Better diagnostics and safety checks | Changes generated code and runtime cost; keep separate debug and release measurements |
 | `kernel_profiler=True` | Runtime measurement | Attributes device time to kernels | Profiling can add synchronization or instrumentation overhead; do not use profiler-on numbers as release latency without qualification |
 
@@ -61,11 +62,15 @@ available for diagnosis.
 With advanced IR optimization disabled, nested reverse-mode loops containing
 local variables still receive one local CFG dataflow cleanup and algebraic
 simplification before differentiation. This avoids turning redundant control
-state into AD stack operations. The cleanup does not enable global-memory
-forwarding, respects `fast_math`, and can be disabled with
-`cfg_optimization=False`. Forward mode and non-nested loops do not take this
-path. It does not enable the full advanced pipeline or promise faster execution
-for every AD workload.
+state into AD stack operations. On Vulkan, this preparation also runs one
+advanced simplification batch before differentiation, combining conditional
+field reads before they become separate gradient atomic updates. The number of
+global pass batches is capped at one; existing AD memory guards and `fast_math` remain
+in force. `cfg_optimization=False` disables this preparation. Primal kernels,
+forward mode and non-nested loops do not take this path; later lowering keeps
+the requested tier. CPU/CUDA retain local-only CFG cleanup. The additional
+Vulkan preparation can cost compilation time and does not promise a speedup
+for every AD workload. Its cache-schema update invalidates earlier artifacts.
 
 On CPU/CUDA outside AD recording, assigning a standalone Python `ti.Matrix` value to a
 zero-dimensional homogeneous f32/f64 matrix field (`field[None] = value`)
