@@ -1692,8 +1692,10 @@ class MatrixField(Field):
         # A scalar-shaped matrix is one complete field value. Reuse the bulk
         # transfer instead of compiling one SNode writer per component. Keep
         # host-access aliases, mixed dtypes and AD recording on the established
-        # element-wise path. Limit this to CPU/CUDA: bulk transfer retained
-        # more host memory than scalar writers in Vulkan measurements.
+        # element-wise path. Prefer the native packed copy: unlike a transfer
+        # helper kernel, it needs no compilation even for a zero-dimensional
+        # field. Vulkan keeps scalar writers because even native bulk transfer
+        # increased the measured resident host working set.
         runtime = impl.get_runtime()
         if (
             key is None
@@ -1714,7 +1716,10 @@ class MatrixField(Field):
             # narrowing to the field dtype. Preserve that rounding for large
             # integer values as well as floating-point input.
             values = np.asarray(value.to_list(), dtype=np.float64)
-            self.from_numpy(values.astype(to_numpy_type(self.dtype), copy=False))
+            values = values.astype(to_numpy_type(self.dtype), copy=False)
+            if self._try_native_dense_packed_from_numpy(values, self.ndim == 1):
+                return
+            self.from_numpy(values)
             return
         self._initialize_host_accessors()
         self[key]._set_entries(value)

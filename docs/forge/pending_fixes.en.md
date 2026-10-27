@@ -20,6 +20,7 @@ the fixes below. The release column will be updated when the next version is ass
 | F070-8 | 0.7.0 | Vulkan ignores `random_seed`. Initialize the shared RNG counter from runtime configuration, including independent fixed Graph workspaces; cached shaders remain seed-independent. | Next release, TBD |
 | F070-9 | 0.7.0 | SPIR-V f32/f16 and LLVM f16 random draws can round to 1.0, violating `[0, 1)`. Generate only the destination's significant bits before scaling; invalidate old compiled artifacts. | Next release, TBD |
 | F070-10 | 0.7.0 | Cross-task temporaries can overlap the SPIR-V RNG counter, so even a kernel without random draws can corrupt the random stream. Reserve the historical RNG word in temporary allocation, preserving contiguous tensors and scalar alignment; invalidate old compiled artifacts. | Next release, TBD |
+| F070-11 | 0.7.0 | CPU/CUDA whole-value assignment to a packed scalar matrix still compiles a transfer helper after F070-5. Use the existing native packed host copy first, retaining the earlier fallback and host rounding. | Next release, TBD |
 
 F070-2 configuration candidates apply to CUDA/Vulkan primal kernels. CPU retains
 its existing execution path; gradient kernels are not configuration candidates
@@ -41,7 +42,9 @@ Fix commits and focused regressions:
 - F070-9: `9ce09cbe6`; an inverse-derived seed produces UINT32_MAX on the first draw, deterministically reproducing four rounding failures. Six CPU/CUDA/Vulkan dtype checks, three existing distribution checks, two seed/cache/Graph checks and SPIR-V validation pass. Integer streams and LLVM f32/f64 conversion remain unchanged; affected floating-point streams change.
 - F070-10: committed with this entry as `Reserve SPIR-V random state in global temporary allocation`; a 1032-element cross-task integer array changes the next random draw before the fix. JIT and bound Graph regressions require exactly the same integer stream with or without that unrelated kernel. Seed/cache/Graph and floating-point boundary checks also pass. The counter stays at byte 4096 for existing shader/runtime layout compatibility; old AOT artifacts must be re-exported to gain the allocator fix. The existing 1 MiB buffer is unchanged; a tensor crossing the reserved word moves wholly past it. CPU/CUDA temporary allocation is unchanged.
 
-F070-3 through F070-10 describe source changes, not the behavior of the published
+- F070-11: committed with this entry as `Avoid transfer kernel compilation for packed scalar matrices`; CPU/CUDA matrix and vector assignments require no new executable or host accessor. Existing rounding, f64, alias and Tape checks remain. Vulkan keeps scalar assignment: a native-copy candidate still increased LBM resident host memory, so it is not enabled.
+
+F070-3 through F070-11 describe source changes, not the behavior of the published
 0.7.0 wheel. See [compilation trade-offs](compilation_tradeoffs.en.md) for their
 scope and diagnostic controls. These changes do not guarantee a universal speedup
 or bitwise equality across backends.

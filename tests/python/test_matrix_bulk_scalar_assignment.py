@@ -21,17 +21,44 @@ def test_scalar_matrix_assignment_has_bounded_executables(n, m):
     np.testing.assert_array_equal(matrix.to_numpy(), -values.astype(np.float32))
 
 
+@pytest.mark.parametrize("vector", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_scalar_matrix_assignment_needs_no_compilation(monkeypatch, vector):
+    matrix = ti.Vector.field(3, ti.f32, shape=()) if vector else ti.Matrix.field(2, 3, ti.f32, shape=())
+    values = np.arange(3 if vector else 6, dtype=np.float32) / 8
+    if not vector:
+        values = values.reshape(2, 3)
+
+    def unexpected_transfer(*args):
+        raise AssertionError("A packed scalar matrix must not compile transfer or writer kernels")
+
+    monkeypatch.setattr(matrix, "from_numpy", unexpected_transfer)
+    monkeypatch.setattr(matrix, "_initialize_host_accessors", unexpected_transfer)
+    prog = ti.lang.impl.get_runtime().prog
+    before = prog._debug_kernel_executable_lifecycle_stats(False)
+    matrix[None] = ti.Matrix(values)
+    after = prog._debug_kernel_executable_lifecycle_stats(False)
+    assert after["resident_templates"] == before["resident_templates"]
+    np.testing.assert_array_equal(matrix.to_numpy(), values)
+
+
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_scalar_matrix_assignment_keeps_vulkan_scalar_path(monkeypatch):
-    matrix = ti.Matrix.field(2, 3, ti.f32, shape=())
+def test_scalar_matrix_assignment_keeps_unsupported_layout_fallback(monkeypatch):
+    # Root-placed components do not satisfy the packed dense transfer contract.
+    matrix = ti.Matrix.field(2, 3, ti.f32)
+    guard = ti.field(ti.i32)
+    ti.root.place(guard, matrix)
+    guard[None] = 1234567
     values = np.arange(6, dtype=np.float32).reshape(2, 3) / 8
 
     def unexpected_transfer(*args):
-        raise AssertionError("Vulkan retains the scalar path to avoid bulk-transfer memory overhead")
+        raise AssertionError("Unsupported Vulkan layouts must retain scalar writers")
 
     monkeypatch.setattr(matrix, "from_numpy", unexpected_transfer)
+    assert matrix._native_dense_packed_plan() is None
     matrix[None] = ti.Matrix(values)
     np.testing.assert_array_equal(matrix.to_numpy(), values)
+    assert guard[None] == 1234567
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -88,6 +115,7 @@ def test_scalar_matrix_assignment_does_not_record_transfer_in_tape(monkeypatch):
         raise AssertionError("Host assignment inside Tape must keep its scalar semantics")
 
     monkeypatch.setattr(matrix, "from_numpy", unexpected_transfer)
+    monkeypatch.setattr(matrix, "_try_native_dense_packed_from_numpy", unexpected_transfer)
     with ti.ad.Tape(loss):
         matrix[None] = ti.Matrix([[2.0, 0.0], [0.0, 1.0]])
         evaluate()

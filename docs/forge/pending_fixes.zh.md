@@ -19,6 +19,7 @@
 | F070-8 | 0.7.0 | Vulkan 忽略 `random_seed`。现从运行时配置初始化共享 RNG 计数器，独立固定 Graph 工作区同样传入种子；缓存 shader 仍与种子无关。 | 下一版本，待定 |
 | F070-9 | 0.7.0 | SPIR-V 的 f32/f16 与 LLVM 的 f16 随机数可能舍入到 1.0，违反 `[0, 1)`。现按目标类型有效位数截取整数再缩放，并使旧编译产物失效。 | 下一版本，待定 |
 | F070-10 | 0.7.0 | 跨任务临时变量可能覆盖 SPIR-V RNG 计数器，导致不含随机调用的 kernel 也能破坏随机流。现为历史 RNG 槽位预留空间，保持张量连续与标量对齐，并使旧编译产物失效。 | 下一版本，待定 |
+| F070-11 | 0.7.0 | F070-5 之后，CPU/CUDA 连续零维矩阵整体赋值仍会编译传输辅助内核。现优先使用既有原生连续布局主机复制，保留原回退与主机舍入。 | 下一版本，待定 |
 
 F070-2 的配置候选适用于 CUDA/Vulkan primal kernel；CPU 保留原有执行路径，
 梯度 kernel 不作为本轮配置候选。候选只在物化时编译，重放不增加搜索或配置转换。
@@ -38,7 +39,9 @@ F070-2 的配置候选适用于 CUDA/Vulkan primal kernel；CPU 保留原有执�
 - F070-9：`9ce09cbe6`；通过整数反演构造首次抽样为 UINT32_MAX 的种子，确定性复现四个舍入失败。六项 CPU/CUDA/Vulkan 类型边界、三项现有分布、两项 seed/cache/Graph 检查及 SPIR-V 验证通过。整数流和 LLVM f32/f64 转换不变，受影响的浮点流会改变。
 - F070-10：与此条目同次提交 `Reserve SPIR-V random state in global temporary allocation`；1032 元素跨任务整数数组在修复前会改变下一次随机值。JIT 与绑定 Graph 回归要求插入该无关 kernel 前后的整数流完全一致，种子/cache/Graph 与浮点边界检查亦通过。计数器仍位于 byte 4096，保留既有 shader/runtime 布局；旧 AOT 产物需重新导出才能获得分配修复。既有 1 MiB 缓冲区不变，跨越预留槽位的张量整体移到其后。CPU/CUDA 临时变量分配不变。
 
-F070-3 至 F070-10 描述源码改动，不代表已发布 0.7.0 wheel 的行为。范围与诊断开关见
+- F070-11：与此条目同次提交 `Avoid transfer kernel compilation for packed scalar matrices`；CPU/CUDA 矩阵与向量赋值要求不产生新编译产物或主机访问器，保留舍入、f64、别名与 Tape 回归。Vulkan 仍使用标量赋值：原生复制候选依然增加 LBM 常驻主机内存，因此未启用。
+
+F070-3 至 F070-11 描述源码改动，不代表已发布 0.7.0 wheel 的行为。范围与诊断开关见
 [编译权衡](compilation_tradeoffs.zh.md)。这些改动均不保证所有工作负载加速或跨后端逐位一致。
 
 ## 随版本维护
