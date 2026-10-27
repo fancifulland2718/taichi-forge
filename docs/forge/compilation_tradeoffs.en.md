@@ -4,6 +4,10 @@
 
 > Scope: current source documentation. Check [version and installation guidance](index.en.md#versions-and-installation) for your installed release.
 
+The CPU O1 policy, nested reverse-AD cleanup and CPU/CUDA scalar-shaped Matrix
+assignment changes below are [pending source fixes F070-3–F070-5](pending_fixes.en.md),
+not behavior included in the published 0.7.0 packages.
+
 This guide explains how to shorten Taichi Forge cold compilation without
 quietly trading away production throughput, numerical confidence, or
 autodiff coverage. It complements the [compile and cache guide](cache_compile.en.md),

@@ -4,6 +4,9 @@
 
 > 适用范围：当前源码文档。请按安装版本核对[版本与安装说明](index.zh.md#版本与安装)。
 
+下文 CPU O1 策略、嵌套反向 AD 清理与 CPU/CUDA 零维矩阵赋值属于
+[待发布源码修复 F070-3–F070-5](pending_fixes.zh.md)，已发布的 0.7.0 包尚未包含。
+
 本文说明如何缩短 Taichi Forge 冷编译，同时避免悄悄牺牲生产吞吐、数值可信度或
 自动微分覆盖。缓存与复用机制见[编译与缓存说明](cache_compile.zh.md)，完整 Forge
 配置清单见 [Forge options](forge_options.zh.md)。
