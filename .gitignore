@@ -115,3 +115,6 @@ temp_outputs/
 dist-runtime/
 runtimes/
 temp/
+
+# Local import-only PyPI application performance study.
+/ecosystem_import_bench_20261027/
