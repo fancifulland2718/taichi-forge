@@ -315,6 +315,7 @@ class TI_DLL_EXPORT GfxRuntime {
     bool cmdlist_lazy_submit{false};
     int cmdlist_max_dispatches{8};
     bool debug{false};
+    uint32_t random_seed{0};
   };
 
   explicit GfxRuntime(const Params &params);
@@ -662,10 +663,14 @@ class TI_DLL_EXPORT GfxRuntime {
    private:
     friend class GfxRuntime;
     FixedGraphWorkspace(Device *device,
+                        uint32_t random_seed,
                         std::shared_ptr<SparseDiagnosticCollector> collector)
-        : device_(device), diagnostic_collector_(std::move(collector)) {
+        : device_(device),
+          random_seed_(random_seed),
+          diagnostic_collector_(std::move(collector)) {
     }
     Device *device_;
+    uint32_t random_seed_;
     std::shared_ptr<DeviceAllocationGuard> global_tmps_;
     struct PrivateDiagnostic {
       DeviceAllocationUnique buffer;
@@ -1200,6 +1205,7 @@ class TI_DLL_EXPORT GfxRuntime {
   bool cmdlist_lazy_submit_enabled_{false};
   size_t cmdlist_lazy_submit_min_dispatches_{8};
   bool debug_mode_{false};
+  uint32_t random_seed_{0};
 
   std::unordered_map<int, std::unique_ptr<CompiledTaichiKernel>> ti_kernels_;
   std::unordered_map<int, std::vector<int>> ti_kernel_snode_tree_ids_;

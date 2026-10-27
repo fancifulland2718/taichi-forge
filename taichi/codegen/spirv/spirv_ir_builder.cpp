@@ -2340,12 +2340,12 @@ void IRBuilder::init_random_function(Value global_tmp_) {
   Value _362436069u = uint_immediate_number(t_uint32_, 362436069u);
   Value _521288629u = uint_immediate_number(t_uint32_, 521288629u);
   Value _88675123u = uint_immediate_number(t_uint32_, 88675123u);
-  Value _1024 = int_immediate_number(t_uint32_, 1024);
+  Value counter_index = int_immediate_number(t_uint32_, kRandomCounterWord);
 
   // init_rand_ segment (inline to main)
   // ad-hoc: hope no kernel will use more than 1024 gtmp variables...
   ib_.begin(spv::OpAccessChain)
-      .add_seq(gtmp_type, rand_gtmp_, global_tmp_, const_i32_zero_, _1024)
+      .add_seq(gtmp_type, rand_gtmp_, global_tmp_, const_i32_zero_, counter_index)
       .commit(&func_header_);
   // Get gl_GlobalInvocationID.x, assert it has be visited
   // (in generate_serial_kernel/generate_range_for_kernel

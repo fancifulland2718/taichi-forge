@@ -52,6 +52,27 @@ namespace gfx {
 
 namespace {
 
+void initialize_global_temporaries(CommandList &commands,
+                                  const DeviceAllocation &buffer,
+                                  uint32_t random_seed) {
+  if (random_seed == 0) {
+    // Keep the default full-buffer clear for GFX backends that do not support
+    // subregion fills (DX11) or nonzero fill values (Metal).
+    commands.buffer_fill(buffer.get_ptr(), kGtmpBufferSize, 0);
+    return;
+  }
+  constexpr size_t counter_offset = spirv::kRandomCounterWord * sizeof(uint32_t);
+  constexpr size_t tail_offset = counter_offset + sizeof(uint32_t);
+  static_assert(tail_offset <= kGtmpBufferSize);
+  // Disjoint fills avoid overlapping transfer writes. The seed belongs to
+  // runtime state, not compiled shader code or its offline-cache identity.
+  commands.buffer_fill(buffer.get_ptr(), counter_offset, 0);
+  commands.buffer_fill(buffer.get_ptr(counter_offset), sizeof(uint32_t),
+                       random_seed * 1048391u);
+  commands.buffer_fill(buffer.get_ptr(tail_offset),
+                       kGtmpBufferSize - tail_offset, 0);
+}
+
 int host_launch_groups(const TaskAttributes &task,
                        LaunchContextBuilder &ctx) {
   const int block = task.advisory_num_threads_per_group;
@@ -1273,7 +1294,8 @@ GfxRuntime::GfxRuntime(const Params &params)
           params.cmdlist_max_dispatches > 0
               ? static_cast<size_t>(params.cmdlist_max_dispatches)
               : size_t{0}),
-      debug_mode_(params.debug) {
+      debug_mode_(params.debug),
+      random_seed_(params.random_seed) {
   graph_replay_registry_ = std::make_shared<GraphReplayRegistry>(this);
   TI_ERROR_IF(params.listgen_buffer_MB < 0,
               "vulkan_listgen_buffer_MB must be >= 0, got {}",
@@ -3299,7 +3321,8 @@ GfxRuntime::create_fixed_graph_workspace() {
     sparse_diagnostic_collector_ =
         std::make_shared<SparseDiagnosticCollector>();
   return std::shared_ptr<FixedGraphWorkspace>(
-      new FixedGraphWorkspace(device_, sparse_diagnostic_collector_));
+      new FixedGraphWorkspace(device_, random_seed_,
+                              sparse_diagnostic_collector_));
 }
 
 void GfxRuntime::prepare_fixed_private_image(
@@ -3456,7 +3479,7 @@ void GfxRuntime::FixedGraphWorkspace::record_initialization(
   TI_ERROR_IF(initialization_recorded_,
               "Fixed Graph workspace initialization was already recorded");
   if (global_tmps_) {
-    commands.buffer_fill(global_tmps_->get_ptr(), kGtmpBufferSize, 0);
+    initialize_global_temporaries(commands, *global_tmps_, random_seed_);
     commands.memory_barrier();
   }
   for (const auto &[id, diagnostic] : diagnostics_) {
@@ -8238,8 +8261,7 @@ void GfxRuntime::init_nonroot_buffers() {
       device_->get_compute_stream()->new_command_list_unique();
   TI_ASSERT(res == RhiResult::success);
 
-  cmdlist->buffer_fill(global_tmps_buffer_->get_ptr(0), kBufferSizeEntireSize,
-                       /*data=*/0);
+  initialize_global_temporaries(*cmdlist, *global_tmps_buffer_, random_seed_);
   cmdlist->buffer_fill(hash_overflow_buffer_->get_ptr(0),
                        kBufferSizeEntireSize, /*data=*/0);
   stream->submit_synced(cmdlist.get());

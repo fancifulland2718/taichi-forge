@@ -188,6 +188,7 @@ void VulkanProgramImpl::materialize_runtime(KernelProfilerBase *profiler,
   params.cmdlist_lazy_submit = config->gfx_cmdlist_lazy_submit;
   params.cmdlist_max_dispatches = config->gfx_cmdlist_max_dispatches;
   params.debug = config->debug;
+  params.random_seed = static_cast<uint32_t>(config->random_seed);
   runtime_ = std::make_unique<gfx::GfxRuntime>(std::move(params));
   embedded_device_->device()->set_default_pipeline_cache(
       runtime_->get_backend_cache());

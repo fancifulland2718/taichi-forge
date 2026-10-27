@@ -14,6 +14,9 @@
 namespace taichi::lang {
 namespace spirv {
 
+// Word index in the global temporary buffer, shared with GFX initialization.
+inline constexpr uint32_t kRandomCounterWord = 1024;
+
 template <bool stop, std::size_t I, typename F>
 struct for_each_dispatcher {
   template <typename T, typename... Args>
