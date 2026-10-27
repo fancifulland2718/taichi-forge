@@ -4519,14 +4519,13 @@ def kernel(fn=None, *, opt_level=None):
     """
     # Support both bare `@ti.kernel` and parameterized `@ti.kernel(opt_level=...)`.
     # When called bare, fn is the user function (level_of_class_stackframe=3:
-    # _kernel_impl -> kernel -> user). When called with parens, fn is None and
-    # we return the inner decorator (level_of_class_stackframe=4:
-    # _kernel_impl -> _decorator -> kernel(...) call site -> user).
+    # _kernel_impl -> kernel -> user). The returned decorator has the same
+    # application depth: the earlier kernel(...) factory call has returned.
     if fn is not None:
         return _kernel_impl(fn, level_of_class_stackframe=3, opt_level=opt_level)
 
     def _decorator(_fn):
-        return _kernel_impl(_fn, level_of_class_stackframe=4, opt_level=opt_level)
+        return _kernel_impl(_fn, level_of_class_stackframe=3, opt_level=opt_level)
 
     return _decorator
 
