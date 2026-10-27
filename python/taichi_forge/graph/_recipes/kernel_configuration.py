@@ -250,41 +250,70 @@ class GraphKernelConfigurationSource:
         return kernel_cpp
 
 
+def _sequence_occurrences(sequence, path, offset=0):
+    for index, (item, ir_node) in enumerate(zip(sequence._items, sequence._ir_nodes)):
+        child_path = f"{path}/{offset + index}:{ir_node.kind}"
+        if item[0] == "dispatch":
+            source = sequence._kernel_configuration_sources.get(index)
+            if source is not None:
+                yield source, child_path
+        elif item[0] == "structured":
+            yield from _node_occurrences(item[1], child_path)
+
+
+def _node_occurrences(node, path):
+    for index, (_, sequence) in enumerate(getattr(node, "_definition_regions", ())):
+        yield from _sequence_occurrences(sequence, f"{path}/{index}:sequential_region")
+    offset = 0
+    for _ in range(getattr(node, "definition_repetitions", 1)):
+        for sequence in getattr(node, "definition_sequence_snapshots", ()):
+            yield from _sequence_occurrences(sequence, path, offset)
+            offset += len(sequence._ir_nodes)
+    offset = 0
+    for operation in getattr(node, "recipe_operations", ()):
+        if operation[0] == "dispatch":
+            for source in operation[4:]:
+                if isinstance(source, GraphKernelConfigurationSource):
+                    yield source, f"{path}/{offset}:dispatch"
+        elif operation[0] == "sequential":
+            yield from _sequence_occurrences(operation[1], path, offset)
+        offset += _recipe_operation_dispatch_count(operation)
+
+
 def _source_groups(definition):
     """Map exact replay occurrences, including intervening other node kinds.
 
     Matching semantic identities alone is insufficient when equal kernels occur
     in different regions. Only source objects retained in replay are eligible.
     """
-    sources = getattr(
-        definition._runtime_spec, "_graph_kernel_configuration_sources", ()
-    )
-    if not sources:
+    if definition._runtime_spec is None:
         return ()
-    source_ids = {id(source): source for source in sources}
     regions = {region.path: region for region in definition.regions}
     groups = {}
     for node_index, node in enumerate(definition._runtime_spec.nodes):
-        dispatch_index = 0
-        for operation in getattr(node, "recipe_operations", ()):
-            count = _recipe_operation_dispatch_count(operation)
-            if operation[0] == "dispatch":
-                matches = tuple(
-                    source_ids[id(item)]
-                    for item in operation[4:]
-                    if id(item) in source_ids
+        path = f"graph/{node_index}:{node.ir_node.kind}"
+        for source, occurrence_path in _node_occurrences(node, path):
+            region = regions.get(occurrence_path)
+            if region is None or region.kind != "dispatch":
+                raise ValueError(
+                    "kernel configuration source differs from frozen Graph topology"
                 )
-                if matches:
-                    (source,) = matches
-                    path = f"graph/{node_index}:{node.ir_node.kind}/{dispatch_index}:dispatch"
-                    region = regions.get(path)
-                    if region is not None:
-                        group = groups.setdefault(source.baseline_kernel_cpp, ([], []))
-                        group[0].append(source)
-                        group[1].append(region.region_id)
-            dispatch_index += count
+            group = groups.setdefault(
+                source.baseline_kernel_cpp,
+                (
+                    {},
+                    [],
+                    source._recipe_source_key
+                    or f"kernel-configuration:{occurrence_path}",
+                ),
+            )
+            # A frozen sequence can be appended repeatedly. Register its code
+            # rewriter once, while retaining every executable occurrence.
+            group[0][id(source)] = source
+            group[1].append(region.region_id)
     return tuple(
-        (tuple(sources), tuple(coverage)) for sources, coverage in groups.values()
+        (tuple(sources.values()), tuple(coverage), key)
+        for sources, coverage, key in groups.values()
     )
 
 
@@ -301,30 +330,32 @@ class GraphKernelConfigurationRecipeProvider(GraphRuntimeFragmentProvider):
             _choice_fragment(
                 definition,
                 "kernel_configuration",
-                sources[0]._recipe_source_key,
+                key,
                 coverage,
                 manifest,
                 provider_descriptor=self.descriptor,
                 application_kind="dispatch_configuration",
             )
-            for sources, coverage in _source_groups(definition)
+            for sources, coverage, key in _source_groups(definition)
             for manifest, _ in sources[0].choices()
         )
 
     def _resolve_group(self, definition, fragment_key):
-        for sources, coverage in _source_groups(definition):
-            prefix = f"kernel_configuration:{sources[0]._recipe_source_key}:"
+        for sources, coverage, key in _source_groups(definition):
+            prefix = f"kernel_configuration:{key}:"
             if fragment_key.startswith(prefix):
                 manifest, spec = sources[0].resolve(fragment_key[len(prefix) :])
-                return sources, coverage, manifest, spec
+                return sources, coverage, key, manifest, spec
         raise KeyError("kernel configuration source group is unavailable")
 
     def resolve(self, definition, fragment_key):
-        sources, coverage, manifest, _ = self._resolve_group(definition, fragment_key)
+        sources, coverage, key, manifest, _ = self._resolve_group(
+            definition, fragment_key
+        )
         return _choice_fragment(
             definition,
             "kernel_configuration",
-            sources[0]._recipe_source_key,
+            key,
             coverage,
             manifest,
             provider_descriptor=self.descriptor,
@@ -332,12 +363,12 @@ class GraphKernelConfigurationRecipeProvider(GraphRuntimeFragmentProvider):
         )
 
     def expand(self, definition, fragment_key):
-        sources, coverage, _, spec = self._resolve_group(definition, fragment_key)
+        sources, coverage, key, _, spec = self._resolve_group(definition, fragment_key)
         return tuple(
             _choice_fragment(
                 definition,
                 "kernel_configuration",
-                sources[0]._recipe_source_key,
+                key,
                 coverage,
                 manifest,
                 provider_descriptor=self.descriptor,
@@ -349,9 +380,8 @@ class GraphKernelConfigurationRecipeProvider(GraphRuntimeFragmentProvider):
     def contribute_runtime(self, assembly, selection):
         matches = tuple(
             sources
-            for sources, coverage in _source_groups(assembly.definition)
-            if sources[0]._recipe_source_key == selection.source_key
-            and coverage == selection.coverage_region_ids
+            for sources, coverage, key in _source_groups(assembly.definition)
+            if key == selection.source_key and coverage == selection.coverage_region_ids
         )
         if len(matches) != 1:
             raise ValueError("kernel configuration source group is unavailable")

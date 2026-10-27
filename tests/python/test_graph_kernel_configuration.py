@@ -7,6 +7,7 @@ import taichi_forge as ti
 from taichi_forge.graph._recipes.families import GraphRuntimeAssemblyProvider
 from taichi_forge.graph._recipes.kernel_configuration import (
     GraphKernelConfigurationRecipeProvider,
+    _source_groups,
 )
 from tests import test_utils
 
@@ -109,16 +110,286 @@ def test_multi_task_workgroup_keeps_order_dense_lowering_and_aot(tmp_path):
         assert tuple(t.selected_block_size for t in source.facts.snapshot.manifests) == before
 
 
-def choose(definition, catalog, predicate):
-    source = definition._runtime_spec._graph_kernel_configuration_sources[0]
+def choose_for_kernel(definition, catalog, kernel, predicate):
+    sources, coverage, _ = next(
+        group for group in _source_groups(definition) if group[0][0].kernel_fn is kernel
+    )
     choice = next(
-        manifest.recipe_id for manifest, spec in source.choices() if predicate(spec)
+        manifest.recipe_id for manifest, spec in sources[0].choices() if predicate(spec)
     )
     return next(
         fragment
         for fragment in catalog.fragments
-        if fragment.provider_metadata["family_selection"]["choice_id"] == choice
+        if fragment.coverage_region_ids == coverage
+        and fragment.provider_metadata["family_selection"]["choice_id"] == choice
     )
+
+
+@pytest.mark.parametrize("kind", ["if", "switch"])
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, compile_tier="fast"
+)
+def test_configuration_in_nested_sequence_preserves_branch_bindings(kind):
+    @ti.kernel
+    def condition(value: ti.i32, selector: ti.types.ndarray(ti.i32, 0)):
+        selector[None] = value
+
+    @ti.kernel
+    def advance(output: ti.types.ndarray(ti.i32, 1), delta: ti.i32):
+        for i in output:
+            output[i] += delta
+
+    builder = ti.graph.GraphBuilder()
+    output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
+    value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
+    selector = builder.private_ndarray("selector", ti.i32, ())
+    parent, cond, yes, no = (builder.create_sequential() for _ in range(4))
+    cond.dispatch(condition, value, selector)
+    yes.dispatch(advance, output, yes._bind_internal_scalar("yes_delta", ti.i32, 2))
+    no.dispatch(advance, output, no._bind_internal_scalar("no_delta", ti.i32, 5))
+    if kind == "if":
+        parent.if_then_else(
+            cond, yes, predicate=selector, else_region=no, lowering_mode="portable"
+        )
+    else:
+        parent.switch(
+            cond, [yes], selector=selector, default_region=no, lowering_mode="portable"
+        )
+    parent.dispatch(
+        advance, output, parent._bind_internal_scalar("tail_delta", ti.i32, 100)
+    )
+    builder.append(parent)
+    definition = builder.freeze()
+    before = len(advance._primal.compiled_kernels)
+    catalog = definition.recipe_catalog(providers=PROVIDERS)
+    assert len(advance._primal.compiled_kernels) == before
+    recipes = [catalog.baseline.recipe]
+    if ti.lang.impl.current_cfg().arch != ti.cpu:
+        fragment = choose_for_kernel(
+            definition, catalog, advance, lambda spec: spec.backend.workgroup_size == 64
+        )
+        assert len(fragment.coverage_region_ids) == 3
+        recipes.insert(
+            0, catalog.compose((fragment.fragment_id,), stage="branch").recipe
+        )
+    # Editing the original branch after freeze cannot change a recipe's body.
+    yes.dispatch(advance, output, yes._bind_internal_scalar("extra_delta", ti.i32, 9))
+    with definition.materialization_context(providers=PROVIDERS) as context:
+        handles = [context.materialize(recipe) for recipe in recipes]
+        if len(handles) == 2:
+            assert (
+                handles[0].materialized_physical_id
+                != handles[1].materialized_physical_id
+            )
+            assert len(advance._primal.compiled_kernels) == before + 1
+        result = ti.ndarray(ti.i32, 17)
+        for handle in handles:
+            for selected in (-1, 0, 1):
+                result.fill(0)
+                handle.executor.run(dict(output=result, value=selected))
+                expected = (
+                    102 if (selected != 0 if kind == "if" else selected == 0) else 105
+                )
+                np.testing.assert_array_equal(result.to_numpy(), np.full(17, expected))
+            handle.close()
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, compile_tier="fast"
+)
+def test_appended_sequence_configuration_reuses_code_and_freezes_bindings():
+    @ti.kernel
+    def update(out: ti.types.ndarray(ti.i32, 1), delta: ti.i32):
+        for i in out:
+            out[i] += i + delta
+
+    out_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+    delta_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "delta", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    sequence = builder.create_sequential()
+    sequence.dispatch(update, out_arg, delta_arg)
+    builder.append(sequence)
+    builder.append(sequence)
+    definition = builder.freeze()
+    before = len(update._primal.compiled_kernels)
+    catalog = definition.recipe_catalog(providers=PROVIDERS)
+    assert len(update._primal.compiled_kernels) == before
+    if ti.lang.impl.current_cfg().arch == ti.cpu:
+        assert not catalog.fragments
+        recipe = catalog.baseline.recipe
+    else:
+        fragment = choose_for_kernel(
+            definition, catalog, update, lambda spec: spec.backend.workgroup_size == 64
+        )
+        assert len(fragment.coverage_region_ids) == 2
+        recipe = catalog.compose((fragment.fragment_id,), stage="appended").recipe
+    sequence.dispatch(update, out_arg, delta_arg)
+    with definition.materialization_context(providers=PROVIDERS) as context:
+        baseline = context.materialize(catalog.baseline.recipe)
+        selected = context.materialize(recipe)
+        if ti.lang.impl.current_cfg().arch != ti.cpu:
+            assert (
+                selected.materialized_physical_id != baseline.materialized_physical_id
+            )
+            assert len(update._primal.compiled_kernels) == before + 1
+            assert all(
+                t.selected_block_size == 64
+                for t in selected.executor.task_manifest()
+                if t.task_type == "range_for"
+            )
+        out = ti.ndarray(ti.i32, 65)
+        out.fill(0)
+        selected.executor.run(dict(out=out, delta=3))
+        np.testing.assert_array_equal(out.to_numpy(), np.arange(65) * 2 + 6)
+        out.fill(0)
+        baseline.executor.run(dict(out=out, delta=7))
+        np.testing.assert_array_equal(out.to_numpy(), np.arange(65) * 2 + 14)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False, compile_tier="fast")
+def test_while_configuration_covers_condition_body_and_surrounding_bindings():
+    @ti.kernel
+    def update(out: ti.types.ndarray(ti.i32, 1), delta: ti.i32):
+        for i in out:
+            out[i] += i + delta
+
+    @ti.kernel
+    def condition(
+        count: ti.types.ndarray(ti.i32, 0),
+        predicate: ti.types.ndarray(ti.i32, 0),
+        limit: ti.i32,
+    ):
+        predicate[None] = int(count[None] < limit)
+
+    @ti.kernel
+    def increment(count: ti.types.ndarray(ti.i32, 0)):
+        count[None] += 1
+
+    builder = ti.graph.GraphBuilder()
+    arrays = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0)
+        for name in ("count", "predicate")
+    }
+    out_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+    scalars = {
+        name: ti.graph.Arg(ti.graph.ArgKind.SCALAR, name, ti.i32)
+        for name in ("first", "second", "third", "last", "limit")
+    }
+    prefix = builder.create_sequential()
+    prefix.dispatch(update, out_arg, scalars["first"])
+    builder.append(prefix)
+    builder.append(prefix)
+    cond, body = builder.create_sequential(), builder.create_sequential()
+    cond.dispatch(condition, arrays["count"], arrays["predicate"], scalars["limit"])
+    body.dispatch(update, out_arg, scalars["second"])
+    body.dispatch(update, out_arg, scalars["third"])
+    body.dispatch(increment, arrays["count"])
+    builder.while_loop(
+        cond,
+        body,
+        predicate=arrays["predicate"],
+        control_inputs=(arrays["count"], scalars["limit"]),
+        carried_state=(arrays["count"],),
+        counter=arrays["count"],
+        max_iterations=4,
+        lowering_mode="native_required",
+        name="loop",
+    )
+    builder.dispatch(update, out_arg, scalars["last"])
+    definition = builder.freeze()
+    before = len(update._primal.compiled_kernels)
+    catalog = definition.recipe_catalog(providers=PROVIDERS)
+    assert len(update._primal.compiled_kernels) == before
+    dispatch_regions = {
+        region.region_id for region in definition.regions if region.kind == "dispatch"
+    }
+    assert (
+        set().union(
+            *(set(fragment.coverage_region_ids) for fragment in catalog.fragments)
+        )
+        == dispatch_regions
+    )
+    update_fragment = choose_for_kernel(
+        definition, catalog, update, lambda spec: spec.backend.workgroup_size == 64
+    )
+    condition_fragment = choose_for_kernel(
+        definition, catalog, condition, lambda spec: spec.ir.compile_tier == "full"
+    )
+    assert len(update_fragment.coverage_region_ids) == 5
+    recipe = catalog.compose(
+        (update_fragment.fragment_id, condition_fragment.fragment_id),
+        stage="structured",
+    ).recipe
+    body.dispatch(update, out_arg, scalars["last"])
+    with definition.materialization_context(providers=PROVIDERS) as context:
+        baseline = context.materialize(catalog.baseline.recipe)
+        selected = context.materialize(recipe)
+        assert selected.materialized_physical_id != baseline.materialized_physical_id
+        assert len(update._primal.compiled_kernels) == before + 1
+        condition_only = context.materialize(
+            catalog.compose(
+                (condition_fragment.fragment_id,), stage="condition-only"
+            ).recipe
+        )
+        assert (
+            condition_only.materialized_physical_id != baseline.materialized_physical_id
+        )
+        compiled_regions = tuple(
+            region
+            for task in selected.manifest.tasks
+            for region in task.properties.get("structured_compiled_regions", ())
+        )
+        assert compiled_regions
+        range_tasks = tuple(
+            task
+            for region in compiled_regions
+            for task in region["tasks"]
+            if task["task_type"] == "range_for"
+        )
+        assert range_tasks and all(
+            task["selected_block_size"] == 64 for task in range_tasks
+        )
+        condition_tasks = next(
+            region["tasks"]
+            for region in compiled_regions
+            if region["path"] == "control/condition"
+        )
+        condition_source = next(
+            group[0][0]
+            for group in _source_groups(definition)
+            if group[0][0].kernel_fn is condition
+        )
+        condition_spec = next(
+            spec
+            for _, spec in condition_source.choices()
+            if spec.ir.compile_tier == "full"
+        )
+        assert condition_tasks and all(
+            task["optimization_spec_id"] == condition_spec.compilation_identity
+            for task in condition_tasks
+        )
+        for handle in (selected, baseline):
+            args = {name: ti.ndarray(ti.i32, ()) for name in arrays}
+            args.update(out=ti.ndarray(ti.i32, 65), first=1, second=2, third=3, last=7)
+            for limit, iterations in ((0, 0), (3, 3), (8, 4)):
+                for name in (*arrays, "out"):
+                    args[name].fill(0)
+                handle.executor.run(dict(args, limit=limit))
+                assert args["count"].to_numpy()[()] == iterations
+                np.testing.assert_array_equal(
+                    args["out"].to_numpy(),
+                    np.arange(65) * (3 + 2 * iterations) + 9 + 5 * iterations,
+                )
+                report = handle.executor.control_flow_stats()[0]
+                assert report.logical_iterations == iterations
+                assert "host" not in report.lowering
+            handle.close()
+        assert len(update._primal.compiled_kernels) == before + 1
+
+
+def choose(definition, catalog, predicate):
+    source = definition._runtime_spec._graph_kernel_configuration_sources[0]
+    return choose_for_kernel(definition, catalog, source.kernel_fn, predicate)
 
 
 @test_utils.test(
@@ -249,7 +520,7 @@ def test_selected_configuration_exports_primal_and_original_reverse(tmp_path):
     builder.dispatch(square, arguments["x"], arguments["y"], gain)
     builder.dispatch(square.grad, arguments["x"], arguments["y"], gain)
     definition = builder.freeze()
-    assert len(definition._runtime_spec._graph_kernel_configuration_sources) == 1
+    assert {group[0][0].kernel_fn for group in _source_groups(definition)} == {seed, square}
     catalog = definition.recipe_catalog(providers=PROVIDERS)
     fragment = choose(definition, catalog, lambda spec: spec.ir.compile_tier == "full")
     entry = catalog.compose((fragment.fragment_id,), stage="primal-tier")

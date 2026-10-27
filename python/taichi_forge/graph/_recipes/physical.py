@@ -1209,6 +1209,8 @@ def _stage_source_regions(definition, recipe, pipeline):
 def observe_graph_physical_manifest(definition, recipe, graph):
     """Translate one materialized Graph into the backend-neutral manifest."""
 
+    from taichi_forge.graph._graph import _structured_compiled_regions
+
     if graph.definition is not definition:
         raise GraphPhysicalManifestError(
             "materialized Graph does not own this GraphDefinition"
@@ -1282,6 +1284,14 @@ def observe_graph_physical_manifest(definition, recipe, graph):
         return task_index
 
     for stage, regions in zip(pipeline, stage_regions):
+        # Observe retained region code only when a materialization manifest is
+        # requested; ordinary Graph construction/replay needs no extra probe.
+        stage = {
+            **stage,
+            "structured_compiled_regions": _structured_compiled_regions(
+                graph._spec.nodes[stage["stage_index"]]
+            ),
+        }
         stage_tasks = tuple(stage["tasks"])
         native_actions = tuple(stage["native_actions"])
         external_commands = tuple(stage.get("external_commands", ()))
@@ -1295,6 +1305,11 @@ def observe_graph_physical_manifest(definition, recipe, graph):
 
         def append_native_action(action, external=None):
             payload = action.to_dict(_static_resources=static_resources)
+            if stage.get("structured_compiled_regions"):
+                payload = {
+                    **payload,
+                    "structured_compiled_regions": stage["structured_compiled_regions"],
+                }
             if external is not None:
                 payload = {**payload, **external}
             physical_plan_id = action.physical_plan_id or ("native-action:" + _digest(payload))
@@ -1418,6 +1433,9 @@ def observe_graph_physical_manifest(definition, recipe, graph):
                     "path_id": stage["path_id"],
                     "physical_dispatch_count": stage["physical_dispatch_count"],
                     "task_mapping_status": stage["task_mapping_status"],
+                    "structured_compiled_regions": stage.get(
+                        "structured_compiled_regions", ()
+                    ),
                 },
             )
             task_topology_exact = False
@@ -1573,6 +1591,9 @@ def _combined_pipeline_identity(*identities):
 
 def _stage_plan_identity(stage):
     identities = []
+    compiled_regions = stage.get("structured_compiled_regions", ())
+    if compiled_regions:
+        identities.append("structured-code:" + _digest(compiled_regions))
     physical_plan_id = str(stage.get("physical_plan_id", ""))
     if physical_plan_id:
         identities.append(physical_plan_id)

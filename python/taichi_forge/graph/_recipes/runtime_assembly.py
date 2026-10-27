@@ -101,7 +101,28 @@ class GraphRuntimeRecipeAssembly:
             )
         if kind in ("bounded", "graph_reduction", "native"):
             return self.operation_rewriter(operation[1]) is not None
+        if kind == "sequential":
+            return self.sequence_has_dispatch_selection(operation[1])
         return False
+
+    def sequence_has_dispatch_selection(self, sequence):
+        return any(
+            self.dispatch_rewriter(source) is not None
+            for source in sequence._kernel_configuration_sources.values()
+        ) or any(
+            self.control_has_dispatch_selection(item[1])
+            for item in sequence._items
+            if item[0] == "structured"
+        )
+
+    def control_has_dispatch_selection(self, node):
+        sequences = tuple(
+            region for _, region in getattr(node, "_definition_regions", ())
+        )
+        sequences += tuple(getattr(node, "definition_sequence_snapshots", ()))
+        return any(
+            self.sequence_has_dispatch_selection(sequence) for sequence in sequences
+        )
 
     def add_map_source_group(self, source_group):
         source_group = tuple(int(index) for index in source_group)

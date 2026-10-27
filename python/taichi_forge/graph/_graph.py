@@ -6785,8 +6785,8 @@ class _CompiledWhileGraphNode:
         self.control_depth = 1
         self._nested_subregion = False
         self._definition_regions = (
-            ("condition", condition),
-            ("body", body),
+            ("condition", _GraphSequentialRecipeSnapshot(condition).thaw()),
+            ("body", _GraphSequentialRecipeSnapshot(body).thaw()),
         )
         self._definition_children = tuple(
             (role, _sequence_structured_nodes(region))
@@ -8341,7 +8341,7 @@ class _CompiledIfGraphNode:
         self.control_depth = 1
         self._nested_subregion = False
         self._definition_regions = tuple(
-            (role, region)
+            (role, _GraphSequentialRecipeSnapshot(region).thaw())
             for role, region in (
                 ("condition", condition),
                 ("then", then_region),
@@ -8762,7 +8762,10 @@ class _CompiledSwitchGraphNode:
         )
         if default_region is not None:
             definition_regions.append(("default", default_region))
-        self._definition_regions = tuple(definition_regions)
+        self._definition_regions = tuple(
+            (role, _GraphSequentialRecipeSnapshot(region).thaw())
+            for role, region in definition_regions
+        )
         self._definition_children = tuple(
             (role, _sequence_structured_nodes(region))
             for role, region in self._definition_regions
@@ -9451,6 +9454,51 @@ def _pipeline_task_manifests(node):
         tuple(GraphTaskManifest._from_core(item) for item in raw if "external_command" not in item),
         tuple(dict(item) for item in raw if "external_command" in item),
     )
+
+
+def _structured_compiled_regions(node):
+    """Cold evidence of retained control-region code, not an execution DAG.
+
+    A loop can retain several chunk variants and native replay containers.
+    Report their compiled tasks separately without treating them as one
+    unconditional sequence or claiming an observed device command topology.
+    """
+    result = []
+
+    def visit(current, path):
+        if isinstance(current, _CompiledCGraphNode):
+            tasks, external = _pipeline_task_manifests(current)
+            result.append(
+                {
+                    "path": path,
+                    "tasks": tuple(asdict(task) for task in tasks),
+                    "external_commands": external,
+                }
+            )
+        elif isinstance(current, _CompiledSequentialRegionNode):
+            for index, child in enumerate(current.nodes):
+                visit(child, f"{path}/{index}")
+        elif isinstance(current, _CompiledWhileGraphNode):
+            visit(current._condition, f"{path}/condition")
+            for count, child in current._chunks.items():
+                visit(child, f"{path}/chunk:{count}")
+            for role in ("_vulkan_structured", "_vulkan_nested", "_cuda_nested"):
+                child = getattr(current, role, None)
+                if child is not None:
+                    visit(child, f"{path}/{role[1:]}")
+        elif isinstance(current, _CompiledIfGraphNode):
+            for role in ("condition", "then", "else"):
+                child = getattr(current, f"_{role}")
+                if child is not None:
+                    visit(child, f"{path}/{role}")
+        elif isinstance(current, _CompiledSwitchGraphNode):
+            visit(current._condition, f"{path}/condition")
+            for index, child in enumerate(current._branches):
+                visit(child, f"{path}/branch:{index}")
+
+    if not isinstance(node, _CompiledCGraphNode):
+        visit(node, "control")
+    return tuple(result)
 
 
 def _pipeline_mapping_status(node, external_commands=()):
@@ -11006,7 +11054,9 @@ def _replay_recipe_cgraph_node(
                 )
             continue
         if kind == "sequential":
-            builder.append(operation[1].thaw())
+            builder.append(
+                _clone_recipe_sequential(operation[1], None, assembly=assembly)
+            )
             continue
         if kind == "native":
             _, executable, admission = operation
@@ -11117,12 +11167,12 @@ def _dispatch_leaf_count(node):
     return sum(_dispatch_leaf_count(child) for child in node.children)
 
 
-def _clone_control_recipe_runtime_node(node, control_recipe):
+def _clone_control_recipe_runtime_node(node, control_recipe, *, assembly=None):
     if _is_structured_control_node(node):
-        return _clone_structured_recipe_node(node, control_recipe)
+        return _clone_structured_recipe_node(node, control_recipe, assembly=assembly)
     if isinstance(node, _CompiledSequentialRegionNode):
         sequences = tuple(
-            _clone_recipe_sequential(sequence, control_recipe)
+            _clone_recipe_sequential(sequence, control_recipe, assembly=assembly)
             for sequence in node.definition_sequence_snapshots
         )
         if not sequences:
@@ -11140,7 +11190,7 @@ def _clone_control_recipe_runtime_node(node, control_recipe):
     raise TaichiRuntimeError("unknown structured-control recipe container")
 
 
-def _clone_structured_recipe_node(node, control_recipe):
+def _clone_structured_recipe_node(node, control_recipe, *, assembly=None):
     # No override means preserve this node's frozen route, not choose again
     # from process-wide environment. Children keep their own frozen choices.
     selected_recipe = control_recipe
@@ -11159,7 +11209,7 @@ def _clone_structured_recipe_node(node, control_recipe):
             ),
         )
     regions = {
-        role: _clone_recipe_sequential(region, control_recipe)
+        role: _clone_recipe_sequential(region, control_recipe, assembly=assembly)
         for role, region in node._definition_regions
     }
     if isinstance(node, _CompiledWhileGraphNode):
@@ -11207,18 +11257,37 @@ def _clone_structured_recipe_node(node, control_recipe):
     raise TaichiRuntimeError("unknown structured-control recipe source")
 
 
-def _clone_recipe_sequential(sequence, control_recipe):
+def _clone_recipe_sequential(sequence, control_recipe, *, assembly=None):
     clone = (
         sequence.thaw()
         if isinstance(sequence, _GraphSequentialRecipeSnapshot)
         else _GraphSequentialRecipeSnapshot(sequence).thaw()
     )
     for index, item in enumerate(tuple(clone._items)):
-        if item[0] != "structured":
-            continue
-        child = _clone_structured_recipe_node(item[1], control_recipe)
-        clone._items[index] = ("structured", child)
-        clone._ir_nodes[index] = child.ir_node
+        if item[0] == "structured":
+            child = _clone_structured_recipe_node(
+                item[1], control_recipe, assembly=assembly
+            )
+            clone._items[index] = ("structured", child)
+            clone._ir_nodes[index] = child.ir_node
+        elif item[0] == "dispatch" and assembly is not None:
+            source = clone._kernel_configuration_sources.get(index)
+            rewriter = assembly.dispatch_rewriter(source)
+            if rewriter is not None:
+                kernel_cpp, contracts, layouts = rewriter()
+                _, _, args, label = item
+                clone._items[index] = ("dispatch", kernel_cpp, args, label)
+                clone._ir_nodes[index] = replace(
+                    _dispatch_ir_node(kernel_cpp, args, dispatch_label=label),
+                    memory_disjoint_pairs=contracts,
+                    memory_layout_requirements=layouts,
+                )
+    # The list is a plain-dispatch projection of the ordered items; indirect
+    # and native actions retain their own recording/ownership paths.
+    clone._dispatches = [
+        (item[1], item[2]) for item in clone._items if item[0] == "dispatch"
+    ]
+    clone._dispatch_labels = [item[3] for item in clone._items if item[0] == "dispatch"]
     return clone
 
 
@@ -11906,6 +11975,8 @@ class _GraphSpec:
                 node = node.materialize()
             elif isinstance(node, _CompiledObservationGraphNode):
                 node = node.materialize()
+            if assembly.control_has_dispatch_selection(node):
+                node = _clone_control_recipe_runtime_node(node, None, assembly=assembly)
             nodes.append(node)
             node_source_regions.append(source_regions)
 
@@ -16228,7 +16299,7 @@ class _AOTSequentialSnapshot:
 
 
 class _GraphSequentialRecipeSnapshot:
-    """Frozen replay input for one non-structured Sequential append."""
+    """Frozen replay input for a Sequential and its dispatch provenance."""
 
     def __init__(self, sequence):
         self._items = tuple(sequence._items)
@@ -16237,6 +16308,9 @@ class _GraphSequentialRecipeSnapshot:
             (kernel_cpp, tuple(args)) for kernel_cpp, args in sequence._dispatches
         )
         self._dispatch_labels = tuple(sequence._dispatch_labels)
+        self._kernel_configuration_sources = dict(
+            sequence._kernel_configuration_sources
+        )
         self._runtime_arg_names = frozenset(sequence._runtime_arg_names)
         self._recording_runtime_arg_names = frozenset(
             sequence._recording_runtime_arg_names
@@ -16252,13 +16326,16 @@ class _GraphSequentialRecipeSnapshot:
         self._structured_depth = int(sequence._structured_depth)
 
     def thaw(self):
-        sequence = Sequential()
+        sequence = Sequential(_capture_recipe_sources=False)
         sequence._items = list(self._items)
         sequence._ir_nodes = list(self._ir_nodes)
         sequence._dispatches = [
             (kernel_cpp, list(args)) for kernel_cpp, args in self._dispatches
         ]
         sequence._dispatch_labels = list(self._dispatch_labels)
+        sequence._kernel_configuration_sources = dict(
+            self._kernel_configuration_sources
+        )
         sequence._runtime_arg_names = set(self._runtime_arg_names)
         sequence._recording_runtime_arg_names = set(self._recording_runtime_arg_names)
         sequence._derived_runtime_arg_names = set(self._derived_runtime_arg_names)
@@ -16288,7 +16365,14 @@ def _declared_private_arguments(declarations, args):
 
 
 class Sequential:
-    def __init__(self, *, _declared_private_bindings=None):
+
+    def __init__(
+        self,
+        *,
+        _declared_private_bindings=None,
+        _capture_recipe_sources=True,
+        _recipe_task_facts=None,
+    ):
         # Share declarations while recording; append freezes referenced owners.
         self._declared_private_bindings = (
             {} if _declared_private_bindings is None else _declared_private_bindings
@@ -16296,6 +16380,11 @@ class Sequential:
         self._dispatch_count = 0
         self._dispatches = []
         self._dispatch_labels = []
+        self._capture_recipe_sources = _capture_recipe_sources
+        self._recipe_task_facts = (
+            {} if _recipe_task_facts is None else _recipe_task_facts
+        )
+        self._kernel_configuration_sources = {}
         self._items = []
         self._ir_nodes = []
         self._runtime_arg_names = set()
@@ -16390,6 +16479,24 @@ class Sequential:
         unzipped_args = flatten_args(args)
         self._bind_declared_private_args(unzipped_args)
         ir_node = _dispatch_ir_node(kernel_cpp, unzipped_args, dispatch_label=label)
+        if self._capture_recipe_sources and impl.current_cfg().arch in (
+            _ti_core.Arch.cuda,
+            _ti_core.Arch.vulkan,
+        ):
+            from taichi_forge.graph._recipes.kernel_configuration import (
+                GraphKernelConfigurationSource,
+            )
+            from taichi_forge.graph._recipes.task_facts import GraphKernelTaskFacts
+
+            facts = self._recipe_task_facts.get(kernel_cpp)
+            if facts is None:
+                facts = GraphKernelTaskFacts(kernel_cpp)
+                self._recipe_task_facts[kernel_cpp] = facts
+            source = GraphKernelConfigurationSource.try_create(
+                kernel_fn, args, kernel_cpp, template_args, facts
+            )
+            if source is not None:
+                self._kernel_configuration_sources[len(self._items)] = source
         self._dispatches.append((kernel_cpp, unzipped_args))
         self._dispatch_labels.append(label)
         self._items.append(("dispatch", kernel_cpp, unzipped_args, label))
@@ -16627,6 +16734,11 @@ class Sequential:
                         f"binding {name!r}"
                     )
             self._fixed_runtime_args[name] = value
+        offset = len(self._items)
+        self._kernel_configuration_sources.update(
+            (offset + index, source)
+            for index, source in sequence._kernel_configuration_sources.items()
+        )
         self._items.extend(sequence._items)
         self._ir_nodes.extend(sequence._ir_nodes)
         self._runtime_arg_names.update(sequence._runtime_arg_names)
@@ -18037,7 +18149,11 @@ class GraphBuilder:
         self._dispatch_count += 1
 
     def create_sequential(self):
-        return Sequential(_declared_private_bindings=self._declared_private_bindings)
+        return Sequential(
+            _declared_private_bindings=self._declared_private_bindings,
+            _capture_recipe_sources=self._capture_recipe_sources,
+            _recipe_task_facts=self._recipe_task_facts,
+        )
 
     def append(self, node):
         # TODO: support appending dispatch node as well.
