@@ -1858,6 +1858,50 @@ built with the C API; it does not add a frontend dependency to standalone AOT
 consumption. Windows CPU/CUDA/Vulkan checks cover direct and fixed execution,
 explicit gradients, module state isolation, GC and concurrent finalization.
 
+The unreleased **FG-AOT-01** enhancement adds an explicit frontend Graph root
+entry point for loaded kernels:
+
+```python
+runtime = ti.aot.borrow_runtime()
+module = runtime.load_module("simulation.tcm")
+state = ti.ndarray(ti.i32, 17)  # Match the exported upload_body_state ABI.
+state_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "state", ti.i32, ndim=1)
+builder = ti.graph.GraphBuilder()
+builder.dispatch_loaded(module.kernel("upload_body_state"), state_arg)
+graph = builder.compile()
+bindings = graph.bind({"state": state})  # Import storage and prepare once.
+graph.submit(bindings).wait()
+graph.close()
+runtime.close()
+```
+
+Ordinary `dispatch` continues to accept frontend kernels; it does not disguise
+a loaded entry as `_primal`. `dispatch_loaded` retains the exact loaded module
+and entry generation, with conservative read/write array effects and opaque
+module-state effects. It accepts void kernels with primitive SCALAR symbols and
+compact scalar/vector/matrix NDARRAY symbols. Binding imports the original JIT
+storage without copies and checks the artifact ABI in native preparation.
+The Runtime must have been borrowed from the current Program; an independent
+Runtime, even on the same device, is rejected. Closing/replacing the source
+module does not redirect an existing Graph to a new entry. Program reset retires
+the old Graph and its borrowed resources.
+
+Windows CPU/CUDA/Vulkan focused checks cover JIT → loaded AOT → JIT submission
+order, binding reuse, empty argument lists, shared arrays and aliases, module
+state, replacement, retirement, reset, and rejection of invalid ABI/owners.
+No Python numerical definition is retrieved or compiled. AOT consumer backend
+materialization is still permitted; this is not a claim of zero backend
+compilation or one fused device Graph. Repeated submission of a bound frame
+does not prepare it again or call Runtime.wait. Raw dictionaries prepare fresh
+frames and may incur cold preparation/retirement costs.
+
+This entry point currently belongs to the Graph root sequence. It does not
+add loaded-entry recording inside Sequential/control bodies, re-export of a
+live loaded owner, ArgPack/texture/struct-array arguments, private Graph arrays,
+or implicit gradient bindings. Use the existing Runtime ExecutionPlan contracts
+for broader AOT orchestration. GeoPhys model specialization and shared
+solver/control/rendering integration remain consumer work (GP-AOT-01/02).
+
 Borrowers can explicitly import compact scalar/vector/matrix ndarrays from the
 same Program with `runtime.import_ndarray(jit_array)`. The returned view works
 with ordinary and prepared AOT calls and shares the original device storage.

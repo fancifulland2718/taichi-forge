@@ -932,7 +932,7 @@ class Module(_Resource):
         with self._runtime._lock:
             self._check()
             handle = self._runtime._api.call(self._runtime._api.ti_get_aot_module_kernel, self._handle, _name(name))
-            return Kernel(self, handle)
+            return Kernel(self, handle, name=name)
 
     def graph(self, name):
         with self._runtime._lock:
@@ -1376,8 +1376,9 @@ class PreparedCall(_Resource):
 
 
 class Kernel:
-    def __init__(self, module, handle):
+    def __init__(self, module, handle, *, name=None):
         self._module, self._handle = module, handle
+        self._name = name
         self._layouts = {}
         layout = None if isinstance(self, Graph) else ReturnLayout(module, handle)
         self._return_layout = layout if layout is not None and layout.has_values else None

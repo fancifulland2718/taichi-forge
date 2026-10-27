@@ -12410,7 +12410,14 @@ class _GraphSpec:
             self._binding_statistics["version_volatile_replays"] += 1
             args = binding_version.arguments
         self._validate_runtime_arg_names(args, entrypoint)
-        prepared = self.prepare_runtime_args(args, temporaries, fixed_runtime_args)
+        prepared = self.prepare_runtime_args(
+            args, temporaries, fixed_runtime_args,
+            native_actions=(
+                binding_version.native_actions
+                if binding_version is not None and self.native_publish_frame_stable
+                else None
+            ),
+        )
         if self.control_binding_plan.bindings:
             self._binding_statistics["control_replay_validations"] += 1
         self._validate_bound_runtime_args(prepared.arguments)
@@ -12439,7 +12446,9 @@ class _GraphSpec:
             }
         )
 
-    def prepare_runtime_args(self, args, temporaries=None, fixed_runtime_args=None):
+    def prepare_runtime_args(
+        self, args, temporaries=None, fixed_runtime_args=None, *, native_actions=None
+    ):
         if isinstance(args, _PreparedGraphInvocation):
             return args
         if fixed_runtime_args:
@@ -12534,12 +12543,12 @@ class _GraphSpec:
                         f"{name!r}"
                     )
                 bound[name] = value
+        if native_actions is None and self._native_preparers:
+            native_actions = self._prepare_native_actions(bound)
         return _PreparedGraphInvocation(
             bound,
             tuple(submission_owners),
-            native_actions=(
-                self._prepare_native_actions(bound) if self._native_preparers else None
-            ),
+            native_actions=native_actions,
         )
 
     def _prepare_native_actions(self, arguments):
@@ -18528,6 +18537,24 @@ class GraphBuilder:
         """
         return self._append_native(node, prewarm=prewarm, admission=admission)
 
+    def dispatch_loaded(self, entry, *args):
+        """Record a void loaded AOT Kernel on the current borrowed Runtime.
+
+        Arguments are SCALAR or NDARRAY symbols. Bind JIT arrays with ``bind``
+        to prepare once and reuse their storage without copies. The module
+        remains an explicit owner; closing it invalidates this Graph. This
+        root command boundary is neither a Python kernel compilation nor a
+        serializable AOT definition or a structured-control body.
+        """
+        from ._loaded import LoadedKernelExecutable
+
+        if any(getattr(arg, "name", None) in self._declared_private_bindings for arg in args):
+            raise TaichiRuntimeError("dispatch_loaded requires public Graph arguments, not private Graph arrays")
+        executable = LoadedKernelExecutable(entry, args)
+        self._append_native_executable(executable, admission="explicit")
+        self._aot_graph_plan.mark_internal_fixed_bindings()
+        return self
+
     def freeze(self):
         """Freeze this builder into an immutable semantic Graph definition."""
 
@@ -20009,6 +20036,16 @@ class Graph:
                     if runtime._materialize_dirty or runtime._pending_aot_snode_trees:
                         with runtime._kernel_compilation_lock:
                             runtime.materialize()
+                    # Cold native binding may import storage and acquire SNode
+                    # lifecycle locks. Finish it before the submission transaction
+                    # holds those locks; preparation must not launch application work.
+                    prepared = self._spec.prepare_invocation(
+                        runtime_args,
+                        temporary_bindings,
+                        submission_instance._fixed_runtime_args,
+                        entrypoint="Graph.submit",
+                        binding_version=binding_version,
+                    )
                     queue_before = (
                         _queue_submission_snapshot() if telemetry_enabled else None
                     )
@@ -20021,13 +20058,6 @@ class Graph:
                         telemetry_lease.recorder
                         if telemetry_lease is not None
                         else None
-                    )
-                    prepared = self._spec.prepare_invocation(
-                        runtime_args,
-                        temporary_bindings,
-                        submission_instance._fixed_runtime_args,
-                        entrypoint="Graph.submit",
-                        binding_version=binding_version,
                     )
                     if self._contains_structured_control_value:
                         if telemetry_recorder is not None:
@@ -20046,7 +20076,12 @@ class Graph:
                         submission_instance.run_with_gpu_timing(prepared, transaction)
                     else:
                         submission_instance.run(prepared)
+                    # Raw dictionaries also create native binding packets. Keep
+                    # them through completion, just as immutable BindingVersions
+                    # are retained, so their destruction cannot wait in submit().
                     submission_owners = prepared.submission_owners
+                    if prepared.native_actions is not None:
+                        submission_owners = (*submission_owners, prepared.native_actions)
                     # CGraph/kernel paths publish work themselves. Native plans
                     # use Program methods outside that launch path, so publish
                     # once for the whole native portion without changing run().

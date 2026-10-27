@@ -183,6 +183,7 @@ class ArgumentLayout:
             if self.root_indices is not None else None
         )
         self.encoders = {}
+        self.value_types = {}
         for value in layout["values"]:
             index, size = value["index"], value["buffer_size"]
             if physical_to_root is not None:
@@ -192,6 +193,7 @@ class ArgumentLayout:
             if type(size) is not int or size < 0:
                 raise ValueError("Invalid compiled value argument size")
             self.encoders[index] = size, _encoder(value["value"], size)
+            self.value_types[index] = value["value"]
 
     def encode(self, index, value, buffers):
         size, encode = self.encoders[index]

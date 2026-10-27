@@ -36,6 +36,9 @@ def borrow_runtime():
         dense_view_importer=_import_dense_view,
         acceleration_structure_importer=_import_acceleration_structure,
     )
+    # The frontend Graph bridge must distinguish Programs, not just devices or
+    # backend names. The native client still owns retirement and storage checks.
+    result._frontend_program = runtime.prog
     runtime.register_runtime_object(result)
     return result
 

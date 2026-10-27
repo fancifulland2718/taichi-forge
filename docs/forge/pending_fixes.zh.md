@@ -47,6 +47,16 @@ F070-2 的配置候选适用于 CUDA/Vulkan primal kernel；CPU 保留原有执�
 F070-3 至 F070-12 描述源码改动，不代表已发布 0.7.0 wheel 的行为。范围与诊断开关见
 [编译权衡](compilation_tradeoffs.zh.md)。这些改动均不保证所有工作负载加速或跨后端逐位一致。
 
+## 待发布的接口增强
+
+| ID | 范围与验证 | 包含版本 |
+| --- | --- | --- |
+| FG-AOT-01 | 增加显式 `GraphBuilder.dispatch_loaded`，在当前借用 Program 上调用无返回值的 loaded AOT kernel。保留入口/模块身份、原生 ABI 校验、保守 effects 与 completion 所有权，不恢复 Python 数值定义。Windows CPU/CUDA/Vulkan：9 项定向检查及 14 项既有 borrowing、native storage、BindingSet 回归通过。范围为主顺序、基本类型标量和紧凑 JIT ndarray；这是相对 0.7.0 的接口增强，不是 Runtime ExecutionPlan 的新缺陷。 | 下一版本，待定 |
+
+与本条一并提交，提交名为 `Add explicit loaded AOT kernel dispatch to frontend Graph`。
+生命周期、绑定和范围见 [AOT SDK](aot_sdk.zh.md)。
+GP-AOT-01/02 继续归属 GeoPhys 接入工作，不列为 Forge 缺陷。
+
 ## 随版本维护
 
 - 新问题使用固定编号，写清已知受影响版本、症状、修复提交和修复发布版本；不推断未核查的旧版本。

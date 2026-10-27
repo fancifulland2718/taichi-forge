@@ -52,6 +52,16 @@ F070-3 through F070-12 describe source changes, not the behavior of the publishe
 scope and diagnostic controls. These changes do not guarantee a universal speedup
 or bitwise equality across backends.
 
+## Interface enhancements awaiting release
+
+| ID | Scope and validation | Available in release |
+| --- | --- | --- |
+| FG-AOT-01 | Add explicit `GraphBuilder.dispatch_loaded` for void loaded AOT kernels on the current borrowed Program. Preserve entry/module identity, native ABI validation, conservative effects and completion ownership without recovering Python numerical definitions. Windows CPU/CUDA/Vulkan: nine focused checks plus fourteen existing borrowing, native-storage and BindingSet checks. Root sequence with primitive scalars and compact JIT ndarrays only; this is an enhancement over 0.7.0, not a newly discovered failure of Runtime ExecutionPlan. | Next release, TBD |
+
+Committed with this entry as `Add explicit loaded AOT kernel dispatch to frontend Graph`.
+See the [AOT SDK](aot_sdk.en.md) for lifecycle, binding and scope details.
+GP-AOT-01/02 remain GeoPhys integration work and are not Forge defects.
+
 ## Version maintenance
 
 - Use stable IDs and record known affected versions, symptoms, fix commits and the release containing the fix. Do not infer coverage of unexamined older versions.

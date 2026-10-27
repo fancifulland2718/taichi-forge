@@ -1450,6 +1450,41 @@ with ti.aot.borrow_runtime() as runtime:
 的前端依赖。Windows CPU/CUDA/Vulkan 验收覆盖普通/固定执行、显式梯度、模块状态
 隔离、GC 和并发 finalize。
 
+尚未发布的 **FG-AOT-01** 增强为前端 Graph 主顺序增加显式 loaded entry 入口：
+
+```python
+runtime = ti.aot.borrow_runtime()
+module = runtime.load_module("simulation.tcm")
+state = ti.ndarray(ti.i32, 17)  # 必须匹配导出的 upload_body_state ABI。
+state_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "state", ti.i32, ndim=1)
+builder = ti.graph.GraphBuilder()
+builder.dispatch_loaded(module.kernel("upload_body_state"), state_arg)
+graph = builder.compile()
+bindings = graph.bind({"state": state})  # 一次导入存储并准备调用。
+graph.submit(bindings).wait()
+graph.close()
+runtime.close()
+```
+
+普通 `dispatch` 仍接受前端 kernel，不会把 loaded entry 伪装成 `_primal`。
+`dispatch_loaded` 保留确切的模块 owner、入口与 generation，将数组 effects 保守
+声明为读写，将模块内部状态声明为 opaque。当前接受无返回值 kernel、基本类型
+SCALAR 符号以及紧凑 scalar/vector/matrix NDARRAY 符号。绑定时直接导入原 JIT
+存储，不复制数组，由原生准备路径校验产物 ABI。Runtime 必须由当前 Program 借用；
+同一设备上的独立 Runtime 也会被拒绝。关闭或替换源模块不会使旧 Graph 转向同名
+新入口；Program reset 会退休旧 Graph 及借用资源。
+
+Windows CPU/CUDA/Vulkan 定向检查覆盖 JIT → loaded AOT → JIT 提交顺序、绑定复用、
+空参数、共享数组及别名、模块状态、替换、退休、reset，以及错误 ABI/owner 的拒绝。
+不获取或编译 Python 数值定义；消费端 AOT 后端物化仍可发生，不表示零后端编译或
+融合成单个设备 Graph。反复提交已绑定帧不会重新 prepare 或调用 Runtime.wait。
+直接传参数字典会准备新帧，可能承担冷准备与退休成本。
+
+当前入口位于 Graph 主顺序，不扩展到 Sequential/控制体内 loaded-entry 录制、
+活模块 owner 再导出、ArgPack/texture/struct-array 参数、Graph 私有数组或隐式梯度
+绑定。更广的 AOT 组织继续使用已有 Runtime ExecutionPlan 合同。GeoPhys 模型特化与
+共享 solver/control/rendering 接入仍属于消费端工作（GP-AOT-01/02）。
+
 借用者通过 `runtime.import_ndarray(jit_array)` 显式导入同一 Program 的紧凑
 scalar/vector/matrix ndarray。导入返回可用于普通/固定 AOT 调用的数组视图，复用
 原设备存储；JIT 和 AOT 的读写共享数据及 owner 的提交顺序，不产生设备复制。
