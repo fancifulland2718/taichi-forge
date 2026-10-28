@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 #include "taichi/ir/snode.h"
+#include "taichi/struct/dense_snode_schema.h"
 #include "taichi/common/commit_hash.h"
 #include "taichi/common/runtime_contract.h"
 #include "taichi/aot/argpack_layout.h"
@@ -6031,6 +6032,8 @@ void export_lang(py::module &m) {
   py::class_<SNodeTree>(m, "SNodeTree")
       .def("id", &SNodeTree::id)
       .def("generation", &SNodeTree::generation)
+      .def("root", [](SNodeTree &tree) { return tree.root(); },
+           py::return_value_policy::reference_internal)
       .def(
           "destroy_snode_tree",
           [](SNodeTree *snode_tree, Program *program) {
@@ -9007,6 +9010,21 @@ void export_lang(py::module &m) {
       },
       py::return_value_policy::reference,
       py::call_guard<py::gil_scoped_release>());
+
+  py::class_<DenseSNodeSchema>(m, "DenseSNodeSchema")
+      .def_static("capture", &DenseSNodeSchema::capture)
+      .def_static("from_json", &DenseSNodeSchema::from_json)
+      .def("to_json", &DenseSNodeSchema::to_json)
+      .def("instantiate",
+           [](const DenseSNodeSchema &schema, Program &program,
+              const std::map<std::string, int> &dimensions) {
+             TI_ERROR_IF(!arch_is_cpu(program.compile_config().arch) &&
+                             program.compile_config().arch != Arch::cuda,
+                         "Dense component schemas are qualified only for CPU/CUDA");
+             return program.add_snode_tree(schema.instantiate(dimensions), false);
+           },
+           py::return_value_policy::reference,
+           py::call_guard<py::gil_scoped_release>());
 
   // Sparse Matrix
   py::class_<SparseMatrixBuilder>(m, "SparseMatrixBuilder")

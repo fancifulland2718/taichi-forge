@@ -36,9 +36,30 @@ across owners and sizes, unused declarations, static/helper changes, conditional
 capture use, ordinary Field JIT numerical comparison, owner release, failure
 recovery and Runtime retirement.
 
-This is the first A1 slice, not a deployed component SDK. Dense Field groups must
-use the shared authoritative SNode layout and consumer instantiation rules; they
-are explicitly rejected by `Array`. Symbolic layout, declared dimension relations,
-Graph export, TCM-only consumption and loaded-module instance lifetimes remain
-separate implementation gates. The current per-call Ndarray binding test does not
-qualify same-loaded-module Field instances or asynchronous capture.
+This is not yet a deployed component SDK. Dense Field groups are explicitly
+rejected by `Array`; capture lowering must preserve their group contract.
+
+The native `DenseSNodeSchema` is the next layout building block. It records the
+original root/dense/place construction and scalar placement order, replacing only
+explicitly identified dense axes with dimension parameters. It stores no live
+node IDs, producer offsets, addresses or model values. Serialization uses the
+existing native type/JSON contracts. The first layout family excludes nested
+dense, sparse, quantized, Morton, index-offset and ambient layouts.
+
+Instantiation calls the original `SNode::dense`/`insert_children` constructors,
+then `Program::add_snode_tree` invokes the existing backend StructCompiler and
+allocator. On CPU/CUDA, the original LLVM types and target DataLayout determine
+all byte sizes and offsets. There is no Python padding calculator. The schema
+validates version, placement order, required dimensions and positive i32 index
+products before allocating a tree.
+
+`test_dense_snode_schema.py` compares every actual compiled node's type, shape,
+cell size and offset to ordinary FieldsBuilder at previously unseen extents.
+It includes scalar, vector, matrix and rank-zero placements, and validates that
+rejected bindings do not leave active tree instances.
+
+The current schema entry uses Program-owned trees. Connecting it to the
+standalone Runtime owner, Dense capture addressing, dimension relations, Graph
+export, TCM-only consumption and loaded-module instance lifetimes remains work
+in progress. Neither this layout comparison nor per-call Ndarray binding qualifies
+same-loaded-module Field instances or asynchronous capture.

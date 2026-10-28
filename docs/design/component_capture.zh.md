@@ -25,7 +25,23 @@ context 绑定实际值。普通 JIT 保留原特化路径。
 后端编译、无关声明、静态值/helper 改变、条件内捕获、普通 Field JIT 数值对照、owner
 释放、失败恢复和 Runtime 失效。
 
-这只是 A1 首个切片。Dense Field 组必须接入共用权威 SNode 布局与消费端实例化规则，
-不能用 `Array` 冒充，当前明确拒绝。符号布局、维度关系、Graph 导出、仅 TCM 消费及
-loaded Module 多实例生命周期仍需实现；当前逐调用 Ndarray 绑定测试不证明 loaded
-Field 实例或异步 capture 已取得资格。
+这尚非可部署的完整组件 SDK。Dense Field 组不能用 `Array` 冒充，当前捕获路径明确拒绝，
+接通时必须保留组合同。
+
+原生 `DenseSNodeSchema` 提供下一步的布局基础：记录原 root/dense/place 构造及标量
+放置顺序，仅把显式指定的 dense 轴替换为维度参数。不保存实际节点 ID、producer
+offset、地址或模型数据；序列化复用现有 native 类型/JSON 合同。首个布局族排除嵌套
+dense、Sparse、量化、Morton、索引 offset 和 ambient 布局。
+
+实例化调用原 `SNode::dense`/`insert_children` 构造，再经 `Program::add_snode_tree`
+进入原后端 StructCompiler 与分配器。CPU/CUDA 的字节大小、成员偏移仍由原 LLVM 类型
+及目标 DataLayout 决定，没有 Python padding 计算器。分配前校验版本、放置顺序、
+必需维度及正 i32 索引乘积。
+
+`test_dense_snode_schema.py` 将新 extent 下每个实际编译 SNode 的类型、shape、cell
+size 和 offset 与普通 FieldsBuilder 对照，包含标量、vector、matrix 和 rank-0；
+另验证错误绑定不会遗留活动树实例。
+
+当前 schema 入口使用 Program 拥有的树。独立 Runtime owner、Dense 捕获寻址、维度关系、
+Graph 导出、仅 TCM 消费及 loaded Module 多实例生命周期仍需接通。布局对照及逐调用
+Ndarray 绑定测试均不证明 loaded Field 实例或异步 capture 已取得资格。
