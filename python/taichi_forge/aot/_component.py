@@ -178,14 +178,34 @@ class StaticValue:
         key = _static_value(value)
         if self.choices is not None and key not in tuple(_static_value(item) for item in self.choices):
             raise TaichiCompilationError(
-                f"Component entry {entry}: static configuration self.{name}={value!r} "
+                f"Component entry {entry}: static configuration {self._label(name)}={value!r} "
                 f"is outside its declared domain {self.choices!r}"
             )
         return key
 
+    def _label(self, name):
+        return f"self.{name}"
+
     @property
     def schema(self):
         return ("static",)
+
+
+@dataclass(frozen=True)
+class RootOption(StaticValue):
+    """Finite value of a normal recording argument, not an owner capture."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.choices is None:
+            raise ValueError("Component recording options require finite choices")
+
+    @property
+    def schema(self):
+        return ("root_option",)
+
+    def _label(self, name):
+        return f"recording argument {name!r}"
 
 
 @dataclass(frozen=True)
@@ -500,6 +520,8 @@ class _Capture:
 
     def attribute(self, ctx, name):
         declaration = self.declarations.get(name)
+        if isinstance(declaration, RootOption):
+            raise TaichiCompilationError(f"Component {name!r} is a recording option, not a numerical owner capture")
         if declaration is None:
             value = inspect.getattr_static(self.owner, name)
             if getattr(value, "_is_taichi_function", False):

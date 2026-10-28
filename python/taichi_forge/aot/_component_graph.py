@@ -4,6 +4,7 @@ This module collects contracts. Graph owns operation order and executable
 lowering; there is no component execution interpreter.
 """
 
+import inspect
 import json
 
 from taichi_forge.aot._component import (
@@ -11,6 +12,7 @@ from taichi_forge.aot._component import (
     DenseField,
     Dimension,
     RuntimeValue,
+    RootOption,
     StaticValue,
     _digest,
     _member,
@@ -23,9 +25,10 @@ from taichi_forge.types._argument_descriptor import describe_symbolic_arg
 
 
 class _GraphCapture:
-    def __init__(self, component, record):
+    def __init__(self, component, record, args=(), kwargs=None, build=None):
         self.component = component
         self.owner = None
+        self.build = build
         self.codes = []
         self.groups = {}
         self.dimensions = {}
@@ -41,6 +44,17 @@ class _GraphCapture:
             for name, declaration in component.declarations.items()
             if isinstance(declaration, StaticValue) and declaration.choices is not None
         }
+        self._options = {}
+        if any(isinstance(declaration, RootOption) for declaration in self._choices.values()):
+            signature = inspect.signature(record)
+            parameters = signature.bind(object(), *args, **(kwargs or {}))
+            parameters.apply_defaults()
+            builder_name = next(iter(signature.parameters))
+            for name, declaration in self._choices.items():
+                if isinstance(declaration, RootOption):
+                    if name == builder_name or name not in parameters.arguments:
+                        raise TaichiCompilationError(f"Component recording option {name!r} has no normal argument")
+                    self._options[name] = parameters.arguments[name]
         self._root_name = getattr(record, "__qualname__", "component root")
         self.configuration = {}
         if self._choices:
@@ -55,7 +69,11 @@ class _GraphCapture:
     def _configuration(self):
         return {
             name: dict(
-                selected=declaration.validate(_member(self.owner, name), name, self._root_name),
+                selected=declaration.validate(
+                    self._options[name] if isinstance(declaration, RootOption) else _member(self.owner, name),
+                    name,
+                    self._root_name,
+                ),
                 choices=[_static_value(value) for value in declaration.choices],
             )
             for name, declaration in self._choices.items()
@@ -79,6 +97,8 @@ class _GraphCapture:
             raise TaichiCompilationError("A component Graph root requires one declared resource owner")
         injected = produce_injected_args_for_graph(kernel, args, expected_templates)
         code = self.component.compile(entry, *injected[1:])
+        if self.build is not None:
+            self.build.admit_kernel(code)
         for arg in flatten_args(args):
             if arg.name.startswith("__component_"):
                 raise TaichiCompilationError("Explicit Graph arguments cannot use the reserved __component_ prefix")
@@ -276,13 +296,15 @@ def _complete_compiler_contract(graph, contract, codes):
     return contract
 
 
-def compile_component_graph(component, record, *args, **kwargs):
+def compile_component_graph(component, record, *args, _build=None, **kwargs):
     from taichi_forge.graph import GraphBuilder
 
-    capture = _GraphCapture(component, record)
+    capture = _GraphCapture(component, record, args, kwargs, _build)
     builder = GraphBuilder(_capture_recipe_sources=False, _component_capture=capture)
     record(builder, *args, **kwargs)
     contract = capture.finish(builder)
+    if _build is not None:
+        _build.check_time("before backend compilation")
     graph = builder.compile()
     contract = _complete_compiler_contract(graph, contract, capture.codes)
     if capture.configuration:
@@ -293,4 +315,6 @@ def compile_component_graph(component, record, *args, **kwargs):
         contract["version"] = 3
         contract["required_capabilities"].append("component_static_choices_v1")
         contract["configuration"] = capture.configuration
+    if _build is not None:
+        _build.check_time("after backend compilation")
     return ComponentGraph(graph, contract)

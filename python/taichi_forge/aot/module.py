@@ -337,6 +337,7 @@ class Module:
         self._exported_kernels = {}
         self._component_entries = {}
         self._component_roots = {}
+        self._component_families = {}
         self._kernel_launch_abis = {}
         self._execution_plans = {}
         self._data_payloads = {}
@@ -813,6 +814,13 @@ class Module:
             directory = output_dir / "components"
             directory.mkdir(exist_ok=True)
             for name, contract in self._component_roots.items():
+                (directory / (quote(name, safe="-_.") + ".json")).write_text(
+                    json.dumps(contract, sort_keys=True, separators=(",", ":")), encoding="utf8"
+                )
+        if self._component_families:
+            directory = output_dir / "component_families"
+            directory.mkdir(exist_ok=True)
+            for name, contract in self._component_families.items():
                 (directory / (quote(name, safe="-_.") + ".json")).write_text(
                     json.dumps(contract, sort_keys=True, separators=(",", ":")), encoding="utf8"
                 )

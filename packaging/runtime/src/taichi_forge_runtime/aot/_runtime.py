@@ -888,6 +888,12 @@ class Module(_Resource):
 
         return Component(self, name)
 
+    def component_variants(self, name):
+        """Select declared configurations from one already loaded code Module."""
+        from ._component_variants import ComponentVariants
+
+        return ComponentVariants(self, name)
+
     def component_entry_contract(self, name):
         """Read an experimental compiler-produced entry capture projection.
 

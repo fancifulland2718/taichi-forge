@@ -148,6 +148,31 @@ consumer 在 `instantiate(dimensions, configuration=...)` 中声明正常模型�
 将四个未取得资格的算法开关明确限定为 False，独立消费者也检查该约束；不能只凭 shape
 接受另一算法的模型。模型拓扑数据与这些声明的一致性仍由正常模型准备层负责。
 
-当前按请求的正常根构建配置，没有自动求布尔笛卡尔积。跨根批量构建预算/变体覆盖与
-选择、完整初始化/约束投影、B 的真实自动扩展反证及 C 的完整生命周期仍在推进。
-正式 wheel 和全引擎资格保留在 E；原入口级机制测试不替代这些门槛。
+`RootOption(choices=(...))` 在同一声明环境中标明普通 recording 参数，例如
+`report_power`；取正常调用实参或签名默认值，不把它当作 `self` 数值捕获。它使用同一
+v3 配置合同，消费端选择后不再执行 Python 构图。正常组件的新增功率诊断已经通过
+CPU/CUDA 无私有数值源码消费：新 Kernel/rank-0 资源自动进入闭包，无逐核清单或绑定表。
+
+内部 `_component_variants` 提供 `Variant(env, normal_record, **options)`、`BuildBudget`
+和 `build_variants`。请求是合法正常组件配置的集合，不是执行阶段表，也不自动枚举布尔
+笛卡尔积。构建统计实际 Kernel 语义变体和使用关系；相同实际依赖复用已有编译候选。
+每个请求只正常记录一次 Graph，仍由原 lowering/ExecutionPlan 导出，公共 Kernel
+沿既有模块导出器去重。`family.select(configuration).contract` 查询已构建根。
+
+预算限制配置数、实际 Kernel 变体数及阶段间累计时间。新 Kernel 的依赖发现后、后端
+编译前检查变体预算；时间预算在阶段边界检查，不抢占正在执行的 native 编译。失败抛
+`ComponentBuildError`，其 `report` 区分已完成、已知缺失以及请求输入是否已读完；不返回
+或导出半成品 family。完整前端定义可保留供重试，不能冒充完成产物。发布中失败则沿原
+Graph 导出的规则禁止保存部分模块。
+
+`family.export(module, name)` 发布所有已请求配置的索引与实际入口集合。
+Runtime `module.component_variants(name)` 验证索引、各根的静态配置/代码身份及 Plan
+引用；`select(configuration)` 返回已有组件，`instantiate(..., configuration=...)`
+按选择绑定同一加载模块。缺失配置、域外值和合法但未导出的组合分别拒绝，没有源码
+回退、重复 load 或数值计划解释器。覆盖声明为 `exact_requested_configurations`，
+不声称 choices 所有组合都已实现。
+
+RNE 的纯计算与带功率诊断两种正常配置已在 CPU/CUDA 验证：两个根共用 RNE 代码，
+产物只有两份数值 Kernel 入口；新尺寸实例从冻结产物按配置选择，消费端只含 Runtime。
+更广的模型算法域、完整初始化/约束/来源投影和 C 的完整生命周期仍在推进；正式 wheel
+和全引擎资格留在 E。此次批量构建不提供跨平台编译服务或分布式构建调度器。

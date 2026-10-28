@@ -213,7 +213,41 @@ consumer. Shape compatibility alone cannot admit another algorithm. The normal
 model-preparation layer still owns consistency between topology data and these
 declarations.
 
-Builds currently record requested normal roots, not a Boolean Cartesian product.
-Batch build budgets, variant coverage/selection, full initialization/constraint
-projections, B's real automatic-extension check and complete C lifetimes remain
-in progress. Release wheels and whole-engine qualification remain in E.
+`RootOption(choices=(...))` declares a normal recording argument, such as
+`report_power`, in the same environment. Its value comes from normal call
+arguments or defaults, not a numerical `self` capture. It uses the same v3
+configuration contract; selection never executes Python graph construction in
+the consumer. The normal RNE power diagnostic already passes CPU/CUDA isolated
+consumption: its new kernel and rank-0 resource enter the closure automatically.
+
+Internal `_component_variants` provides `Variant(env, normal_record, **options)`,
+`BuildBudget` and `build_variants`. Requests describe legal normal configurations,
+not execution stages or an automatically enumerated Boolean product. Builds
+record actual kernel semantic variants and reuse relationships. Each request
+records its normal Graph once; existing lowering, ExecutionPlan export and
+module kernel deduplication remain authoritative. Query built roots through
+`family.select(configuration).contract`.
+
+Budgets bound configuration count, actual kernel variants and elapsed time
+between stages. The variant limit is checked after frontend dependency discovery
+and before backend compilation. Time limits do not preempt an active native
+compiler. `ComponentBuildError.report` distinguishes completed requests, known
+missing requests and whether admission exhausted the input. Incomplete families
+cannot be returned/exported. Complete frontend definitions can be reused after
+failure, but do not count as completed artifacts. Partial native export failures
+retain the existing rule forbidding module publication.
+
+`family.export(module, name)` publishes an index and actual entry closure.
+Runtime `module.component_variants(name)` checks it against root static choices,
+code identity and ExecutionPlans. `select(configuration)` returns an existing
+component; `instantiate(..., configuration=...)` binds it under the same loaded
+module. Missing inputs, out-of-domain values and legal but unexported combinations
+reject without source fallback, repeated loading or an execution interpreter.
+Coverage is `exact_requested_configurations`, not all combinations of choices.
+
+CPU/CUDA RNE qualification covers plain and power-reporting roots sharing RNE
+code, with two numerical kernel entries in one artifact. New-size models select
+from the frozen artifact in Runtime-only consumers. Broader algorithm domains,
+full initialization/constraint/provenance projections and complete C lifetimes
+remain in progress. Wheels and whole-engine qualification remain in E; this
+batch builder is not a cross-platform or distributed compilation service.
