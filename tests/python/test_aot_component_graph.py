@@ -21,13 +21,33 @@ class _RootModel(_DenseModel):
         for i in range(self.active):
             self.x[i] = a + 2 * b + self.weight
 
+    @ti.kernel
+    def randomize(self, scale: ti.f32):
+        for i in range(self.active):
+            self.x[i] = scale * ti.random(ti.f32)
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, saturating_grid_dim=1, default_gpu_block_dim=64)
 def test_normal_graph_root_exports_its_actual_compiled_closure(tmp_path):
     model = _RootModel(7, 7)
     root = _environment().compile_graph(model.record)
     assert len(root.contract["entries"]) == 2
     assert len(root.contract["groups"]) == 2
+    facts = root.contract["compilation"]
+    assert root.contract["version"] == 2 and facts["task_scope"] == "compiled_not_observed_replay"
+    assert all(not entry["opaque"] and entry["tasks"] for entry in facts["entries"])
+    assert {name: resource["access"] for name, resource in root.contract["resources"].items()} == {
+        "alias_x": "read_write",
+        "y": "read_write",
+        "v": "write",
+        "m": "write",
+    }
+    assert all(resource["effects_precision"] == "compiler_proven" for resource in root.contract["resources"].values())
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        tasks = [task for entry in facts["entries"] for task in entry["tasks"]]
+        assert all(task["range_mapping"] == "grid_stride" for task in tasks)
+        assert all(task["selected_grid_size"] == 1 and task["selected_block_size"] == 64 for task in tasks)
+        assert all(task["actual_grid_size"] is None for task in tasks)
     module = ti.aot.Module(ti.lang.impl.current_cfg().arch)
     plan = root.export(module, "normal_root")
     assert len(plan.kernel_entries) == 2
@@ -41,6 +61,7 @@ def test_normal_graph_root_exports_its_actual_compiled_closure(tmp_path):
     with Runtime("cpu" if ti.lang.impl.current_cfg().arch == ti.cpu else "cuda") as runtime:
         loaded = runtime.load_module(target)
         component = loaded.component("normal_root")
+        # Larger than both the producer and the selected 1 * 64 CUDA grid.
         with component.instantiate(dict(capacity=257, active=251)) as first:
             with pytest.raises(ValueError, match="explicit consumer initialization"):
                 first.prepare(values=dict(gravity=[5, 7, 9]))
@@ -78,9 +99,10 @@ def test_component_root_identity_includes_actual_argument_connections(tmp_path):
     swapped = environment.compile_graph(lambda builder: builder.dispatch(model.combine, b, a))
     assert direct.contract["entries"][0]["semantic_key"] == swapped.contract["entries"][0]["semantic_key"]
     assert direct.contract["semantic_key"] != swapped.contract["semantic_key"]
+    assert direct.contract["resources"]["x"]["access"] == "write"
     module = ti.aot.Module()
     direct.export(module, "connected")
-    good, bad = tmp_path / "good.tcm", tmp_path / "bad.tcm"
+    good, bad, legacy = (tmp_path / name for name in ("good.tcm", "bad.tcm", "legacy.tcm"))
     module.archive(str(good))
     # Same argument set and native code, but inconsistent connection order.
     with ZipFile(good) as source, ZipFile(bad, "w") as target:
@@ -92,6 +114,19 @@ def test_component_root_identity_includes_actual_argument_connections(tmp_path):
                 args[0], args[1] = args[1], args[0]
                 data = json.dumps(contract)
             target.writestr(name, data)
+    # Version 1 remains conservative and has no compiled-task projection.
+    with ZipFile(good) as source, ZipFile(legacy, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            if name == "components/connected.json":
+                contract = json.loads(data)
+                contract["version"] = 1
+                contract.pop("compilation")
+                contract["required_capabilities"].remove("component_compiler_facts_v1")
+                for resource in contract["resources"].values():
+                    resource.update(access="read_write", effects_precision="conservative")
+                data = json.dumps(contract)
+            target.writestr(name, data)
     with Runtime("cpu") as runtime:
         component = runtime.load_module(good).component("connected")
         with component.instantiate(dict(capacity=11, active=9)) as instance:
@@ -101,3 +136,14 @@ def test_component_root_identity_includes_actual_argument_connections(tmp_path):
             assert struct.unpack("<11f", instance.resource("x").read()) == tuple([8] * 9 + [0] * 2)
         with pytest.raises(ValueError, match="actual execution plan"):
             runtime.load_module(bad).component("connected")
+        assert runtime.load_module(legacy).component("connected").contract["version"] == 1
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_unknown_effects_keep_conservative_resource_contract():
+    model = _RootModel(7, 7)
+    scale = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scale", ti.f32)
+    root = _environment().compile_graph(lambda builder: builder.dispatch(model.randomize, scale))
+    assert root.contract["compilation"]["entries"][0]["opaque"]
+    assert root.contract["resources"]["x"]["access"] == "read_write"
+    assert root.contract["resources"]["x"]["effects_precision"] == "conservative"

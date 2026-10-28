@@ -78,9 +78,21 @@ class Component:
                 "execution_entries",
                 "target",
             }
-            if set(contract) != required or contract["version"] != 1 or contract["name"] != name:
+            if contract.get("version") == 2:
+                required.add("compilation")
+            if set(contract) != required or contract["version"] not in (1, 2) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
-            if set(contract["required_capabilities"]) != {"dense_snode_group_v1", "component_root_v1"}:
+            capabilities = {"dense_snode_group_v1", "component_root_v1"}
+            if contract["version"] == 2:
+                capabilities.add("component_compiler_facts_v1")
+                compilation = contract["compilation"]
+                if (
+                    compilation.get("version") != 1
+                    or len(compilation.get("entries", ())) != len(contract["entries"])
+                    or compilation.get("task_scope") != "compiled_not_observed_replay"
+                ):
+                    raise ValueError("Invalid component compiler facts")
+            if set(contract["required_capabilities"]) != capabilities:
                 raise ValueError("Unsupported required component capability")
             if contract["target"] not in ("x64", "cuda") or contract["target"] != module._runtime.arch:
                 raise ValueError("Component target does not match this Runtime")
@@ -121,8 +133,13 @@ class Component:
             for key, resource in contract["resources"].items():
                 if (
                     resource.get("group") not in contract["groups"]
-                    or resource.get("access") != "read_write"
-                    or resource.get("effects_precision") != "conservative"
+                    or not (
+                        resource.get("access") == "read_write"
+                        and resource.get("effects_precision") == "conservative"
+                        or contract["version"] == 2
+                        and resource.get("effects_precision") == "compiler_proven"
+                        and resource.get("access") in ("none", "read", "write", "read_write", "atomic")
+                    )
                     or resource.get("initialization") != "consumer_explicit"
                 ):
                     raise ValueError("Invalid component resource contract")

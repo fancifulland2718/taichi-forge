@@ -141,8 +141,11 @@ connections and explicit types; dynamic model values do not specialize code.
 Runtime `module.component(name)` queries the immutable contract;
 `instantiate(dimensions)` creates independent roots using authoritative native
 SNode rules. `initialize(data, zero=...)` explicitly supplies model data or zeros.
-Effects are conservatively read/write and every referenced resource requires
-initialization; no producer live state is serialized. `instance.prepare(values=...,
+Version 2 projects resource access from the compiled Graph; unknown effects stay
+conservative and version 1 remains readable. Every referenced resource still
+requires initialization: write-only access does not prove full-capacity coverage
+or justify skipping tail initialization. No producer live state is serialized.
+`instance.prepare(values=...,
 dimensions=...)` binds through the existing ExecutionPlan and PreparedCall, with
 no new Python execution interpreter. Fixed vector/matrix values reuse native ABI
 encoding; every entry consuming a named value must have compatible value ABI.
@@ -165,6 +168,29 @@ this proves isolated finite RNE consumption, not source-free model/FK/whole-step
 construction. Initial cost samples separate load, allocation, initialization,
 prepare and warm component execution; no speed or scaled-memory claim follows.
 
-Full initialization/effects/constraint projections, finite algorithm-domain
-coverage, actual task/launch observation and complete instance lifetimes remain
-in progress. Release wheels and whole-engine qualification remain in E.
+`contract["compilation"]` also exposes the existing compiler's final task
+manifest: work-range sources, selected block/grid, mapping and launch-bound
+facts. This cold query adds no range interpreter. Its
+`compiled_not_observed_replay` label separates compiled choices from observed
+submission. Unknown ranges or actual grid sizes remain unknown, not zero or
+producer constants. Multiple loops, ordinary while/continue and invocation-value
+extraction preserve known resource identities. Atomic effects retain their
+synchronization/fusion restrictions; unknown side effects remain conservative.
+
+The finite RNE root projects read-only model inputs, bias-force writes and atomic
+workspaces on CPU/CUDA while retaining isolated-consumer correctness. A separate
+producer-N=7 probe consumes C=257/B=251 and B=0 with one 64-thread CUDA block;
+active tails, capacity traversal and six sentinel elements remain correct.
+
+Local Nsight Systems observation of frozen artifacts shows one CUDA Graph replay
+per RNE call, containing two numerical kernels. All three tasks in the small-grid
+probe actually launch at 1x64 and cover the new range with grid-stride loops.
+Each five-replay region waits only at its explicit completion boundary, with no
+per-kernel Host callback submission observed. Empty active work still launches
+an empty kernel; zero-launch execution is not claimed. These are scoped physical
+submission observations, not a speed advantage or general execution-domain and
+concurrency qualification. Compiler manifests alone do not establish them.
+
+Full initialization/constraint projections, finite algorithm-domain coverage,
+B's automatic-extension check and complete C lifetimes remain in progress.
+Release wheels and whole-engine qualification remain in E.

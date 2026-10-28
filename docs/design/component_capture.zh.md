@@ -100,8 +100,10 @@ native 节点、外部 Ndarray 所有权及 recipe 搜索需分别取得资格�
 
 Runtime 的 `module.component(name)` 查询不可变合同，`instantiate(dimensions)` 使用
 原生权威 SNode 规则创建独立根；`initialize(data, zero=...)` 明确提供模型数据或零值。
-当前 effects 保守标为读写，所有被引用资源都要求显式初始化；没有把 producer live state
-写入 TCM。运行时参数与资源由 `instance.prepare(values=..., dimensions=...)` 接入原
+版本 2 合同从已编译 Graph 投影实际资源读写；未知 effects 仍保守标为读写，版本 1
+继续可读。所有被引用资源仍要求显式初始化：只写不代表覆盖完整容量，不能据此跳过
+尾部初始化。没有把 producer live state 写入 TCM。运行时参数与资源由
+`instance.prepare(values=..., dimensions=...)` 接入原
 ExecutionPlan 和 PreparedCall，调用期没有新增 Python 计划解释器。固定向量/矩阵值复用
 native 调用 ABI 编码，命名值在所有使用入口的 ABI 必须相容。
 
@@ -117,5 +119,21 @@ GeoPhys 正常 `build_bias_force_graph` 同时服务普通 prestep Graph 与组�
 整个模型/FK/物理步可无源码构造。首次成本采样区分 load、分配、初始化、prepare 和稳态
 组件，不构成速度领先或规模化内存结论。
 
-完整初始化/effects/约束投影、有限算法域覆盖、实际 task/launch 观测及 C 的完整生命周期
-仍在推进。正式 wheel 和全引擎资格保留在 E；原入口级机制测试不替代这些门槛。
+`contract["compilation"]` 同时查询已有编译器的最终 task manifest，包含工作域来源、
+选定 block/grid、映射与 launch-bound 事实；这是冷查询，不新增范围解释器。标记
+`compiled_not_observed_replay` 明确区分编译选择与实际提交；未知范围/实际 grid 保留
+未知，不能当作 0 或 producer 常量。多循环、普通 while/continue、调用参数取分量
+不再丢弃已知资源集合；原子 effects 保留同步/融合限制，未知副作用仍保守处理。
+
+有限 RNE 在 CPU/CUDA 投影出只读质量/拓扑、bias-force 写入和原子工作区，隔离消费
+门槛保持通过。另用 producer N=7、consumer C=257/B=251 及 B=0 验证新范围；CUDA
+限定一个 64 线程 block，活动尾元素、容量遍历及六个尾部哨兵均正确。
+
+本地 Nsight Systems 对冻结产物的观测确认：RNE 每次重放一条 CUDA Graph，内含两个
+计算 Kernel；小 grid 样例三个 task 均实际使用 1×64，通过 grid-stride 覆盖新范围。
+各五次重放区间只在区间末显式等待，未见逐 Kernel Host 回调提交。空 active 仍提交
+一个空计算 Kernel，因此不声称零 launch。上述是选定路径的实际提交证据，不是速度
+优势、任意设备执行域或并发资格；编译 manifest 本身也不能替代该观测。
+
+完整初始化/约束投影、有限算法域覆盖、B 的自动扩展反证及 C 的完整生命周期仍在
+推进。正式 wheel 和全引擎资格保留在 E；原入口级机制测试不替代这些门槛。

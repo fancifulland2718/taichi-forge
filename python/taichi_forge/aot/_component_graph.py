@@ -169,6 +169,78 @@ class ComponentGraph:
         return plan
 
 
+def _complete_compiler_contract(graph, contract, codes):
+    """Project existing compiled Graph effects and final native task facts.
+
+    This is a cold query, not another effects analyzer or launch evaluator.
+    Task manifests describe compiled choices; actual replay needs observation.
+    """
+    from taichi_forge.graph._ir import DispatchNode, GraphAccess, SequentialRegion, _merge_parallel_access
+    from taichi_forge.lang import impl
+
+    nodes = []
+
+    def visit(node):
+        if isinstance(node, DispatchNode):
+            nodes.append(node)
+        elif isinstance(node, SequentialRegion):
+            for child in node.children:
+                visit(child)
+        else:
+            raise TaichiCompilationError("Component compiler facts require a qualified sequential Graph root")
+
+    visit(graph._spec.ir_root)
+    if len(nodes) != len(codes):
+        raise TaichiCompilationError("Component compiled Graph changed its entry closure")
+    accesses, uncertain, entries, task_cache = {}, set(), [], {}
+    for node, code, entry in zip(nodes, codes, contract["entries"]):
+        effects = []
+        for effect in node.effects:
+            binding = contract["bindings"].get(effect.resource)
+            # The opaque Graph fallback includes scalar/aggregate bindings too.
+            # Component explicit arguments are restricted to such value types.
+            if node.opaque and (
+                effect.resource in contract["explicit"] or binding is not None and binding["kind"] != "resource"
+            ):
+                continue
+            if binding is None or binding["kind"] != "resource" or not effect.runtime_bound:
+                raise TaichiCompilationError(f"Component Graph has an undeclared resource effect: {effect}")
+            identity = binding["name"]
+            previous = accesses.get(identity)
+            accesses[identity] = effect.access if previous is None else _merge_parallel_access(previous, effect.access)
+            effects.append(dict(resource=identity, access=effect.access.value))
+        if node.opaque:
+            uncertain.update(
+                contract["bindings"][symbol]["name"]
+                for symbol in entry["arguments"]
+                if symbol in contract["bindings"] and contract["bindings"][symbol]["kind"] == "resource"
+            )
+        if code.semantic_key not in task_cache:
+            task_cache[code.semantic_key] = impl.get_runtime().prog._kernel_task_manifest(
+                code.kernel.compiled_kernels[code.key]
+            )
+        entries.append(
+            dict(
+                effects=effects,
+                opaque=node.opaque,
+                side_effects=list(node.side_effects),
+                iteration_domain=node.iteration_domain,
+                fusion_blocker=node.fusion_blocker,
+                tasks=task_cache[code.semantic_key],
+            )
+        )
+    for name, resource in contract["resources"].items():
+        if name not in uncertain and accesses.get(name) != GraphAccess.OPAQUE:
+            access = accesses.get(name)
+            resource["access"] = access.value if access is not None else "none"
+            resource["effects_precision"] = "compiler_proven"
+    contract["version"] = 2
+    contract["required_capabilities"].append("component_compiler_facts_v1")
+    contract["semantic_key"] = _digest({name: value for name, value in contract.items() if name != "semantic_key"})
+    contract["compilation"] = dict(version=1, entries=entries, task_scope="compiled_not_observed_replay")
+    return contract
+
+
 def compile_component_graph(component, record, *args, **kwargs):
     from taichi_forge.graph import GraphBuilder
 
@@ -177,4 +249,4 @@ def compile_component_graph(component, record, *args, **kwargs):
     record(builder, *args, **kwargs)
     contract = capture.finish(builder)
     graph = builder.compile()
-    return ComponentGraph(graph, contract)
+    return ComponentGraph(graph, _complete_compiler_contract(graph, contract, capture.codes))
