@@ -38,7 +38,12 @@ class Window:
         vsync (bool): whether or not vertical sync should be enabled. Vulkan
             prefers immediate presentation when False and supported; this can
             tear. Otherwise the surface's supported synchronized modes are used.
+            True may select MAILBOX, which synchronizes display updates but
+            does not limit application submissions to the monitor refresh rate.
         show_window (bool): where or not display the window after initialization.
+        fps_limit (float): software limit on visible frame presentations. The
+            default 65535 disables pacing. Event-only or dropped show() calls
+            are not paced; this is not a simulation or event-loop rate limit.
         pos (tuple[int]): position (left to right, up to bottom) of the window which origins from the left-top of your main screen, in pixels.
     """
 
@@ -236,7 +241,14 @@ class Window:
         return self.window.is_render_input_available()
 
     def show(self):
-        """Display this window."""
+        """Poll events and submit pending drawing work.
+
+        Returns True for a submitted frame (including hidden rendering), or
+        False when no frame was submitted, for example with no drawing work,
+        display backpressure or a minimized window. Count successful submissions
+        using this result or get_display_stats(), not the number of loop calls.
+        Neither a successful submission nor the title FPS measures monitor scanout.
+        """
         return self.window.show()
 
     def is_headless_display(self):

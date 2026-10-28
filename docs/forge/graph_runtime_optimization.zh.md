@@ -261,6 +261,16 @@ CUDA/Vulkan 共享图像仍由外部 semaphore 和 display completion 管理，�
 显示 fence。Vulkan 的 `vsync=False` 在支持时优先选择 IMMEDIATE，允许撕裂；否则仍
 回退到 MAILBOX/latest-ready/FIFO。桌面合成器与显示器的调度约束依然存在。
 
+`vsync=True` 优先选择受支持的 MAILBOX：屏幕在垂直消隐时更新，但待显示帧可以被
+新提交替换，因此主机循环或提交频率高于显示器刷新率不代表 vsync 失效。
+这是 [Vulkan 呈现模式](https://docs.vulkan.org/refpages/latest/refpages/source/VkPresentModeKHR.html)
+的行为。只在 `window.show()` 返回 `True` 时累计提交帧数，或读取
+`window.get_display_stats()["window_submitted_frames"]`；这些仍不是屏幕实际显示帧数。
+源码的窗口标题 FPS 也只统计窗口提交，空循环、丢帧和最小化期间的事件泵不计入。
+需要限制可见画面提交频率时可显式设置 `fps_limit=60`；它不会限制未提交帧的空循环
+或仿真步频。诊断 vsync 时先区分这些计数，再用呈现跟踪工具检查实际显示；
+仅凭循环帧率不必先停用显示适配器。
+
 同时测量成功呈现的**新画面**、完成物理步数、主机提交耗时和服务 p95。同流 render 服务
 区间包含之前的设备工作，不能全部算作主机阻塞。将忙等改成 blocking wait 可以节省 CPU，
 但不消除设备排队。移出等待应带来有效工作或延迟收益，不能换来无界队列、过期快照或

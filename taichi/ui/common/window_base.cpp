@@ -67,7 +67,6 @@ SceneBase *WindowBase::get_scene() {
 
 bool WindowBase::show() {
   CHECK_WINDOW_SHOWING;
-  ++frames_since_last_record_;
 
   double current_time = glfwGetTime();
 
@@ -121,6 +120,7 @@ void WindowBase::record_display_frame_submitted() {
   ++display_stats_.submitted_frames;
   display_stats_.last_submitted = true;
   if (config_.show_window) {
+    ++frames_since_last_record_;
     ++display_stats_.window_submitted_frames;
     display_stats_.last_window_submitted = true;
   } else {

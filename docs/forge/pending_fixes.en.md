@@ -24,6 +24,15 @@ the fixes below. The release column will be updated when the next version is ass
 | F070-12 | 0.7.0 | The first host read or write creates both accessor kernel definitions, retaining an unused counterpart for fields accessed in only one direction. Create each accessor on demand and retire whichever definitions exist with the SNode tree. | Next release, TBD |
 | F070-13 | 0.7.0 | Compiled kernels are only persisted at reset/normal exit, losing cache work on forced termination. Publish each `.tic` atomically and recover unindexed artifacts, retaining corrupt-file fallback and cache-disabled behavior. | Next release, TBD |
 
+F070-15: current-source GGUI title FPS counts every `show()` call, including those
+that submit no frame. Count only window frame submissions without changing
+present modes, event pumping or pacing. Before/after native checks of the affected
+C++ methods with clock/window stubs cover idle loops, submissions, drops, stats
+reset and offscreen counts; old code fails and the fix passes. This is not headed
+display or driver qualification. Committed as
+`Count submitted window frames in the GGUI FPS title`; awaiting the next release.
+See [runtime/display scheduling](graph_runtime_optimization.en.md) for vsync versus submission rate.
+
 F070-14: locate static-expansion warnings at the largest contributing outer loop,
 including inlined helpers, instead of the threshold-crossing statement. Nine
 checks cover shared counts, a later larger loop, failed retries, early exits and

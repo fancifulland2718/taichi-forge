@@ -119,7 +119,8 @@ class WindowBase {
   InputHandler input_handler_;
   WindowLayoutState window_layout_;
 
-  // used for FPS counting
+  // Window submission rate, excluding event-only/dropped show() calls.
+  // This is not a count of images scanned out by the display.
   double last_record_time_{0.0};
   int frames_since_last_record_{0};
 

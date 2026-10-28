@@ -341,6 +341,18 @@ With Vulkan, `vsync=False` prefers IMMEDIATE presentation where supported;
 this permits tearing. Otherwise MAILBOX/latest-ready/FIFO remain fallbacks.
 Compositor and monitor scheduling still apply.
 
+`vsync=True` prefers MAILBOX when supported. The display updates at vertical
+blank, but a newer submission can replace a pending image, so a loop or submission
+rate above monitor refresh does not establish a vsync failure. See the
+[Vulkan present-mode specification](https://docs.vulkan.org/refpages/latest/refpages/source/VkPresentModeKHR.html).
+Count submissions only when `window.show()` returns `True`, or read
+`window.get_display_stats()["window_submitted_frames"]`; neither measures monitor
+scanout. In current source the title FPS also counts window submissions, excluding
+event-only, dropped and minimized iterations. Set `fps_limit=60` to pace visible
+frame presentations. This does not throttle iterations that submit no frame or
+simulation steps. Distinguish these counters before tracing actual display events;
+a high loop rate alone does not warrant disabling display adapters.
+
 Measure successful **new** presents and completed physics steps alongside
 host submission time and service p95. A render service interval includes prior
 device work on an ordered stream; it is not all host blocking. Replacing a busy
