@@ -10,6 +10,7 @@ import hashlib
 import inspect
 import json
 import marshal
+import operator
 from dataclasses import dataclass
 from types import MappingProxyType, ModuleType
 
@@ -116,20 +117,170 @@ class StaticValue:
         return ("static",)
 
 
+@dataclass(frozen=True)
+class Dimension:
+    """An explicitly named extent or active count on the normal owner."""
+
+    kind: str = "extent"
+    capacity: str = ""
+
+    @property
+    def schema(self):
+        if self.kind not in ("extent", "active") or (self.kind == "extent" and self.capacity):
+            raise ValueError("Dimension requires extent, or active with an optional capacity reference")
+        return ("dimension", "i32", self.kind, self.capacity)
+
+    def declare(self, name):
+        return kernel_arguments.decl_scalar_arg(primitive_types.i32, name, 0)
+
+    @property
+    def annotation(self):
+        return primitive_types.i32
+
+
+def _dimension_value(component, owner, name, visiting=()):
+    declaration = component.declarations.get(name)
+    if not isinstance(declaration, Dimension) or name in visiting:
+        raise TaichiCompilationError(f"Invalid or cyclic dimension declaration {name!r}")
+    value = operator.index(_member(owner, name))
+    minimum = 1 if declaration.kind == "extent" else 0
+    if not minimum <= value <= 2**31 - 1:
+        raise TaichiCompilationError(f"Dimension {name!r} is outside its declared i32 {declaration.kind} range")
+    if declaration.capacity:
+        capacity = component.declarations.get(declaration.capacity)
+        if not isinstance(capacity, Dimension) or capacity.kind != "extent":
+            raise TaichiCompilationError(f"Active dimension {name!r} requires an extent capacity")
+        if value > _dimension_value(component, owner, declaration.capacity, (*visiting, name)):
+            raise TaichiCompilationError(f"Active dimension {name!r} exceeds capacity {declaration.capacity!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class DenseField:
+    dtype: object
+    shape: tuple
+    group: str
+
+    @property
+    def schema(self):
+        if not self.group or not isinstance(self.shape, tuple):
+            raise ValueError("DenseField requires a group ID and a tuple of extent declarations")
+        if any(not (isinstance(x, str) and x) and not (type(x) is int and x > 0) for x in self.shape):
+            raise ValueError("DenseField extents must be dimension IDs or positive static integers")
+        return ("dense_field", RuntimeValue(self.dtype).schema, self.shape, self.group)
+
+    def declare(self, name):
+        from taichi_forge._lib import core
+
+        element = self.dtype.tensor_type if isinstance(self.dtype, MatrixType) else cook_dtype(self.dtype)
+        return kernel_arguments.decl_ndarray_arg(element, len(self.shape), name, False, core.BoundaryMode.UNSAFE)
+
+    @property
+    def annotation(self):
+        return NdarrayType(dtype=self.dtype, ndim=len(self.shape))
+
+    def validate(self, field):
+        from taichi_forge.lang._storage_view import describe_storage
+
+        description = describe_storage(field)
+        if not description.supported or not description.properties["ndarray_abi_compatible"]:
+            raise TaichiCompilationError("Dense component Field requires a qualified compact SNode member")
+        return description
+
+
+def _dense_group(component, owner, group):
+    """Project a real SNode group, using declared provenance for every axis.
+
+    No byte layout is computed here. The native schema retains placements and
+    calls the original SNode constructors/StructCompiler on instantiation.
+    """
+    from taichi_forge._lib import core
+    from taichi_forge.lang.field import Field
+
+    members = {}
+    root = None
+    axes = {}
+    dimensions = {}
+    for name, declaration in component.declarations.items():
+        if not isinstance(declaration, DenseField) or declaration.group != group:
+            continue
+        field = _member(owner, name)
+        if not isinstance(field, Field):
+            raise TaichiCompilationError(f"Dense resource {name!r} must be a Field")
+        scalar_dtype = (
+            declaration.dtype.dtype if isinstance(declaration.dtype, MatrixType) else cook_dtype(declaration.dtype)
+        )
+        element_shape = tuple(declaration.dtype.get_shape()) if isinstance(declaration.dtype, MatrixType) else ()
+        actual_element = ((field.n,) if field.ndim == 1 else (field.n, field.m)) if hasattr(field, "n") else ()
+        if field.dtype != scalar_dtype or actual_element != element_shape:
+            raise TaichiCompilationError(f"Dense resource {name!r} element type differs from its declaration")
+        expected_shape = []
+        for extent in declaration.shape:
+            if isinstance(extent, str):
+                dim = component.declarations.get(extent)
+                if not isinstance(dim, Dimension) or dim.kind != "extent":
+                    raise TaichiCompilationError(f"Dense resource {name!r} requires extent declaration {extent!r}")
+                dimensions[extent] = dim.schema
+                expected_shape.append(_dimension_value(component, owner, extent))
+            else:
+                expected_shape.append(extent)
+        if tuple(field.shape) != tuple(expected_shape):
+            raise TaichiCompilationError(f"Dense resource {name!r} shape differs from its declared extent relation")
+        nodes = tuple(var.ptr.snode() for var in field._get_field_members())
+        members[name] = nodes
+        for node in nodes:
+            current_root = impl.get_runtime().prog.get_snode_root(node.get_snode_tree_id())
+            if root is None:
+                root = current_root
+            if current_root.id != root.id:
+                raise TaichiCompilationError(f"Resource group {group!r} must preserve one actual SNode root")
+            parent = node.parent
+            if declaration.shape and parent.type != core.SNodeType.dense:
+                raise TaichiCompilationError(f"Resource {name!r} is not a simple dense member")
+            physical_axes = node.get_physical_index_position()[: len(declaration.shape)]
+            for axis, extent in zip(physical_axes, declaration.shape):
+                key = (parent.id, axis)
+                if key in axes and axes[key][1] != extent:
+                    raise TaichiCompilationError(f"Conflicting dimension provenance in group {group!r}")
+                axes[key] = (parent, extent)
+    paths = {}
+
+    def visit(node, path):
+        paths[node.id] = path
+        if node.type == core.SNodeType.dense:
+            for axis in node.get_physical_index_position()[: node.num_active_indices()]:
+                if (node.id, axis) not in axes:
+                    raise TaichiCompilationError(f"Group {group!r} has an undeclared sibling extent at {path}")
+        for index in range(node.get_num_ch()):
+            visit(node.get_ch(index), (*path, index))
+
+    visit(root, ())
+    parameters = [(node, axis, extent) for (_, axis), (node, extent) in axes.items() if isinstance(extent, str)]
+    schema = core.DenseSNodeSchema.capture(root, parameters).to_json()
+    return (
+        schema,
+        {name: tuple(paths[node.id] for node in nodes) for name, nodes in members.items()},
+        dimensions,
+        root.id,
+    )
+
+
 class Component:
     """Immutable, component-wide declarations; currently an internal API.
 
     Attribute names are explicit declaration IDs in this initial flat namespace.
     ``compile(owner.entry, ...)`` uses the original decorated numerical entry.
     No owner is retained by the resulting code, and no per-entry binding table
-    is supplied by the application. Dense groups/Graph export follow separately.
+    is supplied by the application. Graph export follows separately.
     """
 
     __slots__ = ("_declarations",)
 
     def __init__(self, **declarations):
         for name, declaration in declarations.items():
-            if not name.isidentifier() or not isinstance(declaration, (RuntimeValue, Array, StaticValue)):
+            if not name.isidentifier() or not isinstance(
+                declaration, (RuntimeValue, Array, StaticValue, Dimension, DenseField)
+            ):
                 raise TypeError("Component declarations require attribute IDs and supported declaration types")
             declaration.schema  # Validate without reading an instance.
         self._declarations = MappingProxyType(dict(declarations))
@@ -156,6 +307,7 @@ class Component:
             )
         call_args = _process_args(kernel, (owner, *args), {})
         runtime = impl.get_runtime()
+        runtime.materialize(for_aot=True)
         with runtime._kernel_compilation_lock:
             for code in kernel._component_candidates:
                 if code.matches(self, owner):
@@ -187,6 +339,17 @@ class _Capture:
         self.functions = {}
         self.entry_definition = _definition(kernel.func)
         self.contract = None
+        self.groups = {}
+        self.member_paths = {}
+        self.resource_aliases = {}
+        self.bound_group_roots = {}
+
+    def dimension_dependency(self, name):
+        declaration = self.declarations[name]
+        _dimension_value(self.component, self.owner, name)
+        self.used[name] = declaration.schema
+        if declaration.capacity:
+            self.dimension_dependency(declaration.capacity)
 
     def attribute(self, ctx, name):
         declaration = self.declarations.get(name)
@@ -200,6 +363,8 @@ class _Capture:
                 "declare it as a runtime value, resource or static configuration"
             )
         self.used[name] = declaration.schema
+        if isinstance(declaration, Dimension):
+            self.dimension_dependency(name)
         if isinstance(declaration, StaticValue):
             value = _member(self.owner, name)
             fact = _static_value(value)
@@ -215,8 +380,23 @@ class _Capture:
             )
         if name not in self.expressions:
             value = _member(self.owner, name)
-            if isinstance(declaration, Array):
+            if isinstance(declaration, (Array, DenseField)):
                 declaration.validate(value)
+            if isinstance(declaration, DenseField):
+                schema, members, dimensions, root_id = _dense_group(self.component, self.owner, declaration.group)
+                other_group = self.bound_group_roots.setdefault(root_id, declaration.group)
+                if other_group != declaration.group:
+                    raise TaichiCompilationError("Distinct component groups cannot split the same SNode root")
+                previous = self.groups.setdefault(declaration.group, schema)
+                if previous != schema:
+                    raise TaichiCompilationError("Resource group changed during compilation; retry")
+                for dim in dimensions:
+                    self.dimension_dependency(dim)
+                self.member_paths[name] = (declaration.group, members[name])
+                canonical = self.resource_aliases.setdefault(self.member_paths[name], name)
+                if canonical != name:
+                    self.expressions[name] = self.expressions[canonical]
+                    return self.expressions[name]
             self.dynamic.append(name)
             self.expressions[name] = declaration.declare("__capture_" + name)
         return self.expressions[name]
@@ -257,6 +437,9 @@ class _Capture:
             "explicit_abi": [str(arg.annotation) for arg in self.kernel.arguments[1:]],
             "captures": [(name, self.used[name]) for name in self.dynamic],
             "static": sorted(self.static.items()),
+            "groups": self.groups,
+            "members": self.member_paths,
+            "dimensions": {name: schema for name, schema in self.used.items() if schema[0] == "dimension"},
             "methods": sorted(self.methods.items()),
             "functions": sorted((name, definition) for (_, name), definition in self.functions.items()),
         }
@@ -268,6 +451,19 @@ class _Capture:
             declaration = component.declarations.get(name)
             if declaration is None or declaration.schema != schema:
                 return False
+            if isinstance(declaration, Dimension):
+                _dimension_value(component, owner, name)
+        roots = set()
+        for group, schema in self.groups.items():
+            actual, members, _, root_id = _dense_group(component, owner, group)
+            if root_id in roots:
+                raise TaichiCompilationError("Distinct component groups cannot split the same SNode root")
+            roots.add(root_id)
+            if actual != schema:
+                return False
+            for name, (member_group, paths) in self.member_paths.items():
+                if member_group == group and members.get(name) != paths:
+                    return False
         for name, value in self.static.items():
             if _static_value(_member(owner, name)) != value:
                 return False
@@ -295,6 +491,8 @@ class _ComponentCode:
         self.static = dict(context.static)
         self.methods = dict(context.methods)
         self.functions = dict(context.functions)
+        self.groups = dict(context.groups)
+        self.member_paths = dict(context.member_paths)
         self.dynamic = tuple(context.dynamic)
         self._contract = json.dumps(context.contract)
         self.arguments = tuple(kernel.arguments[1:]) + tuple(
@@ -312,7 +510,7 @@ class _ComponentCode:
         for name in self.dynamic:
             value = _member(owner, name)
             declaration = component.declarations[name]
-            if isinstance(declaration, Array):
+            if isinstance(declaration, (Array, DenseField)):
                 declaration.validate(value)
 
     def run(self, component, owner, *args):
@@ -323,7 +521,16 @@ class _ComponentCode:
         self.validate_bindings(component, owner)
         if len(args) != len(self.kernel.arguments) - 1:
             raise TypeError("Wrong number of explicit component arguments")
-        values = tuple(_member(owner, name) for name in self.dynamic)
+        from taichi_forge.lang._storage_view import ndarray_view
+
+        values = tuple(
+            (
+                ndarray_view(_member(owner, name))
+                if isinstance(component.declarations[name], DenseField)
+                else _member(owner, name)
+            )
+            for name in self.dynamic
+        )
         return self.kernel.launch_kernel(
             self.kernel.compiled_kernels[self.key], *args, *values, _arguments=self.arguments
         )

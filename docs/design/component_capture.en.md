@@ -36,8 +36,10 @@ across owners and sizes, unused declarations, static/helper changes, conditional
 capture use, ordinary Field JIT numerical comparison, owner release, failure
 recovery and Runtime retirement.
 
-This is not yet a deployed component SDK. Dense Field groups are explicitly
-rejected by `Array`; capture lowering must preserve their group contract.
+This is not yet a deployed component SDK. Dense Fields use `DenseField`
+declarations, not `Array`. `Dimension` distinguishes positive extents from active
+counts, which may be zero and may reference an extent as their capacity bound.
+Relations come from declarations, never from equal producer integer values.
 
 The native `DenseSNodeSchema` is the next layout building block. It records the
 original root/dense/place construction and scalar placement order, replacing only
@@ -58,8 +60,22 @@ cell size and offset to ordinary FieldsBuilder at previously unseen extents.
 It includes scalar, vector, matrix and rank-zero placements, and validates that
 rejected bindings do not leave active tree instances.
 
-The current schema entry uses Program-owned trees. Connecting it to the
-standalone Runtime owner, Dense capture addressing, dimension relations, Graph
-export, TCM-only consumption and loaded-module instance lifetimes remains work
-in progress. Neither this layout comparison nor per-call Ndarray binding qualifies
-same-loaded-module Field instances or asynchronous capture.
+Original `self.field` captures now retain the complete root schema and member
+paths. Sibling blocks require declared dimension provenance; logical groups
+cannot split or merge physical roots. Attribute aliases of the same member share
+one physical parameter. Calls bind existing zero-copy Field views, retaining the
+original root, offsets and owner. They neither copy members into independent
+Ndarrays nor mutate module root pointers. This first slice requires qualified
+compact members while preserving the full root in the schema.
+
+`test_aot_component_dense.py` compares the same numerical definition with ordinary
+JIT on CPU/CUDA. It covers new capacities, range/Field-shape/full-Field iteration,
+vector/matrix elements, aliases, empty active ranges and capacity-tail sentinels.
+Different sizes share one frontend definition and one native compilation; invalid
+dimension/root bindings fail before execution.
+
+The current schema entry still uses Program-owned trees. Standalone Runtime
+ownership, Graph export, TCM-only consumption, real GeoPhys RNE and loaded-module
+instance lifetimes remain work in progress. Per-call bindings do not qualify
+loaded instances or asynchronous capture. Validation and description work has
+not yet moved to cold preparation, and no runtime performance claim is made.

@@ -25,8 +25,9 @@ context 绑定实际值。普通 JIT 保留原特化路径。
 后端编译、无关声明、静态值/helper 改变、条件内捕获、普通 Field JIT 数值对照、owner
 释放、失败恢复和 Runtime 失效。
 
-这尚非可部署的完整组件 SDK。Dense Field 组不能用 `Array` 冒充，当前捕获路径明确拒绝，
-接通时必须保留组合同。
+这尚非可部署的完整组件 SDK。Dense Field 使用独立的 `DenseField` 声明，不能用
+`Array` 冒充。`Dimension` 区分正 extent 与可为零的 active count，并可声明 active
+不超过某个 extent。维度关系来自声明，不能按 producer 的相同整数值推断。
 
 原生 `DenseSNodeSchema` 提供下一步的布局基础：记录原 root/dense/place 构造及标量
 放置顺序，仅把显式指定的 dense 轴替换为维度参数。不保存实际节点 ID、producer
@@ -42,6 +43,16 @@ dense、Sparse、量化、Morton、索引 offset 和 ambient 布局。
 size 和 offset 与普通 FieldsBuilder 对照，包含标量、vector、matrix 和 rank-0；
 另验证错误绑定不会遗留活动树实例。
 
-当前 schema 入口使用 Program 拥有的树。独立 Runtime owner、Dense 捕获寻址、维度关系、
-Graph 导出、仅 TCM 消费及 loaded Module 多实例生命周期仍需接通。布局对照及逐调用
-Ndarray 绑定测试均不证明 loaded Field 实例或异步 capture 已取得资格。
+原 `self.field` 捕获现在保存完整的实际根 schema 和成员路径；同根兄弟块的维度必须有
+声明，逻辑组不能拆开或合并实际根。相同成员的属性别名共用一个物理参数。每次调用
+通过已有零复制 Field view 绑定成员，保留原根、偏移及 owner；不会复制成独立 Ndarray，
+也不改写模块级根指针。首期成员限于合格紧凑布局；完整根仍由 schema 保留。
+
+`test_aot_component_dense.py` 在 CPU/CUDA 对照同源普通 JIT，验证新容量下 range、
+Field shape、完整 Field 遍历、vector/matrix 元素及别名；active 为零或小于容量时检查
+尾部哨兵。不同尺寸复用同一个前端定义和一次本机编译，错误维度/根绑定在执行前拒绝。
+
+当前 schema 入口仍使用 Program 拥有的树。独立 Runtime owner、Graph 导出、仅 TCM
+消费、真实 GeoPhys RNE 及 loaded Module 多实例生命周期仍需接通。上述逐调用绑定
+不证明 loaded 实例或异步 capture 已取得资格；验证和描述工作尚未移到冷 prepare 路径，
+也没有运行性能结论。
