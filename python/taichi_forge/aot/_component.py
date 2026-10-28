@@ -27,6 +27,7 @@ from taichi_forge.lang.matrix import Matrix, MatrixType, Vector
 from taichi_forge.lang.util import cook_dtype
 from taichi_forge.types import primitive_types
 from taichi_forge.types.ndarray_type import NdarrayType
+from taichi_forge_runtime._static_values import static_key
 
 
 def _digest(value):
@@ -35,13 +36,10 @@ def _digest(value):
 
 def _static_value(value):
     # No repr(), object IDs, getters or user-defined serialization in a key.
-    if value is None or type(value) in (bool, int, str):
-        return (type(value).__name__, value)
-    if type(value) is float:
-        return ("float", value.hex())
-    if type(value) is tuple:
-        return ("tuple", tuple(_static_value(x) for x in value))
-    raise TaichiCompilationError("Component static captures must be immutable scalar values or tuples")
+    try:
+        return static_key(value)
+    except ValueError as error:
+        raise TaichiCompilationError(str(error)) from error
 
 
 def _function(value):
@@ -160,6 +158,31 @@ class Array:
 
 @dataclass(frozen=True)
 class StaticValue:
+    """Static code input, optionally with an explicit finite deployment domain.
+
+    Choices are component admission policy, not additional numerical code
+    dependencies. The frontend still specializes only actual captured values.
+    """
+
+    choices: tuple = None
+
+    def __post_init__(self):
+        if self.choices is not None:
+            values = tuple(self.choices)
+            keys = tuple(_static_value(value) for value in values)
+            if not keys or len(set(keys)) != len(keys):
+                raise ValueError("Component static choices must be nonempty and distinct typed values")
+            object.__setattr__(self, "choices", values)
+
+    def validate(self, value, name, entry):
+        key = _static_value(value)
+        if self.choices is not None and key not in tuple(_static_value(item) for item in self.choices):
+            raise TaichiCompilationError(
+                f"Component entry {entry}: static configuration self.{name}={value!r} "
+                f"is outside its declared domain {self.choices!r}"
+            )
+        return key
+
     @property
     def schema(self):
         return ("static",)
@@ -491,7 +514,7 @@ class _Capture:
             self.dimension_dependency(name)
         if isinstance(declaration, StaticValue):
             value = _member(self.owner, name)
-            fact = _static_value(value)
+            fact = declaration.validate(value, name, self.kernel.func.__qualname__)
             if name in self.static and self.static[name] != fact:
                 raise TaichiCompilationError(f"Component static dependency {name!r} changed during compilation; retry")
             self.static[name] = fact
@@ -641,6 +664,8 @@ class _ComponentCode:
         return json.loads(self._contract)
 
     def validate_bindings(self, component, owner):
+        for name in self.static:
+            component.declarations[name].validate(_member(owner, name), name, self.kernel.func.__qualname__)
         for name in self.dynamic:
             value = _member(owner, name)
             declaration = component.declarations[name]

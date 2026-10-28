@@ -10,6 +10,10 @@ and `StaticValue` accepts immutable scalar/tuple configuration. Entry arguments
 currently support scalar and fixed vector/matrix values. The public SDK API is
 not frozen.
 
+Optional `StaticValue(choices=(...))` declares a finite deployment domain. This
+is admission policy; numerical identity still uses only actual static captures.
+Narrowed choices are checked on cache hits and direct calls too.
+
 The component environment and each entry's ABI are separate. Attribute accesses,
 including those inside inline `ti.func`, append only used captures to the native
 callable. `finalize_params()` runs after this single frontend traversal; argument
@@ -191,6 +195,25 @@ an empty kernel; zero-launch execution is not claimed. These are scoped physical
 submission observations, not a speed advantage or general execution-domain and
 concurrency qualification. Compiler manifests alone do not establish them.
 
-Full initialization/constraint projections, finite algorithm-domain coverage,
-B's automatic-extension check and complete C lifetimes remain in progress.
-Release wheels and whole-engine qualification remain in E.
+Finite-choice roots require a normal bound recording method. Configuration is
+frozen before Python graph construction and checked again afterward, including
+choices which only affect the dispatch sequence. Such choices never enter the
+ABI or numerical identity of kernels that do not read them. Unused choices and
+widened domains do not recompile numerical code. Root code identity is separate
+from its fixed exported configuration; identical code does not prove identical
+model admission.
+
+Version 3 adds `configuration`, containing finite choices and this root's
+selected values; v1/v2 remain readable. Consumers supply actual normal-model
+configuration to `instantiate(dimensions, configuration=...)`. Missing inputs,
+out-of-domain values or a different exported selection reject before native
+allocation; bool and int remain distinct. The finite RNE root explicitly limits
+four unqualified algorithm switches to False, including in its isolated
+consumer. Shape compatibility alone cannot admit another algorithm. The normal
+model-preparation layer still owns consistency between topology data and these
+declarations.
+
+Builds currently record requested normal roots, not a Boolean Cartesian product.
+Batch build budgets, variant coverage/selection, full initialization/constraint
+projections, B's real automatic-extension check and complete C lifetimes remain
+in progress. Release wheels and whole-engine qualification remain in E.

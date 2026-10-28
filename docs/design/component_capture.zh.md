@@ -5,6 +5,8 @@
 
 `Component` 在组件层声明属性：`RuntimeValue` 支持标量和固定 vector/matrix，
 `Array` 当前支持标量 Ndarray，`StaticValue` 支持不可变标量/tuple 配置。
+可选 `StaticValue(choices=(...))` 声明有限部署配置域；它是准入约束，代码身份仍仅使用
+入口实际读取的静态值。缩窄 choices 时，缓存命中及直接调用同样检查域，不借旧候选绕过。
 入口显式参数当前限于标量和固定 vector/matrix。
 
 组件声明环境与每核 ABI 分层。原属性访问和嵌套 `ti.func` 只为实际使用的捕获追加
@@ -135,5 +137,17 @@ GeoPhys 正常 `build_bias_force_graph` 同时服务普通 prestep Graph 与组�
 一个空计算 Kernel，因此不声称零 launch。上述是选定路径的实际提交证据，不是速度
 优势、任意设备执行域或并发资格；编译 manifest 本身也不能替代该观测。
 
-完整初始化/约束投影、有限算法域覆盖、B 的自动扩展反证及 C 的完整生命周期仍在
-推进。正式 wheel 和全引擎资格保留在 E；原入口级机制测试不替代这些门槛。
+有有限 choices 的组件要求正常 bound recording method，在调用 Python 构图之前冻结
+配置，结束时再次检查。因此仅影响构图的选项也属于根准入条件；它不会进入未使用该值
+的 Kernel ABI/代码身份。无关选择或 choices 扩宽不导致数值代码重编译。根代码身份
+与固定导出配置分开：相同代码可以对应不同准入记录，不能拿代码 key 代替模型资格。
+
+版本 3 合同增加 `configuration`，记录有限 choices 和本根实际选定值；v1/v2 仍可读。
+consumer 在 `instantiate(dimensions, configuration=...)` 中声明正常模型的实际配置，
+在 native 分配之前拒绝缺项、域外值或另一导出配置。bool 与 int 严格区分。有限 RNE
+将四个未取得资格的算法开关明确限定为 False，独立消费者也检查该约束；不能只凭 shape
+接受另一算法的模型。模型拓扑数据与这些声明的一致性仍由正常模型准备层负责。
+
+当前按请求的正常根构建配置，没有自动求布尔笛卡尔积。跨根批量构建预算/变体覆盖与
+选择、完整初始化/约束投影、B 的真实自动扩展反证及 C 的完整生命周期仍在推进。
+正式 wheel 和全引擎资格保留在 E；原入口级机制测试不替代这些门槛。

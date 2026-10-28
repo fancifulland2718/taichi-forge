@@ -6,7 +6,16 @@ lowering; there is no component execution interpreter.
 
 import json
 
-from taichi_forge.aot._component import Array, DenseField, Dimension, RuntimeValue, _digest, _member
+from taichi_forge.aot._component import (
+    Array,
+    DenseField,
+    Dimension,
+    RuntimeValue,
+    StaticValue,
+    _digest,
+    _member,
+    _static_value,
+)
 from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang.exception import TaichiCompilationError
 from taichi_forge.lang.matrix import MatrixType
@@ -14,7 +23,7 @@ from taichi_forge.types._argument_descriptor import describe_symbolic_arg
 
 
 class _GraphCapture:
-    def __init__(self, component):
+    def __init__(self, component, record):
         self.component = component
         self.owner = None
         self.codes = []
@@ -27,6 +36,30 @@ class _GraphCapture:
         self.entries = []
         self.symbols = {}
         self._members = {}
+        self._choices = {
+            name: declaration
+            for name, declaration in component.declarations.items()
+            if isinstance(declaration, StaticValue) and declaration.choices is not None
+        }
+        self._root_name = getattr(record, "__qualname__", "component root")
+        self.configuration = {}
+        if self._choices:
+            self.owner = getattr(record, "__self__", None)
+            if self.owner is None:
+                raise TaichiCompilationError(
+                    "A finite component domain requires a bound normal recording method; "
+                    "its configuration must be frozen before Python graph construction"
+                )
+            self.configuration = self._configuration()
+
+    def _configuration(self):
+        return {
+            name: dict(
+                selected=declaration.validate(_member(self.owner, name), name, self._root_name),
+                choices=[_static_value(value) for value in declaration.choices],
+            )
+            for name, declaration in self._choices.items()
+        }
 
     def dispatch(self, builder, entry, args, template_args, label):
         from taichi_forge.graph._graph import Arg, ArgKind, flatten_args
@@ -123,6 +156,8 @@ class _GraphCapture:
             raise TaichiCompilationError("Component roots currently require a nonempty ordinary dispatch sequence")
         if builder._nodes or builder._runtime_graph_source_native_count:
             raise TaichiCompilationError("Component root control/native regions require separate qualification")
+        if self.configuration != self._configuration():
+            raise TaichiCompilationError("Component configuration changed while recording its Graph; retry")
         # Detect declaration/static mutation over the whole normal recording.
         for code in self.codes:
             if not code.matches(self.component, self.owner):
@@ -244,9 +279,18 @@ def _complete_compiler_contract(graph, contract, codes):
 def compile_component_graph(component, record, *args, **kwargs):
     from taichi_forge.graph import GraphBuilder
 
-    capture = _GraphCapture(component)
+    capture = _GraphCapture(component, record)
     builder = GraphBuilder(_capture_recipe_sources=False, _component_capture=capture)
     record(builder, *args, **kwargs)
     contract = capture.finish(builder)
     graph = builder.compile()
-    return ComponentGraph(graph, _complete_compiler_contract(graph, contract, capture.codes))
+    contract = _complete_compiler_contract(graph, contract, capture.codes)
+    if capture.configuration:
+        # Admission describes the whole normal root, including Python choices
+        # which may alter its dispatch sequence. It never widens a kernel ABI
+        # or its actual static dependency key. Same code may admit several
+        # configurations; this fixed root exports the selected one explicitly.
+        contract["version"] = 3
+        contract["required_capabilities"].append("component_static_choices_v1")
+        contract["configuration"] = capture.configuration
+    return ComponentGraph(graph, contract)

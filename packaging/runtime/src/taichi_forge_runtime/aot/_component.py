@@ -5,6 +5,7 @@ from types import MappingProxyType
 import weakref
 
 from .._dimensions import evaluate_extent, extent_dependencies, validate_extent
+from .._static_values import read_static_key, static_key
 
 
 def _dimensions(declarations, supplied):
@@ -78,12 +79,14 @@ class Component:
                 "execution_entries",
                 "target",
             }
-            if contract.get("version") == 2:
+            if contract.get("version") in (2, 3):
                 required.add("compilation")
-            if set(contract) != required or contract["version"] not in (1, 2) or contract["name"] != name:
+            if contract.get("version") == 3:
+                required.add("configuration")
+            if set(contract) != required or contract["version"] not in (1, 2, 3) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
-            if contract["version"] == 2:
+            if contract["version"] >= 2:
                 capabilities.add("component_compiler_facts_v1")
                 compilation = contract["compilation"]
                 if (
@@ -92,6 +95,23 @@ class Component:
                     or compilation.get("task_scope") != "compiled_not_observed_replay"
                 ):
                     raise ValueError("Invalid component compiler facts")
+            self._configuration = {}
+            if contract["version"] == 3:
+                capabilities.add("component_static_choices_v1")
+                if not isinstance(contract["configuration"], dict) or not contract["configuration"]:
+                    raise ValueError("Invalid component configuration domain")
+                for key, spec in contract["configuration"].items():
+                    if not key.isidentifier() or set(spec) != {"selected", "choices"} or not spec["choices"]:
+                        raise ValueError("Invalid component static choice declaration")
+                    selected = static_key(read_static_key(spec["selected"]))
+                    choices = tuple(static_key(read_static_key(value)) for value in spec["choices"])
+                    if len(set(choices)) != len(choices) or selected not in choices:
+                        raise ValueError("Component selected configuration is outside its domain")
+                    for entry in contract["entries"]:
+                        for dependency, value in entry["static"]:
+                            if dependency == key and static_key(read_static_key(value)) != selected:
+                                raise ValueError("Component configuration differs from compiled static dependencies")
+                    self._configuration[key] = (selected, choices)
             if set(contract["required_capabilities"]) != capabilities:
                 raise ValueError("Unsupported required component capability")
             if contract["target"] not in ("x64", "cuda") or contract["target"] != module._runtime.arch:
@@ -136,7 +156,7 @@ class Component:
                     or not (
                         resource.get("access") == "read_write"
                         and resource.get("effects_precision") == "conservative"
-                        or contract["version"] == 2
+                        or contract["version"] >= 2
                         and resource.get("effects_precision") == "compiler_proven"
                         and resource.get("access") in ("none", "read", "write", "read_write", "atomic")
                     )
@@ -187,7 +207,21 @@ class Component:
         self._module._check()
         return json.loads(self._contract_json)
 
-    def instantiate(self, dimensions):
+    def instantiate(self, dimensions, *, configuration=None):
+        supplied = dict(configuration or {})
+        if set(supplied) != set(self._configuration):
+            raise ValueError(
+                "Component configuration inputs differ: "
+                f"missing={sorted(set(self._configuration)-set(supplied))}, "
+                f"extra={sorted(set(supplied)-set(self._configuration))}"
+            )
+        for name, value in supplied.items():
+            selected, choices = self._configuration[name]
+            actual = static_key(value)
+            if actual not in choices:
+                raise ValueError(f"Component configuration {name!r} is outside its declared domain")
+            if actual != selected:
+                raise ValueError(f"Component configuration {name!r} requires a different compiled variant")
         return ComponentInstance(self, dimensions)
 
 
