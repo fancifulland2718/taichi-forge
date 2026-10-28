@@ -672,7 +672,12 @@ def _combine(A, b, dt):
 
 
 def solve(A, b, dt=None):
-    """Solve a matrix using Gauss elimination method.
+    """Solve a nonsingular fixed-size square system using pivoted elimination.
+
+    Dimensions other than 2 and 3 use serial runtime loops, without cubic static
+    expansion or a fixed upper dimension limit. Use f32 or f64. A zero pivot
+    raises an assertion in debug mode; the runtime-loop path returns NaNs in
+    non-debug mode with fast_math=False. No regularization is applied.
 
     Args:
         A (ti.Matrix(n, n)): input nxn matrix `A`.
@@ -683,10 +688,16 @@ def solve(A, b, dt=None):
         x (ti.Vector(n, 1)): the solution of Ax=b.
     """
     assert A.n == A.m, "Only square matrix is supported"
-    assert A.n >= 2 and A.n <= 3, "Only 2D and 3D matrices are supported"
+    assert A.n >= 1, "The matrix dimension must be positive"
     assert A.m == b.n, "Matrix and Vector dimension dismatch"
+    assert len(b.get_shape()) == 1, "The right-hand side must be a vector"
     if dt is None:
         dt = impl.get_runtime().default_fp
+    if A.n not in (2, 3):
+        from taichi_forge.lang.matrix_ops import _solve_large
+
+        assert dt in (f32, f64), "Small matrix solve requires f32 or f64"
+        return _solve_large(A, b, dt)
     Ab = _combine(A, b, dt)
     if A.n == 2:
         return _gauss_elimination_2x2(Ab, dt)

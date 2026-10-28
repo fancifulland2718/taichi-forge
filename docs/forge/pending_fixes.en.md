@@ -67,6 +67,16 @@ or bitwise equality across backends.
 
 ## Interface enhancements awaiting release
 
+FG-MATH-01: add partial-pivot runtime elimination to local `ti.solve` and
+`Matrix.inverse()`, removing fixed dimension limits while retaining existing
+small-dimension paths. New solve paths use f32/f64. Thirty-four focused cases
+pass across targeted runs after repairing the failing case, alongside 100
+existing solve checks, 12 small inverse checks and a CPU f32 dimension-64 probe.
+CUDA dimension-64 compilation remains expensive and is not qualified here.
+Committed as `Support general fixed-size local matrix solves and inverses`;
+see [local matrix solves](local_matrix_solve.en.md) for size, precision,
+singular-input and large ndarray-system boundaries.
+
 FG-LANG-01: matching types/shapes defined in both runtime `if/else` branches
 become visible after the conditional. Focused CPU/CUDA/Vulkan checks cover scalar
 and aggregate values, nested branches and analytic reverse gradients. One-sided

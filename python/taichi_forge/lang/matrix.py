@@ -473,13 +473,16 @@ class Matrix(TaichiOperations):
         """Returns the inverse of this matrix.
 
         Note:
-            The matrix dimension should be less than or equal to 4.
+            Dimensions above 4 use pivoted elimination with serial runtime
+            loops, without a fixed upper dimension limit. Inputs must be
+            nonsingular. Zero pivots assert in debug mode; the runtime-loop
+            path returns NaNs in non-debug mode with fast_math=False.
 
         Returns:
             :class:`~taichi_forge.Matrix`: The inverse of a matrix.
 
         Raises:
-            Exception: Inversions of matrices with sizes >= 5 are not supported.
+            Exception: Non-square matrices are not supported.
         """
         from taichi_forge.lang import matrix_ops  # pylint: disable=C0415
 

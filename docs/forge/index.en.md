@@ -35,6 +35,7 @@ Release artifacts, source archives and maintainer steps: [release process](../de
 | --- | --- |
 | Run a kernel and reuse a Graph | [Quick start](quickstart.en.md) |
 | Understand branch variable merging | [Language semantics](language_semantics.en.md) |
+| Solve local square systems inside kernels | [Local matrix solves](local_matrix_solve.en.md) |
 | Deploy AOT without Python | [Standalone C/C++ SDK](aot_sdk.en.md) |
 | Schedule CUDA/Vulkan compute domains; configure CUDA/Vulkan association | [Execution domains](cuda_execution_domains.en.md), [experimental CiG initialization and limits](cuda_vulkan_cig.en.md), [Vulkan external buffers](vulkan_external_buffers.en.md) |
 | Wait for any JIT/AOT completion | [Completion sets, timeout and cancellation](completion_wait_sets.en.md) |

@@ -58,6 +58,13 @@ F070-3 至 F070-12 描述源码改动，不代表已发布 0.7.0 wheel 的行为
 
 ## 待发布的接口增强
 
+FG-MATH-01：局部 `ti.solve` 和 `Matrix.inverse()` 新增部分选主元运行期消元，
+取消原有尺寸上限，保留低阶原路径；`ti.solve` 的新增路径使用 f32/f64。
+34 项新定向用例（失败项修正后单独复测）、既有 100 项 solve 与 12 项低阶 inverse 通过，
+另有 CPU 64 阶 f32 探针通过。CUDA 64 阶编译成本仍高，不列为已资格化。
+与此条目同次提交 `Support general fixed-size local matrix solves and inverses`；
+尺寸、精度、奇异输入及大型 ndarray 系统的边界见[局部矩阵求解](local_matrix_solve.zh.md)。
+
 FG-LANG-01：运行期 `if/else` 中两边定义的同类型、同形状变量可以在分支后读取，
 标量、聚合值、嵌套分支和解析反向梯度通过 CPU/CUDA/Vulkan 定向检查。
 单侧定义和类型冲突仍拒绝；静态对象及循环作用域不放宽。

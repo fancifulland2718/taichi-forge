@@ -1,7 +1,9 @@
 import taichi_forge.lang.ops as ops_mod
+from taichi_forge.lang import impl
 from taichi_forge.lang.impl import static
 from taichi_forge.lang.kernel_impl import func, pyfunc
 from taichi_forge.lang.matrix import Matrix, Vector
+from taichi_forge.lang.misc import loop_config
 from taichi_forge.lang.matrix_ops_utils import (
     arg_at,
     arg_foreach_check,
@@ -113,10 +115,77 @@ def determinant(mat):
     return None
 
 
-@preconditions(square_matrix, dim_lt(0, 5))
+@pyfunc
+def _solve_pivoted(mat: template(), rhs: template()):
+    # Runtime loops avoid cubic Python/static expansion. These loops must be
+    # serial even when this helper is called at the top level of a kernel.
+    n = static(mat.n)
+    columns = static(rhs.m)
+    a = mat * 1
+    result = rhs * 1
+    valid = 1
+    if static(impl.inside_kernel()):
+        loop_config(serialize=True)
+    for k in range(n):
+        pivot = k
+        magnitude = ops_mod.abs(a[k, k])
+        for row in range(k + 1, n):
+            if ops_mod.abs(a[row, k]) > magnitude:
+                magnitude = ops_mod.abs(a[row, k])
+                pivot = row
+        if magnitude == 0:
+            valid = 0
+        else:
+            if pivot != k:
+                for column in range(n):
+                    a[k, column], a[pivot, column] = a[pivot, column], a[k, column]
+                for column in range(columns):
+                    result[k, column], result[pivot, column] = result[pivot, column], result[k, column]
+            for row in range(k + 1, n):
+                scale = a[row, k] / a[k, k]
+                a[row, k] = 0
+                for column in range(k + 1, n):
+                    a[row, column] -= scale * a[k, column]
+                for column in range(columns):
+                    result[row, column] -= scale * result[k, column]
+    # An explicit device assertion can terminate a CUDA thread, so omit it
+    # entirely outside debug mode before executing the NaN fallback.
+    if static(not impl.inside_kernel() or impl.current_cfg().debug):
+        assert valid != 0, "Matrix is singular in linear solve."
+    if valid:
+        for reverse_row in range(n):
+            row = n - reverse_row - 1
+            for column in range(columns):
+                for j in range(row + 1, n):
+                    result[row, column] -= a[row, j] * result[j, column]
+                result[row, column] /= a[row, row]
+    else:
+        for row in range(n):
+            for column in range(columns):
+                result[row, column] = _singular_result
+    return result
+
+
+_singular_result = float("nan")
+
+
+@func
+def _solve_large(mat: template(), rhs: template(), dtype: template()):
+    n = static(mat.n)
+    result = _solve_pivoted(mat.cast(dtype), Matrix([[rhs[i]] for i in static(range(n))], dtype))
+    return Vector([result[i, 0] for i in static(range(n))], dtype)
+
+
+@preconditions(square_matrix)
 @pyfunc
 def inverse(mat):
     shape = static(mat.get_shape())
+    if static(shape[0] > 4):
+        # Division promotes integer inputs and preserves floating input types.
+        floating = mat / 1
+        zero = floating[0, 0] * 0
+        identity = Matrix([[zero + (i == j) for j in static(range(shape[0]))] for i in static(range(shape[0]))])
+        return _solve_pivoted(floating, identity)
     if static(shape[0] == 1):
         return Matrix([[1.0 / mat[0, 0]]])
     inv_determinant = 1.0 / determinant(mat)
