@@ -18,6 +18,24 @@
 复用、静态模板变化、错误资源类型和冻结后的 Runtime 消费；这些机制门槛不代替真实
 EFC/TGS 控制资格。
 
+`Record` 声明嵌套的普通数据记录，保持原 `self.binding.field` / `ti.func`
+访问链。`optional=True` 的存在性只支持 `ti.static(record is [not] None)`；存在与缺失
+生成不同变体，记录内 scalar、维度和 Field 按各自合同绑定，整个对象不进入静态常量。
+普通属性及 frozen dataclass 的内建 slots 可读取，property/自定义 descriptor 和对象间
+identity 比较明确拒绝。未使用成员不进入数值代码身份。局部维度关系自动取得稳定的
+命名空间，SNode 组仍由实际根验证；不按同值合并两个维度。
+
+在正常 `ResourceScope` 中赋值已声明的子 owner，例如 `scope.buffers = buffers`，
+`Component.from_owner` 会递归收集该显式声明边；只需以 `Record(gain=RuntimeValue(...))`
+补充该对象的非资源值角色，无需逐 Field 或逐 Kernel 表。循环声明拒绝。
+冻结合同的 compiler facts 给出 `record_presence` 和 `capture_paths`，消费者不必解析
+内部 ID 来恢复原属性路径。`test_aot_component_records.py` 覆盖 CPU/CUDA 的新尺寸、
+别名、存在性变体、未使用成员、getter 拒绝和 Runtime 消费。
+
+这不自动接通任意外部借用记录：没有正常声明的 dataclass、跨 owner 的完整 SNode
+布局依赖和维度重命名仍需显式合同。GeoPhys 的 EFC mass-block/质量矩阵共享绑定
+尚未因此取得完整 AOT 资格，不能用手写逐核绑定表或把绑定对象整体静态化来绕过。
+
 组件声明环境与每核 ABI 分层。原属性访问和嵌套 `ti.func` 只为实际使用的捕获追加
 native 参数；一次前端遍历后执行 `finalize_params()`，参数初始化区仍在数值主体之前结束。
 首次使用顺序决定物理槽位，查询 `contract["captures"]` 可见该投影。未使用的独立声明

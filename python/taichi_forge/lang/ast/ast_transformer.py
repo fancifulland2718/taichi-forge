@@ -1077,6 +1077,13 @@ class ASTTransformer(Builder):
             node.ptr = ctx.deployment.attribute(ctx, node.attr)
             return node.ptr
 
+        if ctx.deployment is not None:
+            from taichi_forge.aot._component import _RecordReference
+
+            if isinstance(node.value.ptr, _RecordReference):
+                node.ptr = ctx.deployment.attribute(ctx, node.attr, prefix=node.value.ptr.path)
+                return node.ptr
+
         if isinstance(node.value.ptr, Expr) and not hasattr(node.value.ptr, node.attr):
             if node.attr in Matrix._swizzle_to_keygroup:
                 keygroup = Matrix._swizzle_to_keygroup[node.attr]
@@ -1243,6 +1250,8 @@ class ASTTransformer(Builder):
                 raise TaichiSyntaxError(f'Operator "{name}" in Taichi scope is not supported.')
             l = operands[i]
             r = operands[i + 1]
+            if ctx.deployment is not None:
+                ctx.deployment.check_record_comparison(l, r, type(node_op).__name__)
             op = ops.get(type(node_op))
 
             if op is None:

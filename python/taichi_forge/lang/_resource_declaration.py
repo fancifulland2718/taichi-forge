@@ -67,7 +67,7 @@ class ResourceScope:
         object.__setattr__(self, "_owner", owner)
         object.__setattr__(self, "_builder", builder)
         if not hasattr(owner, "_forge_resource_declarations"):
-            owner._forge_resource_declarations = {"fields": {}, "dimensions": {}}
+            owner._forge_resource_declarations = {"fields": {}, "dimensions": {}, "records": {}}
 
     def __getattr__(self, name):
         return getattr(self._owner, name)
@@ -82,6 +82,15 @@ class ResourceScope:
                 if declaration["identity"] is None:
                     declaration["identity"] = name
                 self._owner._forge_resource_declarations["fields"][name] = dict(declaration)
+        elif inspect.getattr_static(value, "_forge_resource_declarations", None) is not None:
+            # Assignment through an explicit declaration scope exposes a
+            # normal child resource owner. No attribute-dictionary scan.
+            caller = inspect.currentframe().f_back
+            self._owner._forge_resource_declarations.setdefault("records", {})[name] = (
+                caller.f_code.co_filename,
+                caller.f_lineno,
+            )
+            del caller
 
     def dim(self, name):
         if not isinstance(name, str) or not name.isidentifier():

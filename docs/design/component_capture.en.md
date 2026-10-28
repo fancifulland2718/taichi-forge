@@ -24,6 +24,29 @@ original helpers; bound methods may omit owner. CPU/CUDA checks in
 templates, wrong resource types and frozen Runtime consumption. These mechanism
 checks do not qualify real EFC/TGS control.
 
+`Record` declares a nested plain-data namespace while preserving original
+`self.binding.field` and `ti.func` accesses. Optional presence supports only
+`ti.static(record is [not] None)` and selects a code variant; scalar, dimension
+and Field leaves retain their own contracts. The whole object is never a static
+constant. Plain attributes and built-in frozen-dataclass slots are supported;
+properties, custom descriptors and record identity comparisons are rejected.
+Unused members do not enter code identity. Local dimension references receive
+stable namespaces while actual roots still validate SNode groups.
+
+Assigning an already declared child through normal `ResourceScope`, such as
+`scope.buffers = buffers`, makes `Component.from_owner` collect that explicit
+declaration edge recursively. A `Record(gain=RuntimeValue(...))` overlay only
+adds non-resource value roles; there is no per-field or per-kernel export table.
+Declaration cycles are rejected. Compiler facts expose `record_presence` and
+`capture_paths`, so consumers need not decode internal IDs. CPU/CUDA tests in
+`test_aot_component_records.py` cover new dimensions, aliases, presence variants,
+unused members, rejected getters and Runtime consumption.
+
+Arbitrary borrowed records are not automatically qualified: undeclared
+dataclasses, complete foreign SNode layout dependencies and dimension remapping
+still need explicit contracts. This does not complete GeoPhys EFC mass-block or
+mass-matrix sharing; per-kernel adapters or static whole objects are not a remedy.
+
 Optional `StaticValue(choices=(...))` declares a finite deployment domain. This
 is admission policy; numerical identity still uses only actual static captures.
 Narrowed choices are checked on cache hits and direct calls too.

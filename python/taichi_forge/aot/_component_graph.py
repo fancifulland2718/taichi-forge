@@ -15,7 +15,6 @@ from taichi_forge.aot._component import (
     RootOption,
     StaticValue,
     _digest,
-    _member,
     _static_value,
 )
 from taichi_forge.aot.utils import produce_injected_args_for_graph
@@ -43,7 +42,9 @@ class _GraphCapture:
         self._choices = {
             name: declaration
             for name, declaration in component.declarations.items()
-            if isinstance(declaration, StaticValue) and declaration.choices is not None
+            if isinstance(declaration, StaticValue)
+            and declaration.choices is not None
+            and (self.owner is None or component.available(self.owner, name))
         }
         self._options = {}
         if any(isinstance(declaration, RootOption) for declaration in self._choices.values()):
@@ -71,7 +72,11 @@ class _GraphCapture:
         return {
             name: dict(
                 selected=declaration.validate(
-                    self._options[name] if isinstance(declaration, RootOption) else _member(self.owner, name),
+                    (
+                        self._options[name]
+                        if isinstance(declaration, RootOption)
+                        else self.component.read(self.owner, name)
+                    ),
                     name,
                     self._root_name,
                 ),
@@ -129,7 +134,7 @@ class _GraphCapture:
                 member_key = json.dumps((group, paths), sort_keys=True)
                 identity = self._members.get(member_key)
                 if identity is None:
-                    field = _member(owner, name)
+                    field = self.component.read(owner, name)
                     normal = getattr(field, "_logical_resource_declaration", None)
                     identity = normal["identity"] if normal else name
                     if identity in self.resources:
@@ -403,6 +408,9 @@ def _complete_compiler_contract(graph, contract, capture):
                 tasks=task_cache[code.semantic_key],
             )
         )
+        if code.objects:
+            entries[-1]["record_presence"] = dict(code.contract["objects"])
+            entries[-1]["capture_paths"] = code.contract["access_paths"]
     for name, resource in contract["resources"].items():
         if name not in uncertain and accesses.get(name) != GraphAccess.OPAQUE:
             access = accesses.get(name)

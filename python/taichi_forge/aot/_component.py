@@ -12,7 +12,7 @@ import json
 import operator
 import sys
 from dataclasses import dataclass
-from types import CodeType, MappingProxyType, ModuleType
+from types import CodeType, MappingProxyType, MemberDescriptorType, ModuleType
 
 from taichi_forge.lang import impl, kernel_arguments
 from taichi_forge.lang._resource_declaration import (
@@ -98,6 +98,10 @@ def _code_definition(code):
 def _member(owner, name):
     # Deployment compilation must not execute arbitrary properties/descriptors.
     descriptor = inspect.getattr_static(owner, name)
+    if isinstance(descriptor, MemberDescriptorType):
+        # Built-in slots read stored state; properties/custom descriptors can
+        # execute arbitrary Python and remain outside the capture contract.
+        return descriptor.__get__(owner, type(owner))
     if hasattr(descriptor, "__get__"):
         raise TaichiCompilationError(f"Component capture {name!r} uses a descriptor; declare plain state instead")
     return descriptor
@@ -246,7 +250,7 @@ def _dimension_value(component, owner, name, visiting=()):
             lambda dependency: _dimension_value(component, owner, dependency, (*visiting, name)),
         )
         if declaration.expression
-        else operator.index(_member(owner, name))
+        else operator.index(component.read(owner, name))
     )
     minimum = 1 if declaration.kind == "extent" else 0
     if not minimum <= value <= 2**31 - 1:
@@ -293,6 +297,42 @@ class DenseField:
         return description
 
 
+@dataclass(frozen=True, init=False)
+class Record:
+    """A declared plain record namespace, not a static Python object.
+
+    Member dimension references are local to this record. Group identifiers
+    remain component-wide so aliases across records can retain one SNode root.
+    Only presence is static; actual leaves keep their own capture contracts.
+    """
+
+    optional: bool
+    members: object
+
+    def __init__(self, *, optional=False, **members):
+        if type(optional) is not bool:
+            raise TypeError("Record optional must be a bool")
+        object.__setattr__(self, "optional", optional)
+        object.__setattr__(self, "members", MappingProxyType(dict(members)))
+
+    @property
+    def schema(self):
+        # Unused members must not become code dependencies.
+        return ("record", self.optional)
+
+
+@dataclass(frozen=True)
+class _RecordReference:
+    path: tuple
+
+    def __bool__(self):
+        raise TaichiCompilationError("A declared record is a namespace; test its presence with 'is not None'")
+
+
+def _capture_id(path):
+    return path[0] if len(path) == 1 else "__record_" + "_".join(f"{len(part)}_{part}" for part in path)
+
+
 def _dense_group(component, owner, group):
     """Project a real SNode group, using declared provenance for every axis.
 
@@ -309,7 +349,7 @@ def _dense_group(component, owner, group):
     for name, declaration in component.declarations.items():
         if not isinstance(declaration, DenseField) or declaration.group != group:
             continue
-        field = _member(owner, name)
+        field = component.read(owner, name)
         if not isinstance(field, Field):
             raise TaichiCompilationError(f"Dense resource {name!r} must be a Field")
         scalar_dtype = (
@@ -379,17 +419,68 @@ class Component:
     is supplied by the application. Graph export follows separately.
     """
 
-    __slots__ = ("_declarations", "_sources")
+    __slots__ = ("_declarations", "_sources", "_paths")
 
     def __init__(self, **declarations):
-        for name, declaration in declarations.items():
-            if not name.isidentifier() or not isinstance(
-                declaration, (RuntimeValue, Array, StaticValue, Dimension, DenseField)
-            ):
-                raise TypeError("Component declarations require attribute IDs and supported declaration types")
-            declaration.schema  # Validate without reading an instance.
-        self._declarations = MappingProxyType(dict(declarations))
+        flattened, paths = {}, {}
+
+        def qualify(expression, prefix):
+            op, *args = expression
+            if op == "dim":
+                return (op, _capture_id((*prefix, args[0])))
+            return expression if op == "const" else (op, *(qualify(arg, prefix) for arg in args))
+
+        def add(members, prefix=()):
+            if len(prefix) > 32:
+                raise ValueError("Component record nesting exceeds the declaration depth limit")
+            for name, declaration in members.items():
+                if (
+                    not name.isidentifier()
+                    or name.startswith("__record_")
+                    or not isinstance(declaration, (RuntimeValue, Array, StaticValue, Dimension, DenseField, Record))
+                ):
+                    raise TypeError("Component declarations require attribute IDs and supported declaration types")
+                path = (*prefix, name)
+                identity = _capture_id(path)
+                if prefix:
+                    if isinstance(declaration, RootOption):
+                        raise TypeError("Recording options belong to the component root, not a record")
+                    if isinstance(declaration, Dimension):
+                        declaration = Dimension(
+                            declaration.kind,
+                            _capture_id((*prefix, declaration.capacity)) if declaration.capacity else "",
+                            qualify(declaration.expression, prefix) if declaration.expression else (),
+                        )
+                    elif isinstance(declaration, DenseField):
+                        declaration = DenseField(
+                            declaration.dtype,
+                            tuple(
+                                _capture_id((*prefix, value)) if isinstance(value, str) else value
+                                for value in declaration.shape
+                            ),
+                            declaration.group,
+                        )
+                declaration.schema
+                flattened[identity], paths[identity] = declaration, path
+                if isinstance(declaration, Record):
+                    add(declaration.members, path)
+
+        add(declarations)
+        self._declarations = MappingProxyType(flattened)
+        self._paths = MappingProxyType(paths)
         self._sources = MappingProxyType({})
+
+    def read(self, owner, name):
+        for part in self._paths.get(name, (name,)):
+            owner = _member(owner, part)
+        return owner
+
+    def available(self, owner, name):
+        for part in self._paths.get(name, (name,))[:-1]:
+            owner = _member(owner, part)
+            if owner is None:
+                return False
+        return True
 
     @property
     def declarations(self):
@@ -404,33 +495,45 @@ class Component:
         """
         from taichi_forge.lang.matrix import MatrixType, VectorType
 
-        registry = _member(owner, "_forge_resource_declarations")
         impl.get_runtime().materialize(for_aot=True)
-        declarations = {name: Dimension("active") for name in registry["dimensions"]}
-        sources = dict(registry["dimensions"])
-        roots = {}
-        fields = {}
-        for name, declaration in registry["fields"].items():
-            field = _member(owner, name)
-            if getattr(field, "_logical_resource_declaration", None) != declaration:
-                raise TaichiCompilationError(f"Normal resource declaration {name!r} was replaced without redeclaration")
-            nodes = tuple(member.ptr.snode() for member in field._get_field_members())
-            root_ids = {node.get_snode_tree_id() for node in nodes}
-            if len(root_ids) != 1:
-                raise TaichiCompilationError(f"Normal resource {name!r} spans multiple SNode groups")
-            root_id = next(iter(root_ids))
-            roots.setdefault(root_id, set()).add(declaration["identity"])
-            fields[name] = (field, declaration, root_id)
-        for name, (field, declaration, root_id) in fields.items():
+        declarations, sources, roots, fields = {}, {}, {}, []
+
+        def collect(current, prefix=(), ancestors=()):
+            if any(current is ancestor for ancestor in ancestors) or len(prefix) > 32:
+                raise TaichiCompilationError("Normal resource records must form a bounded acyclic declaration tree")
+            registry = _member(current, "_forge_resource_declarations")
+            members = {name: Dimension("active") for name in registry["dimensions"]}
+            for name, source in registry["dimensions"].items():
+                sources[_capture_id((*prefix, name))] = source
+            for name, declaration in registry["fields"].items():
+                field = _member(current, name)
+                if getattr(field, "_logical_resource_declaration", None) != declaration:
+                    raise TaichiCompilationError(
+                        f"Normal resource declaration {'.'.join((*prefix, name))!r} was replaced without redeclaration"
+                    )
+                nodes = tuple(member.ptr.snode() for member in field._get_field_members())
+                root_ids = {node.get_snode_tree_id() for node in nodes}
+                if len(root_ids) != 1:
+                    raise TaichiCompilationError(f"Normal resource {name!r} spans multiple SNode groups")
+                root_id = next(iter(root_ids))
+                roots.setdefault(root_id, set()).add(".".join((*prefix, declaration["identity"])))
+                fields.append((members, prefix, name, field, declaration, root_id))
+            for name, source in registry.get("records", {}).items():
+                sources[_capture_id((*prefix, name))] = source
+                members[name] = collect(_member(current, name), (*prefix, name), (*ancestors, current))
+            return members
+
+        declarations = collect(owner)
+        for members, prefix, name, field, declaration, root_id in fields:
             if name.startswith("__extent_"):
                 raise ValueError("Normal resource IDs cannot use the reserved __extent_ prefix")
-            sources[name] = declaration["source"]
+            sources[_capture_id((*prefix, name))] = declaration["source"]
             shape = []
             for extent in declaration["shape"]:
                 if isinstance(extent, Extent):
                     identifier = "__extent_" + _digest(extent.expression)
-                    declarations[identifier] = Dimension(expression=extent.expression)
-                    sources[identifier] = declaration["source"]
+                    members[identifier] = Dimension(expression=extent.expression)
+                    sources[_capture_id((*prefix, identifier))] = declaration["source"]
                     shape.append(identifier)
                 else:
                     shape.append(extent)
@@ -439,12 +542,24 @@ class Component:
                 dtype = VectorType(field.n, dtype) if field.ndim == 1 else MatrixType(field.n, field.m, 2, dtype)
             # The normal declaration identity, not a tree/object/instance ID.
             group = "snode:" + min(roots[root_id])
-            declarations[name] = DenseField(dtype, tuple(shape), group)
-        for name, declaration in values.items():
-            if name in declarations:
-                raise ValueError(f"Duplicate normal component declaration {name!r}")
-            declarations[name] = declaration
-        result = cls(**declarations)
+            members[name] = DenseField(dtype, tuple(shape), group)
+
+        def complete(members, additions):
+            result = {}
+            for name, declaration in members.items():
+                if isinstance(declaration, dict):
+                    overlay = additions.get(name, Record())
+                    if not isinstance(overlay, Record):
+                        raise TypeError(f"Normal resource record {name!r} requires Record value declarations")
+                    result[name] = Record(optional=overlay.optional, **complete(declaration, overlay.members))
+                else:
+                    if name in additions:
+                        raise ValueError(f"Duplicate normal component declaration {name!r}")
+                    result[name] = declaration
+            result.update((name, declaration) for name, declaration in additions.items() if name not in members)
+            return result
+
+        result = cls(**complete(declarations, values))
         result._sources = MappingProxyType(sources)
         return result
 
@@ -530,6 +645,7 @@ class _Capture:
         self.dynamic = []
         self.static = {}
         self.static_objects = {}
+        self.objects = {}
         self.methods = {}
         self.functions = {}
         self.entry_definition = _definition(kernel.func)
@@ -548,24 +664,34 @@ class _Capture:
         for dependency in extent_dependencies(declaration.expression) if declaration.expression else ():
             self.dimension_dependency(dependency)
 
-    def attribute(self, ctx, name):
+    def attribute(self, ctx, name, *, prefix=()):
+        path = (*prefix, name)
+        name = _capture_id(path)
         declaration = self.declarations.get(name)
         if isinstance(declaration, RootOption):
             raise TaichiCompilationError(f"Component {name!r} is a recording option, not a numerical owner capture")
         if declaration is None:
-            value = inspect.getattr_static(self.owner, name)
-            if getattr(value, "_is_taichi_function", False):
+            value = inspect.getattr_static(self.owner, name, None) if not prefix else None
+            if not prefix and getattr(value, "_is_taichi_function", False):
                 self.methods[name] = _definition(value)
                 return value.__get__(self.owner, type(self.owner))
             raise TaichiCompilationError(
-                f"Component entry {self.kernel.func.__qualname__}: undeclared capture self.{name}; "
+                f"Component entry {self.kernel.func.__qualname__}: undeclared capture self.{'.'.join(path)}; "
                 "declare it as a runtime value, resource or static configuration"
             )
         self.used[name] = declaration.schema
+        if isinstance(declaration, Record):
+            present = self.component.read(self.owner, name) is not None
+            if not present and not declaration.optional:
+                raise TaichiCompilationError(f"Required component record self.{'.'.join(path)} is absent")
+            previous = self.objects.setdefault(name, present)
+            if previous != present:
+                raise TaichiCompilationError("Component record presence changed during compilation; retry")
+            return _RecordReference(path) if present else None
         if isinstance(declaration, Dimension):
             self.dimension_dependency(name)
         if isinstance(declaration, StaticValue):
-            value = _member(self.owner, name)
+            value = self.component.read(self.owner, name)
             fact = declaration.validate(value, name, self.kernel.func.__qualname__)
             if name in self.static and self.static[name] != fact:
                 raise TaichiCompilationError(f"Component static dependency {name!r} changed during compilation; retry")
@@ -578,7 +704,7 @@ class _Capture:
                 "cannot be used in ti.static; its declaration is dynamic"
             )
         if name not in self.expressions:
-            value = _member(self.owner, name)
+            value = self.component.read(self.owner, name)
             if isinstance(declaration, (Array, DenseField)):
                 declaration.validate(value)
             if isinstance(declaration, DenseField):
@@ -638,6 +764,11 @@ class _Capture:
             return
         raise TaichiCompilationError("Uncontrolled Python calls are not supported in component captures")
 
+    def check_record_comparison(self, left, right, operation):
+        if isinstance(left, _RecordReference) or isinstance(right, _RecordReference):
+            if operation not in ("Is", "IsNot") or left is not None and right is not None:
+                raise TaichiCompilationError("Declared records only support presence comparisons with None")
+
     def finish(self):
         mismatch = self.dependency_mismatch(self.component, self.owner)
         if mismatch:
@@ -658,6 +789,11 @@ class _Capture:
                 name: self.component._sources[name] for name in self.used if name in self.component._sources
             },
         }
+        if self.objects:
+            self.contract.update(
+                objects=sorted(self.objects.items()),
+                access_paths={name: self.component._paths[name] for name in self.used},
+            )
 
     def matches(self, component, owner):
         return self.dependency_mismatch(component, owner) is None
@@ -665,6 +801,9 @@ class _Capture:
     def dependency_mismatch(self, component, owner):
         if _definition(self.kernel.func) != self.entry_definition:
             return "entry definition"
+        for name, present in self.objects.items():
+            if (component.read(owner, name) is not None) != present:
+                return f"record presence {name!r}"
         for name, schema in self.used.items():
             declaration = component.declarations.get(name)
             if declaration is None or declaration.schema != schema:
@@ -683,7 +822,7 @@ class _Capture:
                 if member_group == group and members.get(name) != paths:
                     return f"member {name!r} in group {group!r}"
         for name, value in self.static.items():
-            if _static_value(_member(owner, name)) != value:
+            if _static_value(component.read(owner, name)) != value:
                 return f"static value {name!r}"
         for name, definition in self.methods.items():
             value = inspect.getattr_static(owner, name, None)
@@ -710,6 +849,7 @@ class _ComponentCode:
         self.entry_definition = context.entry_definition
         self.used = dict(context.used)
         self.static = dict(context.static)
+        self.objects = dict(context.objects)
         self.methods = dict(context.methods)
         self.functions = dict(context.functions)
         self.groups = dict(context.groups)
@@ -733,9 +873,9 @@ class _ComponentCode:
 
     def validate_bindings(self, component, owner):
         for name in self.static:
-            component.declarations[name].validate(_member(owner, name), name, self.kernel.func.__qualname__)
+            component.declarations[name].validate(component.read(owner, name), name, self.kernel.func.__qualname__)
         for name in self.dynamic:
-            value = _member(owner, name)
+            value = component.read(owner, name)
             declaration = component.declarations[name]
             if isinstance(declaration, (Array, DenseField)):
                 declaration.validate(value)
@@ -792,9 +932,9 @@ class _ComponentCode:
 
         values = tuple(
             (
-                ndarray_view(_member(owner, name))
+                ndarray_view(component.read(owner, name))
                 if isinstance(component.declarations[name], DenseField)
-                else _member(owner, name)
+                else component.read(owner, name)
             )
             for name in self.dynamic
         )
