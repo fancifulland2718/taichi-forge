@@ -203,8 +203,11 @@ ti.compile_kernels([
 Python `ti.init()` defaults to `compile_tier="fast"` and
 `advanced_optimization=False`, including packaged installations. Explicit
 `balanced` or `full` initialization enables advanced IR optimization unless
-the caller separately overrides that flag. Select `full` when the measured
-workload benefits from the most conservative legacy optimization pipeline.
+the caller separately overrides that flag. `full` allows more global
+simplification iterations without guaranteeing faster execution than `balanced`.
+Alternatively, `compile_tier="fast", advanced_optimization=True` enables advanced
+IR while retaining the fast backend policy. See [compilation tradeoffs](compilation_tradeoffs.en.md)
+for workload-based selection, compilation costs and numerical boundaries.
 
 ## Metadata Lock Lifetime
 

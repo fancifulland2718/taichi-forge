@@ -14,8 +14,8 @@
 | 符号 | 用途 |
 |---|---|
 | `ti.compile_kernels(kernels)` | 在热循环**之前**用线程池预编译一组 kernel。支持装饰器 kernel 或 `(kernel, args_tuple)` 对。返回提交数量。所有后端可用。 |
-| `ti.compile_profile()` | Context manager。退出时输出每个 pass 的耗时报告，可选导出 CSV / Chrome trace JSON。开发期定位编译热点。 |
-| `@ti.kernel(opt_level=...)` | 每个 kernel 单独覆盖 LLVM 优化级别。接受 `"fast"` / `"balanced"` / `"full"` 或 `0`–`3`。每个覆盖独立 cache key，混合 tier 批次互不污染。 |
+| `ti.compile_profile()` | Context manager。捕获编译阶段耗时；退出后用 `top_n()` / `records()` 读取，或用 `dump_csv()` / `dump_python_csv()` / `dump_chrome_trace()` 导出。用于开发期定位编译热点。 |
+| `@ti.kernel(opt_level=...)` | 每个 kernel 覆盖编译档位（`"fast"` / `"balanced"` / `"full"`）或 LLVM 等级（`0`–`3`）。继承 Program 的高级 IR 开关；每个覆盖独立 cache key。 |
 
 ### CLI
 
@@ -33,10 +33,19 @@
 
 | 参数 | 默认 | 用途 |
 |---|---|---|
-| `compile_tier` | `ti.init()` 中为 `"fast"` | `"fast"` 强制 LLVM 使用 `-O0`（NVPTX / AMDGCN 下兜底 `-O1`），并以 level 0 跳过 `spirv-opt`；`"balanced"` 与 `"full"` 保留已配置的后端等级。应用层推荐只使用该选项。 |
+| `compile_tier` | `ti.init()` 中为 `"fast"` | 当前源码的 `"fast"` 在 CPU/CUDA/AMDGPU 使用 LLVM O1，Vulkan 跳过 `spirv-opt`；`"balanced"` 与 `"full"` 保留已配置的后端等级。`full` 还允许未显式限制的高级全局简化迭代到不动点。应用层优先使用该选项。 |
 | `inline_ir_cache` | `False` | 实验性选项，在单次 kernel 编译内复用合格标量 `ti.func` 的 IR，再展开。也可用 `TI_INLINE_IR_CACHE=1` 开启；见[范围与取舍](cache_compile.zh.md#实验性内联函数-ir-复用)。 |
 | `advanced_optimization` | `fast` 为 `False`；显式初始化为 `balanced/full` 时为 `True` | 选择高级 IR 优化管线。显式参数或 `TI_ADVANCED_OPTIMIZATION` 覆盖按 tier 推导的默认值，参数优先于环境变量；每 kernel 的 tier 覆盖仍继承 Program 级的此开关。 |
-| `llvm_opt_level` | `3` | 非 `fast` tier 下显式指定 LLVM `-O` 等级（`0`–`3`）；`compile_tier="fast"` 仍会强制后端安全的 O0/O1。除非代表性 benchmark 证明有必要，否则优先使用 `compile_tier`。 |
+| `llvm_opt_level` | `3` | 非 `fast` tier 下显式指定 LLVM `-O` 等级（`0`–`3`，GPU 保留 O1 下限）；当前源码的 CPU/CUDA/AMDGPU `fast` 使用 O1。除非代表性 benchmark 证明有必要，否则优先使用 `compile_tier`。 |
+
+默认配置面向快速编译；长期运行的仿真/渲染可先尝试 `compile_tier="balanced"`，
+再按实际收益考虑 `"full"`。也支持 `compile_tier="fast", advanced_optimization=True`，
+只开启高级 IR 而保留 fast 后端策略。更高档位不保证运行更快，总编译时间也不一定增加：
+高层化简可能减少后端工作。选档示例、数值检查与编译成本的测量方式见
+[编译与高级优化权衡](compilation_tradeoffs.zh.md)。
+
+CPU fast 的 O1 策略属于[待发布修复 F070-3](pending_fixes.zh.md)；已发布 0.7.0 的 CPU
+fast 仍为 O0。不要把当前源码策略套用于旧 wheel。
 
 ### 2.2 编译管线 / 线程
 

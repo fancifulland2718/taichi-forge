@@ -154,7 +154,10 @@ ti.compile_kernels([
 
 Python `ti.init()`（包括打包安装）默认使用 `compile_tier="fast"` 与
 `advanced_optimization=False`。显式初始化为 `balanced/full` 时，若没有单独覆盖
-该开关，则开启高级 IR 优化。需要最保守 legacy 优化管线且有实测收益时，可选择 `full`。
+该开关，则开启高级 IR 优化。`full` 允许更多全局简化迭代，但不保证比 `balanced`
+运行更快。也可以使用 `compile_tier="fast", advanced_optimization=True`，单独尝试
+高级 IR 并保留 fast 后端策略。按工作负载选档、编译成本和数值边界见
+[编译与高级优化权衡](compilation_tradeoffs.zh.md)。
 
 ## Metadata lock 生命周期
 

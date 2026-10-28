@@ -15,6 +15,49 @@ autodiff coverage. It complements the [compile and cache guide](cache_compile.en
 which focuses on reuse, and [Forge options](forge_options.en.md), which is the
 canonical option inventory.
 
+## Fast compilation by default, runtime optimization on demand
+
+Python `ti.init()` defaults to `compile_tier="fast"` and
+`advanced_optimization=False`, giving ordinary use a smaller compilation budget.
+Applications that repeatedly simulate or render can explicitly spend more on
+optimization for a possible runtime benefit. Tier names describe compilation
+policies; they do not guarantee increasing runtime speed.
+
+| Workload need | Initialization | Reason to choose it |
+| --- | --- | --- |
+| Development, short tasks, frequent new specializations | `ti.init(arch=ti.cuda)` | Keep the default `fast` policy to control cold compilation cost |
+| Repeated simulation or rendering | `ti.init(arch=ti.cuda, compile_tier="balanced")` | Enable advanced IR optimization and retain configured backend levels; compare actual execution time |
+| Hotspots with measured gains beyond `balanced` | `ti.init(arch=ti.cuda, compile_tier="full")` | Also allow advanced global simplification to reach a fixed point; explicit options remain in force |
+| Advanced IR while retaining the fast backend policy | `ti.init(arch=ti.cuda, compile_tier="fast", advanced_optimization=True)` | Evaluate high-level optimization separately from backend optimization levels |
+
+The same initialization options work with `ti.cpu` and `ti.vulkan`; measure each
+backend separately. Select one configuration per launch, before creating fields
+and compiling kernels. `advanced_optimization=True` is a supported independent
+switch. Combined with `fast`, it retains fast LLVM levels and skips the external
+SPIR-V optimizer on Vulkan, so it is not equivalent to `balanced`. An explicit
+`advanced_optimization=False` remains effective with `balanced` or `full`.
+
+Advanced optimization does **not necessarily increase total compilation time**.
+LICM, CSE, CFG and algebraic simplification cost time, but smaller IR can reduce
+later LLVM, code generation and driver work. The current pipeline avoids repeated
+scans and bounds the global simplification batches in `balanced`. Older overhead
+estimates may no longer apply; small kernels also do not establish the cost of
+large static expansions. `full` permits more optimization work without promising
+a runtime improvement over `balanced`.
+
+Measure cold compilation, first execution and complete steady steps with the
+runtime profiler disabled. Check state, gradients and application error bounds
+after changing configuration: floating-point evaluation and atomic accumulation
+order can change. If extra compilation cost is ΔC and time saved per step is ΔT,
+both positive, break-even is approximately ΔC / ΔT steps. Offline caching can
+avoid subsequent compilation for matching configurations, but not the first
+cache miss. `ti.compile_profile()` exports stage timings; parent and child events
+overlap and must not all be added together.
+
+Benchmark reports should distinguish default and explicitly tuned configurations
+and record their options. A default comparison does not establish the best
+runtime available from every configuration. See below for per-kernel inheritance.
+
 ## Recommended decision order
 
 Use this order for production work:
@@ -36,8 +79,8 @@ setting can be a win for a short CLI tool or an interactive edit-run loop.
 | `offline_cache=True` | Matching backend and compile configuration | Avoids recompiling unchanged artifacts in later processes | First run still compiles; changed source, shape, layout, backend, or keyed configuration causes a miss |
 | `ti.compile_kernels(...)` | Selected specializations | Moves compilation before the hot loop | Does not make compilation cheaper; requires representative arguments |
 | `compile_tier='fast'` | Python `ti.init()` default, or one kernel through `@ti.kernel(opt_level='fast')` | Uses LLVM O1 on CPU to retain basic runtime optimization, an O1 safety floor on CUDA/AMDGPU, and skips SPIR-V optimization | Can reduce kernel throughput and change floating-point rounding; benchmark the steady workload |
-| `compile_tier='balanced'` | Explicit Program or per-kernel selection | Production-oriented compromise; LLVM/SPIR-V retain their configured optimization levels | More cold work than `fast` |
-| `compile_tier='full'` | Program or selected kernels | Lets Forge global IR simplification run to fixed point when the default cap is unchanged | Highest compile cost; use only where measured runtime wins justify it |
+| `compile_tier='balanced'` | Explicit Program or per-kernel selection | Production-oriented compromise; LLVM/SPIR-V retain their configured optimization levels | Adds optimization work; total compilation time also depends on the smaller downstream IR |
+| `compile_tier='full'` | Program or selected kernels | Lets Forge global IR simplification run to fixed point when the default cap is unchanged | May add compile time without a runtime gain; use for measured hotspots |
 | `advanced_optimization=False` | Broad Taichi IR pipeline | Can dramatically shorten pathological IR simplification and helps isolate optimizer failures | Disables the general advanced pipeline; basic simplification, bounded preparation for nested reverse AD, and fast LLVM local CSE remain |
 | `debug=True` and bounds/AD validation | Program | Better diagnostics and safety checks | Changes generated code and runtime cost; keep separate debug and release measurements |
 | `kernel_profiler=True` | Runtime measurement | Attributes device time to kernels | Profiling can add synchronization or instrumentation overhead; do not use profiler-on numbers as release latency without qualification |
@@ -185,20 +228,21 @@ work separately; use `@ti.func` for small helpers unless evidence favors a chang
 Taichi's official settings guide says that disabling advanced optimization can
 save compile time and reduce possible errors. Its debugging guide also
 recommends the switch to determine whether an optimizer caused a compilation
-failure. Treat that as a diagnostic contract, not a promise that runtime
-performance is unchanged:
+failure. Forge's Python default `fast` also uses this setting for a smaller
+compilation budget; runtime performance is not guaranteed to stay the same:
 
 - Use it to isolate a compiler crash, invalid IR, or an extreme cold-compile
   outlier.
 - It can be a valid deployment profile for kernels that are cold, serial,
   launch-bound, or dominated by I/O, after measurement.
-- Do not make it a blanket default for a solver, renderer, sparse traversal, or
-  reduction workload without steady-state CPU/CUDA/Vulkan benchmarks.
+- For long-running solvers, renderers, sparse traversal or reductions, compare
+  with advanced optimization enabled on the target backend instead of assuming
+  the default has the best runtime performance.
 - Re-run numerical and gradient checks. Removing optimization should preserve
   language semantics, but different instruction selection and floating-point
   reassociation opportunities can change rounding and tolerance requirements.
 
-## Prefer local tiering before a global switch
+## Select a tier for individual hotspots
 
 Start with the Python default `fast`, then select a stronger tier for kernels
 whose measured runtime improvement justifies the additional compilation:
@@ -222,6 +266,12 @@ def long_running_solver_step():
 Per-kernel tiers have separate cache identities. They are preferable when a
 few very large specializations dominate startup but the main timestep still
 benefits from optimized code.
+
+Here, `opt_level='full'` still inherits the Program's
+`advanced_optimization=False`; it does not enable advanced IR on its own. Enable
+that switch in `ti.init()`, or initialize with `balanced/full`, when advanced IR
+is needed. The switch is Program-wide: a per-kernel tier cannot turn it on or off
+locally. The example only demonstrates tier overrides.
 
 ## Other compile settings
 

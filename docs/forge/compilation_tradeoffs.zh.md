@@ -11,6 +11,39 @@
 自动微分覆盖。缓存与复用机制见[编译与缓存说明](cache_compile.zh.md)，完整 Forge
 配置清单见 [Forge options](forge_options.zh.md)。
 
+## 默认快速编译，按需选择运行期优化
+
+Python `ti.init()` 默认使用 `compile_tier="fast"`、`advanced_optimization=False`，
+让一般用户直接使用较低的编译预算。反复执行仿真或渲染的应用可以显式选择更强的优化，
+用一次编译换取可能的运行期收益。档位名称表示编译策略，不保证运行速度按档位递增。
+
+| 使用需求 | 初始化配置 | 选择依据 |
+| --- | --- | --- |
+| 日常开发、短任务、频繁产生新特化 | `ti.init(arch=ti.cuda)` | 保留默认 `fast`，先控制冷编译成本 |
+| 长时间重复执行的仿真或渲染 | `ti.init(arch=ti.cuda, compile_tier="balanced")` | 开启高级 IR 优化并保留配置的后端优化等级；先比较实际运行时间 |
+| `balanced` 后仍有可验证收益的热点 | `ti.init(arch=ti.cuda, compile_tier="full")` | 进一步允许高级全局简化迭代到不动点；不自动覆盖显式选项 |
+| 只尝试高级 IR，保留快速后端编译策略 | `ti.init(arch=ti.cuda, compile_tier="fast", advanced_optimization=True)` | 将高级 IR 的作用与后端优化等级分开评估 |
+
+这些初始化选项也可用于 `ti.cpu`、`ti.vulkan`；收益与成本必须分别测量。
+每次启动选择一种配置，在创建字段和编译 kernel 前调用 `ti.init()`。
+`advanced_optimization=True` 是受支持的独立开关：与 `fast` 组合时，LLVM 仍按 fast
+策略选择等级，Vulkan 仍跳过外部 SPIR-V optimizer。它不等同于 `balanced`。
+显式传入 `advanced_optimization=False` 时，`balanced/full` 也不会强行打开它。
+
+高级优化的**总编译成本不一定更高**。LICM、CSE、CFG 和代数化简需要时间，但精简后的
+IR 也可能减少后续 LLVM、代码生成和驱动编译工作。当前管线已减少重复扫描，并限制
+`balanced` 的全局简化批次；不能沿用旧版本的开销估计，也不能从少量小 kernel 推断
+所有大规模静态展开都便宜。`full` 允许更多优化工作，并不保证比 `balanced` 更快。
+
+选择时分别记录冷编译、首次执行和关闭 profiler 后的稳态完整步骤；改变配置后复核
+状态、梯度和应用误差要求。浮点求值顺序及原子累加顺序可能变化，不能只看速度。
+若额外编译成本为 ΔC、每步节省 ΔT，且两者都为正，约需 ΔC / ΔT 步才能回本。
+使用 offline cache 可以减少后续相同配置的重复编译，但首次缓存未命中仍有这项成本。
+`ti.compile_profile()` 可导出分阶段记录；父子事件存在包含关系，不能直接全部相加。
+
+基准报告应分别标明“默认配置”和“显式调优配置”，记录完整选项；默认配置的比较不代表
+该实现所有配置中的最佳运行性能。局部 kernel 档位的继承边界见下文。
+
 ## 推荐决策顺序
 
 生产环境建议按以下顺序决策：
@@ -30,8 +63,8 @@
 | `offline_cache=True` | 相同后端与编译配置 | 后续进程可免去未改变产物的重复编译 | 首次运行仍需编译；源码、shape、layout、后端或进入 key 的配置变化都会 miss |
 | `ti.compile_kernels(...)` | 指定 specialization | 把编译移到热循环前 | 不会减少编译工作量；参数必须有代表性 |
 | `compile_tier='fast'` | Python `ti.init()` 默认，或 `@ti.kernel(opt_level='fast')` 指定的单 kernel | CPU 使用 LLVM O1 保留基本运行期优化，CUDA/AMDGPU 使用保证正确 lowering 的 O1 下限，SPIR-V 跳过 optimizer | 可能降低 kernel 吞吐并改变浮点舍入；必须测稳态工作负载 |
-| `compile_tier='balanced'` | 显式选择的 Program 或单 kernel | 面向生产的折中；LLVM/SPIR-V 保持配置的优化级别 | 冷编译工作多于 `fast` |
-| `compile_tier='full'` | Program 或指定 kernel | 默认 global IR cap 未显式改动时，允许全局简化迭代到 fixed point | 编译代价最高；只用于已证明有运行期收益的热点 |
+| `compile_tier='balanced'` | 显式选择的 Program 或单 kernel | 面向生产的折中；LLVM/SPIR-V 保持配置的优化级别 | 增加优化工作；总编译耗时取决于后续 IR 是否缩小 |
+| `compile_tier='full'` | Program 或指定 kernel | 默认 global IR cap 未显式改动时，允许全局简化迭代到 fixed point | 可能增加编译时间而没有额外运行收益；用于已测量的热点 |
 | `advanced_optimization=False` | 大范围 Taichi IR pipeline | 可显著缩短病态 IR 简化，也可隔离 optimizer 故障 | 成组关闭高级 LICM、whole-kernel CSE 和全局 CFG 优化；基础简化、嵌套反向 AD 的局部清理与 fast LLVM 局部 CSE 仍保留 |
 | `debug=True` 及越界/AD validation | Program | 更强诊断与安全检查 | 改变生成代码和运行成本；debug 与 release 必须分开测量 |
 | `kernel_profiler=True` | 运行期测量 | 把设备时间归因到 kernel | profiler 可能增加同步或 instrumentation；不能不加说明地把 profiler-on 数字当发布延迟 |
@@ -138,16 +171,16 @@ kernel 的机器码只编译一次。函数内部的静态循环仍会展开，�
 
 Taichi 官方 global settings 文档说明，关闭 advanced optimization 可以节省编译时间并
 减少部分潜在错误；官方 debugging 文档也建议用它判断编译失败是否由 optimizer 引起。
-这是一项诊断能力，不代表运行性能不变：
+Forge 的 Python 默认 `fast` 也使用这个设置，面向较低的编译预算；它不代表运行性能不变：
 
 - 适合隔离 compiler crash、invalid IR 或极端冷编译离群点。
 - 对冷路径、串行、launch-bound 或 I/O 主导 kernel，经测量后可以成为部署 profile。
-- 未做稳态 CPU/CUDA/Vulkan benchmark 前，不应把它设为 solver、renderer、sparse
-  traversal 或 reduction 的全局默认值。
+- 长时间运行的 solver、renderer、sparse traversal 或 reduction 不应仅凭默认设置
+  就认定运行性能最优；应在目标后端与显式开启高级优化的配置比较。
 - 必须重跑数值和梯度检查。关闭优化应保持语言语义，但 instruction selection 与浮点
   reassociation 机会变化可能改变舍入和所需 tolerance。
 
-## 优先局部 tier，而不是全局关闭
+## 少量热点可单独选择 tier
 
 从 Python 默认的 `fast` 开始，只为实测运行收益足以抵消额外编译成本的 kernel
 选择更高档位：
@@ -170,6 +203,11 @@ def long_running_solver_step():
 
 单 kernel tier 有独立 cache identity。当少量超大 specialization 主导启动时间、而主
 timestep 仍受益于优化代码时，这比全局关闭更合适。
+
+这里的 `opt_level='full'` 仍继承 Program 的 `advanced_optimization=False`，
+不会单独开启高级 IR。需要高级 IR 时，应在 `ti.init()` 中显式开启该开关，或选择
+`balanced/full` 初始化。此开关是 Program 级配置，不能用单 kernel tier 将其局部开启
+或关闭；上例只演示档位覆盖。
 
 ## 其他编译配置
 

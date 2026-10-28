@@ -11,8 +11,8 @@ This document is the single canonical reference for Forge-specific knobs and too
 | Symbol | Purpose |
 |---|---|
 | `ti.compile_kernels(kernels)` | Pre-compile a list of kernels on a background thread pool **before** the hot loop. Accepts either decorated kernels or `(kernel, args_tuple)` pairs. Returns the number of kernels submitted. Available on every backend. |
-| `ti.compile_profile()` | Context manager. On exit, prints a per-pass timing report and (optionally) writes a CSV / Chrome-trace JSON. Use during development to find compile-time hot spots. |
-| `@ti.kernel(opt_level=...)` | Per-kernel LLVM optimisation override. Accepts `"fast"` / `"balanced"` / `"full"` or `0`–`3`. Cache key is isolated per override, so mixed-tier batches do not poison each other. |
+| `ti.compile_profile()` | Context manager capturing compilation-stage timings. Read `top_n()` / `records()` after exit, or export with `dump_csv()` / `dump_python_csv()` / `dump_chrome_trace()`. Use during development to locate compile-time hotspots. |
+| `@ti.kernel(opt_level=...)` | Per-kernel compilation tier (`"fast"` / `"balanced"` / `"full"`) or LLVM level (`0`–`3`). Inherits the Program's advanced IR switch; each override has its own cache key. |
 
 ### CLI
 
@@ -30,10 +30,21 @@ All defaults match upstream 1.7.4 unless noted.
 
 | Kwarg | Default | Purpose |
 |---|---|---|
-| `compile_tier` | `"fast"` in `ti.init()` | `"fast"` forces LLVM to `-O0` (floor `-O1` on NVPTX / AMDGCN) and skips `spirv-opt` at level 0. `"balanced"` and `"full"` keep the configured backend level. This is the recommended application-facing control. |
+| `compile_tier` | `"fast"` in `ti.init()` | In current source, `"fast"` uses LLVM O1 on CPU/CUDA/AMDGPU and skips `spirv-opt` on Vulkan. `"balanced"` and `"full"` retain configured backend levels. `full` also lets advanced global simplification reach a fixed point unless explicitly capped. Prefer this application-facing control. |
 | `inline_ir_cache` | `False` | Experimental kernel-local reuse of eligible scalar `ti.func` IR before inlining. Also accepts `TI_INLINE_IR_CACHE=1`; see [scope and tradeoffs](cache_compile.en.md#experimental-inline-function-ir-reuse). |
 | `advanced_optimization` | `False` for `fast`; `True` for explicit `balanced`/`full` initialization | Selects the advanced IR pipeline. An explicit keyword or `TI_ADVANCED_OPTIMIZATION` overrides the tier-derived default; keywords take precedence over environment values. Per-kernel tier overrides continue to inherit this Program-level flag. |
-| `llvm_opt_level` | `3` | Explicit LLVM `-O` level (`0`–`3`) for non-`fast` tiers. `compile_tier="fast"` still forces the backend-safe O0/O1 level. Prefer `compile_tier` unless a representative benchmark justifies a backend-specific override. |
+| `llvm_opt_level` | `3` | Explicit LLVM `-O` level (`0`–`3`, with a GPU O1 floor) for non-`fast` tiers. Current CPU/CUDA/AMDGPU `fast` uses O1. Prefer `compile_tier` unless a representative benchmark justifies a backend-specific override. |
+
+Defaults favor fast compilation. For long-running simulation or rendering, try
+`compile_tier="balanced"` first and consider `"full"` when measurements justify it.
+`compile_tier="fast", advanced_optimization=True` enables advanced IR while keeping
+the fast backend policy. Stronger tiers do not promise faster execution, and total
+compilation time need not increase: high-level simplification can reduce backend
+work. See [compilation tradeoffs](compilation_tradeoffs.en.md) for selection
+examples, numerical checks and compile-cost measurement.
+
+CPU fast O1 is [pending source fix F070-3](pending_fixes.en.md); released 0.7.0
+still uses CPU fast O0. Do not apply current-source behavior to older wheels.
 
 ### 2.2 Compile-pipeline batch & threading
 
