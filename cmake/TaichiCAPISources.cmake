@@ -18,7 +18,7 @@ function(ti_get_c_api_sources OUT_SOURCES OUT_HEADERS)
         c_api/include/taichi/taichi.h
         c_api/include/taichi/taichi_unity.h)
     if(TI_WITH_LLVM)
-        list(APPEND _sources c_api/src/taichi_llvm_impl.cpp)
+        list(APPEND _sources c_api/src/taichi_llvm_impl.cpp c_api/src/dense_snode_group.cpp)
         list(APPEND _headers c_api/include/taichi/taichi_cpu.h)
         if(TI_WITH_CUDA)
             list(APPEND _sources c_api/src/execution_domain.cpp c_api/src/cuda_context_config.cpp)

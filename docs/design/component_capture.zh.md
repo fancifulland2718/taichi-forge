@@ -52,7 +52,22 @@ size 和 offset 与普通 FieldsBuilder 对照，包含标量、vector、matrix 
 Field shape、完整 Field 遍历、vector/matrix 元素及别名；active 为零或小于容量时检查
 尾部哨兵。不同尺寸复用同一个前端定义和一次本机编译，错误维度/根绑定在执行前拒绝。
 
-当前 schema 入口仍使用 Program 拥有的树。独立 Runtime owner、Graph 导出、仅 TCM
-消费、真实 GeoPhys RNE 及 loaded Module 多实例生命周期仍需接通。上述逐调用绑定
-不证明 loaded 实例或异步 capture 已取得资格；验证和描述工作尚未移到冷 prepare 路径，
-也没有运行性能结论。
+独立 Runtime 现有实验入口 `dense_snode_group(schema_json, dimensions)`。它先用
+同一 `DenseSNodeSchema` 构造实际 SNode，再调用从普通 `StructCompilerLLVM::run`
+提取的共享 `run_layout`；普通 JIT 也调用该函数。布局查询直接投影实际编译节点，
+不接受消费者提供的 offset/stride。首期简单 Dense 根按原 LLVM allocator 一次分配并
+零初始化；数值寻址经显式参数，不注册或切换固定模块根指针。
+
+`group.member(paths, dtype, element_shape=...)` 验证根相对的 place 路径、元素类型和
+紧凑布局，返回共享根的有限视图。路径将由编译器产物合同提供，不是应用的逐核字段表。
+根与视图复用已有内存句柄、借用租约和 prepared 退休机制。当前 `close()` 是冷操作，
+先等待，再撤销所有别名；另一组不受影响。旧视图句柄在撤销后仍可安全关闭。
+
+`test_aot_dense_snode_group.py` 对照新尺寸的普通 SNode 布局，并检查 scalar/vector/
+matrix/rank-0 读写、别名、错误 Runtime、非法维度和 loaded Kernel 的双组 prepared
+交错执行及关闭失效。这证明独立 Runtime 的简单 Dense 存储和实际调用路径，尚不证明
+完整组件实例合同、非阻塞退休或 capture 换代。
+
+Graph 组件自动导出、原 Field 捕获的冻结 TCM 消费、真实 GeoPhys RNE 及 C 的完整
+生命周期仍需接通。原 Field producer 调用的验证尚未全部移到冷 prepare 路径；没有
+运行性能或全 SDK 完成结论。

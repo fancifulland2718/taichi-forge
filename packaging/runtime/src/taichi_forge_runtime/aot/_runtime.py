@@ -367,6 +367,17 @@ class Runtime:
             memory = _Memory(self, size, usage)
             return NdArray(memory, dtype, code, shape, element_shape)
 
+    def dense_snode_group(self, schema, dimensions):
+        """Instantiate an experimental dense schema with the native layout compiler.
+
+        The complete root is allocated once. Qualified compact member views
+        share it; closing the group drains/revokes all views. This cold API
+        does not load the DSL or compile numerical definitions.
+        """
+        from ._dense_group import DenseSNodeGroup
+
+        return DenseSNodeGroup.create(self, schema, dimensions)
+
     def host_blob(self, data):
         """Copy immutable host bytes for native provider preparation.
 

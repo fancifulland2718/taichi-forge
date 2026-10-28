@@ -74,8 +74,29 @@ vector/matrix elements, aliases, empty active ranges and capacity-tail sentinels
 Different sizes share one frontend definition and one native compilation; invalid
 dimension/root bindings fail before execution.
 
-The current schema entry still uses Program-owned trees. Standalone Runtime
-ownership, Graph export, TCM-only consumption, real GeoPhys RNE and loaded-module
-instance lifetimes remain work in progress. Per-call bindings do not qualify
-loaded instances or asynchronous capture. Validation and description work has
-not yet moved to cold preparation, and no runtime performance claim is made.
+The standalone Runtime now provides experimental
+`dense_snode_group(schema_json, dimensions)`. It reconstructs actual SNodes with
+the same schema, then invokes `StructCompilerLLVM::run_layout`, extracted from
+and also used by ordinary JIT layout compilation. Queries project actual compiled
+nodes; consumers do not supply offsets/strides. The complete simple dense root
+is allocated once and zeroed through the LLVM allocator. Numerical addressing
+uses arguments, without registering or switching fixed module root pointers.
+
+`group.member(paths, dtype, element_shape=...)` validates root-relative place
+paths, element types and compact layout, returning finite views of that root.
+Paths will come from compiler-produced contracts, not application per-kernel
+field tables. Groups reuse existing memory handles, borrowed leases and prepared
+retirement. Closing is currently cold: wait, revoke all aliases, then release
+storage. Other groups remain valid; revoked view handles remain closeable.
+
+`test_aot_dense_snode_group.py` compares new-size layouts with ordinary SNodes
+and covers scalar/vector/matrix/rank-zero transfers, aliasing, wrong Runtime,
+invalid dimensions, and two groups used by loaded Kernel preparations with
+interleaved execution and retirement. This qualifies simple dense storage and
+its actual standalone calling path, not the full component instance contract,
+nonblocking retirement or capture replacement.
+
+Automatic Graph/component export, frozen TCM consumption of original Field
+captures, real GeoPhys RNE and full instance lifetimes remain work in progress.
+Producer Field calls still perform validation outside cold preparation. No
+runtime performance or complete SDK qualification is claimed.

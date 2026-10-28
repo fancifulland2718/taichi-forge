@@ -15,6 +15,8 @@ struct NativePreparationContext;
 
 namespace capi {
 
+struct DenseSNodeGroup;
+
 class LlvmRuntime : public Runtime {
  public:
   LlvmRuntime(taichi::Arch arch);
@@ -28,6 +30,14 @@ class LlvmRuntime : public Runtime {
   std::pair<const taichi::lang::StructType *, std::size_t>
   resolve_argpack_type(const taichi::lang::StructType *type,
                        const std::string &layout);
+
+  TiMemory create_dense_snode_group(const std::string &schema,
+                                    const std::string &dimensions);
+  const std::string &dense_snode_group_layout(TiMemory group);
+  TiNdArray dense_snode_group_member(TiMemory group,
+                                      const std::string &paths,
+                                      TiDataType dtype,
+                                      const TiNdShape &element_shape);
 
  private:
   /* Internally used interfaces */
@@ -49,6 +59,9 @@ class LlvmRuntime : public Runtime {
   std::unique_ptr<taichi::lang::LlvmRuntimeExecutor> owned_executor_;
   taichi::lang::LlvmRuntimeExecutor *executor_{nullptr};
   taichi::uint64 *result_buffer{nullptr};
+  std::unordered_map<TiMemory, std::shared_ptr<DenseSNodeGroup>> dense_groups_;
+  void retire_dense_groups();
+  void free_dense_group(TiMemory group);
 };
 
 }  // namespace capi

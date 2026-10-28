@@ -27,6 +27,10 @@ class StructCompilerLLVM : public StructCompiler, public LLVMModuleBuilder {
 
   void run(SNode &node) override;
 
+  // Shared layout authority for ordinary Field trees and parameterized dense
+  // groups. Does not generate accessors or publish a fixed-tree module.
+  void run_layout(SNode &node);
+
   llvm::Function *create_function(llvm::FunctionType *ft,
                                   std::string func_name);
 

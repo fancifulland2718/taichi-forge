@@ -1171,6 +1171,24 @@ TI_DLL_EXPORT TiMemory TI_API_CALL
 ti_allocate_memory(TiRuntime runtime,
                    const TiMemoryAllocateInfo *allocate_info);
 
+// Experimental component resource contract (schema version 1), CPU/CUDA.
+// Reconstructs a simple dense SNode root using the backend's normal layout
+// compiler, and allocates zero-initialized instance storage. No numerical DSL
+// compilation or fixed module root binding is involved. Free the group with
+// ti_free_memory after use; this drains and revokes all its member views.
+TI_DLL_EXPORT TiMemory TI_API_CALL ti_create_dense_snode_group_ext(
+    TiRuntime runtime, const char *schema_json, const char *dimensions_json);
+// Copies the immutable compiled layout projection, including terminating NUL.
+// A NULL output queries required size; undersized buffers are rejected.
+TI_DLL_EXPORT void TI_API_CALL ti_get_dense_snode_group_layout_ext(
+    TiRuntime runtime, TiMemory group, uint64_t *size, char *json);
+// paths_json is an ordered list of root-relative scalar-place child paths.
+// Qualified compact members only; aliases share the group's storage lifetime.
+// Each returned memory handle must be freed, including after group retirement.
+TI_DLL_EXPORT void TI_API_CALL ti_get_dense_snode_group_member_ext(
+    TiRuntime runtime, TiMemory group, const char *paths_json,
+    TiDataType dtype, const TiNdShape *element_shape, TiNdArray *array);
+
 // Function `ti_free_memory` (1.4.0)
 //
 // Frees a memory allocation.

@@ -584,6 +584,24 @@ class Api:
             setattr(self, name, function)
         self._completion_timing_loaded = True
 
+    def load_dense_snode_groups(self):
+        if getattr(self, "_dense_snode_groups_loaded", False):
+            return
+        declarations = {
+            "ti_create_dense_snode_group_ext": ([Handle, C.c_char_p, C.c_char_p], Handle),
+            "ti_get_dense_snode_group_layout_ext": ([Handle, Handle, C.POINTER(C.c_uint64), C.c_void_p], None),
+            "ti_get_dense_snode_group_member_ext": (
+                [Handle, Handle, C.c_char_p, UInt, C.POINTER(Shape), C.POINTER(NdArray)], None),
+        }
+        try:
+            functions = {name: getattr(self.library, name) for name in declarations}
+        except AttributeError as error:
+            raise NotImplementedError("The selected runtime has no dense SNode group API") from error
+        for name, function in functions.items():
+            function.argtypes, function.restype = declarations[name]
+            setattr(self, name, function)
+        self._dense_snode_groups_loaded = True
+
     def call(self, function, *arguments):
         self.ti_set_last_error(0, None)
         result = function(*arguments)

@@ -285,7 +285,7 @@ std::string StructCompilerLLVM::type_stub_name(SNode *snode) {
   return snode->node_type_name + "_type_stubs";
 }
 
-void StructCompilerLLVM::run(SNode &root) {
+void StructCompilerLLVM::run_layout(SNode &root) {
   TI_AUTO_PROF;
   // bottom to top
   collect_snodes(root);
@@ -295,6 +295,13 @@ void StructCompilerLLVM::run(SNode &root) {
 
   for (auto &n : snodes_rev)
     generate_types(*n);
+
+  auto node_type = get_llvm_node_type(module.get(), &root);
+  root_size = tlctx_->get_type_size(node_type);
+}
+
+void StructCompilerLLVM::run(SNode &root) {
+  run_layout(root);
 
   generate_child_accessors(root);
 
@@ -308,9 +315,6 @@ void StructCompilerLLVM::run(SNode &root) {
     TI_ERROR_IF(snode->runtime_local_id < 0,
                 "LLVM SNode {} has no tree-local runtime id.", snode->id);
   }
-
-  auto node_type = get_llvm_node_type(module.get(), &root);
-  root_size = tlctx_->get_type_size(node_type);
 
   tlctx_->add_struct_module(std::move(module), root.get_snode_tree_id());
 }

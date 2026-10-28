@@ -81,9 +81,12 @@ LlvmRuntime::LlvmRuntime(taichi::lang::LlvmRuntimeExecutor &executor,
 LlvmRuntime::~LlvmRuntime() {
   try {
     retire_execution_domains();
+    retire_dense_groups();
   } catch (...) {
     // Failed drain cannot prove that domains stopped accessing the executor.
     // Preserve its finite allocation and referenced configuration on failure.
+    if (!dense_groups_.empty())
+      (void)new decltype(dense_groups_)(std::move(dense_groups_));
     (void)owned_executor_.release();
     (void)cfg_.release();
     return;
@@ -130,6 +133,7 @@ TiMemory LlvmRuntime::allocate_memory(
 }
 
 void LlvmRuntime::free_memory(TiMemory devmem) {
+  free_dense_group(devmem);
   Runtime::free_memory(devmem);
 }
 
