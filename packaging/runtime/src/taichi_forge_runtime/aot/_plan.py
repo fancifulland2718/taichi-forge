@@ -628,18 +628,11 @@ class ExecutionPlan:
         # introduced, preserving every existing execution and storage choice.
         return ExecutionPlan(**document)
 
-    def argpack(self, module, name, values, *, gradients=None):
-        """Create a public immutable pack without exposing generated kernel names.
-
-        Values and resource members follow Kernel.argpack(). Preparation checks
-        compatibility at every use, including other argument positions. This is
-        a cold factory; submission performs no descriptor decoding or lookup.
-        """
-        if name not in self.argument_names:
-            raise ValueError("ArgPack factory requires a public plan argument")
+    def _kernel_argument_uses(self, module):
+        """Query actual entry uses in all regions; never execute plan control."""
         document = json.loads(self._json)
         pending = list(document["operations"]) + document.get("initialization", [])
-        first = None
+        kernels = {}
         while pending:
             operation = pending.pop()
             kind = operation["kind"]
@@ -652,12 +645,28 @@ class ExecutionPlan:
             elif kind in ("cuda_parallel", "vulkan_parallel"):
                 for region in operation["branches"]:
                     pending.extend(region)
-            elif kind == "kernel" and name in operation["arguments"]:
-                kernel = module.kernel(operation["entry"])
+            elif kind == "kernel":
+                name = operation["entry"]
+                if name not in kernels:
+                    kernels[name] = module.kernel(name)
+                yield kernels[name], operation["arguments"]
+
+    def argpack(self, module, name, values, *, gradients=None):
+        """Create a public immutable pack without exposing generated kernel names.
+
+        Values and resource members follow Kernel.argpack(). Preparation checks
+        compatibility at every use, including other argument positions. This is
+        a cold factory; submission performs no descriptor decoding or lookup.
+        """
+        if name not in self.argument_names:
+            raise ValueError("ArgPack factory requires a public plan argument")
+        first = None
+        for kernel, arguments in self._kernel_argument_uses(module):
+            if name in arguments:
                 layout = kernel._argument_layout
-                for index, argument in enumerate(operation["arguments"]):
+                for index, argument in enumerate(arguments):
                     if argument == name:
-                        if (layout is None or len(operation["arguments"]) < layout.count
+                        if (layout is None or len(arguments) < layout.count
                                 or index not in layout.pack_indices):
                             raise ValueError("Plan argument is not consistently a logical ArgPack")
                         first = kernel, index
@@ -682,26 +691,12 @@ class ExecutionPlan:
 
         if name not in self.argument_names:
             raise ValueError("Value factory requires a public plan argument")
-        document = json.loads(self._json)
-        pending = list(document["operations"]) + document.get("initialization", [])
         first = None
         signature = None
-        while pending:
-            operation = pending.pop()
-            kind = operation["kind"]
-            if kind == "while":
-                pending.extend(operation["condition"] + operation["body"])
-            elif kind == "branch":
-                pending.extend(operation["condition"])
-                for region in operation["bodies"]:
-                    pending.extend(region)
-            elif kind in ("cuda_parallel", "vulkan_parallel"):
-                for region in operation["branches"]:
-                    pending.extend(region)
-            elif kind == "kernel" and name in operation["arguments"]:
-                kernel = module.kernel(operation["entry"])
+        for kernel, arguments in self._kernel_argument_uses(module):
+            if name in arguments:
                 layout = kernel._argument_layout
-                for index, argument in enumerate(operation["arguments"]):
+                for index, argument in enumerate(arguments):
                     if argument != name:
                         continue
                     if layout is None or index not in layout.value_types:

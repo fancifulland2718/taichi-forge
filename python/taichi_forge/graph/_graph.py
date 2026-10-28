@@ -10237,6 +10237,26 @@ def _graph_resource_binding_requirements(nodes):
     return (*requirements.values(), *packs)
 
 
+def _graph_native_preparation_nodes(nodes):
+    """Visit actual executable regions, retaining shared packets by node identity."""
+    pending, seen = list(reversed(nodes)), set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, _CompiledNativeGraphNode):
+            yield node
+        elif isinstance(node, _CompiledSequentialRegionNode):
+            pending.extend(reversed(node.nodes))
+        elif isinstance(node, _CompiledWhileGraphNode):
+            pending.extend(reversed((node._condition, *node._chunks.values())))
+        elif isinstance(node, _CompiledIfGraphNode):
+            pending.extend(child for child in (node._else, node._then, node._condition) if child is not None)
+        elif isinstance(node, _CompiledSwitchGraphNode):
+            pending.extend(reversed((node._condition, *node._branches)))
+
+
 def _graph_memory_disjoint_pairs(root):
     pairs = set()
 
@@ -10858,6 +10878,40 @@ class GraphBindingSet:
 
         self._graph._update_binding_set(self, arguments, replace_all=True)
         return self
+
+    def initialize(self):
+        """Run bound native-plan initializers once at an explicit cold boundary.
+
+        Binding itself executes no numerical work. Initialization may wait and
+        write the declared initialization resources; it is not rolled back on
+        failure. Concurrent publication requires initializing the new revision.
+        """
+        with self._graph._lifecycle_lock:
+            self._graph._check_runtime_valid()
+            with self._lock:
+                version = self._version
+            if self._graph._spec._native_preparers and version.native_actions is None:
+                raise TaichiRuntimeError("Native initialization requires a stable prepared Graph binding frame")
+            actions = tuple((version.native_actions or {}).values())
+        # Native initialization can wait; do not retain Graph publication locks.
+        for action in actions:
+            initialize = getattr(action, "initialize", None)
+            if initialize is not None:
+                initialize()
+        with self._lock:
+            if self._version is not version:
+                raise TaichiRuntimeError("Graph binding changed during initialization; initialize the new revision")
+        return self
+
+    def native_execution_info(self):
+        """Cold query of prepared native plans; reports no inferred launch counts."""
+        with self._graph._lifecycle_lock:
+            self._graph._check_runtime_valid()
+            with self._lock:
+                actions = tuple((self._version.native_actions or {}).values())
+        return tuple(
+            MappingProxyType(action.execution_info()) for action in actions if hasattr(action, "execution_info")
+        )
 
     def statistics(self):
         """Inspect publication facts, including after the Graph is retired.
@@ -11605,9 +11659,8 @@ class _GraphSpec:
         self.observation_count = len(self.observation_nodes)
         self._native_preparers = tuple(
             (n, n.recordable_action.backend_command_recording)
-            for n in self.nodes
-            if isinstance(n, _CompiledNativeGraphNode)
-            and isinstance(n.recordable_action, BackendCommandGraphAction)
+            for n in _graph_native_preparation_nodes(self.nodes)
+            if isinstance(n.recordable_action, BackendCommandGraphAction)
             and callable(
                 getattr(
                     n.recordable_action.backend_command_recording,
@@ -12554,11 +12607,12 @@ class _GraphSpec:
         )
 
     def _prepare_native_actions(self, arguments):
-        """Bind optional root command packets once per immutable binding frame.
+        """Bind optional command packets once per immutable binding frame.
 
         Preparation must not submit work. The packet retains its precise bindings;
         runtime owners still retire/invalidate through their existing native gates.
-        Structured nodes and providers without this hook retain their current route.
+        Sequential/control regions share this frame; providers without the hook
+        retain their current route. No control condition is evaluated here.
         """
         if not self._native_preparers:
             return None
@@ -16658,6 +16712,14 @@ class Sequential:
             LoadedKernelExecutable(entry, args), allow_command_boundary=True
         )
 
+    def dispatch_loaded_plan(self, module, name, arguments, *, execution="preserve"):
+        """Append a whole loaded Plan without changing its internal control."""
+        from ._loaded import LoadedPlanExecutable
+
+        return self._append_native_executable(
+            LoadedPlanExecutable(module, name, arguments, execution=execution), allow_command_boundary=True
+        )
+
     def _append_native_executable(self, executable, *, allow_command_boundary=False):
         self._bind_declared_private_args(executable.graph_binding_symbols)
         structured = executable.recordable_sequence
@@ -18590,6 +18652,23 @@ class GraphBuilder:
 
         executable = LoadedKernelExecutable(entry, args)
         self._append_native_executable(executable, admission="explicit")
+        self._aot_graph_plan.mark_internal_fixed_bindings()
+        return self
+
+    def dispatch_loaded_plan(self, module, name, arguments, *, execution="preserve"):
+        """Record one module-scoped Plan call with named Graph input symbols.
+
+        Control, private resources and initialization stay in the native Plan.
+        ``execution='device'`` requires a prepared CUDA Graph/Vulkan command path;
+        ``'preserve'`` keeps the artifact's selected executor, including Host
+        control. This outer boundary remains segmented. Bind then initialize
+        explicitly to keep one-time initialization out of repeat submission.
+        """
+        from ._loaded import LoadedPlanExecutable
+
+        self._append_native_executable(
+            LoadedPlanExecutable(module, name, arguments, execution=execution), admission="explicit"
+        )
         self._aot_graph_plan.mark_internal_fixed_bindings()
         return self
 

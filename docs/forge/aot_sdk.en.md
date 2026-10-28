@@ -1914,12 +1914,55 @@ Host control requires explicit portable mode and does not qualify EFC/TGS device
 loops.
 
 New ArgPack/Sequential/private-workspace combinations have CPU/CUDA evidence;
-Vulkan qualification is separate. Texture/StructNdarray members, re-export of a
-live Module owner and loaded composite Plans need further work. See the
+Vulkan qualification is separate. Texture/StructNdarray members and re-export of a
+live Module owner need further work. See the
 [component capture contract](../design/component_capture.en.md) for declarations,
 automatic capture and instances. Applications define normal model preparation and
 physical execution order; Forge reuses Graph/ExecutionPlan/Runtime contracts
 for broader AOT orchestration.
+
+Use `dispatch_loaded_plan` to invoke a complete named ExecutionPlan from an artifact:
+
+```python
+builder.dispatch_loaded_plan(
+    module, "solve_stage", {"state": state_arg, "iterations": iterations_arg},
+    execution="device",  # or preserve: retain the artifact's actual execution mode
+)
+graph = builder.compile()
+binding = graph.bind({"state": state_array, "iterations": 5})
+binding.initialize()  # explicit cold initialization; may wait
+info = binding.native_execution_info()
+ticket = graph.submit(binding)
+ticket.wait()
+```
+
+Mapping keys are the complete public Plan parameter set; values are Graph symbols
+whose names may differ. CPU/CUDA checks cover scalar/vector values, ArgPacks and
+compact ndarrays. Aggregate encoding uses native entry ABI metadata. Entry names
+and private resources stay scoped to their Module/preparation; operation lists
+are neither concatenated nor rewritten. Separate bindings own separate Plan
+private state, and replay preserves that state. Per-step resets belong in the
+normal Plan definition. Legacy fixed-Field modules still share their module roots;
+this API does not turn them into component Instances.
+
+Both root and Sequential calls prepare once per immutable binding frame. Binding
+executes no numerical work. `initialize()` is idempotent for that binding and runs
+only declared native initialization, not ordinary Graph nodes. Without it, Runtime
+retains lazy initialization, so first submission may wait. Binding updates create
+new prepared frames with their own initialization obligations. The query reports
+actual `execution_kind`, preparation resource bytes and initialization state;
+static dispatch counts do not measure conditional-loop Kernel executions.
+`execution="device"` requires `cuda_graph` or `vulkan_commands` at bind time and
+rejects Host/mixed/ordered execution. `preserve` leaves native selection unchanged.
+These new combinations are qualified on CPU/CUDA only; naming the Vulkan mode
+does not establish Vulkan support.
+
+The outer call remains segmented while the Plan retains its internal control.
+A small Nsight check recorded five replays as five CUDA Graph launches, 25 loop
+body executions, 30 condition checks and one final wait, without per-iteration
+Host launches. This does not establish fusion across loaded Plans or qualify
+GeoPhys EFC/TGS. Closing a Module rejects new submissions; accepted work retains
+its completion leases. Initialization failure does not roll back prior writes.
 
 Borrowers can explicitly import compact scalar/vector/matrix ndarrays from the
 same Program with `runtime.import_ndarray(jit_array)`. The returned view works

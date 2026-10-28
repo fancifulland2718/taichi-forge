@@ -1494,9 +1494,43 @@ Windows CPU/CUDA/Vulkan 定向检查覆盖 JIT → loaded AOT → JIT 提交顺�
 只有显式 portable 模式才允许 Host 控制，不将其用于宣称 EFC/TGS 设备循环已交付。
 
 新 ArgPack/Sequential/private-workspace 组合目前记录 CPU/CUDA 资格，Vulkan 随后单独验证。
-texture/StructNdarray 等成员、活 Module owner 再导出和 loaded composite Plan 仍需扩展。
+texture/StructNdarray 等成员和活 Module owner 再导出仍需扩展。
 组件声明、自动捕获与实例化进度见[组件捕获合同](../design/component_capture.zh.md)；
 正常模型准备与物理执行顺序仍由应用定义，Forge 继续复用现有 Graph/ExecutionPlan/Runtime。
+
+完整阶段使用 `dispatch_loaded_plan` 调用已导出的命名 ExecutionPlan：
+
+```python
+builder.dispatch_loaded_plan(
+    module, "solve_stage", {"state": state_arg, "iterations": iterations_arg},
+    execution="device",  # 或 preserve：保留产物的实际执行方式
+)
+graph = builder.compile()
+binding = graph.bind({"state": state_array, "iterations": 5})
+binding.initialize()  # 显式冷初始化；可能等待，只运行产物声明的初始化
+info = binding.native_execution_info()
+ticket = graph.submit(binding)
+ticket.wait()
+```
+
+映射左侧是 Plan 的完整公共参数集合，右侧是 Graph 符号，名称可以不同。
+CPU/CUDA 已验证 scalar、vector 值、ArgPack 和紧凑 ndarray；聚合值使用原生入口 ABI。
+同名入口和私有资源留在各自 Module/prepare 的作用域内，不拼接或改写 Plan 的操作列表。
+独立绑定拥有独立的 Plan 私有状态，重放同一绑定保留其状态；若需要每步清零，须由原
+Plan 的正常执行定义规定。固定 Field 模块的共享根语义仍然保留，不因此变成组件 Instance。
+
+根层级和 Sequential 都在绑定时准备完整调用，重放不重新准备。绑定本身不执行数值工作；
+`initialize()` 对该绑定的初始化幂等，不执行普通 Graph 节点。未显式初始化时保留 Runtime
+首次执行自动初始化的行为，首次提交因此可能等待。修改绑定会产生新准备帧及其初始化责任。
+查询返回实际 `execution_kind`、准备资源字节及初始化状态，不能将静态 dispatch 数量当作
+条件循环的实际 Kernel 次数。`execution="device"` 在 bind 时要求 `cuda_graph` 或
+`vulkan_commands`，拒绝 Host/mixed/ordered 模式；`preserve` 不改变原生执行器选择。
+新组合目前只取得 CPU/CUDA 资格，不因列出 Vulkan 执行种类就宣称该后端通过。
+
+外层仍是分段调用，Plan 内部保留原控制策略。小例的 Nsight 记录为 5 次重放对应 5 次
+CUDA Graph launch、25 次循环体、30 次条件检查和区间末一次等待，没有逐轮 Host launch。
+这不等于多个 loaded Plan 已融合为一张设备 Graph，也不等于 GeoPhys EFC/TGS 已取得资格。
+模块关闭后拒绝新提交，已接受调用按原完成租约退休；初始化失败不回滚已经写入的数据。
 
 借用者通过 `runtime.import_ndarray(jit_array)` 显式导入同一 Program 的紧凑
 scalar/vector/matrix ndarray。导入返回可用于普通/固定 AOT 调用的数组视图，复用
