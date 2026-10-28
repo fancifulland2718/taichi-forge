@@ -1399,6 +1399,7 @@ void export_lang(py::module &m) {
       .def("begin_frontend_if_true", &ASTBuilder::begin_frontend_if_true)
       .def("pop_scope", &ASTBuilder::pop_scope)
       .def("begin_frontend_if_false", &ASTBuilder::begin_frontend_if_false)
+      .def("merge_frontend_if_variable", &ASTBuilder::merge_frontend_if_variable)
       .def("insert_deactivate", &ASTBuilder::insert_snode_deactivate)
       .def("insert_activate", &ASTBuilder::insert_snode_activate)
       .def("expr_snode_get_addr", &ASTBuilder::snode_get_addr)

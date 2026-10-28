@@ -1147,6 +1147,10 @@ class ASTBuilder {
                          const DebugInfo &dbg_info = DebugInfo());
   void begin_frontend_if_true();
   void begin_frontend_if_false();
+  Expr merge_frontend_if_variable(const Expr &true_value,
+                                  const Expr &false_value,
+                                  const std::string &name,
+                                  const DebugInfo &dbg_info = DebugInfo());
   void insert_external_func_call(std::size_t func_addr,
                                  std::string source,
                                  std::string filename,

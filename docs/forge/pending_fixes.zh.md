@@ -54,6 +54,12 @@ F070-3 至 F070-12 描述源码改动，不代表已发布 0.7.0 wheel 的行为
 
 ## 待发布的接口增强
 
+FG-LANG-01：运行期 `if/else` 中两边定义的同类型、同形状变量可以在分支后读取，
+标量、聚合值、嵌套分支和解析反向梯度通过 CPU/CUDA/Vulkan 定向检查。
+单侧定义和类型冲突仍拒绝；静态对象及循环作用域不放宽。
+与此条目同次提交 `Merge matching variables defined in both runtime branches`；
+见[语言语义与迁移限制](language_semantics.zh.md)。这是增强，不是原版作用域的 bug。
+
 | ID | 范围与验证 | 包含版本 |
 | --- | --- | --- |
 | FG-AOT-01 | 增加显式 `GraphBuilder.dispatch_loaded`，在当前借用 Program 上调用无返回值的 loaded AOT kernel。保留入口/模块身份、原生 ABI 校验、保守 effects 与 completion 所有权，不恢复 Python 数值定义。Windows CPU/CUDA/Vulkan：9 项定向检查及 14 项既有 borrowing、native storage、BindingSet 回归通过。范围为主顺序、基本类型标量和紧凑 JIT ndarray；这是相对 0.7.0 的接口增强，不是 Runtime ExecutionPlan 的新缺陷。 | 下一版本，待定 |

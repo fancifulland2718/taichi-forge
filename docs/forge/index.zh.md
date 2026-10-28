@@ -30,6 +30,7 @@ vendor 库及 Vulkan shader 编译 addon 另有显式依赖。
 | 任务 | 文档 |
 | --- | --- |
 | 执行 kernel 并复用 Graph | [快速开始](quickstart.zh.md) |
+| 理解分支变量合并规则 | [语言语义](language_semantics.zh.md) |
 | 脱离 Python 部署 AOT | [独立 C/C++ SDK](aot_sdk.zh.md) |
 | CUDA/Vulkan compute 多域调度及两后端关联 | [执行域](cuda_execution_domains.zh.md)、[实验 CiG 初始化与限制](cuda_vulkan_cig.zh.md)、[Vulkan 外部缓冲](vulkan_external_buffers.zh.md) |
 | 等待任意 JIT/AOT 提交完成 | [完成集合、超时与取消](completion_wait_sets.zh.md) |

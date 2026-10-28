@@ -1,5 +1,6 @@
 import ast
 import collections.abc
+import copy
 import itertools
 import operator
 import re
@@ -1621,6 +1622,42 @@ class ASTTransformer(Builder):
         return None
 
     @staticmethod
+    def is_branch_runtime_value(value):
+        if isinstance(value, (Expr, Struct)):
+            return True
+        if isinstance(value, (tuple, list)):
+            return any(ASTTransformer.is_branch_runtime_value(item) for item in value)
+        return False
+
+    @staticmethod
+    def merge_branch_value(ctx, name, true_value, false_value, dbg_info):
+        if isinstance(true_value, Expr) and isinstance(false_value, Expr):
+            return Expr(ctx.ast_builder.merge_frontend_if_variable(
+                true_value.ptr, false_value.ptr, name, dbg_info))
+        if isinstance(true_value, Struct) and isinstance(false_value, Struct):
+            if true_value.keys != false_value.keys or true_value.methods != false_value.methods:
+                raise TaichiTypeError(f"Variable '{name}' has different struct types in if/else branches")
+            # A shallow copy preserves the struct dtype/methods without emitting
+            # any loads of branch-local values outside their defining paths.
+            result = copy.copy(true_value)
+            result._Struct__entries = {
+                key: ASTTransformer.merge_branch_value(
+                    ctx, f"{name}.{key}", true_value[key], false_value[key], dbg_info)
+                for key in true_value.keys
+            }
+            result._register_methods()
+            return result
+        if type(true_value) is type(false_value) and isinstance(true_value, (tuple, list)):
+            if len(true_value) != len(false_value):
+                raise TaichiTypeError(f"Variable '{name}' has different lengths in if/else branches")
+            return type(true_value)(ASTTransformer.merge_branch_value(
+                ctx, f"{name}[{index}]", lhs, rhs, dbg_info)
+                for index, (lhs, rhs) in enumerate(zip(true_value, false_value)))
+        raise TaichiTypeError(
+            f"Variable '{name}' cannot be merged from if/else branches: "
+            "both values must have matching Taichi types; static Python objects remain block-local")
+
+    @staticmethod
     def build_If(ctx, node):
         build_stmt(ctx, node.test)
         is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
@@ -1636,11 +1673,20 @@ class ASTTransformer(Builder):
             stmt_dbg_info = _ti_core.DebugInfo(ctx.get_pos_info(node))
             impl.begin_frontend_if(ctx.ast_builder, node.test.ptr, stmt_dbg_info)
             ctx.ast_builder.begin_frontend_if_true()
-            build_stmts(ctx, node.body)
+            true_scope = build_stmts(ctx, node.body, capture_scope=True)
             ctx.ast_builder.pop_scope()
             ctx.ast_builder.begin_frontend_if_false()
-            build_stmts(ctx, node.orelse)
+            false_scope = build_stmts(ctx, node.orelse, capture_scope=True)
             ctx.ast_builder.pop_scope()
+            for name in true_scope:
+                if name in false_scope:
+                    # Compile each branch with an independent symbol scope.
+                    # New names become visible only after both paths define them.
+                    if not ASTTransformer.is_branch_runtime_value(true_scope[name]) and not (
+                            ASTTransformer.is_branch_runtime_value(false_scope[name])):
+                        continue
+                    ctx.create_variable(name, ASTTransformer.merge_branch_value(
+                        ctx, name, true_scope[name], false_scope[name], stmt_dbg_info))
         return None
 
     @staticmethod
@@ -1792,11 +1838,13 @@ class ASTTransformer(Builder):
 build_stmt = ASTTransformer()
 
 
-def build_stmts(ctx, stmts):
+def build_stmts(ctx, stmts, *, capture_scope=False):
     with ctx.variable_scope_guard():
         for stmt in stmts:
             if ctx.returned != ReturnStatus.NoReturn or ctx.loop_status() != LoopStatus.Normal:
                 break
             else:
                 build_stmt(ctx, stmt)
+        if capture_scope:
+            return dict(ctx.current_scope())
     return stmts

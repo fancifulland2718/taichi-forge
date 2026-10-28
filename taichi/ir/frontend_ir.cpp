@@ -1721,6 +1721,33 @@ void ASTBuilder::begin_frontend_if_false() {
   this->create_scope(if_stmt->false_statements);
 }
 
+Expr ASTBuilder::merge_frontend_if_variable(const Expr &true_value,
+                                           const Expr &false_value,
+                                           const std::string &name,
+                                           const DebugInfo &dbg_info) {
+  auto if_stmt = get_last_stmt()->as<FrontendIfStmt>();
+  const auto type = true_value.get_rvalue_type();
+  const auto false_type = false_value.get_rvalue_type();
+  if (type == PrimitiveType::unknown || type != false_type) {
+    ErrorEmitter(TaichiTypeError(), if_stmt,
+                 fmt::format("Variable '{}' has different types in if/else "
+                             "branches: {} and {}. Use matching types and "
+                             "shapes, or initialize it before the if statement.",
+                             name, type->to_string(), false_type->to_string()));
+  }
+  // Only the storage is outside the conditional. Each value is read and
+  // stored on its own path, never speculatively evaluated after the join.
+  auto var = make_id_expr(name);
+  insert(std::make_unique<FrontendAllocaStmt>(
+             var.cast<IdExpression>()->id, PrimitiveType::unknown, dbg_info),
+         current_block()->locate(if_stmt));
+  if_stmt->true_statements->insert(
+      std::make_unique<FrontendAssignStmt>(var, true_value, dbg_info));
+  if_stmt->false_statements->insert(
+      std::make_unique<FrontendAssignStmt>(var, false_value, dbg_info));
+  return var;
+}
+
 void ASTBuilder::insert_external_func_call(std::size_t func_addr,
                                            std::string source,
                                            std::string filename,

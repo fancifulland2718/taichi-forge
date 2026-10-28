@@ -61,6 +61,14 @@ or bitwise equality across backends.
 
 ## Interface enhancements awaiting release
 
+FG-LANG-01: matching types/shapes defined in both runtime `if/else` branches
+become visible after the conditional. Focused CPU/CUDA/Vulkan checks cover scalar
+and aggregate values, nested branches and analytic reverse gradients. One-sided
+definitions and type conflicts remain errors; static/loop scopes are unchanged.
+Committed with this entry as `Merge matching variables defined in both runtime branches`;
+see [language semantics and migration boundaries](language_semantics.en.md).
+This is an enhancement, not a bug in upstream scope rules.
+
 | ID | Scope and validation | Available in release |
 | --- | --- | --- |
 | FG-AOT-01 | Add explicit `GraphBuilder.dispatch_loaded` for void loaded AOT kernels on the current borrowed Program. Preserve entry/module identity, native ABI validation, conservative effects and completion ownership without recovering Python numerical definitions. Windows CPU/CUDA/Vulkan: nine focused checks plus fourteen existing borrowing, native-storage and BindingSet checks. Root sequence with primitive scalars and compact JIT ndarrays only; this is an enhancement over 0.7.0, not a newly discovered failure of Runtime ExecutionPlan. | Next release, TBD |
