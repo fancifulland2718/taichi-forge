@@ -882,6 +882,28 @@ class Module(_Resource):
 
     _kind = "module"
 
+    def component_entry_contract(self, name):
+        """Read an experimental compiler-produced entry capture projection.
+
+        This is an entry contract, not a complete component-root/instance API.
+        Native entry argument validation remains authoritative at preparation.
+        """
+        from urllib.parse import quote
+        from zipfile import ZipFile
+
+        with self._runtime._lock:
+            self._check()
+            _name(name)
+            relative = "component_entries/" + quote(name, safe="-_.") + ".json"
+            if self._source_path.is_dir():
+                value = json.loads((self._source_path / relative).read_text(encoding="utf8"))
+            else:
+                with ZipFile(self._source_path) as archive:
+                    value = json.loads(archive.read(relative))
+            if value.get("version") != 1 or value.get("entry") != name:
+                raise ValueError("Unknown or mismatched component entry contract")
+            return value
+
     def ndarray_layout(self, name):
         """Query a named fixed-AoS layout without loading executable entries."""
         runtime = self._runtime

@@ -513,6 +513,46 @@ class _ComponentCode:
             if isinstance(declaration, (Array, DenseField)):
                 declaration.validate(value)
 
+    def export(self, module, name):
+        """Export this compiled entry and its capture projection, without state.
+
+        This low-level entry hook will also serve component-root/Graph closure
+        export; it does not require a decorated wrapper or recompiling an owner.
+        """
+        if not isinstance(name, str) or not name or "\0" in name:
+            raise ValueError("Component entry requires a nonempty name without NUL")
+        if impl.get_runtime() is not self.runtime or self.key not in self.kernel.compiled_kernels:
+            raise RuntimeError("Component code belongs to a retired Runtime")
+        if module._runtime is not self.runtime:
+            raise ValueError("Component entry and export Module belong to different Runtimes")
+        if module._arch != impl.current_cfg().arch:
+            raise ValueError("Component entry target must match its compilation Runtime")
+        compiled = self.kernel.compiled_kernels[self.key]
+        if not module._check_kernel_export(name, compiled):
+            if module._component_entries.get(name, {}).get("semantic_key") != self.semantic_key:
+                raise ValueError("Existing entry was not exported with this component contract")
+            return
+        try:
+            module._aot_builder.add(name, compiled)
+            if module._aot_builder._used_snode_tree_ids([name]):
+                raise TaichiCompilationError("Generic component entry retains an undeclared fixed Field dependency")
+        except BaseException:
+            # Native builders cannot roll back partially added code. Preserve
+            # the same fail-closed publication rule as existing Graph export.
+            module._graph_export_failed = True
+            raise
+        module._component_entries[name] = {
+            "version": 1,
+            "entry": name,
+            "target": module._arch.name,
+            "semantic_key": self.semantic_key,
+            "contract": self.contract,
+            "initialization": {"group_storage": "zero", "model_data": "consumer"},
+        }
+        module._exported_kernels[name] = compiled
+        module._kernels.append(self.kernel)
+        module._content.extend(("kernel:" + name, "component_entry:" + name))
+
     def run(self, component, owner, *args):
         if impl.get_runtime() is not self.runtime or self.key not in self.kernel.compiled_kernels:
             raise RuntimeError("Component code belongs to a retired Runtime")

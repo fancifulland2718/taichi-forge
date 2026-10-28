@@ -335,6 +335,7 @@ class Module:
         self._arch = arch
         self._kernels = []
         self._exported_kernels = {}
+        self._component_entries = {}
         self._kernel_launch_abis = {}
         self._execution_plans = {}
         self._data_payloads = {}
@@ -344,6 +345,7 @@ class Module:
         self._array_fields = set()
         self._ndarray_layouts = {}
         rtm = impl.get_runtime()
+        self._runtime = rtm
         rtm._finalize_root_fb_for_aot()
         self._aot_builder = rtm.prog.make_aot_module_builder(arch, caps)
         if artifact_format is not None:
@@ -799,6 +801,13 @@ class Module:
             directory.mkdir(exist_ok=True)
             for name, plan in self._execution_plans.items():
                 plan.save(directory / (quote(name, safe="-_.") + ".json"))
+        if self._component_entries:
+            directory = output_dir / "component_entries"
+            directory.mkdir(exist_ok=True)
+            for name, contract in self._component_entries.items():
+                (directory / (quote(name, safe="-_.") + ".json")).write_text(
+                    json.dumps(contract, sort_keys=True, separators=(",", ":")), encoding="utf8"
+                )
         with open(f"{filepath}/__content__", "w") as f:
             f.write("\n".join(self._content))
         with open(f"{filepath}/__version__", "w") as f:

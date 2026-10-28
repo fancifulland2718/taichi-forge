@@ -96,7 +96,23 @@ interleaved execution and retirement. This qualifies simple dense storage and
 its actual standalone calling path, not the full component instance contract,
 nonblocking retirement or capture replacement.
 
-Automatic Graph/component export, frozen TCM consumption of original Field
-captures, real GeoPhys RNE and full instance lifetimes remain work in progress.
-Producer Field calls still perform validation outside cold preparation. No
-runtime performance or complete SDK qualification is claimed.
+The internal code object's `export(module, name)` now passes its existing
+frontend definition to the AOT builder and writes a versioned entry capture
+projection. It neither recompiles the decorated owner nor snapshots model data.
+Residual fixed-Field dependencies reject artifact publication. Consumers query
+`module.component_entry_contract(name)`; native preparation still validates the
+actual calling ABI.
+
+`test_aot_component_export.py` freezes two original Field entries, copies only
+the Runtime package into an independent process and forbids DSL/test/GeoPhys
+numerical-source imports. Fresh N=37/129, active=31/0 and gravity values drive
+compiler-contract group construction and member binding on CPU/CUDA. Active
+tails and full Field iteration are checked; the TCM hash stays fixed, with no
+model payloads or fixed-root dependencies. This is an A2 mechanism probe, not a
+release wheel or complete real-component acceptance.
+
+Automatic Graph/component closure, real GeoPhys RNE, full initialization and
+constraint projections, and complete instance lifetimes remain work in progress.
+Entry export does not replace component-root organization; the test contract
+driver is not a production scheduler. Producer Field calls still perform checks
+outside cold preparation. No runtime performance or full SDK claim is made.

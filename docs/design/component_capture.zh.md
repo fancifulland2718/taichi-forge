@@ -68,6 +68,18 @@ matrix/rank-0 读写、别名、错误 Runtime、非法维度和 loaded Kernel �
 交错执行及关闭失效。这证明独立 Runtime 的简单 Dense 存储和实际调用路径，尚不证明
 完整组件实例合同、非阻塞退休或 capture 换代。
 
-Graph 组件自动导出、原 Field 捕获的冻结 TCM 消费、真实 GeoPhys RNE 及 C 的完整
-生命周期仍需接通。原 Field producer 调用的验证尚未全部移到冷 prepare 路径；没有
-运行性能或全 SDK 完成结论。
+内部代码对象的 `export(module, name)` 现在直接把该前端定义交给现有 AOT builder，
+同时写出版本化入口捕获投影。它不会调用原装饰入口重编译，也不打包 producer 数据；
+若后端发现残留固定 Field 依赖，拒绝整个产物发布。消费端可用
+`module.component_entry_contract(name)` 查询；实际调用 ABI 仍由 native prepare 校验。
+
+`test_aot_component_export.py` 在冻结原 Field 的两个入口后，仅复制 Runtime 包到
+独立进程，禁用 DSL/测试/GeoPhys 数值源码导入。新建 N=37/129、active=31/0 和新重力，
+按编译器合同物化根、绑定成员并运行；CPU/CUDA 验证活动尾部和完整 Field 遍历。
+TCM hash 保持不变，产物无模型数据载荷及固定根依赖。该探针是 A2 的机制证据，
+不是正式 wheel 或完整真实组件验收。
+
+Graph 组件自动闭包、真实 GeoPhys RNE、完整初始化/约束投影及 C 的完整生命周期
+仍需接通。当前入口级导出不替代组件根组织；测试中的合同消费驱动不是生产调度器。
+原 Field producer 调用的验证尚未全部移到冷 prepare 路径，没有运行性能或全 SDK
+完成结论。
