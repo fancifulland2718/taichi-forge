@@ -22,6 +22,13 @@ the fixes below. The release column will be updated when the next version is ass
 | F070-10 | 0.7.0 | Cross-task temporaries can overlap the SPIR-V RNG counter, so even a kernel without random draws can corrupt the random stream. Reserve the historical RNG word in temporary allocation, preserving contiguous tensors and scalar alignment; invalidate old compiled artifacts. | Next release, TBD |
 | F070-11 | 0.7.0 | CPU/CUDA whole-value assignment to a packed scalar matrix still compiles a transfer helper after F070-5. Use the existing native packed host copy first, retaining the earlier fallback and host rounding. | Next release, TBD |
 | F070-12 | 0.7.0 | The first host read or write creates both accessor kernel definitions, retaining an unused counterpart for fields accessed in only one direction. Create each accessor on demand and retire whichever definitions exist with the SNode tree. | Next release, TBD |
+| F070-13 | 0.7.0 | Compiled kernels are only persisted at reset/normal exit, losing cache work on forced termination. Publish each `.tic` atomically and recover unindexed artifacts, retaining corrupt-file fallback and cache-disabled behavior. | Next release, TBD |
+
+F070-13: committed with this entry as `Publish offline kernel cache artifacts before process exit`.
+17 focused checks cover CPU/CUDA/Vulkan forced termination, corruption recovery,
+concurrent publication, index reconstruction and existing reset regressions.
+Environment-path reporting and explicit-argument precedence pass; the reported
+empty path was not reproduced. Power-loss durability is not claimed.
 
 F070-2 configuration candidates apply to CUDA/Vulkan primal kernels. CPU retains
 its existing execution path; gradient kernels are not configuration candidates

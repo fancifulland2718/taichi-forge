@@ -62,6 +62,15 @@ CPU 仍使用原有线程池和连续内循环。对于分块算术可证明安�
 
 ## 缓存复用规则
 
+开启 `offline_cache=True` 后，每个可缓存 kernel 完成编译便将完整 `.tic` 产物
+通过同目录临时文件原子发布，不再等待 `ti.reset()` 或正常退出。索引仍在结束时合并，
+新进程可以恢复尚未记入索引的完整产物；损坏文件会重新编译。写盘失败不会阻止运行，
+但会失去对应缓存。此保证覆盖已成功发布的产物，不包括被中断的编译或断电持久性。
+
+`ti.init()` 后可用 `ti.lang.impl.current_cfg().offline_cache_file_path` 查询生效路径。
+`TI_OFFLINE_CACHE_FILE_PATH` 会生效，显式初始化参数优先；本轮未复现“环境路径返回空串”。
+上述即时写盘修复尚未包含在发布的 0.7.0 包中，见 [F070-13](pending_fixes.zh.md)。
+
 Forge 只复用在当前 program、arch、dtype、shape、layout 和 compile configuration 下安全的
 数据。
 

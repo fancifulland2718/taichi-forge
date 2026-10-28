@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -16,6 +17,10 @@
 namespace taichi::lang {
 
 namespace {
+
+std::size_t persist_kernel(const std::string &filename,
+                          const std::string &kernel_key,
+                          const CompiledKernelData &compiled);
 
 std::string cache_prefix_from_metadata_filename(
     const std::string &metadata_filename) {
@@ -195,18 +200,13 @@ KernelCompilationManager::load_or_compile_execution_handle(
     cache_cv_.wait(lock);
   }
 
-  // P-Compile-2-B4: snapshot whether the offline cache metadata advertises
-  // this key, while we still hold the lock. We use this hint to attempt a
-  // disk load (outside the lock) BEFORE falling back to a full compile —
+  // P-Compile-2-B4: attempt a disk load outside the lock before compiling —
   // multiple workers can therefore do their respective disk reads in
   // parallel rather than serializing through `cache_mutex_`.
-  bool disk_metadata_hit = false;
-  if (cache_mode == CacheData::MemAndDiskCache) {
-    auto it = cached_data_.kernels.find(kernel_key);
-    // peek above guarantees `compiled_kernel_data` is null here, so a
-    // metadata entry implies a disk-only candidate.
-    disk_metadata_hit = (it != cached_data_.kernels.end());
-  }
+  // A completed artifact can outlive a killed process before its metadata
+  // index was flushed. Probe the exact backend/schema/key filename even if
+  // the index is absent; load_ckd still validates the serialized artifact.
+  const bool disk_candidate = cache_mode == CacheData::MemAndDiskCache;
 
   in_progress_keys_.insert(kernel_key);
   // Drop the lock across compile() — the compile step is pure work on
@@ -217,8 +217,9 @@ KernelCompilationManager::load_or_compile_execution_handle(
   std::unique_ptr<CompiledKernelData> compiled;
   std::string logical_kernel_key;
   bool from_disk = false;
+  std::size_t persisted_size = 0;
   try {
-    if (disk_metadata_hit) {
+    if (disk_candidate) {
       compiled = load_ckd(kernel_key, compile_config.arch);
       if (compiled) {
         from_disk = true;
@@ -238,6 +239,22 @@ KernelCompilationManager::load_or_compile_execution_handle(
     // and outside cache_mutex_ so unrelated cache traffic remains concurrent.
     logical_kernel_key =
         make_kernel_semantic_key(compile_config, caps, kernel_def);
+    if (disk_candidate) {
+      if (from_disk) {
+        std::error_code error;
+        const auto size = std::filesystem::file_size(
+            std::filesystem::u8path(make_filename(kernel_key)), error);
+        if (!error) {
+          persisted_size = size;
+        }
+      }
+      if (persisted_size == 0) {
+        // Serialize only the new artifact, outside cache_mutex_. Do not
+        // rewrite the growing metadata index after every kernel (O(N^2)).
+        persisted_size =
+            persist_kernel(make_filename(kernel_key), kernel_key, *compiled);
+      }
+    }
   } catch (...) {
     lock.lock();
     in_progress_keys_.erase(kernel_key);
@@ -260,6 +277,7 @@ KernelCompilationManager::load_or_compile_execution_handle(
   auto &result = install_compiled_kernel_locked(
       kernel_key, logical_kernel_key, kernel_def.optimization_spec_identity(),
       cache_mode, std::move(compiled));
+  result.size = persisted_size;
   in_progress_keys_.erase(kernel_key);
   cache_cv_.notify_all();
   return ensure_execution_handle_locked(result);
@@ -379,38 +397,23 @@ void KernelCompilationManager::dump() {
   // Add new data
   for (auto &[kernel_key, kernel] : caching_kernels_) {
     if (kernel.cache_mode == CacheData::MemAndDiskCache) {
-      auto [iter, ok] = kernels.insert({kernel_key, std::move(kernel)});
-      TI_ASSERT(!ok || iter->second.size == 0);
+      if (kernel.size == 0) {
+        kernel.size = persist_kernel(make_filename(kernel_key), kernel_key,
+                                     *kernel.compiled_kernel_data);
+      }
+      if (kernel.size != 0) {
+        auto old = kernels.find(kernel_key);
+        if (old != kernels.end()) {
+          data.size -= std::min(data.size, old->second.size);
+        }
+        data.size += kernel.size;
+        kernels[kernel_key] = std::move(kernel);
+      }
     }
   }
   // Clear caching_kernels_
   caching_kernels_.clear();
-  // Dump cached CompiledKernelData to disk
-  for (auto &[_, k] : kernels) {
-    if (k.compiled_kernel_data) {
-      auto cache_filename = make_filename(k.kernel_key);
-      // Serialize once into an in-memory buffer so we can both write the
-      // file and populate the in-process mirror without re-serializing.
-      std::ostringstream oss(std::ios::out | std::ios::binary);
-      auto err = k.compiled_kernel_data->dump(oss);
-      if (err == CompiledKernelData::Err::kNoError) {
-        std::string bytes = oss.str();
-        std::ofstream fs{cache_filename,
-                         std::ios::out | std::ios::binary};
-        TI_ASSERT(fs.is_open());
-        fs.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-        TI_ASSERT(!!fs);
-        k.size = bytes.size();
-        data.size += k.size;
-        // P1.b — seed the mirror so the *next* Program within the same
-        // process skips disk entirely.
-        InprocDiskMirror::put(k.kernel_key, std::move(bytes));
-      } else {
-        TI_DEBUG("Dump cached CompiledKernelData(kernel_key={}) failed: {}",
-                 k.kernel_key, CompiledKernelData::get_err_msg(err));
-      }
-    }
-  }
+  // Artifacts were already atomically published; only update the index here.
   // Dump offline cache metadata
   if (!kernels.empty()) {
     write_to_binary_file(data, filepath);
@@ -865,7 +868,7 @@ KernelCompilationManager::install_compiled_kernel_locked(
   k.kernel_key = kernel_key;
   k.created_at = k.last_used_at = std::time(nullptr);
   k.compiled_kernel_data = std::move(compiled);
-  k.size = 0;  // Populate `size` within the KernelCompilationManager::dump()
+  k.size = 0;  // The caller supplies the published size after installation.
   k.cache_mode = cache_mode;
   auto &kernel_data = (caching_kernels_[kernel_key] = std::move(k));
   record_if_enabled(executable_lifecycle_telemetry_.enabled,
@@ -887,6 +890,11 @@ std::unique_ptr<CompiledKernelData> KernelCompilationManager::load_ckd(
       return nullptr;
     }
     if (auto cerr = ckd->check(); cerr != CompiledKernelData::Err::kNoError) {
+      return nullptr;
+    }
+    // Specialization identities are host-only and restored at installation;
+    // they are deliberately absent from the serialized .tic payload.
+    if (ckd->arch() != arch) {
       return nullptr;
     }
     return ckd;
@@ -923,6 +931,69 @@ std::unique_ptr<CompiledKernelData> KernelCompilationManager::load_ckd(
   InprocDiskMirror::put(kernel_key, std::move(bytes));
   return ckd;
 }
+
+namespace {
+
+std::size_t persist_kernel(const std::string &filename,
+                           const std::string &kernel_key,
+                           const CompiledKernelData &compiled) {
+  TI_COMPILE_PROFILER("cpp.compile.cache.publish");
+  std::ostringstream stream(std::ios::out | std::ios::binary);
+  if (compiled.dump(stream) != CompiledKernelData::Err::kNoError) {
+    return 0;
+  }
+  auto bytes = stream.str();
+  const auto destination = std::filesystem::u8path(filename);
+  std::error_code error;
+  std::filesystem::create_directories(destination.parent_path(), error);
+  if (error) {
+    TI_WARN("Cannot create offline-cache directory: {}", error.message());
+    return 0;
+  }
+  static std::atomic<std::uint64_t> sequence{0};
+  std::string temporary;
+  do {
+    temporary = filename + "." + std::to_string(PID::get_pid()) + "." +
+                std::to_string(sequence.fetch_add(1)) + ".tmp";
+    // Reserve a unique name, including against leftovers from a prior PID.
+  } while (taichi::path_exists(temporary));
+  if (!taichi::try_lock_with_file(temporary)) {
+    TI_WARN("Cannot create offline-cache temporary file {}", temporary);
+    return 0;
+  }
+  auto cleanup = make_cleanup([&] {
+    std::error_code ignored;
+    std::filesystem::remove(std::filesystem::u8path(temporary), ignored);
+  });
+  {
+    std::ofstream file(std::filesystem::u8path(temporary),
+                        std::ios::out | std::ios::binary | std::ios::trunc);
+    file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    file.close();
+    if (!file) {
+      TI_WARN("Cannot write offline-cache artifact {}", temporary);
+      return 0;
+    }
+  }
+#ifdef TI_PLATFORM_WINDOWS
+  if (!MoveFileExW(std::filesystem::u8path(temporary).c_str(), destination.c_str(),
+                   MOVEFILE_REPLACE_EXISTING)) {
+    error = std::error_code(GetLastError(), std::system_category());
+  }
+#else
+  std::filesystem::rename(std::filesystem::u8path(temporary), destination, error);
+#endif
+  if (error) {
+    TI_WARN("Cannot publish offline-cache artifact {}: {}",
+            destination.u8string(), error.message());
+    return 0;
+  }
+  const auto size = bytes.size();
+  InprocDiskMirror::put(kernel_key, std::move(bytes));
+  return size;
+}
+
+}  // namespace
 
 CacheData::CacheMode KernelCompilationManager::get_cache_mode(
     const CompileConfig &compile_config,

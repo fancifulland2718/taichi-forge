@@ -80,6 +80,20 @@ Use `parallelize/serialize` on CPU and `block_dim` on GPU.
 
 ## Cache Reuse Rules
 
+With `offline_cache=True`, each cacheable kernel publishes its complete `.tic`
+artifact through an atomic rename of a temporary file in the same directory as
+soon as compilation finishes, without waiting for reset or normal exit. The
+index is still merged at finalization; a new process can recover complete,
+unindexed artifacts and recompile corrupt files. I/O failure does not prevent
+execution but loses that cache entry. This covers successfully published
+artifacts, not interrupted compilation or power-loss durability.
+
+After `ti.init()`, `ti.lang.impl.current_cfg().offline_cache_file_path` reports
+the effective path. `TI_OFFLINE_CACHE_FILE_PATH` is honored, with explicit init
+arguments taking precedence; the reported empty-path issue was not reproduced.
+Immediate publication is not in the released 0.7.0 package; see
+[F070-13](pending_fixes.en.md).
+
 Forge only reuses data that is safe under the current program, arch, dtype,
 shape, layout, and compile configuration.
 
