@@ -164,49 +164,63 @@ class UnrollWarning:
         self.statements = 0
         self.iterations = 0
         self.warned = False
+        self.reason = None
+        self.outer_loop = None
+        self.loop_statements = {}
 
     @contextmanager
-    def static_scope(self):
+    def static_scope(self, ctx, node):
+        if not self.enabled:
+            yield
+            return
+        previous = self.outer_loop
+        if self.depth == 0:
+            self.outer_loop = (ctx.file, node.lineno + ctx.lineno_offset)
+            self.loop_statements.setdefault(self.outer_loop, 0)
         self.depth += 1
         try:
             yield
         finally:
             self.depth -= 1
+            self.outer_loop = previous
 
     def record_iteration(self, ctx, node, count):
         if not self.enabled:
             return
         self.iterations += 1
-        if self.loop_limit and count > self.loop_limit:
-            self.warn(ctx, node, f"a loop exceeded unrolling_limit={self.loop_limit}")
+        if self.reason is None and self.loop_limit and count > self.loop_limit:
+            self.reason = f"a loop exceeded unrolling_limit={self.loop_limit}"
 
     def record_statement(self, ctx, node):
         if not self.depth:
             return
         self.statements += 1
-        if self.statement_limit and self.statements > self.statement_limit:
-            self.warn(
-                ctx,
-                node,
-                f"source expansion exceeded unrolling_kernel_warning_limit={self.statement_limit}",
-            )
+        self.loop_statements[self.outer_loop] += 1
+        if self.reason is None and self.statement_limit and self.statements > self.statement_limit:
+            self.reason = f"source expansion exceeded unrolling_kernel_warning_limit={self.statement_limit}"
 
-    def warn(self, ctx, node, reason):
-        if self.warned:
+    def finish(self):
+        if self.warned or self.reason is None:
             return
         self.warned = True
-        # The diagnostic is a single snapshot. Stop accounting after emitting it.
         self.enabled = False
+        # A nested loop contributes no more statements than its enclosing
+        # outer loop. Aggregate outer loops by source location, including
+        # inlined calls, then report the largest after the transform finishes.
+        location = max(self.loop_statements, key=self.loop_statements.get)
+        contribution = self.loop_statements[location]
         warnings.warn_explicit(
-            f"Compiling '{self.name}': {reason}; so far {self.statements} expanded "
+            f"Compiling '{self.name}': {self.reason}; {self.statements} expanded "
             f"source statements across {self.iterations} ti.static iterations. "
+            f"The largest outer ti.static loop contributed {contribution} statements "
+            "(including nested loops and inlined functions). "
             "Large static expansions may compile slowly. Compilation continues "
             "with unchanged semantics. If compile-time specialization is not needed, "
             "consider a runtime outer loop. Adjust these warning thresholds or set "
             "ti.init(unrolling_limit=0, unrolling_kernel_warning_limit=0) to silence them.",
             SyntaxWarning,
-            ctx.file,
-            node.lineno + ctx.lineno_offset,
+            location[0],
+            location[1],
             module="taichi_forge",
         )
 

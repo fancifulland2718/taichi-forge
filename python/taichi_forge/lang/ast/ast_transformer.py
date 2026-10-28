@@ -1298,7 +1298,7 @@ class ASTTransformer(Builder):
 
     @staticmethod
     def build_static_for(ctx, node, is_grouped):
-        with ctx.unroll_warning.static_scope():
+        with ctx.unroll_warning.static_scope(ctx, node):
             return ASTTransformer._build_static_for(ctx, node, is_grouped)
 
     @staticmethod

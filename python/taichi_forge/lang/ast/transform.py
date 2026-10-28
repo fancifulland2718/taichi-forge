@@ -19,3 +19,4 @@ def transform_tree(tree, ctx: ASTTransformerContext):
     finally:
         if token is not None:
             _unroll_warning.reset(token)
+            warning.finish()

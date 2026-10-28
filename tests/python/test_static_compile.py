@@ -1,4 +1,5 @@
 import warnings
+import inspect
 
 import numpy as np
 import pytest
@@ -168,3 +169,32 @@ def test_static_warnings_can_be_disabled():
         warnings.simplefilter("always")
         assert calculate() == sum(range(64))
     assert not caught
+
+
+@test_utils.test(ti.cpu, unrolling_limit=0, unrolling_kernel_warning_limit=3)
+def test_static_warning_points_to_largest_outer_loop_not_helper():
+    @ti.func
+    def helper(value):
+        value += 1
+        value += 2
+        return value
+
+    @ti.kernel
+    def calculate() -> ti.i32:
+        total = 0
+        for i in ti.static(range(2)):
+            total += helper(i)  # Crosses the threshold first.
+        for j in ti.static(range(8)):
+            total += helper(j)  # Largest source contribution.
+        return total
+
+    source, first_line = inspect.getsourcelines(calculate.__wrapped__)
+    expected_line = first_line + next(i for i, line in enumerate(source) if 'range(8)' in line)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        assert calculate() == 59
+    messages = [warning for warning in caught if 'expanded source statements' in str(warning.message)]
+    assert len(messages) == 1
+    assert messages[0].filename == __file__
+    assert messages[0].lineno == expected_line
+    assert 'largest outer ti.static loop' in str(messages[0].message)

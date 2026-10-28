@@ -80,6 +80,13 @@ Use `parallelize/serialize` on CPU and `block_dim` on GPU.
 
 ## Cache Reuse Rules
 
+Static-expansion warnings are summarized when the frontend transform finishes.
+They point to the outer `ti.static` loop contributing the most visited source
+statements, including nested loops and inlined functions, instead of the helper
+statement that happened to cross the threshold. Failed transforms report partial
+counts; these are not native IR sizes. Expansion semantics do not change, and
+setting both warning thresholds to zero disables accounting.
+
 With `offline_cache=True`, each cacheable kernel publishes its complete `.tic`
 artifact through an atomic rename of a temporary file in the same directory as
 soon as compilation finishes, without waiting for reset or normal exit. The

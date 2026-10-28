@@ -24,6 +24,12 @@ the fixes below. The release column will be updated when the next version is ass
 | F070-12 | 0.7.0 | The first host read or write creates both accessor kernel definitions, retaining an unused counterpart for fields accessed in only one direction. Create each accessor on demand and retire whichever definitions exist with the SNode tree. | Next release, TBD |
 | F070-13 | 0.7.0 | Compiled kernels are only persisted at reset/normal exit, losing cache work on forced termination. Publish each `.tic` atomically and recover unindexed artifacts, retaining corrupt-file fallback and cache-disabled behavior. | Next release, TBD |
 
+F070-14: locate static-expansion warnings at the largest contributing outer loop,
+including inlined helpers, instead of the threshold-crossing statement. Nine
+checks cover shared counts, a later larger loop, failed retries, early exits and
+disabled warnings. Committed as `Locate static expansion warnings at the largest outer loop`;
+awaiting the next release.
+
 F070-13: committed with this entry as `Publish offline kernel cache artifacts before process exit`.
 17 focused checks cover CPU/CUDA/Vulkan forced termination, corruption recovery,
 concurrent publication, index reconstruction and existing reset regressions.
