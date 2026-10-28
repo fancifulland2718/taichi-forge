@@ -30,6 +30,7 @@ class _GraphCapture:
         self.owner = getattr(record, "__self__", None)
         self.build = build
         self.codes = []
+        self.dispatches = {}
         self.groups = {}
         self.dimensions = {}
         self.resources = {}
@@ -172,17 +173,24 @@ class _GraphCapture:
             hidden.append(self.symbols.setdefault(symbol_name, symbol))
         compiled = kernel.compiled_kernels[code.key]
         arguments = flatten_args((*args, *hidden))
-        builder._record_dispatch(compiled, arguments, label)
-        self.entries.append(
-            dict(semantic_key=code.semantic_key, static=contract["static"], arguments=[arg.name for arg in arguments])
+        entry_fact = dict(
+            semantic_key=code.semantic_key, static=contract["static"], arguments=[arg.name for arg in arguments]
         )
+        # This label identifies a captured source call, independent of producer
+        # objects and native kernel numbering. Control construction order need
+        # not be execution order; query the actual Graph IR after compilation.
+        capture_label = "__component_call_" + _digest((entry_fact, label))
+        self.dispatches[capture_label] = (code, entry_fact)
+        builder._record_dispatch(compiled, arguments, capture_label)
+        self.entries.append(entry_fact)
         self.codes.append(code)
+        return builder
 
     def finish(self, builder):
-        if not self.codes or len(builder._runtime_graph_dispatches) != len(self.codes):
-            raise TaichiCompilationError("Component roots currently require a nonempty ordinary dispatch sequence")
-        if builder._nodes or builder._runtime_graph_source_native_count:
-            raise TaichiCompilationError("Component root control/native regions require separate qualification")
+        if not self.codes:
+            raise TaichiCompilationError("Component roots require a nonempty captured dispatch closure")
+        if builder._runtime_graph_source_native_count:
+            raise TaichiCompilationError("Component native regions require separate qualification")
         if self.configuration != self._configuration():
             raise TaichiCompilationError("Component configuration changed while recording its Graph; retry")
         # Detect declaration/static mutation over the whole normal recording.
@@ -196,11 +204,18 @@ class _GraphCapture:
             resources=self.resources,
             values=self.values,
             bindings=self.bindings,
-            explicit=self.explicit,
+            explicit={
+                name: schema for name, schema in self.explicit.items() if name not in builder._declared_private_bindings
+            },
             entries=self.entries,
             required_capabilities=["dense_snode_group_v1", "component_root_v1"],
         )
-        if any(descriptor[0] == "ndarray" for descriptor in self.explicit.values()):
+        internal = {
+            name: schema for name, schema in self.explicit.items() if name in builder._declared_private_bindings
+        }
+        if internal:
+            facts["internal_arguments"] = internal
+        if any(descriptor[0] == "ndarray" for descriptor in facts["explicit"].values()):
             facts["required_capabilities"].append("component_explicit_ndarray_v1")
         facts["semantic_key"] = _digest(facts)
         return facts
@@ -226,42 +241,133 @@ class ComponentGraph:
             name=name,
             execution=name,
             target=module._arch.name,
-            execution_entries=[operation["entry"] for operation in json.loads(plan.to_json())["operations"]],
+            execution_entries=(
+                list(plan.kernel_entries)
+                if contract["version"] == 4
+                else [operation["entry"] for operation in json.loads(plan.to_json())["operations"]]
+            ),
         )
+        if contract["version"] == 4:
+            if plan.data_entries:
+                # Export already added native definitions. Preserve the
+                # module's existing fail-closed publication contract.
+                module._graph_export_failed = True
+                raise TaichiCompilationError("Generic control components cannot capture producer state")
+            contract["execution_fingerprint"] = _digest(
+                dict(plan=json.loads(plan.to_json()), semantic_key=contract["semantic_key"])
+            )
         module._component_roots[name] = contract
         module._content.append("component:" + name)
         return plan
 
 
-def _complete_compiler_contract(graph, contract, codes):
+def _complete_compiler_contract(graph, contract, capture):
     """Project existing compiled Graph effects and final native task facts.
 
     This is a cold query, not another effects analyzer or launch evaluator.
     Task manifests describe compiled choices; actual replay needs observation.
     """
-    from taichi_forge.graph._ir import DispatchNode, GraphAccess, SequentialRegion, _merge_parallel_access
+    from taichi_forge.graph._ir import (
+        DispatchNode,
+        GraphAccess,
+        SequentialRegion,
+        WhileRegion,
+        _merge_parallel_access,
+        graph_ir_to_dict,
+    )
     from taichi_forge.lang import impl
 
+    # Root and Sequential private declarations converge in Graph's actual
+    # fixed binding contract. A nested factory need not use root declarations.
+    for name in set(contract["explicit"]) & set(graph._spec.fixed_runtime_args):
+        contract.setdefault("internal_arguments", {})[name] = contract["explicit"].pop(name)
     nodes = []
+    entries_in_order, codes = [], []
+    has_control = False
+    skipped = 0
+
+    def dispatch_count(node):
+        return 1 if isinstance(node, DispatchNode) else sum(dispatch_count(child) for child in node.children)
 
     def visit(node):
+        nonlocal has_control, skipped
         if isinstance(node, DispatchNode):
+            if node.dispatch_label not in capture.dispatches:
+                raise TaichiCompilationError("Component Graph contains a dispatch outside its capture context")
+            code, entry = capture.dispatches[node.dispatch_label]
+            if [binding.name for binding in node.bindings] != entry["arguments"]:
+                raise TaichiCompilationError("Component Graph changed captured argument connections")
             nodes.append(node)
+            codes.append(code)
+            entries_in_order.append(entry)
+            return dict(kind="kernel", semantic_key=code.semantic_key, arguments=entry["arguments"])
         elif isinstance(node, SequentialRegion):
-            for child in node.children:
-                visit(child)
+            return dict(kind="sequence", children=[visit(child) for child in node.children])
+        elif isinstance(node, WhileRegion):
+            has_control = True
+            facts = graph_ir_to_dict(node)
+            children = [visit(node.condition)]
+            if node.max_iterations:
+                children.append(visit(node.body))
+            else:
+                # The ordinary zero-budget while still evaluates its condition,
+                # but exports no body code. Do not demand dead captures/values.
+                skipped += dispatch_count(node.body)
+                children.append(dict(kind="sequence", children=[]))
+            # The Graph IR owns these control policies. Display names, compiler
+            # counters and derived analysis facts are not semantic identities.
+            return {
+                **{
+                    key: facts[key]
+                    for key in (
+                        "kind",
+                        "predicate",
+                        "counter",
+                        "status",
+                        "max_iterations",
+                        "control_inputs",
+                        "carried_state",
+                        "chunk_size",
+                        "compound_chunk_size",
+                        "vulkan_first_chunk_strategy",
+                        "masked_execution",
+                        "lowering_mode",
+                    )
+                },
+                "children": children,
+            }
         else:
-            raise TaichiCompilationError("Component compiler facts require a qualified sequential Graph root")
+            raise TaichiCompilationError("Component compiler facts require qualified sequential/while regions")
 
-    visit(graph._spec.ir_root)
-    if len(nodes) != len(codes):
+    control = visit(graph._spec.ir_root)
+    if len(nodes) + skipped != len(capture.codes):
         raise TaichiCompilationError("Component compiled Graph changed its entry closure")
+    contract["entries"] = entries_in_order
+    used_symbols = {symbol for entry in entries_in_order for symbol in entry["arguments"]}
+    for key in ("bindings", "explicit", "internal_arguments"):
+        if key in contract:
+            contract[key] = {name: value for name, value in contract[key].items() if name in used_symbols}
+    for key, kind in (("resources", "resource"), ("values", "value")):
+        required = {value["name"] for value in contract["bindings"].values() if value["kind"] == kind}
+        contract[key] = {name: value for name, value in contract[key].items() if name in required}
+    required_groups = {value["group"] for value in contract["resources"].values()}
+    contract["groups"] = {name: value for name, value in contract["groups"].items() if name in required_groups}
+    required_dimensions = {name for code in codes for name in code.contract["dimensions"]}
+    contract["dimensions"] = {
+        name: value for name, value in contract["dimensions"].items() if name in required_dimensions
+    }
+    if not any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
+        contract["required_capabilities"] = [
+            name for name in contract["required_capabilities"] if name != "component_explicit_ndarray_v1"
+        ]
     accesses, uncertain, entries, task_cache = {}, set(), [], {}
     for node, code, entry in zip(nodes, codes, contract["entries"]):
         effects = []
         for effect in node.effects:
             binding = contract["bindings"].get(effect.resource)
-            explicit = contract["explicit"].get(effect.resource)
+            explicit = contract["explicit"].get(effect.resource) or contract.get("internal_arguments", {}).get(
+                effect.resource
+            )
             if explicit is not None and effect.runtime_bound:
                 if explicit[0] == "ndarray":
                     effects.append(dict(argument=effect.resource, access=effect.access.value))
@@ -304,6 +410,12 @@ def _complete_compiler_contract(graph, contract, codes):
             resource["effects_precision"] = "compiler_proven"
     contract["version"] = 2
     contract["required_capabilities"].append("component_compiler_facts_v1")
+    if has_control or "internal_arguments" in contract:
+        contract["version"] = 4
+        contract["control"] = control
+        contract.setdefault("internal_arguments", {})
+        contract["configuration"] = {}
+        contract["required_capabilities"].append("component_control_v1")
     contract["semantic_key"] = _digest({name: value for name, value in contract.items() if name != "semantic_key"})
     contract["compilation"] = dict(version=1, entries=entries, task_scope="compiled_not_observed_replay")
     return contract
@@ -319,15 +431,23 @@ def compile_component_graph(component, record, *args, _build=None, **kwargs):
     if _build is not None:
         _build.check_time("before backend compilation")
     graph = builder.compile()
-    contract = _complete_compiler_contract(graph, contract, capture.codes)
-    if capture.configuration:
-        # Admission describes the whole normal root, including Python choices
-        # which may alter its dispatch sequence. It never widens a kernel ABI
-        # or its actual static dependency key. Same code may admit several
-        # configurations; this fixed root exports the selected one explicitly.
-        contract["version"] = 3
-        contract["required_capabilities"].append("component_static_choices_v1")
-        contract["configuration"] = capture.configuration
-    if _build is not None:
-        _build.check_time("after backend compilation")
-    return ComponentGraph(graph, contract)
+    try:
+        contract = _complete_compiler_contract(graph, contract, capture)
+        if capture.configuration:
+            # Admission describes the whole normal root, including Python choices
+            # which may alter its dispatch sequence. It never widens a kernel ABI
+            # or its actual static dependency key. Same code may admit several
+            # configurations; this fixed root exports the selected one explicitly.
+            contract["version"] = max(contract["version"], 3)
+            contract["required_capabilities"].append("component_static_choices_v1")
+            contract["configuration"] = capture.configuration
+        if _build is not None:
+            _build.check_time("after backend compilation")
+        if contract["version"] == 4:
+            from taichi_forge_runtime.aot._component import _control_identity
+
+            contract["semantic_key"] = _control_identity(contract)
+        return ComponentGraph(graph, contract)
+    except BaseException:
+        graph.close()
+        raise

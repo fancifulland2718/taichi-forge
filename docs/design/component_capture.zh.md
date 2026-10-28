@@ -15,8 +15,8 @@
 
 内部 `compile(entry, ..., owner=model, template_args={...})` 可编译这种原 helper；
 绑定方法仍可省略 owner。`test_aot_component_helpers.py` 在 CPU/CUDA 验证不同 owner/尺寸
-复用、静态模板变化、错误资源类型和冻结后的 Runtime 消费。条件/循环组件根的完整捕获
-仍需下一片资格化；这里没有以平铺 helper 成功宣称真实 EFC/TGS 控制完成。
+复用、静态模板变化、错误资源类型和冻结后的 Runtime 消费；这些机制门槛不代替真实
+EFC/TGS 控制资格。
 
 组件声明环境与每核 ABI 分层。原属性访问和嵌套 `ti.func` 只为实际使用的捕获追加
 native 参数；一次前端遍历后执行 `finalize_params()`，参数初始化区仍在数值主体之前结束。
@@ -105,9 +105,22 @@ TCM hash 保持不变，产物无模型数据载荷及固定根依赖。该探�
 
 `Component.compile_graph(normal_record)` 现在沿原 GraphBuilder 记录原装饰入口，收集
 各入口的实际捕获，并通过既有 Graph lowering/`Module.add_execution_plan` 自动导出
-闭包。应用无需维护 Kernel 名单或绑定表。首期只覆盖一个正常 owner 的顺序根；控制区域、
-native 节点、外部 Ndarray 所有权及 recipe 搜索需分别取得资格，不能从本次成功推定。
+闭包。应用无需维护 Kernel 名单或绑定表。当前覆盖一个正常 owner 的顺序根及以下 while
+切片；if/switch、native 节点、捕获 Ndarray 的实例所有权及 recipe 搜索仍需分别取得资格。
 根身份包含每次调用的参数连接及显式参数类型；动态模型值不进入代码身份。
+
+顺序子区域继承同一捕获上下文，`Sequential.create_sequential()` 继续传递该上下文和
+私有资源声明。CPU/CUDA 的 while 组件小例包含分组、逐步停止掩码、精确尾部和 private
+控制数组；所有数值入口仍来自正常 Kernel/func。代码不通过 Python 逐轮解释执行。
+版本 4 查询从现有 Graph IR 投影控制策略，并校验其语义身份与实际导出 Plan 指纹。
+静态零预算保留初始条件检查和收尾，不要求不可达循环体的资源/值；同根布局兄弟仍保留。
+固定布局资源由组件实例持有，Graph 控制 scratch 按原 Plan 私有资源合同创建。
+
+`test_aot_component_control.py` 检查 0/1/3/4/5/9 预算、空活动集、提前停止、跨 producer
+尺寸及尾部哨兵；改变产物中的循环预算会在消费前拒绝。有限 RootOption 域继续与数值代码
+身份分离。源码 task 查询描述数值入口，不冒充运行时动态次数或生成的控制 Kernel 数量。
+本切片尚不证明嵌套 TGS、真实 EFC 收敛或 Vulkan 资格，已有 loaded Plan Nsight 记录也
+不是此次组件捕获路径的性能证据。
 
 Runtime 的 `module.component(name)` 查询不可变合同，`instantiate(dimensions)` 使用
 原生权威 SNode 规则创建独立根；`initialize(data, zero=...)` 明确提供模型数据或零值。

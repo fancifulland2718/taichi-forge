@@ -16437,7 +16437,9 @@ class Sequential:
         _declared_private_bindings=None,
         _capture_recipe_sources=True,
         _recipe_task_facts=None,
+        _component_capture=None,
     ):
+        self._component_capture = _component_capture
         # Share declarations while recording; append freezes referenced owners.
         self._declared_private_bindings = (
             {} if _declared_private_bindings is None else _declared_private_bindings
@@ -16543,8 +16545,19 @@ class Sequential:
         self._fixed_runtime_args[name] = value
         return Arg(ArgKind.SCALAR, name, dtype)
 
+    def create_sequential(self):
+        """Create a child recording with the same resource and compile context."""
+        return Sequential(
+            _declared_private_bindings=self._declared_private_bindings,
+            _capture_recipe_sources=self._capture_recipe_sources,
+            _recipe_task_facts=self._recipe_task_facts,
+            _component_capture=self._component_capture,
+        )
+
     def dispatch(self, kernel_fn, *args, template_args=None, label=None):
         label = _normalize_dispatch_label(label)
+        if self._component_capture is not None:
+            return self._component_capture.dispatch(self, kernel_fn, args, template_args, label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
         self._bind_declared_private_args(unzipped_args)
@@ -16567,6 +16580,12 @@ class Sequential:
             )
             if source is not None:
                 self._kernel_configuration_sources[len(self._items)] = source
+        return self._record_dispatch(kernel_cpp, unzipped_args, label, ir_node=ir_node)
+
+    def _record_dispatch(self, kernel_cpp, unzipped_args, label, *, ir_node=None):
+        if ir_node is None:
+            self._bind_declared_private_args(unzipped_args)
+            ir_node = _dispatch_ir_node(kernel_cpp, unzipped_args, dispatch_label=label)
         self._dispatches.append((kernel_cpp, unzipped_args))
         self._dispatch_labels.append(label)
         self._items.append(("dispatch", kernel_cpp, unzipped_args, label))
@@ -18263,6 +18282,7 @@ class GraphBuilder:
             _declared_private_bindings=self._declared_private_bindings,
             _capture_recipe_sources=self._capture_recipe_sources,
             _recipe_task_facts=self._recipe_task_facts,
+            _component_capture=self._component_capture,
         )
 
     def append(self, node):

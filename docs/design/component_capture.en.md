@@ -21,9 +21,8 @@ without becoming component-private storage.
 Internal `compile(entry, ..., owner=model, template_args={...})` compiles these
 original helpers; bound methods may omit owner. CPU/CUDA checks in
 `test_aot_component_helpers.py` cover reuse across owners/sizes, changed static
-templates, wrong resource types and frozen Runtime consumption. Full conditional
-and loop component roots still require qualification; flat helper support does
-not qualify real EFC/TGS control.
+templates, wrong resource types and frozen Runtime consumption. These mechanism
+checks do not qualify real EFC/TGS control.
 
 Optional `StaticValue(choices=(...))` declares a finite deployment domain. This
 is admission policy; numerical identity still uses only actual static captures.
@@ -152,10 +151,29 @@ or per-kernel resource tables.
 `Component.compile_graph(normal_record)` now records original decorated entries
 through GraphBuilder, collects actual captures, and exports the closure through
 existing Graph lowering and `Module.add_execution_plan`. Applications do not
-maintain kernel lists or binding tables. The first slice covers sequential roots
-with one normal owner. Control regions, native nodes, external Ndarray ownership
-and recipe search need separate qualification. Root identity includes argument
+maintain kernel lists or binding tables. Coverage includes sequential roots with
+one normal owner and the while slice below. If/switch, native nodes, captured
+Ndarray instance ownership and recipe search need separate qualification. Root identity includes argument
 connections and explicit types; dynamic model values do not specialize code.
+
+Sequential subregions inherit the capture context; `Sequential.create_sequential()`
+propagates it together with private resource declarations. The CPU/CUDA while
+component check covers grouped work, per-step stopping masks, exact tails and
+private control arrays. All numerical entries remain normal Kernel/func definitions;
+there is no Python per-iteration executor. Version 4 projects control policies
+from existing Graph IR and checks semantic identity plus the actual exported Plan
+fingerprint. A static zero budget retains the initial condition and suffix, without
+requiring unreachable body captures. Layout siblings remain in their original roots.
+Component instances own their resource groups; control scratch uses existing Plan
+private-resource construction.
+
+`test_aot_component_control.py` checks budgets 0/1/3/4/5/9, empty active work, early
+termination, larger consumer dimensions and tail sentinels. Changing the artifact's
+loop budget fails before consumption. Finite RootOption admission stays separate
+from numerical identity. Task queries describe numerical entries, not dynamic
+execution counts or generated control kernels. This slice does not qualify nested
+TGS, real EFC convergence or Vulkan; earlier loaded-Plan Nsight traces are not
+performance evidence for this new component capture path.
 
 Runtime `module.component(name)` queries the immutable contract;
 `instantiate(dimensions)` creates independent roots using authoritative native

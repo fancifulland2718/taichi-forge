@@ -1,5 +1,6 @@
 """Cold component resource binding onto existing native ExecutionPlans."""
 
+import hashlib
 import json
 import threading
 from types import MappingProxyType
@@ -7,6 +8,19 @@ import weakref
 
 from .._dimensions import evaluate_extent, extent_dependencies, validate_extent
 from .._static_values import read_static_key, static_key
+
+
+def _control_identity(contract):
+    """Canonical compiler-fact projection; no layout or execution interpretation."""
+    ignored = {
+        "semantic_key", "compilation", "configuration", "name", "execution",
+        "execution_entries", "execution_fingerprint", "target",
+    }
+    facts = {key: value for key, value in contract.items() if key not in ignored}
+    facts["required_capabilities"] = [
+        value for value in facts["required_capabilities"] if value != "component_static_choices_v1"
+    ]
+    return hashlib.sha256(json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _dimensions(declarations, supplied):
@@ -80,11 +94,13 @@ class Component:
                 "execution_entries",
                 "target",
             }
-            if contract.get("version") in (2, 3):
+            if contract.get("version") in (2, 3, 4):
                 required.add("compilation")
-            if contract.get("version") == 3:
+            if contract.get("version") in (3, 4):
                 required.add("configuration")
-            if set(contract) != required or contract["version"] not in (1, 2, 3) or contract["name"] != name:
+            if contract.get("version") == 4:
+                required.update(("control", "internal_arguments", "execution_fingerprint"))
+            if set(contract) != required or contract["version"] not in (1, 2, 3, 4) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
             if any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
@@ -99,7 +115,13 @@ class Component:
                 ):
                     raise ValueError("Invalid component compiler facts")
             self._configuration = {}
-            if contract["version"] == 3:
+            if contract["version"] == 4:
+                capabilities.add("component_control_v1")
+                if not isinstance(contract["configuration"], dict):
+                    raise ValueError("Invalid component configuration domain")
+                if _control_identity(contract) != contract["semantic_key"]:
+                    raise ValueError("Component control facts differ from their semantic identity")
+            if contract["version"] == 3 or (contract["version"] == 4 and contract["configuration"]):
                 capabilities.add("component_static_choices_v1")
                 if not isinstance(contract["configuration"], dict) or not contract["configuration"]:
                     raise ValueError("Invalid component configuration domain")
@@ -173,7 +195,21 @@ class Component:
             plan = module.execution_plan(contract["execution"])
             document = json.loads(plan.to_json())
             operations = document["operations"]
-            if (
+            if contract["version"] == 4:
+                fingerprint = hashlib.sha256(
+                    json.dumps(
+                        dict(plan=document, semantic_key=contract["semantic_key"]),
+                        sort_keys=True, separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                if (
+                    fingerprint != contract["execution_fingerprint"]
+                    or list(plan.kernel_entries) != contract["execution_entries"]
+                ):
+                    raise ValueError("Component control contract differs from its actual execution plan")
+                if plan.data_entries:
+                    raise ValueError("Generic component Plan contains producer data")
+            elif (
                 document.get("initialization")
                 or document.get("resources")
                 or len(operations) != len(contract["entries"])
