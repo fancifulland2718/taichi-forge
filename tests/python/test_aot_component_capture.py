@@ -173,3 +173,26 @@ def test_uncategorized_closure_and_field_bindings_are_rejected():
     owner.out = ti.field(ti.f32, shape=7)
     with pytest.raises(ti.TaichiCompilationError, match="SNode layout contract"):
         _declarations().compile(owner.evaluate, 0.0)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_internal_matrix_functions_and_stable_definition_contents():
+    from taichi_forge.aot._component import _definition
+
+    @ti.data_oriented
+    class Model:
+        @ti.kernel
+        def cross(self, x: ti.f32) -> ti.f32:
+            return ti.Vector([x, 2.0, 3.0]).cross(ti.Vector([0.0, 1.0, 0.0]))[2]
+
+    owner = Model()
+    function = owner.cross._primal.func
+    original = _definition(function)
+    # Holding references to constants must not change a content-based key.
+    retained_constants = list(function.__code__.co_consts)
+    env = Component()
+    code = env.compile(owner.cross, 7.0)
+    assert _definition(function) == original
+    assert env.compile(Model().cross, 19.0) is code
+    assert code.run(env, owner, 19.0) == 19.0
+    assert retained_constants == list(function.__code__.co_consts)

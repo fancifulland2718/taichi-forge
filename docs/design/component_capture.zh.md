@@ -79,7 +79,20 @@ matrix/rank-0 读写、别名、错误 Runtime、非法维度和 loaded Kernel �
 TCM hash 保持不变，产物无模型数据载荷及固定根依赖。该探针是 A2 的机制证据，
 不是正式 wheel 或完整真实组件验收。
 
-Graph 组件自动闭包、真实 GeoPhys RNE、完整初始化/约束投影及 C 的完整生命周期
+实验入口 `ti.experimental.ResourceScope(owner, builder=...)` 在正常资源创建处保留
+维度来源；`dim("n").maximum(1)`、加法等有界声明表达式分别表达逻辑数量与分配容量。
+它调用普通 Field/FieldsBuilder，不求解应用 Python 源码，也不计算另一套字节布局。
+内部 `Component.from_owner` 从这些声明及实际 SNode 根形成环境，原入口只收集实际
+捕获。独立无关组不进 ABI/代码身份；同根布局依赖必须完整。来源可查询，但文件路径
+和行号不进入语义 Key。定义指纹使用不可变字节码内容，避免 marshal 引用编码随前端
+解析变化导致的伪失效；Matrix 内部 DSL 函数与应用 helper 使用相同依赖 guard。
+
+真实 GeoPhys 正常构造现已提供有限 RNE 数值证据：CPU/CUDA 上 3/7/5 刚体、不同拓扑、
+质量、qpos/qvel 和重力复用原 `_rne_bias_force`，与普通 JIT 对照；静止链另检查解析重力矩。
+正常资源分组先隔离 body 状态、广义动力学和 bias-force 工作区，所有路径共用这些分组；
+没有复制数值定义或添加逐核资源表。这不是整个正常组件的冻结 TCM 消费验收。
+
+Graph 组件自动闭包、真实 RNE 的隔离产物消费、完整初始化/约束投影及 C 的完整生命周期
 仍需接通。当前入口级导出不替代组件根组织；测试中的合同消费驱动不是生产调度器。
 原 Field producer 调用的验证尚未全部移到冷 prepare 路径，没有运行性能或全 SDK
 完成结论。

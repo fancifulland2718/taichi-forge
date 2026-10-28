@@ -9,14 +9,15 @@ deliberately not converted to unrelated ndarrays here.
 import hashlib
 import inspect
 import json
-import marshal
 import operator
+import sys
 from dataclasses import dataclass
-from types import MappingProxyType, ModuleType
+from types import CodeType, MappingProxyType, ModuleType
 
 from taichi_forge.lang import impl, kernel_arguments
+from taichi_forge.lang._resource_declaration import Extent, evaluate_extent, extent_dependencies, validate_extent
 from taichi_forge.lang.exception import TaichiCompilationError
-from taichi_forge.lang.matrix import MatrixType
+from taichi_forge.lang.matrix import Matrix, MatrixType, Vector
 from taichi_forge.lang.util import cook_dtype
 from taichi_forge.types import primitive_types
 from taichi_forge.types.ndarray_type import NdarrayType
@@ -44,9 +45,50 @@ def _function(value):
     return value
 
 
+def _dsl_function(value):
+    return getattr(value, "_is_taichi_function", False) or (
+        inspect.isfunction(value) and value.__module__.startswith("taichi_forge.")
+    )
+
+
 def _definition(value):
     value = _function(value)
-    return (value.__module__, value.__qualname__, hashlib.sha256(marshal.dumps(value.__code__)).hexdigest())
+    return (value.__module__, value.__qualname__, _digest(_code_definition(value.__code__)))
+
+
+def _code_definition(code):
+    # marshal's reference/intern encoding can change when inspect/AST parsing
+    # retains constants, even though the immutable code object did not change.
+    # Hash semantic contents, not serializer reference bookkeeping or locations.
+    def constant(value):
+        if isinstance(value, CodeType):
+            return ("code", _code_definition(value))
+        if isinstance(value, tuple):
+            return ("tuple", tuple(constant(item) for item in value))
+        if isinstance(value, frozenset):
+            return ("frozenset", sorted((constant(item) for item in value), key=lambda x: json.dumps(x)))
+        if isinstance(value, bytes):
+            return ("bytes", value.hex())
+        if isinstance(value, complex):
+            return ("complex", value.real.hex(), value.imag.hex())
+        if value is Ellipsis:
+            return ("ellipsis",)
+        return _static_value(value)
+
+    return (
+        sys.implementation.cache_tag,
+        code.co_code.hex(),
+        tuple(constant(value) for value in code.co_consts),
+        code.co_names,
+        code.co_varnames,
+        code.co_freevars,
+        code.co_cellvars,
+        code.co_argcount,
+        code.co_posonlyargcount,
+        code.co_kwonlyargcount,
+        code.co_flags,
+        getattr(code, "co_exceptiontable", b"").hex(),
+    )
 
 
 def _member(owner, name):
@@ -123,12 +165,16 @@ class Dimension:
 
     kind: str = "extent"
     capacity: str = ""
+    expression: tuple = ()
 
     @property
     def schema(self):
         if self.kind not in ("extent", "active") or (self.kind == "extent" and self.capacity):
             raise ValueError("Dimension requires extent, or active with an optional capacity reference")
-        return ("dimension", "i32", self.kind, self.capacity)
+        base = ("dimension", "i32", self.kind, self.capacity)
+        if self.expression:
+            validate_extent(self.expression)
+        return (*base, self.expression) if self.expression else base
 
     def declare(self, name):
         return kernel_arguments.decl_scalar_arg(primitive_types.i32, name, 0)
@@ -142,7 +188,14 @@ def _dimension_value(component, owner, name, visiting=()):
     declaration = component.declarations.get(name)
     if not isinstance(declaration, Dimension) or name in visiting:
         raise TaichiCompilationError(f"Invalid or cyclic dimension declaration {name!r}")
-    value = operator.index(_member(owner, name))
+    value = (
+        evaluate_extent(
+            declaration.expression,
+            lambda dependency: _dimension_value(component, owner, dependency, (*visiting, name)),
+        )
+        if declaration.expression
+        else operator.index(_member(owner, name))
+    )
     minimum = 1 if declaration.kind == "extent" else 0
     if not minimum <= value <= 2**31 - 1:
         raise TaichiCompilationError(f"Dimension {name!r} is outside its declared i32 {declaration.kind} range")
@@ -274,7 +327,7 @@ class Component:
     is supplied by the application. Graph export follows separately.
     """
 
-    __slots__ = ("_declarations",)
+    __slots__ = ("_declarations", "_sources")
 
     def __init__(self, **declarations):
         for name, declaration in declarations.items():
@@ -284,10 +337,64 @@ class Component:
                 raise TypeError("Component declarations require attribute IDs and supported declaration types")
             declaration.schema  # Validate without reading an instance.
         self._declarations = MappingProxyType(dict(declarations))
+        self._sources = MappingProxyType({})
 
     @property
     def declarations(self):
         return self._declarations
+
+    @classmethod
+    def from_owner(cls, owner, **values):
+        """Project opt-in normal construction declarations, never a kernel list.
+
+        Actual roots determine groups. Values remain explicit static/runtime
+        declarations; no Python attribute dictionary is scanned for captures.
+        """
+        from taichi_forge.lang.matrix import MatrixType, VectorType
+
+        registry = _member(owner, "_forge_resource_declarations")
+        impl.get_runtime().materialize(for_aot=True)
+        declarations = {name: Dimension("active") for name in registry["dimensions"]}
+        sources = dict(registry["dimensions"])
+        roots = {}
+        fields = {}
+        for name, declaration in registry["fields"].items():
+            field = _member(owner, name)
+            if getattr(field, "_logical_resource_declaration", None) != declaration:
+                raise TaichiCompilationError(f"Normal resource declaration {name!r} was replaced without redeclaration")
+            nodes = tuple(member.ptr.snode() for member in field._get_field_members())
+            root_ids = {node.get_snode_tree_id() for node in nodes}
+            if len(root_ids) != 1:
+                raise TaichiCompilationError(f"Normal resource {name!r} spans multiple SNode groups")
+            root_id = next(iter(root_ids))
+            roots.setdefault(root_id, set()).add(declaration["identity"])
+            fields[name] = (field, declaration, root_id)
+        for name, (field, declaration, root_id) in fields.items():
+            if name.startswith("__extent_"):
+                raise ValueError("Normal resource IDs cannot use the reserved __extent_ prefix")
+            sources[name] = declaration["source"]
+            shape = []
+            for extent in declaration["shape"]:
+                if isinstance(extent, Extent):
+                    identifier = "__extent_" + _digest(extent.expression)
+                    declarations[identifier] = Dimension(expression=extent.expression)
+                    sources[identifier] = declaration["source"]
+                    shape.append(identifier)
+                else:
+                    shape.append(extent)
+            dtype = field.dtype
+            if hasattr(field, "n"):
+                dtype = VectorType(field.n, dtype) if field.ndim == 1 else MatrixType(field.n, field.m, 2, dtype)
+            # The normal declaration identity, not a tree/object/instance ID.
+            group = "snode:" + min(roots[root_id])
+            declarations[name] = DenseField(dtype, tuple(shape), group)
+        for name, declaration in values.items():
+            if name in declarations:
+                raise ValueError(f"Duplicate normal component declaration {name!r}")
+            declarations[name] = declaration
+        result = cls(**declarations)
+        result._sources = MappingProxyType(sources)
+        return result
 
     def compile(self, entry, *args):
         from taichi_forge.lang.kernel_impl import _process_args
@@ -350,6 +457,8 @@ class _Capture:
         self.used[name] = declaration.schema
         if declaration.capacity:
             self.dimension_dependency(declaration.capacity)
+        for dependency in extent_dependencies(declaration.expression) if declaration.expression else ():
+            self.dimension_dependency(dependency)
 
     def attribute(self, ctx, name):
         declaration = self.declarations.get(name)
@@ -407,11 +516,13 @@ class _Capture:
         value = ctx.global_vars[node.id]
         if isinstance(value, ModuleType) and value.__name__.startswith("taichi_forge"):
             return
-        if getattr(value, "_is_taichi_function", False):
+        if _dsl_function(value):
             self.functions[(ctx.func.func, node.id)] = _definition(value)
             return
         if id(value) in primitive_types.type_ids or isinstance(value, MatrixType):
             return
+        if value is Matrix or value is Vector:
+            return  # Built-in DSL constructors, also available through ti.Matrix/Vector.
         raise TaichiCompilationError(
             f"Component entry {self.kernel.func.__qualname__}: undeclared global/closure capture {node.id!r}; "
             "use a declared component value or a literal"
@@ -427,10 +538,9 @@ class _Capture:
         raise TaichiCompilationError("Uncontrolled Python calls are not supported in component captures")
 
     def finish(self):
-        if not self.matches(self.component, self.owner):
-            raise TaichiCompilationError(
-                "Component declarations or static dependencies changed during compilation; retry"
-            )
+        mismatch = self.dependency_mismatch(self.component, self.owner)
+        if mismatch:
+            raise TaichiCompilationError(f"Component dependency changed during compilation: {mismatch}; retry")
         self.contract = {
             "version": 1,
             "entry": self.entry_definition,
@@ -442,15 +552,21 @@ class _Capture:
             "dimensions": {name: schema for name, schema in self.used.items() if schema[0] == "dimension"},
             "methods": sorted(self.methods.items()),
             "functions": sorted((name, definition) for (_, name), definition in self.functions.items()),
+            "declaration_sources": {
+                name: self.component._sources[name] for name in self.used if name in self.component._sources
+            },
         }
 
     def matches(self, component, owner):
+        return self.dependency_mismatch(component, owner) is None
+
+    def dependency_mismatch(self, component, owner):
         if _definition(self.kernel.func) != self.entry_definition:
-            return False
+            return "entry definition"
         for name, schema in self.used.items():
             declaration = component.declarations.get(name)
             if declaration is None or declaration.schema != schema:
-                return False
+                return f"declaration {name!r}"
             if isinstance(declaration, Dimension):
                 _dimension_value(component, owner, name)
         roots = set()
@@ -460,23 +576,23 @@ class _Capture:
                 raise TaichiCompilationError("Distinct component groups cannot split the same SNode root")
             roots.add(root_id)
             if actual != schema:
-                return False
+                return f"layout of group {group!r}"
             for name, (member_group, paths) in self.member_paths.items():
                 if member_group == group and members.get(name) != paths:
-                    return False
+                    return f"member {name!r} in group {group!r}"
         for name, value in self.static.items():
             if _static_value(_member(owner, name)) != value:
-                return False
+                return f"static value {name!r}"
         for name, definition in self.methods.items():
             value = inspect.getattr_static(owner, name, None)
             if not getattr(value, "_is_taichi_function", False) or _definition(value) != definition:
-                return False
+                return f"method {name!r}"
         for (function, name), definition in self.functions.items():
             variables = inspect.getclosurevars(function)
             value = {**variables.globals, **variables.nonlocals}.get(name)
-            if not getattr(value, "_is_taichi_function", False) or _definition(value) != definition:
-                return False
-        return True
+            if not _dsl_function(value) or _definition(value) != definition:
+                return f"function {name!r} in {function.__qualname__}"
+        return None
 
 
 class _ComponentCode:
@@ -484,7 +600,9 @@ class _ComponentCode:
         self.kernel = kernel
         self.key = key
         self.runtime = kernel.runtime
-        self.semantic_key = _digest(context.contract)
+        self.semantic_key = _digest(
+            {key: value for key, value in context.contract.items() if key != "declaration_sources"}
+        )
         # Copy plain dependency facts, never the lowering context/owner/Exprs.
         self.entry_definition = context.entry_definition
         self.used = dict(context.used)
@@ -501,6 +619,7 @@ class _ComponentCode:
         )
 
     matches = _Capture.matches
+    dependency_mismatch = _Capture.dependency_mismatch
 
     @property
     def contract(self):

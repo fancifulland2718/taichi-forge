@@ -111,7 +111,26 @@ tails and full Field iteration are checked; the TCM hash stays fixed, with no
 model payloads or fixed-root dependencies. This is an A2 mechanism probe, not a
 release wheel or complete real-component acceptance.
 
-Automatic Graph/component closure, real GeoPhys RNE, full initialization and
+Experimental `ti.experimental.ResourceScope(owner, builder=...)` records dimension
+provenance during normal construction. Bounded declarations such as
+`dim("n").maximum(1)` distinguish logical counts from allocated capacities.
+Factories use ordinary Field/FieldsBuilder construction, with no Python source
+interpreter or separate byte-layout calculator. Internal `Component.from_owner`
+projects these declarations and actual SNode roots; individual entries retain
+only their numerical and layout dependencies. Independent unused groups do not
+affect ABI or code identity. Source locations are queryable but excluded from
+the semantic key. Definition guards hash immutable bytecode contents rather than
+marshal reference encoding, which can change during frontend inspection.
+Internal Matrix DSL functions participate in the same dependency guards.
+
+Normal GeoPhys construction now provides a bounded numerical RNE gate on CPU/CUDA:
+3/7/5 bodies with different topology, mass, qpos/qvel and gravity reuse the original
+entry and agree with ordinary JIT. A resting chain also checks analytic gravity
+moments. Body state, generalized dynamics and bias-force workspaces have explicit
+normal groups shared by JIT and deployment, with no copied numerical definitions
+or per-kernel resource tables. This is not isolated real-component TCM acceptance.
+
+Automatic Graph/component closure, isolated real RNE consumption, full initialization and
 constraint projections, and complete instance lifetimes remain work in progress.
 Entry export does not replace component-root organization; the test contract
 driver is not a production scheduler. Producer Field calls still perform checks
