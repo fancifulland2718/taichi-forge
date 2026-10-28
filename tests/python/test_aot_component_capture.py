@@ -1,5 +1,7 @@
 import gc
+import importlib.util
 import weakref
+from types import ModuleType
 
 import numpy as np
 import pytest
@@ -196,3 +198,28 @@ def test_internal_matrix_functions_and_stable_definition_contents():
     assert env.compile(Model().cross, 19.0) is code
     assert code.run(env, owner, 19.0) == 19.0
     assert retained_constants == list(function.__code__.co_consts)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_legacy_import_of_same_frontend_is_a_dsl_module():
+    spec = importlib.util.spec_from_file_location("taichi", ti.__file__, submodule_search_locations=list(ti.__path__))
+    compat = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(compat)
+    unrelated = ModuleType("taichi")
+    unrelated.cast, unrelated.f32 = ti.cast, ti.f32
+
+    @ti.data_oriented
+    class Model:
+        @ti.kernel
+        def cast(self, value: ti.i32) -> ti.f32:
+            return compat.cast(value, compat.f32)
+
+        @ti.kernel
+        def invalid(self, value: ti.i32) -> ti.f32:
+            return unrelated.cast(value, unrelated.f32)
+
+    owner, environment = Model(), Component()
+    code = environment.compile(owner.cast, 7)
+    assert code.run(environment, owner, 13) == 13.0
+    with pytest.raises(ti.TaichiCompilationError, match="undeclared global/closure capture 'unrelated'"):
+        environment.compile(owner.invalid, 7)

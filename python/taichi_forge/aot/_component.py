@@ -604,8 +604,19 @@ class _Capture:
         if node.id not in ctx.global_vars:
             return  # Builtins are checked at their call site.
         value = ctx.global_vars[node.id]
-        if isinstance(value, ModuleType) and value.__name__.startswith("taichi_forge"):
-            return
+        if isinstance(value, ModuleType):
+            if value.__name__ == "taichi_forge" or value.__name__.startswith("taichi_forge."):
+                return
+            # Some consumers load this same package under the legacy public
+            # import name. Qualify its actual package and frontend, not an
+            # arbitrary module merely named "taichi" or re-exporting cast.
+            frontend = sys.modules["taichi_forge"]
+            if (
+                value.__name__ == "taichi"
+                and vars(value).get("__file__") == frontend.__file__
+                and vars(value).get("lang") is frontend.lang
+            ):
+                return
         if _dsl_function(value):
             self.functions[(ctx.func.func, node.id)] = _definition(value)
             return
