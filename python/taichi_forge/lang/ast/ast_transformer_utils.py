@@ -242,6 +242,8 @@ class ASTTransformerContext:
         source_info_cache=None,
     ):
         self.func = func
+        kernel = impl.get_runtime().current_kernel
+        self.deployment = getattr(kernel, "_deployment_context", None)
         self.local_scopes = []
         self.loop_scopes: List[LoopScopeAttribute] = []
         self.excluded_parameters = excluded_parameters

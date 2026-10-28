@@ -68,6 +68,8 @@ def boundary_type_cast_warning(expression):
 class ASTTransformer(Builder):
     @staticmethod
     def build_Name(ctx, node):
+        if ctx.deployment is not None and not ctx.is_var_declared(node.id):
+            ctx.deployment.check_name(ctx, node)
         node.ptr = ctx.get_var_by_name(node.id)
         if isinstance(node, (ast.stmt, ast.expr)) and isinstance(node.ptr, Expr):
             node.ptr.dbg_info = _ti_core.DebugInfo(ctx.get_pos_info(node))
@@ -569,6 +571,8 @@ class ASTTransformer(Builder):
                 args.append(arg.ptr)
         keywords = dict(ChainMap(*[keyword.ptr for keyword in node.keywords]))
         func = node.func.ptr
+        if ctx.deployment is not None:
+            ctx.deployment.check_call(func)
 
         if id(func) in [id(print), id(impl.ti_print)]:
             ctx.func.has_print = True
@@ -786,7 +790,8 @@ class ASTTransformer(Builder):
             for k, v in create_variable_later.items():
                 ctx.create_variable(k, v)
 
-            impl.get_runtime().compiling_callable.finalize_params()
+            if ctx.deployment is None:
+                impl.get_runtime().compiling_callable.finalize_params()
             impl.get_runtime().compiling_callable.finish_argument_initialization()
             # remove original args
             node.args.args = []
@@ -871,6 +876,11 @@ class ASTTransformer(Builder):
 
         with ctx.variable_scope_guard():
             build_stmts(ctx, node.body)
+
+        if ctx.is_kernel and ctx.deployment is not None:
+            # Captures are discovered by this same traversal. Only parameters
+            # actually used by this entry have been appended to the callable.
+            impl.get_runtime().compiling_callable.finalize_params()
 
         return None
 
@@ -1061,6 +1071,10 @@ class ASTTransformer(Builder):
             raise e
 
         if ASTTransformer.build_attribute_if_is_dynamic_snode_method(ctx, node):
+            return node.ptr
+
+        if ctx.deployment is not None and node.value.ptr is ctx.deployment.owner:
+            node.ptr = ctx.deployment.attribute(ctx, node.attr)
             return node.ptr
 
         if isinstance(node.value.ptr, Expr) and not hasattr(node.value.ptr, node.attr):

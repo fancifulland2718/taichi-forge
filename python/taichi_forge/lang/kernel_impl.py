@@ -368,7 +368,10 @@ class Func:
 
         # P9.A-2 (F2) — auto_real_function: one-shot promotion check before
         # entering the inline path. Once promoted, stays promoted.
-        if not self.is_real_function and not self._auto_promoted:
+        deployment = getattr(impl.get_runtime().current_kernel, "_deployment_context", None)
+        if deployment is not None and self.is_real_function:
+            raise TaichiSyntaxError("Component capture does not yet support real_func; use an inline ti.func")
+        if deployment is None and not self.is_real_function and not self._auto_promoted:
             if self._can_auto_promote() and self._should_auto_promote():
                 self._auto_promoted = True
                 self.is_real_function = True
@@ -394,6 +397,7 @@ class Func:
         runtime = impl.get_runtime()
         if (
             runtime.inline_ir_cache
+            and deployment is None
             and _SOURCE_TEMPLATE_CACHE
             and not self.pyfunc
             and not impl.default_cfg().auto_real_function
@@ -1411,6 +1415,8 @@ class Kernel:
     def reset(self):
         self.runtime = impl.get_runtime()
         self.compiled_kernels = {}
+        self._deployment_context = None
+        self._component_candidates = []
         # Four weak-guarded entries cover common ping-pong and triple-buffer
         # bindings without turning a Kernel into an unbounded resource owner.
         # Keep the singular attribute as the MRU alias for compatibility with
@@ -1650,6 +1656,7 @@ class Kernel:
         range_one_to_one=False,
         offload_execution_plan=None,
         for_aot=False,
+        deployment=None,
     ):
         if key is None:
             key = (self.func, 0, self.autodiff_mode)
@@ -1669,7 +1676,7 @@ class Kernel:
                 force=self.runtime._resident_specialization_count
                 >= self.runtime.kernel_specialization_limit
             )
-            if offload_execution_plan is None and self._try_relocatable_template(
+            if deployment is None and offload_execution_plan is None and self._try_relocatable_template(
                 key, args, task_launch_policy, range_one_to_one
             ):
                 return
@@ -1728,11 +1735,12 @@ class Kernel:
                 kernel_optimization_spec,
                 range_one_to_one,
                 offload_execution_plan,
+                deployment,
             )
             self.runtime._compiled_specialization_count += 1
             self.compiled_kernels[key]._charge_specialization()
             self.runtime._resident_specialization_count += 1
-            if offload_execution_plan is None:
+            if deployment is None and offload_execution_plan is None:
                 self._publish_relocatable_candidate(
                     key, args, task_launch_policy, range_one_to_one
                 )
@@ -1746,6 +1754,7 @@ class Kernel:
         kernel_optimization_spec=None,
         range_one_to_one=False,
         offload_execution_plan=None,
+        deployment=None,
     ):
         kernel_name = f"{self.func.__name__}_c{self.kernel_counter}_{key[1]}"
         _logging.trace(f"Compiling kernel {kernel_name} in {self.autodiff_mode}...")
@@ -1756,6 +1765,7 @@ class Kernel:
             excluded_parameters=self.template_slot_locations,
             arg_features=arg_features,
         )
+        ctx.deployment = deployment
 
         if self.autodiff_mode != AutodiffMode.NONE:
             KernelSimplicityASTChecker(self.func.__name__, ctx.file, ctx.lineno_offset + 1).visit(tree)
@@ -1776,6 +1786,7 @@ class Kernel:
             self.kernel_cpp = kernel_cxx
             self.runtime.inside_kernel = True
             self.runtime.current_kernel = self
+            self._deployment_context = deployment
             assert self.runtime.compiling_callable is None
             self.runtime.compiling_callable = kernel_cxx
             self._inline_ir_cache = {} if self.runtime.inline_ir_cache else None
@@ -1792,6 +1803,8 @@ class Kernel:
                     f"python.kernel.ast_transform:{self.func.__name__}"
                 ):
                     transform_tree(tree, ctx)
+                if deployment is not None:
+                    deployment.finish()
                 if not ctx.is_real_function:
                     if self.return_type and ctx.returned != ReturnStatus.ReturnedValue:
                         raise TaichiSyntaxError(
@@ -1799,6 +1812,7 @@ class Kernel:
                         )
             finally:
                 self._inline_ir_cache = None
+                self._deployment_context = None
                 self.runtime.inside_kernel = False
                 self.runtime.current_kernel = None
                 self.runtime.compiling_callable = None
@@ -1880,10 +1894,10 @@ class Kernel:
         _explicit_external_grad_args=frozenset(),
         _grid_residency_waves=None,
         _range_work_per_thread_target=None,
+        _arguments=None,
     ):
-        assert len(args) == len(
-            self.arguments
-        ), f"{len(self.arguments)} arguments needed but {len(args)} provided"
+        arguments = self.arguments if _arguments is None else _arguments
+        assert len(args) == len(arguments), f"{len(arguments)} arguments needed but {len(args)} provided"
 
         tmps = []
         callbacks = []
@@ -2343,7 +2357,7 @@ class Kernel:
 
         template_num = 0
         for i, val in enumerate(args):
-            needed_ = self.arguments[i].annotation
+            needed_ = arguments[i].annotation
             if isinstance(needed_, template):
                 template_num += 1
                 continue
