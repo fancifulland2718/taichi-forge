@@ -15,7 +15,13 @@ from dataclasses import dataclass
 from types import CodeType, MappingProxyType, ModuleType
 
 from taichi_forge.lang import impl, kernel_arguments
-from taichi_forge.lang._resource_declaration import Extent, evaluate_extent, extent_dependencies, validate_extent
+from taichi_forge.lang._resource_declaration import (
+    Extent,
+    evaluate_extent,
+    extent_dependencies,
+    freeze_extent,
+    validate_extent,
+)
 from taichi_forge.lang.exception import TaichiCompilationError
 from taichi_forge.lang.matrix import Matrix, MatrixType, Vector
 from taichi_forge.lang.util import cook_dtype
@@ -166,6 +172,9 @@ class Dimension:
     kind: str = "extent"
     capacity: str = ""
     expression: tuple = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "expression", freeze_extent(self.expression) if self.expression else ())
 
     @property
     def schema(self):
@@ -429,6 +438,12 @@ class Component:
             code = _ComponentCode(kernel, key, context)
             kernel._component_candidates.append(code)
             return code
+
+    def compile_graph(self, record, *args, **kwargs):
+        """Compile a normal Graph recording with automatic captured inputs."""
+        from taichi_forge.aot._component_graph import compile_component_graph
+
+        return compile_component_graph(self, record, *args, **kwargs)
 
 
 class _Capture:

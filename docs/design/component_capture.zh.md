@@ -90,9 +90,32 @@ TCM hash 保持不变，产物无模型数据载荷及固定根依赖。该探�
 真实 GeoPhys 正常构造现已提供有限 RNE 数值证据：CPU/CUDA 上 3/7/5 刚体、不同拓扑、
 质量、qpos/qvel 和重力复用原 `_rne_bias_force`，与普通 JIT 对照；静止链另检查解析重力矩。
 正常资源分组先隔离 body 状态、广义动力学和 bias-force 工作区，所有路径共用这些分组；
-没有复制数值定义或添加逐核资源表。这不是整个正常组件的冻结 TCM 消费验收。
+没有复制数值定义或添加逐核资源表。
 
-Graph 组件自动闭包、真实 RNE 的隔离产物消费、完整初始化/约束投影及 C 的完整生命周期
-仍需接通。当前入口级导出不替代组件根组织；测试中的合同消费驱动不是生产调度器。
-原 Field producer 调用的验证尚未全部移到冷 prepare 路径，没有运行性能或全 SDK
-完成结论。
+`Component.compile_graph(normal_record)` 现在沿原 GraphBuilder 记录原装饰入口，收集
+各入口的实际捕获，并通过既有 Graph lowering/`Module.add_execution_plan` 自动导出
+闭包。应用无需维护 Kernel 名单或绑定表。首期只覆盖一个正常 owner 的顺序根；控制区域、
+native 节点、外部 Ndarray 所有权及 recipe 搜索需分别取得资格，不能从本次成功推定。
+根身份包含每次调用的参数连接及显式参数类型；动态模型值不进入代码身份。
+
+Runtime 的 `module.component(name)` 查询不可变合同，`instantiate(dimensions)` 使用
+原生权威 SNode 规则创建独立根；`initialize(data, zero=...)` 明确提供模型数据或零值。
+当前 effects 保守标为读写，所有被引用资源都要求显式初始化；没有把 producer live state
+写入 TCM。运行时参数与资源由 `instance.prepare(values=..., dimensions=...)` 接入原
+ExecutionPlan 和 PreparedCall，调用期没有新增 Python 计划解释器。固定向量/矩阵值复用
+native 调用 ABI 编码，命名值在所有使用入口的 ABI 必须相容。
+
+每个 prepared 保存自己的资源与值绑定，不改写 Module 共享根指针；实例保留独立状态，
+共享同一加载代码 owner。首期 close/reset 边界是同步冷操作：已有 prepared 必须关闭后
+才能再次 initialize；改变容量需新实例。新 prepare 可改变不影响布局的 active count。
+异步执行域明确拒绝，未声称完成 C 的在途退休、capture 更新或任意并发保证。
+
+GeoPhys 正常 `build_bias_force_graph` 同时服务普通 prestep Graph 与组件构建。CPU/CUDA
+探针冻结 TCM 后构造两个新模型，改变拓扑、质量、qpos/qvel 和重力，仅复制 Runtime 包到
+独立进程并禁止私有数值源码导入；一个加载模块绑定两个独立实例，交错执行及冷关闭隔离
+通过。输入世界状态由进程外正常 JIT 运动学准备；这证明有限 RNE 的无源码消费，不证明
+整个模型/FK/物理步可无源码构造。首次成本采样区分 load、分配、初始化、prepare 和稳态
+组件，不构成速度领先或规模化内存结论。
+
+完整初始化/effects/约束投影、有限算法域覆盖、实际 task/launch 观测及 C 的完整生命周期
+仍在推进。正式 wheel 和全引擎资格保留在 E；原入口级机制测试不替代这些门槛。

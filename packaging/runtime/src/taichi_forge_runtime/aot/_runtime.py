@@ -28,7 +28,7 @@ from . import _c_api as abi
 from ._c_api import AotError
 from ._completion import SubmissionTicket
 from ._struct import StructLayout
-from ._value import ArgPackLayout, ArgumentLayout, ReturnLayout
+from ._value import ArgPackLayout, ArgumentLayout, ReturnLayout, _BoundValue
 
 __all__ = [
     "AotError",
@@ -882,6 +882,12 @@ class Module(_Resource):
 
     _kind = "module"
 
+    def component(self, name):
+        """Load a compiler-produced component root and its resource contract."""
+        from ._component import Component
+
+        return Component(self, name)
+
     def component_entry_contract(self, name):
         """Read an experimental compiler-produced entry capture projection.
 
@@ -979,6 +985,9 @@ class Module(_Resource):
 
 
 def _argument(runtime, value, owners):
+    if isinstance(value, _BoundValue):
+        owners.append(value)
+        return value._argument()
     if isinstance(value, NativeResource):
         value._check()
         if value._runtime is not runtime:

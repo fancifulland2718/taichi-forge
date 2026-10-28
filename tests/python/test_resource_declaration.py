@@ -27,6 +27,13 @@ class _Declared:
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_normal_declarations_preserve_relations_and_actual_root():
+    from taichi_forge.aot._component import Dimension
+    from taichi_forge.lang._resource_declaration import Extent
+
+    expression = ["max", ["dim", "count"], ["const", 1]]
+    extent, dimension = Extent(expression), Dimension(expression=expression)
+    expression[2][1] = 9
+    assert extent.expression == dimension.expression == ("max", ("dim", "count"), ("const", 1))
     small = _Declared(3)
     env = Component.from_owner(small)
     code = env.compile(small.fill)

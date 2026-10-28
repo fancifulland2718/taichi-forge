@@ -128,10 +128,43 @@ Normal GeoPhys construction now provides a bounded numerical RNE gate on CPU/CUD
 entry and agree with ordinary JIT. A resting chain also checks analytic gravity
 moments. Body state, generalized dynamics and bias-force workspaces have explicit
 normal groups shared by JIT and deployment, with no copied numerical definitions
-or per-kernel resource tables. This is not isolated real-component TCM acceptance.
+or per-kernel resource tables.
 
-Automatic Graph/component closure, isolated real RNE consumption, full initialization and
-constraint projections, and complete instance lifetimes remain work in progress.
-Entry export does not replace component-root organization; the test contract
-driver is not a production scheduler. Producer Field calls still perform checks
-outside cold preparation. No runtime performance or full SDK claim is made.
+`Component.compile_graph(normal_record)` now records original decorated entries
+through GraphBuilder, collects actual captures, and exports the closure through
+existing Graph lowering and `Module.add_execution_plan`. Applications do not
+maintain kernel lists or binding tables. The first slice covers sequential roots
+with one normal owner. Control regions, native nodes, external Ndarray ownership
+and recipe search need separate qualification. Root identity includes argument
+connections and explicit types; dynamic model values do not specialize code.
+
+Runtime `module.component(name)` queries the immutable contract;
+`instantiate(dimensions)` creates independent roots using authoritative native
+SNode rules. `initialize(data, zero=...)` explicitly supplies model data or zeros.
+Effects are conservatively read/write and every referenced resource requires
+initialization; no producer live state is serialized. `instance.prepare(values=...,
+dimensions=...)` binds through the existing ExecutionPlan and PreparedCall, with
+no new Python execution interpreter. Fixed vector/matrix values reuse native ABI
+encoding; every entry consuming a named value must have compatible value ABI.
+
+Each prepared call owns its resource/value bindings, without changing shared
+Module root pointers. Instances retain separate state under one loaded code
+owner. Close and reset are currently synchronous cold operations: close existing
+prepared calls before reinitializing; changed capacity requires a new instance.
+A new prepare may change active counts that do not affect layout. Independent
+execution domains explicitly reject until lifecycle qualification. This is not
+complete C coverage for in-flight retirement, capture updates or concurrency.
+
+GeoPhys `build_bias_force_graph` serves ordinary prestep Graphs and component
+building. CPU/CUDA probes freeze a TCM, create two new models with different
+topology, mass, qpos/qvel and gravity, copy only Runtime into an isolated process,
+and forbid private numerical-source imports. One loaded module serves two
+independent instances with interleaved execution and cold-close isolation.
+World-state inputs are prepared by normal JIT kinematics outside that process;
+this proves isolated finite RNE consumption, not source-free model/FK/whole-step
+construction. Initial cost samples separate load, allocation, initialization,
+prepare and warm component execution; no speed or scaled-memory claim follows.
+
+Full initialization/effects/constraint projections, finite algorithm-domain
+coverage, actual task/launch observation and complete instance lifetimes remain
+in progress. Release wheels and whole-engine qualification remain in E.

@@ -671,6 +671,49 @@ class ExecutionPlan:
         return self._prepare(module, arguments, gradients=gradients, execution_domain=execution_domain,
                              mutable_parameters=mutable_parameters)
 
+    def value(self, module, name, value):
+        """Encode a named aggregate value using every consuming entry's native ABI.
+
+        Generated entry names and argument positions remain compiler details.
+        Preparation reuses the existing native immutable value binding path.
+        Primitive scalar arguments continue to use Scalar or Python numbers.
+        """
+        from ._value import _BoundValue
+
+        if name not in self.argument_names:
+            raise ValueError("Value factory requires a public plan argument")
+        document = json.loads(self._json)
+        pending = list(document["operations"]) + document.get("initialization", [])
+        first = None
+        signature = None
+        while pending:
+            operation = pending.pop()
+            kind = operation["kind"]
+            if kind == "while":
+                pending.extend(operation["condition"] + operation["body"])
+            elif kind == "branch":
+                pending.extend(operation["condition"])
+                for region in operation["bodies"]:
+                    pending.extend(region)
+            elif kind in ("cuda_parallel", "vulkan_parallel"):
+                for region in operation["branches"]:
+                    pending.extend(region)
+            elif kind == "kernel" and name in operation["arguments"]:
+                kernel = module.kernel(operation["entry"])
+                layout = kernel._argument_layout
+                for index, argument in enumerate(operation["arguments"]):
+                    if argument != name:
+                        continue
+                    if layout is None or index not in layout.value_types:
+                        raise ValueError("Plan argument is not consistently a pure value")
+                    current = (layout.encoders[index][0], layout.value_types[index])
+                    if signature is not None and signature != current:
+                        raise ValueError("Plan value has incompatible native ABI uses")
+                    signature, first = current, (layout, index)
+        if first is None:
+            raise ValueError("Plan argument has no value kernel use")
+        return _BoundValue(*first, value)
+
     def _prepare(self, module, arguments, *, gradients=None, source=None, execution_domain=None,
                  mutable_parameters=()):
         from . import _c_api as abi

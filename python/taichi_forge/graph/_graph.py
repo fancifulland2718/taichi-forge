@@ -17010,7 +17010,9 @@ class GraphBuilder:
         _capture_recipe_sources=True,
         _explicit_map_source_groups=None,
         _map_recipe=None,
+        _component_capture=None,
     ):
+        self._component_capture = _component_capture
         self._aot_graph_plan = _AOTGraphBuilderPlan()
         self._aot_plan_cursor = 0
         self._explicit_map_source_groups = _explicit_map_source_groups
@@ -17092,6 +17094,8 @@ class GraphBuilder:
 
     def dispatch(self, kernel_fn, *args, template_args=None, label=None):
         label = _normalize_dispatch_label(label)
+        if self._component_capture is not None:
+            return self._component_capture.dispatch(self, kernel_fn, args, template_args, label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
         task_facts = None

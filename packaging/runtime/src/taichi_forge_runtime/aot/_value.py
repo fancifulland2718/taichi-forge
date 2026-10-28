@@ -152,6 +152,18 @@ def _encoder(node, buffer_size):
     return encode
 
 
+class _BoundValue:
+    """An immutable host value encoded by a loaded entry's actual value ABI."""
+
+    def __init__(self, layout, index, value):
+        buffers = []
+        self._argument_value = layout.encode(index, value, buffers)
+        self._buffers = tuple(buffers)
+
+    def _argument(self):
+        return self._argument_value
+
+
 class ArgumentLayout:
     """Copied logical shapes and reusable encoders for one loaded Kernel."""
 

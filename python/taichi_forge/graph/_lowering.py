@@ -424,7 +424,7 @@ class GraphLoweringContext:
             bindings = kernel_pack_bindings(self, args, name, jit_source)
         else:
             bindings = [self.kernel_binding(arg) for arg in args]
-        if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY) for arg in args):
+        if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.MATRIX, core.ArgKind.NDARRAY) for arg in args):
             self._buffer_only_kernels = False
         if self.source_arrays is not None and not has_packs:
             self.source_arrays.validate_kernel(args, bindings)
@@ -432,6 +432,7 @@ class GraphLoweringContext:
             arg.tag
             not in (
                 core.ArgKind.SCALAR,
+                core.ArgKind.MATRIX,
                 core.ArgKind.NDARRAY,
                 core.ArgKind.TEXTURE,
                 core.ArgKind.RWTEXTURE,
@@ -441,7 +442,7 @@ class GraphLoweringContext:
             )
             for arg in args
         ):
-            raise TaichiRuntimeError("AOT execution Graph requires scalar, ndarray or qualified image/AS bindings")
+            raise TaichiRuntimeError("AOT execution Graph requires value, ndarray or qualified image/AS bindings")
         self._used_kernel_entries.add(name)
         operation = dict(kind="kernel", entry=name, arguments=bindings)
         if label:

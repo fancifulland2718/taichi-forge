@@ -10,49 +10,7 @@ import operator
 from dataclasses import dataclass
 
 
-def validate_extent(expression, depth=0):
-    if depth > 32 or not isinstance(expression, tuple) or not expression:
-        raise ValueError("A dimension expression must be a bounded immutable declaration")
-    op, *args = expression
-    if op == "dim":
-        valid = len(args) == 1 and isinstance(args[0], str) and args[0].isidentifier()
-    elif op == "const":
-        valid = len(args) == 1 and type(args[0]) is int and 0 <= args[0] <= 2**31 - 1
-    else:
-        valid = op in ("add", "mul", "max", "min", "floordiv") and len(args) == 2
-        if valid:
-            for argument in args:
-                validate_extent(argument, depth + 1)
-    if not valid:
-        raise ValueError(f"Invalid dimension expression {op!r}")
-
-
-def evaluate_extent(expression, resolve):
-    op, *args = expression
-    if op == "dim":
-        return operator.index(resolve(args[0]))
-    if op == "const":
-        return args[0]
-    left, right = (evaluate_extent(arg, resolve) for arg in args)
-    if op == "add":
-        return left + right
-    if op == "mul":
-        return left * right
-    if op == "max":
-        return max(left, right)
-    if op == "min":
-        return min(left, right)
-    if op == "floordiv" and right > 0:
-        return left // right
-    raise ValueError(f"Unsupported dimension operation {op!r}")
-
-
-def extent_dependencies(expression):
-    if expression[0] == "dim":
-        return {expression[1]}
-    if expression[0] == "const":
-        return set()
-    return set().union(*(extent_dependencies(arg) for arg in expression[1:]))
+from taichi_forge_runtime._dimensions import evaluate_extent, extent_dependencies, freeze_extent, validate_extent
 
 
 @dataclass(frozen=True)
@@ -60,7 +18,7 @@ class Extent:
     expression: tuple
 
     def __post_init__(self):
-        validate_extent(self.expression)
+        object.__setattr__(self, "expression", freeze_extent(self.expression))
 
     def _binary(self, op, other):
         if isinstance(other, Extent):
