@@ -1454,6 +1454,18 @@ class Kernel:
         self._argument_layout = None if isinstance(self, Graph) else ArgumentLayout(module, handle)
         self._argpack_layouts = None
 
+    def _get_argpack_layout(self, argument):
+        index = operator.index(argument)
+        if self._argument_layout is None or index not in self._argument_layout.pack_indices:
+            raise ValueError("Argument is not an exported ArgPack")
+        with self._module._runtime._lock:
+            self._module._check()
+            if self._argpack_layouts is None:
+                self._argpack_layouts = {}
+            if index not in self._argpack_layouts:
+                self._argpack_layouts[index] = ArgPackLayout(self._module, self._handle, index)
+            return self._argpack_layouts[index]
+
     def argpack(self, argument, values, *, gradients=None):
         """Create an immutable pack from nested dictionaries and member resources.
 
@@ -1468,11 +1480,7 @@ class Kernel:
         runtime = self._module._runtime
         with runtime._lock:
             self._module._check()
-            if self._argpack_layouts is None:
-                self._argpack_layouts = {}
-            if index not in self._argpack_layouts:
-                self._argpack_layouts[index] = ArgPackLayout(self._module, self._handle, index)
-            leaves, buffers = self._argpack_layouts[index].encode(values)
+            leaves, buffers = self._get_argpack_layout(index).encode(values)
             gradient_members = {}
             for path, gradient in (gradients or {}).items():
                 key = (path,) if isinstance(path, str) else tuple(path)

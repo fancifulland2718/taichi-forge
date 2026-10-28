@@ -3,7 +3,11 @@
 from taichi_forge._lib import core
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray, StructNdarray
+from taichi_forge.lang.argpack import ArgPack
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.lang.matrix import Matrix
+from taichi_forge.lang.struct import Struct
+from taichi_forge.types._argument_descriptor import describe_element_type, describe_symbolic_arg
 
 from ._ir import GraphAccess, ResourceEffect, RuntimeBinding
 from ._native import BackendCommandGraphAction, BackendCommandRecording, NativeGraphExecutable
@@ -42,25 +46,63 @@ class _LoadedRecording(BackendCommandRecording):
         source.validate_graph_lifetime()
         runtime = source.runtime
         imported = {}
+        packs = {}
+        retained = list(bindings.values())
         values = {}
+
+        def import_array(value, symbol):
+            if not isinstance(value, Ndarray) or isinstance(value, StructNdarray):
+                raise TypeError("Loaded Graph entries require scalar or tensor JIT ndarrays")
+            if value.arr is None or value._runtime_prog is not source.program:
+                raise TaichiRuntimeError("Loaded Graph storage belongs to a retired or different Program")
+            if (
+                value.dtype != symbol.dtype()
+                or len(value.shape) != symbol.field_dim
+                or tuple(value.element_shape) != tuple(symbol.element_shape)
+            ):
+                raise TaichiRuntimeError(f"Loaded Graph ndarray {symbol.name!r} does not match its symbol ABI")
+            key = value._runtime_allocation_identity
+            if key not in imported:
+                imported[key] = runtime.import_ndarray(value)
+                retained.append(value)
+            return imported[key]
+
+        def plain_value(value):
+            if isinstance(value, Matrix):
+                return value.to_list()
+            if isinstance(value, Struct):
+                return {name: plain_value(member) for name, member in value.entries.items()}
+            return value
+
+        def pack_values(value, symbol, gradients, path=()):
+            if not isinstance(value, ArgPack):
+                raise TypeError("Loaded Graph ARGPACK bindings require a managed ArgPack")
+            if value._ArgPack__argpack is None or value._ArgPack__runtime_prog is not source.program:
+                raise TaichiRuntimeError("Loaded Graph ArgPack belongs to a retired or different Program")
+            if value._ArgPack__dtype != symbol.dtype() or tuple(value.keys) != tuple(m.name for m in symbol.members):
+                raise TaichiRuntimeError("Loaded Graph ArgPack does not match its symbol ABI")
+            result = {}
+            for member in symbol.members:
+                child = value[member.name]
+                member_path = (*path, member.name)
+                if member.tag == core.ArgKind.ARGPACK:
+                    result[member.name] = pack_values(child, member, gradients, member_path)
+                elif member.tag == core.ArgKind.NDARRAY:
+                    result[member.name] = import_array(child, member)
+                    if child.grad is not None:
+                        gradients[member_path] = import_array(child.grad, member)
+                else:
+                    result[member.name] = plain_value(child)
+            return result
+
         try:
             for name, symbol in source.symbols.items():
                 value = bindings[name]
                 if symbol.tag == core.ArgKind.NDARRAY:
-                    if not isinstance(value, Ndarray) or isinstance(value, StructNdarray):
-                        raise TypeError("Loaded Graph entries require scalar or tensor JIT ndarrays")
-                    if value.arr is None or value._runtime_prog is not source.program:
-                        raise TaichiRuntimeError("Loaded Graph storage belongs to a retired or different Program")
-                    if (
-                        value.dtype != symbol.dtype()
-                        or len(value.shape) != symbol.field_dim
-                        or tuple(value.element_shape) != tuple(symbol.element_shape)
-                    ):
-                        raise TaichiRuntimeError(f"Loaded Graph ndarray {name!r} does not match its symbol ABI")
-                    key = value._runtime_allocation_identity
-                    if key not in imported:
-                        imported[key] = runtime.import_ndarray(value)
-                    values[name] = imported[key]
+                    values[name] = import_array(value, symbol)
+                elif symbol.tag == core.ArgKind.ARGPACK:
+                    gradients = {}
+                    values[name] = pack_values(value, symbol, gradients), gradients
                 else:
                     if type(value) not in (bool, int, float):
                         raise TypeError("Loaded Graph scalar bindings require bool, int or float")
@@ -68,19 +110,31 @@ class _LoadedRecording(BackendCommandRecording):
             # Native preparation validates the artifact's actual ABI (including
             # dtype, rank, tensor shape and gradient requirements), without a
             # Python numerical definition or a launch. Bind aliases only once.
-            arguments = [
-                (
-                    Scalar(str(source.symbols[name].dtype()), values[name])
-                    if source.symbols[name].tag == core.ArgKind.SCALAR
-                    and index not in source.entry._argument_layout.encoders
-                    else values[name]
-                )
-                for index, name in enumerate(source.arguments)
-            ]
-            prepared = source.entry.prepare(*arguments)
-            prepared._owners = (*prepared._owners, tuple(bindings.values()))
+            arguments = []
+            argument_gradients = {}
+            for index, name in enumerate(source.arguments):
+                symbol = source.symbols[name]
+                if symbol.tag == core.ArgKind.ARGPACK:
+                    if name not in packs:
+                        data, gradients = values[name]
+                        packs[name] = source.entry.argpack(index, data, gradients=gradients)
+                    arguments.append(packs[name])
+                elif symbol.tag == core.ArgKind.SCALAR and index not in source.entry._argument_layout.encoders:
+                    arguments.append(Scalar(str(symbol.dtype()), values[name]))
+                else:
+                    arguments.append(values[name])
+                    if symbol.tag == core.ArgKind.NDARRAY and bindings[name].grad is not None:
+                        argument_gradients[index] = import_array(bindings[name].grad, symbol)
+            prepared = (
+                source.entry.prepare(*arguments, gradients=argument_gradients)
+                if argument_gradients
+                else source.entry.prepare(*arguments)
+            )
+            prepared._owners = (*prepared._owners, tuple(retained))
             return _LoadedCall(prepared)
         except BaseException:
+            for value in packs.values():
+                value.close()
             for value in imported.values():
                 value.close()
             raise
@@ -111,13 +165,19 @@ class LoadedKernelExecutable(NativeGraphExecutable):
         layout = entry._argument_layout
         if len(args) != layout.count:
             raise ValueError("Loaded Graph argument count does not match the exported kernel ABI")
-        if layout.pack_indices:
-            raise TaichiRuntimeError("Loaded Graph entries currently accept scalar and ndarray arguments only")
         self.symbols = {}
         self.arguments = tuple(arg.name if isinstance(arg, core.Arg) else None for arg in args)
         for index, arg in enumerate(args):
-            if not isinstance(arg, core.Arg) or arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY):
-                raise TypeError("dispatch_loaded arguments must be SCALAR or NDARRAY Graph symbols")
+            if not isinstance(arg, core.Arg) or arg.tag not in (
+                core.ArgKind.SCALAR,
+                core.ArgKind.NDARRAY,
+                core.ArgKind.ARGPACK,
+            ):
+                raise TypeError("dispatch_loaded arguments must be SCALAR, NDARRAY or ARGPACK Graph symbols")
+            if (arg.tag == core.ArgKind.ARGPACK) != (index in layout.pack_indices):
+                raise ValueError("Loaded Graph ArgPack symbol does not match the exported kernel ABI")
+            if arg.tag == core.ArgKind.ARGPACK:
+                self._validate_pack(arg, entry._get_argpack_layout(index).description, index)
             value_type = layout.value_types.get(index)
             if value_type is not None:
                 if (
@@ -137,7 +197,52 @@ class LoadedKernelExecutable(NativeGraphExecutable):
 
     @staticmethod
     def _symbol_abi(symbol):
-        return (int(symbol.tag), str(symbol.dtype()), symbol.field_dim, tuple(symbol.element_shape))
+        return describe_symbolic_arg(symbol).structural_key()
+
+    @staticmethod
+    def _validate_pack(symbol, layout, index):
+        # Compare logical names and pure-value types. All storage offsets and
+        # resource dtype/rank/gradient validation still belong to the native ABI.
+        symbols = {}
+
+        def visit(arg, path):
+            if arg.tag not in (
+                core.ArgKind.ARGPACK,
+                core.ArgKind.SCALAR,
+                core.ArgKind.MATRIX,
+                core.ArgKind.STRUCT,
+                core.ArgKind.NDARRAY,
+            ):
+                raise TaichiRuntimeError("Loaded Graph ArgPack resource kind is not qualified")
+            symbols[path] = arg
+            if arg.tag == core.ArgKind.ARGPACK:
+                for child, member in enumerate(arg.members):
+                    visit(member, (*path, child))
+
+        def logical(dtype):
+            element = describe_element_type(dtype)
+            if element.category == "struct":
+                return ("struct", tuple((name, logical(child)) for name, child in core.data_type_struct_members(dtype)))
+            return ("tensor" if element.shape else "scalar", str(element.scalar_type), tuple(element.shape))
+
+        def compiled(value):
+            if value["kind"] == "struct":
+                return ("struct", tuple((member["name"], compiled(member["value"])) for member in value["members"]))
+            return (value["kind"], value["dtype"], tuple(value["shape"]))
+
+        visit(symbol, (index,))
+        members = layout["members"]
+        if set(symbols) != {tuple(member["origin"]["logical"]) for member in members}:
+            raise ValueError("Loaded Graph ArgPack members do not match the exported kernel ABI")
+        for member in members:
+            origin = member["origin"]
+            path = tuple(origin["logical"])
+            arg = symbols[path]
+            kind = {core.ArgKind.ARGPACK: "argpack", core.ArgKind.NDARRAY: "ndarray"}.get(arg.tag, "value")
+            if (len(path) > 1 and arg.name != origin["name"]) or kind != origin["kind"]:
+                raise ValueError("Loaded Graph ArgPack member does not match the exported kernel ABI")
+            if kind == "value" and logical(arg.element_dtype()) != compiled(member["value"]):
+                raise ValueError("Loaded Graph ArgPack value type does not match the exported kernel ABI")
 
     def validate_graph_lifetime(self):
         if impl.get_runtime().prog is not self.program:
@@ -154,9 +259,15 @@ class LoadedKernelExecutable(NativeGraphExecutable):
     @property
     def runtime_arg_schema(self):
         return tuple(
-            RuntimeBinding(name, "ndarray" if arg.tag == core.ArgKind.NDARRAY else "scalar")
+            RuntimeBinding(
+                name, {core.ArgKind.NDARRAY: "ndarray", core.ArgKind.ARGPACK: "argpack"}.get(arg.tag, "scalar")
+            )
             for name, arg in self.symbols.items()
         )
+
+    @property
+    def graph_binding_symbols(self):
+        return tuple(self.symbols.values())
 
     @property
     def resource_effects(self):
@@ -167,7 +278,7 @@ class LoadedKernelExecutable(NativeGraphExecutable):
             *(
                 ResourceEffect(name, GraphAccess.READ_WRITE)
                 for name, arg in self.symbols.items()
-                if arg.tag == core.ArgKind.NDARRAY
+                if arg.tag in (core.ArgKind.NDARRAY, core.ArgKind.ARGPACK)
             ),
         )
 

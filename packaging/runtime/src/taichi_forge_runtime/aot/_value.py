@@ -240,6 +240,7 @@ class ArgPackLayout:
             raise ValueError("Unsupported compiled ArgPack layout")
         root = (index,)
         self.root = root
+        self.description = layout
         self.packs, self.leaves = [], []
         names = {root: ()}
         children = {}

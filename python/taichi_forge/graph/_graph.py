@@ -10219,6 +10219,8 @@ def _graph_resource_binding_requirements(nodes):
                 requirements[key] = arg
 
     def visit(node):
+        if isinstance(node, _CompiledNativeGraphNode):
+            add(node.executable.graph_binding_symbols)
         for dispatch in getattr(node, "recording_dispatches", ()):
             add(dispatch.args)
         for child in getattr(node, "nodes", ()):
@@ -16409,7 +16411,12 @@ class Sequential:
 
     @property
     def _has_host_native(self):
-        return any(manifest.execution_kind == "opaque_host" for manifest in self._native_action_manifests)
+        # Explicit host issue boundaries also include loaded backend commands
+        # that do not yet have a qualified device-control capture recipe.
+        return (
+            any(item[0] == "host_native" for item in self._items)
+            or any(manifest.execution_kind == "opaque_host" for manifest in self._native_action_manifests)
+        )
 
     def _bind_declared_private_args(self, args):
         for symbolic, requirement in _declared_private_arguments(
@@ -16637,6 +16644,21 @@ class Sequential:
         executable = compile_native_graph_node(node)
         if prewarm:
             executable.prewarm()
+        return self._append_native_executable(executable)
+
+    def dispatch_loaded(self, entry, *args):
+        """Append a loaded entry as an ordered, explicitly segmented boundary.
+
+        Native-required control still rejects this boundary until the loaded
+        command has a device-region lowering. No numerical source is compiled.
+        """
+        from ._loaded import LoadedKernelExecutable
+
+        return self._append_native_executable(
+            LoadedKernelExecutable(entry, args), allow_command_boundary=True
+        )
+
+    def _append_native_executable(self, executable, *, allow_command_boundary=False):
         self._bind_declared_private_args(executable.graph_binding_symbols)
         structured = executable.recordable_sequence
         if structured is not None:
@@ -16644,14 +16666,7 @@ class Sequential:
         compiled = _CompiledNativeGraphNode(executable)
         action = compiled.recordable_action
         if action is None:
-            self._items.append(("host_native", compiled))
-            self._ir_nodes.append(compiled.ir_node)
-            self._runtime_arg_names.update(compiled.runtime_arg_names)
-            self._recording_runtime_arg_names.update(compiled.recording_runtime_arg_names)
-            self._lifetime_leases.extend(compiled.lifetime_leases)
-            self._source_native_count += compiled.source_native_count
-            self._native_action_manifests.extend(compiled.native_action_manifests)
-            return self
+            return self._append_host_native_boundary(compiled)
         backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
         if not action.supports_backend(backend):
             raise TaichiRuntimeError(
@@ -16660,6 +16675,8 @@ class Sequential:
         dispatches = tuple(action.dispatches)
         capture_recipe = _recordable_cuda_capture(action, backend)
         if action.backend_command_recording is not None and capture_recipe is None:
+            if allow_command_boundary:
+                return self._append_host_native_boundary(compiled)
             raise TaichiRuntimeError(
                 "Backend command actions are not yet qualified inside a "
                 "structured Graph Sequential"
@@ -16691,6 +16708,24 @@ class Sequential:
         self._source_native_count += compiled.source_native_count
         self._native_action_manifests.extend(compiled.native_action_manifests)
         self._dispatch_count += 1 if capture_recipe is not None else len(dispatches)
+        return self
+
+    def _append_host_native_boundary(self, compiled):
+        for name, value in compiled.fixed_runtime_args.items():
+            previous = self._fixed_runtime_args.get(name)
+            if previous is not None and previous is not value:
+                if not (isinstance(previous, (int, float)) and isinstance(value, (int, float)) and previous == value):
+                    raise TaichiRuntimeError(f"Sequential native binding {name!r} conflicts with its declaration")
+            self._fixed_runtime_args[name] = value
+        self._items.append(("host_native", compiled))
+        self._ir_nodes.append(compiled.ir_node)
+        self._runtime_arg_names.update(compiled.runtime_arg_names)
+        self._recording_runtime_arg_names.update(compiled.recording_runtime_arg_names)
+        self._derived_runtime_arg_names.update(compiled.derived_runtime_arg_names)
+        self._lifetime_leases.extend(compiled.lifetime_leases)
+        self._temporary_actions.extend(compiled.temporary_actions)
+        self._source_native_count += compiled.source_native_count
+        self._native_action_manifests.extend(compiled.native_action_manifests)
         return self
 
     def _append_recordable_sequence(self, sequence, executable):
@@ -18365,7 +18400,7 @@ class GraphBuilder:
         self._active_bounded_publication = None
         self._flush_graph_builder()
         compiled = _CompiledNativeGraphNode(executable)
-        if action is not None and action.backend_command_recording is None:
+        if action is not None:
             # Public provider ports can refer to storage owned by the enclosing
             # Graph. Keep the provider's symbolic schema intact, but carry the
             # enclosing declarations into the compiled node's binding frame.
@@ -18544,16 +18579,15 @@ class GraphBuilder:
     def dispatch_loaded(self, entry, *args):
         """Record a void loaded AOT Kernel on the current borrowed Runtime.
 
-        Arguments are SCALAR or NDARRAY symbols. Bind JIT arrays with ``bind``
+        Arguments are SCALAR, NDARRAY or ARGPACK symbols. Bind JIT arrays with ``bind``
         to prepare once and reuse their storage without copies. The module
         remains an explicit owner; closing it invalidates this Graph. This
-        root command boundary is neither a Python kernel compilation nor a
-        serializable AOT definition or a structured-control body.
+        command boundary is not a Python kernel compilation or a serializable
+        AOT definition. Sequential regions preserve this segmented boundary;
+        native-required control needs a separate device-region qualification.
         """
         from ._loaded import LoadedKernelExecutable
 
-        if any(getattr(arg, "name", None) in self._declared_private_bindings for arg in args):
-            raise TaichiRuntimeError("dispatch_loaded requires public Graph arguments, not private Graph arrays")
         executable = LoadedKernelExecutable(entry, args)
         self._append_native_executable(executable, admission="explicit")
         self._aot_graph_plan.mark_internal_fixed_bindings()

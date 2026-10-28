@@ -191,9 +191,9 @@ def test_loaded_graph_rejects_wrong_owner_and_abi(tmp_path):
     with pytest.raises(ValueError, match="count"):
         ti.graph.GraphBuilder().dispatch_loaded(entry, symbol)
     private_builder = ti.graph.GraphBuilder()
-    private = private_builder.private_ndarray("private", ti.i32, (4,))
-    with pytest.raises(ti.TaichiRuntimeError, match="public Graph arguments"):
-        private_builder.dispatch_loaded(entry, private, delta)
+    private_builder.private_ndarray("private", ti.i32, (4,))
+    with pytest.raises(ti.TaichiRuntimeError, match="symbol returned by private_ndarray"):
+        private_builder.dispatch_loaded(entry, _symbol("private"), delta)
     bad_scalar = (
         ti.graph.GraphBuilder()
         .dispatch_loaded(entry, symbol, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "delta", ti.f32))

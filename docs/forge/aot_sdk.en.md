@@ -1858,7 +1858,7 @@ built with the C API; it does not add a frontend dependency to standalone AOT
 consumption. Windows CPU/CUDA/Vulkan checks cover direct and fixed execution,
 explicit gradients, module state isolation, GC and concurrent finalization.
 
-The unreleased **FG-AOT-01** enhancement adds an explicit frontend Graph root
+The unreleased **FG-AOT-01** enhancement adds an explicit frontend Graph
 entry point for loaded kernels:
 
 ```python
@@ -1895,12 +1895,31 @@ compilation or one fused device Graph. Repeated submission of a bound frame
 does not prepare it again or call Runtime.wait. Raw dictionaries prepare fresh
 frames and may incur cold preparation/retirement costs.
 
-This entry point currently belongs to the Graph root sequence. It does not
-add loaded-entry recording inside Sequential/control bodies, re-export of a
-live loaded owner, ArgPack/texture/struct-array arguments, private Graph arrays,
-or implicit gradient bindings. Use the existing Runtime ExecutionPlan contracts
-for broader AOT orchestration. GeoPhys model specialization and shared
-solver/control/rendering integration remain consumer work (GP-AOT-01/02).
+The component SDK follow-up qualifies ARGPACK symbols on CPU/CUDA. Bind a managed
+ArgPack with nested packs, scalar/vector/matrix/struct values and compact ndarray
+members. The loaded native entry supplies value layout and resource ABI; frontend
+logical type checks compute no separate byte offsets. Each bind creates an
+immutable AOT pack. Mutating the original pack does not change an existing binding;
+rebind to capture new values. Array contents remain shared, and aliases across
+pack/root arguments import once. Existing `.grad` arrays use native gradient
+contracts; a small forward/exported-backward check is not general component AD
+qualification.
+
+`builder.create_sequential().dispatch_loaded(...)` preserves an ordered segmented
+command boundary. Original symbols returned by `private_ndarray()` may bind
+Graph-owned scratch, followed by ordinary JIT or other loaded nodes. Recompiling
+the GraphDefinition preserves owners and private resources. This is not a device
+control-region lowering: GPU `native_required` control rejects the boundary.
+Host control requires explicit portable mode and does not qualify EFC/TGS device
+loops.
+
+New ArgPack/Sequential/private-workspace combinations have CPU/CUDA evidence;
+Vulkan qualification is separate. Texture/StructNdarray members, re-export of a
+live Module owner and loaded composite Plans need further work. See the
+[component capture contract](../design/component_capture.en.md) for declarations,
+automatic capture and instances. Applications define normal model preparation and
+physical execution order; Forge reuses Graph/ExecutionPlan/Runtime contracts
+for broader AOT orchestration.
 
 Borrowers can explicitly import compact scalar/vector/matrix ndarrays from the
 same Program with `runtime.import_ndarray(jit_array)`. The returned view works

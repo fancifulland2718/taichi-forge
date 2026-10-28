@@ -1450,7 +1450,7 @@ with ti.aot.borrow_runtime() as runtime:
 的前端依赖。Windows CPU/CUDA/Vulkan 验收覆盖普通/固定执行、显式梯度、模块状态
 隔离、GC 和并发 finalize。
 
-尚未发布的 **FG-AOT-01** 增强为前端 Graph 主顺序增加显式 loaded entry 入口：
+尚未发布的 **FG-AOT-01** 增强为前端 Graph 增加显式 loaded entry 入口：
 
 ```python
 runtime = ti.aot.borrow_runtime()
@@ -1480,10 +1480,23 @@ Windows CPU/CUDA/Vulkan 定向检查覆盖 JIT → loaded AOT → JIT 提交顺�
 融合成单个设备 Graph。反复提交已绑定帧不会重新 prepare 或调用 Runtime.wait。
 直接传参数字典会准备新帧，可能承担冷准备与退休成本。
 
-当前入口位于 Graph 主顺序，不扩展到 Sequential/控制体内 loaded-entry 录制、
-活模块 owner 再导出、ArgPack/texture/struct-array 参数、Graph 私有数组或隐式梯度
-绑定。更广的 AOT 组织继续使用已有 Runtime ExecutionPlan 合同。GeoPhys 模型特化与
-共享 solver/control/rendering 接入仍属于消费端工作（GP-AOT-01/02）。
+组件 SDK 的后续切片增加 CPU/CUDA 已验证的 `ARGPACK` 符号：绑定普通 managed ArgPack，
+支持嵌套 pack、scalar/vector/matrix/struct 值与紧凑 ndarray 成员。原生入口提供值布局和
+资源 ABI；前端检查逻辑成员类型，不计算另一份字节偏移。每次 bind 创建不可变 AOT pack，
+之后修改原 pack 的值不会改变已有绑定；重新 bind 才取得新值。数组内容仍共享，跨 pack/
+直接参数的别名只导入一次。已有 `.grad` 通过原生资源合同绑定，前向/已导出反向入口均有
+小例验证，不表示整个组件 SDK 的 AD 已取得资格。
+
+`builder.create_sequential().dispatch_loaded(...)` 保留有序的分段命令边界；
+`private_ndarray()` 返回的原符号可作为 loaded 参数，由 Graph 分配与管理 scratch。
+调用后可以接正常 JIT 或其他 loaded 节点，GraphDefinition 重建保留 owner 与私有资源。
+该顺序组织尚未合并为设备控制区域；GPU `native_required` 条件循环明确拒绝这种边界，
+只有显式 portable 模式才允许 Host 控制，不将其用于宣称 EFC/TGS 设备循环已交付。
+
+新 ArgPack/Sequential/private-workspace 组合目前记录 CPU/CUDA 资格，Vulkan 随后单独验证。
+texture/StructNdarray 等成员、活 Module owner 再导出和 loaded composite Plan 仍需扩展。
+组件声明、自动捕获与实例化进度见[组件捕获合同](../design/component_capture.zh.md)；
+正常模型准备与物理执行顺序仍由应用定义，Forge 继续复用现有 Graph/ExecutionPlan/Runtime。
 
 借用者通过 `runtime.import_ndarray(jit_array)` 显式导入同一 Program 的紧凑
 scalar/vector/matrix ndarray。导入返回可用于普通/固定 AOT 调用的数组视图，复用
