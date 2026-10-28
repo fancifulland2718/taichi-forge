@@ -32,6 +32,9 @@ def test_ir_metadata_shares_readonly_facts_and_preserves_snapshot_isolation():
     views = compiled._dispatch_ir_metadata
     snapshots = compiled._dispatch_metadata
     assert len(views) == len(snapshots) == 16
+    assert all(not row["opaque"] and row["synchronization"] for row in views)
+    assert all("atomic" in row["side_effects"] and not row["elementwise"] for row in views)
+    assert any(effect["access"] == "atomic" for effect in views[0]["effects"])
     assert len({id(row["effects"]) for row in views}) == 1
     assert len({id(row["effects"]) for row in snapshots}) == 16
 
@@ -233,4 +236,45 @@ def test_subword_field_rows_need_physical_storage_proof():
     graph = builder.compile()
     record = graph._spec.nodes[0].compiled_graph._dispatch_metadata[0]
     assert record["opaque"] and record["blocker"] == "unsupported_field_storage"
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_multiple_and_nested_loops_keep_resource_effects_without_fusion():
+    @ti.kernel
+    def update(
+        source: ti.types.ndarray(ti.i32, ndim=1),
+        output: ti.types.ndarray(ti.i32, ndim=1),
+        n: ti.i32,
+        increment: ti.types.vector(2, ti.i32),
+    ):
+        for i in range(n):
+            output[i] = 0
+        for i in range(n):
+            j = 0
+            total = 0
+            while j < 3:
+                j += 1
+                if j == 2:
+                    continue
+                total += source[i] + j + increment[0]
+            output[i] = total
+
+    source = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1)
+    output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
+    count = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    increment = ti.graph.Arg(ti.graph.ArgKind.MATRIX, "increment", ti.types.vector(2, ti.i32))
+    builder = ti.graph.GraphBuilder(_explicit_map_source_groups=())
+    builder.dispatch(update, source, output, count, increment)
+    graph = builder.compile()
+    metadata = graph._spec.nodes[0].compiled_graph._dispatch_metadata[0]
+    assert not metadata["opaque"] and not metadata["elementwise"]
+    assert metadata["blocker"] == "multiple_iteration_domains"
+    assert {(tuple(effect["arg_id"]), effect["access"]) for effect in metadata["effects"]} == {
+        ((0,), "read"), ((1,), "write")}
+    assert all(effect["footprint"]["pattern"] == "opaque" for effect in metadata["effects"])
+    assert graph._ir_debug_info["fusion_plan"]["eligible_dispatches"] == 0
+    values, result = ti.ndarray(ti.i32, 17), ti.ndarray(ti.i32, 17)
+    values.from_numpy(np.arange(17, dtype=np.int32))
+    graph.run(dict(source=values, output=result, count=17, increment=ti.Vector([3, 5])))
+    np.testing.assert_array_equal(result.to_numpy(), 2 * np.arange(17) + 10)
     graph.close()

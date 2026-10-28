@@ -302,7 +302,35 @@ class MetadataVisitor final : public BasicStmtVisitor {
     if (stmt == loop_ || stmt->is<IfStmt>()) {
       return;
     }
+    // A union over ordinary loop bodies still identifies every accessed
+    // resource. It cannot establish one pointwise iteration domain.
+    if (stmt->is<RangeForStmt>() || stmt->is<WhileStmt>()) {
+      block_fusion("nested_control_flow");
+      return;
+    }
     block("nested_control_flow", "control_flow");
+  }
+
+  void visit(WhileControlStmt *) override {
+    block_fusion("control_flow");
+  }
+
+  void visit(ContinueStmt *) override {
+    block_fusion("control_flow");
+  }
+
+  void visit(GetElementStmt *stmt) override {
+    // Extracting a scalar/vector/struct argument reads the invocation's value
+    // buffer, not an external resource. Do not generalize this to a struct
+    // loaded from external storage: those accesses need their own provenance.
+    Stmt *source = stmt->src;
+    while (auto *element = source->cast<GetElementStmt>()) {
+      source = element->src;
+    }
+    if (source->is<ArgLoadStmt>()) {
+      return;
+    }
+    block("unsupported_aggregate_source", "opaque_access");
   }
 
   void visit(GlobalLoadStmt *stmt) override {
@@ -334,11 +362,13 @@ class MetadataVisitor final : public BasicStmtVisitor {
     // Frontend augmented assignments may survive until this pre-offload stage
     // as atomics on a thread-private local accumulator. They neither publish a
     // Graph resource effect nor synchronize different loop iterations. Keep
-    // global, external, shared, and unknown atomics fail-closed below.
+    // Global/external atomics retain their resource identity, but still block
+    // fusion and require synchronization. Unknown origins remain opaque.
     if (is_thread_private_pointer(stmt->dest)) {
       return;
     }
-    block("atomic_effect", "atomic");
+    block_fusion("atomic_effect");
+    note_side_effect("atomic");
     record(stmt->dest, "atomic");
   }
 
@@ -518,6 +548,10 @@ class MetadataVisitor final : public BasicStmtVisitor {
   void block(const std::string &reason, const std::string &side_effect) {
     effects_complete_ = false;
     block_fusion(reason);
+    note_side_effect(side_effect);
+  }
+
+  void note_side_effect(const std::string &side_effect) {
     if (!side_effect.empty() &&
         std::find(side_effects_.begin(), side_effects_.end(), side_effect) ==
             side_effects_.end()) {
@@ -715,11 +749,12 @@ GraphKernelMetadata analyze_graph_kernel_metadata(IRNode *root,
   }
 
   RangeForStmt *loop = nullptr;
+  bool multiple_domains = false;
   for (const auto &statement : root->as<Block>()->statements) {
     if (auto *candidate = statement->cast<RangeForStmt>()) {
       if (loop != nullptr) {
         result.blocker = "multiple_iteration_domains";
-        return result;
+        multiple_domains = true;
       }
       loop = candidate;
       continue;
@@ -729,19 +764,24 @@ GraphKernelMetadata analyze_graph_kernel_metadata(IRNode *root,
       result.blocker = "top_level_side_effect";
     }
   }
+  if (multiple_domains) {
+    loop = nullptr;
+    result.blocker = "multiple_iteration_domains";
+  }
   if (loop == nullptr) {
-    result.blocker = "missing_range_for";
+    if (result.blocker.empty())
+      result.blocker = "missing_range_for";
   } else if (loop->strictly_serialized || loop->reversed ||
              loop->is_bit_vectorized) {
     result.blocker = "unsupported_iteration_mode";
-    return result;
+    loop = nullptr;
   }
 
   if (loop != nullptr) {
     result.iteration_domain = iteration_domain(loop);
     if (result.iteration_domain.kind == "unknown") {
       result.blocker = "unknown_iteration_domain";
-      return result;
+      loop = nullptr;
     }
   }
 
@@ -750,6 +790,7 @@ GraphKernelMetadata analyze_graph_kernel_metadata(IRNode *root,
   visitor.finalize(&result.iteration_domain);
   result.effects = visitor.effects();
   result.side_effects = visitor.side_effects();
+  result.synchronization = !result.side_effects.empty();
   if (!visitor.effects_complete()) {
     if (result.blocker.empty())
       result.blocker = visitor.blocker();
