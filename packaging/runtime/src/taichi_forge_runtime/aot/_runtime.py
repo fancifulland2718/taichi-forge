@@ -1138,6 +1138,7 @@ class PreparedCall(_Resource):
         self._closing = False
         self._close_lock = threading.RLock()
         self._domain_owner_key = None
+        self._binding_owners = ()
         # Imports created exclusively by a JIT adapter for this instance.
         # User-owned AOT modules/arrays must never be included here.
         self._instance_imports = ()
@@ -1154,6 +1155,24 @@ class PreparedCall(_Resource):
         super()._check()
         if self._closing:
             raise RuntimeError("Prepared execution is retiring")
+        for owner in self._binding_owners:
+            owner._check()
+
+    def _retain_binding_owner(self, owner):
+        """Pin an instance and revoke new submissions when it starts closing.
+
+        Domain ownership outlives release of this Python handle. Register the
+        complete owner tuple before exposing the prepared call to its caller.
+        """
+        with self._runtime._lock:
+            self._check()
+            owner._check()
+            self._binding_owners = (*self._binding_owners, owner)
+            self._owners = (*self._owners, owner)
+            if self._replay_owners is not None:
+                self._replay_owners = (*self._replay_owners, owner)
+            if self._domain_owner_key is not None:
+                self._runtime._domain_owners[self._domain_owner_key][self._handle] = self._owners
 
     def prepare_binding(self, arguments, *, gradients=None):
         """Prepare a sibling sharing the selected CUDA plan's state and executable.
@@ -1244,6 +1263,7 @@ class PreparedCall(_Resource):
         self._owners = ()
         self._replay_owners = None
         self._family = None
+        self._binding_owners = ()
 
         if retirement_error is not None:
             raise retirement_error
@@ -1267,6 +1287,7 @@ class PreparedCall(_Resource):
         self._owners = ()
         self._replay_owners = None
         self._family = None
+        self._binding_owners = ()
 
     def __del__(self):
         try:

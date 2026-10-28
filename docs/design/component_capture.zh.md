@@ -110,14 +110,24 @@ ExecutionPlan 和 PreparedCall，调用期没有新增 Python 计划解释器。
 native 调用 ABI 编码，命名值在所有使用入口的 ABI 必须相容。
 
 每个 prepared 保存自己的资源与值绑定，不改写 Module 共享根指针；实例保留独立状态，
-共享同一加载代码 owner。首期 close/reset 边界是同步冷操作：已有 prepared 必须关闭后
-才能再次 initialize；改变容量需新实例。新 prepare 可改变不影响布局的 active count。
-异步执行域明确拒绝，未声称完成 C 的在途退休、capture 更新或任意并发保证。
+共享同一加载代码 owner。CPU 普通执行与 CUDA 独立执行域已取得有限组件资格；使用
+`instance.prepare(..., execution_domain=domain)` 后先 `call.initialize()`，再以
+`call.submit()` 获取既有完成票据。新 prepare 可改变不影响布局的 active count 和值，
+每份绑定/捕获独立；不原地改写已提交描述符。一个实例的持久状态同时只允许一条有序
+执行域（或普通执行路径），跨域绑定须先退休现有绑定，不承诺同实例任意并发。
+
+close/reset 仍是阻塞冷操作：close 先禁止该实例所有绑定继续提交，再沿原生逐调用
+退休机制等待已接受工作，等待期间不持有 Python Runtime 提交锁；底层存储清理仍可能
+同步设备，不承诺整个 close 无等待或完全不影响其他队列。已有 prepared 必须关闭后
+才能再次 initialize；改变容量需新实例。`call.release()` 仅释放 Host 句柄，原生执行域
+继续保留实例与根资源，且禁止据此提前 reset，直到域退休。另一个实例继续可用；关闭
+代码 Module 则拒绝新提交并完成已接受工作。失败准备不切换实例状态或复用半成品。
 
 GeoPhys 正常 `build_bias_force_graph` 同时服务普通 prestep Graph 与组件构建。CPU/CUDA
 探针冻结 TCM 后构造两个新模型，改变拓扑、质量、qpos/qvel 和重力，仅复制 Runtime 包到
-独立进程并禁止私有数值源码导入；一个加载模块绑定两个独立实例，交错执行及冷关闭隔离
-通过。输入世界状态由进程外正常 JIT 运动学准备；这证明有限 RNE 的无源码消费，不证明
+独立进程并禁止私有数值源码导入；一个加载模块绑定两个独立实例，交错提交、关闭已接受
+工作所在实例、冷 reset 和代码模块关闭门槛通过。球关节模型的 bodies=5、nq=20、nv=15
+验证维度不依赖铰链数量恰好相等。输入世界状态由进程外正常 JIT 运动学准备；这证明有限 RNE 的无源码消费，不证明
 整个模型/FK/物理步可无源码构造。首次成本采样区分 load、分配、初始化、prepare 和稳态
 组件，不构成速度领先或规模化内存结论。
 

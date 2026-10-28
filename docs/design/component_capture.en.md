@@ -156,17 +156,32 @@ encoding; every entry consuming a named value must have compatible value ABI.
 
 Each prepared call owns its resource/value bindings, without changing shared
 Module root pointers. Instances retain separate state under one loaded code
-owner. Close and reset are currently synchronous cold operations: close existing
-prepared calls before reinitializing; changed capacity requires a new instance.
-A new prepare may change active counts that do not affect layout. Independent
-execution domains explicitly reject until lifecycle qualification. This is not
-complete C coverage for in-flight retirement, capture updates or concurrency.
+owner. Ordinary CPU execution and independent CUDA domains are qualified for
+this finite component. Use `instance.prepare(..., execution_domain=domain)`,
+then `call.initialize()` before obtaining completion tickets with `call.submit()`.
+A new preparation may change non-layout active counts and values; each binding
+and capture keeps its own snapshot. Submitted descriptors are never rewritten.
+One instance's persistent state permits only one ordered domain (or ordinary
+execution lane) while bindings remain live, not arbitrary concurrent mutation.
+
+Close and reset remain blocking cold operations. Close first revokes every
+binding's submission rights, then uses native per-call retirement without holding
+the Python Runtime submission lock while waiting. Storage cleanup may still
+synchronize the device; the entire close is neither nonblocking nor guaranteed
+to leave other queues unsynchronized. Retire existing preparations before
+reinitializing; changed capacity requires a new instance. `call.release()` drops
+only the host handle: domain ownership retains the instance and roots and blocks
+reset until domain retirement. Peers remain usable. Closing the code Module
+rejects new submissions and finishes accepted work. Failed preparation does not
+switch instance state or reuse a partial binding.
 
 GeoPhys `build_bias_force_graph` serves ordinary prestep Graphs and component
 building. CPU/CUDA probes freeze a TCM, create two new models with different
 topology, mass, qpos/qvel and gravity, copy only Runtime into an isolated process,
 and forbid private numerical-source imports. One loaded module serves two
-independent instances with interleaved execution and cold-close isolation.
+independent instances with interleaved submissions, close with accepted work,
+cold reset and code-module close. A ball-joint model with bodies=5, nq=20 and
+nv=15 verifies independent dimensions beyond equal-sized hinge examples.
 World-state inputs are prepared by normal JIT kinematics outside that process;
 this proves isolated finite RNE consumption, not source-free model/FK/whole-step
 construction. Initial cost samples separate load, allocation, initialization,

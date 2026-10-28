@@ -1,6 +1,7 @@
 """Cold component resource binding onto existing native ExecutionPlans."""
 
 import json
+import threading
 from types import MappingProxyType
 import weakref
 
@@ -228,14 +229,17 @@ class Component:
 class ComponentInstance:
     """Private resource groups with immutable per-prepare argument bindings.
 
-    Initial implementation provides cold close/reprepare. It does not swap any
-    module-level root pointer and makes no nonblocking retirement claim.
+    Each preparation owns its argument snapshot, including on an independent
+    execution domain. Close revokes submission then retires accepted work;
+    it is a blocking cold operation, never a module root-pointer swap.
     """
 
     def __init__(self, component, dimensions):
         self._component = component
         self._groups, self._resources = {}, {}
         self._prepared = weakref.WeakSet()
+        self._binding_domain = None
+        self._close_lock = threading.RLock()
         self._closed = self._retired = False
         self._initialized = set()
         contract = component.contract
@@ -300,7 +304,7 @@ class ComponentInstance:
 
     def _initialize(self, data, *, zero):
         self._check()
-        if any(call._handle is not None for call in self._prepared):
+        if self._has_live_bindings():
             raise RuntimeError("Component initialization requires closing prepared calls at a cold boundary")
         selected = {}
         for name, value in dict(data or {}).items():
@@ -317,14 +321,20 @@ class ComponentInstance:
             self._resources[name].write(value)
             self._initialized.add(name)
 
+    def _has_live_bindings(self):
+        runtime = self._component._module._runtime
+        return any(call._handle is not None for call in self._prepared) or any(
+            self in owners for bindings in runtime._domain_owners.values() for owners in bindings.values()
+        )
+
     def prepare(self, *, values=None, dimensions=None, arguments=None, execution_domain=None):
         from ._runtime import Scalar
 
-        if execution_domain is not None:
-            raise ValueError("Component execution domains require separate lifecycle qualification")
         runtime = self._component._module._runtime
         with runtime._lock:
             self._check()
+            if self._has_live_bindings() and execution_domain is not self._binding_domain:
+                raise ValueError("Component state requires one ordered execution domain until its bindings retire")
             if self._initialized != set(self._resources):
                 raise ValueError("Component resources require explicit consumer initialization before preparation")
             updates = dict(dimensions or {})
@@ -358,21 +368,29 @@ class ComponentInstance:
             call = self._component._module.prepare_execution(
                 self._component._plan, bindings, execution_domain=execution_domain
             )
-            call._owners = (*call._owners, self)
-            if call._replay_owners is not None:
-                call._replay_owners = (*call._replay_owners, self)
+            try:
+                call._retain_binding_owner(self)
+            except BaseException:
+                call.close()
+                raise
             self._prepared.add(call)
+            self._binding_domain = execution_domain
             return call
 
     def close(self):
-        with self._component._module._runtime._lock:
+        with self._close_lock:
             self._close()
 
     def _close(self):
-        if getattr(self, "_retired", True):
-            return
-        self._closed = True
-        for call in tuple(self._prepared):
+        runtime = self._component._module._runtime
+        with runtime._lock:
+            if getattr(self, "_retired", True):
+                return
+            self._closed = True
+            calls = tuple(self._prepared)
+        # PreparedCall.close() releases the runtime submission lock while
+        # retiring its accepted domain work. Do not enclose it in that lock.
+        for call in calls:
             call.close()
         for resource in self._resources.values():
             resource.close()
