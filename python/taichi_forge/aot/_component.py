@@ -448,36 +448,65 @@ class Component:
         result._sources = MappingProxyType(sources)
         return result
 
-    def compile(self, entry, *args):
-        from taichi_forge.lang.kernel_impl import _process_args
+    def compile(self, entry, *args, owner=None, template_args=None):
+        from taichi_forge.lang.kernel_impl import _process_args, TaichiCallableTemplateMapper
+        from taichi_forge.lang._ndarray import ScalarNdarray
 
         kernel = getattr(entry, "_primal", None)
-        owner = getattr(entry, "_kernel_owner", None)
-        if kernel is None or owner is None:
-            raise TypeError("Component.compile requires a bound, decorated kernel method")
-        if kernel.template_slot_locations != [0] or kernel.autodiff_mode.name != "NONE":
-            raise TaichiCompilationError("Component capture currently requires only the self template and no autodiff")
-        if any(
-            id(arg.annotation) not in primitive_types.type_ids and not isinstance(arg.annotation, MatrixType)
-            for arg in kernel.arguments[1:]
-        ):
-            raise TaichiCompilationError(
-                "Component capture currently supports only explicit scalar/vector/matrix values"
-            )
-        call_args = _process_args(kernel, (owner, *args), {})
+        bound_owner = getattr(entry, "_kernel_owner", None)
+        owner = bound_owner if owner is None else owner
+        if kernel is None or owner is None or bound_owner is not None and bound_owner is not owner:
+            raise TypeError("Component.compile requires a decorated kernel and its declared owner")
+        if kernel.autodiff_mode.name != "NONE":
+            raise TaichiCompilationError("Component capture autodiff is not qualified")
+        templates = {} if template_args is None else dict(template_args)
+        slots = set(kernel.template_slot_locations)
+        if bound_owner is not None:
+            name = kernel.arguments[0].name
+            if name in templates and templates[name] is not owner:
+                raise TaichiCompilationError("Component template owner differs from its bound method")
+            templates[name] = owner
+        expected = {kernel.arguments[i].name for i in slots}
+        if set(templates) != expected:
+            raise TaichiCompilationError("Component template_args must exactly name the kernel's template parameters")
+        explicit = tuple(arg for i, arg in enumerate(kernel.arguments) if i not in slots)
+        if len(args) > len(explicit):
+            raise TypeError("Too many explicit component arguments")
+        call_args = _process_args(kernel, (), {**templates, **dict(zip((a.name for a in explicit), args))})
+        features, abi, template_facts = [], [], []
+        for i, (argument, value) in enumerate(zip(kernel.arguments, call_args)):
+            if i in slots:
+                template_facts.append(
+                    (i, "owner" if value is owner else "static", None if value is owner else _static_value(value))
+                )
+                features.append(None)
+            elif isinstance(argument.annotation, NdarrayType):
+                if not isinstance(value, ScalarNdarray):
+                    raise TaichiCompilationError("Component explicit arrays currently require scalar JIT ndarrays")
+                feature = TaichiCallableTemplateMapper.extract_arg(value, argument.annotation, argument.name)
+                if feature[2]:
+                    raise TaichiCompilationError("Component explicit ndarray gradients are not qualified")
+                features.append(feature)
+                abi.append(("ndarray", str(feature[0]), feature[1], feature[2], str(feature[3]), feature[4]))
+            elif id(argument.annotation) in primitive_types.type_ids or isinstance(argument.annotation, MatrixType):
+                features.append(None)
+                abi.append(("value", str(argument.annotation)))
+            else:
+                raise TaichiCompilationError(
+                    "Component explicit arguments require scalar/vector/matrix values or ndarrays"
+                )
+        signature = (tuple(template_facts), tuple(abi))
         runtime = impl.get_runtime()
         runtime.materialize(for_aot=True)
         with runtime._kernel_compilation_lock:
             for code in kernel._component_candidates:
-                if code.matches(self, owner):
+                if code.call_signature == signature and code.matches(self, owner):
                     code.validate_bindings(self, owner)
                     return code
-            context = _Capture(self, owner, kernel)
+            context = _Capture(self, owner, kernel, signature)
             # No self identity or runtime value enters the template mapper.
-            # Explicit arguments in this slice are value types only.
-            features = tuple(None for _ in call_args)
             key = (kernel.func, "component_" + str(len(kernel._component_candidates)), kernel.autodiff_mode)
-            kernel.materialize(key=key, args=call_args, arg_features=features, for_aot=True, deployment=context)
+            kernel.materialize(key=key, args=call_args, arg_features=tuple(features), for_aot=True, deployment=context)
             code = _ComponentCode(kernel, key, context)
             kernel._component_candidates.append(code)
             return code
@@ -490,11 +519,12 @@ class Component:
 
 
 class _Capture:
-    def __init__(self, component, owner, kernel):
+    def __init__(self, component, owner, kernel, call_signature):
         self.component = component
         self.declarations = dict(component.declarations)
         self.owner = owner
         self.kernel = kernel
+        self.call_signature = call_signature
         self.used = {}
         self.expressions = {}
         self.dynamic = []
@@ -604,7 +634,8 @@ class _Capture:
         self.contract = {
             "version": 1,
             "entry": self.entry_definition,
-            "explicit_abi": [str(arg.annotation) for arg in self.kernel.arguments[1:]],
+            "explicit_abi": self.call_signature[1],
+            "templates": self.call_signature[0],
             "captures": [(name, self.used[name]) for name in self.dynamic],
             "static": sorted(self.static.items()),
             "groups": self.groups,
@@ -659,6 +690,7 @@ class _ComponentCode:
     def __init__(self, kernel, key, context):
         self.kernel = kernel
         self.key = key
+        self.call_signature = context.call_signature
         self.runtime = kernel.runtime
         self.semantic_key = _digest(
             {key: value for key, value in context.contract.items() if key != "declaration_sources"}
@@ -673,7 +705,10 @@ class _ComponentCode:
         self.member_paths = dict(context.member_paths)
         self.dynamic = tuple(context.dynamic)
         self._contract = json.dumps(context.contract)
-        self.arguments = tuple(kernel.arguments[1:]) + tuple(
+        self.explicit_arguments = tuple(
+            arg for i, arg in enumerate(kernel.arguments) if i not in kernel.template_slot_locations
+        )
+        self.arguments = self.explicit_arguments + tuple(
             kernel_arguments.KernelArgument(context.component.declarations[name].annotation, "__capture_" + name)
             for name in self.dynamic
         )
@@ -740,7 +775,7 @@ class _ComponentCode:
         if not self.matches(component, owner):
             raise ValueError("Component bindings do not match the compiled declaration/static dependencies")
         self.validate_bindings(component, owner)
-        if len(args) != len(self.kernel.arguments) - 1:
+        if len(args) != len(self.explicit_arguments):
             raise TypeError("Wrong number of explicit component arguments")
         from taichi_forge.lang._storage_view import ndarray_view
 

@@ -7,7 +7,16 @@
 `Array` 当前支持标量 Ndarray，`StaticValue` 支持不可变标量/tuple 配置。
 可选 `StaticValue(choices=(...))` 声明有限部署配置域；它是准入约束，代码身份仍仅使用
 入口实际读取的静态值。缩窄 choices 时，缓存命中及直接调用同样检查域，不借旧候选绕过。
-入口显式参数当前限于标量和固定 vector/matrix。
+入口显式参数支持标量、固定 vector/matrix 和无梯度的标量 Ndarray。
+组件 Graph 也接受正常自由 Kernel helper：使用原 `template_args` 指定同一个声明 owner，
+无需包装成方法。无 owner 参数的 helper 仍经同一受约束捕获编译路径检查全局依赖。
+额外模板参数必须是可记录的静态值，进入代码身份；owner 身份、数组地址和 shape 不进入。
+显式数组复用原参数特征提取及原生绑定校验，不将其冒充组件私有存储。
+
+内部 `compile(entry, ..., owner=model, template_args={...})` 可编译这种原 helper；
+绑定方法仍可省略 owner。`test_aot_component_helpers.py` 在 CPU/CUDA 验证不同 owner/尺寸
+复用、静态模板变化、错误资源类型和冻结后的 Runtime 消费。条件/循环组件根的完整捕获
+仍需下一片资格化；这里没有以平铺 helper 成功宣称真实 EFC/TGS 控制完成。
 
 组件声明环境与每核 ABI 分层。原属性访问和嵌套 `ti.func` 只为实际使用的捕获追加
 native 参数；一次前端遍历后执行 `finalize_params()`，参数初始化区仍在数值主体之前结束。

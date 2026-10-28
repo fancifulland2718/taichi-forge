@@ -27,7 +27,7 @@ from taichi_forge.types._argument_descriptor import describe_symbolic_arg
 class _GraphCapture:
     def __init__(self, component, record, args=(), kwargs=None, build=None):
         self.component = component
-        self.owner = None
+        self.owner = getattr(record, "__self__", None)
         self.build = build
         self.codes = []
         self.groups = {}
@@ -84,19 +84,26 @@ class _GraphCapture:
 
         owner = getattr(entry, "_kernel_owner", None)
         kernel = getattr(entry, "_primal", None)
-        if owner is None or kernel is None:
-            raise TaichiCompilationError("A component Graph requires original bound kernels and no extra templates")
-        expected_templates = {kernel.arguments[0].name: owner}
-        if template_args is not None and (
-            set(template_args) != set(expected_templates) or template_args[kernel.arguments[0].name] is not owner
-        ):
-            raise TaichiCompilationError("Component Graph templates must name the same declared owner")
+        if kernel is None:
+            raise TaichiCompilationError("A component Graph requires original decorated kernels")
+        expected_templates = {} if template_args is None else dict(template_args)
+        if owner is not None:
+            name = kernel.arguments[0].name
+            if name in expected_templates and expected_templates[name] is not owner:
+                raise TaichiCompilationError("Component Graph templates must name the same declared owner")
+            expected_templates[name] = owner
         if self.owner is None:
             self.owner = owner
-        if owner is not self.owner:
+        if self.owner is None or owner is not None and owner is not self.owner:
             raise TaichiCompilationError("A component Graph root requires one declared resource owner")
+        owner = self.owner
         injected = produce_injected_args_for_graph(kernel, args, expected_templates)
-        code = self.component.compile(entry, *injected[1:])
+        code = self.component.compile(
+            entry,
+            *(value for i, value in enumerate(injected) if i not in kernel.template_slot_locations),
+            owner=owner,
+            template_args=expected_templates,
+        )
         if self.build is not None:
             self.build.admit_kernel(code)
         for arg in flatten_args(args):
@@ -193,6 +200,8 @@ class _GraphCapture:
             entries=self.entries,
             required_capabilities=["dense_snode_group_v1", "component_root_v1"],
         )
+        if any(descriptor[0] == "ndarray" for descriptor in self.explicit.values()):
+            facts["required_capabilities"].append("component_explicit_ndarray_v1")
         facts["semantic_key"] = _digest(facts)
         return facts
 
@@ -252,8 +261,12 @@ def _complete_compiler_contract(graph, contract, codes):
         effects = []
         for effect in node.effects:
             binding = contract["bindings"].get(effect.resource)
+            explicit = contract["explicit"].get(effect.resource)
+            if explicit is not None and effect.runtime_bound:
+                if explicit[0] == "ndarray":
+                    effects.append(dict(argument=effect.resource, access=effect.access.value))
+                continue
             # The opaque Graph fallback includes scalar/aggregate bindings too.
-            # Component explicit arguments are restricted to such value types.
             if node.opaque and (
                 effect.resource in contract["explicit"] or binding is not None and binding["kind"] != "resource"
             ):

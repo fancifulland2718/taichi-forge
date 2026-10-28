@@ -7,8 +7,23 @@ the application a second time or create a numerical wrapper.
 `Component` declarations describe the owner's attributes. `RuntimeValue` supports
 scalar and fixed vector/matrix values, `Array` currently supports scalar Ndarray,
 and `StaticValue` accepts immutable scalar/tuple configuration. Entry arguments
-currently support scalar and fixed vector/matrix values. The public SDK API is
-not frozen.
+support scalars, fixed vectors/matrices and scalar Ndarrays without gradients.
+The public SDK API is not frozen.
+
+Component Graphs also accept original free Kernel helpers: ordinary
+`template_args` identifies the same declared owner without a method wrapper.
+Helpers without an owner parameter still use constrained capture compilation to
+check global dependencies. Additional templates must be recordable static values
+and enter code identity; owner identity, array addresses and shapes do not.
+Explicit arrays reuse argument feature extraction and native binding checks,
+without becoming component-private storage.
+
+Internal `compile(entry, ..., owner=model, template_args={...})` compiles these
+original helpers; bound methods may omit owner. CPU/CUDA checks in
+`test_aot_component_helpers.py` cover reuse across owners/sizes, changed static
+templates, wrong resource types and frozen Runtime consumption. Full conditional
+and loop component roots still require qualification; flat helper support does
+not qualify real EFC/TGS control.
 
 Optional `StaticValue(choices=(...))` declares a finite deployment domain. This
 is admission policy; numerical identity still uses only actual static captures.

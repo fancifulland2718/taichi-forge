@@ -87,6 +87,8 @@ class Component:
             if set(contract) != required or contract["version"] not in (1, 2, 3) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
+            if any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
+                capabilities.add("component_explicit_ndarray_v1")
             if contract["version"] >= 2:
                 capabilities.add("component_compiler_facts_v1")
                 compilation = contract["compilation"]
@@ -347,6 +349,10 @@ class ComponentInstance:
                 raise ValueError("Component value/explicit argument inputs differ from its contract")
             for symbol, value in tuple(bindings.items()):
                 descriptor = contract["explicit"][symbol]
+                if descriptor[0] == "ndarray":
+                    # Resource type, runtime, dimensions and lifetime remain
+                    # the existing native preparation contract's authority.
+                    continue
                 bindings[symbol] = (
                     Scalar(descriptor[1][1], value)
                     if descriptor[0] == "scalar"
