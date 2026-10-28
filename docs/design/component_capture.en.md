@@ -42,10 +42,31 @@ Declaration cycles are rejected. Compiler facts expose `record_presence` and
 `test_aot_component_records.py` cover new dimensions, aliases, presence variants,
 unused members, rejected getters and Runtime consumption.
 
-Arbitrary borrowed records are not automatically qualified: undeclared
-dataclasses, complete foreign SNode layout dependencies and dimension remapping
-still need explicit contracts. This does not complete GeoPhys EFC mass-block or
-mass-matrix sharing; per-kernel adapters or static whole objects are not a remedy.
+`ResourceScope.borrow(name, field, dimensions={...})` declares a normal foreign
+Field binding without changing the Field or retaining its Python owner. For
+example, `scope.borrow("mass", source.mass, dimensions={"n": scope.dim("nv")})`
+maps a declared source dimension to the target's normal count. The map must cover
+all dimensions of the complete source group, including layout-only siblings.
+Their provenance comes from an explicit normal `FieldsBuilder` declaration;
+ordinary undeclared Fields are not automatically qualified. One such builder
+uses one declaration namespace. No relationship is inferred from equal integers.
+
+`from_owner` projects the full source group into the existing native
+`DenseSNodeSchema`; native SNode layout and consumer instantiation still compute
+offsets, strides and allocation sizes. Only numerical captures enter the Kernel
+ABI. Layout-only siblings do not become numerical inputs or producer snapshots.
+Aliases preserve one root, and nested declared records qualify target dimension
+names. Missing/conflicting relations, replaced sources and shape mismatches
+reject. CPU/CUDA tests in `test_aot_component_borrowed.py` cover new capacities,
+changed sibling offsets, aliasing, tail markers, ordinary JIT and Runtime
+consumption. Adding an unused independent borrow does not change code identity.
+The first normal binding names a borrowed group in its target namespace; later
+aliases preserve that name.
+
+This does not automatically declare arbitrary frozen binding dataclasses or
+complete GeoPhys EFC mass-block/mass-matrix integration. Those normal binding
+types still need their declaration boundary; per-kernel adapters and static
+whole objects are not a remedy. No new instance-pointer switching is introduced.
 
 Optional `StaticValue(choices=(...))` declares a finite deployment domain. This
 is admission policy; numerical identity still uses only actual static captures.

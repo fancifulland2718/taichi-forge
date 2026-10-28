@@ -17,6 +17,7 @@ from types import CodeType, MappingProxyType, MemberDescriptorType, ModuleType
 from taichi_forge.lang import impl, kernel_arguments
 from taichi_forge.lang._resource_declaration import (
     Extent,
+    _source_members,
     evaluate_extent,
     extent_dependencies,
     freeze_extent,
@@ -419,7 +420,7 @@ class Component:
     is supplied by the application. Graph export follows separately.
     """
 
-    __slots__ = ("_declarations", "_sources", "_paths")
+    __slots__ = ("_declarations", "_sources", "_paths", "_borrowed_reads")
 
     def __init__(self, **declarations):
         flattened, paths = {}, {}
@@ -437,6 +438,7 @@ class Component:
                 if (
                     not name.isidentifier()
                     or name.startswith("__record_")
+                    or name.startswith("__borrowed_")
                     or not isinstance(declaration, (RuntimeValue, Array, StaticValue, Dimension, DenseField, Record))
                 ):
                     raise TypeError("Component declarations require attribute IDs and supported declaration types")
@@ -469,8 +471,24 @@ class Component:
         self._declarations = MappingProxyType(flattened)
         self._paths = MappingProxyType(paths)
         self._sources = MappingProxyType({})
+        self._borrowed_reads = MappingProxyType({})
 
     def read(self, owner, name):
+        borrowed = self._borrowed_reads.get(name)
+        if borrowed is not None:
+            anchor_path, anchor_identity, member_identity, expected = borrowed
+            for part in anchor_path:
+                owner = _member(owner, part)
+            try:
+                members = _source_members(owner)
+                if owner._logical_resource_declaration["identity"] != anchor_identity:
+                    raise ValueError("source anchor identity changed")
+                field = members[member_identity]
+                if field._logical_resource_declaration != expected:
+                    raise ValueError("source member declaration changed")
+            except (AttributeError, KeyError, ValueError) as error:
+                raise TaichiCompilationError(f"Borrowed resource {'.'.join(anchor_path)!r}: {error}") from error
+            return field
         for part in self._paths.get(name, (name,)):
             owner = _member(owner, part)
         return owner
@@ -496,7 +514,14 @@ class Component:
         from taichi_forge.lang.matrix import MatrixType, VectorType
 
         impl.get_runtime().materialize(for_aot=True)
-        declarations, sources, roots, fields = {}, {}, {}, []
+        declarations, sources, roots, fields, borrowed = {}, {}, {}, [], []
+
+        def root_of(field, name):
+            nodes = tuple(member.ptr.snode() for member in field._get_field_members())
+            root_ids = {node.get_snode_tree_id() for node in nodes}
+            if len(root_ids) != 1:
+                raise TaichiCompilationError(f"Normal resource {name!r} spans multiple SNode groups")
+            return next(iter(root_ids))
 
         def collect(current, prefix=(), ancestors=()):
             if any(current is ancestor for ancestor in ancestors) or len(prefix) > 32:
@@ -511,13 +536,15 @@ class Component:
                     raise TaichiCompilationError(
                         f"Normal resource declaration {'.'.join((*prefix, name))!r} was replaced without redeclaration"
                     )
-                nodes = tuple(member.ptr.snode() for member in field._get_field_members())
-                root_ids = {node.get_snode_tree_id() for node in nodes}
-                if len(root_ids) != 1:
-                    raise TaichiCompilationError(f"Normal resource {name!r} spans multiple SNode groups")
-                root_id = next(iter(root_ids))
+                root_id = root_of(field, name)
                 roots.setdefault(root_id, set()).add(".".join((*prefix, declaration["identity"])))
                 fields.append((members, prefix, name, field, declaration, root_id))
+            for name, declaration in registry.get("borrowed", {}).items():
+                field = _member(current, name)
+                path = (*prefix, name)
+                root_id = root_of(field, name)
+                borrowed.append((path, field, declaration, root_id))
+                roots.setdefault(root_id, set()).add("borrow:" + ".".join((*prefix, declaration["group"])))
             for name, source in registry.get("records", {}).items():
                 sources[_capture_id((*prefix, name))] = source
                 members[name] = collect(_member(current, name), (*prefix, name), (*ancestors, current))
@@ -560,8 +587,90 @@ class Component:
             return result
 
         result = cls(**complete(declarations, values))
+        result._project_borrowed(borrowed, roots, sources)
         result._sources = MappingProxyType(sources)
         return result
+
+    def _project_borrowed(self, borrowed, roots, sources):
+        """Complete layout dependencies from source declarations, not a new ABI.
+
+        Virtual members are used only by the existing native group capture.
+        Numerical captures keep their normal target attribute/record paths.
+        """
+        from taichi_forge.lang.matrix import VectorType
+
+        declarations, paths, reads, mappings = dict(self.declarations), dict(self._paths), {}, {}
+
+        def rewrite(expression, mapping):
+            op, *args = expression
+            if op == "dim":
+                return mapping[args[0]]
+            return expression if op == "const" else (op, *(rewrite(arg, mapping) for arg in args))
+
+        for path, anchor, binding, root_id in sorted(borrowed, key=lambda item: item[0]):
+            try:
+                members = _source_members(anchor)
+                identity = anchor._logical_resource_declaration["identity"]
+                if identity != binding["identity"]:
+                    raise ValueError("source Field was replaced without redeclaration")
+                dependencies = {
+                    dim
+                    for field in members.values()
+                    for extent in field._logical_resource_declaration["shape"]
+                    if isinstance(extent, Extent)
+                    for dim in extent_dependencies(extent.expression)
+                }
+                if dependencies != binding["dimensions"].keys():
+                    raise ValueError(
+                        f"whole source group dimensions require {sorted(dependencies)!r}; "
+                        f"received {sorted(binding['dimensions'])!r}"
+                    )
+                target_dimensions = {
+                    name: ("dim", _capture_id((*path[:-1], name)))
+                    for expression in binding["dimensions"].values()
+                    for name in extent_dependencies(expression)
+                }
+                mapping = {
+                    name: rewrite(expression, target_dimensions) for name, expression in binding["dimensions"].items()
+                }
+                if root_id in mappings and mappings[root_id] != mapping:
+                    raise ValueError("aliases of one source group have conflicting dimension relations")
+                first = root_id not in mappings
+                mappings[root_id] = mapping
+            except (AttributeError, KeyError, ValueError) as error:
+                raise TaichiCompilationError(f"Borrowed resource {'.'.join(path)!r}: {error}") from error
+
+            group = "snode:" + min(roots[root_id])
+            for member_identity, field in members.items():
+                source = field._logical_resource_declaration
+                shape = []
+                for extent in source["shape"]:
+                    if isinstance(extent, Extent):
+                        expression = rewrite(extent.expression, mapping)
+                        dimension = "__extent_" + _digest(expression)
+                        declarations[dimension] = Dimension(expression=expression)
+                        paths[dimension] = (dimension,)
+                        sources[dimension] = binding["source"]
+                        shape.append(dimension)
+                    else:
+                        shape.append(extent)
+                dtype = field.dtype
+                if hasattr(field, "n"):
+                    dtype = VectorType(field.n, dtype) if field.ndim == 1 else MatrixType(field.n, field.m, 2, dtype)
+                declaration = DenseField(dtype, tuple(shape), group)
+                accessor = (path, identity, member_identity, dict(source))
+                if first:
+                    name = "__borrowed_" + _digest((group, member_identity))
+                    declarations[name], paths[name], reads[name] = declaration, path, accessor
+                if field is anchor:
+                    name = _capture_id(path)
+                    if name in declarations:
+                        raise ValueError(f"Duplicate borrowed component declaration {'.'.join(path)!r}")
+                    declarations[name], paths[name], reads[name] = declaration, path, accessor
+                    sources[name] = binding["source"]
+        self._declarations = MappingProxyType(declarations)
+        self._paths = MappingProxyType(paths)
+        self._borrowed_reads = MappingProxyType(reads)
 
     def compile(self, entry, *args, owner=None, template_args=None):
         from taichi_forge.lang.kernel_impl import _process_args, TaichiCallableTemplateMapper

@@ -32,9 +32,24 @@ identity 比较明确拒绝。未使用成员不进入数值代码身份。局�
 内部 ID 来恢复原属性路径。`test_aot_component_records.py` 覆盖 CPU/CUDA 的新尺寸、
 别名、存在性变体、未使用成员、getter 拒绝和 Runtime 消费。
 
-这不自动接通任意外部借用记录：没有正常声明的 dataclass、跨 owner 的完整 SNode
-布局依赖和维度重命名仍需显式合同。GeoPhys 的 EFC mass-block/质量矩阵共享绑定
-尚未因此取得完整 AOT 资格，不能用手写逐核绑定表或把绑定对象整体静态化来绕过。
+`ResourceScope.borrow(name, field, dimensions={...})` 声明正常外部 Field 绑定，
+保持原 Field，不保留其 Python owner。例如
+`scope.borrow("mass", source.mass, dimensions={"n": scope.dim("nv")})`
+将源维度映射到目标正常计数。映射必须覆盖完整源组的所有维度，包括只影响布局的兄弟。
+来源由正常显式 `FieldsBuilder` 声明保留；未声明的普通 Field 不自动取得部署资格。
+一个显式 builder 使用同一个声明命名空间，不按整数相等猜关系。
+
+`from_owner` 将完整源组投影到已有 native `DenseSNodeSchema`，offset、stride、分配
+大小仍由原 SNode 布局和消费端实例化计算。只有数值捕获进入 Kernel ABI；布局兄弟
+不自动成为数值输入或 producer 快照。同根别名保持一致，嵌套声明记录对目标维度限定
+命名空间。遗漏/冲突映射、源替换和 shape 不匹配明确拒绝。
+`test_aot_component_borrowed.py` 覆盖 CPU/CUDA 新容量、兄弟偏移变化、别名、尾部
+哨兵、普通 JIT 与 Runtime 消费；新增未使用的独立借用不改变代码身份。首次正常绑定
+为目标命名空间中的借用组命名，后续别名保留该名字。
+
+这仍不自动声明任意 frozen binding dataclass，也不等于 GeoPhys EFC mass-block/
+质量矩阵已完整接入。这些正常绑定类型还需自己的声明边界；不能用逐核适配表或将
+整个对象静态化绕过。本片不增加实例间共享模块指针切换。
 
 组件声明环境与每核 ABI 分层。原属性访问和嵌套 `ti.func` 只为实际使用的捕获追加
 native 参数；一次前端遍历后执行 `finalize_params()`，参数初始化区仍在数值主体之前结束。

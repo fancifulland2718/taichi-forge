@@ -52,6 +52,21 @@ class Extent:
         raise TypeError("A declared extent is not a Python condition; use the normal model value")
 
 
+def _source_members(field):
+    """Read declaration provenance, never infer layout from sample extents."""
+    group = getattr(field, "_logical_resource_group", None)
+    if group is None:
+        raise ValueError("Borrowed resources require an explicit declared FieldsBuilder source group")
+    members = {}
+    for member in group:
+        declaration = member._logical_resource_declaration
+        identity = declaration["identity"]
+        if identity is None or identity in members:
+            raise ValueError("Borrowed source group members require distinct normal declaration identities")
+        members[identity] = member
+    return members
+
+
 class ResourceScope:
     """Declare normal owner attributes while constructing ordinary Fields.
 
@@ -68,6 +83,14 @@ class ResourceScope:
         object.__setattr__(self, "_builder", builder)
         if not hasattr(owner, "_forge_resource_declarations"):
             owner._forge_resource_declarations = {"fields": {}, "dimensions": {}, "records": {}}
+        if builder is not None:
+            namespace = owner._forge_resource_declarations
+            previous = getattr(builder, "_resource_declaration_namespace", namespace)
+            if previous is not namespace:
+                raise ValueError("A declared FieldsBuilder group requires one dimension declaration namespace")
+            builder._resource_declaration_namespace = namespace
+            if not hasattr(builder, "_resource_declaration_members"):
+                builder._resource_declaration_members = []
 
     def __getattr__(self, name):
         return getattr(self._owner, name)
@@ -82,6 +105,7 @@ class ResourceScope:
                 if declaration["identity"] is None:
                     declaration["identity"] = name
                 self._owner._forge_resource_declarations["fields"][name] = dict(declaration)
+                self._owner._forge_resource_declarations.get("borrowed", {}).pop(name, None)
         elif inspect.getattr_static(value, "_forge_resource_declarations", None) is not None:
             # Assignment through an explicit declaration scope exposes a
             # normal child resource owner. No attribute-dictionary scan.
@@ -106,6 +130,54 @@ class ResourceScope:
         )
         del caller
         return Extent(("dim", name))
+
+    def borrow(self, name, field, *, dimensions):
+        """Bind an existing Field and explicitly relate its whole source group.
+
+        The target retains the original Field and storage ownership. This is a
+        normal binding declaration, independent of kernels/export. Source
+        dimensions include layout-only siblings, not just this Field's shape.
+        """
+        from taichi_forge.lang.field import Field
+
+        if not isinstance(name, str) or not name.isidentifier() or not isinstance(field, Field):
+            raise TypeError("Resource borrow requires an attribute name and a Field")
+        _source_members(field)
+        mapping = {}
+        for source, target in dimensions.items():
+            if not isinstance(source, str) or not source.isidentifier() or not isinstance(target, Extent):
+                raise TypeError("Borrowed dimension mappings require source names and declared target extents")
+            validate_extent(target.expression)
+            if (
+                not set(extent_dependencies(target.expression))
+                <= self._owner._forge_resource_declarations["dimensions"].keys()
+            ):
+                raise ValueError("Borrowed dimensions must reference declared target dimensions")
+            mapping[source] = target.expression
+        registry = self._owner._forge_resource_declarations
+        # The first normal binding names this source group in the target
+        # namespace. Later aliases do not rename it or invalidate unrelated
+        # entry code. Object identity is used only to recognize the existing
+        # source group during binding; it never enters a serialized identity.
+        group = name
+        for alias, previous in registry.get("borrowed", {}).items():
+            candidate = inspect.getattr_static(self._owner, alias, None)
+            if getattr(candidate, "_logical_resource_group", None) is field._logical_resource_group:
+                group = previous["group"]
+                break
+        caller = inspect.currentframe().f_back
+        declaration = dict(
+            identity=field._logical_resource_declaration["identity"],
+            group=group,
+            dimensions=mapping,
+            source=(caller.f_code.co_filename, caller.f_lineno),
+        )
+        del caller
+        setattr(self._owner, name, field)
+        registry["fields"].pop(name, None)
+        registry.get("records", {}).pop(name, None)
+        registry.setdefault("borrowed", {})[name] = declaration
+        return field
 
     def _create(self, factory, args, kwargs):
         shape = kwargs.get("shape")
@@ -141,6 +213,12 @@ class ResourceScope:
         field._logical_resource_declaration = dict(
             identity=None, shape=shape, source=(caller.f_code.co_filename, caller.f_lineno)
         )
+        if self._builder is not None:
+            # Keep the complete declared layout unit, without retaining its
+            # Python owner. Native SNode capture still checks actual placement.
+            group = self._builder._resource_declaration_members
+            group.append(field)
+            field._logical_resource_group = group
         del caller
         return field
 
