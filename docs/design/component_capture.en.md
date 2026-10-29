@@ -64,6 +64,11 @@ and frozen Runtime consumption. A CUDA GeoPhys temporal-contact entry also
 passed generic and loaded execution against its original JIT definition;
 complete TGS root qualification is still in progress.
 
+Captured `Field.dtype` remains the declared scalar component type, including
+vector/matrix Fields and inline helper arguments. It is guarded by the existing
+type/ABI contract; changing dtype selects different code, while changing a
+legal extent can reuse it. This metadata does not make shape or contents static.
+
 `ResourceScope.borrow(name, field, dimensions={...})` declares a normal foreign
 Field binding without changing the Field or retaining its Python owner. For
 example, `scope.borrow("mass", source.mass, dimensions={"n": scope.dim("nv")})`

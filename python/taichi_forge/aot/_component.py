@@ -289,7 +289,12 @@ class DenseField:
         from taichi_forge._lib import core
 
         element = self.dtype.tensor_type if isinstance(self.dtype, MatrixType) else cook_dtype(self.dtype)
-        return kernel_arguments.decl_ndarray_arg(element, len(self.shape), name, False, core.BoundaryMode.UNSAFE)
+        reference = kernel_arguments.decl_ndarray_arg(element, len(self.shape), name, False, core.BoundaryMode.UNSAFE)
+        # Preserve Field.dtype (the scalar component type, also for vector and
+        # matrix Fields) on its lowered reference. The declaration/ABI already
+        # guards this static metadata; shape and storage stay runtime inputs.
+        reference.dtype = cook_dtype(self.dtype.dtype if isinstance(self.dtype, MatrixType) else self.dtype)
+        return reference
 
     @property
     def annotation(self):

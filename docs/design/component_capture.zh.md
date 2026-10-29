@@ -46,6 +46,10 @@ identity 比较明确拒绝。未使用成员不进入数值代码身份。局�
 CPU/CUDA 已验证原 helper、嵌套记录、别名、尺寸变化和冻结产物消费；GeoPhys 原 CUDA
 temporal-contact 入口的泛化/加载调用也与普通 JIT 一致，完整 TGS 根仍在推进。
 
+捕获后的 `Field.dtype` 保留声明的标量分量类型，包含向量/矩阵 Field 及内联 helper
+参数。它受原类型/ABI 合同保护：改变 dtype 选择不同代码，合法 extent 改变可复用
+代码；这项静态元数据不使 shape 或内容变为静态。
+
 `ResourceScope.borrow(name, field, dimensions={...})` 声明正常外部 Field 绑定，
 保持原 Field，不保留其 Python owner。例如
 `scope.borrow("mass", source.mass, dimensions={"n": scope.dim("nv")})`
