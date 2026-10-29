@@ -10,6 +10,16 @@ and `StaticValue` accepts immutable scalar/tuple configuration. Entry arguments
 support scalars, fixed vectors/matrices and scalar Ndarrays without gradients.
 The public SDK API is not frozen.
 
+LLVM launches use the compiler-sized argument buffer through `RuntimeContext`;
+they are not limited to the historical 64 argument slots. Python launches and
+the C API now follow that storage contract, including loaded Kernel/Graph
+binding. Exported ABI counts, types, layouts and resource lifetime checks still
+apply. Other backends retain their existing argument-count guard. CPU/CUDA
+qualification covers 72 captured Fields plus two scalar arguments, changed
+dimensions and two instances under one loaded module, as well as large ArgPacks
+and named Graph arguments. This does not imply a fixed per-capture cost or
+qualify a full application component.
+
 Component Graphs also accept original free Kernel helpers: ordinary
 `template_args` identifies the same declared owner without a method wrapper.
 Helpers without an owner parameter still use constrained capture compilation to

@@ -13,6 +13,13 @@
 额外模板参数必须是可记录的静态值，进入代码身份；owner 身份、数组地址和 shape 不进入。
 显式数组复用原参数特征提取及原生绑定校验，不将其冒充组件私有存储。
 
+LLVM 通过 `RuntimeContext` 使用编译器确定大小的参数缓冲区，不再受历史 64 项槽位
+检查限制。Python 调用及 C API 的 loaded Kernel/Graph 绑定遵循同一存储合同；实际
+ABI 数量、类型、布局及资源生命周期校验继续生效。其他后端保留既有数量限制。
+CPU/CUDA 已验证 72 个 Field 加两个标量的捕获、动态尺寸及同模块双实例交错调用，
+以及大 ArgPack 和多命名参数 Graph。这不表示每个捕获的成本固定，也不替代完整应用
+组件的资格检查。
+
 内部 `compile(entry, ..., owner=model, template_args={...})` 可编译这种原 helper；
 绑定方法仍可省略 owner。`test_aot_component_helpers.py` 在 CPU/CUDA 验证不同 owner/尺寸
 复用、静态模板变化、错误资源类型和冻结后的 Runtime 消费；这些机制门槛不代替真实

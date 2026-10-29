@@ -436,7 +436,10 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
   if (arg_count > 0) {
     TI_CAPI_ARGUMENT_NULL_RV(args);
   }
-  if (arg_count > taichi_max_num_args_total) {
+  // LLVM uses the exported callable's sized argument buffer. Its ABI count
+  // check below remains authoritative; it has no fixed 64-slot storage.
+  if (!taichi::arch_uses_llvm(runtime2.arch) &&
+      arg_count > taichi_max_num_args_total) {
     ti_set_last_error(TI_ERROR_ARGUMENT_OUT_OF_RANGE, "arg_count");
     return nullptr;
   }
@@ -823,7 +826,8 @@ std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
   if (arg_count > 0) {
     TI_CAPI_ARGUMENT_NULL_RV(args);
   }
-  if (arg_count > taichi_max_num_args_total) {
+  if (!taichi::arch_uses_llvm(runtime2.arch) &&
+      arg_count > taichi_max_num_args_total) {
     ti_set_last_error(TI_ERROR_ARGUMENT_OUT_OF_RANGE, "arg_count");
     return nullptr;
   }

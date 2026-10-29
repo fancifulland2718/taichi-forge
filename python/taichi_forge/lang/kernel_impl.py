@@ -1910,7 +1910,10 @@ class Kernel:
             launch_ctx._set_cuda_range_work_per_thread_target(
                 _range_work_per_thread_target
             )
-        max_arg_num = 64
+        # LLVM launches use the callable's sized argument buffer through
+        # RuntimeContext, not the historical fixed 64-slot argument array.
+        # Keep the existing guard for other backends until qualified there.
+        max_arg_num = None if _ti_core.arch_uses_llvm(impl.current_cfg().arch) else 64
         exceed_max_arg_num = False
 
         def set_arg_ndarray(indices, v):
@@ -2206,7 +2209,7 @@ class Kernel:
         def recursive_set_args(needed, provided, v, indices):
             in_argpack = len(indices) > 1
             nonlocal actual_argument_slot, exceed_max_arg_num, set_later_list
-            if actual_argument_slot >= max_arg_num:
+            if max_arg_num is not None and actual_argument_slot >= max_arg_num:
                 exceed_max_arg_num = True
                 return 0
             actual_argument_slot += 1
