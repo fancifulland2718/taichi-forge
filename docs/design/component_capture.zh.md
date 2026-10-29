@@ -281,6 +281,13 @@ Python 不计算字节布局。绑定 ID/代际不进入语义代码身份。生
 消费端通过已有 prepared API 以同一加载代码驱动独立实例。入口导出检查全部实际树依赖，
 不采样 live 数值或激活集合。树 schema 改变需要另一代码变体，不称为动态容量。
 
+placement 也可来自正常当前 `ti.root`；显式 scope 仍检查自己的 FieldsBuilder，默认
+scope 检查当前未物化的默认根，不能把已物化或另一 builder 的节点当作新声明位置。
+固定 `struct_field` 支持原来的 `state[I].member` 与 grouped struct-for：现有 AST
+在真正索引/遍历时解析声明，再交给原 StructField lowering，不另解释字段或地址。
+成员优先的 `state.member[I]` 仍只捕获实际成员；整个结构元素的索引沿原前端构造
+全部成员引用并保留完整固定组。参数化 Dense 结构的整个元素索引仍需独立资格。
+
 普通组件 recording 经 `component.compile_graph(owner.record)` 收集实际入口和固定树
 依赖，`root.export(module, name)` 自动导出，不需要逐 Kernel 清单。v6 根合同区分
 `fixed_snode` 组和参数化 Dense 组；模块最终 dump 的真实重定位表生成消费绑定，

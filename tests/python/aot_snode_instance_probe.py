@@ -430,10 +430,41 @@ def check_component(folder, backend):
             domain.close()
 
 
+def check_struct(folder, backend):
+    from taichi_forge_runtime.aot import Runtime
+
+    with Runtime(backend) as runtime:
+        module = runtime.load_module(folder)
+        component = module.component("step")
+        states = [component.instantiate({}) for _ in range(2)]
+        domain = runtime.execution_domain(capacity=1, instance_capacity=1) if backend == "cuda" else None
+        output = runtime.ndarray("f32", (8, 3))
+        for index, gravity in ((0, [1, -2, 3]), (1, [-3, 2, -1]), (0, [2, 3, 4])):
+            with states[index].prepare(values=dict(gravity=gravity), arguments=dict(out=output),
+                                       execution_domain=domain) as call:
+                call.initialize()
+                if domain:
+                    ticket = call.submit()
+                    ticket.wait()
+                    ticket.close()
+                else:
+                    call.run()
+            result = array.array("f")
+            result.frombytes(output.read())
+            expected = [i / (i + 1) * (j + 1) + gravity[j] if i < 6 else 0 for i in range(8) for j in range(3)]
+            assert all(abs(a - b) < 1e-6 for a, b in zip(result, expected)), (list(result), expected)
+        for state in states:
+            state.close()
+        if domain:
+            domain.close()
+
+
 if __name__ == "__main__":
     sys.path.insert(0, os.environ["FORGE_AOT_TEST_PACKAGE"])
     sys.meta_path.insert(0, NoNumericalSource())
-    if len(sys.argv) > 3 and sys.argv[3] == "component":
+    if len(sys.argv) > 3 and sys.argv[3] == "struct":
+        check_struct(sys.argv[1], sys.argv[2])
+    elif len(sys.argv) > 3 and sys.argv[3] == "component":
         check_component(sys.argv[1], sys.argv[2])
     elif len(sys.argv) > 3 and sys.argv[3] == "capture":
         check_capture(sys.argv[1], sys.argv[2])

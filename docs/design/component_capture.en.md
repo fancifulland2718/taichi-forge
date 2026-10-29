@@ -307,6 +307,17 @@ Entry export verifies every compiled tree dependency and never snapshots live
 values or activation. Sparse tree schema changes require another code
 variant and are not advertised as dynamic capacity.
 
+Placement may also come from the ordinary current `ti.root`. Explicit scopes
+validate their own FieldsBuilder; default scopes validate the current pending
+root, rejecting a materialized or foreign builder's placement. Fixed
+`struct_field` declarations preserve `state[I].member` and grouped struct-for:
+the existing AST resolves declarations when indexing or iterating, then uses
+ordinary StructField lowering without another field/address interpreter.
+Member-first `state.member[I]` access still captures only that member. Whole
+element indexing constructs all member references as the ordinary frontend does
+and retains the full fixed group. Whole elements of parameterized dense structs
+still require separate qualification.
+
 An ordinary component recording through `component.compile_graph(owner.record)`
 collects its actual entries and fixed-tree dependencies. `root.export(module, name)`
 exports them without a per-kernel list. The v6 root contract distinguishes

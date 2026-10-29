@@ -369,14 +369,16 @@ class ResourceScope:
         if any(not isinstance(item, Extent) and type(item) is not int for item in shape):
             raise TypeError("Resource extents require declared dimensions or explicit integer constants")
         if placement is not None:
+            from taichi_forge.lang import impl
             from taichi_forge.lang.snode import SNode
 
-            if self._builder is None or not isinstance(placement, SNode):
-                raise ValueError("Fixed SNode placement requires this scope's explicit FieldsBuilder")
+            if not isinstance(placement, SNode):
+                raise ValueError("Fixed SNode placement requires a normal SNode")
+            builder = self._builder if self._builder is not None else impl._root_fb
             root = placement.ptr
             while root.parent is not None:
                 root = root.parent
-            if root.id != self._builder.ptr.id:
+            if root.id != builder.ptr.id:
                 raise ValueError("Fixed SNode placement belongs to another FieldsBuilder")
             if any(isinstance(item, Extent) for item in shape):
                 raise ValueError("Fixed SNode schema cannot use dynamic extents; declare active counts separately")
@@ -392,7 +394,7 @@ class ResourceScope:
         )
         if any(not 0 < value <= 2**31 - 1 for value in concrete):
             raise ValueError("Resource Field extents must be positive i32 values")
-        if self._builder is None:
+        if self._builder is None and placement is None:
             field = factory(*args, **{**kwargs, "shape": concrete})
         else:
             from taichi_forge.lang import impl

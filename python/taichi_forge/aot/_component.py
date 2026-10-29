@@ -1171,6 +1171,30 @@ class _Capture:
             self.expressions[name] = declaration.declare("__capture_" + name)
         return self.expressions[name]
 
+    def field_operand(self, ctx, value):
+        """Resolve a declared fixed StructField into the ordinary Field lowering.
+
+        Member-first access remains lazy. Whole-record indexing builds all
+        member references in impl.subscript, so those declarations must be
+        captured before handing the original StructField to that same path.
+        """
+        if not isinstance(value, _RecordReference):
+            return value
+        from taichi_forge.lang.struct import StructField
+
+        field = self.component.read(self.owner, _capture_id(value.path))
+        if not isinstance(field, StructField):
+            raise TaichiCompilationError("A declared record namespace is not an indexable or iterable Field")
+        names = tuple(field.field_dict)
+        if not names or any(
+            not isinstance(self.declarations.get(_capture_id((*value.path, name))), FixedSNodeField)
+            for name in names
+        ):
+            raise TaichiCompilationError("Whole StructField indexing/traversal requires declared fixed SNode members")
+        for name in names:
+            self.attribute(ctx, name, prefix=value.path)
+        return field
+
     def named_attribute(self, ctx, args, keywords):
         """Resolve builtin getattr through the same declared attribute path."""
         if keywords or len(args) != 2 or type(args[1]) is not str:

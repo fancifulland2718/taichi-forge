@@ -63,6 +63,78 @@ class _SparseGraphState(_SparseState):
         builder.dispatch(self.summarize, out, template_args={"self": self})
 
 
+@ti.data_oriented
+class _SparseStructState:
+    def __init__(self, implicit_root=False):
+        builder = None if implicit_root else ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        leaf = (ti.root if implicit_root else builder).pointer(ti.ijk, 2).bitmasked(ti.ijk, 4)
+        scope.grid = scope.struct_field(
+            dict(mass=ti.f32, momentum=ti.types.vector(3, ti.f32), velocity=ti.types.vector(3, ti.f32)),
+            shape=(8, 8, 8), placement=leaf)
+        self.tree = None if implicit_root else builder.finalize()
+        self.gravity = ti.Vector([1.0, -2.0, 3.0])
+        scope.value("gravity", ti.types.vector(3, ti.f32))
+
+    @ti.kernel
+    def seed(self):
+        for i in range(6):
+            self.grid[i, 2, 3].mass = i + 1
+            self.grid[i, 2, 3].momentum = ti.Vector([i, 2 * i, 3 * i])
+
+    @ti.func
+    def update_node(self, I):
+        if self.grid[I].mass > 0:
+            self.grid[I].velocity = self.grid[I].momentum / self.grid[I].mass + self.gravity
+
+    @ti.kernel
+    def update(self):
+        for I in ti.grouped(self.grid):
+            self.update_node(I)
+
+    @ti.kernel
+    def read(self, out: ti.types.ndarray(ti.f32, 2)):
+        for i in range(8):
+            for j in ti.static(range(3)):
+                out[i, j] = self.grid[i, 2, 3].velocity[j]
+
+    def record(self, builder):
+        out = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.f32, ndim=2)
+        builder.dispatch(self.seed, template_args={"self": self})
+        builder.dispatch(self.update, template_args={"self": self})
+        builder.dispatch(self.read, out, template_args={"self": self})
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
+def test_fixed_snode_struct_elements_keep_normal_field_lowering(tmp_path):
+    state = _SparseStructState(implicit_root=ti.cfg.arch == ti.cpu)
+    out = ti.ndarray(ti.f32, (8, 3))
+    state.seed()
+    state.update()
+    state.read(out)
+    reference = out.to_numpy()
+    expected = np.zeros((8, 3), dtype=np.float32)
+    expected[:6] = np.arange(6)[:, None] / np.arange(1, 7)[:, None] * [1, 2, 3] + [1, -2, 3]
+    np.testing.assert_allclose(reference, expected, rtol=1e-6, atol=1e-6)
+    component = Component.from_owner(state)
+    root = component.compile_graph(state.record)
+    assert len(root.contract["fixed_groups"]) == 1
+    assert len(root.contract["resources"]) == 3
+    # Reuse the original struct indexing, traversal and helper with captured
+    # runtime gravity; do not rewrite the numerical expression as member arrays.
+    code = component.compile(state.update)
+    state.gravity = ti.Vector([-3.0, 2.0, -1.0])
+    code.run(component, state)
+    state.read(out)
+    expected[:6] += [-4, 4, -4]
+    np.testing.assert_allclose(out.to_numpy(), expected, rtol=1e-6, atol=1e-6)
+    module = ti.aot.Module()
+    root.export(module, "step")
+    folder = tmp_path / "artifact"
+    module.save(folder)
+    _consume_isolated(folder, tmp_path, "struct")
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
 def test_fixed_snode_normal_component_graph_exports_and_instantiates(tmp_path):
     spare = _SparseState(32)
