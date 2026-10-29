@@ -1,5 +1,7 @@
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
 
+#include <atomic>
+
 #include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/runtime/llvm/list_manager_constants.h"
 #include "taichi/runtime/llvm/snode_runtime_state.h"
@@ -715,6 +717,8 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
   // new tree itself does not overlap an existing view. Drain/return borrowed
   // views before this cold mutation; a default-stream wait is insufficient.
   require_no_cuda_sparse_loans();
+  const auto construction =
+      std::make_shared<const LLVM::SNodeTreeLayout>(field_cache_data);
   auto *const runtime_jit = get_runtime_jit_module();
   // By the time this creator is called, "this" is already destroyed.
   // Therefore it is necessary to capture members by values.
@@ -1415,6 +1419,81 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
     }
     runtime_jit->call<void *>("runtime_element_lists_finalize_backing_pool",
                               llvm_runtime_);
+  }
+  active_snode_tree_runtime_states_.at(tree_id).construction = construction;
+}
+
+LLVM::SNodeTreeLayout LlvmRuntimeExecutor::clone_snode_tree_runtime(
+    const LlvmSparseRuntimeViewTree &prototype,
+    int target_tree_id,
+    uint64 *result_buffer) {
+  std::unique_lock<std::recursive_mutex> submission;
+#if defined(TI_WITH_CUDA)
+  if (config_.arch == Arch::cuda)
+    submission = CUDAContext::get_instance().get_submission_lock_guard();
+#endif
+  const auto found = active_snode_tree_runtime_states_.find(prototype.tree_id);
+  if (finalized_ || prototype.reserved ||
+      found == active_snode_tree_runtime_states_.end() ||
+      found->second.generation != prototype.generation ||
+      !found->second.construction || target_tree_id < 0 ||
+      !snode_tree_id_registry_.contains(target_tree_id) ||
+      has_snode_tree_runtime_state(target_tree_id))
+    throw std::invalid_argument("Invalid or stale SNode instance prototype");
+  const auto construction = found->second.construction;
+  const bool element_lists = found->second.element_lists;
+  auto layout = *construction;
+  layout.tree_id = target_tree_id;
+  // IDs can be recycled at a cold boundary; a saved numeric binding must not
+  // become valid again just because its slot was allocated a second time.
+  static std::atomic<std::uint64_t> next_generation{1};
+  auto generation = next_generation.load(std::memory_order_relaxed);
+  do {
+    if (generation == std::numeric_limits<std::uint64_t>::max())
+      throw std::overflow_error("SNode instance generation space exhausted");
+  } while (!next_generation.compare_exchange_weak(
+      generation, generation + 1, std::memory_order_relaxed));
+  layout.tree_generation = generation;
+  try {
+    initialize_llvm_runtime_snodes(layout, result_buffer, element_lists);
+    active_snode_tree_runtime_states_.at(target_tree_id).construction =
+        construction;
+  } catch (...) {
+    if (has_snode_tree_runtime_state(target_tree_id))
+      destroy_snode_tree_runtime(layout);
+    throw;
+  }
+  return layout;
+}
+
+void LlvmRuntimeExecutor::validate_snode_tree_instance_bindings(
+    const std::vector<LlvmSparseRuntimeViewBinding> &bindings) const {
+  std::unique_lock<std::recursive_mutex> submission;
+#if defined(TI_WITH_CUDA)
+  if (config_.arch == Arch::cuda)
+    submission = CUDAContext::get_instance().get_submission_lock_guard();
+#endif
+  if (finalized_)
+    throw std::invalid_argument("SNode instance bindings require a live executor");
+  int previous = -1;
+  std::unordered_set<int> sources;
+  for (const auto &binding : bindings) {
+    const auto code = active_snode_tree_runtime_states_.find(binding.tree_id);
+    const auto state =
+        active_snode_tree_runtime_states_.find(binding.source_tree_id);
+    if (binding.tree_id <= previous ||
+        binding.tree_id == std::numeric_limits<int>::max() ||
+        !sources.insert(binding.source_tree_id).second ||
+        code == active_snode_tree_runtime_states_.end() ||
+        state == active_snode_tree_runtime_states_.end() ||
+        code->second.generation != binding.code_generation ||
+        state->second.generation != binding.generation ||
+        !code->second.construction ||
+        code->second.construction != state->second.construction)
+      throw std::invalid_argument(
+          "SNode instance binding requires the exact construction recipe and "
+          "live code/state generations");
+    previous = binding.tree_id;
   }
 }
 

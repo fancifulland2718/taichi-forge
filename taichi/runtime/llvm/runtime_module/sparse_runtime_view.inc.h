@@ -92,8 +92,17 @@ void sparse_view_rebind_managers(LlvmSNodeTreeRuntimeState *tree,
   }
 }
 
+extern "C++" {
+inline int sparse_view_source(const LlvmSparseRuntimeViewTree &tree) {
+  return tree.reserved == 0 ? tree.tree_id : -1;
+}
+inline int sparse_view_source(const LlvmSparseRuntimeViewBinding &tree) {
+  return tree.source_tree_id;
+}
+
+template <typename Entry>
 bool sparse_view_preflight(LLVMRuntime *view,
-                           const LlvmSparseRuntimeViewTree *trees,
+                           const Entry *trees,
                            int count,
                            bool release,
                            LlvmSparseRuntimeViewStatus *status) {
@@ -110,16 +119,23 @@ bool sparse_view_preflight(LLVMRuntime *view,
   int previous = -1;
   for (int i = 0; i < count; ++i) {
     const auto id = trees[i].tree_id;
+    const auto source_id = sparse_view_source(trees[i]);
     status->tree_id = id;
     status->error = LlvmSparseRuntimeViewError::invalid_request;
-    if (id <= previous || trees[i].reserved != 0 ||
+    if (id <= previous || source_id < 0 ||
         id >= view->snode_tree_state_capacity)
       return false;
+    if constexpr (std::is_same_v<Entry, LlvmSparseRuntimeViewBinding>) {
+      // A manager has one view owner. Do not publish one state in two slots.
+      for (int j = 0; j < i; ++j)
+        if (sparse_view_source(trees[j]) == source_id)
+          return false;
+    }
     previous = id;
     status->error = LlvmSparseRuntimeViewError::unavailable_tree;
-    if (id >= source->snode_tree_state_capacity || !source->snode_tree_states)
+    if (source_id >= source->snode_tree_state_capacity || !source->snode_tree_states)
       return false;
-    auto *tree = source->snode_tree_states[id];
+    auto *tree = source->snode_tree_states[source_id];
     if (!tree || tree->node_count < 0 || (tree->node_count && !tree->nodes))
       return false;
     status->error = LlvmSparseRuntimeViewError::stale_generation;
@@ -135,33 +151,51 @@ bool sparse_view_preflight(LLVMRuntime *view,
   return true;
 }
 
+template <typename Entry>
+void sparse_view_transfer(LLVMRuntime *view,
+                          const Entry *trees,
+                          int count,
+                          bool release,
+                          LlvmSparseRuntimeViewStatus *status) {
+  if (!sparse_view_preflight(view, trees, count, release, status))
+    return;
+  for (int i = 0; i < count; ++i) {
+    const int id = trees[i].tree_id;
+    auto *source = view->sparse_allocation_source;
+    auto *tree = source->snode_tree_states[sparse_view_source(trees[i])];
+    sparse_view_rebind_managers(tree, release ? source : view);
+    view->snode_tree_states[id] = release ? nullptr : tree;
+  }
+  if (release)
+    view->sparse_allocation_source = nullptr;
+  view->sparse_view_tree_count = release ? -1 : count;
+}
+}  // extern "C++"
+
 void runtime_sparse_view_bind(LLVMRuntime *view,
                               const LlvmSparseRuntimeViewTree *trees,
                               int count,
                               LlvmSparseRuntimeViewStatus *status) {
-  if (!sparse_view_preflight(view, trees, count, false, status))
-    return;
-  for (int i = 0; i < count; ++i) {
-    const int id = trees[i].tree_id;
-    auto *tree = view->sparse_allocation_source->snode_tree_states[id];
-    sparse_view_rebind_managers(tree, view);
-    view->snode_tree_states[id] = tree;
-  }
-  view->sparse_view_tree_count = count;
+  sparse_view_transfer(view, trees, count, false, status);
 }
 
 void runtime_sparse_view_release(LLVMRuntime *view,
                                  const LlvmSparseRuntimeViewTree *trees,
                                  int count,
                                  LlvmSparseRuntimeViewStatus *status) {
-  if (!sparse_view_preflight(view, trees, count, true, status))
-    return;
-  for (int i = 0; i < count; ++i) {
-    const int id = trees[i].tree_id;
-    sparse_view_rebind_managers(view->snode_tree_states[id],
-                                view->sparse_allocation_source);
-    view->snode_tree_states[id] = nullptr;
-  }
-  view->sparse_allocation_source = nullptr;
-  view->sparse_view_tree_count = -1;
+  sparse_view_transfer(view, trees, count, true, status);
+}
+
+void runtime_sparse_view_bind_mapped(LLVMRuntime *view,
+                                     const LlvmSparseRuntimeViewBinding *trees,
+                                     int count,
+                                     LlvmSparseRuntimeViewStatus *status) {
+  sparse_view_transfer(view, trees, count, false, status);
+}
+
+void runtime_sparse_view_release_mapped(LLVMRuntime *view,
+                                        const LlvmSparseRuntimeViewBinding *trees,
+                                        int count,
+                                        LlvmSparseRuntimeViewStatus *status) {
+  sparse_view_transfer(view, trees, count, true, status);
 }

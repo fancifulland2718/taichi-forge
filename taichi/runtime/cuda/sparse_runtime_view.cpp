@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <mutex>
 
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -39,7 +40,9 @@ struct SparseRuntimeView::State {
   const std::uint64_t identity{next_view_identity.fetch_add(1)};
   std::shared_ptr<RuntimeFaultDomain> owner;
   std::shared_ptr<SparseTreeAdmission::Loan> loan;
-  std::vector<LlvmSparseRuntimeViewTree> trees;
+  std::vector<LlvmSparseRuntimeViewBinding> bindings;
+  std::map<int, void *> roots;
+  std::map<std::vector<int>, void *> root_tables;
   std::vector<void *> allocations;
   std::vector<std::shared_ptr<DiagnosticSnapshot>> snapshots;
   JITModuleCUDA *module{nullptr};
@@ -48,7 +51,7 @@ struct SparseRuntimeView::State {
   void *stream{nullptr};
   void *temporary{nullptr};
   void *host{nullptr};
-  LlvmSparseRuntimeViewTree *device_trees{nullptr};
+  LlvmSparseRuntimeViewBinding *device_trees{nullptr};
   LlvmSparseRuntimeViewStatus *status{nullptr};
   void *release_function{nullptr};
   void *snapshot_function{nullptr};
@@ -122,16 +125,35 @@ void SparseRuntimeView::initialize(
     LlvmRuntimeExecutor &executor,
     const std::vector<LlvmSparseRuntimeViewTree> &trees,
     std::shared_ptr<RuntimeFaultDomain> owner) {
+  std::vector<LlvmSparseRuntimeViewBinding> bindings;
+  bindings.reserve(trees.size());
+  for (const auto &tree : trees) {
+    if (tree.reserved)
+      throw std::invalid_argument("Invalid CUDA sparse runtime view tree");
+    bindings.push_back(
+        {tree.tree_id, tree.tree_id, tree.generation, tree.generation});
+  }
+  initialize_mapped(executor, bindings, std::move(owner));
+}
+
+void SparseRuntimeView::initialize_mapped(
+    LlvmRuntimeExecutor &executor,
+    const std::vector<LlvmSparseRuntimeViewBinding> &bindings,
+    std::shared_ptr<RuntimeFaultDomain> owner) {
   auto &s = *state_;
   if (s.attempted || !owner || owner->backend() != Arch::cuda ||
-      trees.size() > std::size_t(std::numeric_limits<int>::max()) ||
-      (!trees.empty() &&
-       trees.back().tree_id == std::numeric_limits<int>::max()))
+      bindings.size() > std::size_t(std::numeric_limits<int>::max()))
     throw std::invalid_argument("Invalid CUDA sparse runtime view preparation");
   owner->throw_if_new_submission_disallowed("prepare CUDA sparse runtime view");
+  executor.validate_snode_tree_instance_bindings(bindings);
+  std::vector<LlvmSparseRuntimeViewTree> trees;
+  for (const auto &binding : bindings)
+    trees.push_back({binding.source_tree_id, 0, binding.generation});
+  std::sort(trees.begin(), trees.end(),
+            [](const auto &a, const auto &b) { return a.tree_id < b.tree_id; });
   s.owner = std::move(owner);
   s.attempted = true;
-  s.trees = trees;
+  s.bindings = bindings;
   s.source = executor.get_llvm_runtime();
   s.module = dynamic_cast<JITModuleCUDA *>(executor.get_runtime_jit_module());
   if (!s.module)
@@ -142,7 +164,11 @@ void SparseRuntimeView::initialize(
   auto guard = context.get_guard();
   {
     auto submission = context.get_submission_lock_guard();
+    executor.validate_snode_tree_instance_bindings(bindings);
     s.loan = executor.reserve_cuda_sparse_trees(trees);
+    for (const auto &binding : bindings)
+      s.roots.emplace(binding.tree_id,
+                      executor.get_snode_tree_root_ptr(binding.source_tree_id));
     producer = RuntimeCompletion::from_cuda_stream(
         s.owner->snapshot().program_domain,
         s.owner->allocate_submission_sequence(), nullptr, s.owner);
@@ -154,15 +180,17 @@ void SparseRuntimeView::initialize(
   driver.stream_create(&s.stream, CU_STREAM_NON_BLOCKING);
   producer.enqueue_cuda_wait(s.stream, s.owner->snapshot().program_domain,
                              s.owner);
-  s.release_function = s.module->lookup_function("runtime_sparse_view_release");
+  s.release_function =
+      s.module->lookup_function("runtime_sparse_view_release_mapped");
   s.snapshot_function =
       s.module->lookup_function("runtime_sparse_view_snapshot");
   auto *size_function =
       s.module->lookup_function("runtime_sparse_view_get_size");
   auto *initialize_function =
       s.module->lookup_function("runtime_sparse_view_initialize");
-  auto *bind_function = s.module->lookup_function("runtime_sparse_view_bind");
-  const auto input_bytes = trees.size() * sizeof(trees.front());
+  auto *bind_function =
+      s.module->lookup_function("runtime_sparse_view_bind_mapped");
+  const auto input_bytes = bindings.size() * sizeof(bindings.front());
   driver.mem_host_alloc(&s.host, std::max(input_bytes, sizeof(std::uint64_t)),
                         0);
   auto *size_result =
@@ -175,7 +203,7 @@ void SparseRuntimeView::initialize(
   s.view = static_cast<LLVMRuntime *>(s.allocate(view_bytes));
   driver.memsetd32_async(s.view, 0, view_bytes / sizeof(std::uint32_t),
                          s.stream);
-  const int capacity = trees.empty() ? 0 : trees.back().tree_id + 1;
+  const int capacity = bindings.empty() ? 0 : bindings.back().tree_id + 1;
   auto *directory =
       capacity ? s.allocate(std::size_t(capacity) * sizeof(void *)) : nullptr;
   s.temporary = s.allocate(taichi_global_tmp_buffer_size);
@@ -185,8 +213,8 @@ void SparseRuntimeView::initialize(
       static_cast<LlvmSparseRuntimeViewStatus *>(s.allocate(sizeof(*s.status)));
   if (input_bytes) {
     s.device_trees =
-        static_cast<LlvmSparseRuntimeViewTree *>(s.allocate(input_bytes));
-    std::memcpy(s.host, trees.data(), input_bytes);
+        static_cast<LlvmSparseRuntimeViewBinding *>(s.allocate(input_bytes));
+    std::memcpy(s.host, bindings.data(), input_bytes);
     driver.memcpy_host_to_device_async(s.device_trees, s.host, input_bytes,
                                        s.stream);
   }
@@ -195,8 +223,8 @@ void SparseRuntimeView::initialize(
   s.check_status("initialize");
   s.possibly_bound =
       true;  // Driver failure must not free possibly rebound managers.
-  s.call(bind_function, "runtime_sparse_view_bind", s.stream, s.view,
-         s.device_trees, int(trees.size()), s.status);
+  s.call(bind_function, "runtime_sparse_view_bind_mapped", s.stream, s.view,
+         s.device_trees, int(bindings.size()), s.status);
   s.read(s.status, sizeof(*s.status));
   if (static_cast<const LlvmSparseRuntimeViewStatus *>(s.host)->error !=
       LlvmSparseRuntimeViewError::success) {
@@ -214,11 +242,38 @@ LLVMRuntime *SparseRuntimeView::bind(LLVMRuntime *source,
         "CUDA sparse runtime view source has retired or changed");
   for (int id : trees)
     if (!std::binary_search(
-            s.trees.begin(), s.trees.end(), LlvmSparseRuntimeViewTree{id, 0, 0},
+            s.bindings.begin(), s.bindings.end(),
+            LlvmSparseRuntimeViewBinding{id, 0, 0, 0},
             [](const auto &a, const auto &b) { return a.tree_id < b.tree_id; }))
       throw std::invalid_argument(
           "CUDA sparse runtime view omits a selected tree");
   return s.view;
+}
+
+void *SparseRuntimeView::root_binding(const std::vector<int> &trees) const {
+  auto &s = *state_;
+  std::lock_guard<std::mutex> lock(s.retirement_mutex);
+  if (!s.ready || trees.empty())
+    throw std::invalid_argument("CUDA sparse root binding requires a live view");
+  std::vector<void *> roots;
+  roots.reserve(trees.size());
+  for (int id : trees) {
+    auto found = s.roots.find(id);
+    if (found == s.roots.end())
+      throw std::invalid_argument("CUDA sparse root binding omits a code tree");
+    roots.push_back(found->second);
+  }
+  if (roots.size() == 1)
+    return roots.front();
+  auto existing = s.root_tables.find(trees);
+  if (existing != s.root_tables.end())
+    return existing->second;
+  auto guard = CUDAContext::get_instance().get_guard();
+  const auto bytes = roots.size() * sizeof(void *);
+  auto *table = s.allocate(bytes);
+  CUDADriver::get_instance().memcpy_host_to_device(table, roots.data(), bytes);
+  s.root_tables.emplace(trees, table);
+  return table;
 }
 
 void *SparseRuntimeView::temporaries() const {
@@ -257,8 +312,8 @@ void SparseRuntimeView::retire() {
   auto guard = CUDAContext::get_instance().get_guard();
   auto &driver = CUDADriver::get_instance();
   if (s.possibly_bound) {
-    s.call(s.release_function, "runtime_sparse_view_release", s.stream, s.view,
-           s.device_trees, int(s.trees.size()), s.status);
+    s.call(s.release_function, "runtime_sparse_view_release_mapped", s.stream,
+           s.view, s.device_trees, int(s.bindings.size()), s.status);
     s.check_status("return");
     s.possibly_bound = false;
   }

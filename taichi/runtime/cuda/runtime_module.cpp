@@ -38,7 +38,9 @@ CUDARuntimeGroup cuda_runtime_group(const std::string &entry) {
       "runtime_sparse_view_snapshot",
       "runtime_sparse_view_initialize",
       "runtime_sparse_view_bind",
-      "runtime_sparse_view_release"};
+      "runtime_sparse_view_release",
+      "runtime_sparse_view_bind_mapped",
+      "runtime_sparse_view_release_mapped"};
   static const std::unordered_set<std::string> statistics{
       "runtime_get_snode_element_list",
       "runtime_get_snode_node_allocator",

@@ -1104,9 +1104,14 @@ void KernelLauncher::bind_sparse_runtime_view(GraphLaunchPacket &packet,
           context.runtime_state &
           ~(runtime_state_sparse | runtime_state_error)))
     throw std::invalid_argument(blocker);
-  packet.context.runtime =
-      view.bind(packet.context.runtime, context.snode_tree_ids);
-  packet.context.global_tmp_buffer = static_cast<char *>(view.temporaries());
+  auto *runtime = view.bind(packet.context.runtime, context.snode_tree_ids);
+  auto *roots = context.uses_root_binding
+                    ? static_cast<uint64 *>(view.root_binding(context.snode_tree_ids))
+                    : packet.context.result_buffer;
+  auto *temporaries = static_cast<char *>(view.temporaries());
+  packet.context.runtime = runtime;
+  packet.context.result_buffer = roots;
+  packet.context.global_tmp_buffer = temporaries;
 }
 
 void KernelLauncher::bind_execution_temporaries(GraphLaunchPacket &packet,

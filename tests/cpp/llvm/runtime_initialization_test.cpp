@@ -8,6 +8,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <map>
 #include <set>
 #include <thread>
 #ifdef TI_WITH_CUDA
@@ -189,7 +190,56 @@ class LlvmSparseRuntimeView : public ::testing::TestWithParam<Arch> {
     read(value.data(), view.directory, sizeof(value));
     return value;
   }
+  LlvmSparseRuntimeViewStatus transfer_mapped(
+      const View &view,
+      bool release,
+      const std::vector<LlvmSparseRuntimeViewBinding> &requests) {
+    auto *input = allocate(std::max(std::size_t(1), requests.size()) *
+                           sizeof(LlvmSparseRuntimeViewBinding));
+    if (!requests.empty())
+      write(input, requests.data(),
+            requests.size() * sizeof(LlvmSparseRuntimeViewBinding));
+    module->call(release ? "runtime_sparse_view_release_mapped"
+                         : "runtime_sparse_view_bind_mapped",
+                 view.runtime, input, int(requests.size()), status);
+    return read_status();
+  }
 };
+
+TEST_P(LlvmSparseRuntimeView, MapsPrivateCodeSlotsWithoutChangingSourceDirectory) {
+  auto first = make_view();
+  auto second = make_view();
+  const LlvmSparseRuntimeViewBinding a{0, 1, 71, 0};
+  const LlvmSparseRuntimeViewBinding b{0, 3, 83, 0};
+  auto stale = b;
+  ++stale.generation;
+  EXPECT_EQ(transfer_mapped(first, false, {stale}).error,
+            LlvmSparseRuntimeViewError::stale_generation);
+  auto duplicate = a;
+  duplicate.tree_id = 2;
+  EXPECT_EQ(transfer_mapped(first, false, {a, duplicate}).error,
+            LlvmSparseRuntimeViewError::invalid_request);
+  EXPECT_EQ(entries(first), (std::array<void *, 4>{}));
+  EXPECT_EQ(transfer_mapped(first, false, {a}).error,
+            LlvmSparseRuntimeViewError::success);
+  EXPECT_EQ(transfer_mapped(second, false, {b}).error,
+            LlvmSparseRuntimeViewError::success);
+  EXPECT_EQ(entries(first)[0], states[0]);
+  EXPECT_EQ(entries(second)[0], states[1]);
+  std::array<void *, 8> original{};
+  read(original.data(), directory, sizeof(original));
+  EXPECT_EQ(original[1], states[0]);
+  EXPECT_EQ(original[3], states[1]);
+  EXPECT_EQ(original[0], nullptr);
+  EXPECT_EQ(transfer_mapped(first, true, {b}).error,
+            LlvmSparseRuntimeViewError::stale_generation);
+  EXPECT_EQ(entries(first)[0], states[0]);
+  EXPECT_EQ(transfer_mapped(first, true, {a}).error,
+            LlvmSparseRuntimeViewError::success);
+  EXPECT_EQ(entries(second)[0], states[1]);
+  EXPECT_EQ(transfer_mapped(second, true, {b}).error,
+            LlvmSparseRuntimeViewError::success);
+}
 
 TEST_P(LlvmSparseRuntimeView, PreflightsEveryTreeBeforeBindingOrReturning) {
   auto first = make_view();
@@ -345,6 +395,207 @@ TEST_P(LlvmSparseRuntimeView,
 }
 
 #ifdef TI_WITH_CUDA
+TEST(CudaSparseAccess, SameLoadedCodeUsesIndependentClonedTreeStates) {
+  const auto *folder = std::getenv("TAICHI_CUDA_SPARSE_ACCESS_FIXTURE");
+  if (!folder || !cuda::FixedGraph::available())
+    GTEST_SKIP() << "Requires the CUDA sparse access AOT fixture";
+  CompileConfig config;
+  config.arch = Arch::cuda;
+  LlvmRuntimeExecutor executor(config, nullptr);
+  uint64 *result = nullptr;
+  executor.materialize_runtime(nullptr, &result);
+  LLVM::AotModuleParams params;
+  params.module_path = folder;
+  params.executor_ = &executor;
+  params.allocation_result_buffer = result;
+  params.kernel_launcher = std::make_unique<cuda::KernelLauncher>(
+      cuda::KernelLauncher::Config{&executor});
+  auto module = LLVM::make_aot_module(std::move(params));
+  auto kernel = [&](const char *name) {
+    return dynamic_cast<llvm_aot::KernelImpl *>(module->get_kernel(name));
+  };
+  auto *initialize = kernel("initialize");
+  LaunchContextBuilder initial(initialize);
+  initialize->launch(initial);
+  std::map<std::string, llvm_aot::KernelImpl *> code;
+  code.emplace("initialize", initialize);
+  for (const auto *name : {"seed_left", "bump_left", "read_left", "deactivate_left"})
+    code.emplace(name, kernel(name));
+  auto layout = [&](const char *name) {
+    return dynamic_cast<llvm_aot::FieldImpl &>(
+               *static_cast<LLVM::LlvmAotModule &>(*module).get_snode_tree(name))
+        .get_snode_tree_cache();
+  };
+  const auto original = layout("0"), unrelated = layout("1");
+  const LlvmSparseRuntimeViewTree prototype{
+      original.tree_id, 0, original.tree_generation};
+  auto ids = executor.reserve_aot_snode_tree_ids(2);
+  auto a = executor.clone_snode_tree_runtime(prototype, ids[0], result);
+  auto b = executor.clone_snode_tree_runtime(prototype, ids[1], result);
+  auto binding = [&](const auto &state) {
+    return LlvmSparseRuntimeViewBinding{original.tree_id, state.tree_id,
+                                       state.tree_generation,
+                                       original.tree_generation};
+  };
+  // Equal-looking independent trees are not proof of code/layout compatibility.
+  EXPECT_THROW(executor.validate_snode_tree_instance_bindings({binding(unrelated)}),
+               std::invalid_argument);
+  auto stale = binding(a);
+  ++stale.code_generation;
+  EXPECT_THROW(executor.validate_snode_tree_instance_bindings({stale}),
+               std::invalid_argument);
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 7602);
+  cuda::SparseRuntimeView left, right;
+  left.initialize_mapped(executor, {binding(a)}, owner);
+  right.initialize_mapped(executor, {binding(b)}, owner);
+  EXPECT_THROW(executor.destroy_snode_tree_runtime(a), std::invalid_argument);
+  auto &launcher = dynamic_cast<cuda::KernelLauncher &>(code.at("bump_left")->launcher());
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto &driver = CUDADriver::get_instance();
+  std::array<void *, 2> output{}, streams{};
+  for (int i = 0; i < 2; ++i) {
+    driver.malloc(&output[i], 16 * sizeof(int));
+    driver.stream_create(&streams[i], CU_STREAM_NON_BLOCKING);
+  }
+  struct Captured {
+    std::vector<cuda::KernelLauncher::GraphLaunchPacket> packets;
+    void *graph{nullptr}, *executable{nullptr};
+    ~Captured() {
+      auto context = CUDAContext::get_instance().get_guard();
+      auto &driver = CUDADriver::get_instance();
+      if (executable) driver.graph_exec_destroy(executable);
+      if (graph) driver.graph_destroy(graph);
+      for (const auto &packet : packets)
+        if (packet.device_arg_buffer) driver.mem_free(packet.device_arg_buffer);
+    }
+  };
+  auto capture = [&](cuda::SparseRuntimeView &view, int index,
+                     const std::vector<std::string> &names) {
+    auto captured = std::make_unique<Captured>();
+    captured->packets.resize(names.size());
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      auto *entry = code.at(names[i]);
+      LaunchContextBuilder args(entry);
+      args.discard_return_values();
+      if (names[i] == "seed_left") args.set_arg_int({0}, index ? 100 : 10);
+      if (names[i] == "read_left")
+        args.set_arg_external_array_with_shape(
+            {0}, reinterpret_cast<std::uintptr_t>(output[index]),
+            16 * sizeof(int), {16});
+      EXPECT_TRUE(launcher.prepare_cuda_graph_launch_packet(
+          entry->handle(), args, captured->packets[i], true));
+      launcher.bind_sparse_runtime_view(captured->packets[i], view);
+      auto &packet = captured->packets[i];
+      if (names[i] != "initialize")
+        EXPECT_EQ(packet.context.result_buffer,
+                  executor.get_snode_tree_root_ptr(index ? b.tree_id : a.tree_id));
+      // Match ordinary FixedGraph cold upload. A launch packet by itself does
+      // not own the temporary LaunchContextBuilder's host argument buffer.
+      if (packet.arg_buffer_size) {
+        driver.malloc(&packet.device_arg_buffer, packet.arg_buffer_size);
+        driver.memcpy_host_to_device(packet.device_arg_buffer,
+                                     packet.context.arg_buffer,
+                                     packet.arg_buffer_size);
+        packet.context.arg_buffer = static_cast<char *>(packet.device_arg_buffer);
+      }
+    }
+    {
+      auto lock = CUDAContext::get_instance().get_graph_capture_lock_guard();
+      driver.stream_begin_capture(streams[index], CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
+      for (auto &packet : captured->packets)
+        launcher.capture_cuda_graph_launch(packet, streams[index]);
+      driver.stream_end_capture(streams[index], &captured->graph);
+    }
+    driver.graph_instantiate_with_flags(&captured->executable, captured->graph, 0);
+    return captured;
+  };
+  auto read_a = capture(left, 0, {"read_left"});
+  auto read_b = capture(right, 1, {"read_left"});
+  auto seed_a = capture(left, 0, {"seed_left", "bump_left", "read_left"});
+  auto seed_b = capture(right, 1, {"seed_left", "bump_left", "read_left"});
+  auto step_a = capture(left, 0, {"bump_left", "read_left"});
+  auto step_b = capture(right, 1, {"bump_left", "read_left"});
+  auto clear_a = capture(left, 0, {"deactivate_left", "bump_left", "read_left"});
+  auto submit = [&](const auto &captured, int index) {
+    driver.graph_launch(captured->executable, streams[index]);
+  };
+  auto values = [&](int index) {
+    EXPECT_EQ(driver.stream_synchronize.call_concurrent(streams[index]), CUDA_SUCCESS);
+    std::array<int, 16> data{};
+    driver.memcpy_device_to_host(data.data(), output[index], sizeof(data));
+    return data;
+  };
+  submit(read_a, 0);
+  submit(read_b, 1);
+  EXPECT_EQ(values(0), (std::array<int, 16>{}));
+  EXPECT_EQ(values(1), (std::array<int, 16>{}));
+  submit(seed_a, 0);
+  submit(seed_b, 1);
+  submit(step_a, 0);
+  auto av = values(0), bv = values(1);
+  for (int i = 0; i < 16; ++i) {
+    EXPECT_EQ(av[i], i < 5 ? 12 + i : i < 8 ? 2 : 0);
+    EXPECT_EQ(bv[i], i < 5 ? 101 + i : i < 8 ? 1 : 0);
+  }
+  submit(clear_a, 0);
+  submit(step_b, 1);
+  av = values(0);
+  bv = values(1);
+  for (int i = 0; i < 16; ++i) {
+    EXPECT_EQ(av[i], i < 4 ? 0 : i == 4 ? 17 : i < 8 ? 3 : 0);
+    EXPECT_EQ(bv[i], i < 5 ? 102 + i : i < 8 ? 2 : 0);
+  }
+  read_a.reset(); seed_a.reset(); step_a.reset(); clear_a.reset();
+  left.retire();
+  executor.destroy_snode_tree_runtime(a);
+  submit(step_b, 1);
+  EXPECT_EQ(values(1)[0], 103);
+  EXPECT_THROW(executor.validate_snode_tree_instance_bindings({binding(a)}),
+               std::invalid_argument);
+  read_b.reset(); seed_b.reset(); step_b.reset();
+  right.retire();
+  executor.destroy_snode_tree_runtime(b);
+  auto reused = executor.clone_snode_tree_runtime(prototype, ids[0], result);
+  EXPECT_NE(reused.tree_generation, a.tree_generation);
+  EXPECT_THROW(executor.validate_snode_tree_instance_bindings({binding(a)}),
+               std::invalid_argument);
+  EXPECT_NO_THROW(executor.validate_snode_tree_instance_bindings({binding(reused)}));
+  const LlvmSparseRuntimeViewTree other_prototype{
+      unrelated.tree_id, 0, unrelated.tree_generation};
+  auto other = executor.clone_snode_tree_runtime(other_prototype, ids[1], result);
+  cuda::SparseRuntimeView pair;
+  pair.initialize_mapped(executor,
+      {binding(reused), {unrelated.tree_id, other.tree_id,
+                         other.tree_generation, unrelated.tree_generation}}, owner);
+  const std::vector<int> pair_ids{original.tree_id, unrelated.tree_id};
+  auto *root_table = pair.root_binding(pair_ids);
+  EXPECT_EQ(root_table, pair.root_binding(pair_ids));
+  std::array<void *, 2> roots{};
+  driver.memcpy_device_to_host(roots.data(), root_table, sizeof(roots));
+  EXPECT_EQ(roots[0], executor.get_snode_tree_root_ptr(reused.tree_id));
+  EXPECT_EQ(roots[1], executor.get_snode_tree_root_ptr(other.tree_id));
+  auto paired = capture(pair, 0, {"initialize", "bump_left", "read_left"});
+  submit(paired, 0);
+  av = values(0);
+  for (int i = 0; i < 16; ++i) EXPECT_EQ(av[i], i + 4);
+  paired.reset();
+  pair.retire();
+  executor.destroy_snode_tree_runtime(other);
+  executor.destroy_snode_tree_runtime(reused);
+  executor.release_aot_snode_tree_ids(ids);
+  for (int i = 0; i < 2; ++i) {
+    driver.stream_destroy(streams[i]);
+    driver.mem_free(output[i]);
+  }
+  auto *peek = kernel("peek_left");
+  LaunchContextBuilder original_values(peek);
+  peek->launch(original_values);
+  EXPECT_EQ(original_values.get_ret<int>(0), 3);
+  EXPECT_EQ(kernel("bump_left"), code.at("bump_left"));
+  module.reset();
+  executor.finalize();
+}
+
 TEST(CudaSparseAccess, RuntimeViewsCaptureRealKernelsAndReturnManagers) {
   const auto *folder = std::getenv("TAICHI_CUDA_SPARSE_ACCESS_FIXTURE");
   if (!folder || !cuda::FixedGraph::available())

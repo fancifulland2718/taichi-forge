@@ -236,6 +236,20 @@ Vulkan 也需单独验证。
 成员、新尺寸、别名/类型/shape 错误及同模块 CUDA Graph 多实例。成员视图捕获、
 梯度和 Vulkan 组件部署仍需独立取得资格。
 
+固定树 Sparse SNode 已补原生实例化基础，尚未接通公开组件绑定路径。
+`clone_snode_tree_runtime` 使用 executor 保存的原 `SNodeTreeLayout` 构造配方
+创建空状态，不复制数值、激活集合或 allocator 游标。代码树槽与实例树必须来自
+同一构造来源，并通过代码/状态两侧的代际校验；树 ID 回收后新实例取得新代际。
+
+CUDA `SparseRuntimeView` 在私有目录中映射这些槽，并持有私有 compact root
+binding、临时区与诊断。两条根寻址路径指向同一实例，不改写已注册代码或模块
+共享目录；既有树租约保护 allocator/listgen manager，完成有序退休后归还。
+分配仍是冷操作，保留“修改 allocator 存储前归还在外稀疏视图”的现有要求。
+CPU/CUDA 已有嵌入运行时映射事务门槛；真实 CUDA Kernel 验证同一加载模块下
+pointer/dense 的激活、遍历、deactivate、独立退休及单根/多根绑定。
+Sparse 捕获声明、通用组件导出及公开 Runtime 实例接口仍待接通，不能由此
+宣称完整 Sparse 组件部署已通过。
+
 真实 GeoPhys 正常构造现已提供有限 RNE 数值证据：CPU/CUDA 上 3/7/5 刚体、不同拓扑、
 质量、qpos/qvel 和重力复用原 `_rne_bias_force`，与普通 JIT 对照；静止链另检查解析重力矩。
 正常资源分组先隔离 body 状态、广义动力学和 bias-force 工作区，所有路径共用这些分组；

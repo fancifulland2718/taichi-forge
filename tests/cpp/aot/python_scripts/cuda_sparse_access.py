@@ -53,6 +53,23 @@ def fail_left():
     assert left[0] < 0, "left sparse diagnostic"
 
 
+@ti.kernel
+def seed_left(base: ti.i32):
+    for i in range(5):
+        left[i] = base + i
+
+
+@ti.kernel
+def read_left(out: ti.types.ndarray(ti.i32, 1)):
+    for i in range(16):
+        out[i] = left[i]
+
+
+@ti.kernel
+def deactivate_left():
+    ti.deactivate(left.parent().parent(), 0)
+
+
 artifact_format = os.environ.get("TI_TEST_SPARSE_ARTIFACT_FORMAT", "bc")
 caps = (
     [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
@@ -62,7 +79,8 @@ caps = (
 module = ti.aot.Module(ti.cuda, artifact_format=artifact_format, caps=caps)
 module.add_field("left", left)
 module.add_field("right", right)
-for kernel in (initialize, bump_left, bump_right, cold_bump_left, peek_left, peek_right, fail_left):
+for kernel in (initialize, bump_left, bump_right, cold_bump_left, peek_left, peek_right,
+               fail_left, seed_left, read_left, deactivate_left):
     module.add_kernel(kernel)
 graph = ti.graph.GraphBuilder()
 graph.dispatch(bump_right)

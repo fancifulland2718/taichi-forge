@@ -249,6 +249,25 @@ state, nested structure members, new extents, alias/type/shape failures and
 same-module CUDA Graph instances. Member-view captures, gradients and Vulkan
 component deployment remain separately qualified features.
 
+Fixed-schema Sparse SNode instantiation has a native runtime foundation, separate
+from the public component binding path. `clone_snode_tree_runtime` recreates empty
+state through the executor's original `SNodeTreeLayout` construction recipe;
+values, activation sets and allocator cursors are not copied. Code-slot bindings
+require that exact construction provenance and live code/state generations.
+Reusing a retired tree ID gives the new instance a fresh generation.
+
+CUDA `SparseRuntimeView` maps those slots in a private directory and retains
+private compact-root bindings, temporary storage and diagnostics. Both root
+addressing paths select the same instance; neither registered code nor the shared
+module directory is rewritten. Existing tree loans protect allocator/listgen
+managers until ordered retirement. Allocation is a cold operation and retains
+the existing requirement to return outstanding sparse views before changing
+allocator storage. CPU/CUDA gates cover the embedded mapping transaction; real
+CUDA kernels cover pointer/dense activation, traversal, deactivation, independent
+retirement and single/multiple roots under one loaded module. Sparse capture
+declarations, generic component export and public Runtime instance integration
+are not yet qualified by this lower-level mechanism.
+
 `test_aot_component_dense.py` compares the same numerical definition with ordinary
 JIT on CPU/CUDA. It covers new capacities, range/Field-shape/full-Field iteration,
 vector/matrix elements, aliases, empty active ranges and capacity-tail sentinels.

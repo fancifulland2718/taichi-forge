@@ -25,12 +25,22 @@ class SparseRuntimeView final : public RuntimeClient {
   void initialize(LlvmRuntimeExecutor &executor,
                   const std::vector<LlvmSparseRuntimeViewTree> &trees,
                   std::shared_ptr<RuntimeFaultDomain> owner);
+  // Bind code tree slots to independent instances created from the same
+  // executor-owned construction recipe. No registered code or shared runtime
+  // directory is modified. All instances must be allocated at a cold boundary.
+  void initialize_mapped(
+      LlvmRuntimeExecutor &executor,
+      const std::vector<LlvmSparseRuntimeViewBinding> &bindings,
+      std::shared_ptr<RuntimeFaultDomain> owner);
   void retire() override;
   void retire_after(const RuntimeCompletion &prefix) override;
 
   // Cold packet binding verifies the source and complete selected closure.
   // It never changes the source LaunchContextBuilder or registered code.
   LLVMRuntime *bind(LLVMRuntime *source, const std::vector<int> &trees) const;
+  // The compact CUDA root ABI must refer to the same instance as its runtime
+  // directory. Returned tables are immutable and retained until view retirement.
+  void *root_binding(const std::vector<int> &trees) const;
   void *temporaries() const;
   std::size_t bytes() const;
 

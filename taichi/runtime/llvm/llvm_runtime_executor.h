@@ -83,6 +83,16 @@ class LlvmRuntimeExecutor {
   // Shared by JIT and AOT; compiler-side struct modules remain caller-owned.
   void destroy_snode_tree_runtime(const LLVM::SNodeTreeLayout &field);
 
+  // Cold, empty-state instantiation from the exact existing construction
+  // recipe. The caller owns the reserved target id and retires the returned
+  // tree normally. Values, activation and allocator cursors are never copied.
+  LLVM::SNodeTreeLayout clone_snode_tree_runtime(
+      const LlvmSparseRuntimeViewTree &prototype,
+      int target_tree_id,
+      uint64 *result_buffer);
+  void validate_snode_tree_instance_bindings(
+      const std::vector<LlvmSparseRuntimeViewBinding> &bindings) const;
+
   // Ndarray and ArgPack Allocation
   DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
                                              uint64 *result_buffer,
@@ -257,6 +267,9 @@ class LlvmRuntimeExecutor {
     // Allocation, accounting and retirement use this same immutable fact.
     bool element_lists{false};
     std::shared_ptr<SparseTreeRegistration> registration;
+    // Shared only by instances created from this exact recipe, never inferred
+    // by comparing incomplete runtime layout metadata or equal root sizes.
+    std::shared_ptr<const LLVM::SNodeTreeLayout> construction;
   };
   DeviceAllocationUnique snode_tree_runtime_directory_alloc_{nullptr};
   std::vector<void *> snode_tree_runtime_host_directory_;

@@ -16,6 +16,16 @@ struct LlvmSparseRuntimeViewTree {
   std::uint64_t generation;
 };
 
+// An immutable code-slot -> instance-state binding. The host executor verifies
+// common construction provenance and both generations before lending storage.
+// The embedded runtime validates the state generation before publishing slots.
+struct LlvmSparseRuntimeViewBinding {
+  std::int32_t tree_id;
+  std::int32_t source_tree_id;
+  std::uint64_t generation;
+  std::uint64_t code_generation;
+};
+
 enum class LlvmSparseRuntimeViewError : std::int32_t {
   success = 0,
   invalid_view,
