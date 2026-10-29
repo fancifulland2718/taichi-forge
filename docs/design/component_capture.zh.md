@@ -3,6 +3,13 @@
 `taichi_forge.aot._component` 是内部 producer API，公共 SDK 接口尚未冻结。
 它沿正常 AST transformer 编译原有装饰方法，不重跑前端发现捕获，也不生成数值包装函数。
 
+模块常量可通过已求值的 `typing.Final` 注解显式声明静态角色，例如
+`MATERIAL_ID: Final[int] = 3`，值限于不可变标量和元组。普通 JIT 数值表达式保持原样；
+入口及嵌套 helper 的实际读取才将带类型的值纳入代码身份和可查询的 `constants`。
+候选复用和发布前重新检查声明和值，重绑定常量会使 producer 缓存失效，不沿用旧数值
+代码；未使用常量不增加 ABI 或身份依赖。未声明全局值、可变对象、同名闭包值以及
+延迟求值的字符串注解仍拒绝，不执行注解字符串或任意 Python getter。
+
 `Component` 在组件层声明属性：`RuntimeValue` 支持标量和固定 vector/matrix，
 `Array` 支持完整的受管理 Ndarray，`StaticValue` 支持不可变标量/tuple 配置。
 可选 `StaticValue(choices=(...))` 声明有限部署配置域；它是准入约束，代码身份仍仅使用

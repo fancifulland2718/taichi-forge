@@ -228,6 +228,8 @@ class _GraphCapture:
         entry_fact = dict(
             semantic_key=code.semantic_key, static=contract["static"], arguments=[arg.name for arg in arguments]
         )
+        if contract.get("constants"):
+            entry_fact["constants"] = contract["constants"]
         # This label identifies a captured source call, independent of producer
         # objects and native kernel numbering. Control construction order need
         # not be execution order; query the actual Graph IR after compilation.

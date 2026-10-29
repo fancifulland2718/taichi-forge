@@ -11,6 +11,17 @@ support scalars, fixed vectors/matrices and managed scalar/tensor/StructNdarrays
 without gradients.
 The public SDK API is not frozen.
 
+Module constants can opt into static capture with an evaluated `typing.Final`
+annotation, for example `MATERIAL_ID: Final[int] = 3`. Only immutable scalars
+and tuples are accepted. Original JIT expressions remain unchanged; actual
+reads in the entry and nested helpers contribute their typed values to code
+identity and the queryable `constants` facts. Candidate reuse and publication
+recheck both the declaration and value, so rebinding a constant invalidates the
+producer cache rather than silently reusing old numerical code. Unused constants
+add no ABI inputs or identity dependencies. Unannotated globals, mutable values,
+same-named closure captures and deferred string annotations remain rejected;
+the compiler does not evaluate annotation strings or arbitrary Python getters.
+
 LLVM launches use the compiler-sized argument buffer through `RuntimeContext`;
 they are not limited to the historical 64 argument slots. Python launches and
 the C API now follow that storage contract, including loaded Kernel/Graph

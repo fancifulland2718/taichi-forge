@@ -13,6 +13,7 @@ import operator
 import sys
 from dataclasses import dataclass
 from types import CodeType, MappingProxyType, MemberDescriptorType, ModuleType
+from typing import Final, get_origin
 
 from taichi_forge.lang import impl, kernel_arguments
 from taichi_forge.lang._resource_declaration import (
@@ -42,6 +43,19 @@ def _static_value(value):
         return static_key(value)
     except ValueError as error:
         raise TaichiCompilationError(str(error)) from error
+
+
+def _final_global(function, name):
+    """Read an explicit module Final role without evaluating annotations/getters.
+
+    A lexical closure cannot borrow a same-named module declaration. Deferred
+    string annotations require separate qualification; never eval them here.
+    """
+    annotations = function.__globals__.get("__annotations__", {})
+    if name in function.__code__.co_freevars or type(annotations) is not dict:
+        return False
+    annotation = annotations.get(name)
+    return annotation is Final or get_origin(annotation) is Final
 
 
 def _function(value):
@@ -1072,6 +1086,7 @@ class _Capture:
         self.objects = {}
         self.methods = {}
         self.functions = {}
+        self.constants = {}
         self.entry_definition = _definition(kernel.func)
         self.contract = None
         self.groups = {}
@@ -1259,9 +1274,16 @@ class _Capture:
             return
         if value is Matrix or value is Vector:
             return  # Built-in DSL constructors, also available through ti.Matrix/Vector.
+        function = ctx.func.func
+        if _final_global(function, node.id):
+            key = _static_value(value)
+            binding = (function, node.id)
+            if self.constants.setdefault(binding, key) != key:
+                raise TaichiCompilationError(f"Static global {node.id!r} changed during compilation; retry")
+            return
         raise TaichiCompilationError(
             f"Component entry {self.kernel.func.__qualname__}: undeclared global/closure capture {node.id!r}; "
-            "use a declared component value or a literal"
+            "use a declared component value, an immutable module typing.Final, or a literal"
         )
 
     def check_call(self, value):
@@ -1306,6 +1328,10 @@ class _Capture:
                 objects=sorted(self.objects.items()),
                 access_paths={name: self.component._paths[name] for name in self.used},
             )
+        if self.constants:
+            self.contract["constants"] = sorted(
+                (function.__module__, function.__qualname__, name, value)
+                for (function, name), value in self.constants.items())
         if self.resource_templates:
             self.contract["resource_templates"] = sorted(self.resource_templates.items())
         if self.fixed_groups:
@@ -1359,6 +1385,15 @@ class _Capture:
         for name, value in self.static.items():
             if _static_value(component.read(owner, name)) != value:
                 return f"static value {name!r}"
+        for (function, name), value in self.constants.items():
+            if not _final_global(function, name) or name not in function.__globals__:
+                return f"static global declaration {name!r} in {function.__qualname__}"
+            try:
+                current = _static_value(function.__globals__[name])
+            except TaichiCompilationError:
+                return f"static global value {name!r} in {function.__qualname__}"
+            if current != value:
+                return f"static global value {name!r} in {function.__qualname__}"
         for name, definition in self.methods.items():
             value = inspect.getattr_static(owner, name, None)
             if not getattr(value, "_is_taichi_function", False) or _definition(value) != definition:
@@ -1394,6 +1429,7 @@ class _ComponentCode:
         self.objects = dict(context.objects)
         self.methods = dict(context.methods)
         self.functions = dict(context.functions)
+        self.constants = dict(context.constants)
         self.groups = dict(context.groups)
         self.member_paths = dict(context.member_paths)
         self.fixed_groups = dict(context.fixed_groups)
