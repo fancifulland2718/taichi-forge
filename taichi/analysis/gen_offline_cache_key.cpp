@@ -157,6 +157,14 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     emit(expr->ndim);
     emit(expr->arg_id);
     emit(expr->needs_grad);
+    // Equal element types and ranks do not imply equal addressing. These
+    // facts survive frontend specialization and change generated pointer code.
+    emit(expr->is_grad);
+    emit(expr->arg_depth);
+    emit(static_cast<int>(expr->boundary));
+    emit(expr->byte_offset);
+    emit(expr->byte_stride);
+    emit(expr->runtime_affine);
   }
 
   void visit(FieldExpression *expr) override {

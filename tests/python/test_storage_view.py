@@ -738,6 +738,10 @@ def test_positive_multiaxis_affine_view_matches_ordinary_and_graph_addressing():
 
     initial = np.full((7, 8), -7.0, dtype=np.float32)
     base = ti.ndarray(ti.f32, shape=(7, 8))
+    # Materialize the packed specialization first. Its cache identity must not
+    # alias the runtime-stride specialization of the same numerical definition.
+    write(base, 0.0)
+    np.testing.assert_array_equal(base.to_numpy(), np.arange(7)[:, None] * 10 + np.arange(8))
     base.from_numpy(initial)
     view = ti.experimental.ndarray_view(
         base,
