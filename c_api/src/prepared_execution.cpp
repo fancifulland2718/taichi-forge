@@ -27,6 +27,7 @@
 #include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/sparse_runtime_view.h"
+#include "snode_instance.h"
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -161,6 +162,9 @@ struct PreparedExecution {
   // Declared before backend recordings so owned buffers are destroyed last.
   std::shared_ptr<ExecutionResourceStorage> resources;
   std::vector<std::shared_ptr<NativeResource>> native_resources;
+#ifdef TI_WITH_CUDA
+  std::shared_ptr<SNodeInstance> snode_instance;
+#endif
   // Direct-kernel preparations expose one latest-result frame. A completion
   // ticket does not snapshot it; each replay overwrites the same binding.
   std::shared_ptr<NativeKernelResultStorage> kernel_result;
@@ -220,6 +224,9 @@ struct PreparedExecution {
   }
 
   void release_native_resources() {
+#ifdef TI_WITH_CUDA
+    snode_instance.reset();
+#endif
     kernel_result.reset();
     result_valid = false;
     while (!native_resources.empty())
@@ -425,7 +432,8 @@ struct PreparedExecution {
             const auto requirements =
                 launcher->execution_domain_requirements(kernel->handle());
             auto &closure = cuda_closures[requirements.executor];
-            closure.needs_view |= requirements.runtime_view;
+            closure.needs_view |= requirements.runtime_view ||
+                                  (snode_instance && !requirements.trees.empty());
             closure.trees.insert(closure.trees.end(),
                                  requirements.trees.begin(),
                                  requirements.trees.end());
@@ -692,9 +700,14 @@ struct PreparedExecution {
                   continue;
                 auto view = std::make_shared<cuda::SparseRuntimeView>();
                 domain_instance->cuda_views.push_back(view);
-                view->initialize(
-                    *executor, executor->cuda_runtime_view_trees(closure.trees),
-                    runtime.runtime_fault_domain());
+                if (snode_instance)
+                  view->initialize_mapped(
+                      *executor, snode_instance->bindings_for(*executor, closure.trees),
+                      runtime.runtime_fault_domain());
+                else
+                  view->initialize(
+                      *executor, executor->cuda_runtime_view_trees(closure.trees),
+                      runtime.runtime_fault_domain());
                 for (auto *launcher : closure.launchers)
                   selected.runtime_views.emplace(launcher, view);
               }
@@ -1152,8 +1165,9 @@ class PreparedExecutionRegistry {
     // complete initialization/replay group before invalidating these bindings.
     retire(memories_, memory, true, true);
   }
-  void retire_resource(TiNativeResource resource, bool synchronize) {
-    retire(resources_, resource, synchronize);
+  void retire_resource(TiNativeResource resource, bool synchronize,
+                       bool instances_only) {
+    retire(resources_, resource, synchronize, instances_only);
   }
   void retire_module(AotModule *module) {
     retire(modules_, module);
@@ -1190,7 +1204,7 @@ class PreparedExecutionRegistry {
   }
   template <typename Map, typename Key>
   void retire(Map &map, Key key, bool synchronize = true,
-              bool memory_instances_only = false) {
+              bool dependent_instances_only = false) {
     auto found = map.find(key);
     if (found == map.end())
       return;
@@ -1203,7 +1217,7 @@ class PreparedExecutionRegistry {
       auto &entry = *entries_.at(handle);
       if (!entry.domain)
         default_queue = true;
-      if (memory_instances_only && entry.domain)
+      if (dependent_instances_only && entry.domain)
         entry.domain->retire_instance(entry.domain_registration);
       else
         entry.close_domain();
@@ -1266,9 +1280,10 @@ void Runtime::retire_prepared_memory(TiMemory memory) {
     prepared_->retire_memory(memory);
 }
 void Runtime::retire_prepared_native_resource(TiNativeResource resource,
-                                             bool synchronize) {
+                                             bool synchronize,
+                                             bool instances_only) {
   if (prepared_)
-    prepared_->retire_resource(resource, synchronize);
+    prepared_->retire_resource(resource, synchronize, instances_only);
 }
 void Runtime::retire_prepared_module(AotModule *owner) {
   if (prepared_)
@@ -1389,7 +1404,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
     std::shared_ptr<capi::ExecutionBindingFamily> family,
     std::shared_ptr<capi::PreparedExecutionDomain> domain = {},
     uint32_t parameter_count = 0,
-    const char *const *parameter_names = nullptr) {
+    const char *const *parameter_names = nullptr,
+    TiNativeResource snode_instance = TI_NULL_HANDLE) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   TI_CAPI_ARGUMENT_NULL_RV(module);
@@ -1409,7 +1425,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
       throw MemoryBindingError("Execution domain is closed for admission");
   }
   auto &mod = *reinterpret_cast<AotModule *>(module);
-  if (&mod.runtime() != &rt)
+  if (!rt.owns_module(&mod) || &mod.runtime() != &rt)
     throw MemoryBindingError(
         "Execution plan module belongs to another runtime");
   using namespace taichi::lang;
@@ -1440,6 +1456,14 @@ static TiPreparedExecution prepare_execution_plan_impl(
     throw MemoryBindingError("Selected Vulkan submission requires Vulkan");
   const auto &resource_description =
       rebinding ? family->frame_resources : plan.resources;
+  if (snode_instance) {
+    if (!domain || rt.arch != taichi::Arch::cuda || family)
+      throw MemoryBindingError("SNode instance binding requires an independent CUDA execution domain");
+    for (auto index : resource_description.order)
+      if (std::holds_alternative<aot::ExecutionResources::ModuleArray>(
+              resource_description.declarations.at(index).value))
+        throw MemoryBindingError("SNode instances cannot bind fixed module-root array aliases");
+  }
   std::unordered_map<std::string, const TiArgument *> arguments;
   for (uint32_t i = 0; i < arg_count; ++i) {
     if (!args[i].name || !*args[i].name ||
@@ -1510,6 +1534,19 @@ static TiPreparedExecution prepare_execution_plan_impl(
   prepared->owner = &mod;
   prepared->family = family;
   prepared->domain = domain;
+#ifdef TI_WITH_CUDA
+  if (snode_instance) {
+    prepared->snode_instance = std::dynamic_pointer_cast<capi::SNodeInstance>(
+        rt.native_resource_registry().get(snode_instance));
+    if (!prepared->snode_instance)
+      throw MemoryBindingError("Native resource is not an SNode instance");
+    prepared->snode_instance->validate_owner(mod);
+    prepared->native_resources.push_back(prepared->snode_instance);
+    prepared->replay_resources.insert(prepared->snode_instance.get());
+    prepared->external_resources.push_back(snode_instance);
+    prepared->replay_external_resources.insert(snode_instance);
+  }
+#endif
   prepared->submission_values.resize(parameter_count);
   for (uint32_t i = 0; i < parameter_count; ++i)
     prepared->submission_widths.push_back(
@@ -2598,6 +2635,25 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
 }
 
 #ifdef TI_WITH_CUDA
+TiPreparedExecution ti_prepare_execution_plan_snode_instance_on_domain_ext(
+    TiRuntime runtime, TiAotModule module, TiCudaExecutionDomain domain,
+    uint64_t description_size, const char *description,
+    uint32_t arg_count, const TiNamedArgument *args,
+    uint32_t binding_count, const TiNamedNdArrayBinding *bindings,
+    uint32_t parameter_count, const char *const *parameter_names,
+    TiNativeResource snode_instance) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(domain);
+  TI_CAPI_ARGUMENT_NULL_RV(snode_instance);
+  return prepare_execution_plan_impl(
+      runtime, module, description_size, description, arg_count, args,
+      binding_count, bindings, {},
+      std::make_shared<capi::PreparedExecutionDomain>(capi::get_execution_domain(domain)),
+      parameter_count, parameter_names, snode_instance);
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
+}
+
 TiPreparedExecution ti_prepare_execution_plan_on_domain_ext(
     TiRuntime runtime,
     TiAotModule module,

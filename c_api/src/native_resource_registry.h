@@ -19,7 +19,8 @@ class NativeResourceRegistry {
   TiNativeResource publish(std::shared_ptr<taichi::lang::NativeResource> object,
                            std::vector<TiMemory> memories,
                            std::vector<TiNativeResource> parents,
-                           ParentLinks parent_links = {});
+                           ParentLinks parent_links = {},
+                           bool retire_instances_only = false);
   // Cold import transaction. Inputs are original objects, not reconstruction
   // recipes. Private input handles preserve named edges and retire with root.
   TiNativeResource publish_borrowed(
@@ -41,6 +42,9 @@ class NativeResourceRegistry {
     std::vector<TiNativeResource> parents;
     ParentLinks parent_links;
     std::vector<TiNativeResource> owned_parents;
+    // Qualified factories with complete per-instance use/loan tracking can
+    // retire just their dependent calls instead of closing an entire domain.
+    bool retire_instances_only{false};
   };
   void retire(std::vector<TiNativeResource> roots);
   void remove_edges(TiNativeResource handle, const Entry &entry);

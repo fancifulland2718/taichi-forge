@@ -1513,6 +1513,17 @@ ti_probe_native_resource_ext(TiRuntime runtime,
                              uint32_t version,
                              TiNativeOperationAvailabilityExt *availability);
 
+// Cold, empty fixed-tree state for one loaded CUDA AOT module. The handle uses
+// native-resource retirement and retains the exact loaded code owner. It does
+// not copy live values or activation. Allocate before borrowing sparse views.
+TI_DLL_EXPORT TiNativeResource TI_API_CALL
+ti_create_aot_snode_instance_ext(TiRuntime runtime, TiAotModule module);
+// JSON array of immutable code/state tree IDs and generations. These are
+// observations, not consumer-supplied rebinding descriptors.
+TI_DLL_EXPORT void TI_API_CALL
+ti_get_aot_snode_instance_info_ext(TiRuntime runtime, TiNativeResource instance,
+                                  uint64_t *size, char *json);
+
 // Version 1 persistent execution description: ordered loaded kernels, native
 // buffer copy/fill32, sort, compact and fft_c2c_f32. JSON is consumed only
 // during preparation. Named slots refer to supplied arguments; memory

@@ -897,6 +897,12 @@ class Module(_Resource):
 
     _kind = "module"
 
+    def snode_instance(self):
+        """Allocate empty fixed SNode states for this exact loaded code owner."""
+        from ._snode_instance import SNodeInstance
+
+        return SNodeInstance.create(self)
+
     def component(self, name):
         """Load a compiler-produced component root and its resource contract."""
         from ._component import Component
@@ -964,7 +970,8 @@ class Module(_Resource):
             with ZipFile(self._source_path) as archive:
                 return ExecutionPlan.from_json(archive.read(relative))
 
-    def prepare_execution(self, plan, arguments, *, gradients=None, execution_domain=None, mutable_parameters=()):
+    def prepare_execution(self, plan, arguments, *, gradients=None, execution_domain=None, mutable_parameters=(),
+                          snode_instance=None):
         """Prepare a named or explicit ExecutionPlan for repeated native replay."""
         from ._plan import ExecutionPlan
 
@@ -973,7 +980,7 @@ class Module(_Resource):
         if not isinstance(plan, ExecutionPlan):
             raise TypeError("Expected an ExecutionPlan or an exported plan name")
         return plan.prepare(self, arguments, gradients=gradients, execution_domain=execution_domain,
-                            mutable_parameters=mutable_parameters)
+                            mutable_parameters=mutable_parameters, snode_instance=snode_instance)
 
     def prepare_workspace_pool(self, plan, capacity, *, arguments=None, arrays=None, gradients=None):
         """Share code while preparing independent resources and result leases.

@@ -273,6 +273,18 @@ ti_prepare_execution_plan_parameters_on_domain_ext(
     uint32_t parameter_count,
     const char *const *parameter_names);
 
+// Same preparation transaction, binding fixed code tree slots to one private
+// instance. No module-shared root pointers are changed. Closing the resource
+// retires its accepted work and invalidates future submissions of its calls.
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_execution_plan_snode_instance_on_domain_ext(
+    TiRuntime runtime, TiAotModule module, TiCudaExecutionDomain domain,
+    uint64_t description_size, const char *description,
+    uint32_t arg_count, const TiNamedArgument *args,
+    uint32_t binding_count, const TiNamedNdArrayBinding *bindings,
+    uint32_t parameter_count, const char *const *parameter_names,
+    TiNativeResource snode_instance);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

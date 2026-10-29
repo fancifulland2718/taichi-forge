@@ -675,10 +675,11 @@ class ExecutionPlan:
         kernel, index = first
         return kernel.argpack(index, values, gradients=gradients)
 
-    def prepare(self, module, arguments, *, gradients=None, execution_domain=None, mutable_parameters=()):
+    def prepare(self, module, arguments, *, gradients=None, execution_domain=None, mutable_parameters=(),
+                snode_instance=None):
         """Resolve a frozen plan to the same native executor as kernel.prepare()."""
         return self._prepare(module, arguments, gradients=gradients, execution_domain=execution_domain,
-                             mutable_parameters=mutable_parameters)
+                             mutable_parameters=mutable_parameters, snode_instance=snode_instance)
 
     def value(self, module, name, value):
         """Encode a named aggregate value using every consuming entry's native ABI.
@@ -710,7 +711,7 @@ class ExecutionPlan:
         return _BoundValue(*first, value)
 
     def _prepare(self, module, arguments, *, gradients=None, source=None, execution_domain=None,
-                 mutable_parameters=()):
+                 mutable_parameters=(), snode_instance=None):
         from . import _c_api as abi
         from ._runtime import (
             NativeResource, NdArray, PreparedCall, _BindingFamily, _argument, _name,
@@ -739,6 +740,18 @@ class ExecutionPlan:
             owners = [module]
             replay_owners = [module]
             persistent_owners = [module]
+            if snode_instance is not None:
+                from ._snode_instance import SNodeInstance
+
+                if not isinstance(snode_instance, SNodeInstance):
+                    raise TypeError("snode_instance must be an SNodeInstance")
+                if execution_domain is None or execution_domain.backend != "cuda":
+                    raise ValueError("SNode instance binding requires an independent CUDA execution domain")
+                snode_instance._for_module(module)
+                runtime._api.load_snode_instances()
+                owners.append(snode_instance)
+                replay_owners.append(snode_instance)
+                persistent_owners.append(snode_instance)
 
             def bind(name, value):
                 retained = []
@@ -782,13 +795,16 @@ class ExecutionPlan:
             vulkan_domain = execution_domain is not None and execution_domain.backend == "vulkan"
             if submission_parameters.names:
                 runtime._api.load_submission_parameters()
-            if submission_parameters.names or vulkan_domain:
+            if submission_parameters.names or vulkan_domain or snode_instance is not None:
                 function = (runtime._api.ti_prepare_execution_plan_on_vulkan_domain_ext if vulkan_domain
                             else runtime._api.ti_prepare_execution_plan_parameters_on_domain_ext)
                 names = (abi.C.c_char_p * len(submission_parameters.names))(
                     *(_name(name) for name in submission_parameters.names)
                 )
                 suffix = (len(names), names)
+            if snode_instance is not None:
+                function = runtime._api.ti_prepare_execution_plan_snode_instance_on_domain_ext
+                suffix += (snode_instance._handle,)
             handle = runtime._api.call(
                 function,
                 *prefix,

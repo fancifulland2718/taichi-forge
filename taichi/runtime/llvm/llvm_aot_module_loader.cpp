@@ -568,6 +568,32 @@ void LlvmAotModule::ensure_snode_tree_initialized(int logical_tree_id) {
   allocate_aot_snode_tree_type(this, field, allocation_result_buffer_);
 }
 
+std::vector<LlvmSparseRuntimeViewTree>
+LlvmAotModule::snode_instance_prototypes() {
+  if (arch() != Arch::cuda || !allocation_result_buffer_)
+    throw std::invalid_argument(
+        "SNode instances currently require a runtime-owned CUDA AOT module");
+  std::vector<int> physical;
+  for (int logical : snode_tree_ids_) {
+    ensure_snode_tree_initialized(logical);
+    physical.push_back(tree_bindings_.at(logical));
+  }
+  if (physical.empty())
+    throw std::invalid_argument("AOT module has no fixed SNode trees to instantiate");
+  return executor_->cuda_runtime_view_trees(physical);
+}
+
+SNodeTreeLayout LlvmAotModule::clone_instance_tree(
+    const LlvmSparseRuntimeViewTree &prototype,
+    int target_tree_id) {
+  if (!allocation_result_buffer_ ||
+      std::none_of(tree_bindings_.begin(), tree_bindings_.end(),
+                   [&](const auto &entry) { return entry.second == prototype.tree_id; }))
+    throw std::invalid_argument("SNode instance prototype belongs to another module");
+  return executor_->clone_snode_tree_runtime(prototype, target_tree_id,
+                                            allocation_result_buffer_);
+}
+
 LlvmAotModule::RootStorage LlvmAotModule::get_root_storage(int tree_id) {
   const auto binding = tree_bindings_.find(tree_id);
   if (!dense_root_storage_ ||

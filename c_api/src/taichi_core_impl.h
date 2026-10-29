@@ -314,7 +314,8 @@ class Runtime {
   void retire_native_memory(TiMemory memory);
   void clear_native_resources(bool synchronize = true);
   void retire_prepared_native_resource(TiNativeResource resource,
-                                        bool synchronize = true);
+                                        bool synchronize = true,
+                                        bool instances_only = false);
   const taichi::lang::NativeProviderLocations &native_provider_locations()
       const {
     return native_provider_locations_;
@@ -392,7 +393,7 @@ class Runtime {
 class AotModule {
   Runtime *runtime_;
   bool code_live_{true};
-  std::unique_ptr<taichi::lang::aot::Module> aot_module_;
+  std::shared_ptr<taichi::lang::aot::Module> aot_module_;
   std::unordered_map<std::string,
                      std::unique_ptr<taichi::lang::aot::CompiledGraph>>
       loaded_cgraphs_;
@@ -415,6 +416,12 @@ class AotModule {
   taichi::lang::aot::Kernel *get_kernel(const std::string &name);
   taichi::lang::aot::CompiledGraph *get_cgraph(const std::string &name);
   taichi::lang::aot::Module &get();
+  // Instance storage retains the exact loaded code/prototype owner. Closing
+  // the public module still retires its prepared users and entry handles.
+  std::shared_ptr<taichi::lang::aot::Module> retain_code() {
+    check_code_live();
+    return aot_module_;
+  }
   Runtime &runtime();
   // Cold live-JIT loan retirement. Keep the host shell owned by Runtime but
   // drain its independent users before invalidating entry handles/code access.

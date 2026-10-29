@@ -264,9 +264,35 @@ managers until ordered retirement. Allocation is a cold operation and retains
 the existing requirement to return outstanding sparse views before changing
 allocator storage. CPU/CUDA gates cover the embedded mapping transaction; real
 CUDA kernels cover pointer/dense activation, traversal, deactivation, independent
-retirement and single/multiple roots under one loaded module. Sparse capture
-declarations, generic component export and public Runtime instance integration
-are not yet qualified by this lower-level mechanism.
+retirement and single/multiple roots under one loaded module.
+
+The standalone Runtime now exposes `module.snode_instance()` and
+`module.prepare_execution(plan, bindings, execution_domain=domain,
+snode_instance=state)`. The state owns empty clones of the module's fixed trees,
+retains the exact loaded code/prototype owner, and reports actual code/state tree
+IDs and generations through read-only `state.info`. Preparation derives an
+immutable mapping for the kernels actually used by the plan. Numerical
+initialization and control continue through the original ExecutionPlan; mutable
+submission parameters remain supported. Fixed module-root array aliases cannot
+be mixed with this instance binding.
+
+Closing a state retires only its dependent calls, including accepted submissions;
+another state in the same execution domain remains usable. Closing the public
+module prevents new calls and drains its prepared users; remaining state handles
+retain the code/prototype lease until their own retirement. One state cannot be
+lent to concurrent prepared views. After a view retires, another plan can borrow
+the same state without resetting it. New allocations still require returning all
+outstanding sparse views at a cold boundary.
+
+`test_aot_snode_instances.py` exports ordinary pointer/dense and bitmasked/dense
+kernels, freezes the artifact, and consumes it in a physically runtime-only
+`-I -S` process. It covers empty activation/value state, distinct initialization,
+multi-root traversal/deactivation, same-domain interleaving, native foreign-owner
+rejection, failed preparation, per-state close, generation reuse, and module
+close with accepted work. The original module state and loaded kernel handle
+remain unchanged. Public CPU/Vulkan instance calls, Sparse capture declarations
+and generic component export remain unqualified; these tests do not establish
+whole-application support or steady-state performance.
 
 `test_aot_component_dense.py` compares the same numerical definition with ordinary
 JIT on CPU/CUDA. It covers new capacities, range/Field-shape/full-Field iteration,

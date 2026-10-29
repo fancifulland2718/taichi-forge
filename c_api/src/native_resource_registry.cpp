@@ -36,7 +36,8 @@ TiNativeResource NativeResourceRegistry::publish(
     std::shared_ptr<NativeResource> object,
     std::vector<TiMemory> memories,
     std::vector<TiNativeResource> parents,
-    ParentLinks parent_links) {
+    ParentLinks parent_links,
+    bool retire_instances_only) {
   if (!object || object->arch() != runtime_.arch ||
       &object->device() != &runtime_.get())
     throw MemoryBindingError("Native resource belongs to another device");
@@ -62,7 +63,8 @@ TiNativeResource NativeResourceRegistry::publish(
   const auto it =
       entries_
           .emplace(handle, Entry{std::move(object), std::move(memories),
-                                 std::move(parents), std::move(parent_links)})
+                                 std::move(parents), std::move(parent_links),
+                                 {}, retire_instances_only})
           .first;
   try {
     for (auto memory : it->second.memories)
@@ -189,7 +191,8 @@ void NativeResourceRegistry::retire(std::vector<TiNativeResource> roots) {
            reinterpret_cast<std::uintptr_t>(b);
   });
   for (auto handle : roots)
-    runtime_.retire_prepared_native_resource(handle, false);
+    runtime_.retire_prepared_native_resource(
+        handle, false, entries_.at(handle).retire_instances_only);
   for (auto handle : roots) {
     auto &entry = entries_.at(handle);
     remove_edges(handle, entry);

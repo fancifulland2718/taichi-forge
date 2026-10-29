@@ -67,6 +67,10 @@ class LlvmAotModule final : public aot::Module {
   void initialize_snode_tree(const LLVM::SNodeTreeLayout &field,
                              uint64 *result_buffer);
 
+  std::vector<LlvmSparseRuntimeViewTree> snode_instance_prototypes();
+  SNodeTreeLayout clone_instance_tree(const LlvmSparseRuntimeViewTree &prototype,
+                                     int target_tree_id);
+
   std::unique_ptr<aot::CompiledGraph> get_graph(
       const std::string &name) override;
 
