@@ -64,6 +64,9 @@ class AotModuleBuilder {
 
   virtual void dump(const std::string &output_dir,
                     const std::string &filename) const = 0;
+  virtual std::map<int, int> exported_snode_tree_bindings() const {
+    return {};
+  }
 
   // Return the resolved ordinary entries so other producer paths can reuse the
   // same exports. The Program retains ownership of the Kernel objects.

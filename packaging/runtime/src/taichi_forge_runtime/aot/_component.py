@@ -14,7 +14,7 @@ def _control_identity(contract):
     """Canonical compiler-fact projection; no layout or execution interpretation."""
     ignored = {
         "semantic_key", "compilation", "configuration", "name", "execution",
-        "execution_entries", "execution_fingerprint", "target",
+        "execution_entries", "execution_fingerprint", "target", "fixed_bindings",
     }
     facts = {key: value for key, value in contract.items() if key not in ignored}
     facts["required_capabilities"] = [
@@ -75,8 +75,6 @@ class Component:
             else:
                 with ZipFile(module._source_path) as archive:
                     payload = archive.read(relative)
-            if len(payload) > 4 * 1024 * 1024:
-                raise ValueError("Component contract is too large")
             contract = json.loads(payload)
             required = {
                 "version",
@@ -94,17 +92,24 @@ class Component:
                 "execution_entries",
                 "target",
             }
-            if contract.get("version") in (2, 3, 4, 5):
+            if contract.get("version") in (2, 3, 4, 5, 6):
                 required.add("compilation")
-            if contract.get("version") in (3, 4, 5):
+            if contract.get("version") in (3, 4, 5, 6):
                 required.add("configuration")
-            if contract.get("version") in (4, 5):
+            if contract.get("version") in (4, 5, 6):
                 required.update(("control", "internal_arguments", "execution_fingerprint"))
-            if contract.get("version") == 5:
+            if contract.get("version") in (5, 6):
                 required.add("constraints")
-            if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5) or contract["name"] != name:
+            if contract.get("version") == 6:
+                required.update(("fixed_groups", "fixed_bindings"))
+            if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
+            fixed_groups = contract.get("fixed_groups", {})
+            if contract["version"] == 6:
+                if not fixed_groups or set(fixed_groups) & set(contract["groups"]):
+                    raise ValueError("Fixed SNode component groups must have distinct declared identities")
+                capabilities.add("component_fixed_snode_groups_v1")
             if any(resource.get("kind") == "ndarray" for resource in contract["resources"].values()):
                 capabilities.add("component_array_storage_v1")
             if any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
@@ -141,7 +146,7 @@ class Component:
                             if dependency == key and static_key(read_static_key(value)) != selected:
                                 raise ValueError("Component configuration differs from compiled static dependencies")
                     self._configuration[key] = (selected, choices)
-            if contract["version"] == 5:
+            if contract["version"] == 5 or contract["version"] == 6 and contract["constraints"]:
                 capabilities.add("component_dimension_constraints_v1")
                 if not contract["constraints"]:
                     raise ValueError("Constrained component requires nonempty dimension constraints")
@@ -199,6 +204,13 @@ class Component:
             self._array_layouts = {}
             for key, resource in contract["resources"].items():
                 array = resource.get("kind") == "ndarray"
+                fixed = resource.get("kind") == "fixed_snode"
+                if fixed:
+                    if (set(resource) != {"kind", "group", "paths", "dtype", "element_shape", "shape", "aliases",
+                                          "access", "effects_precision", "initialization"}
+                            or resource["group"] not in fixed_groups
+                            or any(type(extent) is not int or extent <= 0 for extent in resource["shape"])):
+                        raise ValueError("Invalid fixed SNode component resource")
                 if array:
                     if set(resource) != {"kind", "shape", "dtype", "element_shape", "layout", "aliases",
                                          "access", "effects_precision", "initialization"}:
@@ -217,7 +229,7 @@ class Component:
                         _dtype(resource["dtype"])
                         _shape(resource["element_shape"])
                 if (
-                    (not array and (resource.get("kind") is not None or resource.get("group") not in contract["groups"]))
+                    (not array and not fixed and (resource.get("kind") is not None or resource.get("group") not in contract["groups"]))
                     or not (
                         resource.get("access") == "read_write"
                         and resource.get("effects_precision") == "conservative"
@@ -225,7 +237,7 @@ class Component:
                         and resource.get("effects_precision") == "compiler_proven"
                         and resource.get("access") in ("none", "read", "write", "read_write", "atomic")
                     )
-                    or resource.get("initialization") != "consumer_explicit"
+                    or resource.get("initialization") != ("empty_activation_and_zero_values" if fixed else "consumer_explicit")
                 ):
                     raise ValueError("Invalid component resource contract")
                 for alias in (key, *resource["aliases"]):
@@ -233,6 +245,27 @@ class Component:
                         raise ValueError("Component resource aliases conflict")
                     aliases[alias] = key
             plan = module.execution_plan(contract["execution"])
+            self._fixed_layouts = {}
+            if fixed_groups:
+                native_layouts = module._fixed_snode_plan_layouts(plan)
+                fixed_bindings = contract["fixed_bindings"]
+                if (set(fixed_bindings) != set(fixed_groups)
+                        or any(type(tree) is not int for tree in fixed_bindings.values())
+                        or len(set(fixed_bindings.values())) != len(fixed_bindings)
+                        or set(fixed_bindings.values()) != set(native_layouts)):
+                    raise ValueError("Fixed SNode component bindings differ from the compiled Plan closure")
+                for group, schema in fixed_groups.items():
+                    if (set(schema) != {"kind", "version", "allocation", "access_fingerprint"}
+                            or schema["kind"] != "fixed_snode" or schema["version"] != 1
+                            or schema["allocation"] != native_layouts[fixed_bindings[group]]):
+                        raise ValueError("Fixed SNode component layout differs from its native compiled layout")
+                    self._fixed_layouts[group] = schema["allocation"]
+                effect_groups = {
+                    effect["group"] for entry in contract["compilation"]["entries"]
+                    for effect in entry["effects"] if "group" in effect
+                }
+                if effect_groups != set(fixed_groups):
+                    raise ValueError("Fixed SNode component effects do not cover its group closure")
             document = json.loads(plan.to_json())
             operations = document["operations"]
             if contract["version"] >= 4:
@@ -275,7 +308,8 @@ class Component:
                 if table is None or key not in table:
                     raise ValueError("Invalid component symbolic binding")
                 used[kind].add(key)
-            if used["resource"] != set(contract["resources"]) or used["value"] != set(contract["values"]):
+            bound_resources = {name for name, resource in contract["resources"].items() if resource.get("kind") != "fixed_snode"}
+            if used["resource"] != bound_resources or used["value"] != set(contract["values"]):
                 raise ValueError("Component contains unreferenced resource/value requirements")
             self._module, self._plan = module, plan
             self._contract_json = json.dumps(contract)
@@ -315,6 +349,7 @@ class ComponentInstance:
     def __init__(self, component, dimensions):
         self._component = component
         self._groups, self._resources = {}, {}
+        self._fixed_state = None
         self._prepared = weakref.WeakSet()
         self._binding_domain = None
         self._close_lock = threading.RLock()
@@ -332,6 +367,8 @@ class ComponentInstance:
         try:
             with runtime._lock:
                 component._module._check()
+                if contract.get("fixed_groups"):
+                    self._fixed_state = component._module.snode_instance(plan=component._plan)
                 for name, schema in contract["groups"].items():
                     required = {
                         extent["parameter"]
@@ -343,6 +380,8 @@ class ComponentInstance:
                         schema, {key: self._dimensions[key] for key in required}
                     )
                 for name, resource in contract["resources"].items():
+                    if resource.get("kind") == "fixed_snode":
+                        continue
                     shape = tuple(
                         self._dimensions[item] if isinstance(item, str) else item for item in resource["shape"]
                     )
@@ -373,12 +412,15 @@ class ComponentInstance:
     def layout(self):
         """Actual native SNode layout facts, including complete root storage."""
         self._check()
-        return {name: group.layout for name, group in self._groups.items()}
+        return {**{name: group.layout for name, group in self._groups.items()},
+                **json.loads(json.dumps(self._component._fixed_layouts))}
 
     @property
     def nbytes(self):
         """Root and independent-array bytes; excludes code and driver overhead."""
         self._check()
+        if self._fixed_state is not None:
+            raise NotImplementedError("Sparse allocator usage is dynamic; fixed root bytes are not total storage usage")
         contract = self._component.contract
         return sum(group.nbytes for group in self._groups.values()) + sum(
             self._resources[name].nbytes for name, resource in contract["resources"].items()
@@ -386,7 +428,10 @@ class ComponentInstance:
 
     def resource(self, name):
         self._check()
-        return self._resources[self._component._aliases[name]]
+        key = self._component._aliases[name]
+        if key not in self._resources:
+            raise NotImplementedError("Sparse resources retain SNode storage; use original component entries to initialize/read values")
+        return self._resources[key]
 
     def initialize(self, data=None, *, zero=()):
         with self._component._module._runtime._lock:
@@ -399,11 +444,15 @@ class ComponentInstance:
         selected = {}
         for name, value in dict(data or {}).items():
             key = self._component._aliases[name]
+            if key not in self._resources:
+                raise ValueError("Sparse model data must use a declared numerical initializer, not a dense byte upload")
             if key in selected:
                 raise ValueError("Initialization repeats an aliased component resource")
             selected[key] = value
         for name in zero:
             key = self._component._aliases[name]
+            if key not in self._resources:
+                raise ValueError("Sparse reset requires the original component reset entry or a new empty instance")
             if key in selected:
                 raise ValueError("Initialization repeats an aliased component resource")
             selected[key] = bytes(self._resources[key].nbytes)
@@ -465,7 +514,7 @@ class ComponentInstance:
                         else Scalar(schema[1], values[name])
                     )
             call = self._component._module.prepare_execution(
-                self._component._plan, bindings, execution_domain=execution_domain
+                self._component._plan, bindings, execution_domain=execution_domain, snode_instance=self._fixed_state
             )
             try:
                 call._retain_binding_owner(self)
@@ -495,6 +544,8 @@ class ComponentInstance:
             resource.close()
         for group in self._groups.values():
             group.close()
+        if self._fixed_state is not None:
+            self._fixed_state.close()
         self._retired = True
 
     def __enter__(self):

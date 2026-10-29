@@ -32,6 +32,8 @@ class _GraphCapture:
         self.codes = []
         self.dispatches = {}
         self.groups = {}
+        self.fixed_groups = {}
+        self.fixed_dependencies = {}
         self.dimensions = {}
         self.resources = {}
         self.bindings = {}
@@ -140,6 +142,27 @@ class _GraphCapture:
                 raise TaichiCompilationError(f"Component Graph argument {arg.name!r} has incompatible uses")
             self.explicit[arg.name] = descriptor
         contract = code.contract
+        for group, schema in code.fixed_groups.items():
+            if self.fixed_groups.setdefault(group, schema) != schema or (
+                self.fixed_dependencies.setdefault(group, code.fixed_dependencies[group]) != code.fixed_dependencies[group]
+            ):
+                raise TaichiCompilationError("Fixed component group changed while recording")
+        for name, (group, paths) in code.fixed_members.items():
+            declaration = self.component.declarations[name]
+            member_key = json.dumps((group, paths), sort_keys=True)
+            identity = self._members.get(member_key)
+            if identity is None:
+                identity = name
+                if identity in self.resources:
+                    raise TaichiCompilationError("Component fixed resource identity collision")
+                self._members[member_key] = identity
+                self.resources[identity] = dict(
+                    kind="fixed_snode", group=group, paths=paths, dtype=declaration.schema[1][1],
+                    element_shape=declaration.schema[1][2], shape=declaration.shape, aliases=[],
+                    access="read_write", effects_precision="conservative",
+                    initialization="empty_activation_and_zero_values")
+            if name not in self.resources[identity]["aliases"]:
+                self.resources[identity]["aliases"].append(name)
         for target, additions in ((self.groups, contract["groups"]), (self.dimensions, contract["dimensions"])):
             for name, schema in additions.items():
                 if name in target and target[name] != schema:
@@ -295,6 +318,8 @@ class _GraphCapture:
             facts["required_capabilities"].append("component_explicit_ndarray_v1")
         if self.array_types or any(value.get("kind") == "ndarray" for value in self.resources.values()):
             facts["required_capabilities"].append("component_array_storage_v1")
+        if self.fixed_groups:
+            facts["fixed_groups"] = self.fixed_groups
         facts["semantic_key"] = _digest(facts)
         return facts
 
@@ -302,10 +327,11 @@ class _GraphCapture:
 class ComponentGraph:
     """Frozen normal Graph plus its compiler-produced resource contract."""
 
-    def __init__(self, graph, contract, array_types=None):
+    def __init__(self, graph, contract, array_types=None, fixed_dependencies=None):
         self._graph = graph
         self._contract = json.dumps(contract, sort_keys=True)
         self._array_types = dict(array_types or {})
+        self._fixed_dependencies = dict(fixed_dependencies or {})
 
     @property
     def contract(self):
@@ -314,7 +340,8 @@ class ComponentGraph:
     def export(self, module, name):
         if name in module._component_roots:
             raise ValueError(f"Duplicate component root {name!r}")
-        plan = module.add_execution_plan(name, self._graph, snapshot_state=False)
+        plan = module.add_execution_plan(name, self._graph, snapshot_state=False,
+                                         _fixed_snode_dependencies=tuple(self._fixed_dependencies.values()))
         contract = self.contract
         try:
             for layout in {resource.get("layout") for resource in contract["resources"].values()} - {None, ""}:
@@ -342,6 +369,8 @@ class ComponentGraph:
                 dict(plan=json.loads(plan.to_json()), semantic_key=contract["semantic_key"])
             )
         module._component_roots[name] = contract
+        if self._fixed_dependencies:
+            module._component_fixed_sources[name] = self._fixed_dependencies
         module._content.append("component:" + name)
         return plan
 
@@ -428,12 +457,29 @@ def _complete_compiler_contract(graph, contract, capture):
     if len(nodes) + skipped != len(capture.codes):
         raise TaichiCompilationError("Component compiled Graph changed its entry closure")
     contract["entries"] = entries_in_order
+    fixed_trees = set()
+    code_fixed_trees = {}
+    for code in dict.fromkeys(codes):
+        if code.fixed_groups:
+            manifest = impl.get_runtime().prog._debug_snode_relocation_manifest(code.kernel.compiled_kernels[code.key])
+            trees = {item["tree_id"] for item in manifest["tree_dependencies"]}
+            code_fixed_trees[code] = trees
+            fixed_trees.update(trees)
+    fixed_groups = {group: schema for group, schema in capture.fixed_groups.items()
+                    if capture.fixed_dependencies[group][0] in fixed_trees}
+    if fixed_groups:
+        contract["fixed_groups"] = fixed_groups
+    else:
+        contract.pop("fixed_groups", None)
     used_symbols = {symbol for entry in entries_in_order for symbol in entry["arguments"]}
     for key in ("bindings", "explicit", "internal_arguments"):
         if key in contract:
             contract[key] = {name: value for name, value in contract[key].items() if name in used_symbols}
     for key, kind in (("resources", "resource"), ("values", "value")):
         required = {value["name"] for value in contract["bindings"].values() if value["kind"] == kind}
+        if kind == "resource":
+            required.update(name for name, resource in contract["resources"].items()
+                            if resource.get("kind") == "fixed_snode" and resource["group"] in fixed_groups)
         contract[key] = {name: value for name, value in contract[key].items() if name in required}
     required_groups = {value["group"] for value in contract["resources"].values() if "group" in value}
     contract["groups"] = {name: value for name, value in contract["groups"].items() if name in required_groups}
@@ -473,6 +519,20 @@ def _complete_compiler_contract(graph, contract, capture):
     for node, code, entry in zip(nodes, codes, contract["entries"]):
         effects = []
         for effect in node.effects:
+            if not effect.runtime_bound and effect.resource.startswith("snode:"):
+                tree = int(effect.resource.split(":")[1])
+                group = next((group for group in fixed_groups if capture.fixed_dependencies[group][0] == tree), None)
+                if group is not None:
+                    effects.append(dict(group=group, access=effect.access.value))
+                    # Activation/listgen can affect every member of a group.
+                    # Preserve the compiler access fact at group granularity.
+                    for identity, resource in contract["resources"].items():
+                        if resource.get("kind") == "fixed_snode" and resource["group"] == group:
+                            previous = accesses.get(identity)
+                            accesses[identity] = effect.access if previous is None else _merge_parallel_access(previous, effect.access)
+                            if node.opaque:
+                                uncertain.add(identity)
+                    continue
             binding = contract["bindings"].get(effect.resource)
             explicit = contract["explicit"].get(effect.resource) or contract.get("internal_arguments", {}).get(
                 effect.resource
@@ -492,6 +552,16 @@ def _complete_compiler_contract(graph, contract, capture):
             previous = accesses.get(identity)
             accesses[identity] = effect.access if previous is None else _merge_parallel_access(previous, effect.access)
             effects.append(dict(resource=identity, access=effect.access.value))
+        # Sparse lowering can conservatively classify allocator/list state
+        # without publishing per-member Graph effects. The compiler's actual
+        # tree closure still requires an opaque group effect, never 'none'.
+        for group in fixed_groups:
+            if capture.fixed_dependencies[group][0] not in code_fixed_trees.get(code, ()):
+                continue
+            if not any(effect.get("group") == group for effect in effects):
+                effects.append(dict(group=group, access="opaque"))
+            uncertain.update(identity for identity, resource in contract["resources"].items()
+                             if resource.get("kind") == "fixed_snode" and resource["group"] == group)
         if node.opaque:
             uncertain.update(
                 contract["bindings"][symbol]["name"]
@@ -522,7 +592,7 @@ def _complete_compiler_contract(graph, contract, capture):
             resource["effects_precision"] = "compiler_proven"
     contract["version"] = 2
     contract["required_capabilities"].append("component_compiler_facts_v1")
-    if has_control or "internal_arguments" in contract or constraints:
+    if has_control or "internal_arguments" in contract or constraints or fixed_groups:
         contract["version"] = 5 if constraints else 4
         contract["control"] = control
         contract.setdefault("internal_arguments", {})
@@ -531,6 +601,10 @@ def _complete_compiler_contract(graph, contract, capture):
     if constraints:
         contract["constraints"] = constraints
         contract["required_capabilities"].append("component_dimension_constraints_v1")
+    if fixed_groups:
+        contract["version"] = 6
+        contract.setdefault("constraints", {})
+        contract["required_capabilities"].append("component_fixed_snode_groups_v1")
     contract["semantic_key"] = _digest({name: value for name, value in contract.items() if name != "semantic_key"})
     contract["compilation"] = dict(version=1, entries=entries, task_scope="compiled_not_observed_replay")
     if constraints:
@@ -573,7 +647,8 @@ def compile_component_graph(component, record, *args, _build=None, **kwargs):
             from taichi_forge_runtime.aot._component import _control_identity
 
             contract["semantic_key"] = _control_identity(contract)
-        return ComponentGraph(graph, contract, capture.array_types)
+        fixed = {group: capture.fixed_dependencies[group] for group in contract.get("fixed_groups", {})}
+        return ComponentGraph(graph, contract, capture.array_types, fixed)
     except BaseException:
         graph.close()
         raise

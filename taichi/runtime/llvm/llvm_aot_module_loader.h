@@ -71,6 +71,8 @@ class LlvmAotModule final : public aot::Module {
 
   std::vector<LlvmSparseRuntimeViewTree> snode_instance_prototypes(
       const std::set<std::string> *entries = nullptr);
+  std::set<int> snode_tree_dependencies(const std::set<std::string> *entries) const;
+  std::string fixed_snode_plan_layouts(const std::set<std::string> &entries) const;
   SNodeTreeLayout clone_instance_tree(const LlvmSparseRuntimeViewTree &prototype,
                                      int target_tree_id);
 

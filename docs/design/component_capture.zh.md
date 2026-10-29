@@ -241,7 +241,7 @@ Vulkan 也需单独验证。
 成员、新尺寸、别名/类型/shape 错误及同模块 CUDA Graph 多实例。成员视图捕获、
 梯度和 Vulkan 组件部署仍需独立取得资格。
 
-固定树 Sparse SNode 已补原生实例化基础，尚未接通公开组件绑定路径。
+固定树 Sparse SNode 的组件绑定复用原生实例化基础。
 `clone_snode_tree_runtime` 使用 executor 保存的原 `SNodeTreeLayout` 构造配方
 创建空状态，不复制数值、激活集合或 allocator 游标。代码树槽与实例树必须来自
 同一构造来源，并通过代码/状态两侧的代际校验；树 ID 回收后新实例取得新代际。
@@ -279,8 +279,21 @@ code.export(module, "evaluate")
 固定 AOT 和 Runtime 克隆共用的原生 StructCompiler 分配布局，以及原生结构访问指纹；
 Python 不计算字节布局。绑定 ID/代际不进入语义代码身份。生产端定义仍校验原树绑定，
 消费端通过已有 prepared API 以同一加载代码驱动独立实例。入口导出检查全部实际树依赖，
-不采样 live 数值或激活集合。本片只取得入口捕获/导出资格；组件根 Graph 自动合同及
-`ComponentInstance` 的 Sparse 组分配另行接通。树 schema 改变需要另一代码变体，不称为动态容量。
+不采样 live 数值或激活集合。树 schema 改变需要另一代码变体，不称为动态容量。
+
+普通组件 recording 经 `component.compile_graph(owner.record)` 收集实际入口和固定树
+依赖，`root.export(module, name)` 自动导出，不需要逐 Kernel 清单。v6 根合同区分
+`fixed_snode` 组和参数化 Dense 组；模块最终 dump 的真实重定位表生成消费绑定，
+后续新增导出入口不使已录制的组指向错误树。消费端在分配实例前，将合同布局与该 Plan
+原生编译依赖的归一化 `SNodeTreeLayout` 对照；仅重算 JSON 身份不能绕过布局检查。
+当前 Sparse Graph 缺少逐成员 effects 时，公开保守组级访问，不报告无读写。
+
+`module.component(name).instantiate(dimensions)` 自动创建所需固定树的空状态，并与
+同实例的 Dense 组一起通过原 prepared API 绑定。数值初始化、读取和停用使用原组件
+入口；Sparse 不伪装成可直接上传的 Dense view，`resource()`/`initialize(data, zero=...)`
+仅用于合格的 Dense/array 资源。含 Sparse 的 `instance.nbytes` 明确拒绝：固定根布局
+字节数不能代表动态 allocator 的总存储。合同查询不另设固定 JSON 大小限制，仍验证
+版本、能力、完整依赖和实际原生布局。
 
 `module.snode_instance(plan=plan)` 只为该 Plan 编译入口的固定树依赖创建实例，包含
 初始化及嵌套控制区域。入口别名复用编译器依赖事实，代码加载后仍可查询。
@@ -303,8 +316,10 @@ CPU 准备要求代码带有 sparse-view 编译资格，拒绝随机数、外部
 CUDA 在途 Module 关闭；CPU 另覆盖循环、其他 view 存活期间分配、随机数准入失败清理
 及断言隔离。原模块状态和 loaded Kernel handle 不变。
 `test_aot_component_sparse.py` 另在 CPU/CUDA 覆盖正常固定 placement、隐式 Field/helper
-捕获、源绑定保护、稳定部署身份及仅含 Runtime 的入口消费。公开 Vulkan 实例调用、
-Sparse 组件根 Graph/实例自动合同仍待接通，不据此宣称完整应用或稳态性能。
+捕获、源绑定保护、稳定部署身份及仅含 Runtime 的入口消费。混合 Sparse/Dense 正常
+Graph 另验证自动导出、后续导出导致的树 ID 重定位、布局篡改拒绝、同一 Module 双实例
+空状态/不同输入/独立关闭及冷准备时只分配实际依赖。公开 Vulkan 实例调用、真实应用
+中的 Sparse 组件和稳态性能仍未取得资格。
 
 真实 GeoPhys 正常构造现已提供有限 RNE 数值证据：CPU/CUDA 上 3/7/5 刚体、不同拓扑、
 质量、qpos/qvel 和重力复用原 `_rne_bias_force`，与普通 JIT 对照；静止链另检查解析重力矩。

@@ -363,10 +363,79 @@ def check_capture(folder, backend):
             domain.close()
 
 
+def check_component(folder, backend):
+    import hashlib
+    import json
+    from pathlib import Path
+    import shutil
+    import tempfile
+    from taichi_forge_runtime.aot import Runtime, Scalar
+    from taichi_forge_runtime.aot._component import _control_identity
+
+    with Runtime(backend) as runtime:
+        module = runtime.load_module(folder)
+        component = module.component("step")
+        contract = component.contract
+        assert len(contract["fixed_groups"]) == len(contract["groups"]) == 1
+        # Cold reflection checks the actual compiled layout, independently of
+        # the component JSON's self-consistent semantic/execution hashes.
+        altered = Path(tempfile.mkdtemp(prefix="altered_", dir=Path(folder).parent)) / "artifact"
+        shutil.copytree(folder, altered)
+        path = altered / "components/step.json"
+        bad = json.loads(path.read_text())
+        next(iter(bad["fixed_groups"].values()))["allocation"]["root_size"] += 8
+        bad["semantic_key"] = _control_identity(bad)
+        plan = json.loads(module.execution_plan("step").to_json())
+        bad["execution_fingerprint"] = hashlib.sha256(json.dumps(
+            dict(plan=plan, semantic_key=bad["semantic_key"]), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        path.write_text(json.dumps(bad))
+        foreign = runtime.load_module(altered)
+        reject(lambda: foreign.component("step"), "native compiled layout")
+        foreign.close()
+        states = [component.instantiate({}) for _ in range(2)]
+        for state in states:
+            state.initialize(zero=("total",))
+            assert len(state.layout) == 2
+            # The otherwise exported spare tree must not become instance state.
+            assert len(state._fixed_state.info) == 1
+        outputs = [runtime.ndarray("i32", 16) for _ in states]
+        domain = runtime.execution_domain(capacity=1, instance_capacity=1) if backend == "cuda" else None
+
+        def run(index, active, offset, bump, drop=0):
+            with states[index].prepare(values=dict(active=active, offset=offset, bump=bump),
+                                       arguments=dict(out=outputs[index], drop=drop),
+                                       execution_domain=domain) as call:
+                call.initialize()
+                if domain:
+                    ticket = call.submit()
+                    ticket.wait()
+                    ticket.close()
+                else:
+                    call.run()
+            assert values(states[index].resource("total")) == [sum(values(outputs[index]))]
+
+        for index in (0, 1):
+            run(index, 0, 0, 0)
+            assert values(outputs[index]) == [0] * 16
+        run(0, 5, 10, 2)
+        assert values(outputs[0]) == list(range(12, 17)) + [2] * 3 + [0] * 8
+        run(1, 9, 100, 3)
+        assert values(outputs[1]) == list(range(103, 112)) + [3] * 3 + [0] * 4
+        run(0, 0, 0, 1, drop=1)
+        assert values(outputs[0]) == [0] * 4 + [17] + [3] * 3 + [0] * 8
+        states[0].close()
+        run(1, 0, 0, 1)
+        states[1].close()
+        if domain:
+            domain.close()
+
+
 if __name__ == "__main__":
     sys.path.insert(0, os.environ["FORGE_AOT_TEST_PACKAGE"])
     sys.meta_path.insert(0, NoNumericalSource())
-    if len(sys.argv) > 3 and sys.argv[3] == "capture":
+    if len(sys.argv) > 3 and sys.argv[3] == "component":
+        check_component(sys.argv[1], sys.argv[2])
+    elif len(sys.argv) > 3 and sys.argv[3] == "capture":
         check_capture(sys.argv[1], sys.argv[2])
     elif len(sys.argv) > 3 and sys.argv[3] == "selection":
         check_selection(sys.argv[1], sys.argv[2])

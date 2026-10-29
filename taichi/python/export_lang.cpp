@@ -5912,6 +5912,7 @@ void export_lang(py::module &m) {
         return entries;
       })
       .def("_used_snode_tree_ids", &AotModuleBuilder::used_snode_tree_ids)
+      .def("_exported_snode_tree_bindings", &AotModuleBuilder::exported_snode_tree_bindings)
       .def("_add_root_storage_view", &AotModuleBuilder::add_root_storage_view)
       .def("_add_initial_root_data",
            [](AotModuleBuilder *builder,

@@ -569,11 +569,8 @@ void LlvmAotModule::ensure_snode_tree_initialized(int logical_tree_id) {
   allocate_aot_snode_tree_type(this, field, allocation_result_buffer_);
 }
 
-std::vector<LlvmSparseRuntimeViewTree>
-LlvmAotModule::snode_instance_prototypes(const std::set<std::string> *entries) {
-  if ((!arch_is_cpu(arch()) && arch() != Arch::cuda) || !allocation_result_buffer_)
-    throw std::invalid_argument(
-        "SNode instances require a runtime-owned CPU/CUDA AOT module");
+std::set<int> LlvmAotModule::snode_tree_dependencies(
+    const std::set<std::string> *entries) const {
   std::set<int> selected;
   if (entries) {
     // Validate the entire requested closure before materializing any tree.
@@ -592,6 +589,35 @@ LlvmAotModule::snode_instance_prototypes(const std::set<std::string> *entries) {
   } else {
     selected.insert(snode_tree_ids_.begin(), snode_tree_ids_.end());
   }
+  return selected;
+}
+
+namespace {
+struct FixedSNodeLayoutProjection {
+  int tree;
+  SNodeTreeLayout layout;
+  TI_IO_DEF(tree, layout);
+};
+}  // namespace
+
+std::string LlvmAotModule::fixed_snode_plan_layouts(
+    const std::set<std::string> &entries) const {
+  std::vector<FixedSNodeLayoutProjection> result;
+  for (int tree : snode_tree_dependencies(&entries)) {
+    SNodeTreeLayout layout;
+    if (!cache_reader_->get_field_cache(layout, tree))
+      throw std::invalid_argument("Missing fixed component tree layout");
+    result.push_back({tree, layout.normalized()});
+  }
+  return liong::json::print(liong::json::serialize(result));
+}
+
+std::vector<LlvmSparseRuntimeViewTree>
+LlvmAotModule::snode_instance_prototypes(const std::set<std::string> *entries) {
+  if ((!arch_is_cpu(arch()) && arch() != Arch::cuda) || !allocation_result_buffer_)
+    throw std::invalid_argument(
+        "SNode instances require a runtime-owned CPU/CUDA AOT module");
+  const auto selected = snode_tree_dependencies(entries);
   std::vector<int> physical;
   for (int logical : selected) {
     ensure_snode_tree_initialized(logical);

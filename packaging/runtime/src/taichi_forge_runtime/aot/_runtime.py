@@ -909,6 +909,19 @@ class Module(_Resource):
 
         return Component(self, name)
 
+    def _fixed_snode_plan_layouts(self, plan):
+        runtime = self._runtime
+        with runtime._lock:
+            self._check()
+            runtime._api.load_snode_component_layouts()
+            query = runtime._api.ti_get_aot_snode_plan_layouts_ext
+            size = C.c_uint64()
+            args = (runtime._handle, self._handle, len(plan._json), plan._json)
+            runtime._api.call(query, *args, C.byref(size), None)
+            data = C.create_string_buffer(size.value)
+            runtime._api.call(query, *args, C.byref(size), data)
+            return {item["tree"]: item["layout"] for item in json.loads(data.value)}
+
     def component_variants(self, name):
         """Select declared configurations from one already loaded code Module."""
         from ._component_variants import ComponentVariants

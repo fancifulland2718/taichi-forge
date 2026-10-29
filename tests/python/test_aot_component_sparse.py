@@ -41,6 +41,63 @@ class _SparseState:
             out[i] = self.alias[i]
 
 
+@ti.data_oriented
+class _SparseGraphState(_SparseState):
+    def __init__(self):
+        super().__init__()
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        scope.total = scope.field(ti.i32, shape=())
+        self.total_tree = builder.finalize()
+
+    @ti.kernel
+    def summarize(self, out: ti.types.ndarray(ti.i32, 1)):
+        self.total[None] = 0
+        for i in range(out.shape[0]):
+            self.total[None] += out[i]
+
+    def record(self, builder):
+        out = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+        drop = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "drop", ti.i32)
+        builder.dispatch(self.evaluate, out, drop, template_args={"self": self})
+        builder.dispatch(self.summarize, out, template_args={"self": self})
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
+def test_fixed_snode_normal_component_graph_exports_and_instantiates(tmp_path):
+    spare = _SparseState(32)
+    state = _SparseGraphState()
+    builder = ti.graph.GraphBuilder()
+    state.record(builder)
+    ordinary = builder.compile()
+    out = ti.ndarray(ti.i32, 16)
+    ordinary.run(dict(out=out, drop=0))
+    reference = out.to_numpy()
+    assert state.total[None] == int(reference.sum())
+    undeclared = ti.aot.Module()
+    with pytest.raises(ti.TaichiRuntimeError, match="snapshot_state=True"):
+        undeclared.add_execution_plan("missing_declaration", ordinary)
+    assert not undeclared._data_payloads and not undeclared._exported_kernels
+    environment = Component.from_owner(state)
+    root = environment.compile_graph(state.record)
+    assert root.contract["version"] == 6
+    assert len(root.contract["fixed_groups"]) == len(root.contract["groups"]) == 1
+    assert len(root.contract["entries"]) == 2
+    assert any("group" in effect for entry in root.contract["compilation"]["entries"] for effect in entry["effects"]), root.contract["compilation"]
+    module = ti.aot.Module()
+    plan = root.export(module, "step")
+    assert len(plan.kernel_entries) == 2 and not plan.data_entries
+    # A later export changes the final local tree numbering. Bindings must
+    # follow native dump relocation, not be guessed during root recording.
+    Component.from_owner(spare).compile(spare.evaluate, ti.ndarray(ti.i32, 32), 0).export(module, "spare")
+    folder = tmp_path / "artifact"
+    module.save(folder)
+    metadata = json.loads((folder / "components/step.json").read_text())
+    assert list(metadata["fixed_bindings"].values()) == [1]
+    assert not (folder / "data").exists()
+    _consume_isolated(folder, tmp_path, "component")
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
 def test_fixed_snode_capture_preserves_source_binding_and_deploys_empty_instances(tmp_path):
     first = _SparseState()

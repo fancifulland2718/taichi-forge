@@ -585,6 +585,17 @@ class Api:
         function.restype = Handle
         self.ti_create_aot_snode_instance_for_plan_ext = function
 
+    def load_snode_component_layouts(self):
+        if hasattr(self, "ti_get_aot_snode_plan_layouts_ext"):
+            return
+        try:
+            function = self.library.ti_get_aot_snode_plan_layouts_ext
+        except AttributeError as error:
+            raise NotImplementedError("The selected runtime has no fixed SNode component layouts") from error
+        function.argtypes = [Handle, Handle, C.c_uint64, C.c_char_p, C.POINTER(C.c_uint64), C.c_void_p]
+        function.restype = None
+        self.ti_get_aot_snode_plan_layouts_ext = function
+
     def load_submission_parameters(self):
         if getattr(self, "_submission_parameters_loaded", False):
             return

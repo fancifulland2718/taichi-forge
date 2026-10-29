@@ -17,6 +17,9 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
             const std::string &filename) const override;
 
   void set_artifact_format(const std::string &format) override;
+  std::map<int, int> exported_snode_tree_bindings() const override {
+    return exported_tree_bindings_;
+  }
 
  protected:
   void add_per_backend(const std::string &identifier, Kernel *kernel) override;
@@ -45,6 +48,7 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
                         const std::string &launch_abi);
 
   LlvmOfflineCache cache_;
+  mutable std::map<int, int> exported_tree_bindings_;
   std::map<std::string, std::string> kernel_launch_abis_;
   std::map<std::string, std::string> kernel_names_;
   std::map<std::string, std::string> kernel_identities_;

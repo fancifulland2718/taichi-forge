@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <vector>
 
 #include "taichi/common/core.h"
@@ -47,6 +48,21 @@ struct SNodeTreeLayout {
   int root_runtime_local_id{0};
   std::size_t root_size{0};
   std::vector<Node> snode_metas;
+
+  SNodeTreeLayout normalized() const {
+    auto result = *this;
+    std::map<int, int> local;
+    for (const auto &node : snode_metas)
+      local.emplace(node.id, node.runtime_local_id);
+    result.tree_id = 0;
+    result.tree_generation = 0;
+    result.root_id = root_runtime_local_id;
+    for (auto &node : result.snode_metas) {
+      node.id = node.runtime_local_id;
+      if (node.parent_id >= 0) node.parent_id = local.at(node.parent_id);
+    }
+    return result;
+  }
 
   TI_IO_DEF(tree_id,
             tree_generation,

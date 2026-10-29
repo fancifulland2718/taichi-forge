@@ -337,6 +337,7 @@ class Module:
         self._exported_kernels = {}
         self._component_entries = {}
         self._component_roots = {}
+        self._component_fixed_sources = {}
         self._component_families = {}
         self._kernel_launch_abis = {}
         self._execution_plans = {}
@@ -587,6 +588,7 @@ class Module:
         source_bindings=None,
         resource_bindings=None,
         argument_resources=None,
+        _fixed_snode_dependencies=(),
     ):
         """Export ordered loaded-kernel/copy/fill commands with symbolic storage.
 
@@ -701,6 +703,7 @@ class Module:
                 source_bindings=source_bindings,
                 resource_bindings=resource_bindings,
                 argument_resources=argument_resources,
+                fixed_snode_dependencies=_fixed_snode_dependencies,
             )
         elif not isinstance(plan, ExecutionPlan):
             raise TypeError("Expected an ExecutionPlan or compiled Graph")
@@ -814,6 +817,13 @@ class Module:
             directory = output_dir / "components"
             directory.mkdir(exist_ok=True)
             for name, contract in self._component_roots.items():
+                contract = dict(contract)
+                if name in self._component_fixed_sources:
+                    tree_bindings = self._aot_builder._exported_snode_tree_bindings()
+                    contract["fixed_bindings"] = {
+                        group: tree_bindings[dependency[0]]
+                        for group, dependency in self._component_fixed_sources[name].items()
+                    }
                 (directory / (quote(name, safe="-_.") + ".json")).write_text(
                     json.dumps(contract, sort_keys=True, separators=(",", ":")), encoding="utf8"
                 )

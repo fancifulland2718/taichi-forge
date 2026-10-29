@@ -154,4 +154,32 @@ TiNativeResource ti_create_aot_snode_instance_for_plan_ext(
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
 }
+
+void ti_get_aot_snode_plan_layouts_ext(
+    TiRuntime runtime, TiAotModule module, uint64_t description_size,
+    const char *description, uint64_t *size, char *json) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(module);
+  TI_CAPI_ARGUMENT_NULL(description);
+  TI_CAPI_ARGUMENT_NULL(size);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  auto *owner = reinterpret_cast<AotModule *>(module);
+  if (!rt.owns_module(owner))
+    throw MemoryBindingError("SNode layout module is not live in this runtime");
+  auto *llvm = dynamic_cast<taichi::lang::LLVM::LlvmAotModule *>(&owner->get());
+  if (!llvm)
+    throw MemoryBindingError("Fixed SNode plan layouts require CPU/CUDA");
+  const auto plan = taichi::lang::aot::ExecutionPlan::parse(std::string(description, description_size));
+  const auto text = llvm->fixed_snode_plan_layouts(plan.kernel_entries());
+  const auto capacity = *size;
+  *size = text.size() + 1;
+  if (json) {
+    if (capacity < *size)
+      throw MemoryBindingError("SNode layout buffer is too small");
+    std::memcpy(json, text.c_str(), *size);
+  }
+  TI_CAPI_TRY_CATCH_END();
+}
 #endif

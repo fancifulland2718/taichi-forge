@@ -249,8 +249,8 @@ state, nested structure members, new extents, alias/type/shape failures and
 same-module CUDA Graph instances. Member-view captures, gradients and Vulkan
 component deployment remain separately qualified features.
 
-Fixed-schema Sparse SNode instantiation has a native runtime foundation, separate
-from the public component binding path. `clone_snode_tree_runtime` recreates empty
+Fixed-schema Sparse SNode component binding reuses the native runtime foundation.
+`clone_snode_tree_runtime` recreates empty
 state through the executor's original `SNodeTreeLayout` construction recipe;
 values, activation sets and allocator cursors are not copied. Code-slot bindings
 require that exact construction provenance and live code/state generations.
@@ -304,10 +304,29 @@ introduced. Binding IDs/generations stay outside the semantic code identity.
 Producer definitions still guard their exact source tree bindings, while loaded
 code serves independent consumer instances through the existing prepared API.
 Entry export verifies every compiled tree dependency and never snapshots live
-values or activation. This slice qualifies entry capture/export; automatic
-component-root Graph contracts and `ComponentInstance` allocation of sparse
-groups remain separate work. Sparse tree schema changes require another code
+values or activation. Sparse tree schema changes require another code
 variant and are not advertised as dynamic capacity.
+
+An ordinary component recording through `component.compile_graph(owner.record)`
+collects its actual entries and fixed-tree dependencies. `root.export(module, name)`
+exports them without a per-kernel list. The v6 root contract distinguishes
+`fixed_snode` groups from parameterized dense groups. Consumer bindings come from
+the native module's final dump relocation map, including entries exported after
+the component was recorded. Before allocating instances, the consumer compares
+the contract with normalized `SNodeTreeLayout` facts from the plan's compiled
+dependencies. Recomputing JSON identities cannot bypass that native layout check.
+Where sparse Graph lowering lacks per-member effects, the contract reports
+conservative group access, never an absence of reads or writes.
+
+`module.component(name).instantiate(dimensions)` creates the required empty fixed
+trees and binds them alongside the instance's dense groups through the existing
+prepared API. Numerical initialization, readback and deactivation use the original
+component entries. Sparse storage is not exposed as an uploadable dense view;
+`resource()` and `initialize(data, zero=...)` apply to qualified dense/array
+resources. `instance.nbytes` explicitly rejects sparse instances because fixed
+root bytes do not measure total dynamic allocator storage. Contract loading has
+no separate fixed JSON size cap; version, capability, closure and native layout
+validation still apply.
 
 `module.snode_instance(plan=plan)` allocates only the fixed-tree dependencies of
 that plan's compiled entries, including initialization and nested control
@@ -343,9 +362,12 @@ a sibling view remains live, failed RNG admission, and assertion isolation. The
 original module state and loaded kernel handle remain unchanged.
 `test_aot_component_sparse.py` additionally covers normal fixed placement,
 implicit Field/helper capture, source-binding guards, stable deployable identity,
-and runtime-only entry consumption on CPU/CUDA. Public Vulkan instance calls and
-automatic sparse component-root Graph/instance contracts remain unqualified;
-these tests do not establish whole-application support or steady-state performance.
+and runtime-only entry consumption on CPU/CUDA. A normal mixed sparse/dense Graph
+additionally covers automatic export, tree relocation after later exports, native
+layout tampering rejection, empty and distinct states under one loaded module,
+independent closure, and allocation of only the actual plan dependencies. Public
+Vulkan instance calls, sparse components in real applications and steady-state
+performance remain unqualified.
 
 `test_aot_component_dense.py` compares the same numerical definition with ordinary
 JIT on CPU/CUDA. It covers new capacities, range/Field-shape/full-Field iteration,

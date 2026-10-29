@@ -20,6 +20,7 @@ class _ExportContext(GraphLoweringContext):
         source_arrays=None,
         source_resources=None,
         resource_inputs=None,
+        fixed_snode_dependencies=(),
     ):
         super().__init__(
             module._arch,
@@ -29,6 +30,9 @@ class _ExportContext(GraphLoweringContext):
             resource_inputs=resource_inputs,
         )
         self.snapshot_state = snapshot_state
+        self.fixed_snode_dependencies = {item[0]: tuple(item) for item in fixed_snode_dependencies}
+        if self.fixed_snode_dependencies and snapshot_state:
+            raise TaichiRuntimeError("Generic fixed SNode groups cannot snapshot producer state")
         self.kernels = {}
         self.kernel_launch_abis = {}
         self._kernel_names = {
@@ -138,7 +142,7 @@ class _ExportContext(GraphLoweringContext):
     def field_state(self, dependencies):
         """Retain source lifetime proofs; the compiled AOT closure selects bytes."""
         for dependency in dependencies:
-            if not self.snapshot_state:
+            if not self.snapshot_state and self.fixed_snode_dependencies.get(dependency[0]) != tuple(dependency):
                 raise TaichiRuntimeError("AOT live Field state requires explicit snapshot_state=True at export")
             dependency = tuple(dependency)
             previous = self._state_dependencies.setdefault(dependency[0], dependency)
@@ -159,6 +163,14 @@ class _ExportContext(GraphLoweringContext):
             | self.retained_arrays.tree_ids
         )
         dependencies = tuple(program._snapshot_snode_tree_dependencies(ids))
+        if self.fixed_snode_dependencies:
+            if self.retained_arrays.tree_ids & self.fixed_snode_dependencies.keys():
+                raise TaichiRuntimeError("Fixed instance trees cannot be borrowed as module-root arrays")
+            if any(self.fixed_snode_dependencies.get(item[0]) != tuple(item) for item in dependencies):
+                raise TaichiRuntimeError("Compiled fixed SNode closure differs from its declared component lifetime")
+            # The actual compiled closure is validated, but no producer bytes
+            # or active sets are sampled. Runtime instances start empty.
+            dependencies = ()
         if dependencies:
             if not self.snapshot_state:
                 raise TaichiRuntimeError("AOT compiled Field state requires explicit snapshot_state=True at export")
@@ -202,6 +214,7 @@ def export_graph(
     source_bindings=None,
     resource_bindings=None,
     argument_resources=None,
+    fixed_snode_dependencies=(),
 ):
     """Preflight the entire region before publishing any module definitions."""
     with graph._lifecycle_lock:
@@ -246,6 +259,7 @@ def export_graph(
             source_arrays=source_arrays,
             source_resources=source_resources,
             resource_inputs=resource_inputs,
+            fixed_snode_dependencies=fixed_snode_dependencies,
         )
         operation_ends = lower_frozen_graph(context, graph)
         submission_recipe = None

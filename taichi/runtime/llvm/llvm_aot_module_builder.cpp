@@ -277,6 +277,7 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
   aot::write_struct_layout_artifact(ndarray_layouts_, output_dir);
   aot::write_value_parameter_artifact(value_parameters_, output_dir);
   aot::write_argument_origin_artifact(argument_origins_, output_dir);
+  exported_tree_bindings_ = tree_mapping;
 }
 
 const std::vector<int> &LlvmAotModuleBuilder::kernel_snode_tree_ids(
