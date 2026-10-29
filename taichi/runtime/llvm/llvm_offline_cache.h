@@ -3,6 +3,7 @@
 #include <ctime>
 #include <functional>
 #include <memory>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -116,6 +117,7 @@ class LlvmOfflineCacheFileReader {
 
   size_t get_num_snode_trees();
   std::vector<int> get_snode_tree_ids() const;
+  std::map<std::string, std::vector<int>> get_kernel_tree_dependencies() const;
   // Query the complete cold closure before take_kernel_* consumes entries.
   std::unordered_set<int> get_element_list_tree_ids(bool exact) const;
 

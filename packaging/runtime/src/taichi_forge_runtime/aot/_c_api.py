@@ -574,6 +574,17 @@ class Api:
             setattr(self, name, function)
         setattr(self, marker, True)
 
+    def load_snode_instance_selection(self):
+        if hasattr(self, "ti_create_aot_snode_instance_for_plan_ext"):
+            return
+        try:
+            function = self.library.ti_create_aot_snode_instance_for_plan_ext
+        except AttributeError as error:
+            raise NotImplementedError("The selected runtime has no SNode instance closure selection") from error
+        function.argtypes = [Handle, Handle, C.c_uint64, C.c_char_p]
+        function.restype = Handle
+        self.ti_create_aot_snode_instance_for_plan_ext = function
+
     def load_submission_parameters(self):
         if getattr(self, "_submission_parameters_loaded", False):
             return

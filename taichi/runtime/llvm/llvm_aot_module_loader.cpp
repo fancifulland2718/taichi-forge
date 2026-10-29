@@ -182,6 +182,7 @@ LlvmAotModule::LlvmAotModule(
   }
 
   snode_tree_ids_ = cache_reader_->get_snode_tree_ids();
+  kernel_tree_dependencies_ = cache_reader_->get_kernel_tree_dependencies();
 
   if (!aot::load_struct_graph_artifact(*directory_, graphs_)) {
     size_t graph_size = 0;
@@ -569,17 +570,35 @@ void LlvmAotModule::ensure_snode_tree_initialized(int logical_tree_id) {
 }
 
 std::vector<LlvmSparseRuntimeViewTree>
-LlvmAotModule::snode_instance_prototypes() {
+LlvmAotModule::snode_instance_prototypes(const std::set<std::string> *entries) {
   if ((!arch_is_cpu(arch()) && arch() != Arch::cuda) || !allocation_result_buffer_)
     throw std::invalid_argument(
         "SNode instances require a runtime-owned CPU/CUDA AOT module");
+  std::set<int> selected;
+  if (entries) {
+    // Validate the entire requested closure before materializing any tree.
+    for (const auto &name : *entries) {
+      const auto alias = metadata_.kernel_aliases.find(name);
+      const auto &code = alias == metadata_.kernel_aliases.end() ? name : alias->second;
+      const auto found = kernel_tree_dependencies_.find(code);
+      if (found == kernel_tree_dependencies_.end())
+        throw std::invalid_argument("SNode instance plan references unknown kernel: " + name);
+      for (int logical : found->second) {
+        if (!std::binary_search(snode_tree_ids_.begin(), snode_tree_ids_.end(), logical))
+          throw std::invalid_argument("SNode instance kernel references a missing tree: " + name);
+        selected.insert(logical);
+      }
+    }
+  } else {
+    selected.insert(snode_tree_ids_.begin(), snode_tree_ids_.end());
+  }
   std::vector<int> physical;
-  for (int logical : snode_tree_ids_) {
+  for (int logical : selected) {
     ensure_snode_tree_initialized(logical);
     physical.push_back(tree_bindings_.at(logical));
   }
   if (physical.empty())
-    throw std::invalid_argument("AOT module has no fixed SNode trees to instantiate");
+    throw std::invalid_argument("Selected AOT closure has no fixed SNode trees to instantiate");
   return executor_->runtime_view_trees(physical);
 }
 

@@ -261,6 +261,12 @@ CPU 使用同一接口但省略 `execution_domain`：prepared 调用上下文持
 Runtime 目录，通过现有 CPU launcher 同步执行，不切换模块共享指针或注册代码。
 固定 module-root 数组别名不得混入此实例调用。
 
+`module.snode_instance(plan=plan)` 只为该 Plan 编译入口的固定树依赖创建实例，包含
+初始化及嵌套控制区域。入口别名复用编译器依赖事实，代码加载后仍可查询。
+闭包之外的树不复制到实例；加载模块仍保有其原型资源。用该实例准备另一个需要缺失树
+的 Plan，会在执行前拒绝。这是沿现有 ExecutionPlan 的冷资源选择，不增加执行路径，
+也不把 Sparse Field 转为 Ndarray；创建实例不执行数值初始化。省略 `plan` 保留整模块克隆。
+
 关闭状态只退休依赖它的调用和已接受提交，同一执行域的其他状态继续有效。
 关闭公开 Module 禁止新调用并排空其 prepared 用户；尚存状态保留代码/原型租约，
 在自身退休时释放。一个状态不能同时借给多个 prepared view；旧 view 退休后可换

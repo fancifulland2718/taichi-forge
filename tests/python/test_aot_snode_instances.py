@@ -66,6 +66,49 @@ def test_same_loaded_sparse_code_runs_independent_runtime_instances(tmp_path):
     ))
     folder = tmp_path / "artifact"
     artifact.save(folder)
+    _consume_isolated(folder, tmp_path)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
+def test_snode_instance_selects_compiled_plan_closure(tmp_path):
+    left, initial, unrelated = (ti.field(ti.i32) for _ in range(3))
+    for field in (left, initial, unrelated):
+        builder = ti.FieldsBuilder()
+        builder.pointer(ti.i, 2).dense(ti.i, 2).place(field)
+        builder.finalize()
+
+    @ti.kernel
+    def main(out: ti.types.ndarray(ti.i32, 1)):
+        for i in range(4):
+            left[i] += 1
+            out[i] = left[i]
+
+    @ti.kernel
+    def initialize():
+        initial[0] = 23
+
+    @ti.kernel
+    def read_initial(out: ti.types.ndarray(ti.i32, 1)):
+        out[4] = initial[0]
+
+    @ti.kernel
+    def unused():
+        unrelated[0] = 99
+
+    artifact = ti.aot.Module()
+    for kernel in (main, initialize, read_initial, unused):
+        artifact.add_kernel(kernel)
+    artifact.add_kernel(main, name="main_alias")
+    artifact.add_execution_plan("selected", ExecutionPlan(
+        [dict(kind="kernel", entry="main_alias", arguments=["out"])],
+        initialization=[dict(kind="kernel", entry="initialize", arguments=[])],
+    ))
+    folder = tmp_path / "artifact"
+    artifact.save(folder)
+    _consume_isolated(folder, tmp_path, "selection")
+
+
+def _consume_isolated(folder, tmp_path, mode="instances"):
     frozen = {str(p.relative_to(folder)): hashlib.sha256(p.read_bytes()).hexdigest()
               for p in folder.rglob("*") if p.is_file()}
 
@@ -81,7 +124,7 @@ def test_same_loaded_sparse_code_runs_independent_runtime_instances(tmp_path):
     # tree inherited from the producer test process.
     environment["TI_LIB_DIR"] = str(package / "taichi_forge_runtime/_lib/runtime")
     backend = "cpu" if ti.cfg.arch == ti.cpu else "cuda"
-    result = subprocess.run([sys.executable, "-I", "-S", str(consumer), str(folder), backend],
+    result = subprocess.run([sys.executable, "-I", "-S", str(consumer), str(folder), backend, mode],
                             cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PUBLIC_SNODE_INSTANCES_OK" in result.stdout

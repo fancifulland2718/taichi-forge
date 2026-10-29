@@ -1518,6 +1518,12 @@ ti_probe_native_resource_ext(TiRuntime runtime,
 // not copy live values or activation. Allocate before borrowing sparse views.
 TI_DLL_EXPORT TiNativeResource TI_API_CALL
 ti_create_aot_snode_instance_ext(TiRuntime runtime, TiAotModule module);
+// Select only compiler-recorded tree dependencies of this ExecutionPlan,
+// including initialization and every control region. No numerical code runs.
+TI_DLL_EXPORT TiNativeResource TI_API_CALL
+ti_create_aot_snode_instance_for_plan_ext(
+    TiRuntime runtime, TiAotModule module, uint64_t description_size,
+    const char *description);
 // JSON array of immutable code/state tree IDs and generations. These are
 // observations, not consumer-supplied rebinding descriptors.
 TI_DLL_EXPORT void TI_API_CALL

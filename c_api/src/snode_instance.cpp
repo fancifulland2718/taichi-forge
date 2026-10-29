@@ -5,6 +5,7 @@
 #include <cstring>
 #include <set>
 #include "native_resource_registry.h"
+#include "taichi/aot/execution_plan.h"
 
 namespace capi {
 using namespace taichi::lang;
@@ -24,8 +25,8 @@ SNodeInstance::SNodeInstance(AotModule &module)
   executor_ = module_->get_runtime_executor();
 }
 
-void SNodeInstance::initialize() {
-  const auto prototypes = module_->snode_instance_prototypes();
+void SNodeInstance::initialize(const std::set<std::string> *entries) {
+  const auto prototypes = module_->snode_instance_prototypes(entries);
   // Reserve host containers first. A failed clone leaves exactly the
   // successfully initialized prefix owned by this object.
   states_.reserve(prototypes.size());
@@ -71,7 +72,7 @@ std::vector<LlvmSparseRuntimeViewBinding> SNodeInstance::bindings_for(
     const auto found = std::lower_bound(bindings_.begin(), bindings_.end(), tree,
         [](const auto &binding, int id) { return binding.tree_id < id; });
     if (found == bindings_.end() || found->tree_id != tree)
-      throw MemoryBindingError("Kernel tree is outside the SNode instance's code owner");
+      throw MemoryBindingError("Kernel tree is outside the SNode instance's selected closure");
     selected.push_back(*found);
   }
   executor_->validate_snode_tree_instance_bindings(selected);
@@ -130,5 +131,27 @@ void ti_get_aot_snode_instance_info_ext(TiRuntime runtime, TiNativeResource inst
     std::memcpy(json, text.c_str(), *size);
   }
   TI_CAPI_TRY_CATCH_END();
+}
+
+TiNativeResource ti_create_aot_snode_instance_for_plan_ext(
+    TiRuntime runtime, TiAotModule module, uint64_t description_size,
+    const char *description) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(module);
+  TI_CAPI_ARGUMENT_NULL_RV(description);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  auto *owner = reinterpret_cast<AotModule *>(module);
+  if (!rt.owns_module(owner))
+    throw MemoryBindingError("SNode instance module is not live in this runtime");
+  const auto plan = taichi::lang::aot::ExecutionPlan::parse(
+      std::string(description, description_size));
+  const auto entries = plan.kernel_entries();
+  auto instance = std::make_shared<capi::SNodeInstance>(*owner);
+  instance->initialize(&entries);
+  return rt.native_resource_registry().publish(std::move(instance), {}, {}, {}, true);
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
 }
 #endif

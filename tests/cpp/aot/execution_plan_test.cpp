@@ -6,6 +6,22 @@
 #include "taichi/program/storage_view.h"
 
 namespace taichi::lang::aot {
+TEST(ExecutionPlan, KernelClosureIncludesInitializationAndNestedRegions) {
+  ExecutionPlan plan;
+  plan.initialization.emplace_back(ExecutionPlan::Kernel{"init"});
+  auto loop = std::make_shared<ExecutionPlan::While>();
+  loop->condition.emplace_back(ExecutionPlan::Kernel{"predicate"});
+  loop->body.emplace_back(ExecutionPlan::Kernel{"loop_body"});
+  auto branch = std::make_shared<ExecutionPlan::Branch>();
+  branch->condition.emplace_back(ExecutionPlan::Kernel{"selector"});
+  branch->bodies = {{ExecutionPlan::Kernel{"first"}}, {loop}};
+  auto parallel = std::make_shared<ExecutionPlan::Parallel>();
+  parallel->branches = {{branch}, {ExecutionPlan::Kernel{"last"}}};
+  plan.operations = {ExecutionPlan::Kernel{"init"}, parallel};
+  EXPECT_EQ(plan.kernel_entries(), (std::set<std::string>{
+      "init", "predicate", "loop_body", "selector", "first", "last"}));
+}
+
 TEST(ExecutionPlan, VulkanSubmissionRequiresV20AndExactReplayCoverage) {
   const std::string source = R"({"version":20,"operations":[
     {"kind":"kernel","entry":"a","arguments":["x"]},

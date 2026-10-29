@@ -194,6 +194,14 @@ bool LlvmOfflineCacheFileReader::take_kernel_cache(
   return true;
 }
 
+std::map<std::string, std::vector<int>>
+LlvmOfflineCacheFileReader::get_kernel_tree_dependencies() const {
+  std::map<std::string, std::vector<int>> result;
+  for (const auto &[name, kernel] : data_.kernels)
+    result.emplace(name, kernel.used_snode_tree_ids);
+  return result;
+}
+
 bool LlvmOfflineCacheFileReader::take_kernel_metadata(
     LlvmOfflineCache::KernelCacheData &res,
     const std::string &key) {

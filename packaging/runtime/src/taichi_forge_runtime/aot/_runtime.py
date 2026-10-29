@@ -897,11 +897,11 @@ class Module(_Resource):
 
     _kind = "module"
 
-    def snode_instance(self):
-        """Allocate empty fixed SNode states for this exact loaded code owner."""
+    def snode_instance(self, *, plan=None):
+        """Allocate fixed-tree state for this module or a plan's compiled closure."""
         from ._snode_instance import SNodeInstance
 
-        return SNodeInstance.create(self)
+        return SNodeInstance.create(self, plan=plan)
 
     def component(self, name):
         """Load a compiler-produced component root and its resource contract."""

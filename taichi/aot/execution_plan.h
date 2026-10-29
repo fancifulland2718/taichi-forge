@@ -142,5 +142,7 @@ struct ExecutionPlan {
   std::optional<OrderedStorageRing> storage_ring;
 
   static ExecutionPlan parse(const std::string &json);
+  // Cold dependency query over all regions, not an execution/interpreter pass.
+  std::set<std::string> kernel_entries() const;
 };
 }  // namespace taichi::lang::aot

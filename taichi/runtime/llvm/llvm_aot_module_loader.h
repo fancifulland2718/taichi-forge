@@ -1,5 +1,7 @@
 #pragma once
 
+#include <set>
+
 #include "taichi/aot/module_loader.h"
 #include "taichi/runtime/llvm/kernel_launcher.h"
 #include "taichi/runtime/llvm/llvm_aot_metadata.h"
@@ -67,7 +69,8 @@ class LlvmAotModule final : public aot::Module {
   void initialize_snode_tree(const LLVM::SNodeTreeLayout &field,
                              uint64 *result_buffer);
 
-  std::vector<LlvmSparseRuntimeViewTree> snode_instance_prototypes();
+  std::vector<LlvmSparseRuntimeViewTree> snode_instance_prototypes(
+      const std::set<std::string> *entries = nullptr);
   SNodeTreeLayout clone_instance_tree(const LlvmSparseRuntimeViewTree &prototype,
                                      int target_tree_id);
 
@@ -116,6 +119,8 @@ class LlvmAotModule final : public aot::Module {
   std::unordered_map<std::string, std::unique_ptr<llvm_aot::KernelImpl>> payload_kernels_;
   std::map<std::string, std::vector<std::uint32_t>> range_selections_;
   std::vector<int> snode_tree_ids_;
+  // Keep logical dependencies after take_kernel_* transfers the code payload.
+  std::map<std::string, std::vector<int>> kernel_tree_dependencies_;
   std::vector<std::size_t> root_storage_sizes_;
   bool dense_root_storage_{false};
   std::map<int, int> tree_bindings_;

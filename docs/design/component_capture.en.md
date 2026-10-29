@@ -280,6 +280,16 @@ module's shared pointers and registered code are never switched between states.
 Fixed module-root array aliases cannot
 be mixed with this instance binding.
 
+`module.snode_instance(plan=plan)` allocates only the fixed-tree dependencies of
+that plan's compiled entries, including initialization and nested control
+regions. Entry aliases resolve to the same compiler-owned dependency facts,
+which remain available after code loading. Trees outside this closure are not
+cloned for the instance; the loaded module still owns its prototype resources.
+Preparing a different plan that needs an omitted tree fails before execution.
+This is cold resource selection over the existing ExecutionPlan, not a new
+execution path or a sparse Field-to-Ndarray conversion. No numerical initializer
+runs during instance creation. Omitting `plan` preserves whole-module cloning.
+
 Closing a state retires only its dependent calls, including accepted submissions;
 another state in the same execution domain remains usable. Closing the public
 module prevents new calls and drains its prepared users; remaining state handles

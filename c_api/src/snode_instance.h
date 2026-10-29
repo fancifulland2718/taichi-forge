@@ -14,7 +14,7 @@ class SNodeInstance final : public taichi::lang::NativeResource {
  public:
   explicit SNodeInstance(AotModule &module);
   ~SNodeInstance() override;
-  void initialize();
+  void initialize(const std::set<std::string> *entries = nullptr);
   void validate_owner(AotModule &module) const;
   std::vector<LlvmSparseRuntimeViewBinding> bindings_for(
       taichi::lang::LlvmRuntimeExecutor &executor,

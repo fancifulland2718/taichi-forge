@@ -13,6 +13,29 @@
 namespace taichi::lang::aot {
 using namespace execution_json;
 
+std::set<std::string> ExecutionPlan::kernel_entries() const {
+  std::set<std::string> result;
+  std::function<void(const std::vector<Operation> &)> collect;
+  collect = [&](const auto &region) {
+    for (const auto &operation : region) {
+      if (const auto *kernel = std::get_if<Kernel>(&operation)) {
+        result.insert(kernel->entry);
+      } else if (const auto *branch = std::get_if<std::shared_ptr<const Branch>>(&operation)) {
+        collect((*branch)->condition);
+        for (const auto &body : (*branch)->bodies) collect(body);
+      } else if (const auto *loop = std::get_if<std::shared_ptr<const While>>(&operation)) {
+        collect((*loop)->condition);
+        collect((*loop)->body);
+      } else if (const auto *parallel = std::get_if<std::shared_ptr<const Parallel>>(&operation)) {
+        for (const auto &body : (*parallel)->branches) collect(body);
+      }
+    }
+  };
+  collect(initialization);
+  collect(operations);
+  return result;
+}
+
 namespace {
 bool flat_kernels(const std::vector<ExecutionPlan::Operation> &region) {
   return std::all_of(region.begin(), region.end(), [](const auto &op) {

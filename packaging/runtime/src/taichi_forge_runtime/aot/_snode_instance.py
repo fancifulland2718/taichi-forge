@@ -14,15 +14,25 @@ class SNodeInstance(NativeResource):
     """
 
     @classmethod
-    def create(cls, module):
+    def create(cls, module, *, plan=None):
+        from ._plan import ExecutionPlan
+
+        if plan is not None and not isinstance(plan, ExecutionPlan):
+            raise TypeError("SNode instance selection requires an ExecutionPlan")
         runtime = module._runtime
         with runtime._lock:
             module._check()
             if runtime.arch not in ("cpu", "x64", "arm64", "cuda"):
                 raise NotImplementedError("SNode instances require CPU/CUDA")
             runtime._api.load_snode_instances(runtime.arch)
-            handle = runtime._api.call(
-                runtime._api.ti_create_aot_snode_instance_ext, runtime._handle, module._handle)
+            if plan is None:
+                handle = runtime._api.call(
+                    runtime._api.ti_create_aot_snode_instance_ext, runtime._handle, module._handle)
+            else:
+                runtime._api.load_snode_instance_selection()
+                handle = runtime._api.call(
+                    runtime._api.ti_create_aot_snode_instance_for_plan_ext,
+                    runtime._handle, module._handle, len(plan._json), plan._json)
             try:
                 result = cls(runtime, handle, (module,))
                 result._module = module

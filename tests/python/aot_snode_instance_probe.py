@@ -257,8 +257,73 @@ def check_cpu(folder):
         states[1].close()
 
 
+def check_selection(folder, backend):
+    from taichi_forge_runtime.aot import Runtime, ExecutionPlan
+
+    with Runtime(backend) as runtime:
+        module = runtime.load_module(folder)
+        output = runtime.ndarray("i32", 5)
+        # Load/consume the physical kernel payload first. Selection still uses
+        # the compiler's immutable logical closure, including aliased entries.
+        main = module.kernel("main")
+        main(output)
+        module.kernel("initialize")()
+        plan = module.execution_plan("selected")
+        left_plan = ExecutionPlan([dict(kind="kernel", entry="main_alias", arguments=["out"])])
+        missing = ExecutionPlan([dict(kind="kernel", entry="missing", arguments=[])])
+        reject(lambda: module.snode_instance(plan=missing), "unknown kernel")
+        arrays_only = ExecutionPlan([dict(kind="fill32", destination="out", value=0)])
+        reject(lambda: module.snode_instance(plan=arrays_only), "no fixed SNode")
+        states = [module.snode_instance(plan=plan), module.snode_instance(plan=left_plan),
+                  module.snode_instance()]
+        assert [len(state.info) for state in states] == [2, 1, 3]
+        assert {r["code_tree"] for r in states[1].info} < {r["code_tree"] for r in states[0].info}
+        # The otherwise unused tree occurs only inside nested control. Cold
+        # dependency collection must include it without executing its kernel.
+        nested = ExecutionPlan([dict(kind="while", predicate="p", max_iterations=1,
+                                    condition=[dict(kind="kernel", entry="unused", arguments=[])],
+                                    body=[dict(kind="kernel", entry="main_alias", arguments=["out"])])],
+                               initialization=[dict(kind="kernel", entry="initialize", arguments=[])])
+        nested_state = module.snode_instance(plan=nested)
+        assert len(nested_state.info) == 3
+        nested_state.close()
+        domain = runtime.execution_domain(capacity=1, instance_capacity=1) if backend == "cuda" else None
+        options = dict(execution_domain=domain) if domain else {}
+
+        def execute(selected_plan, state):
+            bindings = {"out": output}
+            with module.prepare_execution(selected_plan, bindings, snode_instance=state, **options) as call:
+                call.initialize()
+                if domain:
+                    ticket = call.submit()
+                    ticket.wait()
+                    ticket.close()
+                else:
+                    call.run()
+
+        reject(lambda: module.prepare_execution(plan, {"out": output}, snode_instance=states[1], **options),
+               "selected closure")
+        # Failed preparation returns partial loans, allowing this valid call.
+        execute(left_plan, states[1])
+        assert values(output)[:4] == [1] * 4
+        execute(plan, states[0])
+        assert values(output)[:4] == [1] * 4
+        execute(ExecutionPlan([dict(kind="kernel", entry="read_initial", arguments=["out"])]), states[0])
+        assert values(output)[4] == 23
+        assert module.kernel("main")._handle == main._handle
+        main(output)
+        assert values(output)[:4] == [2] * 4  # Original module state is untouched.
+        for state in states:
+            state.close()
+        if domain:
+            domain.close()
+
+
 if __name__ == "__main__":
     sys.path.insert(0, os.environ["FORGE_AOT_TEST_PACKAGE"])
     sys.meta_path.insert(0, NoNumericalSource())
-    (check_cpu if len(sys.argv) > 2 and sys.argv[2] == "cpu" else check_cuda)(sys.argv[1])
+    if len(sys.argv) > 3 and sys.argv[3] == "selection":
+        check_selection(sys.argv[1], sys.argv[2])
+    else:
+        (check_cpu if len(sys.argv) > 2 and sys.argv[2] == "cpu" else check_cuda)(sys.argv[1])
     print("PUBLIC_SNODE_INSTANCES_OK")
