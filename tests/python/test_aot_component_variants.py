@@ -83,6 +83,17 @@ def test_variant_coverage_uses_existing_code_and_execution_plans(tmp_path):
         loaded.close()
         with pytest.raises(RuntimeError, match="closed"):
             variants.select(base)
+    # JSON formatting is not an ABI limit. Reuse the compiled artifact to cross
+    # the former 4 MiB ceiling without generating thousands of numerical entries.
+    large = tmp_path / "large_contract.tcm"
+    with ZipFile(artifact) as source, ZipFile(large, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            if name == "component_families/configured.json":
+                data += b"\n" * (4 * 1024 * 1024)
+            target.writestr(name, data)
+    with Runtime("cpu") as runtime:
+        assert len(runtime.load_module(large).component_variants("configured").contract["cases"]) == 3
     # The selector validates references/coverage against actual root contracts.
     bad = tmp_path / "inconsistent.tcm"
     with ZipFile(artifact) as source, ZipFile(bad, "w") as target:

@@ -30,8 +30,6 @@ class ComponentVariants:
             else:
                 with ZipFile(module._source_path) as archive:
                     payload = archive.read(relative)
-            if len(payload) > 4 * 1024 * 1024:
-                raise ValueError("Component family contract is too large")
             contract = json.loads(payload)
             if (
                 set(contract)
