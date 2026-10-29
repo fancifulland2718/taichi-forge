@@ -64,3 +64,126 @@ def test_normal_declarations_preserve_relations_and_actual_root():
     large.x = ti.field(ti.f32, shape=17)
     with pytest.raises(ti.TaichiCompilationError, match="replaced without redeclaration"):
         Component.from_owner(large)
+
+
+@ti.data_oriented
+class _Derived:
+    def __init__(self, count):
+        self.count = count
+        self.facts = max(1, count * 2)
+        self.rows = self.facts * 6
+        builder = ti.FieldsBuilder()
+        state = ti.experimental.ResourceScope(self, builder=builder)
+        facts = state.derived_dim("facts", (state.dim("count") * 2).maximum(1))
+        rows = state.derived_dim("rows", facts * 6)
+        state.x = state.field(ti.i32, shape=facts)
+        state.y = state.field(ti.i32, shape=rows)
+        self.tree = builder.finalize()
+
+    @ti.kernel
+    def fill(self):
+        for i in range(self.facts):
+            self.x[i] = i + self.count
+        for i in range(self.rows):
+            self.y[i] = self.x[i // 6] + i
+
+    def record(self, builder):
+        builder.dispatch(self.fill)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_named_derived_dimensions_share_loop_and_instance_relations(tmp_path):
+    from taichi_forge_runtime.aot import Runtime
+
+    first = _Derived(3)
+    env = Component.from_owner(first)
+    code = env.compile(first.fill)
+    second = _Derived(17)
+    other = Component.from_owner(second)
+    assert other.compile(second.fill) is code
+    code.run(other, second)
+    expected = np.arange(second.rows) // 6 + 17 + np.arange(second.rows)
+    np.testing.assert_array_equal(second.y.to_numpy(), expected)
+    second.rows += 1
+    with pytest.raises(ti.TaichiCompilationError, match="Derived dimension self.rows"):
+        other.compile(second.fill)
+    with pytest.raises(ti.TaichiCompilationError, match="Derived dimension self.rows"):
+        code.run(other, second)
+    second.rows -= 1
+    assert other.compile(second.fill) is code
+
+    root = env.compile_graph(first.record)
+    assert {name for name, schema in root.contract["dimensions"].items() if len(schema) == 4} == {"count"}
+    module = ti.aot.Module()
+    root.export(module, "derived")
+    path = tmp_path / "derived.tcm"
+    module.archive(str(path))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime:
+        component = runtime.load_module(path).component("derived")
+        with pytest.raises(ValueError, match="dimension inputs differ"):
+            component.instantiate(dict(count=9, rows=1))
+        for count in (0, 37):
+            with component.instantiate(dict(count=count)) as instance:
+                instance.initialize(zero=component.contract["resources"])
+                with instance.prepare() as prepared:
+                    prepared.run()
+                facts = max(1, count * 2)
+                np.testing.assert_array_equal(
+                    np.frombuffer(instance.resource("y").read(), dtype=np.int32),
+                    np.arange(facts * 6) // 6 + count + np.arange(facts * 6),
+                )
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_derived_declaration_failure_does_not_publish_relations():
+    from types import SimpleNamespace
+    from taichi_forge.lang._resource_declaration import Extent
+
+    owner = SimpleNamespace(count=3, facts=7, rows=42)
+    scope = ti.experimental.ResourceScope(owner)
+    count = scope.dim("count")
+    with pytest.raises(ValueError, match="does not match"):
+        scope.derived_dim("facts", count * 2)
+    assert "facts" not in owner._forge_resource_declarations["dimensions"]
+    owner.facts = 6
+    facts = scope.derived_dim("facts", count * 2)
+    assert scope.derived_dim("facts", count * 2) == facts
+    with pytest.raises(ValueError, match="another expression"):
+        scope.derived_dim("facts", count + 3)
+    with pytest.raises(ValueError, match="Cyclic"):
+        scope.derived_dim("count", facts // 2)
+    with pytest.raises(ValueError, match="undeclared"):
+        scope.derived_dim("rows", Extent(("dim", "missing")))
+    owner.rows = 36
+    scope.derived_dim("rows", facts * 6)
+    env = Component.from_owner(owner)
+    assert env.declarations["rows"].expression == ("mul", ("dim", "facts"), ("const", 6))
+
+
+@ti.data_oriented
+class _NestedDerived:
+    def __init__(self, count):
+        scope = ti.experimental.ResourceScope(self)
+        scope.buffers = _Derived(count)
+
+    @ti.kernel
+    def fill(self):
+        for i in range(self.buffers.rows):
+            self.buffers.y[i] = i + self.buffers.facts
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_derived_record_paths_keep_their_original_source_guard():
+    model = _NestedDerived(2)
+    env = Component.from_owner(model)
+    code = env.compile(model.fill)
+    other = _NestedDerived(7)
+    other_env = Component.from_owner(other)
+    assert other_env.compile(other.fill) is code
+    code.run(other_env, other)
+    np.testing.assert_array_equal(other.buffers.y.to_numpy(), np.arange(84) + 14)
+    other.buffers.facts = 15
+    with pytest.raises(ti.TaichiCompilationError, match="self.buffers.facts.*declared at"):
+        code.run(other_env, other)

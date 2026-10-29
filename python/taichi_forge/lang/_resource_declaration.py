@@ -135,6 +135,47 @@ class ResourceScope:
         del caller
         return Extent(("dim", name))
 
+    def derived_dim(self, name, expression):
+        """Relate an existing count to declared counts without changing it.
+
+        The normal constructor still computes its integer attribute. The same
+        bounded expression is retained for deployment layout and loop bounds;
+        it is not another independently supplied consumer dimension.
+        """
+        if not isinstance(name, str) or not name.isidentifier() or not isinstance(expression, Extent):
+            raise TypeError("A derived dimension requires an attribute name and an Extent expression")
+        relations = self._registry.get("derived_dimensions", {})
+        if name in relations and relations[name] != expression.expression:
+            raise ValueError(f"Derived dimension {name!r} was declared with another expression")
+        unknown = extent_dependencies(expression.expression) - self._registry["dimensions"].keys()
+        if unknown:
+            raise ValueError(f"Derived dimension {name!r} references undeclared dimensions {sorted(unknown)!r}")
+        pending = {**relations, name: expression.expression}
+
+        def resolve(key, visiting=()):
+            if key in visiting:
+                raise ValueError(f"Cyclic derived dimension {key!r}")
+            if key in pending:
+                value = evaluate_extent(pending[key], lambda dependency: resolve(dependency, (*visiting, key)))
+            elif key in self._registry.get("inherited_dimensions", {}):
+                parent_name = self._registry["inherited_dimensions"][key][1]
+                value = operator.index(getattr(self._parent._owner, parent_name))
+                return value
+            else:
+                return operator.index(getattr(self._owner, key))
+            if value != operator.index(getattr(self._owner, key)):
+                raise ValueError(f"Derived dimension {key!r} does not match its normal attribute")
+            return value
+
+        value = resolve(name)
+        if not 0 <= value <= 2**31 - 1:
+            raise ValueError(f"Derived dimension {name!r} is outside the i32 count range")
+        caller = inspect.currentframe().f_back
+        self._registry["dimensions"].setdefault(name, (caller.f_code.co_filename, caller.f_lineno))
+        self._registry.setdefault("derived_dimensions", {})[name] = expression.expression
+        del caller
+        return Extent(("dim", name))
+
     def record(self, name, value, *, optional=False):
         """Declare an existing plain record without mutating or wrapping it.
 

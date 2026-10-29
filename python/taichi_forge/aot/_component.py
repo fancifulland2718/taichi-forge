@@ -256,6 +256,12 @@ def _dimension_value(component, owner, name, visiting=()):
     minimum = 1 if declaration.kind == "extent" else 0
     if not minimum <= value <= 2**31 - 1:
         raise TaichiCompilationError(f"Dimension {name!r} is outside its declared i32 {declaration.kind} range")
+    if name in component._derived_attributes and operator.index(component.read(owner, name)) != value:
+        path = ".".join(component._paths[name])
+        raise TaichiCompilationError(
+            f"Derived dimension self.{path} does not match its normal attribute; "
+            f"expected {value} from {declaration.expression!r}; declared at {component._sources.get(name)!r}"
+        )
     if declaration.capacity:
         capacity = component.declarations.get(declaration.capacity)
         if not isinstance(capacity, Dimension) or capacity.kind != "extent":
@@ -420,7 +426,7 @@ class Component:
     is supplied by the application. Graph export follows separately.
     """
 
-    __slots__ = ("_declarations", "_sources", "_paths", "_borrowed_reads")
+    __slots__ = ("_declarations", "_sources", "_paths", "_borrowed_reads", "_derived_attributes")
 
     def __init__(self, **declarations):
         flattened, paths = {}, {}
@@ -472,6 +478,7 @@ class Component:
         self._paths = MappingProxyType(paths)
         self._sources = MappingProxyType({})
         self._borrowed_reads = MappingProxyType({})
+        self._derived_attributes = frozenset()
 
     def read(self, owner, name):
         borrowed = self._borrowed_reads.get(name)
@@ -516,6 +523,7 @@ class Component:
         impl.get_runtime().materialize(for_aot=True)
         declarations, sources, roots, fields, borrowed = {}, {}, {}, [], []
         inherited_dimensions, record_options = {}, {}
+        derived_attributes = set()
 
         def root_of(field, name):
             nodes = tuple(member.ptr.snode() for member in field._get_field_members())
@@ -530,6 +538,9 @@ class Component:
             if registry is None:
                 registry = _member(current, "_forge_resource_declarations")
             members = {name: Dimension("active") for name in registry["dimensions"]}
+            for name, expression in registry.get("derived_dimensions", {}).items():
+                members[name] = Dimension("active", expression=expression)
+                derived_attributes.add(_capture_id((*prefix, name)))
             for name, source in registry["dimensions"].items():
                 sources[_capture_id((*prefix, name))] = source
             for name, expression in registry.get("inherited_dimensions", {}).items():
@@ -607,6 +618,7 @@ class Component:
         result._declarations = MappingProxyType(flattened)
         result._project_borrowed(borrowed, roots, sources)
         result._sources = MappingProxyType(sources)
+        result._derived_attributes = frozenset(derived_attributes)
         return result
 
     def _project_borrowed(self, borrowed, roots, sources):

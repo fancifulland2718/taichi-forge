@@ -195,6 +195,17 @@ the semantic key. Definition guards hash immutable bytecode contents rather than
 marshal reference encoding, which can change during frontend inspection.
 Internal Matrix DSL functions participate in the same dependency guards.
 
+Use `scope.derived_dim("rows", facts * 6)` to relate a capacity already computed
+by the normal constructor. `facts` comes from `dim` or `derived_dim` in that scope.
+This declaration validates the existing integer attribute without assigning it.
+Both `self.rows` in original loops and Field layout use the same relation.
+Consumers supply only base dimensions and cannot override rows independently;
+instantiation reuses bounded expressions and native SNode layout rules. Invalid
+values, unknown sources, cycles and conflicting redeclarations are rejected.
+Used attributes are checked again on cache hits and owner binding, including
+nested Record paths. CPU/CUDA gates cover new capacities, zero counts, consumer
+layout and original loop behavior, plus recovery after rejected declarations.
+
 Normal GeoPhys construction now provides a bounded numerical RNE gate on CPU/CUDA:
 3/7/5 bodies with different topology, mass, qpos/qvel and gravity reuse the original
 entry and agree with ordinary JIT. A resting chain also checks analytic gravity
