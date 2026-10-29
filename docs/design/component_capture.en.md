@@ -280,6 +280,35 @@ module's shared pointers and registered code are never switched between states.
 Fixed module-root array aliases cannot
 be mixed with this instance binding.
 
+Normal declarations can retain a fixed sparse placement without changing the
+numerical kernel or helper signatures:
+
+```python
+builder = ti.FieldsBuilder()
+scope = ti.experimental.ResourceScope(owner, builder=builder)
+leaf = builder.pointer(ti.i, 4).dense(ti.i, 4)
+scope.grid = scope.field(ti.i32, shape=16, placement=leaf)
+builder.finalize()
+component = Component.from_owner(owner)
+code = component.compile(owner.evaluate, output, 0)
+code.export(module, "evaluate")
+```
+
+The explicit placement keeps a fixed tree schema; dynamic `Extent` declarations
+are rejected here. Runtime counts remain separate value/dimension declarations.
+Captured Fields and their aliases retain ordinary indexing, struct-for and
+activation/deactivation lowering. The contract projects the same native
+StructCompiler allocation layout used by fixed AOT and runtime cloning, plus
+the native structural access fingerprint; no Python byte-layout computation is
+introduced. Binding IDs/generations stay outside the semantic code identity.
+Producer definitions still guard their exact source tree bindings, while loaded
+code serves independent consumer instances through the existing prepared API.
+Entry export verifies every compiled tree dependency and never snapshots live
+values or activation. This slice qualifies entry capture/export; automatic
+component-root Graph contracts and `ComponentInstance` allocation of sparse
+groups remain separate work. Sparse tree schema changes require another code
+variant and are not advertised as dynamic capacity.
+
 `module.snode_instance(plan=plan)` allocates only the fixed-tree dependencies of
 that plan's compiled entries, including initialization and nested control
 regions. Entry aliases resolve to the same compiler-owned dependency facts,
@@ -311,10 +340,12 @@ multi-root traversal/deactivation, same-domain interleaving, native foreign-owne
 rejection, failed preparation, per-state close, generation reuse, and module
 close with accepted work on CUDA. CPU additionally covers loops, allocation while
 a sibling view remains live, failed RNG admission, and assertion isolation. The
-original module state and loaded kernel handle remain unchanged. Public Vulkan
-instance calls, Sparse capture declarations
-and generic component export remain unqualified; these tests do not establish
-whole-application support or steady-state performance.
+original module state and loaded kernel handle remain unchanged.
+`test_aot_component_sparse.py` additionally covers normal fixed placement,
+implicit Field/helper capture, source-binding guards, stable deployable identity,
+and runtime-only entry consumption on CPU/CUDA. Public Vulkan instance calls and
+automatic sparse component-root Graph/instance contracts remain unqualified;
+these tests do not establish whole-application support or steady-state performance.
 
 `test_aot_component_dense.py` compares the same numerical definition with ordinary
 JIT on CPU/CUDA. It covers new capacities, range/Field-shape/full-Field iteration,

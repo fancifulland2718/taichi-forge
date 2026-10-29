@@ -360,12 +360,28 @@ class ResourceScope:
     def _create(self, factory, args, kwargs):
         if self._read_only:
             raise TypeError("A declared record scope describes existing resources; it cannot allocate Fields")
+        kwargs = dict(kwargs)
+        placement = kwargs.pop("placement", None)
         shape = kwargs.get("shape")
         if shape is None:
             raise ValueError("ResourceScope Field factories require an explicit shape")
         shape = shape if isinstance(shape, tuple) else (shape,)
         if any(not isinstance(item, Extent) and type(item) is not int for item in shape):
             raise TypeError("Resource extents require declared dimensions or explicit integer constants")
+        if placement is not None:
+            from taichi_forge.lang.snode import SNode
+
+            if self._builder is None or not isinstance(placement, SNode):
+                raise ValueError("Fixed SNode placement requires this scope's explicit FieldsBuilder")
+            root = placement.ptr
+            while root.parent is not None:
+                root = root.parent
+            if root.id != self._builder.ptr.id:
+                raise ValueError("Fixed SNode placement belongs to another FieldsBuilder")
+            if any(isinstance(item, Extent) for item in shape):
+                raise ValueError("Fixed SNode schema cannot use dynamic extents; declare active counts separately")
+            if tuple(placement.shape) != shape:
+                raise ValueError("Fixed SNode placement shape differs from the declared Field shape")
         concrete = tuple(
             (
                 evaluate_extent(item.expression, lambda name: getattr(self._owner, name))
@@ -388,7 +404,10 @@ class ResourceScope:
             ):
                 raise ValueError("ResourceScope explicit groups currently require plain AOS Fields")
             field = factory(*args, **{**kwargs, "shape": None})
-            self._builder.dense(impl.index_nd(len(concrete)), concrete).place(field)
+            if placement is None:
+                self._builder.dense(impl.index_nd(len(concrete)), concrete).place(field)
+            else:
+                placement.place(field)
         caller = inspect.currentframe().f_back.f_back
         source = (caller.f_code.co_filename, caller.f_lineno)
         from taichi_forge.lang.struct import StructField
@@ -402,6 +421,8 @@ class ResourceScope:
             members = ((None, field),)
         for identity, member in members:
             member._logical_resource_declaration = dict(identity=identity, shape=shape, source=source)
+            if placement is not None:
+                member._logical_resource_declaration["storage"] = "fixed_snode"
             if isinstance(field, StructField):
                 field._forge_resource_declarations["fields"][identity] = dict(member._logical_resource_declaration)
                 # The record is a storage namespace, not a new dimension

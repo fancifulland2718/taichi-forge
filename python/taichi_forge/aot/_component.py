@@ -333,6 +333,33 @@ class DenseField:
         return description
 
 
+@dataclass(frozen=True)
+class FixedSNodeField:
+    """Declared fixed tree schema; values and activation belong to an instance.
+
+    Keep the original Field in frontend lowering. This is not an ndarray ABI.
+    """
+
+    dtype: object
+    shape: tuple
+    group: str
+
+    @property
+    def schema(self):
+        if not self.group or not isinstance(self.shape, tuple) or any(type(x) is not int or x <= 0 for x in self.shape):
+            raise ValueError("Fixed SNode fields require a group and positive static extents")
+        return ("fixed_snode_field", RuntimeValue(self.dtype).schema, self.shape, self.group)
+
+    def validate(self, field):
+        from taichi_forge.lang.field import Field
+
+        scalar = cook_dtype(self.dtype.dtype if isinstance(self.dtype, MatrixType) else self.dtype)
+        element = tuple(self.dtype.get_shape()) if isinstance(self.dtype, MatrixType) else ()
+        actual = ((field.n,) if field.ndim == 1 else (field.n, field.m)) if hasattr(field, "n") else ()
+        if not isinstance(field, Field) or field.dtype != scalar or actual != element or tuple(field.shape) != self.shape:
+            raise TaichiCompilationError("Fixed SNode Field type/shape differs from its normal declaration")
+
+
 @dataclass(frozen=True, init=False)
 class Record:
     """A declared plain record namespace, not a static Python object.
@@ -452,6 +479,43 @@ def _dense_group(component, owner, group):
     )
 
 
+def _fixed_snode_group(component, owner, group):
+    """Query native construction/layout facts; never calculate sparse storage."""
+    from taichi_forge._lib import core
+
+    program = impl.get_runtime().prog
+    root, tree_id, members = None, None, {}
+    for name, declaration in component.declarations.items():
+        if not isinstance(declaration, FixedSNodeField) or declaration.group != group:
+            continue
+        field = component.read(owner, name)
+        declaration.validate(field)
+        nodes = tuple(member.ptr.snode() for member in field._get_field_members())
+        for node in nodes:
+            current = node.get_snode_tree_id()
+            if tree_id is None:
+                tree_id, root = current, program.get_snode_root(current)
+            if current != tree_id:
+                raise TaichiCompilationError("Fixed SNode group must preserve one original root")
+        members[name] = nodes
+    paths = {}
+
+    def visit(node, path):
+        if node.type not in (core.SNodeType.root, core.SNodeType.dense, core.SNodeType.pointer,
+                             core.SNodeType.bitmasked, core.SNodeType.place):
+            raise TaichiCompilationError(f"Fixed component SNode type {node.type} is not qualified at {path}")
+        paths[node.id] = path
+        for index in range(node.get_num_ch()):
+            visit(node.get_ch(index), (*path, index))
+
+    visit(root, ())
+    schema = dict(kind="fixed_snode", version=1,
+                  allocation=json.loads(program._fixed_snode_tree_layout(tree_id)),
+                  access_fingerprint=program._snode_tree_layout_fingerprint(tree_id))
+    dependency = tuple(program._snapshot_snode_tree_dependencies([tree_id])[0])
+    return (schema, {name: tuple(paths[node.id] for node in nodes) for name, nodes in members.items()}, dependency)
+
+
 class Component:
     """Immutable, component-wide declarations; currently an internal API.
 
@@ -480,7 +544,7 @@ class Component:
                     not name.isidentifier()
                     or name.startswith("__record_")
                     or name.startswith("__borrowed_")
-                    or not isinstance(declaration, (RuntimeValue, Array, StaticValue, Dimension, DenseField, Record))
+                    or not isinstance(declaration, (RuntimeValue, Array, StaticValue, Dimension, DenseField, FixedSNodeField, Record))
                 ):
                     raise TypeError("Component declarations require attribute IDs and supported declaration types")
                 path = (*prefix, name)
@@ -669,6 +733,7 @@ class Component:
                              _capture_id((*source_prefix, declaration["identity"])))
             members[name] = resource
             array_declarations[_capture_id((*prefix, name))] = resource
+        fixed_roots = {item[5] for item in fields if item[4].get("storage") == "fixed_snode"}
         for members, prefix, name, field, declaration, root_id in fields:
             if name.startswith("__extent_"):
                 raise ValueError("Normal resource IDs cannot use the reserved __extent_ prefix")
@@ -705,7 +770,8 @@ class Component:
                 dtype = VectorType(field.n, dtype) if field.ndim == 1 else MatrixType(field.n, field.m, 2, dtype)
             # The normal declaration identity, not a tree/object/instance ID.
             group = "snode:" + min(roots[root_id])
-            members[name] = DenseField(dtype, tuple(shape), group)
+            field_type = FixedSNodeField if root_id in fixed_roots else DenseField
+            members[name] = field_type(dtype, tuple(shape), group)
             if namespace is not None:
                 record_shapes[_capture_id((*prefix, name))] = tuple(shape)
 
@@ -749,7 +815,7 @@ class Component:
         result._paths = MappingProxyType({**result._paths, **{name: (name,) for name in record_extents}})
         for name, shape in record_shapes.items():
             field = flattened[name]
-            flattened[name] = DenseField(field.dtype, shape, field.group)
+            flattened[name] = type(field)(field.dtype, shape, field.group)
         for name, expression in inherited_dimensions.items():
             flattened[name] = Dimension("active", expression=expression)
         result._declarations = MappingProxyType(flattened)
@@ -991,6 +1057,9 @@ class _Capture:
         self.member_paths = {}
         self.resource_aliases = {}
         self.bound_group_roots = {}
+        self.fixed_groups = {}
+        self.fixed_members = {}
+        self.fixed_dependencies = {}
         self.resource_templates = {}
 
     def resolve_template(self, ctx, value):
@@ -1051,13 +1120,24 @@ class _Capture:
         # its storage, shape and contents remain runtime inputs. This matches
         # ordinary ti.static(Field/AnyArray); scalar values still cannot escape
         # their declared runtime role through a static selection.
-        if ctx.is_in_static_scope() and not isinstance(declaration, (Array, DenseField)):
+        if ctx.is_in_static_scope() and not isinstance(declaration, (Array, DenseField, FixedSNodeField)):
             raise TaichiCompilationError(
                 f"Component entry {self.kernel.func.__qualname__}: runtime capture self.{name} "
                 "cannot be used in ti.static; its declaration is dynamic"
             )
         if name not in self.expressions:
             value = self.component.read(self.owner, name)
+            if isinstance(declaration, FixedSNodeField):
+                schema, members, dependency = _fixed_snode_group(self.component, self.owner, declaration.group)
+                previous = self.fixed_groups.setdefault(declaration.group, schema)
+                if previous != schema or self.fixed_dependencies.setdefault(declaration.group, dependency) != dependency:
+                    raise TaichiCompilationError("Fixed SNode group changed during compilation; retry")
+                if any(other != declaration.group and bound[0] == dependency[0]
+                       for other, bound in self.fixed_dependencies.items()):
+                    raise TaichiCompilationError("Distinct component groups cannot split the same SNode root")
+                self.fixed_members[name] = (declaration.group, members[name])
+                self.expressions[name] = value
+                return value
             if isinstance(declaration, Array):
                 declaration.validate(value, self.component, self.owner)
                 for dim in declaration.shape or ():
@@ -1177,6 +1257,9 @@ class _Capture:
             )
         if self.resource_templates:
             self.contract["resource_templates"] = sorted(self.resource_templates.items())
+        if self.fixed_groups:
+            self.contract.update(fixed_groups=self.fixed_groups, fixed_members=self.fixed_members,
+                                 fixed_captures=[(name, self.used[name]) for name in self.fixed_members])
 
     def matches(self, component, owner):
         return self.dependency_mismatch(component, owner) is None
@@ -1200,6 +1283,18 @@ class _Capture:
                 if declaration.resource_id and arrays.setdefault(declaration.resource_id, value) is not value:
                     return f"array alias {name!r}"
         roots = set()
+        for group, schema in self.fixed_groups.items():
+            actual, members, dependency = _fixed_snode_group(component, owner, group)
+            if schema != actual:
+                return f"fixed layout of group {group!r}"
+            # Producer definitions retain physical Field bindings. They cannot
+            # run on another owner just because the deployable schema matches.
+            # This binding guard never enters the semantic code identity.
+            if self.fixed_dependencies[group] != dependency:
+                return f"source binding of fixed group {group!r}"
+            for name, (member_group, paths) in self.fixed_members.items():
+                if member_group == group and members.get(name) != paths:
+                    return f"fixed member {name!r} in group {group!r}"
         for group, schema in self.groups.items():
             actual, members, _, root_id = _dense_group(component, owner, group)
             if root_id in roots:
@@ -1250,6 +1345,9 @@ class _ComponentCode:
         self.functions = dict(context.functions)
         self.groups = dict(context.groups)
         self.member_paths = dict(context.member_paths)
+        self.fixed_groups = dict(context.fixed_groups)
+        self.fixed_members = dict(context.fixed_members)
+        self.fixed_dependencies = dict(context.fixed_dependencies)
         self.dynamic = tuple(context.dynamic)
         self.resource_templates = dict(context.resource_templates)
         self._contract = json.dumps(context.contract)
@@ -1299,8 +1397,14 @@ class _ComponentCode:
             return
         try:
             module._aot_builder.add(name, compiled)
-            if module._aot_builder._used_snode_tree_ids([name]):
+            actual = set(module._aot_builder._used_snode_tree_ids([name]))
+            declared = {dependency[0] for dependency in self.fixed_dependencies.values()}
+            if not actual <= declared:
                 raise TaichiCompilationError("Generic component entry retains an undeclared fixed Field dependency")
+            if self.fixed_dependencies:
+                live = {tuple(dependency) for dependency in self.runtime.prog._snapshot_snode_tree_dependencies(sorted(actual))}
+                if not live <= set(self.fixed_dependencies.values()):
+                    raise TaichiCompilationError("Component fixed Field lifetime changed before export")
         except BaseException:
             # Native builders cannot roll back partially added code. Preserve
             # the same fail-closed publication rule as existing Graph export.
@@ -1312,7 +1416,8 @@ class _ComponentCode:
             "target": module._arch.name,
             "semantic_key": self.semantic_key,
             "contract": self.contract,
-            "initialization": {"group_storage": "zero", "model_data": "consumer"},
+            "initialization": {"group_storage": "zero", "model_data": "consumer",
+                               **({"fixed_snode": "empty_activation_and_zero_values"} if self.fixed_groups else {})},
         }
         module._exported_kernels[name] = compiled
         module._kernels.append(self.kernel)

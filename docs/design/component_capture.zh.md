@@ -261,6 +261,27 @@ CPU 使用同一接口但省略 `execution_domain`：prepared 调用上下文持
 Runtime 目录，通过现有 CPU launcher 同步执行，不切换模块共享指针或注册代码。
 固定 module-root 数组别名不得混入此实例调用。
 
+正常资源声明可以保留固定 Sparse placement，数值 Kernel/helper 签名不变：
+
+```python
+builder = ti.FieldsBuilder()
+scope = ti.experimental.ResourceScope(owner, builder=builder)
+leaf = builder.pointer(ti.i, 4).dense(ti.i, 4)
+scope.grid = scope.field(ti.i32, shape=16, placement=leaf)
+builder.finalize()
+component = Component.from_owner(owner)
+code = component.compile(owner.evaluate, output, 0)
+code.export(module, "evaluate")
+```
+
+显式 placement 保留固定树 schema，此处拒绝动态 Extent；运行时数量另以 value/dimension
+声明。捕获的 Field/别名继续使用原索引、struct-for、激活/停用 lowering。合同投影来自
+固定 AOT 和 Runtime 克隆共用的原生 StructCompiler 分配布局，以及原生结构访问指纹；
+Python 不计算字节布局。绑定 ID/代际不进入语义代码身份。生产端定义仍校验原树绑定，
+消费端通过已有 prepared API 以同一加载代码驱动独立实例。入口导出检查全部实际树依赖，
+不采样 live 数值或激活集合。本片只取得入口捕获/导出资格；组件根 Graph 自动合同及
+`ComponentInstance` 的 Sparse 组分配另行接通。树 schema 改变需要另一代码变体，不称为动态容量。
+
 `module.snode_instance(plan=plan)` 只为该 Plan 编译入口的固定树依赖创建实例，包含
 初始化及嵌套控制区域。入口别名复用编译器依赖事实，代码加载后仍可查询。
 闭包之外的树不复制到实例；加载模块仍保有其原型资源。用该实例准备另一个需要缺失树
@@ -280,8 +301,10 @@ CPU 准备要求代码带有 sparse-view 编译资格，拒绝随机数、外部
 冻结后在物理上只含 Runtime 的 `-I -S` 进程消费，覆盖空激活/数值、不同初始化、
 多根遍历/停用、同域交错、原生错误 owner 拒绝、失败准备、独立关闭、代际回收与
 CUDA 在途 Module 关闭；CPU 另覆盖循环、其他 view 存活期间分配、随机数准入失败清理
-及断言隔离。原模块状态和 loaded Kernel handle 不变。公开 Vulkan
-实例调用、Sparse 捕获声明和通用组件导出仍待接通，不据此宣称完整应用或稳态性能。
+及断言隔离。原模块状态和 loaded Kernel handle 不变。
+`test_aot_component_sparse.py` 另在 CPU/CUDA 覆盖正常固定 placement、隐式 Field/helper
+捕获、源绑定保护、稳定部署身份及仅含 Runtime 的入口消费。公开 Vulkan 实例调用、
+Sparse 组件根 Graph/实例自动合同仍待接通，不据此宣称完整应用或稳态性能。
 
 真实 GeoPhys 正常构造现已提供有限 RNE 数值证据：CPU/CUDA 上 3/7/5 刚体、不同拓扑、
 质量、qpos/qvel 和重力复用原 `_rne_bias_force`，与普通 JIT 对照；静止链另检查解析重力矩。

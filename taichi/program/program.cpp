@@ -629,6 +629,30 @@ std::uint64_t Program::snode_tree_layout_fingerprint_for(int tree_id) const {
   return snapshot_snode_tree_dependencies({tree_id})[0].layout_fingerprint;
 }
 
+std::string Program::fixed_snode_tree_layout_json(int tree_id) const {
+  snapshot_snode_tree_dependencies({tree_id});
+#ifdef TI_WITH_LLVM
+  auto *llvm = dynamic_cast<LlvmProgramImpl *>(program_impl_.get());
+  if (llvm && (arch_is_cpu(compile_config_.arch) || compile_config_.arch == Arch::cuda)) {
+    // Query the exact StructCompiler result also serialized into fixed AOT
+    // and consumed by runtime cloning. Only binding identities are normalized.
+    auto layout = llvm->get_cached_field(tree_id);
+    std::map<int, int> local;
+    for (const auto &node : layout.snode_metas)
+      local.emplace(node.id, node.runtime_local_id);
+    layout.tree_id = 0;
+    layout.tree_generation = 0;
+    layout.root_id = layout.root_runtime_local_id;
+    for (auto &node : layout.snode_metas) {
+      node.id = node.runtime_local_id;
+      if (node.parent_id >= 0) node.parent_id = local.at(node.parent_id);
+    }
+    return liong::json::print(liong::json::serialize(layout));
+  }
+#endif
+  throw std::invalid_argument("Fixed component SNode layouts require CPU/CUDA");
+}
+
 bool Program::prepare_relocatable_kernel_template(
     const Kernel &kernel_def,
     const std::vector<int> &direct_template_tree_ids) {

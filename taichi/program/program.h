@@ -752,6 +752,7 @@ class TI_DLL_EXPORT Program {
       const std::vector<int> &tree_ids) const;
 
   std::uint64_t snode_tree_layout_fingerprint_for(int tree_id) const;
+  std::string fixed_snode_tree_layout_json(int tree_id) const;
 
   bool prepare_relocatable_kernel_template(
       const Kernel &kernel_def,

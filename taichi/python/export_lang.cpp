@@ -2664,6 +2664,7 @@ void export_lang(py::module &m) {
       })
       .def("_snode_tree_layout_fingerprint",
            &Program::snode_tree_layout_fingerprint_for)
+      .def("_fixed_snode_tree_layout", &Program::fixed_snode_tree_layout_json)
       .def("_snode_executable_reuse_enabled",
            &Program::snode_executable_reuse_enabled)
       .def("_debug_snode_executable_reuse_capabilities",

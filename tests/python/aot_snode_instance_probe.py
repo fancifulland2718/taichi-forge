@@ -319,10 +319,56 @@ def check_selection(folder, backend):
             domain.close()
 
 
+def check_capture(folder, backend):
+    from taichi_forge_runtime.aot import Runtime, Scalar
+
+    with Runtime(backend) as runtime:
+        module = runtime.load_module(folder)
+        contract = module.component_entry_contract("evaluate")
+        assert len(contract["contract"]["fixed_groups"]) == 1
+        plan = module.execution_plan("evaluate")
+        states = [module.snode_instance(plan=plan) for _ in range(2)]
+        outputs = [runtime.ndarray("i32", 16) for _ in states]
+        domain = runtime.execution_domain(capacity=1, instance_capacity=1) if backend == "cuda" else None
+        options = dict(execution_domain=domain) if domain else {}
+
+        def run(index, active, offset, bump, drop=0):
+            values = dict(active=active, offset=offset, bump=bump)
+            bindings = dict(out=outputs[index], drop=Scalar("i32", drop))
+            bindings.update(("__capture_" + name, Scalar("i32", values[name]))
+                            for name, _ in contract["contract"]["captures"])
+            with module.prepare_execution(plan, bindings, snode_instance=states[index], **options) as call:
+                call.initialize()
+                if domain:
+                    ticket = call.submit()
+                    ticket.wait()
+                    ticket.close()
+                else:
+                    call.run()
+
+        for index in (0, 1):
+            run(index, 0, 0, 0)
+            assert values(outputs[index]) == [0] * 16
+        run(0, 5, 10, 2)
+        assert values(outputs[0]) == list(range(12, 17)) + [2] * 3 + [0] * 8
+        run(1, 9, 100, 3)
+        assert values(outputs[1]) == list(range(103, 112)) + [3] * 3 + [0] * 4
+        run(0, 0, 0, 1, drop=1)
+        assert values(outputs[0]) == [0] * 4 + [17] + [3] * 3 + [0] * 8
+        states[0].close()
+        run(1, 0, 0, 1)
+        assert values(outputs[1]) == list(range(104, 113)) + [4] * 3 + [0] * 4
+        states[1].close()
+        if domain:
+            domain.close()
+
+
 if __name__ == "__main__":
     sys.path.insert(0, os.environ["FORGE_AOT_TEST_PACKAGE"])
     sys.meta_path.insert(0, NoNumericalSource())
-    if len(sys.argv) > 3 and sys.argv[3] == "selection":
+    if len(sys.argv) > 3 and sys.argv[3] == "capture":
+        check_capture(sys.argv[1], sys.argv[2])
+    elif len(sys.argv) > 3 and sys.argv[3] == "selection":
         check_selection(sys.argv[1], sys.argv[2])
     else:
         (check_cpu if len(sys.argv) > 2 and sys.argv[2] == "cpu" else check_cuda)(sys.argv[1])
