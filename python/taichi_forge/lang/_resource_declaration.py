@@ -105,6 +105,10 @@ class ResourceScope:
 
         if self._read_only:
             raise TypeError("A declared record scope cannot modify its existing members")
+        if name in self._registry.get("values", {}) and (
+            isinstance(value, Field) or inspect.getattr_static(value, "_forge_resource_declarations", None) is not None
+        ):
+            raise ValueError(f"Normal attribute {name!r} already has a value role")
         setattr(self._owner, name, value)
         if isinstance(value, Field) and not isinstance(value, StructField):
             declaration = getattr(value, "_logical_resource_declaration", None)
@@ -123,9 +127,59 @@ class ResourceScope:
             )
             del caller
 
+    def _declare_value(self, name, declaration):
+        from taichi_forge.aot._component import StaticValue, _member, _static_value
+
+        if not isinstance(name, str) or not name.isidentifier():
+            raise ValueError("A value declaration requires an explicit owner attribute name")
+        if any(name in self._registry.get(kind, {}) for kind in ("fields", "dimensions", "records", "borrowed")):
+            raise ValueError(f"Normal attribute {name!r} already has a resource or dimension role")
+        # Validate the existing contract without wrapping/replacing normal JIT
+        # values or evaluating arbitrary Python descriptors. An absent optional
+        # record can still declare its leaf types for a later present instance.
+        declaration.schema
+        if self._owner is not None:
+            value = _member(self._owner, name)
+            if isinstance(declaration, StaticValue):
+                declaration.validate(value, name, "normal declaration")
+        values = self._registry.get("values", {})
+        if name in values:
+            previous = values[name]["declaration"]
+            if previous.schema != declaration.schema or (
+                isinstance(declaration, StaticValue)
+                and tuple(map(_static_value, previous.choices)) != tuple(map(_static_value, declaration.choices))
+            ):
+                raise ValueError(f"Normal attribute {name!r} already has a different value declaration")
+            return
+        caller = inspect.currentframe().f_back.f_back
+        self._registry.setdefault("values", {})[name] = dict(
+            declaration=declaration, source=(caller.f_code.co_filename, caller.f_lineno)
+        )
+        del caller
+
+    def value(self, name, dtype):
+        """Declare an existing scalar/vector/matrix as a runtime input.
+
+        The original owner value remains unchanged. Only entries that read it
+        acquire an ABI input; dtype and fixed element shape come from this role.
+        """
+        from taichi_forge.aot._component import RuntimeValue
+
+        self._declare_value(name, RuntimeValue(dtype))
+
+    def static(self, name, *, choices):
+        """Declare an existing immutable configuration in an explicit finite domain."""
+        from taichi_forge.aot._component import StaticValue
+
+        if choices is None:
+            raise ValueError("Normal static declarations require finite choices")
+        self._declare_value(name, StaticValue(choices=choices))
+
     def dim(self, name):
         if not isinstance(name, str) or not name.isidentifier():
             raise ValueError("A dimension requires an explicit owner attribute name")
+        if name in self._registry.get("values", {}):
+            raise ValueError(f"Normal attribute {name!r} already has a value role")
         # Counts may be zero; Field extents are independently required positive.
         # Accessing the owner here also catches misspelled declarations early.
         value = operator.index(getattr(self._owner, name))

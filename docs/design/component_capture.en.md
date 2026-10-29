@@ -45,9 +45,18 @@ stable namespaces while actual roots still validate SNode groups.
 
 Assigning an already declared child through normal `ResourceScope`, such as
 `scope.buffers = buffers`, makes `Component.from_owner` collect that explicit
-declaration edge recursively. A `Record(gain=RuntimeValue(...))` overlay only
-adds non-resource value roles; there is no per-field or per-kernel export table.
-Declaration cycles are rejected. Compiler facts expose `record_presence` and
+declaration edge recursively, without a per-field or per-kernel export table.
+Normal constructors can declare dynamic values with
+`scope.value("gravity", ti.types.vector(3, ti.f32))` and finite static domains with
+`scope.static("mode", choices=("fast", "accurate"))`. Original attribute values
+remain unchanged. Read-only record scopes support the same roles without
+rewriting frozen dataclasses. `from_owner` collects roles and source locations;
+separate value lists are unnecessary. Explicit `Record` overlays remain available
+but cannot redeclare normal roles. Conflicting roles, out-of-domain values,
+getters and declaration cycles are rejected. CPU/CUDA checks in
+`test_aot_component_values.py` cover dynamic value/size reuse, actual static
+variants, unused declarations excluded from Kernel ABI, original JIT comparison
+and frozen Runtime consumption. Compiler facts expose `record_presence` and
 `capture_paths`, so consumers need not decode internal IDs. CPU/CUDA tests in
 `test_aot_component_records.py` cover new dimensions, aliases, presence variants,
 unused members, rejected getters and Runtime consumption.

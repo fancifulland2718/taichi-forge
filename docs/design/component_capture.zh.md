@@ -33,8 +33,14 @@ identity 比较明确拒绝。未使用成员不进入数值代码身份。局�
 命名空间，SNode 组仍由实际根验证；不按同值合并两个维度。
 
 在正常 `ResourceScope` 中赋值已声明的子 owner，例如 `scope.buffers = buffers`，
-`Component.from_owner` 会递归收集该显式声明边；只需以 `Record(gain=RuntimeValue(...))`
-补充该对象的非资源值角色，无需逐 Field 或逐 Kernel 表。循环声明拒绝。
+`Component.from_owner` 会递归收集该显式声明边，无需逐 Field 或逐 Kernel 表。
+正常构造时可用 `scope.value("gravity", ti.types.vector(3, ti.f32))` 声明动态值，
+用 `scope.static("mode", choices=("fast", "accurate"))` 声明有限静态域；普通属性值
+保持原样。只读 record 作用域同样支持这些声明，frozen dataclass 不被改写。
+`from_owner` 自动收集角色与声明位置，不再需要单独的值清单；已有显式 `Record`
+补充接口保留，但与正常声明重名时拒绝。冲突角色、域外值、getter 和循环声明拒绝。
+`test_aot_component_values.py` 验证 CPU/CUDA 的动态值/尺寸复用、实际静态变体、
+无关声明不进入 Kernel ABI、原 JIT 对照与冻结后 Runtime 消费。
 冻结合同的 compiler facts 给出 `record_presence` 和 `capture_paths`，消费者不必解析
 内部 ID 来恢复原属性路径。`test_aot_component_records.py` 覆盖 CPU/CUDA 的新尺寸、
 别名、存在性变体、未使用成员、getter 拒绝和 Runtime 消费。

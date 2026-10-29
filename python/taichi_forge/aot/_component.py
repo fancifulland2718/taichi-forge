@@ -526,8 +526,8 @@ class Component:
     def from_owner(cls, owner, **values):
         """Project opt-in normal construction declarations, never a kernel list.
 
-        Actual roots determine groups. Values remain explicit static/runtime
-        declarations; no Python attribute dictionary is scanned for captures.
+        Actual roots determine groups. Values come from normal explicit roles
+        or caller declarations; no attribute dictionary is scanned for captures.
         """
         from taichi_forge.lang.matrix import MatrixType, VectorType
 
@@ -548,7 +548,16 @@ class Component:
                 raise TaichiCompilationError("Normal resource records must form a bounded acyclic declaration tree")
             if registry is None:
                 registry = _member(current, "_forge_resource_declarations")
+            occupied = set()
+            for kind in ("fields", "dimensions", "records", "borrowed", "values"):
+                names = registry.get(kind, {}).keys()
+                if occupied.intersection(names):
+                    raise ValueError(f"Conflicting normal declaration roles: {sorted(occupied.intersection(names))!r}")
+                occupied.update(names)
             members = {name: Dimension("active") for name in registry["dimensions"]}
+            for name, declaration in registry.get("values", {}).items():
+                members[name] = declaration["declaration"]
+                sources[_capture_id((*prefix, name))] = declaration["source"]
             for name, expression in registry.get("derived_dimensions", {}).items():
                 members[name] = Dimension("active", expression=expression)
                 derived_attributes.add(_capture_id((*prefix, name)))
