@@ -329,12 +329,14 @@ class _GraphCapture:
 class ComponentGraph:
     """Frozen normal Graph plus its compiler-produced resource contract."""
 
-    def __init__(self, graph, contract, array_types=None, fixed_dependencies=None, field_io=None):
+    def __init__(self, graph, contract, array_types=None, fixed_dependencies=None, field_io=None,
+                 initialization_nodes=0):
         self._graph = graph
         self._contract = json.dumps(contract, sort_keys=True)
         self._array_types = dict(array_types or {})
         self._fixed_dependencies = dict(fixed_dependencies or {})
         self._field_io = dict(field_io or {})
+        self._initialization_nodes = initialization_nodes
 
     @property
     def contract(self):
@@ -344,8 +346,12 @@ class ComponentGraph:
         if name in module._component_roots:
             raise ValueError(f"Duplicate component root {name!r}")
         plan = module.add_execution_plan(name, self._graph, snapshot_state=False,
-                                         _fixed_snode_dependencies=tuple(self._fixed_dependencies.values()))
+                                         _fixed_snode_dependencies=tuple(self._fixed_dependencies.values()),
+                                         _component_initialization_nodes=self._initialization_nodes)
         contract = self.contract
+        if contract["version"] == 8:
+            contract["fixed_bindings"] = {}
+            contract["field_io_bindings"] = {}
         try:
             if self._field_io:
                 contract["field_io_bindings"] = {}
@@ -387,7 +393,7 @@ class ComponentGraph:
         return plan
 
 
-def _complete_compiler_contract(graph, contract, capture):
+def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     """Project existing compiled Graph effects and final native task facts.
 
     This is a cold query, not another effects analyzer or launch evaluator.
@@ -604,7 +610,7 @@ def _complete_compiler_contract(graph, contract, capture):
             resource["effects_precision"] = "compiler_proven"
     contract["version"] = 2
     contract["required_capabilities"].append("component_compiler_facts_v1")
-    if has_control or "internal_arguments" in contract or constraints or fixed_groups:
+    if has_control or "internal_arguments" in contract or constraints or fixed_groups or lifecycle:
         contract["version"] = 5 if constraints else 4
         contract["control"] = control
         contract.setdefault("internal_arguments", {})
@@ -624,18 +630,35 @@ def _complete_compiler_contract(graph, contract, capture):
     return contract
 
 
-def compile_component_graph(component, record, *args, _build=None, **kwargs):
+def compile_component_graph(component, record, *args, initializer=None, _build=None, **kwargs):
     from taichi_forge.graph import GraphBuilder
 
     capture = _GraphCapture(component, record, args, kwargs, _build)
     builder = GraphBuilder(_capture_recipe_sources=False, _component_capture=capture)
+    initialization_nodes = ()
+    if initializer is not None:
+        if not callable(initializer) or getattr(initializer, "__self__", None) is not capture.owner:
+            raise TaichiCompilationError("Component initializer requires a normal recording with the same owner")
+        initializer(builder)
+        # Flush through the ordinary Graph compiler. This keeps the lifecycle
+        # boundary outside any CGraph fusion/flattening; operation counts come
+        # from the existing lowering, not the number of captured kernels.
+        builder._flush_graph_builder()
+        initialization_nodes = tuple(builder._nodes)
+        if not initialization_nodes:
+            raise TaichiCompilationError("Component initializer must record a nonempty normal Graph")
     record(builder, *args, **kwargs)
     contract = capture.finish(builder)
     if _build is not None:
         _build.check_time("before backend compilation")
     graph = builder.compile()
     try:
-        contract = _complete_compiler_contract(graph, contract, capture)
+        if initialization_nodes and (
+            tuple(graph._spec.nodes[:len(initialization_nodes)]) != initialization_nodes
+            or len(graph._spec.nodes) == len(initialization_nodes)
+        ):
+            raise TaichiCompilationError("Component lifecycle requires a preserved initialization/replay boundary")
+        contract = _complete_compiler_contract(graph, contract, capture, lifecycle=bool(initialization_nodes))
         # Host choices remain part of admission even if no numerical entry uses
         # them. Explicit kernel-only policy follows the final compiler closure,
         # including dead-region pruning, rather than the whole owner registry.
@@ -656,12 +679,24 @@ def compile_component_graph(component, record, *args, _build=None, **kwargs):
         if _build is not None:
             _build.check_time("after backend compilation")
         field_io = _compile_fixed_field_io(component, capture.owner, contract, _build)
+        if initialization_nodes:
+            # Version 8 adds lifecycle to the same compiler projection. Empty
+            # optional resource families stay empty, rather than acquiring a
+            # synthetic fixed tree just to use an initializer.
+            contract["version"] = 8
+            for key in ("configuration", "constraints", "fixed_groups", "field_io", "internal_arguments"):
+                contract.setdefault(key, {})
+            if "component_control_v1" not in contract["required_capabilities"]:
+                contract["required_capabilities"].append("component_control_v1")
+            contract["lifecycle"] = dict(initialization_nodes=len(initialization_nodes),
+                                         initialization="explicit_instance", reprepare="preserve_state")
+            contract["required_capabilities"].append("component_instance_initializer_v1")
         if contract["version"] >= 4:
             from taichi_forge_runtime.aot._component import _control_identity
 
             contract["semantic_key"] = _control_identity(contract)
         fixed = {group: capture.fixed_dependencies[group] for group in contract.get("fixed_groups", {})}
-        return ComponentGraph(graph, contract, capture.array_types, fixed, field_io)
+        return ComponentGraph(graph, contract, capture.array_types, fixed, field_io, len(initialization_nodes))
     except BaseException:
         graph.close()
         raise

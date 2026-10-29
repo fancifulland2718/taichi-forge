@@ -92,28 +92,39 @@ class Component:
                 "execution_entries",
                 "target",
             }
-            if contract.get("version") in (2, 3, 4, 5, 6, 7):
+            if contract.get("version") in (2, 3, 4, 5, 6, 7, 8):
                 required.add("compilation")
-            if contract.get("version") in (3, 4, 5, 6, 7):
+            if contract.get("version") in (3, 4, 5, 6, 7, 8):
                 required.add("configuration")
-            if contract.get("version") in (4, 5, 6, 7):
+            if contract.get("version") in (4, 5, 6, 7, 8):
                 required.update(("control", "internal_arguments", "execution_fingerprint"))
-            if contract.get("version") in (5, 6, 7):
+            if contract.get("version") in (5, 6, 7, 8):
                 required.add("constraints")
-            if contract.get("version") in (6, 7):
+            if contract.get("version") in (6, 7, 8):
                 required.update(("fixed_groups", "fixed_bindings"))
-            if contract.get("version") == 7:
+            if contract.get("version") in (7, 8):
                 required.update(("field_io", "field_io_bindings"))
-            if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7) or contract["name"] != name:
+            if contract.get("version") == 8:
+                required.add("lifecycle")
+            if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7, 8) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
-            if contract["version"] == 7:
+            if contract["version"] >= 7 and contract["field_io"]:
                 capabilities.add("component_field_coordinates_v1")
             fixed_groups = contract.get("fixed_groups", {})
-            if contract["version"] >= 6:
+            if contract["version"] in (6, 7) or fixed_groups:
                 if not fixed_groups or set(fixed_groups) & set(contract["groups"]):
                     raise ValueError("Fixed SNode component groups must have distinct declared identities")
                 capabilities.add("component_fixed_snode_groups_v1")
+            if contract["version"] == 8:
+                lifecycle = contract["lifecycle"]
+                if (set(lifecycle) != {"initialization_nodes", "initialization", "reprepare"}
+                        or type(lifecycle["initialization_nodes"]) is not int or lifecycle["initialization_nodes"] <= 0
+                        or lifecycle["initialization"] != "explicit_instance" or lifecycle["reprepare"] != "preserve_state"):
+                    raise ValueError("Invalid component instance lifecycle")
+                if not fixed_groups and contract["fixed_bindings"]:
+                    raise ValueError("Component without fixed groups cannot contain fixed bindings")
+                capabilities.add("component_instance_initializer_v1")
             if any(resource.get("kind") == "ndarray" for resource in contract["resources"].values()):
                 capabilities.add("component_array_storage_v1")
             if any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
@@ -316,9 +327,25 @@ class Component:
             if used["resource"] != bound_resources or used["value"] != set(contract["values"]):
                 raise ValueError("Component contains unreferenced resource/value requirements")
             self._field_io = {}
-            if contract["version"] == 7:
+            if contract["version"] >= 7:
                 from ._field_coordinates import load_transfers
                 self._field_io = load_transfers(module, contract)
+            self._initializer_plan = None
+            self._replay_plan = plan
+            if contract["version"] == 8:
+                from ._plan import ExecutionPlan
+
+                if (not document.get("initialization") or any(document.get(key) for key in (
+                        "resources", "gradients", "constraints", "binding_strategy", "submission_recipe", "storage_recipe"))):
+                    raise ValueError("Component initializer requires qualified instance-owned resources")
+                # Both phases are projections of the validated native Plan.
+                # Keep the full Plan for native tree-closure instantiation.
+                # A fresh replay preparation never reruns the model initializer.
+                self._initializer_plan = ExecutionPlan(document["initialization"])
+                replay_document = dict(document)
+                replay_document.pop("initialization")
+                replay_document.pop("version")
+                self._replay_plan = ExecutionPlan(**replay_document)
             self._module, self._plan = module, plan
             self._contract_json = json.dumps(contract)
             self._aliases = aliases
@@ -327,6 +354,20 @@ class Component:
     def contract(self):
         self._module._check()
         return json.loads(self._contract_json)
+
+    def inputs(self, *, initialization=False):
+        """Query external values/arguments needed by one lifecycle phase."""
+        plan = self._initializer_plan if initialization else self._replay_plan
+        if plan is None:
+            raise ValueError("Component has no registered instance initializer")
+        contract = self.contract
+        names = set(plan.argument_names)
+        return dict(
+            values={binding["name"]: contract["values"][binding["name"]]
+                    for symbol, binding in contract["bindings"].items()
+                    if symbol in names and binding["kind"] == "value"},
+            arguments={name: spec for name, spec in contract["explicit"].items() if name in names},
+        )
 
     def instantiate(self, dimensions, *, configuration=None):
         supplied = dict(configuration or {})
@@ -364,6 +405,7 @@ class ComponentInstance:
         self._close_lock = threading.RLock()
         self._closed = self._retired = False
         self._initialized = set()
+        self._model_initialized = component._initializer_plan is None
         contract = component.contract
         self._inputs = dict(dimensions)
         self._dimensions = _dimensions(contract["dimensions"], self._inputs)
@@ -480,56 +522,20 @@ class ComponentInstance:
         )
 
     def prepare(self, *, values=None, dimensions=None, arguments=None, execution_domain=None):
-        from ._runtime import Scalar
-
         runtime = self._component._module._runtime
         with runtime._lock:
             self._check()
             if self._transfer_active:
                 raise RuntimeError("Component Field transfer is in progress")
+            if not self._model_initialized:
+                raise ValueError("Component requires initialize_state() before preparation")
             if self._has_live_bindings() and execution_domain is not self._binding_domain:
                 raise ValueError("Component state requires one ordered execution domain until its bindings retire")
             if self._initialized != set(self._resources):
                 raise ValueError("Component resources require explicit consumer initialization before preparation")
-            updates = dict(dimensions or {})
-            if set(updates) & self._component._layout_dimensions:
-                raise ValueError("Changing layout dimensions requires a new component instance")
-            contract = self._component.contract
-            resolved = _dimensions(contract["dimensions"], {**self._inputs, **updates})
-            check_constraints(
-                contract.get("constraints", {}), resolved.__getitem__,
-                contract.get("compilation", {}).get("constraint_sources"),
-                entry=contract["name"],
-            )
-            values, bindings = dict(values or {}), dict(arguments or {})
-            if set(values) != set(contract["values"]) or set(bindings) != set(contract["explicit"]):
-                raise ValueError("Component value/explicit argument inputs differ from its contract")
-            for symbol, value in tuple(bindings.items()):
-                descriptor = contract["explicit"][symbol]
-                if descriptor[0] == "ndarray":
-                    # Resource type, runtime, dimensions and lifetime remain
-                    # the existing native preparation contract's authority.
-                    continue
-                bindings[symbol] = (
-                    Scalar(descriptor[1][1], value)
-                    if descriptor[0] == "scalar"
-                    else self._component._plan.value(self._component._module, symbol, value)
-                )
-            for symbol, binding in contract["bindings"].items():
-                kind, name = binding["kind"], binding["name"]
-                if kind == "resource":
-                    bindings[symbol] = self._resources[name]
-                elif kind == "dimension":
-                    bindings[symbol] = resolved[name]
-                else:
-                    schema = contract["values"][name]
-                    bindings[symbol] = (
-                        self._component._plan.value(self._component._module, symbol, values[name])
-                        if schema[2]
-                        else Scalar(schema[1], values[name])
-                    )
+            bindings = self._bindings(self._component._replay_plan, values, dimensions, arguments)
             call = self._component._module.prepare_execution(
-                self._component._plan, bindings, execution_domain=execution_domain, snode_instance=self._fixed_state
+                self._component._replay_plan, bindings, execution_domain=execution_domain, snode_instance=self._fixed_state
             )
             try:
                 call._retain_binding_owner(self)
@@ -539,6 +545,99 @@ class ComponentInstance:
             self._prepared.add(call)
             self._binding_domain = execution_domain
             return call
+
+    def _bindings(self, plan, values, dimensions, arguments):
+        from ._runtime import Scalar
+
+        updates = dict(dimensions or {})
+        if set(updates) & self._component._layout_dimensions:
+            raise ValueError("Changing layout dimensions requires a new component instance")
+        contract = self._component.contract
+        resolved = _dimensions(contract["dimensions"], {**self._inputs, **updates})
+        check_constraints(
+            contract.get("constraints", {}), resolved.__getitem__,
+            contract.get("compilation", {}).get("constraint_sources"),
+            entry=contract["name"],
+        )
+        values, bindings = dict(values or {}), dict(arguments or {})
+        names = set(plan.argument_names)
+        required_values = {binding["name"] for symbol, binding in contract["bindings"].items()
+                           if symbol in names and binding["kind"] == "value"}
+        if set(values) != required_values or set(bindings) != set(contract["explicit"]) & names:
+            raise ValueError("Component value/explicit argument inputs differ from its contract")
+        for symbol, value in tuple(bindings.items()):
+            descriptor = contract["explicit"][symbol]
+            if descriptor[0] == "ndarray":
+                # Resource type, runtime, dimensions and lifetime remain
+                # the existing native preparation contract's authority.
+                continue
+            bindings[symbol] = (
+                Scalar(descriptor[1][1], value)
+                if descriptor[0] == "scalar"
+                else plan.value(self._component._module, symbol, value)
+            )
+        for symbol, binding in contract["bindings"].items():
+            if symbol not in names:
+                continue
+            kind, name = binding["kind"], binding["name"]
+            if kind == "resource":
+                bindings[symbol] = self._resources[name]
+            elif kind == "dimension":
+                bindings[symbol] = resolved[name]
+            else:
+                schema = contract["values"][name]
+                bindings[symbol] = (
+                    plan.value(self._component._module, symbol, values[name])
+                    if schema[2]
+                    else Scalar(schema[1], values[name])
+                )
+        return bindings
+
+    def initialize_state(self, *, values=None, dimensions=None, arguments=None, reset=False):
+        """Run the original model initializer at a cold instance boundary.
+
+        Repeated initialization requires explicit reset=True. A failed accepted
+        initializer may have written state; replay stays disabled until a
+        successful retry. No numerical writes are transactionally rolled back.
+        """
+        from contextlib import ExitStack, closing
+
+        component = self._component
+        runtime = component._module._runtime
+        with self._close_lock:
+            with runtime._lock:
+                self._check()
+                if component._initializer_plan is None:
+                    raise ValueError("Component has no registered instance initializer")
+                if type(reset) is not bool:
+                    raise TypeError("reset must be a bool")
+                if self._transfer_active or self._has_live_bindings():
+                    raise RuntimeError("State initialization requires closing prepared calls at a cold boundary")
+                if self._model_initialized and not reset:
+                    raise ValueError("Component state is already initialized; use reset=True explicitly")
+                if self._initialized != set(self._resources):
+                    raise ValueError("Component resources require explicit consumer initialization before state initialization")
+                bindings = self._bindings(component._initializer_plan, values, dimensions, arguments)
+                self._transfer_active = True
+            try:
+                with ExitStack() as owners:
+                    domain = (owners.enter_context(runtime.execution_domain(capacity=1, instance_capacity=1))
+                              if runtime.arch == "cuda" else None)
+                    call = owners.enter_context(component._module.prepare_execution(
+                        component._initializer_plan, bindings, execution_domain=domain, snode_instance=self._fixed_state))
+                    with runtime._lock:
+                        self._model_initialized = False
+                    call.initialize()
+                    if domain is None:
+                        call.run()
+                    else:
+                        with closing(call.submit()) as ticket:
+                            ticket.wait()
+                with runtime._lock:
+                    self._model_initialized = True
+            finally:
+                with runtime._lock:
+                    self._transfer_active = False
 
     def close(self):
         with self._close_lock:

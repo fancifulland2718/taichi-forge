@@ -215,6 +215,7 @@ def export_graph(
     resource_bindings=None,
     argument_resources=None,
     fixed_snode_dependencies=(),
+    component_initialization_nodes=0,
 ):
     """Preflight the entire region before publishing any module definitions."""
     with graph._lifecycle_lock:
@@ -262,6 +263,17 @@ def export_graph(
             fixed_snode_dependencies=fixed_snode_dependencies,
         )
         operation_ends = lower_frozen_graph(context, graph)
+        if component_initialization_nodes:
+            if (type(component_initialization_nodes) is not int
+                    or not 0 < component_initialization_nodes < len(operation_ends)):
+                raise TaichiRuntimeError("Component initialization must precede a nonempty replay region")
+            if (context.initialization or context.resources or binding_strategy is not None
+                    or context.storage_recipe is not None or gradients or argument_resources):
+                raise TaichiRuntimeError(
+                    "Component instance initializers with Plan-private resources/recipes require shared-lifetime qualification")
+            boundary = operation_ends[component_initialization_nodes - 1]
+            context.initialization = context.operations[:boundary]
+            context.operations = context.operations[boundary:]
         submission_recipe = None
         if getattr(binding_factory, "__dict__", {}).get("_export_aot_submission") is not None:
             submission_recipe = binding_factory._export_aot_submission(spec, operation_ends)
@@ -276,6 +288,9 @@ def export_graph(
         from taichi_forge.graph._lowering_constraints import export_constraints
 
         constraints = export_constraints(spec, context.binding, additional=context.binding_constraints)
+        if component_initialization_nodes and constraints:
+            raise TaichiRuntimeError(
+                "Component instance initializers with cross-phase Plan binding constraints require qualification")
         if context.storage_recipe is not None:
             if not context._buffer_only_kernels:
                 raise TaichiRuntimeError("AOT storage rings require ordinary buffer dispatches")

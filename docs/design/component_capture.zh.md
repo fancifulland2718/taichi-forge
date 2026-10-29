@@ -329,6 +329,24 @@ CPU/CUDA 已验证 pointer/bitmasked 融合及 pointer/dense 递归路径，包�
 deactivate 仍可使用原组件入口。Sparse 不伪装成可上传的 Dense view；
 `initialize(data, zero=...)` 仍仅用于合格的 Dense/array 资源。新增库入口进入可查询
 构建统计，默认无数量或耗时上限，只有调用者显式启用 BuildBudget 才限制构建成本。
+
+实例初始化可由同一 owner 的正常 recording 注册：
+`component.compile_graph(owner.record_step, initializer=owner.record_initialize)`。
+两个阶段在同一捕获环境中形成资源并集，保留初始化独占的 SNode 根；原 Graph 编译器
+保留阶段边界，原 lowering 的实际 operation 边界生成 ExecutionPlan 的 initialization。
+v8 合同查询及代码身份包含该生命周期，导出不采集模型值。
+
+消费端 `component.inputs(initialization=True)` 查询初始化所需值/显式参数，默认查询
+步进输入。先通过正常模型准备上传输入，再调用 `instance.initialize_state(...)`；
+初始化成功前禁止 prepare。重复 prepare 保留状态，重新初始化必须显式指定 `reset=True`，
+且必须先关闭该实例的 prepared calls。初始化同步完成，不改模块级共享指针；CPU/CUDA
+使用同一 loaded Module 的实例调用绑定，初始化失败不会标记成功，也不承诺数值写回滚。
+Dense/array 的显式初值前置要求仍保留，写 effects 不被当成“完整覆盖全部元素”的证明。
+
+本片支持实例所有的 Dense/固定 SNode 资源；含 Plan 私有资源、跨阶段绑定约束或专用
+提交/storage recipe 的初始化组合明确拒绝，待其共享寿命取得资格。已有无初始化的控制
+组件保持原行为。测试覆盖仅初始化使用的独立根、双实例、重新 prepare、显式 reset、
+关闭隔离及无数值源码消费；不将其扩大为完整 GeoPhys 模型准备或所有后端资格。
 旧 v6 产物仍可消费，但不能凭空获得未导出的坐标传输入口。
 含 Sparse 的 `instance.nbytes` 明确拒绝：固定根布局
 字节数不能代表动态 allocator 的总存储。合同查询不另设固定 JSON 大小限制，仍验证

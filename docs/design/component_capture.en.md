@@ -689,3 +689,28 @@ from the frozen artifact in Runtime-only consumers. Broader algorithm domains,
 full initialization/constraint/provenance projections and complete C lifetimes
 remain in progress. Wheels and whole-engine qualification remain in E; this
 batch builder is not a cross-platform or distributed compilation service.
+
+An original initializer recording can join the same owner's step recording:
+`component.compile_graph(owner.record_step, initializer=owner.record_initialize)`.
+Both phases share capture and resource closure, including initializer-only SNode
+roots. The normal Graph compiler preserves their boundary; existing lowering's
+actual operation boundaries populate ExecutionPlan initialization. The v8 query
+and code identity retain this lifecycle without sampling model state.
+
+`component.inputs(initialization=True)` queries initializer values/arguments;
+the default queries replay inputs. Upload ordinary model inputs first, then call
+`instance.initialize_state(...)`. Preparation is rejected until it succeeds.
+Repreparing preserves state; reinitialization requires explicit `reset=True`
+with all instance prepared calls closed. Initialization completes synchronously
+using the existing instance binding on CPU/CUDA, never a module pointer swap.
+Failure does not mark success or promise rollback of accepted numerical writes.
+Dense/array explicit initialization prerequisites remain: write effects alone do
+not prove that a numerical initializer covers every element.
+
+This slice qualifies instance-owned Dense/fixed-SNode resources. Initializers
+combined with Plan-private resources, cross-phase binding constraints or special
+submission/storage recipes reject pending shared-lifetime qualification. Existing
+components without model initialization retain their behavior. Tests cover an
+initializer-only root, two instances, repreparation, reset, close isolation and
+Runtime-only consumption; this is not complete GeoPhys model preparation or
+qualification of all backends.
