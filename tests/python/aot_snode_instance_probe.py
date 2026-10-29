@@ -534,10 +534,74 @@ def check_coordinates(folder, backend):
             domain.close()
 
 
+def check_soa(folder, backend):
+    from taichi_forge_runtime.aot import Runtime
+
+    def unpack(payload, dtype="f"):
+        result = array.array(dtype)
+        result.frombytes(payload)
+        return list(result)
+
+    with Runtime(backend) as runtime:
+        component = runtime.load_module(folder).component("step")
+        states = [component.instantiate({}) for _ in range(2)]
+        coordinates = [[i] for i in range(7)]
+        for index, state in enumerate(states):
+            base = 100 * (index + 1)  # New values, constructed after export.
+            assert unpack(state.resource("particles.vector").read_at(coordinates)) == [0] * 21
+            state.resource("particles.before").write_at(coordinates, array.array("i", [71 + index] * 7))
+            state.resource("particles.after").write_at(coordinates, array.array("i", [73 + index] * 7))
+            state.resource("particles.vector").write_at(coordinates, array.array("f", [base] * 21))
+            state.resource("particles.matrix").write_at(coordinates, array.array("f", [base + 10] * 28))
+        domain = runtime.execution_domain() if backend == "cuda" else None
+        with states[0].prepare(values=dict(active=3, bump=4.0), execution_domain=domain) as a, \
+                states[1].prepare(values=dict(active=6, bump=7.0), execution_domain=domain) as b:
+            a.initialize()
+            b.initialize()
+            if domain:
+                assert a.info["execution_kind"] == b.info["execution_kind"] == "cuda_graph"
+                with a.submit() as first, b.submit() as second, a.submit() as third:
+                    first.wait()
+                    second.wait()
+                    third.wait()
+            else:
+                a.run()
+                b.run()
+                a.run()
+        for index, (state, active, bump, rounds) in enumerate(zip(states, [3, 6], [4, 7], [2, 1])):
+            base = 100 * (index + 1)
+            expect_v = [base + rounds * [bump, 2, 3][j] if i < active else base
+                        for i in range(7) for j in range(3)]
+            expect_m = [base + 10 + sum(base + 3 * (r + 1) for r in range(rounds))
+                        if i < active and j == 2 else base + 10
+                        for i in range(7) for j in range(4)]
+            assert unpack(state.resource("particles.vector").read_at(coordinates)) == expect_v
+            assert unpack(state.resource("alias").read_at(coordinates)) == expect_v
+            assert unpack(state.resource("particles.matrix").read_at(coordinates)) == expect_m
+            assert unpack(state.resource("particles.before").read_at(coordinates), "i") == [71 + index] * 7
+            assert unpack(state.resource("particles.after").read_at(coordinates), "i") == [73 + index] * 7
+            assert unpack(state.resource("grid").read_at([[i] for i in range(8)]), "i") == (
+                [144 + 2 * index] * active + [0] * (8 - active))
+        states[0].close()
+        with states[1].prepare(values=dict(active=0, bump=123.0), execution_domain=domain) as empty:
+            empty.initialize()
+            if domain:
+                with empty.submit() as ticket:
+                    ticket.wait()
+            else:
+                empty.run()
+        assert unpack(states[1].resource("particles.vector").read_at(coordinates)) == expect_v
+        states[1].close()
+        if domain:
+            domain.close()
+
+
 if __name__ == "__main__":
     sys.path.insert(0, os.environ["FORGE_AOT_TEST_PACKAGE"])
     sys.meta_path.insert(0, NoNumericalSource())
-    if len(sys.argv) > 3 and sys.argv[3] == "clear":
+    if len(sys.argv) > 3 and sys.argv[3] == "soa":
+        check_soa(sys.argv[1], sys.argv[2])
+    elif len(sys.argv) > 3 and sys.argv[3] == "clear":
         check_struct(sys.argv[1], sys.argv[2], clear=True)
     elif len(sys.argv) > 3 and sys.argv[3] == "coordinates":
         check_coordinates(sys.argv[1], sys.argv[2])

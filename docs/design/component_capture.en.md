@@ -203,13 +203,17 @@ original root, offsets and owner. They neither copy members into independent
 Ndarrays nor mutate module root pointers. Qualified compact and interleaved
 record members preserve the full root in the schema.
 
-`scope.struct_field(members, shape=...)` declares a normal flat AOS StructField,
-including rank-zero state and arrays with declared dynamic extents. Members use
+`scope.struct_field(members, shape=...)` declares a normal flat StructField,
+including rank-zero state and arrays with declared dynamic extents. AOS is the
+default. With the implicit root, `layout=ti.Layout.SOA` uses the original
+`Struct.field` allocation: one dense block per member, with the usual vector
+and matrix element layout. Explicit builders/placement currently require AOS;
+an unsupported combination is rejected before allocation. Members use
 the existing Record/DenseField capture path; aliases share an actual argument.
 Dimensions retain their original declaration scope, including through aliases.
 Consumers preserve the complete record through the same SNode layout rules and
 bind each instance at the actual member offsets and record strides. CPU/CUDA
-tests cover scalar/vector/matrix members, ordinary JIT and borrowed storage,
+tests cover AOS/SOA scalar/vector/matrix members, ordinary JIT and borrowed storage,
 and different-size instances sharing loaded code. Packed Host buffers transfer
 only the selected logical elements; neighboring members and inactive tails stay
 intact. Raw packed-memory access cannot reinterpret a strided member handle.
@@ -221,8 +225,13 @@ binding metadata: rebuild using an affine view exemplar or component capture.
 Legacy Graph calls cannot represent these views; use the qualified Kernel or
 complete ExecutionPlan path. Unqualified real-function/shared-staged cases are
 rejected conservatively. Packed bindings retain their existing behavior.
-Nested structs, nested dense trees, component SoA, gradients and whole-struct
-element indexing are not qualified by this API; Vulkan needs separate admission.
+Implicit-root SOA records can also share a fixed SNode root with sparse fields.
+CPU/CUDA tests preserve that mixed root, whole-record indexing and member aliases,
+then consume new values in two instances without the producer's numerical source.
+This fixed schema does not make the sparse tree or its dense capacities dynamic.
+Nested structs, nested dense trees, component-wise vector/matrix SoA and gradients
+are not qualified by this API. Whole-struct element indexing requires the fixed
+SNode path below; Vulkan needs separate admission.
 
 `scope.ndarray(dtype, shape=...)` declares an independent normal managed array.
 Scalar, vector/matrix and fixed-AoS StructNdarray elements retain their existing

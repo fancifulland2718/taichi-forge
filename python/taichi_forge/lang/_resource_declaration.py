@@ -480,20 +480,21 @@ class ResourceScope:
         return self._create(Matrix.field, args, kwargs)
 
     def struct_field(self, members, **kwargs):
-        """Declare a flat AOS record at its normal allocation site.
+        """Declare a flat record at its normal allocation site.
 
         Member Field access and aliases retain the original shared placement.
-        Member arrays retain the native record stride. Whole Struct element
-        indexing and nested records require separate lowering qualification.
+        Implicit-root SOA uses Struct.field's ordinary per-member placement;
+        explicit groups/placement currently require AOS. Whole Struct element
+        indexing requires fixed-SNode capture; nested records are unqualified.
         """
         from taichi_forge.lang.enums import Layout
         from taichi_forge.lang.struct import Struct, StructType
 
         if (
             kwargs.get("shape") is None
-            or kwargs.get("layout", Layout.AOS) != Layout.AOS
+            or kwargs.get("layout", Layout.AOS) not in (Layout.AOS, Layout.SOA)
             or any(kwargs.get(key) for key in ("offset", "needs_grad", "needs_dual"))
             or any(isinstance(dtype, StructType) for dtype in members.values())
         ):
-            raise ValueError("ResourceScope struct_field requires a flat plain AOS record with an explicit shape")
+            raise ValueError("ResourceScope struct_field requires a flat plain record with an explicit shape")
         return self._create(Struct.field, (members,), kwargs)

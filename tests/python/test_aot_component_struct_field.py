@@ -78,25 +78,31 @@ def test_normal_fixed_record_deploys_shared_layout_and_independent_instances(tmp
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_record_declaration_rejects_unqualified_layout_before_allocation():
     scope = ti.experimental.ResourceScope(type("Owner", (), {})())
-    for kwargs in (dict(), dict(shape=(), layout=ti.Layout.SOA), dict(shape=(), needs_grad=True)):
-        with pytest.raises(ValueError, match="flat plain AOS"):
+    for kwargs in (dict(), dict(shape=(), layout="unrecognized"), dict(shape=(), needs_grad=True)):
+        with pytest.raises(ValueError, match="flat plain record"):
             scope.struct_field(dict(value=ti.f32), **kwargs)
+    builder = ti.FieldsBuilder()
+    explicit = ti.experimental.ResourceScope(type("Owner", (), {})(), builder=builder)
+    with pytest.raises(ValueError, match="explicit groups currently require plain AOS"):
+        explicit.struct_field(dict(value=ti.f32), shape=(), layout=ti.Layout.SOA)
+    # Reject before allocating unplaced fields or mutating the builder.
+    assert not builder.root._get_children()
 
 
 @ti.data_oriented
 class _RecordArray:
-    def __init__(self, capacity, active):
+    def __init__(self, capacity, active, layout=ti.Layout.AOS):
         self.capacity, self.active = capacity, active
-        builder = ti.FieldsBuilder()
+        builder = None if layout == ti.Layout.SOA else ti.FieldsBuilder()
         scope = ti.experimental.ResourceScope(self, builder=builder)
         capacity_dim = scope.dim("capacity")
         scope.dim("active")
         scope.state = scope.struct_field(
             dict(before=ti.i32, vector=ti.types.vector(3, ti.f32), matrix=ti.types.matrix(2, 2, ti.f32), after=ti.i32),
-            shape=capacity_dim,
+            shape=capacity_dim, layout=layout,
         )
         scope.alias = self.state.vector
-        self.tree = builder.finalize()
+        self.tree = None if builder is None else builder.finalize()
 
     @ti.func
     def advance(self, i):
@@ -112,12 +118,13 @@ class _RecordArray:
         builder.dispatch(self.step)
 
 
+@pytest.mark.parametrize("layout", [ti.Layout.AOS, ti.Layout.SOA], ids=["aos", "soa"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_interleaved_record_component_preserves_stride_and_instance_state(tmp_path):
-    producer = _RecordArray(7, 7)
+def test_record_component_preserves_layout_and_instance_state(tmp_path, layout):
+    producer = _RecordArray(7, 7, layout)
     environment = Component.from_owner(producer)
     code = environment.compile(producer.step)
-    larger = _RecordArray(37, 31)
+    larger = _RecordArray(37, 31, layout)
     assert Component.from_owner(larger).compile(larger.step) is code
     larger.state.before.fill(71)
     larger.state.after.fill(73)

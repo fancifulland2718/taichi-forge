@@ -118,6 +118,66 @@ class _SparseStructState:
         builder.dispatch(self.read, empty, template_args={"self": self})
 
 
+@ti.data_oriented
+class _SOAMixedState:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.particles = scope.struct_field(
+            dict(before=ti.i32, vector=ti.types.vector(3, ti.f32),
+                 matrix=ti.types.matrix(2, 2, ti.f32), after=ti.i32),
+            shape=7, layout=ti.Layout.SOA)
+        leaf = ti.root.pointer(ti.i, 2).bitmasked(ti.i, 4)
+        scope.grid = scope.field(ti.i32, shape=8, placement=leaf)
+        scope.alias = self.particles.vector
+        self.active, self.bump = 5, 4
+        scope.value("active", ti.i32)
+        scope.value("bump", ti.f32)
+
+    @ti.func
+    def advance(self, i):
+        self.particles[i].vector += ti.Vector([self.bump, 2, 3])
+        self.particles[i].matrix[1, 0] += self.alias[i][2]
+        self.grid[i] = self.particles[i].before + self.particles[i].after
+
+    @ti.kernel
+    def step(self):
+        for i in range(self.active):
+            self.advance(i)
+
+    def record(self, builder):
+        builder.dispatch(self.step, template_args={"self": self})
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
+def test_normal_soa_record_keeps_dense_members_in_shared_sparse_instance(tmp_path):
+    state = _SOAMixedState()
+    # Struct.field's normal SOA placement has one dense block per member;
+    # vector/matrix components retain their usual intra-element placement.
+    assert len({field.parent().ptr.id for field in state.particles.field_dict.values()}) == 4
+    state.particles.before.fill(71)
+    state.particles.after.fill(73)
+    state.particles.vector.fill(10)
+    state.particles.matrix.fill(20)
+    state.step()
+    expect_v = np.full((7, 3), 10, dtype=np.float32)
+    expect_v[:5] += [4, 2, 3]
+    expect_m = np.full((7, 2, 2), 20, dtype=np.float32)
+    expect_m[:5, 1, 0] += 13
+    np.testing.assert_array_equal(state.particles.vector.to_numpy(), expect_v)
+    np.testing.assert_array_equal(state.particles.matrix.to_numpy(), expect_m)
+    np.testing.assert_array_equal(state.grid.read_at([[i] for i in range(8)]), [144] * 5 + [0] * 3)
+    environment = Component.from_owner(state)
+    root = environment.compile_graph(state.record)
+    assert len(root.contract["fixed_groups"]) == 1 and not root.contract["groups"]
+    assert len(root.contract["resources"]) == 5  # Vector alias shares its member.
+    module = ti.aot.Module()
+    root.export(module, "step")
+    folder = tmp_path / "artifact"
+    module.save(folder)
+    assert not (folder / "data").exists()
+    _consume_isolated(folder, tmp_path, "soa")
+
+
 @pytest.mark.parametrize("bitmasked", [True, False])
 @test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
 def test_normal_snode_deactivation_records_shared_kernels_and_instance_bindings(tmp_path, bitmasked):

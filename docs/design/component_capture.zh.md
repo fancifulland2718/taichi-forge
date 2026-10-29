@@ -209,11 +209,14 @@ Kernel ABI 参数或改变数值代码身份。根合同补齐仅供约束使用
 拒绝前零分配、prepare 更新、空范围/尾部及 record 来源。GeoPhys 用同一机制表达
 排序 word 容量和正常有限归并序列的覆盖范围。
 
-`scope.struct_field(members, shape=...)` 声明正常的扁平 AOS StructField，
-包括 rank-zero 状态和具有显式动态 extent 的记录数组。成员沿既有 Record/DenseField
+`scope.struct_field(members, shape=...)` 声明正常的扁平 StructField，
+包括 rank-zero 状态和具有显式动态 extent 的记录数组，默认使用 AOS。
+隐式根下可选择 `layout=ti.Layout.SOA`，直接沿原 `Struct.field` 分配：每个成员
+占一个 dense 块，向量/矩阵元素内部仍保留原排列。显式 builder/placement 当前
+要求 AOS，不支持的组合在分配前拒绝。成员沿既有 Record/DenseField
 路径自动捕获，原成员别名共用实际参数；维度保留原声明作用域，不因进入记录或别名
 而改名。消费者以同一 SNode 布局规则保留整个记录，按成员真实偏移及 record stride
-绑定各实例，复用已有 affine 参数 ABI。CPU/CUDA 已验证标量/向量/矩阵成员、普通
+绑定各实例，复用已有 affine 参数 ABI。CPU/CUDA 已验证 AOS/SOA 标量/向量/矩阵成员、普通
 JIT 与借用存储、同模块不同尺寸实例交错执行。Host 紧凑缓冲只传输选定成员的逻辑
 元素，相邻成员和未活动尾部保持不变；原始紧凑内存接口拒绝重新解释 strided 成员。
 已加载 LLVM 入口还必须带有编译器证明的 runtime-stride 参数资格；事实来自原 IR
@@ -221,8 +224,11 @@ JIT 与借用存储、同模块不同尺寸实例交错执行。Host 紧凑缓�
 入口不能通过改绑定元数据获得此能力，需使用 affine view exemplar 或组件捕获重新
 构建。旧 Graph 调用接口明确拒绝，使用合格 Kernel 或完整 ExecutionPlan 路径；
 尚无证明的 real-function/shared-staged 路线保守拒绝，紧凑绑定保持原行为。
-嵌套 struct/多层 dense、组件 SoA、梯度及结构元素整体索引尚未取得该入口资格，
-Vulkan 也需单独验证。
+隐式根的 SOA 记录也可与稀疏字段共享固定 SNode 根。CPU/CUDA 已验证原混合根、
+结构元素索引与成员别名，并在没有 producer 数值源码的消费进程中以两个实例执行
+新数据；这不使固定稀疏树及其中的 dense 容量变为动态。
+嵌套 struct/多层 dense、向量/矩阵各分量分块的 SoA 与梯度尚未取得该入口资格；
+结构元素整体索引要求下文的固定 SNode 路径，Vulkan 也需单独验证。
 
 `scope.ndarray(dtype, shape=...)` 在正常分配处声明独立的受管理数组，保留标量、
 向量/矩阵和固定 AoS StructNdarray 的原存储类型。数值 Kernel 使用原有显式
