@@ -155,6 +155,11 @@ Field shape、完整 Field 遍历、vector/matrix 元素及别名；active 为�
 根与视图复用已有内存句柄、借用租约和 prepared 退休机制。当前 `close()` 是冷操作，
 先等待，再撤销所有别名；另一组不受影响。旧视图句柄在撤销后仍可安全关闭。
 
+Dense 部署不另设 4096 个节点、子节点索引或元素分量的上限，也不按固定 JSON 字节数
+限制该构造接口。节点引用使用正常 SNode 的有符号整数范围；成员按实际树范围、
+placement、Ndarray ABI 的合法维度与字节乘积，以及实际根分配边界校验。CPU/CUDA
+回归覆盖 4098 个 place 的同根布局与大元素/末成员别名读写；这不是大局部矩阵计算性能资格。
+
 `test_aot_dense_snode_group.py` 对照新尺寸的普通 SNode 布局，并检查 scalar/vector/
 matrix/rank-0 读写、别名、错误 Runtime、非法维度和 loaded Kernel 的双组 prepared
 交错执行及关闭失效。这证明独立 Runtime 的简单 Dense 存储和实际调用路径，尚不证明

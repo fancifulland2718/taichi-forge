@@ -43,11 +43,6 @@ struct Layout {
   TI_IO_DEF(version, root_size, nodes);
 };
 
-liong::json::JsonValue parse_small(const std::string &text) {
-  if (text.size() > 4 * 1024 * 1024)
-    throw std::invalid_argument("Dense group binding JSON is too large");
-  return liong::json::parse_complete(text);
-}
 }  // namespace
 
 struct DenseSNodeGroup {
@@ -63,7 +58,7 @@ TiMemory LlvmRuntime::create_dense_snode_group(const std::string &schema_json,
   if (!arch_is_cpu(arch) && arch != taichi::Arch::cuda)
     throw std::invalid_argument("Dense group requires a CPU/CUDA runtime");
   auto schema = DenseSNodeSchema::from_json(schema_json);
-  const auto bindings = parse_small(dimensions);
+  const auto bindings = liong::json::parse_complete(dimensions);
   if (!bindings.is_obj())
     throw std::invalid_argument("Dense dimensions must be an object of integers");
   std::map<std::string, int> extents;
@@ -131,7 +126,17 @@ TiNdArray LlvmRuntime::dense_snode_group_member(TiMemory handle,
   using namespace taichi::lang;
   dense_snode_group_layout(handle);  // Runtime/owner validation before use.
   const auto &group = dense_groups_.at(handle);
-  const auto paths_json = parse_small(text);
+  if (element_shape.dim_count > 2)
+    throw MemoryBindingError("Dense member requires a scalar/vector/matrix element");
+  TiNdArray array{};
+  array.elem_type = dtype;
+  array.elem_shape = element_shape;
+  // Reuse the ordinary ndarray ABI's extent and checked byte-product rules.
+  // The actual tree/placement validates the number of lanes, not a fixed cap.
+  const auto element_layout = ndarray_storage_layout(array);
+  const uint64_t width = element_layout.alignment;
+  const uint64_t lanes = element_layout.element_bytes / width;
+  const auto paths_json = liong::json::parse_complete(text);
   if (!paths_json.is_arr())
     throw MemoryBindingError("Dense member paths must be an array");
   std::vector<std::vector<int>> paths;
@@ -140,25 +145,16 @@ TiNdArray LlvmRuntime::dense_snode_group_member(TiMemory handle,
       throw MemoryBindingError("Dense member path must be an integer array");
     std::vector<int> path;
     for (const auto &index : path_json.elems()) {
-      if (index.ty != liong::json::L_JSON_INT || index.num_int < 0 || index.num_int > 4096)
-        throw MemoryBindingError("Dense member path requires bounded child indices");
+      if (index.ty != liong::json::L_JSON_INT || index.num_int < 0 ||
+          index.num_int > std::numeric_limits<int>::max())
+        throw MemoryBindingError("Dense member path requires nonnegative native child indices");
       path.push_back(static_cast<int>(index.num_int));
     }
     paths.push_back(std::move(path));
   }
-  if (paths.empty() || paths.size() > 4096 || element_shape.dim_count > 2)
-    throw MemoryBindingError("Dense member requires scalar/vector/matrix place paths");
-  uint64_t lanes = 1;
-  for (uint32_t i = 0; i < element_shape.dim_count; ++i) {
-    const auto extent = element_shape.dims[i];
-    if (!extent || extent > 4096 / lanes)
-      throw MemoryBindingError("Dense member element shape exceeds qualified range");
-    lanes *= extent;
-  }
   if (lanes != paths.size())
     throw MemoryBindingError("Dense member element shape differs from component paths");
   const auto scalar_type = ndarray_scalar_type(dtype);
-  const uint64_t width = data_type_size(scalar_type);
   SNode *anchor = nullptr;
   for (std::size_t lane = 0; lane < paths.size(); ++lane) {
     auto *node = group->root.get();
@@ -172,15 +168,13 @@ TiNdArray LlvmRuntime::dense_snode_group_member(TiMemory handle,
     if (!anchor)
       anchor = node;
     if (node->parent != anchor->parent ||
-        node->offset_bytes_in_parent_cell != anchor->offset_bytes_in_parent_cell + lane * width)
+        node->offset_bytes_in_parent_cell < anchor->offset_bytes_in_parent_cell ||
+        node->offset_bytes_in_parent_cell - anchor->offset_bytes_in_parent_cell != lane * width)
       throw MemoryBindingError("Dense member components are not contiguous in the same SNode");
   }
   auto *parent = anchor->parent;
-  TiNdArray array{};
-  array.elem_type = dtype;
-  array.elem_shape = element_shape;
   uint64_t offset = anchor->offset_bytes_in_parent_cell;
-  uint64_t record_stride = lanes * width;
+  uint64_t record_stride = element_layout.element_bytes;
   if (parent->type == SNodeType::dense) {
     if (parent->parent != group->root.get())
       throw MemoryBindingError("Dense member is not a qualified uniform record");

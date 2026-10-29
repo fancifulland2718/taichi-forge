@@ -36,6 +36,49 @@ def _compiled_nodes(root):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_dense_group_uses_actual_tree_bounds_above_legacy_node_limit():
+    # Ordinary SNodes already support this tree. Deployment must not introduce
+    # a separate 4096-node, child-index or tensor-lane limit.
+    count = 4098
+    builder = ti.FieldsBuilder()
+    block = builder.dense(ti.i, 2)
+    fields = [ti.field(ti.i32) for _ in range(count)]
+    for field in fields:
+        block.place(field)
+    schema = core.DenseSNodeSchema.capture(builder.ptr, [])
+    producer = builder.finalize()
+    arch = "cpu" if ti.cfg.arch == ti.cpu else "cuda"
+    try:
+        with Runtime(arch) as runtime, runtime.dense_snode_group(schema.to_json(), {}) as group:
+            assert group.layout["nodes"] == _compiled_nodes(builder.ptr)
+            paths = [[0, lane] for lane in range(count)]
+            vector = group.member(paths, "i32", element_shape=(count,))
+            tail = group.member([paths[-1]], "i32")
+            values = np.arange(2 * count, dtype=np.int32).reshape(2, count)
+            vector.write(values)
+            np.testing.assert_array_equal(np.frombuffer(tail.read(), np.int32), values[:, -1])
+            tail.write(np.array([-17, 29], dtype=np.int32))
+            values[:, -1] = [-17, 29]
+            np.testing.assert_array_equal(np.frombuffer(vector.read(), np.int32).reshape(2, count), values)
+
+            resources = len(runtime._resources)
+            for bad_paths, shape in (
+                ([[0, count]], ()),
+                ([[0, 2**31]], ()),
+                ([paths[-1]], (2**31, 2**31)),
+                ([paths[-1]], (0,)),
+                ([paths[-1]], (2,)),
+            ):
+                with pytest.raises((AotError, ValueError)):
+                    group.member(bad_paths, "i32", element_shape=shape)
+                assert len(runtime._resources) == resources
+            tail.close()
+            vector.close()
+    finally:
+        producer.destroy()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_standalone_group_uses_jit_layout_and_owns_member_storage():
     schema, producer, _ = _group(7)
     frozen = schema.to_json()

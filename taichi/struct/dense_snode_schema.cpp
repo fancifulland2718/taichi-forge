@@ -46,6 +46,8 @@ DenseSNodeSchema DenseSNodeSchema::capture(
         require(!source.is_bit_level && !source._morton &&
                     source.index_offsets.empty() && !source.has_ambient,
                 "Dense schema does not support quantized, Morton, offset or ambient layouts");
+        require(schema.nodes.size() < std::numeric_limits<int>::max(),
+                "Dense schema node count exceeds native indexing");
         const auto index = static_cast<int>(schema.nodes.size());
         Node node;
         node.parent = parent;
@@ -86,8 +88,10 @@ DenseSNodeSchema DenseSNodeSchema::capture(
 
 void DenseSNodeSchema::validate() const {
   require(version == 1, "Unsupported Dense schema version");
-  require(!nodes.empty() && nodes.size() <= 4096,
-          "Dense schema must contain 1..4096 nodes");
+  // Parent references and the normal SNode construction API use signed ints.
+  // Do not impose a smaller deployment-only node-count policy.
+  require(!nodes.empty() && nodes.size() <= std::numeric_limits<int>::max(),
+          "Dense schema requires a nonempty tree within native node indexing");
   require(nodes[0].type == SNodeType::root && nodes[0].parent == -1,
           "Dense schema must start with one root");
   std::vector<int> ancestors;
@@ -177,7 +181,6 @@ std::string DenseSNodeSchema::to_json() const {
 }
 
 DenseSNodeSchema DenseSNodeSchema::from_json(const std::string &text) {
-  require(text.size() <= 4 * 1024 * 1024, "Dense schema JSON is too large");
   DenseSNodeSchema schema;
   liong::json::deserialize(liong::json::parse_complete(text), schema);
   schema.validate();

@@ -291,6 +291,14 @@ field tables. Groups reuse existing memory handles, borrowed leases and prepared
 retirement. Closing is currently cold: wait, revoke all aliases, then release
 storage. Other groups remain valid; revoked view handles remain closeable.
 
+Dense deployment does not impose separate 4096-node, child-index or element-lane
+caps, or a fixed JSON byte limit on this construction API. Node references use
+the ordinary signed SNode index range. Member validation uses the actual tree,
+placement, ndarray ABI extents and checked byte products, and allocated root
+bounds. CPU/CUDA coverage includes 4098 places in one root and transfers through
+a large element and its last-member alias; this does not qualify large local
+matrix computation performance.
+
 `test_aot_dense_snode_group.py` compares new-size layouts with ordinary SNodes
 and covers scalar/vector/matrix/rank-zero transfers, aliasing, wrong Runtime,
 invalid dimensions, and two groups used by loaded Kernel preparations with
