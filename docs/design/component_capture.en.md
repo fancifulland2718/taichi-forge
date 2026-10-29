@@ -5,9 +5,10 @@ original decorated method through the normal AST transformer; it does not parse
 the application a second time or create a numerical wrapper.
 
 `Component` declarations describe the owner's attributes. `RuntimeValue` supports
-scalar and fixed vector/matrix values, `Array` currently supports scalar Ndarray,
+scalar and fixed vector/matrix values, `Array` supports whole managed Ndarrays,
 and `StaticValue` accepts immutable scalar/tuple configuration. Entry arguments
-support scalars, fixed vectors/matrices and scalar Ndarrays without gradients.
+support scalars, fixed vectors/matrices and managed scalar/tensor/StructNdarrays
+without gradients.
 The public SDK API is not frozen.
 
 LLVM launches use the compiler-sized argument buffer through `RuntimeContext`;
@@ -223,6 +224,31 @@ rejected conservatively. Packed bindings retain their existing behavior.
 Nested structs, nested dense trees, component SoA, gradients and whole-struct
 element indexing are not qualified by this API; Vulkan needs separate admission.
 
+`scope.ndarray(dtype, shape=...)` declares an independent normal managed array.
+Scalar, vector/matrix and fixed-AoS StructNdarray elements retain their existing
+storage types. Pass these arrays to the original Kernel's ordinary ndarray
+parameters; a normal recording can use
+`builder.dispatch(self.update, self.records, template_args={"self": self})`.
+Both root and Sequential recordings accept concrete managed arrays: ordinary
+Graph retains them through its existing fixed bindings, while component export
+derives instance resource bindings from their normal declarations. Neither path
+introduces a numerical wrapper. Direct implicit `self.ndarray[i]` access is not
+a newly supported normal JIT syntax.
+
+Component contracts distinguish independent arrays (`kind="ndarray"`) from
+SNode group members. Struct layout names refer to the existing native named AoS
+layout registry; consumers query `module.ndarray_layout(name)` for member types,
+offsets, alignment and stride. No Python layout calculator is introduced.
+Declared dimensions and aliases retain their original scope, including across
+records. Resource-triggered capacity constraints survive explicit array calls.
+Each instance allocates its own arrays, uses explicit consumer initialization,
+and shares the existing prepared-call retirement rules. `instance.nbytes`
+includes independent arrays once per allocation as well as complete SNode roots;
+it excludes driver overhead. CPU/CUDA gates cover mixed Dense/StructNdarray
+state, nested structure members, new extents, alias/type/shape failures and
+same-module CUDA Graph instances. Member-view captures, gradients and Vulkan
+component deployment remain separately qualified features.
+
 `test_aot_component_dense.py` compares the same numerical definition with ordinary
 JIT on CPU/CUDA. It covers new capacities, range/Field-shape/full-Field iteration,
 vector/matrix elements, aliases, empty active ranges and capacity-tail sentinels.
@@ -326,8 +352,8 @@ or per-kernel resource tables.
 through GraphBuilder, collects actual captures, and exports the closure through
 existing Graph lowering and `Module.add_execution_plan`. Applications do not
 maintain kernel lists or binding tables. Coverage includes sequential roots with
-one normal owner and the while slice below. If/switch, native nodes, captured
-Ndarray instance ownership and recipe search need separate qualification. Root identity includes argument
+one normal owner and the while slice below. If/switch, native nodes, external
+array views and recipe search need separate qualification. Root identity includes argument
 connections and explicit types; dynamic model values do not specialize code.
 
 Sequential subregions inherit the capture context; `Sequential.create_sequential()`

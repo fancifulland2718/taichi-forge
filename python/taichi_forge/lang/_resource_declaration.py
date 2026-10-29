@@ -74,7 +74,8 @@ class ResourceScope:
     ``scope = ResourceScope(owner)`` forwards attributes to that same owner.
     ``scope.x = scope.field(ti.f32, shape=scope.dim('n').maximum(1))`` retains
     both the declaration and the normal Field. No process hook or kernel list.
-    The API is experimental; only simple dense Field construction is qualified.
+    The API is experimental; simple dense Fields and whole managed arrays use
+    their existing storage contracts.
     """
 
     def __init__(self, owner, *, builder=None):
@@ -101,16 +102,23 @@ class ResourceScope:
 
     def __setattr__(self, name, value):
         from taichi_forge.lang.field import Field
+        from taichi_forge.lang._ndarray import Ndarray
         from taichi_forge.lang.struct import StructField
 
         if self._read_only:
             raise TypeError("A declared record scope cannot modify its existing members")
         if name in self._registry.get("values", {}) and (
-            isinstance(value, Field) or inspect.getattr_static(value, "_forge_resource_declarations", None) is not None
+            isinstance(value, (Field, Ndarray)) or inspect.getattr_static(value, "_forge_resource_declarations", None) is not None
         ):
             raise ValueError(f"Normal attribute {name!r} already has a value role")
         setattr(self._owner, name, value)
-        if isinstance(value, Field) and not isinstance(value, StructField):
+        if isinstance(value, Ndarray):
+            declaration = getattr(value, "_logical_resource_declaration", None)
+            if declaration is not None:
+                if declaration["identity"] is None:
+                    declaration["identity"] = name
+                self._registry.setdefault("arrays", {})[name] = dict(declaration)
+        elif isinstance(value, Field) and not isinstance(value, StructField):
             declaration = getattr(value, "_logical_resource_declaration", None)
             if declaration is not None:
                 if declaration["identity"] is None:
@@ -132,7 +140,7 @@ class ResourceScope:
 
         if not isinstance(name, str) or not name.isidentifier():
             raise ValueError("A value declaration requires an explicit owner attribute name")
-        if any(name in self._registry.get(kind, {}) for kind in ("fields", "dimensions", "records", "borrowed")):
+        if any(name in self._registry.get(kind, {}) for kind in ("fields", "arrays", "dimensions", "records", "borrowed")):
             raise ValueError(f"Normal attribute {name!r} already has a resource or dimension role")
         # Validate the existing contract without wrapping/replacing normal JIT
         # values or evaluating arbitrary Python descriptors. An absent optional
@@ -210,7 +218,7 @@ class ResourceScope:
             return value.expression if isinstance(value, Extent) else freeze_extent(("const", value))
 
         spec = dict(left=expression(left), right=expression(right), when=when)
-        roles = set().union(*(self._registry.get(kind, {}) for kind in ("fields", "dimensions", "values", "borrowed")))
+        roles = set().union(*(self._registry.get(kind, {}) for kind in ("fields", "arrays", "dimensions", "values", "borrowed")))
         validate_constraints({name: spec}, self._registry["dimensions"].keys(), roles)
         if self._owner is not None:
             check_constraints({name: spec}, lambda key: operator.index(getattr(self._owner, key)))
@@ -412,6 +420,31 @@ class ResourceScope:
         from taichi_forge.lang.impl import field
 
         return self._create(field, args, kwargs)
+
+    def ndarray(self, dtype, *, shape):
+        """Declare a normal independent array, retaining its logical extents.
+
+        StructNdarray keeps the existing fixed AoS element layout. A surrounding
+        FieldsBuilder does not make an independent array part of an SNode root.
+        """
+        from taichi_forge.lang.impl import ndarray
+
+        if self._read_only:
+            raise TypeError("A declared record scope cannot allocate arrays")
+        shape = shape if isinstance(shape, tuple) else (shape,)
+        if any(not isinstance(item, Extent) and type(item) is not int for item in shape):
+            raise TypeError("Array extents require declared dimensions or explicit integer constants")
+        concrete = tuple(evaluate_extent(item.expression, lambda name: getattr(self._owner, name))
+                         if isinstance(item, Extent) else item for item in shape)
+        if any(not 0 <= value <= 2**31 - 1 for value in concrete):
+            raise ValueError("Array extents must fit the nonnegative i32 indexing domain")
+        array = ndarray(dtype, shape=concrete)
+        caller = inspect.currentframe().f_back
+        array._logical_resource_declaration = dict(
+            identity=None, shape=shape, source=(caller.f_code.co_filename, caller.f_lineno))
+        array._logical_shape_namespace = self._registry
+        del caller
+        return array
 
     def vector_field(self, *args, **kwargs):
         from taichi_forge.lang.matrix import Vector

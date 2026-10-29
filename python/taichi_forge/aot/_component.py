@@ -28,6 +28,7 @@ from taichi_forge.lang.matrix import Matrix, MatrixType, Vector
 from taichi_forge.lang.util import cook_dtype
 from taichi_forge.types import primitive_types
 from taichi_forge.types.ndarray_type import NdarrayType
+from taichi_forge.types._argument_descriptor import describe_element_type
 from taichi_forge_runtime._static_values import static_key
 
 
@@ -132,29 +133,42 @@ class RuntimeValue:
 class Array:
     dtype: object
     ndim: int
+    shape: tuple = None
+    resource_id: str = ""
 
     @property
     def schema(self):
         if type(self.ndim) is not int or self.ndim < 0:
             raise ValueError("Component array ndim must be a nonnegative integer")
-        return ("ndarray", str(cook_dtype(self.dtype)), self.ndim)
+        if self.shape is not None and (len(self.shape) != self.ndim or any(
+            not (isinstance(x, str) and x) and not (type(x) is int and x >= 0) for x in self.shape
+        )):
+            raise ValueError("Component array shape requires declared dimensions or nonnegative extents")
+        return ("ndarray", describe_element_type(self.dtype).structural_key(), self.ndim, self.shape, self.resource_id)
 
     def declare(self, name):
         from taichi_forge._lib import core
 
         return kernel_arguments.decl_ndarray_arg(
-            cook_dtype(self.dtype), self.ndim, name, False, core.BoundaryMode.UNSAFE
+            describe_element_type(self.dtype).logical_type, self.ndim, name, False, core.BoundaryMode.UNSAFE,
+            logical_element_type=self.dtype,
         )
 
-    def validate(self, value):
-        from taichi_forge.lang._ndarray import ScalarNdarray
+    def validate(self, value, component=None, owner=None):
+        from taichi_forge.lang._ndarray import Ndarray
 
-        if not isinstance(value, ScalarNdarray):
-            raise TaichiCompilationError(
-                "Component Array currently requires a scalar Ndarray; Dense Field groups require the SNode layout contract"
-            )
-        if value.dtype != cook_dtype(self.dtype) or len(value.shape) != self.ndim:
+        if not isinstance(value, Ndarray):
+            raise TaichiCompilationError("Component Array requires a whole managed Ndarray; Fields require the SNode layout contract")
+        if not describe_element_type(self.dtype).matches(value.get_type().element_type) or len(value.shape) != self.ndim:
             raise TaichiCompilationError("Component array dtype/rank does not match its declaration")
+        if value.arr is None or value._runtime_prog is not impl.get_runtime().prog:
+            raise TaichiCompilationError("Component array belongs to a retired or different Runtime")
+        if getattr(value, "grad", None) is not None:
+            raise TaichiCompilationError("Component array gradients require separate qualification")
+        if component is not None and self.shape is not None:
+            expected = tuple(_dimension_value(component, owner, dim) if isinstance(dim, str) else dim for dim in self.shape)
+            if tuple(value.shape) != expected:
+                raise TaichiCompilationError("Component array shape differs from its declared extent relation")
 
     @property
     def annotation(self):
@@ -489,6 +503,12 @@ class Component:
                             ),
                             declaration.group,
                         )
+                    elif isinstance(declaration, Array):
+                        declaration = Array(declaration.dtype, declaration.ndim,
+                            None if declaration.shape is None else tuple(
+                                _capture_id((*prefix, value)) if isinstance(value, str) else value
+                                for value in declaration.shape),
+                            _capture_id((*prefix, declaration.resource_id)) if declaration.resource_id else "")
                 declaration.schema
                 flattened[identity], paths[identity] = declaration, path
                 if isinstance(declaration, Record):
@@ -543,10 +563,10 @@ class Component:
         from taichi_forge.lang.matrix import MatrixType, VectorType
 
         impl.get_runtime().materialize(for_aot=True)
-        declarations, sources, roots, fields, borrowed = {}, {}, {}, [], []
+        declarations, sources, roots, fields, borrowed, arrays = {}, {}, {}, [], [], []
         inherited_dimensions, record_options, constraints = {}, {}, {}
         derived_attributes = set()
-        namespaces, record_shapes, record_extents = {}, {}, {}
+        namespaces, record_shapes, record_extents, array_declarations = {}, {}, {}, {}
 
         def root_of(field, name):
             nodes = tuple(member.ptr.snode() for member in field._get_field_members())
@@ -576,7 +596,7 @@ class Component:
                     source=constraint["source"],
                 )
             occupied = set()
-            for kind in ("fields", "dimensions", "records", "borrowed", "values"):
+            for kind in ("fields", "arrays", "dimensions", "records", "borrowed", "values"):
                 names = registry.get(kind, {}).keys()
                 if occupied.intersection(names):
                     raise ValueError(f"Conflicting normal declaration roles: {sorted(occupied.intersection(names))!r}")
@@ -592,6 +612,12 @@ class Component:
                 sources[_capture_id((*prefix, name))] = source
             for name, expression in registry.get("inherited_dimensions", {}).items():
                 inherited_dimensions[_capture_id((*prefix, name))] = ("dim", _capture_id((*prefix[:-1], expression[1])))
+            for name, declaration in registry.get("arrays", {}).items():
+                array = _member(current, name)
+                if getattr(array, "_logical_resource_declaration", None) != declaration:
+                    raise TaichiCompilationError(f"Normal array {name!r} was replaced without redeclaration")
+                arrays.append((members, prefix, name, array, declaration))
+                sources[_capture_id((*prefix, name))] = declaration["source"]
             for name, declaration in registry["fields"].items():
                 field = _member(current, name)
                 if getattr(field, "_logical_resource_declaration", None) != declaration:
@@ -619,6 +645,30 @@ class Component:
             return members
 
         declarations = collect(owner)
+        for members, prefix, name, array, declaration in arrays:
+            namespace = getattr(array, "_logical_shape_namespace", None)
+            if id(namespace) not in namespaces:
+                raise TaichiCompilationError("Array dimensions require their original normal declaration scope")
+            source_prefix = namespaces[id(namespace)]
+            def qualify_array(expression):
+                op, *args = expression
+                if op == "dim":
+                    return (op, _capture_id((*source_prefix, args[0])))
+                return expression if op == "const" else (op, *(qualify_array(arg) for arg in args))
+            shape = []
+            for extent in declaration["shape"]:
+                if isinstance(extent, Extent):
+                    expression = qualify_array(extent.expression)
+                    identifier = "__extent_" + _digest(expression)
+                    record_extents[identifier] = Dimension(expression=expression)
+                    sources[identifier] = declaration["source"]
+                    shape.append(identifier)
+                else:
+                    shape.append(extent)
+            resource = Array(array.get_type().element_type, len(shape), tuple(shape),
+                             _capture_id((*source_prefix, declaration["identity"])))
+            members[name] = resource
+            array_declarations[_capture_id((*prefix, name))] = resource
         for members, prefix, name, field, declaration, root_id in fields:
             if name.startswith("__extent_"):
                 raise ValueError("Normal resource IDs cannot use the reserved __extent_ prefix")
@@ -695,6 +745,7 @@ class Component:
         result = cls(**complete(declarations, values))
         flattened = dict(result.declarations)
         flattened.update(record_extents)
+        flattened.update(array_declarations)
         result._paths = MappingProxyType({**result._paths, **{name: (name,) for name in record_extents}})
         for name, shape in record_shapes.items():
             field = flattened[name]
@@ -819,7 +870,7 @@ class Component:
 
     def compile(self, entry, *args, owner=None, template_args=None):
         from taichi_forge.lang.kernel_impl import _process_args, TaichiCallableTemplateMapper
-        from taichi_forge.lang._ndarray import ScalarNdarray
+        from taichi_forge.lang._ndarray import Ndarray
         from taichi_forge.lang.field import Field
 
         kernel = getattr(entry, "_primal", None)
@@ -860,8 +911,8 @@ class Component:
                     )
                 features.append(None)
             elif isinstance(argument.annotation, NdarrayType):
-                if not isinstance(value, ScalarNdarray):
-                    raise TaichiCompilationError("Component explicit arrays currently require scalar JIT ndarrays")
+                if not isinstance(value, Ndarray):
+                    raise TaichiCompilationError("Component explicit arrays require whole managed JIT ndarrays")
                 feature = TaichiCallableTemplateMapper.extract_arg(value, argument.annotation, argument.name)
                 if feature[2]:
                     raise TaichiCompilationError("Component explicit ndarray gradients are not qualified")
@@ -1007,7 +1058,19 @@ class _Capture:
             )
         if name not in self.expressions:
             value = self.component.read(self.owner, name)
-            if isinstance(declaration, (Array, DenseField)):
+            if isinstance(declaration, Array):
+                declaration.validate(value, self.component, self.owner)
+                for dim in declaration.shape or ():
+                    if isinstance(dim, str):
+                        self.dimension_dependency(dim)
+                if declaration.resource_id:
+                    canonical = self.resource_aliases.setdefault(("ndarray", declaration.resource_id), name)
+                    if canonical != name:
+                        if self.component.read(self.owner, canonical) is not value:
+                            raise TaichiCompilationError("Component array aliases must refer to the same allocation")
+                        self.expressions[name] = self.expressions[canonical]
+                        return self.expressions[name]
+            elif isinstance(declaration, DenseField):
                 declaration.validate(value)
             if isinstance(declaration, DenseField):
                 schema, members, dimensions, root_id = _dense_group(self.component, self.owner, declaration.group)
@@ -1124,12 +1187,18 @@ class _Capture:
         for name, present in self.objects.items():
             if (component.read(owner, name) is not None) != present:
                 return f"record presence {name!r}"
+        arrays = {}
         for name, schema in self.used.items():
             declaration = component.declarations.get(name)
             if declaration is None or declaration.schema != schema:
                 return f"declaration {name!r}"
             if isinstance(declaration, Dimension):
                 _dimension_value(component, owner, name)
+            if isinstance(declaration, Array):
+                value = component.read(owner, name)
+                declaration.validate(value, component, owner)
+                if declaration.resource_id and arrays.setdefault(declaration.resource_id, value) is not value:
+                    return f"array alias {name!r}"
         roots = set()
         for group, schema in self.groups.items():
             actual, members, _, root_id = _dense_group(component, owner, group)

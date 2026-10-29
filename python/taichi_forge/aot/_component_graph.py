@@ -16,11 +16,12 @@ from taichi_forge.aot._component import (
     StaticValue,
     _digest,
     _static_value,
+    _dimension_value,
 )
 from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang.exception import TaichiCompilationError
 from taichi_forge.lang.matrix import MatrixType
-from taichi_forge.types._argument_descriptor import describe_symbolic_arg
+from taichi_forge.types._argument_descriptor import describe_symbolic_arg, describe_element_type
 
 
 class _GraphCapture:
@@ -38,6 +39,8 @@ class _GraphCapture:
         self.explicit = {}
         self.entries = []
         self.symbols = {}
+        self.array_types = {}
+        self._array_values = {}
         self._members = {}
         self._choices = {
             name: declaration
@@ -87,6 +90,7 @@ class _GraphCapture:
 
     def dispatch(self, builder, entry, args, template_args, label):
         from taichi_forge.graph._graph import Arg, ArgKind, flatten_args
+        from taichi_forge.lang._ndarray import Ndarray
 
         owner = getattr(entry, "_kernel_owner", None)
         kernel = getattr(entry, "_primal", None)
@@ -103,6 +107,20 @@ class _GraphCapture:
         if self.owner is None or owner is not None and owner is not self.owner:
             raise TaichiCompilationError("A component Graph root requires one declared resource owner")
         owner = self.owner
+        managed_symbols = set()
+        normalized = []
+        for value in args:
+            if isinstance(value, Ndarray):
+                matches = [name for name, declaration in self.component.declarations.items()
+                           if isinstance(declaration, Array) and self.component.available(owner, name)
+                           and self.component.read(owner, name) is value]
+                if not matches:
+                    raise TaichiCompilationError("Component Graph managed arrays require a normal ResourceScope declaration")
+                declaration = self.component.declarations[matches[0]]
+                value = self._array_argument(declaration, matches)
+                managed_symbols.add(value.name)
+            normalized.append(value)
+        args = tuple(normalized)
         injected = produce_injected_args_for_graph(kernel, args, expected_templates)
         code = self.component.compile(
             entry,
@@ -113,6 +131,8 @@ class _GraphCapture:
         if self.build is not None:
             self.build.admit_kernel(code)
         for arg in flatten_args(args):
+            if arg.name in managed_symbols:
+                continue
             if arg.name.startswith("__component_"):
                 raise TaichiCompilationError("Explicit Graph arguments cannot use the reserved __component_ prefix")
             descriptor = describe_symbolic_arg(arg).structural_key()
@@ -169,7 +189,11 @@ class _GraphCapture:
                 if kind == "value":
                     self.values[name] = schema
             elif isinstance(declaration, Array):
-                raise TaichiCompilationError("Component Graph external Ndarray ownership is not qualified yet")
+                symbol = self._array_argument(declaration, [alias for alias in code.used
+                    if isinstance(self.component.declarations[alias], Array)
+                    and self.component.declarations[alias].resource_id == declaration.resource_id])
+                symbol_name = symbol.name
+                binding = self.bindings[symbol_name]
             else:
                 raise TaichiCompilationError(f"Unsupported component Graph capture {name!r}")
             if symbol_name in self.bindings and self.bindings[symbol_name] != binding:
@@ -191,6 +215,48 @@ class _GraphCapture:
         self.codes.append(code)
         return builder
 
+    def _array_argument(self, declaration, aliases):
+        from taichi_forge.graph._graph import Arg, ArgKind
+        from taichi_forge.lang._resource_declaration import extent_dependencies
+
+        if declaration.shape is None or not declaration.resource_id:
+            raise TaichiCompilationError("Component Graph arrays require normal ResourceScope ndarray declarations")
+        identity = declaration.resource_id
+        for alias in aliases:
+            value = self.component.read(self.owner, alias)
+            declaration.validate(value, self.component, self.owner)
+            if self._array_values.setdefault(identity, value) is not value:
+                raise TaichiCompilationError("Component array aliases must refer to the same allocation")
+
+        def dimension(name):
+            spec = self.component.declarations[name]
+            _dimension_value(self.component, self.owner, name)
+            self.dimensions[name] = json.loads(json.dumps(spec.schema))
+            for dependency in extent_dependencies(spec.expression) if spec.expression else ():
+                dimension(dependency)
+            if spec.capacity:
+                dimension(spec.capacity)
+
+        for extent in declaration.shape:
+            if isinstance(extent, str):
+                dimension(extent)
+        element = describe_element_type(declaration.dtype)
+        layout = "__component_array_" + _digest(element.structural_key()) if element.category == "struct" else ""
+        if layout:
+            self.array_types[layout] = declaration.dtype
+        resource = dict(kind="ndarray", shape=declaration.shape,
+            dtype=str(element.scalar_type) if not layout else "struct", element_shape=element.shape, layout=layout,
+            aliases=sorted(aliases), access="read_write", effects_precision="conservative", initialization="consumer_explicit")
+        previous = self.resources.get(identity)
+        if previous is not None:
+            if {k: v for k, v in previous.items() if k != "aliases"} != {k: v for k, v in resource.items() if k != "aliases"}:
+                raise TaichiCompilationError(f"Incompatible component array identity {identity!r}")
+            resource["aliases"] = sorted(set(previous["aliases"]) | set(resource["aliases"]))
+        self.resources[identity] = resource
+        symbol_name = "__component_resource_" + _digest(("ndarray", identity))
+        self.bindings[symbol_name] = dict(kind="resource", name=identity)
+        return self.symbols.setdefault(symbol_name, Arg(ArgKind.NDARRAY, symbol_name, declaration.dtype, ndim=declaration.ndim))
+
     def finish(self, builder):
         if not self.codes:
             raise TaichiCompilationError("Component roots require a nonempty captured dispatch closure")
@@ -202,6 +268,11 @@ class _GraphCapture:
         for code in self.codes:
             if not code.matches(self.component, self.owner):
                 raise TaichiCompilationError("Component dependencies changed while recording its Graph")
+        for identity, value in self._array_values.items():
+            for alias in self.resources[identity]["aliases"]:
+                if self.component.read(self.owner, alias) is not value:
+                    raise TaichiCompilationError("Component array binding changed while recording its Graph")
+                self.component.declarations[alias].validate(value, self.component, self.owner)
         facts = dict(
             version=1,
             groups=self.groups,
@@ -222,6 +293,8 @@ class _GraphCapture:
             facts["internal_arguments"] = internal
         if any(descriptor[0] == "ndarray" for descriptor in facts["explicit"].values()):
             facts["required_capabilities"].append("component_explicit_ndarray_v1")
+        if self.array_types or any(value.get("kind") == "ndarray" for value in self.resources.values()):
+            facts["required_capabilities"].append("component_array_storage_v1")
         facts["semantic_key"] = _digest(facts)
         return facts
 
@@ -229,9 +302,10 @@ class _GraphCapture:
 class ComponentGraph:
     """Frozen normal Graph plus its compiler-produced resource contract."""
 
-    def __init__(self, graph, contract):
+    def __init__(self, graph, contract, array_types=None):
         self._graph = graph
         self._contract = json.dumps(contract, sort_keys=True)
+        self._array_types = dict(array_types or {})
 
     @property
     def contract(self):
@@ -242,6 +316,12 @@ class ComponentGraph:
             raise ValueError(f"Duplicate component root {name!r}")
         plan = module.add_execution_plan(name, self._graph, snapshot_state=False)
         contract = self.contract
+        try:
+            for layout in {resource.get("layout") for resource in contract["resources"].values()} - {None, ""}:
+                module.add_ndarray_layout(layout, self._array_types[layout])
+        except BaseException:
+            module._graph_export_failed = True
+            raise
         contract.update(
             name=name,
             execution=name,
@@ -355,20 +435,40 @@ def _complete_compiler_contract(graph, contract, capture):
     for key, kind in (("resources", "resource"), ("values", "value")):
         required = {value["name"] for value in contract["bindings"].values() if value["kind"] == kind}
         contract[key] = {name: value for name, value in contract[key].items() if name in required}
-    required_groups = {value["group"] for value in contract["resources"].values()}
+    required_groups = {value["group"] for value in contract["resources"].values() if "group" in value}
     contract["groups"] = {name: value for name, value in contract["groups"].items() if name in required_groups}
     required_dimensions = {name for code in codes for name in code.contract["dimensions"]}
+    def require_dimension(name):
+        from taichi_forge.lang._resource_declaration import extent_dependencies
+        if name in required_dimensions:
+            return
+        required_dimensions.add(name)
+        spec = contract["dimensions"][name]
+        for dependency in extent_dependencies(spec[4]) if len(spec) == 5 else ():
+            require_dimension(dependency)
+        if spec[3]:
+            require_dimension(spec[3])
+    for resource in contract["resources"].values():
+        if resource.get("kind") == "ndarray":
+            for extent in resource["shape"]:
+                if isinstance(extent, str):
+                    require_dimension(extent)
     contract["dimensions"] = {
         name: value for name, value in contract["dimensions"].items() if name in required_dimensions
     }
+    used_declarations = {name for code in codes for name in code.used}
+    used_declarations.update(alias for resource in contract["resources"].values() for alias in resource["aliases"])
     constraints, constraint_dimensions, constraint_sources = capture.component.constraint_facts(
-        capture.owner, {name for code in codes for name in code.used}, entry=capture._root_name
+        capture.owner, used_declarations, entry=capture._root_name
     )
     contract["dimensions"].update(constraint_dimensions)
     if not any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
         contract["required_capabilities"] = [
             name for name in contract["required_capabilities"] if name != "component_explicit_ndarray_v1"
         ]
+    if not any(value.get("kind") == "ndarray" for value in contract["resources"].values()):
+        contract["required_capabilities"] = [name for name in contract["required_capabilities"]
+                                             if name != "component_array_storage_v1"]
     accesses, uncertain, entries, task_cache = {}, set(), [], {}
     for node, code, entry in zip(nodes, codes, contract["entries"]):
         effects = []
@@ -473,7 +573,7 @@ def compile_component_graph(component, record, *args, _build=None, **kwargs):
             from taichi_forge_runtime.aot._component import _control_identity
 
             contract["semantic_key"] = _control_identity(contract)
-        return ComponentGraph(graph, contract)
+        return ComponentGraph(graph, contract, capture.array_types)
     except BaseException:
         graph.close()
         raise

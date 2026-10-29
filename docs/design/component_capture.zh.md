@@ -4,10 +4,10 @@
 它沿正常 AST transformer 编译原有装饰方法，不重跑前端发现捕获，也不生成数值包装函数。
 
 `Component` 在组件层声明属性：`RuntimeValue` 支持标量和固定 vector/matrix，
-`Array` 当前支持标量 Ndarray，`StaticValue` 支持不可变标量/tuple 配置。
+`Array` 支持完整的受管理 Ndarray，`StaticValue` 支持不可变标量/tuple 配置。
 可选 `StaticValue(choices=(...))` 声明有限部署配置域；它是准入约束，代码身份仍仅使用
 入口实际读取的静态值。缩窄 choices 时，缓存命中及直接调用同样检查域，不借旧候选绕过。
-入口显式参数支持标量、固定 vector/matrix 和无梯度的标量 Ndarray。
+入口显式参数支持标量、固定 vector/matrix 和无梯度的 scalar/tensor/StructNdarray。
 组件 Graph 也接受正常自由 Kernel helper：使用原 `template_args` 指定同一个声明 owner，
 无需包装成方法。无 owner 参数的 helper 仍经同一受约束捕获编译路径检查全局依赖。
 额外模板参数必须是可记录的静态值，进入代码身份；owner 身份、数组地址和 shape 不进入。
@@ -219,6 +219,23 @@ JIT 与借用存储、同模块不同尺寸实例交错执行。Host 紧凑缓�
 嵌套 struct/多层 dense、组件 SoA、梯度及结构元素整体索引尚未取得该入口资格，
 Vulkan 也需单独验证。
 
+`scope.ndarray(dtype, shape=...)` 在正常分配处声明独立的受管理数组，保留标量、
+向量/矩阵和固定 AoS StructNdarray 的原存储类型。数值 Kernel 使用原有显式
+`ti.types.ndarray` 参数；正常录制可写
+`builder.dispatch(self.update, self.records, template_args={"self": self})`。
+根和 Sequential 均支持传入具体数组：普通 Graph 沿现有 fixed bindings 持有它，
+组件导出则从正常声明自动生成实例资源绑定，无需数值包装或逐核 AOT 参数表。
+此功能不将隐式 `self.ndarray[i]` 变成新的普通 JIT 语法。
+
+资源合同以 `kind="ndarray"` 区分独立数组与 SNode 成员；结构数组的 layout 名字
+引用原生已有的 AoS 布局注册表，消费者通过 `module.ndarray_layout(name)` 查询
+类型、offset、alignment 和 stride，不在 Python 中重新计算布局。跨记录别名保留
+原维度来源，显式数组调用的容量约束也进入最终合同。每实例独立分配、显式初始化，
+复用现有 prepared 租约与退休；`instance.nbytes` 累加完整 SNode 根及独立数组，
+不重复计算别名，不包含驱动开销。CPU/CUDA 已验证 Dense/StructNdarray 混用、嵌套
+成员、新尺寸、别名/类型/shape 错误及同模块 CUDA Graph 多实例。成员视图捕获、
+梯度和 Vulkan 组件部署仍需独立取得资格。
+
 真实 GeoPhys 正常构造现已提供有限 RNE 数值证据：CPU/CUDA 上 3/7/5 刚体、不同拓扑、
 质量、qpos/qvel 和重力复用原 `_rne_bias_force`，与普通 JIT 对照；静止链另检查解析重力矩。
 正常资源分组先隔离 body 状态、广义动力学和 bias-force 工作区，所有路径共用这些分组；
@@ -227,7 +244,7 @@ Vulkan 也需单独验证。
 `Component.compile_graph(normal_record)` 现在沿原 GraphBuilder 记录原装饰入口，收集
 各入口的实际捕获，并通过既有 Graph lowering/`Module.add_execution_plan` 自动导出
 闭包。应用无需维护 Kernel 名单或绑定表。当前覆盖一个正常 owner 的顺序根及以下 while
-切片；if/switch、native 节点、捕获 Ndarray 的实例所有权及 recipe 搜索仍需分别取得资格。
+切片；if/switch、native 节点、外部数组视图及 recipe 搜索仍需分别取得资格。
 根身份包含每次调用的参数连接及显式参数类型；动态模型值不进入代码身份。
 
 顺序子区域继承同一捕获上下文，`Sequential.create_sequential()` 继续传递该上下文和

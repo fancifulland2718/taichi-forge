@@ -16429,6 +16429,27 @@ def _declared_private_arguments(declarations, args):
         yield symbolic, requirement
 
 
+def _bind_managed_array_arguments(builder, arguments):
+    """Retain concrete normal arrays using Graph's existing fixed bindings."""
+    from taichi_forge.lang._ndarray import Ndarray
+
+    result = []
+    for value in arguments:
+        if isinstance(value, Ndarray):
+            if value.arr is None or value._runtime_prog is not impl.get_runtime().prog:
+                raise TaichiRuntimeError("Graph array belongs to a retired or different Runtime")
+            # This name is local to a live JIT Graph, never a component code key.
+            symbol = Arg(ArgKind.NDARRAY, f"__ti_managed_array_{id(value)}",
+                         value.get_type().element_type, ndim=len(value.shape))
+            if hasattr(builder, "_bind_internal_runtime_arg"):
+                builder._bind_internal_runtime_arg(symbol, value)
+            else:
+                builder._fixed_runtime_args[symbol.name] = value
+            value = symbol
+        result.append(value)
+    return tuple(result)
+
+
 class Sequential:
 
     def __init__(
@@ -16558,6 +16579,7 @@ class Sequential:
         label = _normalize_dispatch_label(label)
         if self._component_capture is not None:
             return self._component_capture.dispatch(self, kernel_fn, args, template_args, label)
+        args = _bind_managed_array_arguments(self, args)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
         self._bind_declared_private_args(unzipped_args)
@@ -17225,6 +17247,7 @@ class GraphBuilder:
         label = _normalize_dispatch_label(label)
         if self._component_capture is not None:
             return self._component_capture.dispatch(self, kernel_fn, args, template_args, label)
+        args = _bind_managed_array_arguments(self, args)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
         task_facts = None

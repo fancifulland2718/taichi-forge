@@ -105,6 +105,8 @@ class Component:
             if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
+            if any(resource.get("kind") == "ndarray" for resource in contract["resources"].values()):
+                capabilities.add("component_array_storage_v1")
             if any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
                 capabilities.add("component_explicit_ndarray_v1")
             if contract["version"] >= 2:
@@ -194,9 +196,28 @@ class Component:
                         if extent["parameter"]:
                             depend(extent["parameter"])
             aliases = {}
+            self._array_layouts = {}
             for key, resource in contract["resources"].items():
+                array = resource.get("kind") == "ndarray"
+                if array:
+                    if set(resource) != {"kind", "shape", "dtype", "element_shape", "layout", "aliases",
+                                         "access", "effects_precision", "initialization"}:
+                        raise ValueError("Invalid component array contract")
+                    for extent in resource["shape"]:
+                        if isinstance(extent, str):
+                            depend(extent)
+                        elif type(extent) is not int or extent < 0:
+                            raise ValueError("Invalid component array extent")
+                    if resource["layout"]:
+                        if resource["dtype"] != "struct" or resource["element_shape"]:
+                            raise ValueError("Invalid component structure array contract")
+                        self._array_layouts[key] = module.ndarray_layout(resource["layout"])
+                    else:
+                        from ._runtime import _dtype, _shape
+                        _dtype(resource["dtype"])
+                        _shape(resource["element_shape"])
                 if (
-                    resource.get("group") not in contract["groups"]
+                    (not array and (resource.get("kind") is not None or resource.get("group") not in contract["groups"]))
                     or not (
                         resource.get("access") == "read_write"
                         and resource.get("effects_precision") == "conservative"
@@ -322,13 +343,17 @@ class ComponentInstance:
                         schema, {key: self._dimensions[key] for key in required}
                     )
                 for name, resource in contract["resources"].items():
-                    view = self._groups[resource["group"]].member(
-                        resource["paths"], resource["dtype"], element_shape=resource["element_shape"]
-                    )
-                    self._resources[name] = view
                     shape = tuple(
                         self._dimensions[item] if isinstance(item, str) else item for item in resource["shape"]
                     )
+                    if resource.get("kind") == "ndarray":
+                        view = runtime.ndarray(component._array_layouts.get(name, resource["dtype"]), shape,
+                                               element_shape=resource["element_shape"])
+                    else:
+                        view = self._groups[resource["group"]].member(
+                            resource["paths"], resource["dtype"], element_shape=resource["element_shape"]
+                        )
+                    self._resources[name] = view
                     if view.shape != shape:
                         raise ValueError("Native SNode layout differs from the component extent declaration")
         except BaseException:
@@ -352,9 +377,12 @@ class ComponentInstance:
 
     @property
     def nbytes(self):
-        """Root allocation bytes; excludes executable code and driver overhead."""
+        """Root and independent-array bytes; excludes code and driver overhead."""
         self._check()
-        return sum(group.nbytes for group in self._groups.values())
+        contract = self._component.contract
+        return sum(group.nbytes for group in self._groups.values()) + sum(
+            self._resources[name].nbytes for name, resource in contract["resources"].items()
+            if resource.get("kind") == "ndarray")
 
     def resource(self, name):
         self._check()
