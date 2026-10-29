@@ -8,8 +8,8 @@ from ._runtime import NativeResource
 class SNodeInstance(NativeResource):
     """Empty fixed-tree state; numerical initialization uses existing entries.
 
-    CUDA independent execution domains are currently qualified. Allocate all
-    instances at a cold boundary before preparing sparse views. Shape/tree schema
+    CPU prepared calls and CUDA independent domains bind private state. Allocate
+    CUDA instances before preparing sparse views. Shape/tree schema
     stay fixed; active state and values belong to the instance.
     """
 
@@ -18,9 +18,9 @@ class SNodeInstance(NativeResource):
         runtime = module._runtime
         with runtime._lock:
             module._check()
-            if runtime.arch != "cuda":
-                raise NotImplementedError("SNode instances currently require CUDA")
-            runtime._api.load_snode_instances()
+            if runtime.arch not in ("cpu", "x64", "arm64", "cuda"):
+                raise NotImplementedError("SNode instances require CPU/CUDA")
+            runtime._api.load_snode_instances(runtime.arch)
             handle = runtime._api.call(
                 runtime._api.ti_create_aot_snode_instance_ext, runtime._handle, module._handle)
             try:

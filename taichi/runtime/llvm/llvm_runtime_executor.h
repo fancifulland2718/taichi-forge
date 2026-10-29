@@ -121,7 +121,9 @@ class LlvmRuntimeExecutor {
       const std::vector<int> &tree_ids);
   std::shared_ptr<SparseTreeAdmission::Loan> reserve_cuda_sparse_trees(
       const std::vector<LlvmSparseRuntimeViewTree> &trees);
-  std::vector<LlvmSparseRuntimeViewTree> cuda_runtime_view_trees(
+  std::shared_ptr<SparseTreeAdmission::Loan> reserve_cpu_sparse_trees(
+      const std::vector<LlvmSparseRuntimeViewTree> &trees);
+  std::vector<LlvmSparseRuntimeViewTree> runtime_view_trees(
       const std::vector<int> &tree_ids);
 
   const CompileConfig &get_config() const {

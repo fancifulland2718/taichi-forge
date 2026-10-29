@@ -5,6 +5,7 @@ target_sources(cpu_runtime
   PRIVATE
     jit_cpu.cpp
     kernel_launcher.cpp
+    sparse_runtime_view.cpp
   )
 
 # jit_cpu.cpp includes PassManagerBuilder.h, deprecated on LLVM 19.

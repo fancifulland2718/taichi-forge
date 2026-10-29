@@ -716,7 +716,8 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
   // Materialization may replace the shared allocator cursor, even when the
   // new tree itself does not overlap an existing view. Drain/return borrowed
   // views before this cold mutation; a default-stream wait is insufficient.
-  require_no_cuda_sparse_loans();
+  if (config_.arch == Arch::cuda)
+    require_no_cuda_sparse_loans();
   const auto construction =
       std::make_shared<const LLVM::SNodeTreeLayout>(field_cache_data);
   auto *const runtime_jit = get_runtime_jit_module();
@@ -1277,7 +1278,7 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
                                                    !all_dense})
           .second;
   TI_ASSERT(state_inserted);
-  if (config_.arch == Arch::cuda)
+  if (config_.arch == Arch::cuda || arch_is_cpu(config_.arch))
     active_snode_tree_runtime_states_.at(tree_id).registration =
         SparseTreeRegistration::create(sparse_identities_, sparse_admission_);
 
@@ -2082,14 +2083,16 @@ LlvmRuntimeExecutor::prepare_cuda_sparse_access(const std::vector<int> &ids) {
 #if defined(TI_WITH_CUDA)
   auto submission = CUDAContext::get_instance().get_submission_lock_guard();
 #endif
-  auto uses = bind_cuda_sparse_trees(cuda_runtime_view_trees(ids));
+  auto uses = bind_cuda_sparse_trees(runtime_view_trees(ids));
   return uses.empty() ? nullptr : sparse_admission_->prepare(uses);
 }
 
 std::vector<LlvmSparseRuntimeViewTree>
-LlvmRuntimeExecutor::cuda_runtime_view_trees(const std::vector<int> &ids) {
+LlvmRuntimeExecutor::runtime_view_trees(const std::vector<int> &ids) {
+  std::unique_lock<std::recursive_mutex> submission;
 #if defined(TI_WITH_CUDA)
-  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+  if (config_.arch == Arch::cuda)
+    submission = CUDAContext::get_instance().get_submission_lock_guard();
 #endif
   std::vector<int> sorted = ids;
   std::sort(sorted.begin(), sorted.end());
@@ -2098,10 +2101,32 @@ LlvmRuntimeExecutor::cuda_runtime_view_trees(const std::vector<int> &ids) {
   for (int id : sorted) {
     auto state = active_snode_tree_runtime_states_.find(id);
     if (state == active_snode_tree_runtime_states_.end())
-      throw std::invalid_argument("CUDA kernel references an unmaterialized tree");
+      throw std::invalid_argument("LLVM kernel references an unmaterialized tree");
     trees.push_back({id, 0, state->second.generation});
   }
   return trees;
+}
+
+std::shared_ptr<SparseTreeAdmission::Loan>
+LlvmRuntimeExecutor::reserve_cpu_sparse_trees(
+    const std::vector<LlvmSparseRuntimeViewTree> &trees) {
+  if (!arch_is_cpu(config_.arch) || finalized_)
+    throw std::invalid_argument("CPU sparse loan requires a live CPU executor");
+  std::vector<SparseTreeAdmission::PinnedUse> uses;
+  int previous = -1;
+  for (const auto &tree : trees) {
+    const auto found = active_snode_tree_runtime_states_.find(tree.tree_id);
+    if (tree.tree_id <= previous || tree.reserved ||
+        found == active_snode_tree_runtime_states_.end() ||
+        tree.generation != found->second.generation || !found->second.registration)
+      throw std::invalid_argument("Invalid or stale CPU sparse tree closure");
+    previous = tree.tree_id;
+    // CPU submission is synchronous and its owner retains the executor. The
+    // registration blocks destruction until managers have been returned.
+    uses.push_back({{found->second.registration->handle(),
+                     SharedResourceUse::exclusive}, found->second.registration});
+  }
+  return uses.empty() ? nullptr : sparse_admission_->reserve(uses);
 }
 
 std::shared_ptr<SparseTreeAdmission::Loan>

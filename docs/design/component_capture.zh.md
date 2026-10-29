@@ -256,18 +256,25 @@ pointer/dense 的激活、遍历、deactivate、独立退休及单根/多根绑�
 `module.prepare_execution(plan, bindings, execution_domain=domain, snode_instance=state)`
 准备实例调用。状态持有该模块固定树的空克隆及实际 loaded code/prototype 租约；
 只读 `state.info` 查询真实代码/状态树 ID 和代际。准备时按 Plan 实际 Kernel 闭包
-建立不可变映射，初始化和控制沿原 ExecutionPlan，仍支持逐提交可变参数。
+建立不可变映射，初始化和控制沿原 ExecutionPlan，CUDA 仍支持逐提交可变参数。
+CPU 使用同一接口但省略 `execution_domain`：prepared 调用上下文持有独立且不可变的
+Runtime 目录，通过现有 CPU launcher 同步执行，不切换模块共享指针或注册代码。
 固定 module-root 数组别名不得混入此实例调用。
 
 关闭状态只退休依赖它的调用和已接受提交，同一执行域的其他状态继续有效。
 关闭公开 Module 禁止新调用并排空其 prepared 用户；尚存状态保留代码/原型租约，
 在自身退休时释放。一个状态不能同时借给多个 prepared view；旧 view 退休后可换
-Plan 重新准备，不隐式重置历史。新增实例分配仍要求在冷边界归还全部稀疏视图。
+Plan 重新准备，不隐式重置历史。CUDA 新增实例分配仍要求在冷边界归还全部稀疏视图；
+CPU 使用稳定的 Host 分配器，新增状态无需退休另一状态的 prepared view。
+CPU 准备要求代码带有 sparse-view 编译资格，拒绝随机数、外部调用、mesh、打印或
+未知 Runtime 状态。旧固定 AOT 产物仍可普通调用，使用 CPU 实例绑定需重新构建；
+离线缓存 schema 更新为 99。实例断言通过准备期解析的函数地址检查，不在每次回放查询符号。
 
 `test_aot_snode_instances.py` 从正常 pointer/dense、bitmasked/dense Kernel 导出，
 冻结后在物理上只含 Runtime 的 `-I -S` 进程消费，覆盖空激活/数值、不同初始化、
 多根遍历/停用、同域交错、原生错误 owner 拒绝、失败准备、独立关闭、代际回收与
-在途 Module 关闭。原模块状态和 loaded Kernel handle 不变。公开 CPU/Vulkan
+CUDA 在途 Module 关闭；CPU 另覆盖循环、其他 view 存活期间分配、随机数准入失败清理
+及断言隔离。原模块状态和 loaded Kernel handle 不变。公开 Vulkan
 实例调用、Sparse 捕获声明和通用组件导出仍待接通，不据此宣称完整应用或稳态性能。
 
 真实 GeoPhys 正常构造现已提供有限 RNE 数值证据：CPU/CUDA 上 3/7/5 刚体、不同拓扑、

@@ -1,4 +1,6 @@
 #include "taichi/runtime/cpu/kernel_launcher.h"
+#include "taichi/runtime/cpu/sparse_runtime_view.h"
+#include "taichi/runtime/llvm/runtime_context_abi.h"
 #include "taichi/runtime/native_kernel_result.h"
 
 #include <chrono>
@@ -333,7 +335,8 @@ void KernelLauncher::bind_runtime_context(const Context &registration,
 
 KernelLauncher::PreparedLaunch KernelLauncher::prepare_launch(
     Handle handle,
-    LaunchContextBuilder &ctx) {
+    LaunchContextBuilder &ctx,
+    std::shared_ptr<SparseRuntimeView> view) {
   std::lock_guard<std::mutex> execution_lock(execution_mutex_);
   std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
   const auto found = contexts_.find(handle.get_launch_id());
@@ -344,8 +347,20 @@ KernelLauncher::PreparedLaunch KernelLauncher::prepare_launch(
               "Prepared CPU execution requires owned returns and ArgPacks");
   PreparedLaunch result;
   result.registration_ = found->second;
+  if (view) {
+    if (result.registration_->sparse_runtime_view_abi != LLVM::kSparseRuntimeViewABI)
+      throw std::invalid_argument("CPU kernel has no compiled sparse runtime view qualification");
+    if (const auto *blocker = independent_runtime_state_blocker(
+            result.registration_->runtime_state & ~(runtime_state_sparse | runtime_state_error)))
+      throw std::invalid_argument(blocker);
+  }
   bind_runtime_context(*result.registration_, ctx);
   result.context_ = ctx.get_context();
+  if (view) {
+    result.context_.runtime = view->bind(result.context_.runtime,
+                                        result.registration_->snode_tree_ids);
+    result.runtime_view_ = std::move(view);
+  }
   // Exact range scheduling reads its launch binding immediately before the
   // ordinary arguments; the prepared copy must preserve that prefix as well.
   const auto prefix = ctx.arg_buffer_prefix_size();
@@ -362,6 +377,14 @@ KernelLauncher::PreparedLaunch KernelLauncher::prepare_launch(
   return result;
 }
 
+std::vector<int> KernelLauncher::snode_tree_ids(Handle handle) {
+  std::shared_lock<std::shared_mutex> lock(registration_mutex());
+  const auto found = contexts_.find(handle.get_launch_id());
+  if (found == contexts_.end())
+    throw std::invalid_argument("CPU entry is no longer registered");
+  return found->second->snode_tree_ids;
+}
+
 void KernelLauncher::launch_prepared(std::vector<PreparedLaunch> &launches) {
   // One lock for the entire ordered batch. Function addresses and ndarray
   // pointers were resolved before publication; warm replay does no ABI work.
@@ -370,6 +393,8 @@ void KernelLauncher::launch_prepared(std::vector<PreparedLaunch> &launches) {
   for (auto &launch : launches) {
     for (auto task : launch.registration_->task_funcs)
       task(&launch.context_);
+    if (launch.runtime_view_)
+      launch.runtime_view_->check_error();
   }
 }
 
@@ -389,6 +414,8 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
 
     const auto &internal_data = compiled.get_internal_data();
     auto data = internal_data.compiled_data.clone();
+    ctx->sparse_runtime_view_abi = LLVM::sparse_runtime_view_abi(*data.module);
+    ctx->runtime_state = LLVM::runtime_state_use(*data.module);
     auto parameters = internal_data.args;
     auto *jit_module = executor->create_jit_module(std::move(data.module));
 

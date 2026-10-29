@@ -72,7 +72,7 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
                    [](const auto &task) { return task.external_shared_staged; }))
     declare_runtime_affine_arrays(*data.compiled_data.module, dependencies.runtime_affine_arrays);
   declare_runtime_context_abi(*data.compiled_data.module);
-  if (compile_config.arch == Arch::cuda)
+  if (compile_config.arch == Arch::cuda || arch_is_cpu(compile_config.arch))
     data.compiled_data.module->addModuleFlag(
         llvm::Module::Error, kSparseRuntimeViewABIFlag, kSparseRuntimeViewABI);
   // Dense struct-for may become an ordinary range during final task lowering.

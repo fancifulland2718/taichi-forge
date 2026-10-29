@@ -273,7 +273,11 @@ retains the exact loaded code/prototype owner, and reports actual code/state tre
 IDs and generations through read-only `state.info`. Preparation derives an
 immutable mapping for the kernels actually used by the plan. Numerical
 initialization and control continue through the original ExecutionPlan; mutable
-submission parameters remain supported. Fixed module-root array aliases cannot
+submission parameters remain supported on CUDA. CPU uses the same call without
+`execution_domain`: its prepared contexts retain an immutable private runtime
+directory and execute synchronously through the existing CPU launcher. The
+module's shared pointers and registered code are never switched between states.
+Fixed module-root array aliases cannot
 be mixed with this instance binding.
 
 Closing a state retires only its dependent calls, including accepted submissions;
@@ -281,16 +285,24 @@ another state in the same execution domain remains usable. Closing the public
 module prevents new calls and drains its prepared users; remaining state handles
 retain the code/prototype lease until their own retirement. One state cannot be
 lent to concurrent prepared views. After a view retires, another plan can borrow
-the same state without resetting it. New allocations still require returning all
-outstanding sparse views at a cold boundary.
+the same state without resetting it. CUDA allocations still require returning all
+outstanding sparse views at a cold boundary. CPU uses the stable host allocator;
+creating a new state does not require retiring another state's prepared view.
+CPU preparation requires the compiled sparse-view qualification and rejects
+random, external, mesh, print or unknown runtime-state uses. Existing fixed AOT
+artifacts without that qualification can still use ordinary calls, but must be
+rebuilt for CPU instance binding (offline-cache schema 99). Private assertion
+diagnostics are checked through function addresses resolved during preparation.
 
 `test_aot_snode_instances.py` exports ordinary pointer/dense and bitmasked/dense
 kernels, freezes the artifact, and consumes it in a physically runtime-only
 `-I -S` process. It covers empty activation/value state, distinct initialization,
 multi-root traversal/deactivation, same-domain interleaving, native foreign-owner
 rejection, failed preparation, per-state close, generation reuse, and module
-close with accepted work. The original module state and loaded kernel handle
-remain unchanged. Public CPU/Vulkan instance calls, Sparse capture declarations
+close with accepted work on CUDA. CPU additionally covers loops, allocation while
+a sibling view remains live, failed RNG admission, and assertion isolation. The
+original module state and loaded kernel handle remain unchanged. Public Vulkan
+instance calls, Sparse capture declarations
 and generic component export remain unqualified; these tests do not establish
 whole-application support or steady-state performance.
 

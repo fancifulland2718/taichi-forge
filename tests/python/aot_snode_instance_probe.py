@@ -32,7 +32,7 @@ def reject(call, message):
         raise AssertionError("Invalid call was accepted: " + message)
 
 
-def check(folder):
+def check_cuda(folder):
     from taichi_forge_runtime.aot import Runtime, Scalar
 
     with Runtime("cuda") as runtime:
@@ -163,8 +163,102 @@ def check(folder):
             ticket.close()
 
 
+def check_cpu(folder):
+    from taichi_forge_runtime.aot import Runtime, Scalar, ExecutionPlan
+    from taichi_forge_runtime.aot import _c_api as abi
+    from taichi_forge_runtime.aot._runtime import _argument, _name
+
+    with Runtime("cpu") as runtime:
+        module = runtime.load_module(folder)
+        module.kernel("seed")(Scalar("i32", 700))
+        code = module.kernel("step")._handle
+        states = [module.snode_instance() for _ in range(2)]
+        a, b = [state.info for state in states]
+        assert len(a) == len(b) == 2
+        assert [r["code_tree"] for r in a] == [r["code_tree"] for r in b]
+        assert not {r["state_tree"] for r in a} & {r["state_tree"] for r in b}
+        outputs = [runtime.ndarray("i32", 32) for _ in states]
+        empty = [runtime.ndarray("i32", 32) for _ in states]
+        args = [dict(out=outputs[i], empty=empty[i], base=Scalar("i32", base), drop=Scalar("i32", 0))
+                for i, base in enumerate((10, 100))]
+        plan = module.execution_plan("step")
+        retained = []
+        native = (abi.NamedArgument * len(args[0]))(*[
+            abi.NamedArgument(_name(name), _argument(runtime, value, retained))
+            for name, value in args[0].items()])
+        with Runtime("cpu") as other:
+            reject(lambda: runtime._api.call(runtime._api.ti_create_aot_snode_instance_ext,
+                                            other._handle, module._handle), "not live")
+        foreign = runtime.load_module(folder)
+        reject(lambda: runtime._api.call(runtime._api.ti_prepare_execution_plan_snode_instance_ext,
+                                        runtime._handle, foreign._handle, len(plan._json), plan._json,
+                                        len(native), native, 0, None, states[0]._handle), "another loaded module")
+        foreign.close()
+        unsupported = ExecutionPlan([dict(kind="kernel", entry="random_state", arguments=[])])
+        reject(lambda: module.prepare_execution(unsupported, {}, snode_instance=states[0]), "random-number")
+        # Failed preparation must release the partial runtime view and its loan.
+        calls = [module.prepare_execution(plan, args[i], snode_instance=states[i]) for i in range(2)]
+        reject(lambda: module.prepare_execution(plan, args[0], snode_instance=states[0]), "loan")
+        for call in calls:
+            call.initialize()
+        assert values(empty[0]) == values(empty[1]) == [0] * 32
+        for call in calls:
+            call.run()
+        assert values(outputs[0]) == expected(10, 1)
+        assert values(outputs[1]) == expected(100, 1)
+
+        # Rebind an existing state after its prior view is returned. A loop's
+        # entries use the same immutable instance mapping as flat dispatches.
+        calls[0].close()
+        predicate = runtime.ndarray("i32", 1)
+        predicate.write(array.array("i", [1]))
+        loop = ExecutionPlan([dict(kind="while", predicate="p", max_iterations=2,
+                                   condition=[], body=[dict(kind="kernel", entry="step", arguments=["drop"])]),
+                              dict(kind="kernel", entry="read", arguments=["out"])])
+        calls[0] = module.prepare_execution(loop, dict(p=predicate, out=outputs[0], drop=Scalar("i32", 1)),
+                                            snode_instance=states[0])
+        calls[0].run()
+        wanted = expected(10, 3)
+        wanted[:4] = [0] * 4
+        assert values(outputs[0]) == wanted
+        states[0].close()
+        reject(lambda: calls[0].run(), "retired dependency")
+        calls[1].run()
+        assert values(outputs[1]) == expected(100, 2)
+        assert module.kernel("step")._handle == code
+
+        # CPU allocation is synchronous and may coexist with another state's
+        # borrowed view. Recycled IDs acquire a new generation and empty state.
+        fresh_state = module.snode_instance()
+        fresh_info = fresh_state.info
+        assert {r["state_tree"] for r in fresh_info} == {r["state_tree"] for r in a}
+        assert {r["state_generation"] for r in fresh_info}.isdisjoint(r["state_generation"] for r in a)
+        fresh = module.prepare_execution(plan, args[0], snode_instance=fresh_state)
+        fresh.initialize()
+        assert values(empty[0]) == [0] * 32
+        fresh.run()
+        assert values(outputs[0]) == expected(10, 1)
+        fresh.close()
+        failure = module.prepare_execution(
+            ExecutionPlan([dict(kind="kernel", entry="checked", arguments=["flag"])]),
+            dict(flag=Scalar("i32", -1)), snode_instance=fresh_state)
+        reject(failure.run, "instance assertion")
+        failure.close()
+        calls[1].run()
+        assert values(outputs[1]) == expected(100, 3)
+        fresh_state.close()
+        original = runtime.ndarray("i32", 32)
+        module.kernel("read")(original)
+        assert values(original) == expected(700, 0)
+        module.close()
+        reject(lambda: calls[1].run(), "retired dependency")
+        assert states[1].info == b
+        calls[1].close()
+        states[1].close()
+
+
 if __name__ == "__main__":
     sys.path.insert(0, os.environ["FORGE_AOT_TEST_PACKAGE"])
     sys.meta_path.insert(0, NoNumericalSource())
-    check(sys.argv[1])
+    (check_cpu if len(sys.argv) > 2 and sys.argv[2] == "cpu" else check_cuda)(sys.argv[1])
     print("PUBLIC_SNODE_INSTANCES_OK")

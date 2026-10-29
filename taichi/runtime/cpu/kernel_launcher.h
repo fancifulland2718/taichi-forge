@@ -9,6 +9,7 @@
 
 namespace taichi::lang {
 namespace cpu {
+class SparseRuntimeView;
 
 class KernelLauncher : public LLVM::KernelLauncher {
   using Base = LLVM::KernelLauncher;
@@ -24,6 +25,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::vector<int> snode_tree_ids;
     std::vector<TaskFunc> task_funcs;
     bool bounded_range{false};
+    unsigned sparse_runtime_view_abi{0};
+    std::uint32_t runtime_state{0};
     std::vector<OffloadedTaskType> task_types;
     std::vector<std::pair<std::string, std::string>> task_trace_metadata;
     std::vector<SparseTaskMetadata> sparse_task_metadata;
@@ -48,8 +51,11 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::shared_ptr<const Context> registration_;
     RuntimeContext context_{};
     std::vector<char> arguments_;
+    std::shared_ptr<SparseRuntimeView> runtime_view_;
   };
-  PreparedLaunch prepare_launch(Handle handle, LaunchContextBuilder &ctx);
+  PreparedLaunch prepare_launch(Handle handle, LaunchContextBuilder &ctx,
+                                std::shared_ptr<SparseRuntimeView> view = {});
+  std::vector<int> snode_tree_ids(Handle handle);
   void launch_prepared(std::vector<PreparedLaunch> &launches);
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;

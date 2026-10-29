@@ -12,7 +12,7 @@ from taichi_forge_runtime.aot import ExecutionPlan
 from tests import test_utils
 
 
-@test_utils.test(arch=ti.cuda, require=ti.extension.sparse, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False, debug=True)
 def test_same_loaded_sparse_code_runs_independent_runtime_instances(tmp_path):
     left, right = ti.field(ti.i32), ti.field(ti.i32)
     first, second = ti.FieldsBuilder(), ti.FieldsBuilder()
@@ -44,9 +44,17 @@ def test_same_loaded_sparse_code_runs_independent_runtime_instances(tmp_path):
             out[i] = left[i]
             out[16 + i] = right[i]
 
+    @ti.kernel
+    def random_state():
+        left[0] = ti.random(ti.i32)
+
+    @ti.kernel
+    def checked(flag: ti.i32):
+        assert flag >= 0, "instance assertion"
+
     seed(999)
     artifact = ti.aot.Module()
-    for kernel in (seed, step, read):
+    for kernel in (seed, step, read, random_state, checked):
         artifact.add_kernel(kernel)
     artifact.add_field("left", left)
     artifact.add_field("right", right)
@@ -72,7 +80,8 @@ def test_same_loaded_sparse_code_runs_independent_runtime_instances(tmp_path):
     # Use only the runtime package's matching embedded bitcode, not a developer
     # tree inherited from the producer test process.
     environment["TI_LIB_DIR"] = str(package / "taichi_forge_runtime/_lib/runtime")
-    result = subprocess.run([sys.executable, "-I", "-S", str(consumer), str(folder)],
+    backend = "cpu" if ti.cfg.arch == ti.cpu else "cuda"
+    result = subprocess.run([sys.executable, "-I", "-S", str(consumer), str(folder), backend],
                             cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PUBLIC_SNODE_INSTANCES_OK" in result.stdout

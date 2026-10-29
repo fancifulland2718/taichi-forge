@@ -19,8 +19,8 @@ struct InstanceBindingInfo {
 SNodeInstance::SNodeInstance(AotModule &module)
     : code_(module.retain_code()),
       module_(dynamic_cast<LLVM::LlvmAotModule *>(code_.get())) {
-  if (!module_ || module_->arch() != taichi::Arch::cuda)
-    throw MemoryBindingError("SNode instances require a loaded CUDA AOT module");
+  if (!module_ || (!arch_is_cpu(module_->arch()) && module_->arch() != taichi::Arch::cuda))
+    throw MemoryBindingError("SNode instances require a loaded CPU/CUDA AOT module");
   executor_ = module_->get_runtime_executor();
 }
 
@@ -84,6 +84,12 @@ std::string SNodeInstance::info() const {
     result.push_back({binding.tree_id, binding.source_tree_id,
                       binding.code_generation, binding.generation});
   return liong::json::print(liong::json::serialize(result));
+}
+
+std::shared_ptr<cpu::SparseRuntimeView> SNodeInstance::cpu_view(
+    const std::vector<int> &code_trees) const {
+  return std::make_shared<cpu::SparseRuntimeView>(
+      *executor_, bindings_for(*executor_, code_trees));
 }
 }  // namespace capi
 

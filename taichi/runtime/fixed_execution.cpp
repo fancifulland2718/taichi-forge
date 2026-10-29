@@ -266,8 +266,11 @@ FixedExecution::FixedExecution(
     const VulkanSubmissionRecipe *submission_recipe,
     const OrderedStorageRing *storage_ring,
     const CudaExecutionBinding *execution_binding,
-    const VulkanExecutionBinding *vulkan_binding)
+    const VulkanExecutionBinding *vulkan_binding,
+    std::shared_ptr<cpu::SparseRuntimeView> cpu_view)
     : state_(std::make_unique<State>()) {
+  if (cpu_view && !arch_is_cpu(arch))
+    throw std::invalid_argument("CPU SNode view requires CPU execution");
   state_->fault_domain = std::move(fault_domain);
   if (vulkan_binding) {
     if (arch != Arch::vulkan || execution_binding || !state_->fault_domain ||
@@ -335,7 +338,8 @@ FixedExecution::FixedExecution(
       std::vector<Operation> frame(operations.begin() + offset,
                                   operations.begin() + offset + width);
       auto prepared = std::make_unique<FixedExecution>(
-          arch, device, gfx_runtime, frame, nullptr, state_->fault_domain);
+          arch, device, gfx_runtime, frame, nullptr, state_->fault_domain,
+          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, cpu_view);
       if (!state_->storage_frames.empty() &&
           prepared->execution_kind() != state_->kind)
         throw std::invalid_argument("Ordered storage ring frame kinds differ");
@@ -1072,7 +1076,7 @@ FixedExecution::FixedExecution(
           if (steps.empty() || steps.back().launcher != launcher)
             steps.push_back({launcher, {}, {}});
           steps.back().launches.push_back(
-              launcher->prepare_launch(loaded->handle(), *dispatch->context));
+              launcher->prepare_launch(loaded->handle(), *dispatch->context, cpu_view));
           state_->bytes += dispatch->context->arg_buffer_size +
                            dispatch->context->arg_buffer_prefix_size();
         } else if (const auto *native =

@@ -745,10 +745,10 @@ class ExecutionPlan:
 
                 if not isinstance(snode_instance, SNodeInstance):
                     raise TypeError("snode_instance must be an SNodeInstance")
-                if execution_domain is None or execution_domain.backend != "cuda":
+                if runtime.arch == "cuda" and (execution_domain is None or execution_domain.backend != "cuda"):
                     raise ValueError("SNode instance binding requires an independent CUDA execution domain")
                 snode_instance._for_module(module)
-                runtime._api.load_snode_instances()
+                runtime._api.load_snode_instances(runtime.arch)
                 owners.append(snode_instance)
                 replay_owners.append(snode_instance)
                 persistent_owners.append(snode_instance)
@@ -795,7 +795,7 @@ class ExecutionPlan:
             vulkan_domain = execution_domain is not None and execution_domain.backend == "vulkan"
             if submission_parameters.names:
                 runtime._api.load_submission_parameters()
-            if submission_parameters.names or vulkan_domain or snode_instance is not None:
+            if submission_parameters.names or vulkan_domain or (snode_instance is not None and runtime.arch == "cuda"):
                 function = (runtime._api.ti_prepare_execution_plan_on_vulkan_domain_ext if vulkan_domain
                             else runtime._api.ti_prepare_execution_plan_parameters_on_domain_ext)
                 names = (abi.C.c_char_p * len(submission_parameters.names))(
@@ -803,7 +803,8 @@ class ExecutionPlan:
                 )
                 suffix = (len(names), names)
             if snode_instance is not None:
-                function = runtime._api.ti_prepare_execution_plan_snode_instance_on_domain_ext
+                function = (runtime._api.ti_prepare_execution_plan_snode_instance_on_domain_ext
+                            if runtime.arch == "cuda" else runtime._api.ti_prepare_execution_plan_snode_instance_ext)
                 suffix += (snode_instance._handle,)
             handle = runtime._api.call(
                 function,

@@ -548,17 +548,23 @@ class Api:
             setattr(self, name, function)
         setattr(self, marker, True)
 
-    def load_snode_instances(self):
-        if getattr(self, "_snode_instances_loaded", False):
+    def load_snode_instances(self, arch="cuda"):
+        marker = "_snode_instances_loaded_" + arch
+        if getattr(self, marker, False):
             return
         declarations = {
             "ti_create_aot_snode_instance_ext": ([Handle, Handle], Handle),
             "ti_get_aot_snode_instance_info_ext": ([Handle, Handle, C.POINTER(C.c_uint64), C.c_void_p], None),
-            "ti_prepare_execution_plan_snode_instance_on_domain_ext": (
+        }
+        if arch == "cuda":
+            declarations["ti_prepare_execution_plan_snode_instance_on_domain_ext"] = (
                 [Handle, Handle, Handle, C.c_uint64, C.c_char_p, UInt,
                  C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding), UInt,
-                 C.POINTER(C.c_char_p), Handle], Handle),
-        }
+                 C.POINTER(C.c_char_p), Handle], Handle)
+        else:
+            declarations["ti_prepare_execution_plan_snode_instance_ext"] = (
+                [Handle, Handle, C.c_uint64, C.c_char_p, UInt,
+                 C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding), Handle], Handle)
         try:
             functions = {name: getattr(self.library, name) for name in declarations}
         except AttributeError as error:
@@ -566,7 +572,7 @@ class Api:
         for name, function in functions.items():
             function.argtypes, function.restype = declarations[name]
             setattr(self, name, function)
-        self._snode_instances_loaded = True
+        setattr(self, marker, True)
 
     def load_submission_parameters(self):
         if getattr(self, "_submission_parameters_loaded", False):

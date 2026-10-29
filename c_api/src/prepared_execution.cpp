@@ -22,12 +22,16 @@
 #include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/runtime/native_kernel_result.h"
 #include "taichi/program/runtime_fault.h"
+#ifdef TI_WITH_LLVM
+#include "snode_instance.h"
+#include "taichi/runtime/cpu/kernel_launcher.h"
+#include "taichi/runtime/llvm/aot_graph_data.h"
+#endif
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/binding_frame_replay.h"
 #include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/sparse_runtime_view.h"
-#include "snode_instance.h"
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -162,7 +166,7 @@ struct PreparedExecution {
   // Declared before backend recordings so owned buffers are destroyed last.
   std::shared_ptr<ExecutionResourceStorage> resources;
   std::vector<std::shared_ptr<NativeResource>> native_resources;
-#ifdef TI_WITH_CUDA
+#ifdef TI_WITH_LLVM
   std::shared_ptr<SNodeInstance> snode_instance;
 #endif
   // Direct-kernel preparations expose one latest-result frame. A completion
@@ -224,7 +228,7 @@ struct PreparedExecution {
   }
 
   void release_native_resources() {
-#ifdef TI_WITH_CUDA
+#ifdef TI_WITH_LLVM
     snode_instance.reset();
 #endif
     kernel_result.reset();
@@ -401,6 +405,38 @@ struct PreparedExecution {
       bind_discarded_results(runtime, operations, true);
       if ((!family || !family->prepared) && !initializers.empty())
         bind_discarded_results(runtime, initializers, false);
+      std::shared_ptr<cpu::SparseRuntimeView> cpu_view;
+#ifdef TI_WITH_LLVM
+      if (snode_instance && arch_is_cpu(runtime.arch)) {
+        std::vector<int> trees;
+        std::function<void(const std::vector<FixedExecution::Operation> &)> collect;
+        collect = [&](const auto &steps) {
+          for (const auto &step : steps) {
+            if (const auto *dispatch = std::get_if<FixedExecution::Dispatch>(&step)) {
+              auto *kernel = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
+              auto *launcher = kernel
+                  ? dynamic_cast<cpu::KernelLauncher *>(&kernel->launcher()) : nullptr;
+              if (!launcher)
+                throw MemoryBindingError("CPU SNode instances require registered CPU entries");
+              const auto selected = launcher->snode_tree_ids(kernel->handle());
+              trees.insert(trees.end(), selected.begin(), selected.end());
+            } else if (const auto *loop = std::get_if<
+                           std::shared_ptr<const FixedExecution::While>>(&step)) {
+              collect((*loop)->condition);
+              collect((*loop)->body);
+            } else if (const auto *branch = std::get_if<
+                           std::shared_ptr<const FixedExecution::Branch>>(&step)) {
+              collect((*branch)->condition);
+              for (const auto &body : (*branch)->bodies)
+                collect(body);
+            }
+          }
+        };
+        collect(initializers);
+        collect(operations);
+        cpu_view = snode_instance->cpu_view(trees);
+      }
+#endif
       FixedExecution::CudaExecutionBinding selected{domain ? domain->cuda : nullptr, {}};
 #ifdef TI_WITH_CUDA
       struct CudaClosure {
@@ -656,7 +692,7 @@ struct PreparedExecution {
           initialization = std::make_unique<FixedExecution>(
               runtime.arch, runtime.get(), gfx_runtime, initializers, &sequence,
               runtime.runtime_fault_domain(), nullptr, nullptr, nullptr, nullptr,
-              execution_binding, vulkan_binding);
+              execution_binding, vulkan_binding, cpu_view);
           if (!initial_access.empty())
             initialization->bind_external_access(std::move(initial_access));
         }
@@ -668,7 +704,7 @@ struct PreparedExecution {
             runtime.arch, runtime.get(), gfx_runtime, operations, &sequence,
             runtime.runtime_fault_domain(), family ? family->replay : nullptr,
             family ? operands : nullptr, submission_recipe, storage_ring,
-            execution_binding, vulkan_binding);
+            execution_binding, vulkan_binding, cpu_view);
         if (!replay_access.empty())
           native->bind_external_access(std::move(replay_access));
         if (family) {
@@ -706,7 +742,7 @@ struct PreparedExecution {
                       runtime.runtime_fault_domain());
                 else
                   view->initialize(
-                      *executor, executor->cuda_runtime_view_trees(closure.trees),
+                      *executor, executor->runtime_view_trees(closure.trees),
                       runtime.runtime_fault_domain());
                 for (auto *launcher : closure.launchers)
                   selected.runtime_views.emplace(launcher, view);
@@ -1457,8 +1493,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
   const auto &resource_description =
       rebinding ? family->frame_resources : plan.resources;
   if (snode_instance) {
-    if (!domain || rt.arch != taichi::Arch::cuda || family)
-      throw MemoryBindingError("SNode instance binding requires an independent CUDA execution domain");
+    if (family || (!arch_is_cpu(rt.arch) &&
+                   (rt.arch != taichi::Arch::cuda || !domain)))
+      throw MemoryBindingError("SNode instance binding requires CPU or an independent CUDA execution domain");
     for (auto index : resource_description.order)
       if (std::holds_alternative<aot::ExecutionResources::ModuleArray>(
               resource_description.declarations.at(index).value))
@@ -1534,7 +1571,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
   prepared->owner = &mod;
   prepared->family = family;
   prepared->domain = domain;
-#ifdef TI_WITH_CUDA
+#ifdef TI_WITH_LLVM
   if (snode_instance) {
     prepared->snode_instance = std::dynamic_pointer_cast<capi::SNodeInstance>(
         rt.native_resource_registry().get(snode_instance));
@@ -1546,6 +1583,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
     prepared->external_resources.push_back(snode_instance);
     prepared->replay_external_resources.insert(snode_instance);
   }
+#else
+  if (snode_instance)
+    throw MemoryBindingError("SNode instances require an LLVM runtime");
 #endif
   prepared->submission_values.resize(parameter_count);
   for (uint32_t i = 0; i < parameter_count; ++i)
@@ -2633,6 +2673,25 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
                                      description, arg_count, args,
                                      binding_count, bindings, {});
 }
+
+#ifdef TI_WITH_LLVM
+TiPreparedExecution ti_prepare_execution_plan_snode_instance_ext(
+    TiRuntime runtime, TiAotModule module, uint64_t description_size,
+    const char *description, uint32_t arg_count, const TiNamedArgument *args,
+    uint32_t binding_count, const TiNamedNdArrayBinding *bindings,
+    TiNativeResource snode_instance) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(snode_instance);
+  if (!taichi::arch_is_cpu(reinterpret_cast<Runtime *>(runtime)->arch))
+    throw MemoryBindingError("Synchronous SNode instance binding requires CPU");
+  return prepare_execution_plan_impl(
+      runtime, module, description_size, description, arg_count, args,
+      binding_count, bindings, {}, {}, 0, nullptr, snode_instance);
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
+}
+#endif
 
 #ifdef TI_WITH_CUDA
 TiPreparedExecution ti_prepare_execution_plan_snode_instance_on_domain_ext(

@@ -1513,7 +1513,7 @@ ti_probe_native_resource_ext(TiRuntime runtime,
                              uint32_t version,
                              TiNativeOperationAvailabilityExt *availability);
 
-// Cold, empty fixed-tree state for one loaded CUDA AOT module. The handle uses
+// Cold, empty fixed-tree state for one loaded CPU/CUDA AOT module. The handle uses
 // native-resource retirement and retains the exact loaded code owner. It does
 // not copy live values or activation. Allocate before borrowing sparse views.
 TI_DLL_EXPORT TiNativeResource TI_API_CALL
@@ -1523,6 +1523,15 @@ ti_create_aot_snode_instance_ext(TiRuntime runtime, TiAotModule module);
 TI_DLL_EXPORT void TI_API_CALL
 ti_get_aot_snode_instance_info_ext(TiRuntime runtime, TiNativeResource instance,
                                   uint64_t *size, char *json);
+
+// Synchronous CPU preparation over the same loaded code, with instance-owned
+// tree state. CUDA uses the independent-domain entry declared in taichi_cuda.h.
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_execution_plan_snode_instance_ext(
+    TiRuntime runtime, TiAotModule module, uint64_t description_size,
+    const char *description, uint32_t arg_count, const TiNamedArgument *args,
+    uint32_t binding_count, const TiNamedNdArrayBinding *bindings,
+    TiNativeResource snode_instance);
 
 // Version 1 persistent execution description: ordered loaded kernels, native
 // buffer copy/fill32, sort, compact and fft_c2c_f32. JSON is consumed only

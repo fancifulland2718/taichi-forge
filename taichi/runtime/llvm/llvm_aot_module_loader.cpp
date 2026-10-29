@@ -570,9 +570,9 @@ void LlvmAotModule::ensure_snode_tree_initialized(int logical_tree_id) {
 
 std::vector<LlvmSparseRuntimeViewTree>
 LlvmAotModule::snode_instance_prototypes() {
-  if (arch() != Arch::cuda || !allocation_result_buffer_)
+  if ((!arch_is_cpu(arch()) && arch() != Arch::cuda) || !allocation_result_buffer_)
     throw std::invalid_argument(
-        "SNode instances currently require a runtime-owned CUDA AOT module");
+        "SNode instances require a runtime-owned CPU/CUDA AOT module");
   std::vector<int> physical;
   for (int logical : snode_tree_ids_) {
     ensure_snode_tree_initialized(logical);
@@ -580,7 +580,7 @@ LlvmAotModule::snode_instance_prototypes() {
   }
   if (physical.empty())
     throw std::invalid_argument("AOT module has no fixed SNode trees to instantiate");
-  return executor_->cuda_runtime_view_trees(physical);
+  return executor_->runtime_view_trees(physical);
 }
 
 SNodeTreeLayout LlvmAotModule::clone_instance_tree(

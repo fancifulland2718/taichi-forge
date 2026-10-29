@@ -4,6 +4,7 @@
 #include "taichi_core_impl.h"
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #include "taichi/runtime/native_resource.h"
+#include "taichi/runtime/cpu/sparse_runtime_view.h"
 
 namespace capi {
 
@@ -19,6 +20,8 @@ class SNodeInstance final : public taichi::lang::NativeResource {
       taichi::lang::LlvmRuntimeExecutor &executor,
       const std::vector<int> &code_trees) const;
   std::string info() const;
+  std::shared_ptr<taichi::lang::cpu::SparseRuntimeView> cpu_view(
+      const std::vector<int> &code_trees) const;
   taichi::Arch arch() const override;
   taichi::lang::Device &device() const override;
   std::size_t workspace_bytes() const override { return 0; }

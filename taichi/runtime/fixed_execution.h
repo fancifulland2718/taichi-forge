@@ -29,6 +29,9 @@ class Kernel;
 namespace gfx {
 class GfxRuntime;
 }
+namespace cpu {
+class SparseRuntimeView;
+}
 namespace cuda {
 class BindingFrameReplay;
 class ExecutionDomain;
@@ -138,7 +141,8 @@ class FixedExecution {
                  const VulkanSubmissionRecipe *submission_recipe = nullptr,
                  const OrderedStorageRing *storage_ring = nullptr,
                  const CudaExecutionBinding *execution_binding = nullptr,
-                 const VulkanExecutionBinding *vulkan_binding = nullptr);
+                 const VulkanExecutionBinding *vulkan_binding = nullptr,
+                 std::shared_ptr<cpu::SparseRuntimeView> cpu_view = {});
   ~FixedExecution();
   FixedExecution(const FixedExecution &) = delete;
   FixedExecution &operator=(const FixedExecution &) = delete;
