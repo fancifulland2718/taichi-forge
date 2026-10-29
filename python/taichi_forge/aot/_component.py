@@ -969,7 +969,9 @@ class _Capture:
     def check_call(self, value):
         if getattr(value, "_is_taichi_function", False):
             return
-        if any(value is item for item in (range, len, min, max, abs, int, float, bool, enumerate, zip)):
+        # The AST routes builtin print to ti_print/PrintStmt, never to a host
+        # Python callback. Preserve diagnostics in original deployed kernels.
+        if any(value is item for item in (range, len, min, max, abs, int, float, bool, enumerate, zip, print)):
             return
         if getattr(value, "__module__", "").startswith("taichi_forge"):
             return
