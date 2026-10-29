@@ -65,10 +65,11 @@ class _SparseGraphState(_SparseState):
 
 @ti.data_oriented
 class _SparseStructState:
-    def __init__(self, implicit_root=False):
+    def __init__(self, implicit_root=False, bitmasked=True):
         builder = None if implicit_root else ti.FieldsBuilder()
         scope = ti.experimental.ResourceScope(self, builder=builder)
-        leaf = (ti.root if implicit_root else builder).pointer(ti.ijk, 2).bitmasked(ti.ijk, 4)
+        pointer = (ti.root if implicit_root else builder).pointer(ti.ijk, 2)
+        leaf = pointer.bitmasked(ti.ijk, 4) if bitmasked else pointer.dense(ti.ijk, 4)
         scope.grid = scope.struct_field(
             dict(mass=ti.f32, momentum=ti.types.vector(3, ti.f32), velocity=ti.types.vector(3, ti.f32)),
             shape=(8, 8, 8), placement=leaf)
@@ -107,6 +108,45 @@ class _SparseStructState:
     def record_update(self, builder, *, enabled=True):
         if enabled:
             builder.dispatch(self.update, template_args={"self": self})
+
+    def record_with_clear(self, builder):
+        self.record(builder)
+        clear = builder.create_sequential()
+        self.grid.parent(2).deactivate_all(builder=clear)
+        builder.append(clear)
+        empty = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "empty", ti.f32, ndim=2)
+        builder.dispatch(self.read, empty, template_args={"self": self})
+
+
+@pytest.mark.parametrize("bitmasked", [True, False])
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
+def test_normal_snode_deactivation_records_shared_kernels_and_instance_bindings(tmp_path, bitmasked):
+    from taichi_forge._kernels import snode_deactivate
+
+    state = _SparseStructState(bitmasked=bitmasked)
+    state.seed()
+    state.grid.parent(2).deactivate_all()
+    assert state.grid.mass[2, 2, 3] == 0
+    state.seed()
+    builder = ti.graph.GraphBuilder()
+    state.record_with_clear(builder)
+    assert state.grid.mass[2, 2, 3] == 3  # Recording does not execute deactivation.
+    ordinary = builder.compile()
+    out, empty = ti.ndarray(ti.f32, (8, 3)), ti.ndarray(ti.f32, (8, 3))
+    ordinary.run(dict(out=out, empty=empty))
+    assert np.count_nonzero(out.to_numpy()) > 0
+    np.testing.assert_array_equal(empty.to_numpy(), 0)
+    environment = Component.from_owner(state)
+    root = environment.compile_graph(state.record_with_clear)
+    # Foreign SNodes cannot be treated as arbitrary static template objects.
+    foreign = _SparseStructState()
+    with pytest.raises(ti.TaichiCompilationError, match="SNode template.*declared fixed"):
+        environment.compile(snode_deactivate, owner=state, template_args=dict(b=foreign.grid.parent(2)))
+    module = ti.aot.Module()
+    root.export(module, "step")
+    folder = tmp_path / "artifact"
+    module.save(folder)
+    _consume_isolated(folder, tmp_path, "clear")
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)

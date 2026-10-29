@@ -288,6 +288,13 @@ scope 检查当前未物化的默认根，不能把已物化或另一 builder �
 成员优先的 `state.member[I]` 仍只捕获实际成员；整个结构元素的索引沿原前端构造
 全部成员引用并保留完整固定组。参数化 Dense 结构的整个元素索引仍需独立资格。
 
+`snode.deactivate_all(builder=builder)` 可将同一清理操作录制到正常 Graph 或 Sequential；
+省略 builder 时仍立即调用原库 Kernel。两条路径共用原来的子节点优先顺序和两层融合
+清理，不新增清理数值定义。组件捕获将 SNode 模板解析为已声明固定 Field 的真实祖先，
+保留组及祖先关系，拒绝另一 owner 的未声明树。消费执行继续使用实例级不可变树绑定。
+CPU/CUDA 已验证 pointer/bitmasked 融合及 pointer/dense 递归路径，包括普通 JIT、
+录制不执行、清理前后读回、重复重新激活和独立实例；其他稀疏树族仍按各自资格判断。
+
 普通组件 recording 经 `component.compile_graph(owner.record)` 收集实际入口和固定树
 依赖，`root.export(module, name)` 自动导出，不需要逐 Kernel 清单。v6 根合同区分
 `fixed_snode` 组和参数化 Dense 组；模块最终 dump 的真实重定位表生成消费绑定，

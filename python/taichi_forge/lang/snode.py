@@ -480,8 +480,12 @@ class SNode:
         impl.get_runtime().materialize_root_fb(False)
         return self.ptr.offset_bytes_in_parent_cell
 
-    def deactivate_all(self):
-        """Recursively deactivate all children components of `self`."""
+    def deactivate_all(self, *, builder=None):
+        """Deactivate this subtree, or append the same kernels to a Graph.
+
+        With ``builder``, execution is deferred until the Graph runs. Both
+        modes retain the original child-before-parent order and fused pair.
+        """
         SNodeType = _ti_core.SNodeType
         # G11-D2 (P-Vulkan-Sparse-Deact-Merge): fast-path for the canonical
         # two-level sparse layout (pointer→bitmasked, or any pointer/bitmasked
@@ -503,17 +507,23 @@ class SNode:
                     snode_deactivate_pair,
                 )
 
-                snode_deactivate_pair(self, ch[0])
+                if builder is None:
+                    snode_deactivate_pair(self, ch[0])
+                else:
+                    builder.dispatch(snode_deactivate_pair, template_args={"parent": self, "child": ch[0]})
                 return
         # Fallback: original recursive path (covers >2 sparse layers, dynamic,
         # mixed dense/sparse trees, etc.).
         ch = self._get_children()
         for c in ch:
-            c.deactivate_all()
+            c.deactivate_all(builder=builder)
         if self.ptr.type in (SNodeType.pointer, SNodeType.hash, SNodeType.bitmasked):
             from taichi_forge._kernels import snode_deactivate  # pylint: disable=C0415
 
-            snode_deactivate(self)
+            if builder is None:
+                snode_deactivate(self)
+            else:
+                builder.dispatch(snode_deactivate, template_args={"b": self})
         if self.ptr.type == SNodeType.dynamic:
             # Note that dynamic nodes are different from other sparse nodes:
             # instead of deactivating each element, we only need to deactivate
@@ -522,7 +532,10 @@ class SNode:
                 snode_deactivate_dynamic,
             )
 
-            snode_deactivate_dynamic(self)
+            if builder is None:
+                snode_deactivate_dynamic(self)
+            else:
+                builder.dispatch(snode_deactivate_dynamic, template_args={"b": self})
 
     def __repr__(self):
         type_ = str(self.ptr.type)[len("SNodeType.") :]

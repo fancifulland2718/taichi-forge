@@ -396,6 +396,7 @@ class _RecordReference:
 class _ResourceTemplate:
     slot: int
     name: str
+    snode_depth: int = None
 
 
 def _capture_id(path):
@@ -938,6 +939,7 @@ class Component:
         from taichi_forge.lang.kernel_impl import _process_args, TaichiCallableTemplateMapper
         from taichi_forge.lang._ndarray import Ndarray
         from taichi_forge.lang.field import Field
+        from taichi_forge.lang.snode import SNode
 
         kernel = getattr(entry, "_primal", None)
         bound_owner = getattr(entry, "_kernel_owner", None)
@@ -964,10 +966,13 @@ class Component:
         resource_templates = {}
         for i, (argument, value) in enumerate(zip(kernel.arguments, call_args)):
             if i in slots:
-                if value is not owner and isinstance(value, Field):
-                    name = self._template_resource(owner, value, argument.name)
-                    resource_templates[i] = name
-                    call_args[i] = _ResourceTemplate(i, name)
+                if value is not owner and isinstance(value, (Field, SNode)):
+                    if isinstance(value, SNode):
+                        name, depth = self._template_snode(owner, value, argument.name)
+                    else:
+                        name, depth = self._template_resource(owner, value, argument.name), None
+                    resource_templates[i] = name if depth is None else (name, depth)
+                    call_args[i] = _ResourceTemplate(i, name, depth)
                     # Only actual uses select resource bindings below. An unused
                     # declared Field template must not specialize the entry.
                     template_facts.append((i, "resource", None))
@@ -1029,6 +1034,22 @@ class Component:
             f"Component Field template {argument!r} must refer to a declared resource of this owner"
         )
 
+    def _template_snode(self, owner, value, argument):
+        # A SNode template is an actual ancestor of a declared fixed Field,
+        # never a Python object address or a newly interpreted tree schema.
+        for name, declaration in sorted(self.declarations.items()):
+            if not isinstance(declaration, FixedSNodeField) or not self.available(owner, name):
+                continue
+            node = self.read(owner, name).snode
+            depth = 0
+            while node is not None:
+                if node.ptr.id == value.ptr.id:
+                    return name, depth
+                node, depth = node.parent(), depth + 1
+        raise TaichiCompilationError(
+            f"Component SNode template {argument!r} must descend from a declared fixed resource group"
+        )
+
     def compile_graph(self, record, *args, **kwargs):
         """Compile a normal Graph recording with automatic captured inputs."""
         from taichi_forge.aot._component_graph import compile_component_graph
@@ -1065,13 +1086,19 @@ class _Capture:
     def resolve_template(self, ctx, value):
         if not isinstance(value, _ResourceTemplate):
             return value
-        self.resource_templates[value.slot] = value.name
+        self.resource_templates[value.slot] = value.name if value.snode_depth is None else (value.name, value.snode_depth)
         path = self.component._paths[value.name]
         # Record namespace presence just as the normal owner.record.field path
         # does, including optional records and borrowed source namespaces.
         for depth in range(1, len(path)):
             self.attribute(ctx, path[depth - 1], prefix=path[: depth - 1])
-        return self.attribute(ctx, value.name)
+        field = self.attribute(ctx, value.name)
+        if value.snode_depth is None:
+            return field
+        node = field.snode
+        for _ in range(value.snode_depth):
+            node = node.parent()
+        return node
 
     def dimension_dependency(self, name):
         declaration = self.declarations[name]

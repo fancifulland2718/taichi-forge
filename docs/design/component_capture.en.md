@@ -318,6 +318,17 @@ element indexing constructs all member references as the ordinary frontend does
 and retains the full fixed group. Whole elements of parameterized dense structs
 still require separate qualification.
 
+`snode.deactivate_all(builder=builder)` records the same cleanup in an ordinary
+Graph or Sequential region. Omitting the builder still calls the original library
+kernels immediately. Both paths retain child-before-parent order and the fused
+two-level cleanup; no numerical cleanup definition is duplicated. Component
+capture resolves SNode templates as actual ancestors of declared fixed Fields,
+preserving group and ancestor relationships and rejecting undeclared foreign trees.
+Consumer execution uses the existing immutable instance tree bindings. CPU/CUDA
+gates cover pointer/bitmasked fusion and pointer/dense recursion, ordinary JIT,
+deferred recording, before/after readback, repeated activation and independent
+instances. Other sparse tree families retain their separate qualification boundaries.
+
 An ordinary component recording through `component.compile_graph(owner.record)`
 collects its actual entries and fixed-tree dependencies. `root.export(module, name)`
 exports them without a per-kernel list. The v6 root contract distinguishes

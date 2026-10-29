@@ -435,7 +435,7 @@ def check_component(folder, backend):
             domain.close()
 
 
-def check_struct(folder, backend):
+def check_struct(folder, backend, clear=False):
     from taichi_forge_runtime.aot import Runtime
 
     with Runtime(backend) as runtime:
@@ -444,8 +444,10 @@ def check_struct(folder, backend):
         states = [component.instantiate({}) for _ in range(2)]
         domain = runtime.execution_domain(capacity=1, instance_capacity=1) if backend == "cuda" else None
         output = runtime.ndarray("f32", (8, 3))
+        empty = runtime.ndarray("f32", (8, 3)) if clear else None
         for index, gravity in ((0, [1, -2, 3]), (1, [-3, 2, -1]), (0, [2, 3, 4])):
-            with states[index].prepare(values=dict(gravity=gravity), arguments=dict(out=output),
+            arguments = dict(out=output, **({"empty": empty} if clear else {}))
+            with states[index].prepare(values=dict(gravity=gravity), arguments=arguments,
                                        execution_domain=domain) as call:
                 call.initialize()
                 if domain:
@@ -458,6 +460,9 @@ def check_struct(folder, backend):
             result.frombytes(output.read())
             expected = [i / (i + 1) * (j + 1) + gravity[j] if i < 6 else 0 for i in range(8) for j in range(3)]
             assert all(abs(a - b) < 1e-6 for a, b in zip(result, expected)), (list(result), expected)
+            if clear:
+                assert empty.read() == bytes(empty.nbytes)
+                assert states[index].resource("grid.mass").read_at([(2, 2, 3)]) == array.array("f", [0]).tobytes()
         for state in states:
             state.close()
         if domain:
@@ -532,7 +537,9 @@ def check_coordinates(folder, backend):
 if __name__ == "__main__":
     sys.path.insert(0, os.environ["FORGE_AOT_TEST_PACKAGE"])
     sys.meta_path.insert(0, NoNumericalSource())
-    if len(sys.argv) > 3 and sys.argv[3] == "coordinates":
+    if len(sys.argv) > 3 and sys.argv[3] == "clear":
+        check_struct(sys.argv[1], sys.argv[2], clear=True)
+    elif len(sys.argv) > 3 and sys.argv[3] == "coordinates":
         check_coordinates(sys.argv[1], sys.argv[2])
     elif len(sys.argv) > 3 and sys.argv[3] == "struct":
         check_struct(sys.argv[1], sys.argv[2])
