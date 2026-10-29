@@ -413,6 +413,12 @@ SNode activation. Reads do not activate cells. Empty batches are valid; invalid
 coordinates or payload sizes reject before submission. Public nested member paths
 come from compiler declarations rather than decoding internal names.
 
+Instance binding includes the validated transfer entries as well as the original
+numerical and initializer closure. This allocation-only projection is never
+executed; it neither inserts transfers into the step nor includes unrelated
+module trees. Vulkan therefore creates private resource views for cold uploads
+and reads without changing the module's shared bindings.
+
 These are synchronous cold transfers: close the instance's prepared calls first.
 They use existing instance bindings without changing shared module root pointers;
 they are not qualified as efficient per-step or general asynchronous transfers.

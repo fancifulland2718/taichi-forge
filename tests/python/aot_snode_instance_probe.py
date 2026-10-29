@@ -2,6 +2,7 @@
 import array
 import importlib.abc
 import os
+import struct
 import sys
 
 
@@ -430,6 +431,11 @@ def check_component(folder, backend):
         for index in (0, 1):
             run(index, 0, 0, 0)
             assert values(outputs[index]) == [0] * 16
+        # The component's verified cold transfer entries belong to the same
+        # instance closure, without adding the separately exported spare tree.
+        states[0].resource("grid").write_at([(0,)], struct.pack("=i", 41))
+        assert struct.unpack("=i", states[0].resource("alias").read_at([(0,)])) == (41,)
+        assert struct.unpack("=i", states[1].resource("grid").read_at([(0,)])) == (0,)
         run(0, 5, 10, 2)
         assert values(outputs[0]) == list(range(12, 17)) + [2] * 3 + [0] * 8
         run(1, 9, 100, 3)

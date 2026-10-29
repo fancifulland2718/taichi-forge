@@ -330,6 +330,24 @@ class Component:
             if contract["version"] >= 7:
                 from ._field_coordinates import load_transfers
                 self._field_io = load_transfers(module, contract)
+            self._instance_plan = plan
+            if self._field_io:
+                from ._plan import ExecutionPlan
+
+                # Allocation/binding closure only; this projection is never
+                # executed. Cold Field I/O needs its own private Kernel views,
+                # in addition to the numerical and initializer entries. Every
+                # transfer above already passed native tree/contract checks.
+                closure = json.loads(plan.to_json())
+                closure.pop("version")
+                selected = set(plan.kernel_entries)
+                for _, transfers in self._field_io.values():
+                    for transfer in transfers.values():
+                        for operation in json.loads(transfer.to_json())["operations"]:
+                            if operation["entry"] not in selected:
+                                closure["operations"].append(operation)
+                                selected.add(operation["entry"])
+                self._instance_plan = ExecutionPlan(**closure)
             self._initializer_plan = None
             self._replay_plan = plan
             if contract["version"] == 8:
@@ -419,7 +437,7 @@ class ComponentInstance:
             with runtime._lock:
                 component._module._check()
                 if contract.get("fixed_groups"):
-                    self._fixed_state = component._module.snode_instance(plan=component._plan)
+                    self._fixed_state = component._module.snode_instance(plan=component._instance_plan)
                 for name, schema in contract["groups"].items():
                     required = {
                         extent["parameter"]
