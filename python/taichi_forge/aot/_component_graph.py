@@ -248,11 +248,11 @@ class ComponentGraph:
             target=module._arch.name,
             execution_entries=(
                 list(plan.kernel_entries)
-                if contract["version"] == 4
+                if contract["version"] >= 4
                 else [operation["entry"] for operation in json.loads(plan.to_json())["operations"]]
             ),
         )
-        if contract["version"] == 4:
+        if contract["version"] >= 4:
             if plan.data_entries:
                 # Export already added native definitions. Preserve the
                 # module's existing fail-closed publication contract.
@@ -361,6 +361,10 @@ def _complete_compiler_contract(graph, contract, capture):
     contract["dimensions"] = {
         name: value for name, value in contract["dimensions"].items() if name in required_dimensions
     }
+    constraints, constraint_dimensions, constraint_sources = capture.component.constraint_facts(
+        capture.owner, {name for code in codes for name in code.used}, entry=capture._root_name
+    )
+    contract["dimensions"].update(constraint_dimensions)
     if not any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
         contract["required_capabilities"] = [
             name for name in contract["required_capabilities"] if name != "component_explicit_ndarray_v1"
@@ -418,14 +422,19 @@ def _complete_compiler_contract(graph, contract, capture):
             resource["effects_precision"] = "compiler_proven"
     contract["version"] = 2
     contract["required_capabilities"].append("component_compiler_facts_v1")
-    if has_control or "internal_arguments" in contract:
-        contract["version"] = 4
+    if has_control or "internal_arguments" in contract or constraints:
+        contract["version"] = 5 if constraints else 4
         contract["control"] = control
         contract.setdefault("internal_arguments", {})
         contract["configuration"] = {}
         contract["required_capabilities"].append("component_control_v1")
+    if constraints:
+        contract["constraints"] = constraints
+        contract["required_capabilities"].append("component_dimension_constraints_v1")
     contract["semantic_key"] = _digest({name: value for name, value in contract.items() if name != "semantic_key"})
     contract["compilation"] = dict(version=1, entries=entries, task_scope="compiled_not_observed_replay")
+    if constraints:
+        contract["compilation"]["constraint_sources"] = constraint_sources
     return contract
 
 
@@ -460,7 +469,7 @@ def compile_component_graph(component, record, *args, _build=None, **kwargs):
             contract["configuration"] = configuration
         if _build is not None:
             _build.check_time("after backend compilation")
-        if contract["version"] == 4:
+        if contract["version"] >= 4:
             from taichi_forge_runtime.aot._component import _control_identity
 
             contract["semantic_key"] = _control_identity(contract)

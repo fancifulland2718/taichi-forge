@@ -187,6 +187,22 @@ TCM hash 保持不变，产物无模型数据载荷及固定根依赖。该探�
 编译缓存命中和原 owner 绑定时再次验证，包括嵌套 Record 的来源路径。CPU/CUDA
 门槛覆盖新容量/零数量、原循环与消费端布局，以及失败后修正重试。
 
+正常算法预算可用
+`scope.require_le("merge_coverage", scope.dim("count"), budget, when="scratch")`
+声明。触发项必须是已声明角色，只有实际导出的数值入口使用它时，该不等式才进入
+组件合同。复用已有有界维度表达式，支持派生维度与 record 命名空间；不增加无关的
+Kernel ABI 参数或改变数值代码身份。根合同补齐仅供约束使用的维度。原 owner 绑定、
+缓存命中、原生分配前的实例化及绑定前的 prepare 更新均校验，错误指出组件、约束、
+触发项、实际数值和声明位置。
+
+带约束的根使用 v5 合同和必需能力 `component_dimension_constraints_v1`，旧消费者
+明确拒绝。既有 v1–v4 产物保持原合同，需重新构建才获得新增保护。来源位置只用于
+诊断，不等式本身进入根身份及原 ExecutionPlan 指纹；SNode 布局仍由原生实现决定。
+这不推导应用算法预算、不检查任意拓扑数据，也不将高层组件政策强加给 raw Kernel
+调用。`test_aot_component_constraints.py` 覆盖 CPU/CUDA 的代码复用、无关约束排除、
+拒绝前零分配、prepare 更新、空范围/尾部及 record 来源。GeoPhys 用同一机制表达
+排序 word 容量和正常有限归并序列的覆盖范围。
+
 `scope.struct_field(members, shape=())` 声明正常的扁平 rank-zero AOS
 StructField。成员沿既有 Record/DenseField 路径自动捕获，原成员别名共用实际参数；
 消费者以同一 SNode 布局规则保留整个记录，按成员的真实偏移绑定各实例。CPU/CUDA

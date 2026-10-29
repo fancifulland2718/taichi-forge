@@ -276,6 +276,29 @@ Used attributes are checked again on cache hits and owner binding, including
 nested Record paths. CPU/CUDA gates cover new capacities, zero counts, consumer
 layout and original loop behavior, plus recovery after rejected declarations.
 
+Normal algorithm budgets can declare
+`scope.require_le("merge_coverage", scope.dim("count"), budget, when="scratch")`.
+The named trigger must be a declared role; only an exported numerical user brings
+this inequality into its component contract. Expressions reuse the bounded
+dimension algebra, including derived/record dimensions. This policy does not
+add unrelated inputs to a Kernel ABI or change its numerical identity. The
+component root includes any dimensions needed only to check the constraint.
+Code binding validates current owner values; component instantiation validates
+before native allocation, and prepare validates count updates before binding.
+Errors name the component, constraint, trigger, values and declaration location.
+
+Constrained roots use contract v5 and require `component_dimension_constraints_v1`;
+older consumers reject them. Existing v1–v4 artifacts retain their contracts and
+do not acquire new safeguards without rebuilding. Source locations are diagnostic
+provenance; inequalities themselves participate in root identity and the existing
+ExecutionPlan fingerprint. Native SNode layout remains authoritative. These
+declarations do not derive algorithm budgets, validate arbitrary topology data,
+or impose high-level component policy on raw Kernel calls. CPU/CUDA checks in
+`test_aot_component_constraints.py` cover preserved code reuse, absent unrelated
+constraints, no allocation on rejection, prepare updates, zero/tail behavior,
+and qualified nested sources. GeoPhys uses the same contract for sort word
+capacity and the coverage of its normal finite merge sequence.
+
 Normal GeoPhys construction now provides a bounded numerical RNE gate on CPU/CUDA:
 3/7/5 bodies with different topology, mass, qpos/qvel and gravity reuse the original
 entry and agree with ordinary JIT. A resting chain also checks analytic gravity

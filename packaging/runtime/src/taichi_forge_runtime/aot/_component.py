@@ -6,7 +6,7 @@ import threading
 from types import MappingProxyType
 import weakref
 
-from .._dimensions import evaluate_extent, extent_dependencies, validate_extent
+from .._dimensions import check_constraints, evaluate_extent, extent_dependencies, validate_constraints, validate_extent
 from .._static_values import read_static_key, static_key
 
 
@@ -94,13 +94,15 @@ class Component:
                 "execution_entries",
                 "target",
             }
-            if contract.get("version") in (2, 3, 4):
+            if contract.get("version") in (2, 3, 4, 5):
                 required.add("compilation")
-            if contract.get("version") in (3, 4):
+            if contract.get("version") in (3, 4, 5):
                 required.add("configuration")
-            if contract.get("version") == 4:
+            if contract.get("version") in (4, 5):
                 required.update(("control", "internal_arguments", "execution_fingerprint"))
-            if set(contract) != required or contract["version"] not in (1, 2, 3, 4) or contract["name"] != name:
+            if contract.get("version") == 5:
+                required.add("constraints")
+            if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
             if any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
@@ -115,13 +117,13 @@ class Component:
                 ):
                     raise ValueError("Invalid component compiler facts")
             self._configuration = {}
-            if contract["version"] == 4:
+            if contract["version"] >= 4:
                 capabilities.add("component_control_v1")
                 if not isinstance(contract["configuration"], dict):
                     raise ValueError("Invalid component configuration domain")
                 if _control_identity(contract) != contract["semantic_key"]:
                     raise ValueError("Component control facts differ from their semantic identity")
-            if contract["version"] == 3 or (contract["version"] == 4 and contract["configuration"]):
+            if contract["version"] == 3 or (contract["version"] >= 4 and contract["configuration"]):
                 capabilities.add("component_static_choices_v1")
                 if not isinstance(contract["configuration"], dict) or not contract["configuration"]:
                     raise ValueError("Invalid component configuration domain")
@@ -137,6 +139,23 @@ class Component:
                             if dependency == key and static_key(read_static_key(value)) != selected:
                                 raise ValueError("Component configuration differs from compiled static dependencies")
                     self._configuration[key] = (selected, choices)
+            if contract["version"] == 5:
+                capabilities.add("component_dimension_constraints_v1")
+                if not contract["constraints"]:
+                    raise ValueError("Constrained component requires nonempty dimension constraints")
+                triggers = set(contract["dimensions"]) | set(contract["values"]) | set(contract["resources"])
+                triggers.update(name for entry in contract["entries"] for name, _ in entry["static"])
+                triggers.update(alias for resource in contract["resources"].values() for alias in resource["aliases"])
+                validate_constraints(contract["constraints"], contract["dimensions"].keys(), triggers)
+                sources = contract["compilation"].get("constraint_sources")
+                if (
+                    not isinstance(sources, dict) or set(sources) != set(contract["constraints"])
+                    or any(
+                        not isinstance(source, list) or len(source) != 2 or not isinstance(source[0], str)
+                        or type(source[1]) is not int or source[1] <= 0 for source in sources.values()
+                    )
+                ):
+                    raise ValueError("Invalid component constraint declaration sources")
             if set(contract["required_capabilities"]) != capabilities:
                 raise ValueError("Unsupported required component capability")
             if contract["target"] not in ("x64", "cuda") or contract["target"] != module._runtime.arch:
@@ -195,7 +214,7 @@ class Component:
             plan = module.execution_plan(contract["execution"])
             document = json.loads(plan.to_json())
             operations = document["operations"]
-            if contract["version"] == 4:
+            if contract["version"] >= 4:
                 fingerprint = hashlib.sha256(
                     json.dumps(
                         dict(plan=document, semantic_key=contract["semantic_key"]),
@@ -283,6 +302,11 @@ class ComponentInstance:
         contract = component.contract
         self._inputs = dict(dimensions)
         self._dimensions = _dimensions(contract["dimensions"], self._inputs)
+        check_constraints(
+            contract.get("constraints", {}), self._dimensions.__getitem__,
+            contract.get("compilation", {}).get("constraint_sources"),
+            entry=contract["name"],
+        )
         runtime = component._module._runtime
         try:
             with runtime._lock:
@@ -380,6 +404,11 @@ class ComponentInstance:
                 raise ValueError("Changing layout dimensions requires a new component instance")
             contract = self._component.contract
             resolved = _dimensions(contract["dimensions"], {**self._inputs, **updates})
+            check_constraints(
+                contract.get("constraints", {}), resolved.__getitem__,
+                contract.get("compilation", {}).get("constraint_sources"),
+                entry=contract["name"],
+            )
             values, bindings = dict(values or {}), dict(arguments or {})
             if set(values) != set(contract["values"]) or set(bindings) != set(contract["explicit"]):
                 raise ValueError("Component value/explicit argument inputs differ from its contract")

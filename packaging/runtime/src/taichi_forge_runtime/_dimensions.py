@@ -77,3 +77,34 @@ def extent_dependencies(expression):
         elif op != "const":
             pending.extend(args)
     return dependencies
+
+
+def validate_constraints(constraints, dimensions, triggers):
+    """Validate a bounded conjunction of declared dimension inequalities."""
+    if not isinstance(constraints, dict) or len(constraints) > 1024:
+        raise ValueError("Invalid component dimension constraints")
+    for name, spec in constraints.items():
+        if (
+            not isinstance(name, str)
+            or not name.isidentifier()
+            or not isinstance(spec, dict)
+            or set(spec) != {"left", "right", "when"}
+            or not isinstance(spec["when"], str)
+            or spec["when"] not in triggers
+        ):
+            raise ValueError(f"Invalid dimension constraint {name!r} or unused trigger")
+        dependencies = extent_dependencies(spec["left"]) | extent_dependencies(spec["right"])
+        if not dependencies or not dependencies <= dimensions:
+            raise ValueError(f"Dimension constraint {name!r} requires declared dimensions")
+
+
+def check_constraints(constraints, resolve, sources=None, *, entry=None):
+    for name, spec in constraints.items():
+        left, right = (evaluate_extent(spec[side], resolve) for side in ("left", "right"))
+        if left > right:
+            source = (sources or {}).get(name)
+            location = f" (declared at {source[0]}:{source[1]})" if source else ""
+            context = f"Component {entry!r}: " if entry else ""
+            raise ValueError(
+                context + f"Dimension constraint {name!r} for {spec['when']!r} failed: {left} > {right}{location}"
+            )

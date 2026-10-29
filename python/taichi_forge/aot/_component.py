@@ -444,7 +444,7 @@ class Component:
     is supplied by the application. Graph export follows separately.
     """
 
-    __slots__ = ("_declarations", "_sources", "_paths", "_borrowed_reads", "_derived_attributes")
+    __slots__ = ("_declarations", "_sources", "_paths", "_borrowed_reads", "_derived_attributes", "_constraints")
 
     def __init__(self, **declarations):
         flattened, paths = {}, {}
@@ -497,6 +497,7 @@ class Component:
         self._sources = MappingProxyType({})
         self._borrowed_reads = MappingProxyType({})
         self._derived_attributes = frozenset()
+        self._constraints = MappingProxyType({})
 
     def read(self, owner, name):
         borrowed = self._borrowed_reads.get(name)
@@ -540,7 +541,7 @@ class Component:
 
         impl.get_runtime().materialize(for_aot=True)
         declarations, sources, roots, fields, borrowed = {}, {}, {}, [], []
-        inherited_dimensions, record_options = {}, {}
+        inherited_dimensions, record_options, constraints = {}, {}, {}
         derived_attributes = set()
 
         def root_of(field, name):
@@ -555,6 +556,20 @@ class Component:
                 raise TaichiCompilationError("Normal resource records must form a bounded acyclic declaration tree")
             if registry is None:
                 registry = _member(current, "_forge_resource_declarations")
+
+            def qualify(expression):
+                op, *args = expression
+                if op == "dim":
+                    return (op, _capture_id((*prefix, args[0])))
+                return tuple(expression) if op == "const" else (op, *(qualify(arg) for arg in args))
+
+            for name, constraint in registry.get("constraints", {}).items():
+                spec = constraint["spec"]
+                constraints[_capture_id((*prefix, name))] = dict(
+                    spec=dict(left=qualify(spec["left"]), right=qualify(spec["right"]),
+                              when=_capture_id((*prefix, spec["when"]))),
+                    source=constraint["source"],
+                )
             occupied = set()
             for kind in ("fields", "dimensions", "records", "borrowed", "values"):
                 names = registry.get(kind, {}).keys()
@@ -660,7 +675,36 @@ class Component:
         result._project_borrowed(borrowed, roots, sources)
         result._sources = MappingProxyType(sources)
         result._derived_attributes = frozenset(derived_attributes)
+        result._constraints = MappingProxyType(constraints)
         return result
+
+    def constraint_facts(self, owner, used, *, entry=None):
+        """Project admission policy from actual uses without changing Kernel ABI."""
+        from taichi_forge_runtime._dimensions import check_constraints, validate_constraints
+
+        constraints = {name: item["spec"] for name, item in self._constraints.items() if item["spec"]["when"] in used}
+        sources = {name: self._constraints[name]["source"] for name in constraints}
+        dimensions = {}
+
+        def depend(name):
+            if name in dimensions:
+                return
+            declaration = self.declarations.get(name)
+            if not isinstance(declaration, Dimension):
+                raise TaichiCompilationError(f"Constraint requires declared dimension {name!r}")
+            _dimension_value(self, owner, name)
+            dimensions[name] = declaration.schema
+            if declaration.capacity:
+                depend(declaration.capacity)
+            for child in extent_dependencies(declaration.expression) if declaration.expression else ():
+                depend(child)
+
+        for spec in constraints.values():
+            for name in extent_dependencies(spec["left"]) | extent_dependencies(spec["right"]):
+                depend(name)
+        validate_constraints(constraints, dimensions.keys(), used)
+        check_constraints(constraints, lambda name: _dimension_value(self, owner, name), sources, entry=entry)
+        return constraints, dimensions, sources
 
     def _project_borrowed(self, borrowed, roots, sources):
         """Complete layout dependencies from source declarations, not a new ABI.
@@ -1013,6 +1057,7 @@ class _Capture:
                 raise TaichiCompilationError("Declared records only support presence comparisons with None")
 
     def finish(self):
+        self.component.constraint_facts(self.owner, self.used, entry=self.entry_definition[1])
         mismatch = self.dependency_mismatch(self.component, self.owner)
         if mismatch:
             raise TaichiCompilationError(f"Component dependency changed during compilation: {mismatch}; retry")
@@ -1125,6 +1170,7 @@ class _ComponentCode:
         return json.loads(self._contract)
 
     def validate_bindings(self, component, owner):
+        component.constraint_facts(owner, self.used, entry=self.entry_definition[1])
         for name in self.static:
             component.declarations[name].validate(component.read(owner, name), name, self.kernel.func.__qualname__)
         for name in self.dynamic:

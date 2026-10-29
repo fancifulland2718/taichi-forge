@@ -197,6 +197,30 @@ class ResourceScope:
         del caller
         return Extent(("dim", name))
 
+    def require_le(self, name, left, right, *, when):
+        """Declare left <= right for entries that actually use one named role.
+
+        Expressions reuse the dimension algebra. Bounds come from the normal
+        algorithm/layout policy, not inferred sample capacities. This neither
+        changes numerical code nor adds runtime arguments to unrelated entries.
+        """
+        from taichi_forge_runtime._dimensions import check_constraints, validate_constraints
+
+        def expression(value):
+            return value.expression if isinstance(value, Extent) else freeze_extent(("const", value))
+
+        spec = dict(left=expression(left), right=expression(right), when=when)
+        roles = set().union(*(self._registry.get(kind, {}) for kind in ("fields", "dimensions", "values", "borrowed")))
+        validate_constraints({name: spec}, self._registry["dimensions"].keys(), roles)
+        if self._owner is not None:
+            check_constraints({name: spec}, lambda key: operator.index(getattr(self._owner, key)))
+        constraints = self._registry.setdefault("constraints", {})
+        if name in constraints and constraints[name]["spec"] != spec:
+            raise ValueError(f"Dimension constraint {name!r} already has another declaration")
+        caller = inspect.currentframe().f_back
+        constraints.setdefault(name, dict(spec=spec, source=(caller.f_code.co_filename, caller.f_lineno)))
+        del caller
+
     def derived_dim(self, name, expression):
         """Relate an existing count to declared counts without changing it.
 
