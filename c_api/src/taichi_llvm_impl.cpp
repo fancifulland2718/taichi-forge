@@ -85,8 +85,7 @@ LlvmRuntime::~LlvmRuntime() {
   } catch (...) {
     // Failed drain cannot prove that domains stopped accessing the executor.
     // Preserve its finite allocation and referenced configuration on failure.
-    if (!dense_groups_.empty())
-      (void)new decltype(dense_groups_)(std::move(dense_groups_));
+    abandon_dense_groups();
     (void)owned_executor_.release();
     (void)cfg_.release();
     return;
@@ -130,11 +129,6 @@ TiMemory LlvmRuntime::allocate_memory(
            result_buffer, executor_->use_device_memory_pool()});
 
   return devalloc2devmem(*this, devalloc, params.size);
-}
-
-void LlvmRuntime::free_memory(TiMemory devmem) {
-  free_dense_group(devmem);
-  Runtime::free_memory(devmem);
 }
 
 TiAotModule LlvmRuntime::load_aot_module(const char *module_path) {

@@ -182,8 +182,8 @@ class Component:
                 raise ValueError("Unsupported required component capability")
             if contract["target"] not in ("x64", "cuda", "vulkan") or contract["target"] != module._runtime.arch:
                 raise ValueError("Component target does not match this Runtime")
-            if contract["target"] == "vulkan" and (contract["groups"] or fixed_groups):
-                raise NotImplementedError("Vulkan component SNode group instantiation requires native layout qualification")
+            if contract["target"] == "vulkan" and fixed_groups:
+                raise NotImplementedError("Vulkan component fixed SNode group instantiation requires native qualification")
             declarations = contract["dimensions"]
             for key, schema in declarations.items():
                 if (

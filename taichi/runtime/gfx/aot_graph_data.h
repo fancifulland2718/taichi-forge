@@ -16,6 +16,7 @@ class KernelImpl : public aot::Kernel {
     ret_size = params_.kernel_attribs.ctx_attribs.rets_bytes();
     args_type = params_.kernel_attribs.ctx_attribs.args_type();
     args_size = params_.kernel_attribs.ctx_attribs.args_bytes();
+    runtime_affine_arrays = params_.kernel_attribs.runtime_affine_arrays;
     for (const auto &[indices, attrib] :
          params_.kernel_attribs.ctx_attribs.args()) {
       CallableBase::Parameter parameter(
@@ -47,6 +48,12 @@ class KernelImpl : public aot::Kernel {
         }
       }
       nested_parameters.emplace(indices, std::move(parameter));
+    }
+    for (const auto &argument : runtime_affine_arrays) {
+      const auto found = nested_parameters.find(argument);
+      TI_ERROR_IF(found == nested_parameters.end() ||
+                      found->second.ptype != ParameterType::kNdarray,
+                  "Invalid GFX runtime affine argument declaration");
     }
     for (const auto &[indices, type] :
          params_.kernel_attribs.ctx_attribs.argpack_types()) {

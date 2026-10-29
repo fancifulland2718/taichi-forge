@@ -1,11 +1,39 @@
 #include "taichi_gfx_impl.h"
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
+#include "taichi/codegen/spirv/snode_struct_compiler.h"
 
 GfxRuntime::GfxRuntime(taichi::Arch arch) : Runtime(arch) {
 }
 
-Error GfxRuntime::create_aot_module(std::shared_ptr<const taichi::io::VirtualDir> dir,
-                                    TiAotModule &out) {
+std::size_t GfxRuntime::compile_dense_snode_layout(taichi::lang::SNode &root) {
+  if (arch != taichi::Arch::vulkan)
+    throw std::invalid_argument("Dense SNode groups require CPU/CUDA/Vulkan");
+  // Use the same layout pass as SNodeTreeManager, including its placement
+  // ordering and scalar alignment. No LLVM layout or producer offsets apply.
+  return taichi::lang::spirv::compile_snode_structs(root).root_size;
+}
+
+std::pair<taichi::lang::DeviceAllocation, std::shared_ptr<void>>
+GfxRuntime::allocate_dense_snode_storage(std::size_t size) {
+  using namespace taichi::lang;
+  auto [buffer, result] = get().allocate_memory_unique(
+      {size, false, false, false, AllocUsage::Storage});
+  if (result != RhiResult::success)
+    throw std::bad_alloc();
+  auto *stream = get().get_compute_stream();
+  auto [commands, status] = stream->new_command_list_unique();
+  if (status != RhiResult::success)
+    throw std::runtime_error("Dense SNode group initialization failed");
+  commands->buffer_fill(buffer->get_ptr(), kBufferSizeEntireSize, 0);
+  stream->submit_synced(commands.get());
+  const DeviceAllocation allocation = *buffer;
+  return {allocation,
+          std::shared_ptr<DeviceAllocationGuard>(std::move(buffer))};
+}
+
+Error GfxRuntime::create_aot_module(
+    std::shared_ptr<const taichi::io::VirtualDir> dir,
+    TiAotModule &out) {
   taichi::lang::gfx::AotModuleParams params{};
   params.source = std::move(dir);
   params.runtime = &get_gfx_runtime();

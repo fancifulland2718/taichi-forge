@@ -147,6 +147,7 @@ class PreparedExecutionRegistry;
 class NativeResourceRegistry;
 struct SubmissionCompletionState;
 struct BoundKernelArguments;
+struct DenseSNodeGroup;
 }  // namespace capi
 
 class Runtime {
@@ -239,6 +240,12 @@ class Runtime {
   std::array<uint64_t, 32> host_result_buffer_;
 
   explicit Runtime(taichi::Arch arch);
+  std::unordered_map<TiMemory, std::shared_ptr<capi::DenseSNodeGroup>> dense_groups_;
+  virtual std::size_t compile_dense_snode_layout(taichi::lang::SNode &root);
+  virtual std::pair<taichi::lang::DeviceAllocation, std::shared_ptr<void>>
+  allocate_dense_snode_storage(std::size_t size);
+  void free_dense_group(TiMemory group);
+  void abandon_dense_groups();
 
  public:
   const taichi::Arch arch;
@@ -268,6 +275,14 @@ class Runtime {
   virtual TiMemory allocate_memory(
       const taichi::lang::Device::AllocParams &params);
   virtual void free_memory(TiMemory devmem);
+  TiMemory create_dense_snode_group(const std::string &schema,
+                                   const std::string &dimensions);
+  const std::string &dense_snode_group_layout(TiMemory group);
+  TiNdArray dense_snode_group_member(TiMemory group,
+                                    const std::string &paths,
+                                    TiDataType dtype,
+                                    const TiNdShape &element_shape);
+  void retire_dense_groups();
 
   // Adopts an RHI allocation, including imported allocation wrappers. The
   // process-unique opaque handle is never reinterpreted as an RHI slot ID.

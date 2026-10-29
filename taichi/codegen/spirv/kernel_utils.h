@@ -473,8 +473,9 @@ struct TaichiKernelAttributes {
   std::vector<TaskAttributes> tasks_attribs;
 
   KernelContextAttributes ctx_attribs;
+  std::vector<std::vector<int>> runtime_affine_arrays;
 
-  TI_IO_DEF(name, is_jit_evaluator, tasks_attribs, ctx_attribs);
+  TI_IO_DEF(name, is_jit_evaluator, tasks_attribs, ctx_attribs, runtime_affine_arrays);
 };
 
 }  // namespace spirv

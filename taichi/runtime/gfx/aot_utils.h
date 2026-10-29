@@ -49,7 +49,8 @@ struct TaichiAotData {
   // v12 carries host-argument launch bounds with each qualified task.
   // v13 adds affine bounds and their intermediate-overflow input interval.
   // v16 preserves source-owned block geometry for cold tuning admission.
-  static constexpr uint32_t kMetadataVersion = 16;
+  // v17 retains compiler-proven affine array arguments, checked against SPIR-V.
+  static constexpr uint32_t kMetadataVersion = 17;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;

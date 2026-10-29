@@ -88,9 +88,11 @@ VulkanRuntimeImported::VulkanRuntimeImported(
 VulkanRuntimeImported::~VulkanRuntimeImported() {
   try {
     retire_execution_domains();
+    retire_dense_groups();
   } catch (...) {
     // Keep the device adapter and commands together if a drain failed. The
     // external device's own lifetime remains the importer's responsibility.
+    abandon_dense_groups();
     (void)storage_.release();
   }
 }
@@ -154,8 +156,10 @@ VulkanRuntimeOwned::~VulkanRuntimeOwned() {
     // Also protect direct native destruction, before member teardown destroys
     // GfxRuntime and VkDevice. The public destroy path has already done this.
     retire_execution_domains();
+    retire_dense_groups();
   } catch (...) {
     // An unproven prefix must not lose its device/code/storage closure.
+    abandon_dense_groups();
     (void)storage_.release();
   }
 }

@@ -277,9 +277,28 @@ aliases, block-boundary coverage, empty active ranges, untouched tails and
 independent reset/close. Cold initialization and ordinary prepared-call close
 use the existing Runtime completion wait. Closing one instance can drain the
 primary queue; this does not qualify independent asynchronous domains or
-synchronization-free retirement performance. Dense/Sparse SNode groups still
-reject before consumer allocation pending native Vulkan layout/instantiation
-qualification. The array gate does not establish Field or application coverage.
+synchronization-free retirement performance.
+
+Simple Vulkan Dense groups have a separate native-layout and source-free
+consumer gate. Every node at new extents is compared with ordinary FieldsBuilder,
+including scalar/vector/matrix/rank-zero placement. Packed Host IO for interleaved
+records copies only member bytes through one staging buffer and one cold
+submission. Strided regions require four-byte aligned offsets, strides and
+element widths; unaligned subword members reject explicitly. The original
+`self.field` component covers interleaved StructField members, sibling blocks,
+aliases and count/shape/Field loops. Two capacities (53/263) share one loaded
+module and check tails, initialization, repeated runs and independent reset/close.
+Fixed SNode/Sparse instance calls, complex layouts and real applications still
+require their own Vulkan qualification.
+
+GFX metadata v17 carries final-IR runtime-affine argument facts. Corresponding
+declarations are retained in the SPIR-V and checked on load; changing JSON alone
+cannot grant stride support to packed code. This is not an artifact signature
+or a security guarantee for arbitrary hostile shaders. The shared launch boundary
+also checks the actual reachable relative-byte range against SPIR-V's signed-i32
+offset arithmetic. A 64-bit base pointer does not widen that arithmetic; LLVM's
+wider addressing is preserved. This is a code-generation ABI bound, not a
+configuration or model-count budget.
 
 Fixed-schema Sparse SNode component binding reuses the native runtime foundation.
 `clone_snode_tree_runtime` recreates empty
@@ -448,11 +467,12 @@ dimension/root bindings fail before execution.
 
 The standalone Runtime now provides experimental
 `dense_snode_group(schema_json, dimensions)`. It reconstructs actual SNodes with
-the same schema, then invokes `StructCompilerLLVM::run_layout`, extracted from
-and also used by ordinary JIT layout compilation. Queries project actual compiled
-nodes; consumers do not supply offsets/strides. The complete simple dense root
-is allocated once and zeroed through the LLVM allocator. Numerical addressing
-uses arguments, without registering or switching fixed module root pointers.
+the same schema. CPU/CUDA invoke the normal `StructCompilerLLVM::run_layout`;
+Vulkan invokes the same `spirv::compile_snode_structs` used by SNodeTreeManager,
+including its own member ordering, alignment and padding. Queries project actual
+compiled nodes; consumers do not supply offsets/strides. The complete root is
+allocated once and zeroed through its LLVM/Vulkan allocator. Numerical addressing
+uses instance arguments, without registering or switching fixed module pointers.
 
 `group.member(paths, dtype, element_shape=...)` validates root-relative place
 paths, element types and compact or positive uniform-record layout, returning

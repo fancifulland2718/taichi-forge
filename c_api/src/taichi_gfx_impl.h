@@ -29,4 +29,9 @@ class GfxRuntime : public Runtime {
       taichi::lang::ImageLayout layout) override final;
   virtual void flush() override final;
   virtual void wait() override final;
+
+ protected:
+  std::size_t compile_dense_snode_layout(taichi::lang::SNode &root) override;
+  std::pair<taichi::lang::DeviceAllocation, std::shared_ptr<void>>
+  allocate_dense_snode_storage(std::size_t size) override;
 };

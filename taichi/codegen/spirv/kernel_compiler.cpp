@@ -7,6 +7,7 @@
 #include "taichi/ir/control_flow_graph.h"
 #include "taichi/ir/statements.h"
 #include "taichi/codegen/spirv/compiled_kernel_data.h"
+#include "taichi/codegen/spirv/array_layout_abi.h"
 
 namespace taichi::lang {
 namespace spirv {
@@ -137,12 +138,15 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
                 internal_data.src.spirv_src);
   }
   internal_data.metadata.num_snode_trees = config_.compiled_struct_data->size();
-  internal_data.metadata.used_snode_tree_ids =
-      irpass::analysis::gather_snode_tree_dependencies(chi_ir);
+  const auto dependencies = irpass::analysis::gather_kernel_runtime_dependencies(chi_ir);
+  internal_data.metadata.used_snode_tree_ids = dependencies.tree_ids;
+  internal_data.metadata.kernel_attribs.runtime_affine_arrays = dependencies.runtime_affine_arrays;
+  for (auto &code : internal_data.src.spirv_src)
+    declare_runtime_affine_arrays(code, dependencies.runtime_affine_arrays);
   auto result = std::make_unique<spirv::CompiledKernelData>(
       compile_config.arch, std::move(internal_data));
   result->initialize_generation_bound_snode_relocation_descriptor(
-      true, irpass::analysis::gather_snode_relocation_structures(chi_ir));
+      true, dependencies.structures);
   return result;
 }
 

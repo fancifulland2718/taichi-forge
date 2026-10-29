@@ -9,6 +9,7 @@
 #include "taichi/runtime/gfx/cooperative_matrix.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/graph_artifact.h"
+#include "taichi/codegen/spirv/array_layout_abi.h"
 
 namespace taichi::lang {
 namespace gfx {
@@ -58,6 +59,8 @@ class AotModuleImpl : public aot::Module {
             aot::decode_device_range_dispatch(value, ti_aot_data_.device_range_dispatch);
         }
         for (const auto &kernel : ti_aot_data_.kernels) {
+          if (ti_aot_data_.metadata_version < 17 && !kernel.runtime_affine_arrays.empty())
+            throw std::invalid_argument("Legacy GFX metadata cannot declare affine array arguments");
           for (const auto &task : kernel.tasks_attribs) {
             if (!task.valid_device_range_dispatch_contract() ||
                 (ti_aot_data_.metadata_version < 10 &&
@@ -587,6 +590,8 @@ class AotModuleImpl : public aot::Module {
         return false;
       }
       try {
+        if (spirv::runtime_affine_arrays(code) != ti_aot_data_.kernels[index].runtime_affine_arrays)
+          throw std::invalid_argument("GFX affine array metadata differs from compiled SPIR-V");
         validate_cooperative_matrix_metadata(
             task, code, ti_aot_data_.metadata_version);
       } catch (const std::exception &error) {

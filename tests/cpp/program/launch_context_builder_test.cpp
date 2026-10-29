@@ -48,6 +48,42 @@ TEST(LaunchContextBuilderTest, DescriptorPointerWritesPreserveAdjacentScalar) {
   }
 }
 
+TEST(LaunchContextBuilderTest, VulkanAffineOffsetsUseTheActualSignedRange) {
+  auto &types = TypeFactory::get_instance();
+  const auto shape = types.get_struct_type(
+      {{PrimitiveType::i32, "extent", 0},
+       {PrimitiveType::i32, "stride", 4},
+       {PrimitiveType::i32, "affine", 8}});
+  const auto array = types.get_struct_type(
+      {{shape, "shape", 0},
+       {types.get_pointer_type(PrimitiveType::f32), "data", 16}});
+  CallableBase callable;
+  callable.args_type = types.get_struct_type({{array, "array", 0}})->as<StructType>();
+  callable.args_size = 24;
+  callable.nested_parameters[{0}] =
+      CallableBase::Parameter(PrimitiveType::f32, true, false, 0, 1);
+  storage::DenseStorageLayoutSpec layout;
+  layout.scalar_type = PrimitiveType::f32;
+  layout.index_strides_bytes = {std::int64_t(1) << 30};
+  for (const auto arch : {Arch::vulkan, Arch::x64, Arch::cuda}) {
+    callable.arch = arch;
+    for (const int count : {2, 3, 0}) {
+      layout.index_shape = {count};
+      auto view = storage::build_dense_storage_descriptor(
+          storage::StorageOwnerRef::submission_scoped_host(1),
+          storage::StorageSourceKind::kExternalDense, layout);
+      ASSERT_TRUE(view);
+      LaunchContextBuilder builder(&callable);
+      // No device allocation: only the metadata binding boundary is tested.
+      if (arch == Arch::vulkan && count == 3) {
+        EXPECT_THROW(builder.set_arg_dense_storage({0}, *view.descriptor), std::string);
+      } else {
+        EXPECT_NO_THROW(builder.set_arg_dense_storage({0}, *view.descriptor));
+      }
+    }
+  }
+}
+
 void set_test_execution_plan(Kernel &kernel,
                              const std::string &execution_identity,
                              int work_per_thread) {

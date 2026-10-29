@@ -8,7 +8,7 @@ function(ti_get_c_api_sources OUT_SOURCES OUT_HEADERS)
         c_api/src/execution_resources.cpp c_api/src/execution_binding_family.cpp
         c_api/src/native_resource_registry.cpp c_api/src/submission_completion.cpp
         c_api/src/completion.cpp c_api/src/execution_domain_binding.cpp
-        c_api/src/vulkan_execution_domain.cpp)
+        c_api/src/vulkan_execution_domain.cpp c_api/src/dense_snode_group.cpp)
     if(TI_WITH_RUNTIME_C_API)
         list(APPEND _sources c_api/src/aot_runtime_client.cpp c_api/src/jit_module.cpp)
     endif()
@@ -18,7 +18,7 @@ function(ti_get_c_api_sources OUT_SOURCES OUT_HEADERS)
         c_api/include/taichi/taichi.h
         c_api/include/taichi/taichi_unity.h)
     if(TI_WITH_LLVM)
-        list(APPEND _sources c_api/src/taichi_llvm_impl.cpp c_api/src/dense_snode_group.cpp
+        list(APPEND _sources c_api/src/taichi_llvm_impl.cpp
              c_api/src/snode_instance.cpp)
         list(APPEND _headers c_api/include/taichi/taichi_cpu.h)
         if(TI_WITH_CUDA)

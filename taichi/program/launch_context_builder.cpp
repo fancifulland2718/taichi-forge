@@ -493,6 +493,13 @@ void LaunchContextBuilder::set_arg_dense_storage(
   TI_ERROR_IF(descriptor.access() != storage::StorageAccess::kReadWrite,
               "Dense storage kernel binding currently requires read-write "
               "access");
+  // SPIR-V forms the relative byte offset in signed i32 even when the final
+  // storage pointer is 64-bit. Checking each stride alone misses overflow in
+  // index * stride and the sum across axes. Keep LLVM's wider addressing.
+  TI_ERROR_IF(kernel_->arch == Arch::vulkan && properties.item_count &&
+                  properties.reachable_end - properties.reachable_begin - 1 >
+                      (std::numeric_limits<std::int32_t>::max)(),
+              "Vulkan dense view exceeds the signed int32 byte-offset ABI");
 
   const int arg_offset = args_type->get_element_offset(arg_id);
   const auto found = std::find_if(

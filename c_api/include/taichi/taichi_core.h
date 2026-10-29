@@ -1171,7 +1171,7 @@ TI_DLL_EXPORT TiMemory TI_API_CALL
 ti_allocate_memory(TiRuntime runtime,
                    const TiMemoryAllocateInfo *allocate_info);
 
-// Experimental component resource contract (schema version 1), CPU/CUDA.
+// Experimental component resource contract (schema version 1), CPU/CUDA/Vulkan.
 // Reconstructs a simple dense SNode root using the backend's normal layout
 // compiler, and allocates zero-initialized instance storage. No numerical DSL
 // compilation or fixed module root binding is involved. Free the group with
@@ -1193,6 +1193,7 @@ TI_DLL_EXPORT void TI_API_CALL ti_get_dense_snode_group_member_ext(
 // Logical packed Host IO for primitive/tensor ndarrays. Registered record strides
 // remain authoritative; neighboring members are neither read nor overwritten.
 // Both calls wait for preceding work and require exactly the logical byte size.
+// Vulkan strided regions require four-byte aligned offsets, strides and widths.
 TI_DLL_EXPORT void TI_API_CALL ti_copy_ndarray_from_host_ext(
     TiRuntime runtime, const TiNdArray *array, const void *source, uint64_t size);
 TI_DLL_EXPORT void TI_API_CALL ti_copy_ndarray_to_host_ext(

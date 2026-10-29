@@ -1,18 +1,19 @@
-#include "taichi_llvm_impl.h"
-
-#ifdef TI_WITH_LLVM
+#include "taichi_core_impl.h"
 #include <cstring>
 #include <limits>
 
 #include "argument_binding.h"
+#ifdef TI_WITH_LLVM
+#include "taichi_llvm_impl.h"
 #include "taichi/codegen/llvm/struct_llvm.h"
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
+#endif
 #include "taichi/struct/dense_snode_schema.h"
 
-namespace capi {
 namespace {
 using namespace taichi::lang;
 
+#ifdef TI_WITH_LLVM
 struct GroupAllocation {
   DeviceAllocation allocation{};
   LlvmRuntimeExecutor *executor{nullptr};
@@ -26,6 +27,8 @@ struct GroupAllocation {
     }
   }
 };
+
+#endif
 
 struct LayoutNode {
   int parent{-1};
@@ -45,43 +48,76 @@ struct Layout {
 
 }  // namespace
 
-struct DenseSNodeGroup {
+struct capi::DenseSNodeGroup {
   std::unique_ptr<taichi::lang::SNode> root;
   std::shared_ptr<Runtime::BorrowedMemory> storage;
   std::string layout;
 };
 
-TiMemory LlvmRuntime::create_dense_snode_group(const std::string &schema_json,
-                                               const std::string &dimensions) {
+#ifdef TI_WITH_LLVM
+std::size_t capi::LlvmRuntime::compile_dense_snode_layout(
+    taichi::lang::SNode &root) {
+  using namespace taichi::lang;
+  auto *context = executor_->get_llvm_context();
+  StructCompilerLLVM compiler(arch, executor_->get_config(), context,
+                              context->new_module("component_layout"), -1);
+  compiler.run_layout(root);
+  return compiler.root_size;
+}
+
+std::pair<taichi::lang::DeviceAllocation, std::shared_ptr<void>>
+capi::LlvmRuntime::allocate_dense_snode_storage(std::size_t size) {
+  auto owner = std::make_shared<GroupAllocation>();
+  owner->allocation =
+      executor_->allocate_memory_on_device(size, result_buffer, true);
+  owner->executor = executor_;
+  return {owner->allocation, owner};
+}
+#endif
+
+std::size_t Runtime::compile_dense_snode_layout(taichi::lang::SNode &) {
+  throw std::invalid_argument(
+      "Dense SNode groups are unsupported on this backend");
+}
+
+std::pair<taichi::lang::DeviceAllocation, std::shared_ptr<void>>
+Runtime::allocate_dense_snode_storage(std::size_t) {
+  throw std::invalid_argument(
+      "Dense SNode storage is unsupported on this backend");
+}
+
+TiMemory Runtime::create_dense_snode_group(const std::string &schema_json,
+                                           const std::string &dimensions) {
   using namespace taichi::lang;
   std::lock_guard<std::recursive_mutex> lock(submission_mutex());
-  if (!arch_is_cpu(arch) && arch != taichi::Arch::cuda)
-    throw std::invalid_argument("Dense group requires a CPU/CUDA runtime");
   auto schema = DenseSNodeSchema::from_json(schema_json);
   const auto bindings = liong::json::parse_complete(dimensions);
   if (!bindings.is_obj())
-    throw std::invalid_argument("Dense dimensions must be an object of integers");
+    throw std::invalid_argument(
+        "Dense dimensions must be an object of integers");
   std::map<std::string, int> extents;
   for (const auto &[name, value] : bindings.fields()) {
     if (value.ty != liong::json::L_JSON_INT || value.num_int <= 0 ||
         value.num_int > std::numeric_limits<int>::max())
-      throw std::invalid_argument("Dense dimension must be a positive i32 integer");
+      throw std::invalid_argument(
+          "Dense dimension must be a positive i32 integer");
     extents.emplace(name, static_cast<int>(value.num_int));
   }
-  auto group = std::make_shared<DenseSNodeGroup>();
+  auto group = std::make_shared<capi::DenseSNodeGroup>();
   group->root = schema.instantiate(extents);
-  auto *context = executor_->get_llvm_context();
-  StructCompilerLLVM compiler(arch, executor_->get_config(), context,
-                              context->new_module("component_layout"), -1);
-  // Identical layout pass to normal JIT SNodes. These parameterized dense
-  // resources need no fixed-root accessors or LLVM runtime tree directory.
-  compiler.run_layout(*group->root);
   Layout layout;
-  layout.root_size = compiler.root_size;
+  layout.root_size = compile_dense_snode_layout(*group->root);
+  std::vector<SNode *> nodes;
+  std::function<void(SNode &)> collect = [&](SNode &node) {
+    nodes.push_back(&node);
+    for (auto &child : node.ch)
+      collect(*child);
+  };
+  collect(*group->root);
   if (!layout.root_size)
     throw std::invalid_argument("Dense group requires nonempty storage");
-  for (std::size_t i = 0; i < compiler.snodes.size(); ++i) {
-    const auto &node = *compiler.snodes[i];
+  for (std::size_t i = 0; i < nodes.size(); ++i) {
+    const auto &node = *nodes[i];
     LayoutNode entry;
     entry.parent = schema.nodes.at(i).parent;
     entry.type = static_cast<int>(node.type);
@@ -94,14 +130,11 @@ TiMemory LlvmRuntime::create_dense_snode_group(const std::string &schema_json,
   }
   group->layout = liong::json::print(liong::json::serialize(layout));
   group->storage = std::make_shared<Runtime::BorrowedMemory>();
-  // Allocate with the same LLVM runtime allocator used by existing managed
-  // resources. A single allocation retains the complete compiled dense root.
-  auto owner = std::make_shared<GroupAllocation>();
-  owner->allocation = executor_->allocate_memory_on_device(layout.root_size, result_buffer, true);
-  owner->executor = executor_;
-  group->storage->owner = owner;
-  const auto handle = register_memory(owner->allocation, layout.root_size, false,
-                                       0, {}, 0, false, group->storage);
+  // The backend owns allocation and zeroing; all aliases share this lease.
+  auto [allocation, owner] = allocate_dense_snode_storage(layout.root_size);
+  group->storage->owner = std::move(owner);
+  const auto handle = register_memory(allocation, layout.root_size, false, 0,
+                                      {}, 0, false, group->storage);
   try {
     dense_groups_.emplace(handle, group);
   } catch (...) {
@@ -111,29 +144,31 @@ TiMemory LlvmRuntime::create_dense_snode_group(const std::string &schema_json,
   return handle;
 }
 
-const std::string &LlvmRuntime::dense_snode_group_layout(TiMemory handle) {
+const std::string &Runtime::dense_snode_group_layout(TiMemory handle) {
   get_memory(handle);
   const auto found = dense_groups_.find(handle);
   if (found == dense_groups_.end())
-    throw MemoryBindingError("Memory is not a live dense SNode group of this runtime");
+    throw MemoryBindingError(
+        "Memory is not a live dense SNode group of this runtime");
   return found->second->layout;
 }
 
-TiNdArray LlvmRuntime::dense_snode_group_member(TiMemory handle,
-                                               const std::string &text,
-                                               TiDataType dtype,
-                                               const TiNdShape &element_shape) {
+TiNdArray Runtime::dense_snode_group_member(TiMemory handle,
+                                            const std::string &text,
+                                            TiDataType dtype,
+                                            const TiNdShape &element_shape) {
   using namespace taichi::lang;
   dense_snode_group_layout(handle);  // Runtime/owner validation before use.
   const auto &group = dense_groups_.at(handle);
   if (element_shape.dim_count > 2)
-    throw MemoryBindingError("Dense member requires a scalar/vector/matrix element");
+    throw MemoryBindingError(
+        "Dense member requires a scalar/vector/matrix element");
   TiNdArray array{};
   array.elem_type = dtype;
   array.elem_shape = element_shape;
   // Reuse the ordinary ndarray ABI's extent and checked byte-product rules.
   // The actual tree/placement validates the number of lanes, not a fixed cap.
-  const auto element_layout = ndarray_storage_layout(array);
+  const auto element_layout = capi::ndarray_storage_layout(array);
   const uint64_t width = element_layout.alignment;
   const uint64_t lanes = element_layout.element_bytes / width;
   const auto paths_json = liong::json::parse_complete(text);
@@ -147,37 +182,46 @@ TiNdArray LlvmRuntime::dense_snode_group_member(TiMemory handle,
     for (const auto &index : path_json.elems()) {
       if (index.ty != liong::json::L_JSON_INT || index.num_int < 0 ||
           index.num_int > std::numeric_limits<int>::max())
-        throw MemoryBindingError("Dense member path requires nonnegative native child indices");
+        throw MemoryBindingError(
+            "Dense member path requires nonnegative native child indices");
       path.push_back(static_cast<int>(index.num_int));
     }
     paths.push_back(std::move(path));
   }
   if (lanes != paths.size())
-    throw MemoryBindingError("Dense member element shape differs from component paths");
-  const auto scalar_type = ndarray_scalar_type(dtype);
+    throw MemoryBindingError(
+        "Dense member element shape differs from component paths");
+  const auto scalar_type = capi::ndarray_scalar_type(dtype);
   SNode *anchor = nullptr;
   for (std::size_t lane = 0; lane < paths.size(); ++lane) {
     auto *node = group->root.get();
     for (int child : paths[lane]) {
       if (child < 0 || static_cast<std::size_t>(child) >= node->ch.size())
-        throw MemoryBindingError("Dense member path is outside the group schema");
+        throw MemoryBindingError(
+            "Dense member path is outside the group schema");
       node = node->ch[child].get();
     }
     if (node->type != SNodeType::place || node->dt != scalar_type)
-      throw MemoryBindingError("Dense member path/type does not select a declared scalar place");
+      throw MemoryBindingError(
+          "Dense member path/type does not select a declared scalar place");
     if (!anchor)
       anchor = node;
     if (node->parent != anchor->parent ||
-        node->offset_bytes_in_parent_cell < anchor->offset_bytes_in_parent_cell ||
-        node->offset_bytes_in_parent_cell - anchor->offset_bytes_in_parent_cell != lane * width)
-      throw MemoryBindingError("Dense member components are not contiguous in the same SNode");
+        node->offset_bytes_in_parent_cell <
+            anchor->offset_bytes_in_parent_cell ||
+        node->offset_bytes_in_parent_cell -
+                anchor->offset_bytes_in_parent_cell !=
+            lane * width)
+      throw MemoryBindingError(
+          "Dense member components are not contiguous in the same SNode");
   }
   auto *parent = anchor->parent;
   uint64_t offset = anchor->offset_bytes_in_parent_cell;
   uint64_t record_stride = element_layout.element_bytes;
   if (parent->type == SNodeType::dense) {
     if (parent->parent != group->root.get())
-      throw MemoryBindingError("Dense member is not a qualified uniform record");
+      throw MemoryBindingError(
+          "Dense member is not a qualified uniform record");
     record_stride = parent->cell_size_bytes;
     offset += parent->offset_bytes_in_parent_cell;
     array.shape.dim_count = anchor->num_active_indices;
@@ -186,19 +230,25 @@ TiNdArray LlvmRuntime::dense_snode_group_member(TiMemory handle,
     for (uint32_t i = 0; i < array.shape.dim_count; ++i)
       array.shape.dims[i] = anchor->shape_along_axis(i);
   } else if (parent != group->root.get()) {
-    throw MemoryBindingError("Dense member must belong to a simple dense or rank-zero root");
+    throw MemoryBindingError(
+        "Dense member must belong to a simple dense or rank-zero root");
   }
-  ndarray_storage_layout(array);  // Validate logical shape/products independently.
+  capi::ndarray_storage_layout(
+      array);  // Validate logical shape/products independently.
   auto layout = std::make_shared<storage::DenseStorageLayoutSpec>();
   layout->scalar_type = scalar_type;
-  layout->index_shape.assign(array.shape.dims, array.shape.dims + array.shape.dim_count);
-  layout->element_shape.assign(element_shape.dims, element_shape.dims + element_shape.dim_count);
+  layout->index_shape.assign(array.shape.dims,
+                             array.shape.dims + array.shape.dim_count);
+  layout->element_shape.assign(element_shape.dims,
+                               element_shape.dims + element_shape.dim_count);
   auto strides = [](const std::vector<int64_t> &shape, uint64_t stride) {
     std::vector<int64_t> result(shape.size());
     for (std::size_t i = shape.size(); i-- > 0;) {
       if (stride > uint64_t(std::numeric_limits<int64_t>::max()) ||
-          (shape[i] && stride > uint64_t(std::numeric_limits<int64_t>::max()) / shape[i]))
-        throw MemoryBindingError("Dense member stride exceeds native address range");
+          (shape[i] &&
+           stride > uint64_t(std::numeric_limits<int64_t>::max()) / shape[i]))
+        throw MemoryBindingError(
+            "Dense member stride exceeds native address range");
       result[i] = stride;
       stride *= shape[i];
     }
@@ -213,14 +263,16 @@ TiNdArray LlvmRuntime::dense_snode_group_member(TiMemory handle,
   const auto bytes = uint64_t(analysis.properties.reachable_end);
   const auto source = get_memory(handle);
   if (offset > source.size || bytes > source.size - offset)
-    throw MemoryBindingError("Dense member exceeds its compiled root allocation");
-  array.memory = register_memory(source.allocation, bytes, false, offset, {},
-                                  offset, false, group->storage,
-                                  analysis.properties.ndarray_abi_compatible ? nullptr : layout);
+    throw MemoryBindingError(
+        "Dense member exceeds its compiled root allocation");
+  array.memory = register_memory(
+      source.allocation, bytes, false, offset, {}, offset, false,
+      group->storage,
+      analysis.properties.ndarray_abi_compatible ? nullptr : layout);
   return array;
 }
 
-void LlvmRuntime::free_dense_group(TiMemory handle) {
+void Runtime::free_dense_group(TiMemory handle) {
   std::lock_guard<std::recursive_mutex> lock(submission_mutex());
   const auto found = dense_groups_.find(handle);
   if (found == dense_groups_.end())
@@ -235,18 +287,19 @@ void LlvmRuntime::free_dense_group(TiMemory handle) {
   dense_groups_.erase(found);
 }
 
-void LlvmRuntime::retire_dense_groups() {
+void Runtime::retire_dense_groups() {
   while (!dense_groups_.empty())
     free_memory(dense_groups_.begin()->first);
 }
-}  // namespace capi
+void Runtime::abandon_dense_groups() {
+  // Keep leases alive if the device could not prove retirement.
+  if (!dense_groups_.empty())
+    (void)new decltype(dense_groups_)(std::move(dense_groups_));
+}
 
 namespace {
-capi::LlvmRuntime &dense_runtime(TiRuntime handle) {
-  auto &runtime = *reinterpret_cast<Runtime *>(handle);
-  if (!taichi::arch_is_cpu(runtime.arch) && runtime.arch != taichi::Arch::cuda)
-    throw std::invalid_argument("Dense SNode groups require CPU/CUDA");
-  return static_cast<capi::LlvmRuntime &>(runtime);
+Runtime &dense_runtime(TiRuntime handle) {
+  return *reinterpret_cast<Runtime *>(handle);
 }
 }  // namespace
 
@@ -263,8 +316,10 @@ TiMemory ti_create_dense_snode_group_ext(TiRuntime runtime,
   return out;
 }
 
-void ti_get_dense_snode_group_layout_ext(TiRuntime runtime, TiMemory group,
-                                         uint64_t *size, char *json) {
+void ti_get_dense_snode_group_layout_ext(TiRuntime runtime,
+                                         TiMemory group,
+                                         uint64_t *size,
+                                         char *json) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
   TI_CAPI_ARGUMENT_NULL(group);
@@ -282,8 +337,10 @@ void ti_get_dense_snode_group_layout_ext(TiRuntime runtime, TiMemory group,
   TI_CAPI_TRY_CATCH_END();
 }
 
-void ti_get_dense_snode_group_member_ext(TiRuntime runtime, TiMemory group,
-                                         const char *paths, TiDataType dtype,
+void ti_get_dense_snode_group_member_ext(TiRuntime runtime,
+                                         TiMemory group,
+                                         const char *paths,
+                                         TiDataType dtype,
                                          const TiNdShape *element_shape,
                                          TiNdArray *array) {
   TI_CAPI_TRY_CATCH_BEGIN();
@@ -297,4 +354,3 @@ void ti_get_dense_snode_group_member_ext(TiRuntime runtime, TiMemory group,
   *array = owner.dense_snode_group_member(group, paths, dtype, *element_shape);
   TI_CAPI_TRY_CATCH_END();
 }
-#endif  // TI_WITH_LLVM

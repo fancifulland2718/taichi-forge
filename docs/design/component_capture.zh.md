@@ -152,10 +152,11 @@ Field shape、完整 Field 遍历、vector/matrix 元素及别名；active 为�
 尾部哨兵。不同尺寸复用同一个前端定义和一次本机编译，错误维度/根绑定在执行前拒绝。
 
 独立 Runtime 现有实验入口 `dense_snode_group(schema_json, dimensions)`。它先用
-同一 `DenseSNodeSchema` 构造实际 SNode，再调用从普通 `StructCompilerLLVM::run`
-提取的共享 `run_layout`；普通 JIT 也调用该函数。布局查询直接投影实际编译节点，
-不接受消费者提供的 offset/stride。首期简单 Dense 根按原 LLVM allocator 一次分配并
-零初始化；数值寻址经显式参数，不注册或切换固定模块根指针。
+同一 `DenseSNodeSchema` 构造实际 SNode；CPU/CUDA 调用普通 JIT 共用的
+`StructCompilerLLVM::run_layout`，Vulkan 调用正常 SNodeTreeManager 使用的
+`spirv::compile_snode_structs`，保留该后端自己的成员排序、对齐和 padding。布局查询
+直接投影实际编译节点，不接受消费者提供的 offset/stride。完整根由对应 LLVM/Vulkan
+分配器一次分配并零初始化；数值寻址经实例参数，不注册或切换固定模块根指针。
 
 `group.member(paths, dtype, element_shape=...)` 验证根相对的 place 路径、元素类型和
 紧凑布局，返回共享根的有限视图。路径将由编译器产物合同提供，不是应用的逐核字段表。
@@ -259,8 +260,21 @@ GFX 参数和主队列提交。`test_aot_component_vulkan.py` 从容量 7 导出
 Runtime 的独立进程创建容量 53/263 的两个实例，验证原初始化/step、别名、跨 block
 边界、空活动范围、未活动尾部及独立 reset/close。冷初始化和普通 prepared 关闭
 沿原 Runtime 等待完成；关闭一个实例可能排空主队列，不代表独立异步执行域或无同步
-退休已取得性能资格。Dense/Sparse SNode 组仍在消费端分配前明确拒绝，等待 Vulkan
-原生布局/实例化路径验证；不以数组成功推定 Field 或完整应用已支持。
+退休已取得性能资格。
+
+Vulkan 简单 Dense 组另有同源布局及无数值源码消费门槛：新容量的每个节点与普通
+FieldsBuilder 对照，涵盖 scalar/vector/matrix/rank-0；交错记录的 packed Host 传输
+只复制成员字节，使用一个暂存缓冲区和一次冷提交。此 strided 传输要求 offset、stride
+与元素字节数四字节对齐，未对齐的子字节成员明确拒绝。原 `self.field` 组件包含交错
+StructField、同根独立块、别名与三类循环，同一加载模块的容量 53/263 实例验证尾部、
+初始化、重复执行和独立 reset/close。固定 SNode/Sparse 实例调用、复杂布局及真实
+应用仍需单独取得 Vulkan 资格。
+
+GFX v17 合同保存最终 IR 确认的 runtime-affine 参数；SPIR-V 同时携带对应编译声明，
+加载时逐项核对。只改 JSON 不能把 packed 代码变成支持 stride 的代码；这不是产物
+签名或对任意恶意 shader 的安全保证。共享 launch 入口检查实际可达相对字节范围，
+防止 SPIR-V 的有符号 i32 offset 计算溢出；64 位基址不改变这一限制，LLVM 的较宽
+寻址不受该检查限制。该边界来自当前代码生成 ABI，不是配置数或模型数量预算。
 
 固定树 Sparse SNode 的组件绑定复用原生实例化基础。
 `clone_snode_tree_runtime` 使用 executor 保存的原 `SNodeTreeLayout` 构造配方

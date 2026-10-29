@@ -277,6 +277,7 @@ TiMemory Runtime::allocate_memory(
 }
 void Runtime::free_memory(TiMemory devmem) {
   std::lock_guard<std::recursive_mutex> submission_lock(submission_mutex());
+  free_dense_group(devmem);
   retire_native_memory(devmem);
   retire_prepared_memory(devmem);
   std::shared_ptr<void> released;
@@ -573,6 +574,7 @@ void ti_destroy_runtime(TiRuntime runtime) {
   ((Runtime *)runtime)->clear_prepared();
   ((Runtime *)runtime)->clear_native_resources();
   ((Runtime *)runtime)->clear_submission_completions();
+  ((Runtime *)runtime)->retire_dense_groups();
   delete (Runtime *)runtime;
   TI_CAPI_TRY_CATCH_END();
 }
@@ -910,7 +912,52 @@ void transfer_ndarray(Runtime &runtime, const TiNdArray &array, void *host,
     return;
   }
 #endif
-  throw MemoryBindingError("Strided ndarray transfers require CPU/CUDA");
+  if (runtime.arch == taichi::Arch::vulkan) {
+    // One packed staging allocation and one cold submission. Copy only the
+    // member's bytes, never read/modify/write neighboring fields. The normal
+    // portable buffer-copy contract requires four-byte aligned regions.
+    if (memory.byte_offset % 4 || stride % 4 || width % 4)
+      throw MemoryBindingError("Vulkan strided transfers require four-byte aligned regions");
+    auto [staging, allocation_status] = runtime.get().allocate_memory_unique(
+        {size, upload, !upload, false, upload ? AllocUsage::Upload : AllocUsage::None});
+    if (allocation_status != RhiResult::success) {
+      check_transfer_result(allocation_status);
+      return;
+    }
+    void *mapped = nullptr;
+    if (upload) {
+      const auto result = runtime.get().map(*staging, &mapped);
+      if (result != RhiResult::success) {
+        check_transfer_result(result);
+        return;
+      }
+      std::memcpy(mapped, host, size);
+      runtime.get().unmap(*staging);
+    }
+    auto *stream = runtime.get().get_compute_stream();
+    auto [commands, status] = stream->new_command_list_unique();
+    if (status != RhiResult::success) {
+      check_transfer_result(status);
+      return;
+    }
+    for (uint64_t i = 0; i < count; ++i) {
+      const auto packed = staging->get_ptr(i * width);
+      const auto record = memory.allocation.get_ptr(memory.byte_offset + i * stride);
+      commands->buffer_copy(upload ? record : packed, upload ? packed : record, width);
+    }
+    stream->submit_synced(commands.get());
+    if (!upload) {
+      const auto result = runtime.get().map(*staging, &mapped);
+      if (result != RhiResult::success) {
+        check_transfer_result(result);
+        return;
+      }
+      std::memcpy(host, mapped, size);
+      runtime.get().unmap(*staging);
+    }
+    return;
+  }
+  throw MemoryBindingError("Strided ndarray transfers require CPU/CUDA/Vulkan");
 }
 }  // namespace
 

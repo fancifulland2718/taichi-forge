@@ -78,11 +78,11 @@ def test_dense_group_uses_actual_tree_bounds_above_legacy_node_limit():
         producer.destroy()
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_standalone_group_uses_jit_layout_and_owns_member_storage():
     schema, producer, _ = _group(7)
     frozen = schema.to_json()
-    arch = "cpu" if ti.cfg.arch == ti.cpu else "cuda"
+    arch = ti.cfg.arch.name
     with Runtime(arch) as runtime:
         first = runtime.dense_snode_group(frozen, {"N": 37})
         second = runtime.dense_snode_group(frozen, {"N": 113})
@@ -196,10 +196,10 @@ def _interleaved_group(n):
     return schema, tree, builder.ptr
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_interleaved_members_transfer_logical_elements_without_touching_neighbors():
     schema, producer, _ = _interleaved_group(7)
-    with Runtime("cpu" if ti.cfg.arch == ti.cpu else "cuda") as runtime:
+    with Runtime(ti.cfg.arch.name) as runtime:
         with runtime.dense_snode_group(schema.to_json(), {"N": 37}) as group:
             _, expected_tree, root = _interleaved_group(37)
             assert group.layout["nodes"] == _compiled_nodes(root)

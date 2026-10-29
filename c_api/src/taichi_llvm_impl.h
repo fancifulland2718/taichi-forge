@@ -15,8 +15,6 @@ struct NativePreparationContext;
 
 namespace capi {
 
-struct DenseSNodeGroup;
-
 class LlvmRuntime : public Runtime {
  public:
   LlvmRuntime(taichi::Arch arch);
@@ -31,20 +29,14 @@ class LlvmRuntime : public Runtime {
   resolve_argpack_type(const taichi::lang::StructType *type,
                        const std::string &layout);
 
-  TiMemory create_dense_snode_group(const std::string &schema,
-                                    const std::string &dimensions);
-  const std::string &dense_snode_group_layout(TiMemory group);
-  TiNdArray dense_snode_group_member(TiMemory group,
-                                      const std::string &paths,
-                                      TiDataType dtype,
-                                      const TiNdShape &element_shape);
-
  private:
+  std::size_t compile_dense_snode_layout(taichi::lang::SNode &root) override;
+  std::pair<taichi::lang::DeviceAllocation, std::shared_ptr<void>>
+  allocate_dense_snode_storage(std::size_t size) override;
   /* Internally used interfaces */
   TiAotModule load_aot_module(const char *module_path) override;
   TiMemory allocate_memory(
       const taichi::lang::Device::AllocParams &params) override;
-  void free_memory(TiMemory devmem) override;
 
   void buffer_copy(const taichi::lang::DevicePtr &dst,
                    const taichi::lang::DevicePtr &src,
@@ -59,9 +51,6 @@ class LlvmRuntime : public Runtime {
   std::unique_ptr<taichi::lang::LlvmRuntimeExecutor> owned_executor_;
   taichi::lang::LlvmRuntimeExecutor *executor_{nullptr};
   taichi::uint64 *result_buffer{nullptr};
-  std::unordered_map<TiMemory, std::shared_ptr<DenseSNodeGroup>> dense_groups_;
-  void retire_dense_groups();
-  void free_dense_group(TiMemory group);
 };
 
 }  // namespace capi

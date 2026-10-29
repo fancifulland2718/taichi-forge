@@ -295,6 +295,7 @@ void Runtime::retire_resources(bool synchronize) {
     if (memory.owns_allocation)
       cleanup([&] { get().dealloc_memory(memory.allocation); });
   }
+  dense_groups_.clear();
   if (failure)
     std::rethrow_exception(failure);
 }

@@ -117,7 +117,7 @@ def test_cooperative_matrix_aot_graph_and_explicit_adjoint(tmp_path):
     module.archive(str(artifact))
     with ZipFile(artifact) as archive:
         metadata = json.loads(archive.read("metadata.json"))
-        assert metadata["metadata_version"] == 16
+        assert metadata["metadata_version"] == 17
         requirements = [
             requirement
             for kernel in metadata["kernels"]
