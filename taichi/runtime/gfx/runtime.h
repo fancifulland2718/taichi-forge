@@ -194,6 +194,9 @@ class CompiledTaichiKernel {
 #endif
 
     PipelineCache *backend_cache{nullptr};
+    // Private resource views reuse immutable executable pipelines. Their
+    // descriptor sets and buffer binding plans are always rebuilt separately.
+    const CompiledTaichiKernel *shared_code{nullptr};
   };
 
   explicit CompiledTaichiKernel(const Params &ti_params);
@@ -288,7 +291,7 @@ class CompiledTaichiKernel {
   std::vector<SparseTreeAdmission::PinnedUse> sparse_tree_uses_;
   std::shared_ptr<SparseTreeAdmission::Permit> sparse_tree_permit_;
   std::shared_ptr<const SparseDiagnosticTreeMap> diagnostic_trees_;
-  std::vector<std::unique_ptr<Pipeline>> pipelines_;
+  std::vector<std::shared_ptr<Pipeline>> pipelines_;
   std::vector<std::unique_ptr<ShaderResourceSet>> cached_resource_sets_;
 };
 
@@ -347,6 +350,9 @@ class TI_DLL_EXPORT GfxRuntime {
   };
 
   KernelHandle register_taichi_kernel(RegisterParams params);
+  KernelHandle register_taichi_kernel_resource_view(RegisterParams params,
+                                                   KernelHandle code);
+  std::size_t debug_unique_pipeline_count();
 
   // Called only after an explicit Program-side synchronize. Releases compiled
   // pipelines that statically bind the destroyed root allocation. Existing
@@ -1011,6 +1017,8 @@ class TI_DLL_EXPORT GfxRuntime {
   void submit_current_cmdlist_if_timeout();
 
   void init_nonroot_buffers();
+  KernelHandle register_taichi_kernel_impl(RegisterParams params,
+                                          const CompiledTaichiKernel *shared_code);
   void ensure_listgen_buffer_bytes(size_t requested_bytes,
                                    const char *reason);
   void ensure_listgen_capacity_entries(size_t requested_entries,

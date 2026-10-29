@@ -1,6 +1,7 @@
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
 
 #include <algorithm>
+#include <set>
 #include <type_traits>
 #include <unordered_set>
 
@@ -14,6 +15,41 @@
 namespace taichi::lang {
 namespace gfx {
 namespace {
+class SNodeInstanceImpl final : public AotSNodeInstance {
+ public:
+  SNodeInstanceImpl(std::shared_ptr<aot::Module> code, GfxRuntime *runtime)
+      : code_(std::move(code)), runtime_(runtime) {
+  }
+
+  ~SNodeInstanceImpl() override {
+    try {
+      runtime_->release_aot_resources(registrations_, allocated_roots_);
+    } catch (...) {
+      // A failed drain cannot justify recycling state or releasing the code
+      // owner. The Runtime retains the unretired registrations and resources.
+      (void)new std::shared_ptr<aot::Module>(std::move(code_));
+    }
+  }
+
+  KernelImpl *get_kernel(const std::string &name) const override {
+    const auto found = kernels_.find(name);
+    if (found == kernels_.end())
+      throw std::invalid_argument(
+          "Kernel is outside the SNode instance's selected closure: " + name);
+    return found->second.get();
+  }
+
+  const std::vector<int> &root_bindings() const override {
+    return root_bindings_;
+  }
+
+  std::shared_ptr<aot::Module> code_;
+  GfxRuntime *runtime_;
+  std::vector<int> allocated_roots_, root_bindings_;
+  std::vector<GfxRuntime::KernelHandle> registrations_;
+  std::unordered_map<std::string, std::unique_ptr<KernelImpl>> kernels_;
+};
+
 class FieldImpl : public aot::Field {
  public:
   explicit FieldImpl(GfxRuntime *runtime, const aot::CompiledFieldData &field)
@@ -454,6 +490,73 @@ class AotModuleImpl : public aot::Module {
     }
   }
 
+  std::unique_ptr<AotSNodeInstance> instantiate(
+      std::shared_ptr<aot::Module> code,
+      const std::vector<std::string> &entries) {
+    TI_ERROR_IF(is_corrupted() || !owns_runtime_resources_,
+                "SNode instances require an allocated valid GFX AOT module");
+    if (entries.empty())
+      throw std::invalid_argument("SNode instances require an entry closure");
+    std::set<int> trees;
+    std::map<std::string, std::size_t> selected;
+    for (const auto &name : entries) {
+      const auto found = kernel_indices_.find(name);
+      if (found == kernel_indices_.end())
+        throw std::invalid_argument("Unknown SNode instance entry: " + name);
+      selected.emplace(name, found->second);
+      const auto &used =
+          ti_aot_data_.kernel_metadata[found->second].used_snode_tree_ids;
+      trees.insert(used.begin(), used.end());
+    }
+    if (!trees.empty() && ti_aot_data_.snode_tree_resources.empty())
+      throw std::invalid_argument(
+          "SNode instances require authoritative GFX tree resource recipes");
+
+    // Resolve and compile each original entry once, before state allocation.
+    // Aliases already share their original executable registration.
+    std::map<std::string, KernelImpl *> originals;
+    for (const auto &[name, index] : selected)
+      originals.emplace(name, dynamic_cast<KernelImpl *>(get_kernel(name)));
+
+    auto result = std::make_unique<SNodeInstanceImpl>(std::move(code), runtime_);
+    result->registrations_.reserve(selected.size());
+    result->root_bindings_.resize(root_bindings_.size(), -1);
+    std::vector<SNodeTreeResourceSource> sources;
+    for (int id : trees) {
+      const auto &tree = ti_aot_data_.snode_tree_resources.at(id);
+      sources.push_back({tree.producer_tree_id, &tree.resources});
+    }
+    result->allocated_roots_ = runtime_->allocate_aot_snode_trees(sources);
+    std::size_t position = 0;
+    for (int id : trees)
+      result->root_bindings_[id] = result->allocated_roots_[position++];
+
+    std::map<int, GfxRuntime::KernelHandle> views;
+    for (const auto &[name, index] : selected) {
+      auto *original = originals.at(name);
+      TI_ASSERT(original != nullptr);
+      auto params = original->params();
+      params.root_buffer_bindings = result->root_bindings_;
+      params.snode_tree_ids = ti_aot_data_.kernel_metadata[index].used_snode_tree_ids;
+      for (int &id : params.snode_tree_ids)
+        id = result->root_bindings_.at(id);
+      params.sparse_diagnostic_domain = result->allocated_roots_.empty()
+          ? -1 : result->allocated_roots_.front();
+      const int code_id = original->handle().get_launch_id();
+      auto found = views.find(code_id);
+      if (found == views.end()) {
+        const auto handle = runtime_->register_taichi_kernel_resource_view(
+            params, original->handle());
+        result->registrations_.push_back(handle);
+        found = views.emplace(code_id, handle).first;
+      }
+      result->kernels_.emplace(name, std::make_unique<KernelImpl>(
+          runtime_, std::move(params), &found->second,
+          original->device_range_tasks()));
+    }
+    return result;
+  }
+
   std::unique_ptr<aot::CompiledGraph> get_graph(
       const std::string &name) override {
     auto it = graphs_.find(name);
@@ -646,6 +749,15 @@ void allocate_aot_root_buffers(aot::Module *module) {
   auto *gfx_module = dynamic_cast<AotModuleImpl *>(module);
   TI_ERROR_IF(!gfx_module, "Expected a GFX AOT module.");
   gfx_module->allocate_root_buffers();
+}
+
+std::unique_ptr<AotSNodeInstance> make_aot_snode_instance(
+    std::shared_ptr<aot::Module> code,
+    const std::vector<std::string> &entries) {
+  auto *module = dynamic_cast<AotModuleImpl *>(code.get());
+  if (!module)
+    throw std::invalid_argument("SNode instances require a GFX AOT code owner");
+  return module->instantiate(std::move(code), entries);
 }
 
 }  // namespace gfx

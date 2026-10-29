@@ -1117,6 +1117,17 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
       sparse_tree_uses_(ti_params.sparse_tree_uses),
       sparse_tree_permit_(ti_params.sparse_tree_permit),
       diagnostic_trees_(ti_params.diagnostic_trees) {
+  if (ti_params.shared_code) {
+    auto source = ti_params.shared_code->ti_kernel_attribs_;
+    auto target = ti_kernel_attribs_;
+    source.name.clear();
+    target.name.clear();
+    TI_ERROR_IF(device_ != ti_params.shared_code->device_ ||
+                    liong::json::print(liong::json::serialize(source)) !=
+                        liong::json::print(liong::json::serialize(target)),
+                "GFX resource view differs from its compiled code contract");
+    pipelines_ = ti_params.shared_code->pipelines_;
+  }
   TI_ASSERT(sparse_task_resources_.empty() || sparse_task_resources_.size() ==
             ti_kernel_attribs_.tasks_attribs.size());
   input_buffers_[BufferType::GlobalTmps] = ti_params.global_tmps_buffer;
@@ -1240,12 +1251,14 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
       binding_plans.push_back(plan);
     }
 
+    if (ti_params.shared_code)
+      continue;
     PipelineSourceDesc source_desc{PipelineSourceType::spirv_binary,
                                    (void *)spirv_bins[i].data(),
                                    spirv_bins[i].size() * sizeof(uint32_t)};
     auto [vp, res] = ti_params.device->create_pipeline_unique(
         source_desc, task_attribs[i].name, ti_params.backend_cache);
-    pipelines_.push_back(std::move(vp));
+    pipelines_.emplace_back(std::move(vp));
   }
 }
 
@@ -1892,7 +1905,30 @@ void GfxRuntime::check_hash_overflow_counters() {
 GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
     GfxRuntime::RegisterParams reg_params) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  return register_taichi_kernel_impl(std::move(reg_params), nullptr);
+}
+
+GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel_resource_view(
+    RegisterParams params, KernelHandle code) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  const auto found = ti_kernels_.find(code.get_launch_id());
+  TI_ERROR_IF(found == ti_kernels_.end(), "GFX resource view code is retired");
+  return register_taichi_kernel_impl(std::move(params), found->second.get());
+}
+
+std::size_t GfxRuntime::debug_unique_pipeline_count() {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  std::set<Pipeline *> pipelines;
+  for (const auto &[_, kernel] : ti_kernels_)
+    for (std::size_t i = 0; i < kernel->num_pipelines(); ++i)
+      pipelines.insert(kernel->get_pipeline(i));
+  return pipelines.size();
+}
+
+GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel_impl(
+    RegisterParams reg_params, const CompiledTaichiKernel *shared_code) {
   CompiledTaichiKernel::Params params;
+  params.shared_code = shared_code;
   params.ti_kernel_attribs = &(reg_params.kernel_attribs);
   params.device = device_;
   if (!reg_params.root_buffer_bindings.empty()) {

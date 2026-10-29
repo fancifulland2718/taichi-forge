@@ -5389,6 +5389,17 @@ Each sparse module owns a 24-byte diagnostic record and a cold producer-to-runti
 tree mapping. Synchronization reads all live records in one existing readback
 batch; dispatch does not resolve module identities.
 
+The native GFX loader also provides `make_aot_snode_instance(code, entries)`.
+It reconstructs empty private state for the selected entry closure from the
+same validated SNode resource recipes. Its Kernel views share the loaded
+module's executable pipeline objects, with separate resource bindings and
+descriptor sets; module-wide pointers are never switched between instances.
+The instance retains its code owner and uses cold synchronized retirement.
+A Vulkan pointer+dense test covers two roots, aliases, activation, traversal,
+deactivation, interleaved calls and independent close, including unchanged
+pipeline count. This native facility does not yet qualify Vulkan fixed-SNode
+components through the Python SDK or independent execution queues.
+
 Vulkan ndarray kernels using descriptor addressing now export GFX metadata 7.
 Ordinary and fixed execution align the descriptor base down and pass separate
 data/gradient byte offsets. Element-aligned subviews require no extra payload

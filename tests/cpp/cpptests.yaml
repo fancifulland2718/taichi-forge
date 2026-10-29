@@ -68,6 +68,9 @@
   - test: GfxAotTest.VulkanKernelTest1
     script: aot/python_scripts/kernel_aot_test1.py
     args: --arch=vulkan
+  - test: GfxAotTest.VulkanSNodeInstancesShareCodeAndIsolateState
+    script: aot/python_scripts/vulkan_snode_instances.py
+    args: ''
   - test: GfxAotTest.OpenglKernelTest1
     script: aot/python_scripts/kernel_aot_test1.py
     args: --arch=opengl

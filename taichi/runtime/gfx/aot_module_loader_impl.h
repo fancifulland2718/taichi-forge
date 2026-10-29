@@ -42,5 +42,22 @@ TI_DLL_EXPORT std::unique_ptr<aot::Module> make_aot_module(
 // The module then owns independent roots and its execution registrations.
 TI_DLL_EXPORT void allocate_aot_root_buffers(aot::Module *module);
 
+// Empty, private state reconstructed from the loaded module's validated tree
+// recipes. Kernel views retain its executable pipelines and have immutable
+// instance-local resource bindings; they never rewrite module bindings.
+// The Runtime must outlive the module and all its instances. Retirement uses
+// the Runtime's existing cold synchronized resource release.
+class TI_DLL_EXPORT AotSNodeInstance {
+ public:
+  virtual ~AotSNodeInstance() = default;
+  virtual KernelImpl *get_kernel(const std::string &name) const = 0;
+  // Artifact-local tree -> runtime tree; -1 for trees outside the closure.
+  virtual const std::vector<int> &root_bindings() const = 0;
+};
+
+TI_DLL_EXPORT std::unique_ptr<AotSNodeInstance> make_aot_snode_instance(
+    std::shared_ptr<aot::Module> code,
+    const std::vector<std::string> &entries);
+
 }  // namespace gfx
 }  // namespace taichi::lang
