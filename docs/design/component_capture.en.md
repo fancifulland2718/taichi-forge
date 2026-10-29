@@ -63,10 +63,20 @@ consumption. Adding an unused independent borrow does not change code identity.
 The first normal binding names a borrowed group in its target namespace; later
 aliases preserve that name.
 
-This does not automatically declare arbitrary frozen binding dataclasses or
-complete GeoPhys EFC mass-block/mass-matrix integration. Those normal binding
-types still need their declaration boundary; per-kernel adapters and static
-whole objects are not a remedy. No new instance-pointer switching is introduced.
+`record = scope.record("binding", value, optional=True)` declares a read-only
+record scope at the normal binding boundary. Metadata belongs to the parent,
+so the original frozen dataclass stays unchanged. `record.dim("count")` names
+an existing count; `record.parent_dim("nv")` explicitly relates its layout to
+the parent's normal dimension. `record.borrow(...)` must refer to an existing
+Field member and reuses the complete source-group contract. An absent optional
+record retains its presence variant without requiring nonexistent leaves.
+Assigning members or allocating Fields through this scope is rejected.
+
+This is explicit normal resource binding, not automatic introspection of arbitrary
+dataclasses or a per-kernel table. Frozen-record CPU/CUDA tests cover changed
+sizes, parent relations, immutable members and absent variants. No new shared
+instance-pointer switching is introduced; application control and whole-step
+qualification remain separate.
 
 Optional `StaticValue(choices=(...))` declares a finite deployment domain. This
 is admission policy; numerical identity still uses only actual static captures.

@@ -8,6 +8,7 @@ explicit builder preserves the caller's normal SNode ownership boundary.
 import inspect
 import operator
 from dataclasses import dataclass
+from types import MemberDescriptorType
 
 
 from taichi_forge_runtime._dimensions import evaluate_extent, extent_dependencies, freeze_extent, validate_extent
@@ -81,10 +82,13 @@ class ResourceScope:
             owner = owner._owner
         object.__setattr__(self, "_owner", owner)
         object.__setattr__(self, "_builder", builder)
+        object.__setattr__(self, "_read_only", False)
+        object.__setattr__(self, "_parent", None)
         if not hasattr(owner, "_forge_resource_declarations"):
             owner._forge_resource_declarations = {"fields": {}, "dimensions": {}, "records": {}}
+        object.__setattr__(self, "_registry", owner._forge_resource_declarations)
         if builder is not None:
-            namespace = owner._forge_resource_declarations
+            namespace = self._registry
             previous = getattr(builder, "_resource_declaration_namespace", namespace)
             if previous is not namespace:
                 raise ValueError("A declared FieldsBuilder group requires one dimension declaration namespace")
@@ -98,19 +102,21 @@ class ResourceScope:
     def __setattr__(self, name, value):
         from taichi_forge.lang.field import Field
 
+        if self._read_only:
+            raise TypeError("A declared record scope cannot modify its existing members")
         setattr(self._owner, name, value)
         if isinstance(value, Field):
             declaration = getattr(value, "_logical_resource_declaration", None)
             if declaration is not None:
                 if declaration["identity"] is None:
                     declaration["identity"] = name
-                self._owner._forge_resource_declarations["fields"][name] = dict(declaration)
-                self._owner._forge_resource_declarations.get("borrowed", {}).pop(name, None)
+                self._registry["fields"][name] = dict(declaration)
+                self._registry.get("borrowed", {}).pop(name, None)
         elif inspect.getattr_static(value, "_forge_resource_declarations", None) is not None:
             # Assignment through an explicit declaration scope exposes a
             # normal child resource owner. No attribute-dictionary scan.
             caller = inspect.currentframe().f_back
-            self._owner._forge_resource_declarations.setdefault("records", {})[name] = (
+            self._registry.setdefault("records", {})[name] = (
                 caller.f_code.co_filename,
                 caller.f_lineno,
             )
@@ -125,11 +131,45 @@ class ResourceScope:
         if not 0 <= value <= 2**31 - 1:
             raise ValueError(f"Dimension {name!r} is outside the i32 count range")
         caller = inspect.currentframe().f_back
-        self._owner._forge_resource_declarations["dimensions"].setdefault(
-            name, (caller.f_code.co_filename, caller.f_lineno)
-        )
+        self._registry["dimensions"].setdefault(name, (caller.f_code.co_filename, caller.f_lineno))
         del caller
         return Extent(("dim", name))
+
+    def record(self, name, value, *, optional=False):
+        """Declare an existing plain record without mutating or wrapping it.
+
+        The parent owns declaration metadata; the child scope only describes
+        existing values. Frozen dataclasses therefore keep their usual contract.
+        """
+        if not isinstance(name, str) or not name.isidentifier() or type(optional) is not bool:
+            raise TypeError("Resource records require an attribute name and a bool optional flag")
+        if value is None and not optional:
+            raise ValueError("A required resource record cannot be None")
+        if self._read_only:
+            if getattr(self._owner, name) is not value:
+                raise ValueError("A record declaration must refer to its existing member")
+        else:
+            setattr(self._owner, name, value)
+        caller = inspect.currentframe().f_back
+        registry = {"fields": {}, "dimensions": {}, "records": {}}
+        self._registry.setdefault("records", {})[name] = (caller.f_code.co_filename, caller.f_lineno)
+        self._registry.setdefault("record_declarations", {})[name] = registry
+        self._registry.setdefault("record_options", {})[name] = optional
+        del caller
+        child = object.__new__(ResourceScope)
+        for key, item in dict(_owner=value, _builder=None, _registry=registry, _read_only=True, _parent=self).items():
+            object.__setattr__(child, key, item)
+        return child
+
+    def parent_dim(self, name):
+        """Explicitly relate a read-only record's layout to its parent count."""
+        if self._parent is None:
+            raise ValueError("parent_dim requires a declared record scope")
+        self._parent.dim(name)
+        alias = "__parent_" + name
+        self._registry["dimensions"][alias] = self._parent._registry["dimensions"][name]
+        self._registry.setdefault("inherited_dimensions", {})[alias] = ("dim", name)
+        return Extent(("dim", alias))
 
     def borrow(self, name, field, *, dimensions):
         """Bind an existing Field and explicitly relate its whole source group.
@@ -148,13 +188,10 @@ class ResourceScope:
             if not isinstance(source, str) or not source.isidentifier() or not isinstance(target, Extent):
                 raise TypeError("Borrowed dimension mappings require source names and declared target extents")
             validate_extent(target.expression)
-            if (
-                not set(extent_dependencies(target.expression))
-                <= self._owner._forge_resource_declarations["dimensions"].keys()
-            ):
+            if not set(extent_dependencies(target.expression)) <= self._registry["dimensions"].keys():
                 raise ValueError("Borrowed dimensions must reference declared target dimensions")
             mapping[source] = target.expression
-        registry = self._owner._forge_resource_declarations
+        registry = self._registry
         # The first normal binding names this source group in the target
         # namespace. Later aliases do not rename it or invalidate unrelated
         # entry code. Object identity is used only to recognize the existing
@@ -162,6 +199,8 @@ class ResourceScope:
         group = name
         for alias, previous in registry.get("borrowed", {}).items():
             candidate = inspect.getattr_static(self._owner, alias, None)
+            if isinstance(candidate, MemberDescriptorType):
+                candidate = candidate.__get__(self._owner, type(self._owner))
             if getattr(candidate, "_logical_resource_group", None) is field._logical_resource_group:
                 group = previous["group"]
                 break
@@ -173,13 +212,19 @@ class ResourceScope:
             source=(caller.f_code.co_filename, caller.f_lineno),
         )
         del caller
-        setattr(self._owner, name, field)
+        if self._read_only:
+            if getattr(self._owner, name) is not field:
+                raise ValueError("A borrowed record declaration must refer to its existing Field")
+        else:
+            setattr(self._owner, name, field)
         registry["fields"].pop(name, None)
         registry.get("records", {}).pop(name, None)
         registry.setdefault("borrowed", {})[name] = declaration
         return field
 
     def _create(self, factory, args, kwargs):
+        if self._read_only:
+            raise TypeError("A declared record scope describes existing resources; it cannot allocate Fields")
         shape = kwargs.get("shape")
         if shape is None:
             raise ValueError("ResourceScope Field factories require an explicit shape")

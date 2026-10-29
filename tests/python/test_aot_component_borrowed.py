@@ -3,6 +3,7 @@
 import gc
 import struct
 import weakref
+from dataclasses import dataclass, FrozenInstanceError
 
 import numpy as np
 import pytest
@@ -152,3 +153,55 @@ def test_borrowed_group_dimensions_follow_the_declared_record_namespace():
     code.run(other, second)
     np.testing.assert_array_equal(second.binding.state.to_numpy(), list(range(8, 25)) + [0, 0])
     assert ["binding", "padding"] in code.contract["access_paths"].values()
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenBinding:
+    count: int
+    payload: object
+
+
+@ti.data_oriented
+class _FrozenConsumer:
+    def __init__(self, source):
+        self.padding = source.m if source else 0
+        scope = ti.experimental.ResourceScope(self)
+        self.binding = _FrozenBinding(source.n, source.payload) if source else None
+        record = scope.record("binding", self.binding, optional=True)
+        if source:
+            record.borrow(
+                "payload",
+                self.binding.payload,
+                dimensions={"n": record.dim("count"), "m": record.parent_dim("padding")},
+            )
+
+    @ti.kernel
+    def step(self):
+        if ti.static(self.binding is not None):
+            for i in range(self.binding.count):
+                self.binding.payload[i] = i + 6
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_frozen_record_borrow_uses_parent_relations_without_mutation():
+    first, second = _FrozenConsumer(_Source(7, 3)), _FrozenConsumer(_Source(19, 11))
+    environment, other = Component.from_owner(first), Component.from_owner(second)
+    code = environment.compile(first.step)
+    assert other.compile(second.step) is code
+    assert not hasattr(first.binding, "_forge_resource_declarations")
+    with pytest.raises(FrozenInstanceError):
+        first.binding.count = 10
+    code.run(other, second)
+    np.testing.assert_array_equal(second.binding.payload.to_numpy(), np.arange(19) + 6)
+    assert "padding" in code.contract["dimensions"]
+    absent = _FrozenConsumer(None)
+    empty = Component.from_owner(absent)
+    alternative = empty.compile(absent.step)
+    assert alternative.semantic_key != code.semantic_key
+    alternative.run(empty, absent)
+    assert alternative.contract["captures"] == []
+    record = ti.experimental.ResourceScope(second).record("binding", second.binding, optional=True)
+    with pytest.raises(TypeError, match="cannot modify"):
+        record.count = 12
+    with pytest.raises(ValueError, match="existing Field"):
+        record.borrow("payload", first.binding.payload, dimensions={})

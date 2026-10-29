@@ -515,6 +515,7 @@ class Component:
 
         impl.get_runtime().materialize(for_aot=True)
         declarations, sources, roots, fields, borrowed = {}, {}, {}, [], []
+        inherited_dimensions, record_options = {}, {}
 
         def root_of(field, name):
             nodes = tuple(member.ptr.snode() for member in field._get_field_members())
@@ -523,13 +524,16 @@ class Component:
                 raise TaichiCompilationError(f"Normal resource {name!r} spans multiple SNode groups")
             return next(iter(root_ids))
 
-        def collect(current, prefix=(), ancestors=()):
+        def collect(current, prefix=(), ancestors=(), registry=None):
             if any(current is ancestor for ancestor in ancestors) or len(prefix) > 32:
                 raise TaichiCompilationError("Normal resource records must form a bounded acyclic declaration tree")
-            registry = _member(current, "_forge_resource_declarations")
+            if registry is None:
+                registry = _member(current, "_forge_resource_declarations")
             members = {name: Dimension("active") for name in registry["dimensions"]}
             for name, source in registry["dimensions"].items():
                 sources[_capture_id((*prefix, name))] = source
+            for name, expression in registry.get("inherited_dimensions", {}).items():
+                inherited_dimensions[_capture_id((*prefix, name))] = ("dim", _capture_id((*prefix[:-1], expression[1])))
             for name, declaration in registry["fields"].items():
                 field = _member(current, name)
                 if getattr(field, "_logical_resource_declaration", None) != declaration:
@@ -547,7 +551,13 @@ class Component:
                 roots.setdefault(root_id, set()).add("borrow:" + ".".join((*prefix, declaration["group"])))
             for name, source in registry.get("records", {}).items():
                 sources[_capture_id((*prefix, name))] = source
-                members[name] = collect(_member(current, name), (*prefix, name), (*ancestors, current))
+                record_options[_capture_id((*prefix, name))] = registry.get("record_options", {}).get(name, False)
+                members[name] = collect(
+                    _member(current, name),
+                    (*prefix, name),
+                    (*ancestors, current),
+                    registry.get("record_declarations", {}).get(name),
+                )
             return members
 
         declarations = collect(owner)
@@ -571,14 +581,18 @@ class Component:
             group = "snode:" + min(roots[root_id])
             members[name] = DenseField(dtype, tuple(shape), group)
 
-        def complete(members, additions):
+        def complete(members, additions, prefix=()):
             result = {}
             for name, declaration in members.items():
                 if isinstance(declaration, dict):
-                    overlay = additions.get(name, Record())
+                    overlay = additions.get(
+                        name, Record(optional=record_options.get(_capture_id((*prefix, name)), False))
+                    )
                     if not isinstance(overlay, Record):
                         raise TypeError(f"Normal resource record {name!r} requires Record value declarations")
-                    result[name] = Record(optional=overlay.optional, **complete(declaration, overlay.members))
+                    result[name] = Record(
+                        optional=overlay.optional, **complete(declaration, overlay.members, (*prefix, name))
+                    )
                 else:
                     if name in additions:
                         raise ValueError(f"Duplicate normal component declaration {name!r}")
@@ -587,6 +601,10 @@ class Component:
             return result
 
         result = cls(**complete(declarations, values))
+        flattened = dict(result.declarations)
+        for name, expression in inherited_dimensions.items():
+            flattened[name] = Dimension("active", expression=expression)
+        result._declarations = MappingProxyType(flattened)
         result._project_borrowed(borrowed, roots, sources)
         result._sources = MappingProxyType(sources)
         return result

@@ -47,9 +47,15 @@ identity 比较明确拒绝。未使用成员不进入数值代码身份。局�
 哨兵、普通 JIT 与 Runtime 消费；新增未使用的独立借用不改变代码身份。首次正常绑定
 为目标命名空间中的借用组命名，后续别名保留该名字。
 
-这仍不自动声明任意 frozen binding dataclass，也不等于 GeoPhys EFC mass-block/
-质量矩阵已完整接入。这些正常绑定类型还需自己的声明边界；不能用逐核适配表或将
-整个对象静态化绕过。本片不增加实例间共享模块指针切换。
+`record = scope.record("binding", value, optional=True)` 在正常绑定边界取得只读
+记录声明作用域，元数据属于父 owner，原 frozen dataclass 保持不变。
+`record.dim("count")` 声明已有计数，`record.parent_dim("nv")` 显式关联父 owner
+的正常维度；`record.borrow(...)` 必须引用该记录已有的 Field，复用完整源组合同。
+optional 记录缺失时保留存在性变体，不要求不存在的叶节点；通过此作用域改写成员或
+分配新 Field 均拒绝。CPU/CUDA 门槛覆盖新尺寸、父维度、不可变成员与缺失变体。
+
+这是正常资源绑定声明，不自动枚举任意 dataclass，不建立逐核表，也不增加共享模块
+指针切换。应用控制和完整物理步资格仍单独验证。
 
 组件声明环境与每核 ABI 分层。原属性访问和嵌套 `ti.func` 只为实际使用的捕获追加
 native 参数；一次前端遍历后执行 `finalize_params()`，参数初始化区仍在数值主体之前结束。
