@@ -194,9 +194,23 @@ def test_aot_dense_field_loan_and_derived_alias_retire(tmp_path):
         expected = np.arange(12, dtype=np.int32)
         expected[4:8] += 100
         np.testing.assert_array_equal(field.to_numpy(), expected)
+        peer = None
+        if domain is not None:
+            peer = module.prepare_execution(
+                ti.aot.ExecutionPlan([
+                    {"kind": "kernel", "entry": "update", "arguments": ["input", "out"]}
+                ]),
+                dict(input=target, out=target), execution_domain=domain,
+            )
+            peer.initialize()
         tree.destroy()
         if domain is not None:
-            assert domain.info["closed"]
+            # A storage generation retires its own consumers, not unrelated
+            # instances sharing the execution queue.
+            assert not domain.info["closed"]
+            peer.submit().wait()
+            np.testing.assert_array_equal(output.to_numpy(), np.arange(4, 8) + 200)
+            peer.close()
         with pytest.raises(
             (RuntimeError, ValueError), match="retired|live|closed|unknown"
         ):
@@ -286,7 +300,7 @@ def test_jit_dense_field_view_complete_instance(retained):
     expected[2:6] += np.stack([np.arange(4), np.full(4, 7)], axis=1)
     np.testing.assert_array_equal(field.to_numpy(), expected)
     tree.destroy()
-    assert domain.info["closed"]
+    assert not domain.info["closed"]
     with pytest.raises(RuntimeError, match="closed|retired|live"):
         execution.submit()
     execution.close()
