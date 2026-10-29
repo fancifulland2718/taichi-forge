@@ -8,11 +8,23 @@ void runtime_sparse_view_get_size(uint64 *result) {
 
 void runtime_sparse_view_snapshot(LLVMRuntime *view,
                                   LlvmSparseRuntimeDiagnostic *snapshot) {
-  snapshot->code = view->error_code;
-  std::memcpy(snapshot->message, view->error_message_template,
-              sizeof(snapshot->message));
-  std::memcpy(snapshot->arguments, view->error_message_arguments,
-              sizeof(snapshot->arguments));
+  const auto error_code = view->error_code;
+  snapshot->code = error_code;
+#if ARCH_cuda
+  // Avoid copying an unused payload through mapped host memory on every
+  // successful CUDA submission.
+  const bool copy_payload = error_code != 0;
+#else
+  // The CPU observer has already retrieved and reset the code before asking
+  // for the payload. It only calls this function for a failing submission.
+  constexpr bool copy_payload = true;
+#endif
+  if (copy_payload) {
+    std::memcpy(snapshot->message, view->error_message_template,
+                sizeof(snapshot->message));
+    std::memcpy(snapshot->arguments, view->error_message_arguments,
+                sizeof(snapshot->arguments));
+  }
 #if ARCH_cuda
   // Snapshots may be mapped host storage. Publish all stores to the system
   // before the stream's completion event makes this diagnostic observable.

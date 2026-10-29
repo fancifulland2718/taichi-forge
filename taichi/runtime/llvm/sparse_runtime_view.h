@@ -42,6 +42,9 @@ struct LlvmSparseRuntimeViewStatus {
 
 // One immutable submission result, copied after its kernels on the same
 // stream. Device layout has no pointers and is identical on the host.
+// Message and arguments are only meaningful for a failing submission. CUDA
+// success snapshots may retain a preceding payload; the CPU observer preserves
+// the error code retrieved and cleared before requesting the snapshot.
 struct LlvmSparseRuntimeDiagnostic {
   std::int64_t code;
   char message[taichi_error_message_max_length];
