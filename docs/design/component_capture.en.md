@@ -52,7 +52,8 @@ Normal constructors can declare dynamic values with
 remain unchanged. Read-only record scopes support the same roles without
 rewriting frozen dataclasses. `from_owner` collects roles and source locations;
 separate value lists are unnecessary. Explicit `Record` overlays remain available
-but cannot redeclare normal roles. Conflicting roles, out-of-domain values,
+and may narrow a normal static domain to a component's qualified scope. Widening
+the domain, changing roles or repeating value declarations is rejected. Out-of-domain values,
 getters and declaration cycles are rejected. CPU/CUDA checks in
 `test_aot_component_values.py` cover dynamic value/size reuse, actual static
 variants, unused declarations excluded from Kernel ABI, original JIT comparison

@@ -6,7 +6,7 @@ import struct
 import numpy as np
 import pytest
 import taichi_forge as ti
-from taichi_forge.aot._component import Component, RuntimeValue
+from taichi_forge.aot._component import Component, Record, RuntimeValue, StaticValue
 from taichi_forge_runtime.aot import Runtime
 from tests import test_utils
 
@@ -125,3 +125,19 @@ def test_normal_value_declarations_reject_conflicts_without_getters():
     with pytest.raises(TypeError, match="cannot modify"):
         record.gain = 2
     assert model.parameters.gain == 2.0
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_component_can_only_narrow_normal_static_domains():
+    model = _Model(3)
+    normal = Component.from_owner(model)
+    code = normal.compile(model.step)
+    narrowed = Component.from_owner(model, parameters=Record(enabled=StaticValue(choices=(True,))))
+    assert narrowed.compile(model.step) is code
+    with pytest.raises(ti.TaichiCompilationError, match="outside its declared domain"):
+        Component.from_owner(model, parameters=Record(enabled=StaticValue(choices=(False,)))).compile(model.step)
+    for choices in (None, (0, 1), (True, 2)):
+        with pytest.raises(ValueError, match="must narrow"):
+            Component.from_owner(model, parameters=Record(enabled=StaticValue(choices=choices)))
+    with pytest.raises(ValueError, match="Duplicate normal component declaration"):
+        Component.from_owner(model, parameters=Record(gain=StaticValue(choices=(2.0,))))

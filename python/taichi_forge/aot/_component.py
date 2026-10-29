@@ -626,7 +626,20 @@ class Component:
                     )
                 else:
                     if name in additions:
-                        raise ValueError(f"Duplicate normal component declaration {name!r}")
+                        selected = additions[name]
+                        if type(declaration) is StaticValue and type(selected) is StaticValue:
+                            # Normal construction states the available policy;
+                            # a component may qualify a smaller algorithm domain.
+                            # This does not change a role or add code dependencies.
+                            allowed = {_static_value(value) for value in declaration.choices}
+                            if (
+                                selected.choices is None
+                                or not {_static_value(value) for value in selected.choices} <= allowed
+                            ):
+                                raise ValueError(f"Component static domain {name!r} must narrow its normal declaration")
+                            declaration = selected
+                        else:
+                            raise ValueError(f"Duplicate normal component declaration {name!r}")
                     result[name] = declaration
             result.update((name, declaration) for name, declaration in additions.items() if name not in members)
             return result
