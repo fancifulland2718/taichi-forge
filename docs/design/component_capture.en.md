@@ -52,6 +52,18 @@ Declaration cycles are rejected. Compiler facts expose `record_presence` and
 `test_aot_component_records.py` cover new dimensions, aliases, presence variants,
 unused members, rejected getters and Runtime consumption.
 
+Builtin `getattr(owner_or_record, static_name)` resolves through this same
+declaration path. It accepts two positional arguments, a compile-time string
+name and a declared owner/record; defaults and arbitrary Python getters are not
+supported. Selecting a declared Field/Array with `ti.static` creates a resource
+alias, not a snapshot of its storage. Shape, contents and declared runtime
+scalars remain dynamic and cannot be used as static numerical values. A static
+configuration that selects a member remains a guarded code dependency. CPU/CUDA
+tests cover original helper calls, nested records, aliases, changed dimensions
+and frozen Runtime consumption. A CUDA GeoPhys temporal-contact entry also
+passed generic and loaded execution against its original JIT definition;
+complete TGS root qualification is still in progress.
+
 `ResourceScope.borrow(name, field, dimensions={...})` declares a normal foreign
 Field binding without changing the Field or retaining its Python owner. For
 example, `scope.borrow("mass", source.mass, dimensions={"n": scope.dim("nv")})`

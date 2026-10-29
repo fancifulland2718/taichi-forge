@@ -837,7 +837,11 @@ class _Capture:
             self.static[name] = fact
             self.static_objects[name] = value
             return self.static_objects[name]
-        if ctx.is_in_static_scope():
+        # A resource reference can be selected/aliased at compile time while
+        # its storage, shape and contents remain runtime inputs. This matches
+        # ordinary ti.static(Field/AnyArray); scalar values still cannot escape
+        # their declared runtime role through a static selection.
+        if ctx.is_in_static_scope() and not isinstance(declaration, (Array, DenseField)):
             raise TaichiCompilationError(
                 f"Component entry {self.kernel.func.__qualname__}: runtime capture self.{name} "
                 "cannot be used in ti.static; its declaration is dynamic"
@@ -864,6 +868,19 @@ class _Capture:
             self.dynamic.append(name)
             self.expressions[name] = declaration.declare("__capture_" + name)
         return self.expressions[name]
+
+    def named_attribute(self, ctx, args, keywords):
+        """Resolve builtin getattr through the same declared attribute path."""
+        if keywords or len(args) != 2 or type(args[1]) is not str:
+            raise TaichiCompilationError(
+                "Component getattr requires a declared owner/record and a compile-time string name, without a default"
+            )
+        owner, name = args
+        if owner is self.owner:
+            return self.attribute(ctx, name)
+        if isinstance(owner, _RecordReference):
+            return self.attribute(ctx, name, prefix=owner.path)
+        raise TaichiCompilationError("Component getattr requires a declared owner or record")
 
     def check_name(self, ctx, node):
         if node.id not in ctx.global_vars:

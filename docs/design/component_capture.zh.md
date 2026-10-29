@@ -39,6 +39,13 @@ identity 比较明确拒绝。未使用成员不进入数值代码身份。局�
 内部 ID 来恢复原属性路径。`test_aot_component_records.py` 覆盖 CPU/CUDA 的新尺寸、
 别名、存在性变体、未使用成员、getter 拒绝和 Runtime 消费。
 
+内建 `getattr(owner_or_record, static_name)` 复用同一声明解析路径：只接受两个位置
+参数、编译期字符串名称及已声明 owner/record，不支持默认值或任意 Python getter。
+`ti.static` 选择已声明的 Field/Array 只建立资源别名，不采集存储快照；shape、内容和
+声明为运行时的标量仍不能用作静态数值。用于选择成员的静态配置仍进入依赖 guard。
+CPU/CUDA 已验证原 helper、嵌套记录、别名、尺寸变化和冻结产物消费；GeoPhys 原 CUDA
+temporal-contact 入口的泛化/加载调用也与普通 JIT 一致，完整 TGS 根仍在推进。
+
 `ResourceScope.borrow(name, field, dimensions={...})` 声明正常外部 Field 绑定，
 保持原 Field，不保留其 Python owner。例如
 `scope.borrow("mass", source.mass, dimensions={"n": scope.dim("nv")})`
