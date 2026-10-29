@@ -16739,6 +16739,19 @@ class Sequential:
             LoadedPlanExecutable(module, name, arguments, execution=execution), allow_command_boundary=True
         )
 
+    def dispatch_loaded_component(
+        self, instance, *, values=None, dimensions=None, arguments=None, execution="preserve"
+    ):
+        """Append an instance-bound component using its compiler resource contract."""
+        from ._loaded import LoadedComponentExecutable
+
+        return self._append_native_executable(
+            LoadedComponentExecutable(
+                instance, values=values, dimensions=dimensions, arguments=arguments, execution=execution
+            ),
+            allow_command_boundary=True,
+        )
+
     def _append_native_executable(self, executable, *, allow_command_boundary=False):
         self._bind_declared_private_args(executable.graph_binding_symbols)
         structured = executable.recordable_sequence
@@ -18688,6 +18701,28 @@ class GraphBuilder:
 
         self._append_native_executable(
             LoadedPlanExecutable(module, name, arguments, execution=execution), admission="explicit"
+        )
+        self._aot_graph_plan.mark_internal_fixed_bindings()
+        return self
+
+    def dispatch_loaded_component(
+        self, instance, *, values=None, dimensions=None, arguments=None, execution="preserve"
+    ):
+        """Record an instance's complete loaded component Plan.
+
+        Only public values, non-layout active counts and explicit arguments
+        require Graph symbols. The instance supplies its hidden resource ABI.
+        Preparation captures immutable arguments and pins this exact instance;
+        closing it revokes new submissions. Internal Plan control remains
+        native, while the outer call retains an explicit segmented boundary.
+        """
+        from ._loaded import LoadedComponentExecutable
+
+        self._append_native_executable(
+            LoadedComponentExecutable(
+                instance, values=values, dimensions=dimensions, arguments=arguments, execution=execution
+            ),
+            admission="explicit",
         )
         self._aot_graph_plan.mark_internal_fixed_bindings()
         return self

@@ -419,6 +419,13 @@ class LoadedPlanExecutable(LoadedKernelExecutable):
         if not isinstance(arguments, Mapping) or set(arguments) != set(self.plan.argument_names):
             raise ValueError("Loaded Plan bindings must exactly match its public argument contract")
         self.arguments = dict(arguments)
+        self._validate_plan_symbols()
+        self.backend = str(self.runtime.arch)
+        if self.backend in ("x64", "arm64"):
+            self.backend = "cpu"
+        self._action = BackendCommandGraphAction(_LoadedPlanRecording(self))
+
+    def _validate_plan_symbols(self):
         self.symbols = {}
         for symbol in self.arguments.values():
             if not isinstance(symbol, core.Arg) or symbol.tag not in (
@@ -435,7 +442,7 @@ class LoadedPlanExecutable(LoadedKernelExecutable):
             self.symbols[symbol.name] = symbol
         # Query the existing plan's actual uses, including initialization and
         # all control regions. Do not interpret conditions or rewrite its code.
-        for kernel, uses in self.plan._kernel_argument_uses(module):
+        for kernel, uses in self.plan._kernel_argument_uses(self.module):
             for index, argument in enumerate(uses):
                 symbol = self.arguments.get(argument)
                 if symbol is None:
@@ -453,10 +460,6 @@ class LoadedPlanExecutable(LoadedKernelExecutable):
                         core.ArgKind.STRUCT,
                     ) or not self._value_type_matches(symbol, value_type):
                         raise ValueError("Loaded Plan value symbol differs from its compiled use")
-        self.backend = str(self.runtime.arch)
-        if self.backend in ("x64", "arm64"):
-            self.backend = "cpu"
-        self._action = BackendCommandGraphAction(_LoadedPlanRecording(self))
 
     def validate_graph_lifetime(self):
         if impl.get_runtime().prog is not self.program:
@@ -484,3 +487,128 @@ class LoadedPlanExecutable(LoadedKernelExecutable):
     @property
     def debug_info(self):
         return dict(kind="loaded_aot_plan", plan=self.name, execution=self.execution)
+
+
+class _LoadedComponentCall(_LoadedPlanCall):
+    def execution_info(self):
+        return dict(super().execution_info(), kind="loaded_aot_component", component=self.source.component_name)
+
+
+class _LoadedComponentRecording(_LoadedRecording):
+    def prepare_graph_execute(self, bindings):
+        source = self.executable
+        source.validate_graph_lifetime()
+        imports = _LoadedImports(source, bindings)
+        prepared = None
+        try:
+            # Only explicit public arrays cross the JIT/runtime storage boundary.
+            # The instance owns hidden resource groups and resolves their ABI.
+            arguments = {}
+            for name, symbol in source.explicit.items():
+                value = bindings[symbol.name]
+                if symbol.tag == core.ArgKind.NDARRAY:
+                    arguments[name] = imports.array(value, symbol)
+                    if value.grad is not None:
+                        raise TaichiRuntimeError("Loaded component explicit gradients are not qualified")
+                else:
+                    arguments[name] = imports.plain(value)
+            prepared = source.instance.prepare(
+                values={name: imports.plain(bindings[symbol.name]) for name, symbol in source.values.items()},
+                dimensions={name: bindings[symbol.name] for name, symbol in source.dimensions.items()},
+                arguments=arguments,
+            )
+            kind = prepared.info["execution_kind"]
+            if source.execution == "device" and kind not in ("cuda_graph", "vulkan_commands"):
+                raise TaichiRuntimeError(f"Loaded component device execution rejected actual {kind}")
+            retained = tuple(imports.retained)
+            prepared._owners = (*prepared._owners, retained)
+            if prepared._replay_owners is not None:
+                prepared._replay_owners = (*prepared._replay_owners, retained)
+            return _LoadedComponentCall(source, prepared)
+        except BaseException:
+            if prepared is not None:
+                prepared.close()
+            imports.close()
+            raise
+
+
+class LoadedComponentExecutable(LoadedPlanExecutable):
+    """A fixed instance binding around its existing native composite Plan.
+
+    Graph inputs contain public values, active counts and explicit arguments.
+    Resource groups never become application-authored hidden binding tables.
+    """
+
+    def __init__(self, instance, *, values=None, dimensions=None, arguments=None, execution="preserve"):
+        from taichi_forge_runtime.aot._component import ComponentInstance
+
+        if not isinstance(instance, ComponentInstance):
+            raise TypeError("dispatch_loaded_component requires a loaded component Instance")
+        if execution not in ("preserve", "device"):
+            raise ValueError("Loaded component execution must be 'preserve' or 'device'")
+        self.instance = instance
+        component = instance._component
+        self.module, self.runtime = component._module, component._module._runtime
+        self.program = impl.get_runtime().prog
+        if self.program is None or getattr(self.runtime, "_frontend_program", None) is not self.program:
+            raise TaichiRuntimeError("dispatch_loaded_component requires a Runtime borrowed from the current Program")
+        self.module_handle = self.module._handle
+        self.validate_graph_lifetime()
+        contract = component.contract
+        self.component_name, self.name = contract["name"], contract["execution"]
+        self.plan, self.execution = component._plan, execution
+        self.digest = hashlib.sha256(self.plan.to_json().encode("utf8")).hexdigest()
+        self.values, self.dimensions, self.explicit = dict(values or {}), dict(dimensions or {}), dict(arguments or {})
+        if set(self.values) != set(contract["values"]) or set(self.explicit) != set(contract["explicit"]):
+            raise ValueError("Loaded component public value/argument symbols differ from its contract")
+        active = {name for name, schema in contract["dimensions"].items() if len(schema) == 4 and schema[2] == "active"}
+        if not set(self.dimensions) <= active or set(self.dimensions) & component._layout_dimensions:
+            raise ValueError("Loaded component dimension symbols may only update non-layout active counts")
+        self.arguments = dict(self.explicit)
+        for slot, binding in contract["bindings"].items():
+            symbols = (
+                self.values if binding["kind"] == "value" else self.dimensions if binding["kind"] == "dimension" else {}
+            )
+            if binding["name"] in symbols:
+                self.arguments[slot] = symbols[binding["name"]]
+        self._validate_plan_symbols()
+        if any(symbol.tag == core.ArgKind.ARGPACK for symbol in self.symbols.values()):
+            raise TaichiRuntimeError("Loaded component explicit ArgPack arguments are not qualified")
+        # A base active count can feed only a derived hidden ABI dimension.
+        # It is still a public Graph input, even without a direct native slot.
+        for symbol in self.dimensions.values():
+            if not isinstance(symbol, core.Arg) or symbol.tag != core.ArgKind.SCALAR or str(symbol.dtype()) != "i32":
+                raise ValueError("Loaded component active count requires an i32 scalar symbol")
+            previous = self.symbols.get(symbol.name)
+            if previous is not None and self._symbol_abi(previous) != self._symbol_abi(symbol):
+                raise ValueError("Loaded component symbols with the same name must have the same ABI")
+            self.symbols[symbol.name] = symbol
+        self.backend = str(self.runtime.arch)
+        if self.backend in ("x64", "arm64"):
+            self.backend = "cpu"
+        self._action = BackendCommandGraphAction(_LoadedComponentRecording(self))
+
+    def validate_graph_lifetime(self):
+        super().validate_graph_lifetime()
+        self.instance._check()
+
+    @property
+    def resource_effects(self):
+        return (
+            ResourceEffect(self.instance, GraphAccess.OPAQUE, runtime_bound=False),
+            *(
+                ResourceEffect(name, GraphAccess.READ_WRITE)
+                for name, arg in self.symbols.items()
+                if arg.tag == core.ArgKind.NDARRAY
+            ),
+        )
+
+    @property
+    def graph_source_contract(self):
+        result = super().graph_source_contract
+        result.update(kind="loaded_aot_component", component=self.component_name, owner="live_instance_binding")
+        return result
+
+    @property
+    def debug_info(self):
+        return dict(kind="loaded_aot_component", component=self.component_name, execution=self.execution)

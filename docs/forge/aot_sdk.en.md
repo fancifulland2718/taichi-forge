@@ -1964,6 +1964,44 @@ Host launches. This does not establish fusion across loaded Plans or qualify
 GeoPhys EFC/TGS. Closing a Module rejects new submissions; accepted work retains
 its completion leases. Initialization failure does not roll back prior writes.
 
+For a loaded component Instance, use `dispatch_loaded_component` instead of
+mapping compiler-generated resource parameters yourself. The Runtime must be
+borrowed from the current Program, and normal model initialization must precede
+binding:
+
+```python
+# This component declares the public value "gravity" and active count "active".
+builder.dispatch_loaded_component(
+    instance, values={"gravity": gravity_arg}, dimensions={"active": count_arg},
+    execution="device",
+)
+graph = builder.compile()
+binding = graph.bind({"gravity": ti.Vector([0.0, 0.0, -9.81]), "count": 5})
+binding.initialize()
+graph.submit(binding).wait()
+```
+
+Dictionary values are Graph symbols; binding keys use those symbols' names.
+The optional `arguments` mapping supplies the component's explicit public
+arguments, including compact JIT ndarrays. Hidden SNode groups, offsets and
+dimensions come from `ComponentInstance.prepare()`. Only non-layout active counts
+can change through `dimensions`; capacity changes require another instance.
+Values are copied at binding time, and each prepared call pins its exact instance.
+Closing an instance revokes its Graph submissions while preserving accepted work
+and other instances. Instances retain the existing ordered-domain restriction.
+Public ArgPack/gradient arguments on this component route remain unqualified;
+the separate loaded Kernel/Plan routes retain their documented support.
+
+Root and Sequential composition have CPU/CUDA checks, including two instances
+from one loaded Module, failure cleanup and closing in flight. A frozen real
+Newton stage also ran two models in one outer sequence without numerical Python
+compilation: five submissions produced ten CUDA Graph launches and one final
+wait, with no intermediate synchronization or Host callback API observed. Each
+stage retains its native control and private workspace; the outer sequence is
+still segmented. This does not qualify full physical-step/TGS composition,
+Vulkan or throughput. `native_execution_info()` identifies these calls as
+`loaded_aot_component` and reports their actual native execution kind.
+
 Borrowers can explicitly import compact scalar/vector/matrix ndarrays from the
 same Program with `runtime.import_ndarray(jit_array)`. The returned view works
 with ordinary and prepared AOT calls and shares the original device storage.

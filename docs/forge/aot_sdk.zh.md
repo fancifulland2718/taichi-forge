@@ -1532,6 +1532,36 @@ CUDA Graph launch、25 次循环体、30 次条件检查和区间末一次等待
 这不等于多个 loaded Plan 已融合为一张设备 Graph，也不等于 GeoPhys EFC/TGS 已取得资格。
 模块关闭后拒绝新提交，已接受调用按原完成租约退休；初始化失败不回滚已经写入的数据。
 
+已加载的组件 Instance 使用 `dispatch_loaded_component`，无需应用手工填写编译器隐藏
+资源参数。Runtime 必须借用当前 Program，绑定前先通过正常模型初始化合同填充实例：
+
+```python
+# 示例组件声明了公共值 gravity 和 active count active。
+builder.dispatch_loaded_component(
+    instance, values={"gravity": gravity_arg}, dimensions={"active": count_arg},
+    execution="device",
+)
+graph = builder.compile()
+binding = graph.bind({"gravity": ti.Vector([0.0, 0.0, -9.81]), "count": 5})
+binding.initialize()
+graph.submit(binding).wait()
+```
+
+映射右侧是 Graph 符号，bind 字典使用符号名称；可选 `arguments` 映射提供组件的显式
+公共参数，包括紧凑 JIT ndarray。隐藏 SNode 组、offset 和维度由
+`ComponentInstance.prepare()` 解析。`dimensions` 只允许改变不参与布局的 active count，
+容量变化需创建另一个实例。绑定复制动态值并持有准确的实例；关闭该实例拒绝其新提交，
+已经接受的工作安全完成，其他实例不受影响。沿用已有单一有序执行域限制。
+组件路线的显式 ArgPack/gradient 参数尚未取得资格，独立 loaded Kernel/Plan 路线
+保留前文支持范围。
+
+根层级和 Sequential 已通过 CPU/CUDA 检查，包含同一 Module 的两个实例、失败清理及
+在途关闭。真实冻结 Newton 阶段也在同一外层序列中执行两个模型，消费时禁止 Python
+数值编译；五次提交对应十次 CUDA Graph launch，只有末尾一次等待，未观察到阶段间
+同步或 Host callback API。各阶段保留原生控制和私有 workspace，外层仍是分段提交。
+这不等于完整物理步/TGS、Vulkan 或吞吐性能资格。`native_execution_info()` 将此类
+调用标为 `loaded_aot_component`，同时报告实际原生执行种类。
+
 借用者通过 `runtime.import_ndarray(jit_array)` 显式导入同一 Program 的紧凑
 scalar/vector/matrix ndarray。导入返回可用于普通/固定 AOT 调用的数组视图，复用
 原设备存储；JIT 和 AOT 的读写共享数据及 owner 的提交顺序，不产生设备复制。
