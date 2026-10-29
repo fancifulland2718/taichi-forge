@@ -84,6 +84,8 @@ class ComponentVariants:
                     raise ValueError("Component family differs from its actual compiled root")
                 self._components[key] = component
                 kernels.update(component._plan.kernel_entries)
+                kernels.update(entry for operations in facts.get("field_io_bindings", {}).values()
+                               for entry in operations.values())
             report = contract["build_report"]
             if (
                 report.get("version") != 1

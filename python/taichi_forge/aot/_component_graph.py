@@ -327,11 +327,12 @@ class _GraphCapture:
 class ComponentGraph:
     """Frozen normal Graph plus its compiler-produced resource contract."""
 
-    def __init__(self, graph, contract, array_types=None, fixed_dependencies=None):
+    def __init__(self, graph, contract, array_types=None, fixed_dependencies=None, field_io=None):
         self._graph = graph
         self._contract = json.dumps(contract, sort_keys=True)
         self._array_types = dict(array_types or {})
         self._fixed_dependencies = dict(fixed_dependencies or {})
+        self._field_io = dict(field_io or {})
 
     @property
     def contract(self):
@@ -344,6 +345,15 @@ class ComponentGraph:
                                          _fixed_snode_dependencies=tuple(self._fixed_dependencies.values()))
         contract = self.contract
         try:
+            if self._field_io:
+                contract["field_io_bindings"] = {}
+                for resource, operations in self._field_io.items():
+                    bindings = {}
+                    for operation, code in operations.items():
+                        entry = "__component_field_" + _digest((name, resource, operation))
+                        code.export(module, entry)
+                        bindings[operation] = entry
+                    contract["field_io_bindings"][resource] = bindings
             for layout in {resource.get("layout") for resource in contract["resources"].values()} - {None, ""}:
                 module.add_ndarray_layout(layout, self._array_types[layout])
         except BaseException:
@@ -643,12 +653,57 @@ def compile_component_graph(component, record, *args, _build=None, **kwargs):
             contract["configuration"] = configuration
         if _build is not None:
             _build.check_time("after backend compilation")
+        field_io = _compile_fixed_field_io(component, capture.owner, contract, _build)
         if contract["version"] >= 4:
             from taichi_forge_runtime.aot._component import _control_identity
 
             contract["semantic_key"] = _control_identity(contract)
         fixed = {group: capture.fixed_dependencies[group] for group in contract.get("fixed_groups", {})}
-        return ComponentGraph(graph, contract, capture.array_types, fixed)
+        return ComponentGraph(graph, contract, capture.array_types, fixed, field_io)
     except BaseException:
         graph.close()
         raise
+
+
+def _compile_fixed_field_io(component, owner, contract, build=None):
+    """Compile ordinary Field coordinate transfers for the actual closure.
+
+    These are library data transfers, shared with normal Field.read_at/write_at;
+    application numerical functions and signatures are not wrapped or rewritten.
+    """
+    from taichi_forge._kernels import field_read_coordinates, field_write_coordinates
+    from taichi_forge.lang import impl
+    from taichi_forge.lang._field_coordinates import element_type
+
+    result = {}
+    for name, resource in contract["resources"].items():
+        if resource.get("kind") != "fixed_snode":
+            continue
+        field = component.read(owner, resource["aliases"][0])
+        # Keep declaration IDs for cache/ABI identity and expose their original
+        # member paths for public consumption, without decoding internal names.
+        resource["aliases"] = list(dict.fromkeys([
+            *resource["aliases"],
+            *(".".join(component._paths[alias]) for alias in resource["aliases"] if alias in component._paths),
+        ]))
+        indices = impl.ndarray(impl.i32, shape=(1, max(len(field.shape), 1)))
+        values = impl.ndarray(element_type(field), shape=1)
+        operations = {}
+        for operation, entry in (("read", field_read_coordinates), ("write", field_write_coordinates)):
+            code = component.compile(entry, indices, values, owner=owner, template_args={"field": field})
+            if code.dynamic or set(code.fixed_groups) != {resource["group"]}:
+                raise TaichiCompilationError("Field transfer captured unexpected resources or dynamic state")
+            if build is not None:
+                build.admit_kernel(code)
+            operations[operation] = code
+        result[name] = operations
+    if result:
+        contract["version"] = 7
+        contract["field_io"] = {
+            name: dict(entries={operation: code.semantic_key for operation, code in operations.items()},
+                       offsets=list(component.read(owner, contract["resources"][name]["aliases"][0]).snode.ptr.offset)
+                       or [0] * len(contract["resources"][name]["shape"]))
+            for name, operations in result.items()
+        }
+        contract["required_capabilities"].append("component_field_coordinates_v1")
+    return result

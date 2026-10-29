@@ -8,6 +8,7 @@ from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.impl import grouped, static, static_assert
 from taichi_forge.lang.kernel_impl import func, kernel
 from taichi_forge.lang.misc import loop_config
+from taichi_forge.lang.matrix import Vector
 from taichi_forge.lang.simt import block, subgroup, warp
 from taichi_forge.lang.snode import deactivate
 from taichi_forge.types import ndarray_type, texture_type, vector
@@ -18,6 +19,34 @@ from taichi_forge.math import vec3
 
 
 _field_compact_static_kernel_cache = {}
+
+
+@kernel
+def field_write_coordinates(field: template(), indices: ndarray_type.ndarray(dtype=i32, ndim=2),
+                            values: ndarray_type.ndarray()):
+    rank = static(len(field.shape))
+    for row in range(indices.shape[0]):
+        if static(rank == 0):
+            field[None] = values[row]
+        else:
+            index = Vector.zero(i32, rank)
+            for axis in static(range(rank)):
+                index[axis] = indices[row, axis]
+            field[index] = values[row]
+
+
+@kernel
+def field_read_coordinates(field: template(), indices: ndarray_type.ndarray(dtype=i32, ndim=2),
+                           values: ndarray_type.ndarray()):
+    rank = static(len(field.shape))
+    for row in range(indices.shape[0]):
+        if static(rank == 0):
+            values[row] = field[None]
+        else:
+            index = Vector.zero(i32, rank)
+            for axis in static(range(rank)):
+                index[axis] = indices[row, axis]
+            values[row] = field[index]
 
 
 # A set of helper (meta)functions

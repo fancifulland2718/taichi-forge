@@ -331,10 +331,27 @@ conservative group access, never an absence of reads or writes.
 
 `module.component(name).instantiate(dimensions)` creates the required empty fixed
 trees and binds them alongside the instance's dense groups through the existing
-prepared API. Numerical initialization, readback and deactivation use the original
-component entries. Sparse storage is not exposed as an uploadable dense view;
-`resource()` and `initialize(data, zero=...)` apply to qualified dense/array
-resources. `instance.nbytes` explicitly rejects sparse instances because fixed
+prepared API. A v7 root also exports coordinate transfers for its actual captured
+members, using the same library kernels as ordinary `Field.write_at(coordinates,
+values)` and `read_at(coordinates)`. Consumers call
+`instance.resource("grid.mass").write_at(coords, packed_bytes)` or `read_at(coords)`;
+the latter returns contiguous element bytes without importing the numerical DSL.
+The ordinary Field API accepts values of shape `(count, *element_shape)` and
+returns NumPy arrays. Writes require distinct coordinates and preserve normal
+SNode activation. Reads do not activate cells. Empty batches are valid; invalid
+coordinates or payload sizes reject before submission. Public nested member paths
+come from compiler declarations rather than decoding internal names.
+
+These are synchronous cold transfers: close the instance's prepared calls first.
+They use existing instance bindings without changing shared module root pointers;
+they are not qualified as efficient per-step or general asynchronous transfers.
+Original component entries can still initialize, reset and deactivate state.
+Sparse storage is not exposed as an uploadable dense view;
+`initialize(data, zero=...)` still applies only to qualified dense/array resources.
+The extra library entries appear in build statistics. There is no default count
+or time limit; only an explicitly supplied BuildBudget limits construction cost.
+Older v6 artifacts remain consumable but cannot acquire transfers they did not export.
+`instance.nbytes` explicitly rejects sparse instances because fixed
 root bytes do not measure total dynamic allocator storage. Contract loading has
 no separate fixed JSON size cap; version, capability, closure and native layout
 validation still apply.

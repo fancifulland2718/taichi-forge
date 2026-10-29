@@ -349,6 +349,11 @@ def check_capture(folder, backend):
         for index in (0, 1):
             run(index, 0, 0, 0)
             assert values(outputs[index]) == [0] * 16
+        # Reading an inactive coordinate must not activate its pointer block:
+        # the original struct-for would otherwise increment that block here.
+        assert states[0].resource("grid").read_at([(15,)]) == array.array("i", [0]).tobytes()
+        run(0, 0, 0, 1)
+        assert values(outputs[0]) == [0] * 16
         run(0, 5, 10, 2)
         assert values(outputs[0]) == list(range(12, 17)) + [2] * 3 + [0] * 8
         run(1, 9, 100, 3)
@@ -459,10 +464,77 @@ def check_struct(folder, backend):
             domain.close()
 
 
+def check_coordinates(folder, backend):
+    import json
+    from pathlib import Path
+    import shutil
+    import tempfile
+    from taichi_forge_runtime.aot import Runtime
+
+    def floats(payload):
+        result = array.array("f")
+        result.frombytes(payload)
+        return list(result)
+
+    with Runtime(backend) as runtime:
+        module = runtime.load_module(folder)
+        component = module.component("step")
+        selected = module.component_variants("updates").select(dict(enabled=True))
+        assert selected.contract["semantic_key"] == component.contract["semantic_key"]
+        altered = Path(tempfile.mkdtemp()) / "artifact"
+        shutil.copytree(folder, altered)
+        path = altered / "components/step.json"
+        bad = json.loads(path.read_text())
+        name = next(iter(bad["field_io_bindings"]))
+        bad["field_io_bindings"][name]["read"] = bad["field_io_bindings"][name]["write"]
+        path.write_text(json.dumps(bad))
+        with runtime.load_module(altered) as foreign:
+            reject(lambda: foreign.component("step"), "transfer entry differs")
+
+        states = [component.instantiate({}, configuration=dict(enabled=True)) for _ in range(2)]
+        domain = runtime.execution_domain(capacity=1, instance_capacity=1) if backend == "cuda" else None
+        coordinates = [(1, 1, 1), (7, 6, 5)]  # Created only after artifact freeze.
+        for index, state in enumerate(states):
+            mass = state.resource("grid.mass")
+            assert floats(mass.read_at(coordinates)) == [0, 0]
+            mass.write_at([], b"")
+            assert mass.read_at([]) == b""
+            reject(lambda: mass.write_at([(8, 0, 0)], array.array("f", [1])), "outside")
+            reject(lambda: mass.write_at([coordinates[0]] * 2, array.array("f", [1, 2])), "distinct")
+            reject(lambda: mass.write_at(coordinates, array.array("f", [1])), "element shape")
+            mass.write_at(coordinates, array.array("f", [index + 2, index + 4]))
+            state.resource("grid.momentum").write_at(coordinates, array.array("f", [2, 4, 6, 8, 10, 12]))
+
+        for index, gravity in ((0, [1, 2, 3]), (1, [-3, 1, 2]), (0, [4, -2, 1])):
+            state = states[index]
+            with state.prepare(values=dict(gravity=gravity), execution_domain=domain) as call:
+                reject(lambda: state.resource("grid.mass").read_at(coordinates), "cold boundary")
+                call.initialize()
+                if domain:
+                    with call.submit() as ticket:
+                        ticket.wait()
+                else:
+                    call.run()
+            result = floats(state.resource("grid.velocity").read_at(coordinates))
+            expected = [value / (index + (2 if k < 3 else 4)) + gravity[k % 3]
+                        for k, value in enumerate([2, 4, 6, 8, 10, 12])]
+            assert all(abs(a - b) < 1e-6 for a, b in zip(result, expected)), (result, expected)
+            assert floats(state.resource("grid.mass").read_at([(0, 0, 0)])) == [0]
+        view = states[0].resource("grid.mass")
+        states[0].close()
+        reject(lambda: view.read_at(coordinates), "closed")
+        assert floats(states[1].resource("grid.mass").read_at(coordinates)) == [3, 5]
+        states[1].close()
+        if domain:
+            domain.close()
+
+
 if __name__ == "__main__":
     sys.path.insert(0, os.environ["FORGE_AOT_TEST_PACKAGE"])
     sys.meta_path.insert(0, NoNumericalSource())
-    if len(sys.argv) > 3 and sys.argv[3] == "struct":
+    if len(sys.argv) > 3 and sys.argv[3] == "coordinates":
+        check_coordinates(sys.argv[1], sys.argv[2])
+    elif len(sys.argv) > 3 and sys.argv[3] == "struct":
         check_struct(sys.argv[1], sys.argv[2])
     elif len(sys.argv) > 3 and sys.argv[3] == "component":
         check_component(sys.argv[1], sys.argv[2])

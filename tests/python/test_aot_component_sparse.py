@@ -104,6 +104,47 @@ class _SparseStructState:
         builder.dispatch(self.update, template_args={"self": self})
         builder.dispatch(self.read, out, template_args={"self": self})
 
+    def record_update(self, builder, *, enabled=True):
+        if enabled:
+            builder.dispatch(self.update, template_args={"self": self})
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
+def test_fixed_component_coordinate_io_consumes_new_state_without_source(tmp_path):
+    from taichi_forge.aot._component import RootOption
+    from taichi_forge.aot._component_variants import Variant, build_variants
+
+    state = _SparseStructState()
+    state.seed()
+    component = Component.from_owner(state, enabled=RootOption(choices=(True, False)))
+    built = build_variants([Variant(component, state.record_update, enabled=True)])
+    root = built.select(dict(enabled=True))
+    report = built.report
+    assert len(report["kernel_variants"]) == 7  # Update plus two transfers per actual member.
+    assert all(value is None for value in report["budget"].values())
+    module = ti.aot.Module()
+    root.export(module, "step")
+    family = built.export(module, "updates")
+    assert len(family["exported_kernel_entries"]) == 7
+    folder = tmp_path / "artifact"
+    module.save(folder)
+    assert not (folder / "data").exists()
+    _consume_isolated(folder, tmp_path, "coordinates")
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_field_coordinate_transfers_preserve_offsets_and_matrix_elements():
+    shifted = ti.field(ti.i32, shape=4, offset=-2)
+    matrix = ti.Matrix.field(2, 3, ti.f32, shape=())
+    shifted.write_at([[-2], [1]], [5, 9])
+    np.testing.assert_array_equal(shifted.read_at([[-2], [-1], [1]]), [5, 0, 9])
+    expected = np.arange(6, dtype=np.float32).reshape(1, 2, 3)
+    matrix.write_at([[]], expected)
+    np.testing.assert_array_equal(matrix.read_at([[]]), expected)
+    assert matrix.read_at([]).shape == (0, 2, 3)
+    with pytest.raises(ValueError, match="outside"):
+        shifted.write_at([[2]], [3])
+
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
 def test_fixed_snode_struct_elements_keep_normal_field_lowering(tmp_path):
@@ -136,6 +177,35 @@ def test_fixed_snode_struct_elements_keep_normal_field_lowering(tmp_path):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
+def test_coordinate_field_transfers_share_fixed_component_templates():
+    from taichi_forge._kernels import field_write_coordinates, field_read_coordinates
+
+    state = _SparseStructState()
+    coordinates = np.array([[1, 2, 3], [6, 2, 3]], dtype=np.int32)
+    state.grid.mass.write_at(coordinates, [2, 4])
+    state.grid.momentum.write_at(coordinates, [[1, 2, 3], [4, 5, 6]])
+    np.testing.assert_array_equal(state.grid.mass.read_at([[1, 2, 3], [7, 2, 3]]), [2, 0])
+    np.testing.assert_array_equal(state.grid.momentum.read_at(coordinates), [[1, 2, 3], [4, 5, 6]])
+    with pytest.raises(ValueError, match="distinct"):
+        state.grid.mass.write_at([[1, 2, 3], [1, 2, 3]], [1, 2])
+    with pytest.raises(ValueError, match="outside"):
+        state.grid.mass.write_at([[8, 2, 3]], [1])
+    environment = Component.from_owner(state)
+    indices = ti.ndarray(ti.i32, (2, 3))
+    values = ti.ndarray(ti.types.vector(3, ti.f32), 2)
+    indices.from_numpy(coordinates)
+    values.from_numpy(np.array([[7, 8, 9], [10, 11, 12]], dtype=np.float32))
+    writer = environment.compile(field_write_coordinates, indices, values, owner=state,
+                                 template_args={"field": state.grid.momentum})
+    writer.run(environment, state, indices, values)
+    reader = environment.compile(field_read_coordinates, indices, values, owner=state,
+                                 template_args={"field": state.grid.momentum})
+    values.fill(0)
+    reader.run(environment, state, indices, values)
+    np.testing.assert_array_equal(values.to_numpy(), [[7, 8, 9], [10, 11, 12]])
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
 def test_fixed_snode_normal_component_graph_exports_and_instantiates(tmp_path):
     spare = _SparseState(32)
     state = _SparseGraphState()
@@ -152,7 +222,7 @@ def test_fixed_snode_normal_component_graph_exports_and_instantiates(tmp_path):
     assert not undeclared._data_payloads and not undeclared._exported_kernels
     environment = Component.from_owner(state)
     root = environment.compile_graph(state.record)
-    assert root.contract["version"] == 6
+    assert root.contract["version"] == 7
     assert len(root.contract["fixed_groups"]) == len(root.contract["groups"]) == 1
     assert len(root.contract["entries"]) == 2
     assert any("group" in effect for entry in root.contract["compilation"]["entries"] for effect in entry["effects"]), root.contract["compilation"]

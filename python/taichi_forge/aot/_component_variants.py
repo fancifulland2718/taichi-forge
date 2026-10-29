@@ -136,6 +136,10 @@ class ComponentVariants:
             for root_name, configuration, root in named:
                 plan = root.export(module, root_name)
                 kernels.update(plan.kernel_entries)
+                kernels.update(
+                    entry for operations in module._component_roots[root_name].get("field_io_bindings", {}).values()
+                    for entry in operations.values()
+                )
                 cases.append(
                     dict(configuration=configuration, root=root_name, semantic_key=root.contract["semantic_key"])
                 )

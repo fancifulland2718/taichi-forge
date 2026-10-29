@@ -299,6 +299,24 @@ class Field:
         self.dual = dual
 
     @python_scope
+    def write_at(self, coordinates, values):
+        """Write distinct logical coordinates, activating sparse cells as needed.
+
+        This cold host transfer accepts arrays shaped (count, field rank) and
+        (count, *element_shape). It does not clear existing values/activation.
+        """
+        from taichi_forge.lang._field_coordinates import transfer
+
+        transfer(self, coordinates, values)
+
+    @python_scope
+    def read_at(self, coordinates):
+        """Read logical coordinates without activating sparse cells."""
+        from taichi_forge.lang._field_coordinates import transfer
+
+        return transfer(self, coordinates)
+
+    @python_scope
     def fill(self, val):
         """Fills `self` with a specific value.
 

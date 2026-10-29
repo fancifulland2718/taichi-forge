@@ -1016,7 +1016,7 @@ class Component:
         # Identity is used to associate this call with a declared binding; no
         # Python object identity is retained in the code key or artifact.
         for name, declaration in sorted(self.declarations.items()):
-            if not isinstance(declaration, DenseField):
+            if not isinstance(declaration, (DenseField, FixedSNodeField)):
                 continue
             try:
                 if self.available(owner, name) and self.read(owner, name) is value:

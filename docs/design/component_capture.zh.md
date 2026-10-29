@@ -296,9 +296,21 @@ scope 检查当前未物化的默认根，不能把已物化或另一 builder �
 当前 Sparse Graph 缺少逐成员 effects 时，公开保守组级访问，不报告无读写。
 
 `module.component(name).instantiate(dimensions)` 自动创建所需固定树的空状态，并与
-同实例的 Dense 组一起通过原 prepared API 绑定。数值初始化、读取和停用使用原组件
-入口；Sparse 不伪装成可直接上传的 Dense view，`resource()`/`initialize(data, zero=...)`
-仅用于合格的 Dense/array 资源。含 Sparse 的 `instance.nbytes` 明确拒绝：固定根布局
+同实例的 Dense 组一起通过原 prepared API 绑定。v7 根还自动导出实际捕获成员的坐标
+传输入口，与普通 `Field.write_at(coordinates, values)` / `read_at(coordinates)` 共用
+库 Kernel。消费者使用 `instance.resource("grid.mass").write_at(coords, packed_bytes)`
+和 `read_at(coords)`；后者返回连续元素 bytes，不导入数值 DSL。普通 Field 接口接受
+形如 `(count, *element_shape)` 的值，并返回 NumPy 数组。写入坐标须互异；读取不激活
+稀疏单元，写入遵循原 SNode 激活语义。空批次有效，非法坐标/数据长度在提交前拒绝。
+嵌套成员的公共路径来自编译声明，不要求消费者解释内部名称。
+
+传输是同步冷操作，必须先关闭该实例的 prepared 调用；它使用现有实例级绑定，
+不改写模块共享根指针，不作为每步高效传输或通用异步更新接口。数值初始化/reset/
+deactivate 仍可使用原组件入口。Sparse 不伪装成可上传的 Dense view；
+`initialize(data, zero=...)` 仍仅用于合格的 Dense/array 资源。新增库入口进入可查询
+构建统计，默认无数量或耗时上限，只有调用者显式启用 BuildBudget 才限制构建成本。
+旧 v6 产物仍可消费，但不能凭空获得未导出的坐标传输入口。
+含 Sparse 的 `instance.nbytes` 明确拒绝：固定根布局
 字节数不能代表动态 allocator 的总存储。合同查询不另设固定 JSON 大小限制，仍验证
 版本、能力、完整依赖和实际原生布局。
 

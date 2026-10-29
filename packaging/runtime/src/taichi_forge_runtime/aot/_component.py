@@ -14,7 +14,7 @@ def _control_identity(contract):
     """Canonical compiler-fact projection; no layout or execution interpretation."""
     ignored = {
         "semantic_key", "compilation", "configuration", "name", "execution",
-        "execution_entries", "execution_fingerprint", "target", "fixed_bindings",
+        "execution_entries", "execution_fingerprint", "target", "fixed_bindings", "field_io_bindings",
     }
     facts = {key: value for key, value in contract.items() if key not in ignored}
     facts["required_capabilities"] = [
@@ -92,21 +92,25 @@ class Component:
                 "execution_entries",
                 "target",
             }
-            if contract.get("version") in (2, 3, 4, 5, 6):
+            if contract.get("version") in (2, 3, 4, 5, 6, 7):
                 required.add("compilation")
-            if contract.get("version") in (3, 4, 5, 6):
+            if contract.get("version") in (3, 4, 5, 6, 7):
                 required.add("configuration")
-            if contract.get("version") in (4, 5, 6):
+            if contract.get("version") in (4, 5, 6, 7):
                 required.update(("control", "internal_arguments", "execution_fingerprint"))
-            if contract.get("version") in (5, 6):
+            if contract.get("version") in (5, 6, 7):
                 required.add("constraints")
-            if contract.get("version") == 6:
+            if contract.get("version") in (6, 7):
                 required.update(("fixed_groups", "fixed_bindings"))
-            if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6) or contract["name"] != name:
+            if contract.get("version") == 7:
+                required.update(("field_io", "field_io_bindings"))
+            if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
+            if contract["version"] == 7:
+                capabilities.add("component_field_coordinates_v1")
             fixed_groups = contract.get("fixed_groups", {})
-            if contract["version"] == 6:
+            if contract["version"] >= 6:
                 if not fixed_groups or set(fixed_groups) & set(contract["groups"]):
                     raise ValueError("Fixed SNode component groups must have distinct declared identities")
                 capabilities.add("component_fixed_snode_groups_v1")
@@ -146,7 +150,7 @@ class Component:
                             if dependency == key and static_key(read_static_key(value)) != selected:
                                 raise ValueError("Component configuration differs from compiled static dependencies")
                     self._configuration[key] = (selected, choices)
-            if contract["version"] == 5 or contract["version"] == 6 and contract["constraints"]:
+            if contract["version"] == 5 or contract["version"] >= 6 and contract["constraints"]:
                 capabilities.add("component_dimension_constraints_v1")
                 if not contract["constraints"]:
                     raise ValueError("Constrained component requires nonempty dimension constraints")
@@ -311,6 +315,10 @@ class Component:
             bound_resources = {name for name, resource in contract["resources"].items() if resource.get("kind") != "fixed_snode"}
             if used["resource"] != bound_resources or used["value"] != set(contract["values"]):
                 raise ValueError("Component contains unreferenced resource/value requirements")
+            self._field_io = {}
+            if contract["version"] == 7:
+                from ._field_coordinates import load_transfers
+                self._field_io = load_transfers(module, contract)
             self._module, self._plan = module, plan
             self._contract_json = json.dumps(contract)
             self._aliases = aliases
@@ -352,6 +360,7 @@ class ComponentInstance:
         self._fixed_state = None
         self._prepared = weakref.WeakSet()
         self._binding_domain = None
+        self._transfer_active = False
         self._close_lock = threading.RLock()
         self._closed = self._retired = False
         self._initialized = set()
@@ -381,6 +390,10 @@ class ComponentInstance:
                     )
                 for name, resource in contract["resources"].items():
                     if resource.get("kind") == "fixed_snode":
+                        if name in component._field_io:
+                            from ._field_coordinates import FieldCoordinates
+                            self._resources[name] = FieldCoordinates(self, resource, component._field_io[name])
+                            self._initialized.add(name)
                         continue
                     shape = tuple(
                         self._dimensions[item] if isinstance(item, str) else item for item in resource["shape"]
@@ -439,19 +452,19 @@ class ComponentInstance:
 
     def _initialize(self, data, *, zero):
         self._check()
-        if self._has_live_bindings():
+        if self._transfer_active or self._has_live_bindings():
             raise RuntimeError("Component initialization requires closing prepared calls at a cold boundary")
         selected = {}
         for name, value in dict(data or {}).items():
             key = self._component._aliases[name]
-            if key not in self._resources:
+            if key not in self._resources or self._component.contract["resources"][key].get("kind") == "fixed_snode":
                 raise ValueError("Sparse model data must use a declared numerical initializer, not a dense byte upload")
             if key in selected:
                 raise ValueError("Initialization repeats an aliased component resource")
             selected[key] = value
         for name in zero:
             key = self._component._aliases[name]
-            if key not in self._resources:
+            if key not in self._resources or self._component.contract["resources"][key].get("kind") == "fixed_snode":
                 raise ValueError("Sparse reset requires the original component reset entry or a new empty instance")
             if key in selected:
                 raise ValueError("Initialization repeats an aliased component resource")
@@ -472,6 +485,8 @@ class ComponentInstance:
         runtime = self._component._module._runtime
         with runtime._lock:
             self._check()
+            if self._transfer_active:
+                raise RuntimeError("Component Field transfer is in progress")
             if self._has_live_bindings() and execution_domain is not self._binding_domain:
                 raise ValueError("Component state requires one ordered execution domain until its bindings retire")
             if self._initialized != set(self._resources):
