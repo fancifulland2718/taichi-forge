@@ -441,14 +441,23 @@ def compile_component_graph(component, record, *args, _build=None, **kwargs):
     graph = builder.compile()
     try:
         contract = _complete_compiler_contract(graph, contract, capture)
-        if capture.configuration:
+        # Host choices remain part of admission even if no numerical entry uses
+        # them. Explicit kernel-only policy follows the final compiler closure,
+        # including dead-region pruning, rather than the whole owner registry.
+        used_static = {name for entry in contract["entries"] for name, _ in entry["static"]}
+        configuration = {
+            name: spec
+            for name, spec in capture.configuration.items()
+            if not capture._choices[name].kernel_only or name in used_static
+        }
+        if configuration:
             # Admission describes the whole normal root, including Python choices
             # which may alter its dispatch sequence. It never widens a kernel ABI
             # or its actual static dependency key. Same code may admit several
             # configurations; this fixed root exports the selected one explicitly.
             contract["version"] = max(contract["version"], 3)
             contract["required_capabilities"].append("component_static_choices_v1")
-            contract["configuration"] = capture.configuration
+            contract["configuration"] = configuration
         if _build is not None:
             _build.check_time("after backend compilation")
         if contract["version"] == 4:

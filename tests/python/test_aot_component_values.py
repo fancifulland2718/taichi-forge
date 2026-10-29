@@ -19,7 +19,7 @@ class _Parameters:
 
 @ti.data_oriented
 class _Model:
-    def __init__(self, n, *, gain=2.0, enabled=True, extra=False):
+    def __init__(self, n, *, gain=2.0, enabled=True, extra=False, kernel_only=False):
         self.n = n
         self.gravity = ti.Vector([3.0, 5.0, 7.0])
         self.parameters = _Parameters(gain, enabled)
@@ -29,7 +29,7 @@ class _Model:
         scope.value("gravity", ti.types.vector(3, ti.f32))
         record = scope.record("parameters", self.parameters)
         record.value("gain", ti.f32)
-        record.static("enabled", choices=(False, True))
+        record.static("enabled", choices=(False, True), kernel_only=kernel_only)
         if extra:
             self.unused = 123
             scope.value("unused", ti.i32)
@@ -141,3 +141,62 @@ def test_component_can_only_narrow_normal_static_domains():
             Component.from_owner(model, parameters=Record(enabled=StaticValue(choices=choices)))
     with pytest.raises(ValueError, match="Duplicate normal component declaration"):
         Component.from_owner(model, parameters=Record(gain=StaticValue(choices=(2.0,))))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_kernel_only_policy_preserves_used_guards_without_unrelated_domains(tmp_path):
+    from taichi_forge.aot._component import RootOption
+    from taichi_forge.aot._component_variants import ComponentBuildError, Variant, build_variants
+
+    with pytest.raises(ValueError, match="Recording arguments"):
+        RootOption(choices=(False, True), kernel_only=True)
+
+    first, second = _Model(3, kernel_only=True), _Model(19, enabled=False, kernel_only=True)
+    for index, model in enumerate((first, second)):
+        model.other_layout = index + 7
+        scope = ti.experimental.ResourceScope(model)
+        scope.static("other_layout", choices=(model.other_layout,), kernel_only=True)
+        scope.static("other_layout", choices=(model.other_layout,), kernel_only=True)
+        with pytest.raises(ValueError, match="different value declaration"):
+            scope.static("other_layout", choices=(model.other_layout,))
+    environments = [Component.from_owner(model) for model in (first, second)]
+    with pytest.raises(ValueError, match="must narrow"):
+        Component.from_owner(first, parameters=Record(enabled=StaticValue(choices=(True,))))
+    narrowed = Component.from_owner(first, parameters=Record(enabled=StaticValue(choices=(True,), kernel_only=True)))
+    assert narrowed.compile(first.step) is environments[0].compile(first.step)
+    family = build_variants([Variant(env, model.record) for env, model in zip(environments, (first, second))])
+    assert len(family.report["kernel_variants"]) == 2
+    for configuration in family.report["requested_configurations"]:
+        assert "other_layout" not in configuration
+        assert len(configuration) == 1  # The used numerical guard is required.
+    module = ti.aot.Module()
+    manifest = family.export(module, "normal")
+    assert "other_layout" not in manifest["domain"]
+    name = next(iter(manifest["domain"]))
+    artifact = tmp_path / "kernel_only.tcm"
+    module.archive(str(artifact))
+    with Runtime("cpu") as runtime:
+        loaded = runtime.load_module(artifact).component_variants("normal")
+        for enabled in (False, True):
+            component = loaded.select({name: enabled})
+            dimensions = {key: 11 for key, schema in component.contract["dimensions"].items() if len(schema) == 4}
+            with pytest.raises(ValueError, match="different compiled variant"):
+                component.instantiate(dimensions, configuration={name: not enabled})
+            with component.instantiate(dimensions, configuration={name: enabled}) as instance:
+                instance.initialize(zero=component.contract["resources"])
+                values = {key: ([13, 17, 19] if key == "gravity" else 5) for key in component.contract["values"]}
+                with instance.prepare(values=values) as call:
+                    call.run()
+                actual = struct.unpack("<11f", instance.resource("output").read())
+                np.testing.assert_array_equal(actual, (13 + np.arange(11)) * (5 if enabled else 1))
+
+    duplicate = _Model(9, kernel_only=True)
+    duplicate.other_layout = 99
+    ti.experimental.ResourceScope(duplicate).static("other_layout", choices=(99,), kernel_only=True)
+    duplicate_environment = Component.from_owner(duplicate)
+    with pytest.raises(ComponentBuildError, match="ambiguous recorded roots"):
+        build_variants([Variant(environments[0], first.record), Variant(duplicate_environment, duplicate.record)])
+    # Failed family publication retires its Graphs, not reusable definitions.
+    retry = build_variants([Variant(environments[0], first.record)])
+    assert len(retry.report["kernel_variants"]) == 1
+    assert duplicate_environment.compile(duplicate.step) is environments[0].compile(first.step)

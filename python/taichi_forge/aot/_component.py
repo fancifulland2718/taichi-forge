@@ -167,11 +167,16 @@ class StaticValue:
 
     Choices are component admission policy, not additional numerical code
     dependencies. The frontend still specializes only actual captured values.
+    kernel_only limits admission to exported numerical users; such a value
+    must not control Python recording or a resource layout on its own.
     """
 
     choices: tuple = None
+    kernel_only: bool = False
 
     def __post_init__(self):
+        if type(self.kernel_only) is not bool:
+            raise TypeError("Component static kernel_only must be a bool")
         if self.choices is not None:
             values = tuple(self.choices)
             keys = tuple(_static_value(value) for value in values)
@@ -202,6 +207,8 @@ class RootOption(StaticValue):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.kernel_only:
+            raise ValueError("Recording arguments cannot be kernel-only specializations")
         if self.choices is None:
             raise ValueError("Component recording options require finite choices")
 
@@ -635,6 +642,7 @@ class Component:
                             if (
                                 selected.choices is None
                                 or not {_static_value(value) for value in selected.choices} <= allowed
+                                or selected.kernel_only != declaration.kernel_only
                             ):
                                 raise ValueError(f"Component static domain {name!r} must narrow its normal declaration")
                             declaration = selected

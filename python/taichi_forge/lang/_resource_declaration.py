@@ -147,7 +147,10 @@ class ResourceScope:
             previous = values[name]["declaration"]
             if previous.schema != declaration.schema or (
                 isinstance(declaration, StaticValue)
-                and tuple(map(_static_value, previous.choices)) != tuple(map(_static_value, declaration.choices))
+                and (
+                    tuple(map(_static_value, previous.choices)) != tuple(map(_static_value, declaration.choices))
+                    or previous.kernel_only != declaration.kernel_only
+                )
             ):
                 raise ValueError(f"Normal attribute {name!r} already has a different value declaration")
             return
@@ -167,13 +170,17 @@ class ResourceScope:
 
         self._declare_value(name, RuntimeValue(dtype))
 
-    def static(self, name, *, choices):
-        """Declare an existing immutable configuration in an explicit finite domain."""
+    def static(self, name, *, choices, kernel_only=False):
+        """Declare finite configuration; kernel-only values cannot control Host recording.
+
+        A kernel-only declaration enters root admission only when an exported
+        numerical entry actually captures it. Recording choices always remain.
+        """
         from taichi_forge.aot._component import StaticValue
 
         if choices is None:
             raise ValueError("Normal static declarations require finite choices")
-        self._declare_value(name, StaticValue(choices=choices))
+        self._declare_value(name, StaticValue(choices=choices, kernel_only=kernel_only))
 
     def dim(self, name):
         if not isinstance(name, str) or not name.isidentifier():

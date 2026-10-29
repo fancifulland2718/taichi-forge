@@ -93,7 +93,14 @@ class ComponentVariants:
     def __init__(self, roots, domain, build):
         self._roots, self._domain = roots, domain
         self._runtime, self._target = build.runtime, build.target
-        self._report = json.dumps(build.report(), sort_keys=True)
+        report = build.report()
+        # Retain declaration snapshots as build provenance; deployed coverage
+        # and selection use the final root admission domain.
+        report["declaration_configurations"] = report["requested_configurations"]
+        report["requested_configurations"] = report["completed_configurations"] = [
+            configuration for configuration, _ in roots
+        ]
+        self._report = json.dumps(report, sort_keys=True)
 
     @property
     def report(self):
@@ -160,6 +167,7 @@ def build_variants(variants, *, budget=None):
         raise TypeError("Component variants require a BuildBudget")
     build = _Build(budget)
     requests, domain, seen = [], None, set()
+    roots, pending = [], None
     try:
         for variant in variants:
             if not isinstance(variant, Variant):
@@ -170,13 +178,6 @@ def build_variants(variants, *, budget=None):
             snapshot = _GraphCapture(variant.component, variant.record, variant.args, variant.kwargs).configuration
             if not snapshot:
                 raise ValueError("Component variants require an explicit finite configuration domain")
-            current_domain = {
-                key: sorted(spec["choices"], key=lambda value: json.dumps(value)) for key, spec in snapshot.items()
-            }
-            if domain is None:
-                domain = current_domain
-            elif domain != current_domain:
-                raise ValueError("Component variants declare different finite domains")
             configuration = {key: spec["selected"] for key, spec in snapshot.items()}
             identity = _digest(configuration)
             if identity in seen:
@@ -187,16 +188,39 @@ def build_variants(variants, *, budget=None):
         if not requests:
             raise ValueError("Component variant build requires at least one normal root")
         build.admission_complete = True
-        roots = []
+        selected = set()
         for variant, configuration in requests:
             root = compile_component_graph(
                 variant.component, variant.record, *variant.args, _build=build, **variant.kwargs
             )
-            actual = {key: spec["selected"] for key, spec in root.contract["configuration"].items()}
-            if json.dumps(actual, sort_keys=True) != json.dumps(configuration, sort_keys=True):
+            pending = root
+            admitted = root.contract.get("configuration", {})
+            if not admitted:
+                raise ValueError("Component variants require a finite domain used by the recorded root")
+            actual = {key: spec["selected"] for key, spec in admitted.items()}
+            if any(json.dumps(value) != json.dumps(configuration.get(key)) for key, value in actual.items()):
                 raise ValueError("Component configuration changed after request admission; retry")
-            roots.append((configuration, root))
+            # The normal declaration environment can contain other components'
+            # kernel-only roles. Domain/selection follow actual root contracts.
+            current_domain = {
+                key: sorted(spec["choices"], key=lambda value: json.dumps(value)) for key, spec in admitted.items()
+            }
+            if domain is None:
+                domain = current_domain
+            elif domain != current_domain:
+                raise ValueError("Component variants declare different finite domains")
+            identity = _digest(actual)
+            if identity in selected:
+                raise ValueError("Component configuration has duplicate or ambiguous recorded roots")
+            selected.add(identity)
+            roots.append((actual, root))
+            pending = None
             build.completed.append(configuration)
         return ComponentVariants(roots, domain, build)
     except Exception as error:
+        # Domain projection is available only after recording. Release private
+        # Graphs on a late admission failure; complete Kernel definitions remain
+        # reusable through the ordinary cache for a corrected build.
+        for root in ([pending] if pending is not None else []) + [root for _, root in roots]:
+            root._graph.close()
         raise ComponentBuildError(str(error), build.report()) from error

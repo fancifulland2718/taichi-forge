@@ -34,6 +34,16 @@ identity 比较明确拒绝。未使用成员不进入数值代码身份。局�
 
 在正常 `ResourceScope` 中赋值已声明的子 owner，例如 `scope.buffers = buffers`，
 `Component.from_owner` 会递归收集该显式声明边，无需逐 Field 或逐 Kernel 表。
+仅数值入口使用的有限特化值可声明为
+`scope.static("key_shift", choices=(shift,), kernel_only=True)`，或同策略的
+`StaticValue`。最终导出的实际入口闭包决定它是否进入根准入，因此无关排序布局不会
+阻挡动力学组件。实际使用的值仍要求消费者匹配已编译选择。默认策略继续保守保留
+Host 构图选择，即使没有 Kernel 读取它。Host 分支、模板调度次数及独立布局假设不能
+标成 kernel-only；收窄域时不得更改该策略。成功的 family 报告在
+`declaration_configurations` 保留完整声明快照，requested/completed 覆盖及选择使用
+实际准入配置；同一 family 仍要求共同准入域，重复选择明确拒绝。这不自动追踪
+Python Host 读取，也不推导容量约束。
+
 正常构造时可用 `scope.value("gravity", ti.types.vector(3, ti.f32))` 声明动态值，
 用 `scope.static("mode", choices=("fast", "accurate"))` 声明有限静态域；普通属性值
 保持原样。只读 record 作用域同样支持这些声明，frozen dataclass 不被改写。

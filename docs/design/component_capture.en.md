@@ -46,6 +46,20 @@ stable namespaces while actual roots still validate SNode groups.
 Assigning an already declared child through normal `ResourceScope`, such as
 `scope.buffers = buffers`, makes `Component.from_owner` collect that explicit
 declaration edge recursively, without a per-field or per-kernel export table.
+For a finite specialization used only by numerical entries, declare
+`scope.static("key_shift", choices=(shift,), kernel_only=True)` (or the matching
+`StaticValue` policy). The final exported entry closure determines whether that
+value belongs in root admission; an unused sort layout therefore cannot block
+an unrelated dynamics component. Used values still require the consumer's exact
+compiled selection. The default remains conservative for Host recording choices,
+even when no Kernel reads them. Do not mark Host branches, template-dispatch
+counts or independent layout assumptions as kernel-only. Domain overlays must
+preserve this policy. Family build reports retain full declaration snapshots in
+`declaration_configurations`, while requested/completed coverage and selection
+use the admitted root configurations. Families still require a common admitted
+domain and reject ambiguous duplicate selections. This is dependency projection,
+not automatic tracing of Python Host reads or inference of capacity constraints.
+
 Normal constructors can declare dynamic values with
 `scope.value("gravity", ti.types.vector(3, ti.f32))` and finite static domains with
 `scope.static("mode", choices=("fast", "accurate"))`. Original attribute values
