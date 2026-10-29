@@ -50,6 +50,13 @@ temporal-contact 入口的泛化/加载调用也与普通 JIT 一致，完整 TG
 参数。它受原类型/ABI 合同保护：改变 dtype 选择不同代码，合法 extent 改变可复用
 代码；这项静态元数据不使 shape 或内容变为静态。
 
+普通 Kernel 的 `ti.template()` Field 参数可以引用组件 owner 已声明的 Dense Field，
+包含已声明别名。首次使用时接入原捕获/隐藏参数路径；未使用的 Field 模板不增加
+资源 ABI，也不因选择了另一无关资源而特化代码。实际模板到资源的映射进入代码
+合同，交换 source/target 不会误用旧绑定；未声明或其他 owner 的 Field 明确拒绝。
+CPU/CUDA 已验证内联 helper、别名、新尺寸及冻结 Graph 在同模块双实例中的交错调用。
+GeoPhys 原 CUDA 归并排序阶段也通过新容量消费及独立稳定顺序参考，完整 TGS 根仍未完成。
+
 `ResourceScope.borrow(name, field, dimensions={...})` 声明正常外部 Field 绑定，
 保持原 Field，不保留其 Python owner。例如
 `scope.borrow("mass", source.mass, dimensions={"n": scope.dim("nv")})`

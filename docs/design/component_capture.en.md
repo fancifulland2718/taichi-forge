@@ -69,6 +69,17 @@ vector/matrix Fields and inline helper arguments. It is guarded by the existing
 type/ABI contract; changing dtype selects different code, while changing a
 legal extent can reuse it. This metadata does not make shape or contents static.
 
+A normal kernel's `ti.template()` Field argument can refer to a Dense Field
+already declared by the component owner, including a declared alias. Its first
+use joins the existing capture/hidden-argument path; unused Field templates do
+not add resource ABI slots or specialize code by the selected resource. Actual
+template-to-resource bindings enter the code contract, so exchanging source and
+target cannot reuse the wrong binding. Undeclared and foreign-owner Fields are
+rejected. CPU/CUDA tests cover inline helpers, aliases, different extents and
+frozen Graph consumption with two instances of one loaded module. GeoPhys's
+normal CUDA merge-sort stage also passes new-capacity consumption and independent
+stable-order checks; this does not qualify its complete TGS root.
+
 `ResourceScope.borrow(name, field, dimensions={...})` declares a normal foreign
 Field binding without changing the Field or retaining its Python owner. For
 example, `scope.borrow("mass", source.mass, dimensions={"n": scope.dim("nv")})`

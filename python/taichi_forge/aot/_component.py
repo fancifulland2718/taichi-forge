@@ -341,6 +341,12 @@ class _RecordReference:
         raise TaichiCompilationError("A declared record is a namespace; test its presence with 'is not None'")
 
 
+@dataclass(frozen=True)
+class _ResourceTemplate:
+    slot: int
+    name: str
+
+
 def _capture_id(path):
     return path[0] if len(path) == 1 else "__record_" + "_".join(f"{len(part)}_{part}" for part in path)
 
@@ -710,6 +716,7 @@ class Component:
     def compile(self, entry, *args, owner=None, template_args=None):
         from taichi_forge.lang.kernel_impl import _process_args, TaichiCallableTemplateMapper
         from taichi_forge.lang._ndarray import ScalarNdarray
+        from taichi_forge.lang.field import Field
 
         kernel = getattr(entry, "_primal", None)
         bound_owner = getattr(entry, "_kernel_owner", None)
@@ -731,13 +738,22 @@ class Component:
         explicit = tuple(arg for i, arg in enumerate(kernel.arguments) if i not in slots)
         if len(args) > len(explicit):
             raise TypeError("Too many explicit component arguments")
-        call_args = _process_args(kernel, (), {**templates, **dict(zip((a.name for a in explicit), args))})
+        call_args = list(_process_args(kernel, (), {**templates, **dict(zip((a.name for a in explicit), args))}))
         features, abi, template_facts = [], [], []
+        resource_templates = {}
         for i, (argument, value) in enumerate(zip(kernel.arguments, call_args)):
             if i in slots:
-                template_facts.append(
-                    (i, "owner" if value is owner else "static", None if value is owner else _static_value(value))
-                )
+                if value is not owner and isinstance(value, Field):
+                    name = self._template_resource(owner, value, argument.name)
+                    resource_templates[i] = name
+                    call_args[i] = _ResourceTemplate(i, name)
+                    # Only actual uses select resource bindings below. An unused
+                    # declared Field template must not specialize the entry.
+                    template_facts.append((i, "resource", None))
+                else:
+                    template_facts.append(
+                        (i, "owner" if value is owner else "static", None if value is owner else _static_value(value))
+                    )
                 features.append(None)
             elif isinstance(argument.annotation, NdarrayType):
                 if not isinstance(value, ScalarNdarray):
@@ -759,7 +775,11 @@ class Component:
         runtime.materialize(for_aot=True)
         with runtime._kernel_compilation_lock:
             for code in kernel._component_candidates:
-                if code.call_signature == signature and code.matches(self, owner):
+                if (
+                    code.call_signature == signature
+                    and all(resource_templates.get(slot) == name for slot, name in code.resource_templates.items())
+                    and code.matches(self, owner)
+                ):
                     code.validate_bindings(self, owner)
                     return code
             context = _Capture(self, owner, kernel, signature)
@@ -769,6 +789,24 @@ class Component:
             code = _ComponentCode(kernel, key, context)
             kernel._component_candidates.append(code)
             return code
+
+    def _template_resource(self, owner, value, argument):
+        # Search only explicit declarations, never arbitrary owner attributes.
+        # Identity is used to associate this call with a declared binding; no
+        # Python object identity is retained in the code key or artifact.
+        for name, declaration in sorted(self.declarations.items()):
+            if not isinstance(declaration, DenseField):
+                continue
+            try:
+                if self.available(owner, name) and self.read(owner, name) is value:
+                    return name
+            except (AttributeError, TaichiCompilationError):
+                # An unused optional/missing declaration is not a candidate.
+                # _member never executes a user property while resolving it.
+                continue
+        raise TaichiCompilationError(
+            f"Component Field template {argument!r} must refer to a declared resource of this owner"
+        )
 
     def compile_graph(self, record, *args, **kwargs):
         """Compile a normal Graph recording with automatic captured inputs."""
@@ -798,6 +836,18 @@ class _Capture:
         self.member_paths = {}
         self.resource_aliases = {}
         self.bound_group_roots = {}
+        self.resource_templates = {}
+
+    def resolve_template(self, ctx, value):
+        if not isinstance(value, _ResourceTemplate):
+            return value
+        self.resource_templates[value.slot] = value.name
+        path = self.component._paths[value.name]
+        # Record namespace presence just as the normal owner.record.field path
+        # does, including optional records and borrowed source namespaces.
+        for depth in range(1, len(path)):
+            self.attribute(ctx, path[depth - 1], prefix=path[: depth - 1])
+        return self.attribute(ctx, value.name)
 
     def dimension_dependency(self, name):
         declaration = self.declarations[name]
@@ -955,6 +1005,8 @@ class _Capture:
                 objects=sorted(self.objects.items()),
                 access_paths={name: self.component._paths[name] for name in self.used},
             )
+        if self.resource_templates:
+            self.contract["resource_templates"] = sorted(self.resource_templates.items())
 
     def matches(self, component, owner):
         return self.dependency_mismatch(component, owner) is None
@@ -1016,6 +1068,7 @@ class _ComponentCode:
         self.groups = dict(context.groups)
         self.member_paths = dict(context.member_paths)
         self.dynamic = tuple(context.dynamic)
+        self.resource_templates = dict(context.resource_templates)
         self._contract = json.dumps(context.contract)
         self.explicit_arguments = tuple(
             arg for i, arg in enumerate(kernel.arguments) if i not in kernel.template_slot_locations
