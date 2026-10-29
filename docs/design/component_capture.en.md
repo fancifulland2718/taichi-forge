@@ -276,8 +276,9 @@ Used attributes are checked again on cache hits and owner binding, including
 nested Record paths. CPU/CUDA gates cover new capacities, zero counts, consumer
 layout and original loop behavior, plus recovery after rejected declarations.
 
-Normal algorithm budgets can declare
-`scope.require_le("merge_coverage", scope.dim("count"), budget, when="scratch")`.
+Normal algorithm validity conditions can declare
+`scope.require_le("merge_coverage", scope.dim("count"), covered_items, when="scratch")`.
+Bounds must reflect the selected code/layout, not arbitrary SDK-wide size caps.
 The named trigger must be a declared role; only an exported numerical user brings
 this inequality into its component contract. Expressions reuse the bounded
 dimension algebra, including derived/record dimensions. This policy does not
@@ -292,7 +293,7 @@ older consumers reject them. Existing v1–v4 artifacts retain their contracts a
 do not acquire new safeguards without rebuilding. Source locations are diagnostic
 provenance; inequalities themselves participate in root identity and the existing
 ExecutionPlan fingerprint. Native SNode layout remains authoritative. These
-declarations do not derive algorithm budgets, validate arbitrary topology data,
+declarations do not derive algorithm validity ranges, validate arbitrary topology data,
 or impose high-level component policy on raw Kernel calls. CPU/CUDA checks in
 `test_aot_component_constraints.py` cover preserved code reuse, absent unrelated
 constraints, no allocation on rejection, prepare updates, zero/tail behavior,
@@ -434,9 +435,12 @@ records its normal Graph once; existing lowering, ExecutionPlan export and
 module kernel deduplication remain authoritative. Query built roots through
 `family.select(configuration).contract`.
 
-Budgets bound configuration count, actual kernel variants and elapsed time
-between stages. The variant limit is checked after frontend dependency discovery
-and before backend compilation. Time limits do not preempt an active native
+Build counts and elapsed time are reported without default hard limits. Callers
+can opt into `BuildBudget` limits for configuration count, actual kernel variants
+or elapsed time; each omitted/`None` limit is disabled. These are build-cost
+controls, not algorithm correctness or model-size constraints. The variant limit
+is checked after frontend dependency discovery and before backend compilation.
+Time limits do not preempt an active native
 compiler. `ComponentBuildError.report` distinguishes completed requests, known
 missing requests and whether admission exhausted the input. Incomplete families
 cannot be returned/exported. Complete frontend definitions can be reused after

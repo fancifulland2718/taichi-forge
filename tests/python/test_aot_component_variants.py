@@ -21,6 +21,9 @@ class _VariantModel(_ConfiguredModel):
         if include_capacity:
             builder.dispatch(self.capacity_pass)
 
+    def record_configuration(self, builder, *, configuration):
+        builder.dispatch(self.evaluate)
+
 
 def _requests():
     env = Component(**_configured().declarations, include_capacity=RootOption(choices=(False, True)))
@@ -30,6 +33,22 @@ def _requests():
         Variant(env, first.record_options, include_capacity=True),
         Variant(env, other.record_options, include_capacity=True),
     ]
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_build_has_no_implicit_configuration_or_kernel_limit():
+    # Cross the former default configuration ceiling while compiling just one
+    # numerical entry. Host choices still have an explicit finite legal domain.
+    choices = tuple(range(65))
+    env = Component(**_configured().declarations, configuration=RootOption(choices=choices))
+    model = _VariantModel(2)
+    built = build_variants(Variant(env, model.record_configuration, configuration=value) for value in choices)
+    report = built.report
+    assert len(report["completed_configurations"]) == 65
+    assert len(report["kernel_variants"]) == 1
+    assert next(iter(report["kernel_variants"].values()))["uses"] == 65
+    assert report["budget"] == dict(max_configurations=None, max_kernel_variants=None, max_seconds=None)
+    assert not report["missing_configurations"]
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

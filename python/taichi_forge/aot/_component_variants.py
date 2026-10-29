@@ -16,13 +16,18 @@ from taichi_forge.lang import impl
 
 @dataclass(frozen=True)
 class BuildBudget:
-    max_configurations: int = 64
-    max_kernel_variants: int = 128
+    """Optional caller-selected build limits; None leaves an axis unlimited."""
+
+    max_configurations: int = None
+    max_kernel_variants: int = None
     max_seconds: float = None
 
     def __post_init__(self):
-        if any(type(value) is not int or value <= 0 for value in (self.max_configurations, self.max_kernel_variants)):
-            raise ValueError("Component count budgets must be positive integers")
+        if any(
+            value is not None and (type(value) is not int or value <= 0)
+            for value in (self.max_configurations, self.max_kernel_variants)
+        ):
+            raise ValueError("Component count budgets must be positive integers or None")
         if self.max_seconds is not None and (
             type(self.max_seconds) not in (int, float) or not math.isfinite(self.max_seconds) or self.max_seconds <= 0
         ):
@@ -64,7 +69,7 @@ class _Build:
                 static=code.contract["static"],
                 captures=[name for name, _ in code.contract["captures"]],
             )
-            if len(self.kernels) >= self.budget.max_kernel_variants:
+            if self.budget.max_kernel_variants is not None and len(self.kernels) >= self.budget.max_kernel_variants:
                 self.blocked_variant = dict(semantic_key=code.semantic_key, **facts)
                 raise RuntimeError(
                     f"Component kernel variant budget {self.budget.max_kernel_variants} exceeded by "
@@ -158,11 +163,12 @@ class ComponentVariants:
 def build_variants(variants, *, budget=None):
     """Build the explicitly requested legal combinations of normal roots.
 
+    Counts and time are unlimited unless the caller explicitly supplies limits.
     A time budget is checked between stages; it does not interrupt an active
     native compiler. Complete frontend definitions may remain cached after a
     failure, but no incomplete family is returned or exported.
     """
-    budget = budget or BuildBudget()
+    budget = BuildBudget() if budget is None else budget
     if not isinstance(budget, BuildBudget):
         raise TypeError("Component variants require a BuildBudget")
     build = _Build(budget)
@@ -172,7 +178,7 @@ def build_variants(variants, *, budget=None):
         for variant in variants:
             if not isinstance(variant, Variant):
                 raise TypeError("Component variants require normal Variant recording requests")
-            if len(requests) >= budget.max_configurations:
+            if budget.max_configurations is not None and len(requests) >= budget.max_configurations:
                 raise ValueError(f"Component configuration budget {budget.max_configurations} exceeded")
             build.check_time("during request admission")
             snapshot = _GraphCapture(variant.component, variant.record, variant.args, variant.kwargs).configuration

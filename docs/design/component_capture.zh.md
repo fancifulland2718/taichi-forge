@@ -187,9 +187,10 @@ TCM hash 保持不变，产物无模型数据载荷及固定根依赖。该探�
 编译缓存命中和原 owner 绑定时再次验证，包括嵌套 Record 的来源路径。CPU/CUDA
 门槛覆盖新容量/零数量、原循环与消费端布局，以及失败后修正重试。
 
-正常算法预算可用
-`scope.require_le("merge_coverage", scope.dim("count"), budget, when="scratch")`
-声明。触发项必须是已声明角色，只有实际导出的数值入口使用它时，该不等式才进入
+正常算法的有效范围可用
+`scope.require_le("merge_coverage", scope.dim("count"), covered_items, when="scratch")`
+声明。边界应来自所选代码/布局的真实条件，不能随意设置 SDK 全局规模上限。
+触发项必须是已声明角色，只有实际导出的数值入口使用它时，该不等式才进入
 组件合同。复用已有有界维度表达式，支持派生维度与 record 命名空间；不增加无关的
 Kernel ABI 参数或改变数值代码身份。根合同补齐仅供约束使用的维度。原 owner 绑定、
 缓存命中、原生分配前的实例化及绑定前的 prepare 更新均校验，错误指出组件、约束、
@@ -198,7 +199,7 @@ Kernel ABI 参数或改变数值代码身份。根合同补齐仅供约束使用
 带约束的根使用 v5 合同和必需能力 `component_dimension_constraints_v1`，旧消费者
 明确拒绝。既有 v1–v4 产物保持原合同，需重新构建才获得新增保护。来源位置只用于
 诊断，不等式本身进入根身份及原 ExecutionPlan 指纹；SNode 布局仍由原生实现决定。
-这不推导应用算法预算、不检查任意拓扑数据，也不将高层组件政策强加给 raw Kernel
+这不推导应用算法的有效范围、不检查任意拓扑数据，也不将高层组件政策强加给 raw Kernel
 调用。`test_aot_component_constraints.py` 覆盖 CPU/CUDA 的代码复用、无关约束排除、
 拒绝前零分配、prepare 更新、空范围/尾部及 record 来源。GeoPhys 用同一机制表达
 排序 word 容量和正常有限归并序列的覆盖范围。
@@ -302,7 +303,9 @@ CPU/CUDA 无私有数值源码消费：新 Kernel/rank-0 资源自动进入闭�
 每个请求只正常记录一次 Graph，仍由原 lowering/ExecutionPlan 导出，公共 Kernel
 沿既有模块导出器去重。`family.select(configuration).contract` 查询已构建根。
 
-预算限制配置数、实际 Kernel 变体数及阶段间累计时间。新 Kernel 的依赖发现后、后端
+默认只记录构建数量和耗时，不施加硬上限。调用者可主动通过 `BuildBudget` 限制配置数、
+实际 Kernel 变体数或阶段间累计时间；未设置/`None` 的项目不限制。这是可选构建成本控制，
+不是算法正确性条件或模型规模限制。新 Kernel 的依赖发现后、后端
 编译前检查变体预算；时间预算在阶段边界检查，不抢占正在执行的 native 编译。失败抛
 `ComponentBuildError`，其 `report` 区分已完成、已知缺失以及请求输入是否已读完；不返回
 或导出半成品 family。完整前端定义可保留供重试，不能冒充完成产物。发布中失败则沿原
