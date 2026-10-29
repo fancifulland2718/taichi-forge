@@ -266,8 +266,20 @@ and shares the existing prepared-call retirement rules. `instance.nbytes`
 includes independent arrays once per allocation as well as complete SNode roots;
 it excludes driver overhead. CPU/CUDA gates cover mixed Dense/StructNdarray
 state, nested structure members, new extents, alias/type/shape failures and
-same-module CUDA Graph instances. Member-view captures, gradients and Vulkan
-component deployment remain separately qualified features.
+same-module CUDA Graph instances. Member-view captures and gradients remain
+separately qualified features.
+
+Vulkan now has an array-only component gate using scalar Ndarrays and fixed-AoS
+StructNdarrays through the existing GFX arguments and primary queue. After
+exporting capacity 7, `test_aot_component_vulkan.py` creates capacities 53/263
+in a Runtime-only isolated process. It checks the original initializer/step,
+aliases, block-boundary coverage, empty active ranges, untouched tails and
+independent reset/close. Cold initialization and ordinary prepared-call close
+use the existing Runtime completion wait. Closing one instance can drain the
+primary queue; this does not qualify independent asynchronous domains or
+synchronization-free retirement performance. Dense/Sparse SNode groups still
+reject before consumer allocation pending native Vulkan layout/instantiation
+qualification. The array gate does not establish Field or application coverage.
 
 Fixed-schema Sparse SNode component binding reuses the native runtime foundation.
 `clone_snode_tree_runtime` recreates empty

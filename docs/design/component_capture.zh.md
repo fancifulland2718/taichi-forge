@@ -252,7 +252,15 @@ JIT 与借用存储、同模块不同尺寸实例交错执行。Host 紧凑缓�
 复用现有 prepared 租约与退休；`instance.nbytes` 累加完整 SNode 根及独立数组，
 不重复计算别名，不包含驱动开销。CPU/CUDA 已验证 Dense/StructNdarray 混用、嵌套
 成员、新尺寸、别名/类型/shape 错误及同模块 CUDA Graph 多实例。成员视图捕获、
-梯度和 Vulkan 组件部署仍需独立取得资格。
+梯度仍需独立取得资格。
+
+Vulkan 现已验证仅含独立标量 Ndarray 与固定 AoS StructNdarray 的组件，复用现有
+GFX 参数和主队列提交。`test_aot_component_vulkan.py` 从容量 7 导出后，在仅有
+Runtime 的独立进程创建容量 53/263 的两个实例，验证原初始化/step、别名、跨 block
+边界、空活动范围、未活动尾部及独立 reset/close。冷初始化和普通 prepared 关闭
+沿原 Runtime 等待完成；关闭一个实例可能排空主队列，不代表独立异步执行域或无同步
+退休已取得性能资格。Dense/Sparse SNode 组仍在消费端分配前明确拒绝，等待 Vulkan
+原生布局/实例化路径验证；不以数组成功推定 Field 或完整应用已支持。
 
 固定树 Sparse SNode 的组件绑定复用原生实例化基础。
 `clone_snode_tree_runtime` 使用 executor 保存的原 `SNodeTreeLayout` 构造配方
