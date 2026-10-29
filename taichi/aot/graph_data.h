@@ -274,6 +274,8 @@ struct TI_DLL_EXPORT IValue {
 
 class TI_DLL_EXPORT Kernel : public CallableBase {
  public:
+  // Compiler-proven runtime stride inputs. Absent legacy facts are not proof.
+  std::vector<std::vector<int>> runtime_affine_arrays;
   // Rule of 5 to make MSVC happy
   Kernel() = default;
   virtual ~Kernel() = default;

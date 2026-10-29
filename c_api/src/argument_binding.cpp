@@ -175,6 +175,17 @@ uint64_t validate_array_storage(Runtime &runtime,
         "Ndarray buffer is smaller than its declared shape");
   if (memory.base_offset % layout.alignment)
     throw MemoryBindingError("Imported ndarray memory is not scalar aligned");
+  if (memory.dense_layout) {
+    const auto &view = *memory.dense_layout;
+    if (view.scalar_type != primitive_type(array.elem_type) ||
+        view.index_shape != std::vector<int64_t>(array.shape.dims, array.shape.dims + array.shape.dim_count) ||
+        view.element_shape != std::vector<int64_t>(array.elem_shape.dims, array.elem_shape.dims + array.elem_shape.dim_count))
+      throw MemoryBindingError("Ndarray descriptor differs from its strided storage view");
+    const auto analysis = taichi::lang::storage::analyze_dense_storage_layout(view);
+    if (!analysis || analysis.properties.reachable_begin < 0 ||
+        uint64_t(analysis.properties.reachable_end) > memory.size)
+      throw MemoryBindingError("Strided ndarray exceeds its retained storage window");
+  }
   if (element_bytes)
     *element_bytes = layout.element_bytes;
   return layout.bytes;
@@ -194,6 +205,10 @@ void validate_kernel_array(Runtime &runtime,
   }
   validate_array_storage(runtime, array, nullptr, true,
                          prepared_external_access);
+  if (runtime.get_memory(array.memory, prepared_external_access).dense_layout &&
+      std::find(kernel.runtime_affine_arrays.begin(), kernel.runtime_affine_arrays.end(),
+                std::vector<int>{int(index)}) == kernel.runtime_affine_arrays.end())
+    throw MemoryBindingError("Kernel lacks compiler-proven runtime stride support; rebuild with an affine declaration");
   const auto &param = parameter->second;
   const auto *abi =
       kernel.args_type->get_element_type({int(index)})->as<StructType>();
@@ -337,6 +352,8 @@ uint64_t validated_struct_ndarray_bytes(Runtime &runtime,
     throw MemoryBindingError("Unsupported structure ndarray layout version");
   const auto layout = struct_ndarray_storage_layout(array, runtime.get_layout(handle));
   const auto memory = runtime.get_memory(array.memory, prepared_external_access);
+  if (memory.dense_layout)
+    throw MemoryBindingError("Structure ndarray cannot reinterpret a strided member view");
   taichi::lang::validate_native_shader_storage(runtime.arch, memory.allocation);
   if (memory.size < layout.bytes)
     throw MemoryBindingError("Structure ndarray buffer is smaller than its declared shape");
@@ -414,11 +431,20 @@ taichi::lang::NativeArrayBinding bind_native_array(
                                              prepared_external_access);
   const auto memory =
       runtime.get_memory(array.memory, prepared_external_access);
-  return {memory.allocation.get_ptr(memory.byte_offset), bytes,
+  taichi::lang::NativeArrayBinding result{memory.allocation.get_ptr(memory.byte_offset), bytes,
           ndarray_scalar_type(array.elem_type),
           {array.shape.dims, array.shape.dims + array.shape.dim_count},
           {array.elem_shape.dims, array.elem_shape.dims + array.elem_shape.dim_count},
           memory.base_offset};
+  if (memory.dense_layout) {
+    const auto &layout = *memory.dense_layout;
+    result.bytes = memory.size;
+    result.strides = std::make_shared<const taichi::lang::NativeArrayStrides>(
+        taichi::lang::NativeArrayStrides{layout.index_strides_bytes,
+                                       layout.element_strides_bytes,
+                                       layout.byte_offset});
+  }
+  return result;
 }
 
 std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
@@ -644,14 +670,19 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
                 ? std::optional{runtime2.get_memory(gradient_args[i]->memory,
                                                     prepared_external_access)}
                 : std::nullopt;
-        if (memory.byte_offset ||
+        if (memory.dense_layout || (gradient_memory && gradient_memory->dense_layout)) {
+          if (gradient_args[i])
+            throw MemoryBindingError("Strided storage view gradients are not qualified");
+        }
+        if (memory.dense_layout || memory.byte_offset ||
             (gradient_memory && gradient_memory->byte_offset)) {
           namespace storage = taichi::lang::storage;
           const auto layout = ndarray_storage_layout(ndarray);
           if (memory.byte_offset > std::numeric_limits<int64_t>::max())
             throw MemoryBindingError(
                 "Execution view offset exceeds dense indexing");
-          storage::DenseStorageLayoutSpec spec;
+          storage::DenseStorageLayoutSpec spec = memory.dense_layout
+              ? *memory.dense_layout : storage::DenseStorageLayoutSpec{};
           spec.scalar_type = ndarray_scalar_type(ndarray.elem_type);
           spec.byte_offset = static_cast<int64_t>(memory.byte_offset);
           spec.index_shape.assign(ndarray.shape.dims,
@@ -674,11 +705,11 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
             }
             return result;
           };
-          spec.index_strides_bytes =
-              strides(spec.index_shape, layout.element_bytes);
-          spec.element_strides_bytes =
-              strides(spec.element_shape,
-                      taichi::lang::data_type_size(spec.scalar_type));
+          if (!memory.dense_layout) {
+            spec.index_strides_bytes = strides(spec.index_shape, layout.element_bytes);
+            spec.element_strides_bytes = strides(spec.element_shape,
+                        taichi::lang::data_type_size(spec.scalar_type));
+          }
           auto built = storage::build_dense_storage_descriptor(
               storage::StorageOwnerRef::external_managed(
                   reinterpret_cast<std::uintptr_t>(ndarray.memory), 1, 1),
@@ -691,7 +722,7 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
           storage::ResolvedDenseBinding resolved;
           resolved.allocation = memory.allocation;
           resolved.byte_offset = memory.byte_offset;
-          resolved.byte_size = layout.bytes;
+          resolved.byte_size = memory.dense_layout ? memory.size : layout.bytes;
           resolved.runtime_signature =
               reinterpret_cast<std::uintptr_t>(ndarray.memory);
           resolved.valid = true;
@@ -1022,6 +1053,10 @@ std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
       // Legacy CGraph IValues carry an allocation, not a resolved finite view.
       // Reject before any dispatch; complete execution plans and kernels use
       // the resolved dense binder and preserve offsets on every backend.
+      if (runtime2.get_memory(array.memory).dense_layout)
+        throw MemoryBindingError(
+            "Strided views require a kernel or complete execution plan; "
+            "legacy AOT Graph arguments cannot represent the strides");
       if (runtime2.get_memory(array.memory).byte_offset)
         throw MemoryBindingError(
             "Offset views require a kernel or complete execution plan; "
@@ -1046,7 +1081,8 @@ std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
       const auto grad = gradient_args.find(arg.name);
       if (grad != gradient_args.end()) {
         validate_array_storage(runtime2, *grad->second, nullptr, true);
-        if (runtime2.get_memory(grad->second->memory).byte_offset)
+        const auto gradient_memory = runtime2.get_memory(grad->second->memory);
+        if (gradient_memory.byte_offset || gradient_memory.dense_layout)
           throw MemoryBindingError(
               "Offset gradient views require a kernel or complete execution "
               "plan");

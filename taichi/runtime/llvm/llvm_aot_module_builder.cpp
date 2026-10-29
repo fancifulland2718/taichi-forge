@@ -12,6 +12,7 @@
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
 #include "taichi/program/kernel_compile_request.h"
 #include "taichi/runtime/llvm/runtime_context_abi.h"
+#include "taichi/runtime/llvm/array_layout_abi.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
@@ -216,6 +217,9 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
   }
   for (const auto &[name, kernel] : cache_.kernels) {
     const auto state = LLVM::runtime_state_use(*kernel.compiled_data.module);
+    auto arrays = LLVM::runtime_affine_arrays(*kernel.compiled_data.module);
+    if (!arrays.empty())
+      metadata.kernel_runtime_affine_arrays.emplace(name, std::move(arrays));
     if (state)
       metadata.kernel_runtime_state.emplace(name, state);
     const auto view_abi =
@@ -223,11 +227,14 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     if (view_abi)
       metadata.kernel_sparse_runtime_view_abis.emplace(name, view_abi);
   }
-  if (!metadata.kernel_runtime_state.empty()) {
+  if (!metadata.kernel_runtime_state.empty() || !metadata.kernel_runtime_affine_arrays.empty()) {
     if (metadata.abi_sha256.empty())
       metadata.abi_sha256 = LLVM::aot_artifact_sha256(LLVM::read_aot_artifact(
           taichi::join_path(output_dir, "metadata.tcb")));
-    metadata.runtime_state_sha256 = LLVM::aot_runtime_state_sha256(metadata);
+    if (!metadata.kernel_runtime_state.empty())
+      metadata.runtime_state_sha256 = LLVM::aot_runtime_state_sha256(metadata);
+    if (!metadata.kernel_runtime_affine_arrays.empty())
+      metadata.array_layout_sha256 = LLVM::aot_array_layout_sha256(metadata);
   }
   const bool task_launch_policy = std::any_of(
       cache_.kernels.begin(), cache_.kernels.end(), [](const auto &entry) {

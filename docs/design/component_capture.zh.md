@@ -204,11 +204,20 @@ Kernel ABI 参数或改变数值代码身份。根合同补齐仅供约束使用
 拒绝前零分配、prepare 更新、空范围/尾部及 record 来源。GeoPhys 用同一机制表达
 排序 word 容量和正常有限归并序列的覆盖范围。
 
-`scope.struct_field(members, shape=())` 声明正常的扁平 rank-zero AOS
-StructField。成员沿既有 Record/DenseField 路径自动捕获，原成员别名共用实际参数；
-消费者以同一 SNode 布局规则保留整个记录，按成员的真实偏移绑定各实例。CPU/CUDA
-已验证向量/矩阵成员、普通 JIT 对照和同模块两个实例的交错执行。此入口暂不支持
-嵌套 struct、记录数组、梯度或 SoA；结构元素整体索引仍不在该捕获资格内。
+`scope.struct_field(members, shape=...)` 声明正常的扁平 AOS StructField，
+包括 rank-zero 状态和具有显式动态 extent 的记录数组。成员沿既有 Record/DenseField
+路径自动捕获，原成员别名共用实际参数；维度保留原声明作用域，不因进入记录或别名
+而改名。消费者以同一 SNode 布局规则保留整个记录，按成员真实偏移及 record stride
+绑定各实例，复用已有 affine 参数 ABI。CPU/CUDA 已验证标量/向量/矩阵成员、普通
+JIT 与借用存储、同模块不同尺寸实例交错执行。Host 紧凑缓冲只传输选定成员的逻辑
+元素，相邻成员和未活动尾部保持不变；原始紧凑内存接口拒绝重新解释 strided 成员。
+已加载 LLVM 入口还必须带有编译器证明的 runtime-stride 参数资格；事实来自原 IR
+依赖遍历，保留在 bitcode 及带校验的部署元数据中（含 PTX/cubin）。旧产物或紧凑特化
+入口不能通过改绑定元数据获得此能力，需使用 affine view exemplar 或组件捕获重新
+构建。旧 Graph 调用接口明确拒绝，使用合格 Kernel 或完整 ExecutionPlan 路径；
+尚无证明的 real-function/shared-staged 路线保守拒绝，紧凑绑定保持原行为。
+嵌套 struct/多层 dense、组件 SoA、梯度及结构元素整体索引尚未取得该入口资格，
+Vulkan 也需单独验证。
 
 真实 GeoPhys 正常构造现已提供有限 RNE 数值证据：CPU/CUDA 上 3/7/5 刚体、不同拓扑、
 质量、qpos/qvel 和重力复用原 `_rne_bias_force`，与普通 JIT 对照；静止链另检查解析重力矩。

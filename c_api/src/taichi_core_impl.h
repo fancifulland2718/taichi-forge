@@ -40,6 +40,7 @@
 #include "taichi/aot/struct_layout.h"
 #include "taichi/common/virtual_dir.h"
 #include "taichi/runtime/native_provider.h"
+#include "taichi/program/storage_view.h"
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
@@ -206,6 +207,9 @@ class Runtime {
     // lifetime is ordered by prepared retirement, not by a placeholder lease.
     bool owns_allocation{true};
     std::shared_ptr<BorrowedMemory> borrowed;
+    // Optional authoritative uniform-record layout. Its byte offset is relative
+    // to this memory window; raw packed transfers must not discard its strides.
+    std::shared_ptr<const taichi::lang::storage::DenseStorageLayoutSpec> dense_layout;
   };
 
  private:
@@ -274,7 +278,8 @@ class Runtime {
                            std::shared_ptr<void> storage_owner = {},
                            uint64_t byte_offset = 0,
                            bool owns_allocation = true,
-                           std::shared_ptr<BorrowedMemory> borrowed = {});
+                           std::shared_ptr<BorrowedMemory> borrowed = {},
+                           std::shared_ptr<const taichi::lang::storage::DenseStorageLayoutSpec> dense_layout = {});
   // Only whole-recipe cold binding may opt into external synchronization.
   // Ordinary launch/copy/map/export paths cannot bypass the access epoch.
   MemoryAllocation get_memory(TiMemory memory,

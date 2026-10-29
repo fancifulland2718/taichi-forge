@@ -12,6 +12,7 @@
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
 #include "taichi/codegen/llvm/range_dispatch.h"
 #include "taichi/runtime/llvm/runtime_context_abi.h"
+#include "taichi/runtime/llvm/array_layout_abi.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
@@ -78,6 +79,11 @@ LlvmAotModule::LlvmAotModule(
                 "AOT kernel entry policy fields are incomplete");
   }
   validate_llvm_aot_metadata(metadata);
+  TI_ERROR_IF(metadata.kernel_runtime_affine_arrays.empty()
+                  ? !metadata.array_layout_sha256.empty()
+                  : metadata.abi_sha256.size() != 64 ||
+                        metadata.array_layout_sha256 != aot_array_layout_sha256(metadata),
+              "AOT ndarray layout qualification checksum mismatch");
   if (metadata.schema_version == kKernelEntryPolicyAotSchemaVersion)
     TI_ERROR_IF(metadata.kernel_entry_sha256 != aot_kernel_entry_sha256(metadata),
                 "AOT kernel entry policy checksum mismatch");
@@ -104,6 +110,7 @@ LlvmAotModule::LlvmAotModule(
       !metadata.resource_binding.empty() ||
       !metadata.kernel_launch_abis.empty() ||
       !metadata.kernel_runtime_state.empty() ||
+      !metadata.kernel_runtime_affine_arrays.empty() ||
       metadata.schema_version == kKernelEntryPolicyAotSchemaVersion) {
     TI_ERROR_IF(aot_artifact_sha256(read_artifact(
                     *directory_, "metadata.tcb")) != metadata.abi_sha256,
@@ -130,6 +137,13 @@ LlvmAotModule::LlvmAotModule(
     TI_ERROR_IF(!cache_reader_->has_kernel(name),
                 "AOT runtime-state inventory references an absent kernel: {}",
                 name);
+  for (const auto &[name, arrays] : metadata.kernel_runtime_affine_arrays) {
+    TI_ERROR_IF(!cache_reader_->has_kernel(name) || arrays.empty(),
+                "AOT ndarray layout qualification references an absent kernel");
+    for (const auto &argument : arrays)
+      TI_ERROR_IF(argument.empty() || std::any_of(argument.begin(), argument.end(), [](int i) { return i < 0; }),
+                  "AOT ndarray layout qualification has an invalid argument path");
+  }
 
   // Validate the entire entry inventory while the reader still owns all task
   // metadata. take_kernel_* later transfers each physical payload exactly once.
@@ -396,6 +410,13 @@ std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
     const std::string &name) {
   if (!cache_reader_->has_kernel(name)) return nullptr;
   auto kernel_cache = load_kernel_from_cache(name);
+  const auto array_declaration = metadata_.kernel_runtime_affine_arrays.find(name);
+  const auto affine_arrays = array_declaration == metadata_.kernel_runtime_affine_arrays.end()
+      ? std::vector<std::vector<int>>{} : array_declaration->second;
+  for (const auto &argument : affine_arrays)
+    TI_ERROR_IF(std::none_of(kernel_cache.args.begin(), kernel_cache.args.end(),
+        [&](const auto &entry) { return entry.first == argument && entry.second.ptype == ParameterType::kNdarray; }),
+        "AOT ndarray layout qualification does not match a compiled parameter");
   const auto declaration = metadata_.kernel_launch_abis.find(name);
   const std::string launch_abi =
       declaration == metadata_.kernel_launch_abis.end() ? "ordinary"
@@ -489,13 +510,15 @@ std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
               : cuda::KernelLaunchABI::ordinary,
         context_abi, runtime_state, view_abi);
     return std::make_unique<llvm_aot::KernelImpl>(
-        launcher, handle, arch(), kernel_name, data);
+        launcher, handle, arch(), kernel_name, data, affine_arrays);
 #else
     TI_ERROR("CUDA device artifacts require a build with CUDA support");
 #endif
   }
   LLVM::CompiledKernelData compiled{
       arch(), std::move(kernel_cache).take_llvm_ckd_data()};
+  TI_ERROR_IF(runtime_affine_arrays(*compiled.get_internal_data().compiled_data.module) != affine_arrays,
+              "AOT LLVM code does not match its ndarray layout qualification");
   TI_ERROR_IF(
       LLVM::sparse_runtime_view_abi(
           *compiled.get_internal_data().compiled_data.module) != view_abi,
@@ -532,7 +555,7 @@ std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
   // ABI, not an additional LLVM module for the entire AOT module lifetime.
   return std::make_unique<llvm_aot::KernelImpl>(
       kernel_launcher_.get(), handle, arch(), kernel_name,
-      compiled.get_internal_data());
+      compiled.get_internal_data(), affine_arrays);
 }
 
 void LlvmAotModule::ensure_snode_tree_initialized(int logical_tree_id) {

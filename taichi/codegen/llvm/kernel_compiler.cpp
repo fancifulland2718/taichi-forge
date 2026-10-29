@@ -9,6 +9,7 @@
 #include "taichi/runtime/llvm/llvm_module_options.h"
 #include "taichi/runtime/llvm/cuda_lowering_target.h"
 #include "taichi/runtime/llvm/runtime_context_abi.h"
+#include "taichi/runtime/llvm/array_layout_abi.h"
 
 namespace taichi::lang {
 namespace LLVM {
@@ -67,6 +68,9 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
         .write(*data.compiled_data.module);
   LLVMModuleOptions::from_config(compile_config)
       .write(*data.compiled_data.module);
+  if (std::none_of(data.compiled_data.tasks.begin(), data.compiled_data.tasks.end(),
+                   [](const auto &task) { return task.external_shared_staged; }))
+    declare_runtime_affine_arrays(*data.compiled_data.module, dependencies.runtime_affine_arrays);
   declare_runtime_context_abi(*data.compiled_data.module);
   if (compile_config.arch == Arch::cuda)
     data.compiled_data.module->addModuleFlag(

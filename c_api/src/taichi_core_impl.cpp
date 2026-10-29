@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <limits>
 #include <unordered_set>
 #include "argument_binding.h"
@@ -17,8 +18,13 @@
 #include "taichi/common/virtual_dir.h"
 #include "taichi/common/utils.h"
 #include "taichi/runtime/vulkan_execution_domain.h"
+#ifdef TI_WITH_LLVM
+#include "taichi/rhi/cpu/cpu_device.h"
+#endif
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/execution_domain.h"
+#include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/rhi/cuda/cuda_context.h"
 #endif
 
 bool is_vulkan_available() {
@@ -304,7 +310,8 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
                                   std::shared_ptr<void> storage_owner,
                                   uint64_t byte_offset,
                                   bool owns_allocation,
-                                  std::shared_ptr<BorrowedMemory> borrowed) {
+                                  std::shared_ptr<BorrowedMemory> borrowed,
+                                  std::shared_ptr<const taichi::lang::storage::DenseStorageLayoutSpec> dense_layout) {
   TI_ASSERT(allocation.device == &get());
   try {
     if (byte_offset > std::numeric_limits<size_t>::max() ||
@@ -317,7 +324,8 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
     memories_.emplace(
         handle, MemoryAllocation{
                     allocation, size, base_offset, storage_owner, byte_offset,
-                    owns_allocation && !storage_owner && !borrowed, borrowed});
+                    owns_allocation && !storage_owner && !borrowed, borrowed,
+                    std::move(dense_layout)});
     return handle;
   } catch (...) {
     // RHI import paths allocate their own wrapper too. Retire that wrapper;
@@ -699,6 +707,8 @@ void *ti_map_memory(TiRuntime runtime, TiMemory devmem) {
 
   Runtime *runtime2 = (Runtime *)runtime;
   const auto memory = runtime2->get_memory(devmem);
+  if (memory.dense_layout)
+    throw MemoryBindingError("Strided ndarray storage requires logical ndarray transfers");
   TI_ASSERT(runtime2->get().map(memory.allocation, &out) ==
                 taichi::lang::RhiResult::success &&
             "RHI map memory failed: "
@@ -803,6 +813,8 @@ namespace {
 taichi::lang::DevicePtr resolve_memory_slice(Runtime &runtime,
                                              const TiMemorySlice &slice) {
   const auto allocation = runtime.get_memory(slice.memory);
+  if (allocation.dense_layout)
+    throw MemoryBindingError("Strided ndarray storage requires logical ndarray transfers");
   if (slice.offset > allocation.size ||
       slice.size > allocation.size - slice.offset ||
       slice.size > std::numeric_limits<size_t>::max()) {
@@ -832,7 +844,94 @@ void check_transfer_result(taichi::lang::RhiResult result) {
       break;
   }
 }
+
+void transfer_ndarray(Runtime &runtime, const TiNdArray &array, void *host,
+                      uint64_t size, bool upload) {
+  using namespace taichi::lang;
+  std::lock_guard<std::recursive_mutex> lock(runtime.submission_mutex());
+  if (capi::validated_ndarray_bytes(runtime, array) != size)
+    throw MemoryBindingError("Host ndarray transfer size differs from its logical shape");
+  if (!size)
+    return;
+  if (!host)
+    throw MemoryBindingError("Host ndarray transfer requires a buffer");
+  const auto memory = runtime.get_memory(array.memory);
+  runtime.wait();
+  if (!memory.dense_layout) {
+    auto pointer = memory.allocation.get_ptr(memory.byte_offset);
+    size_t bytes = size;
+    if (upload) {
+      const void *source = host;
+      check_transfer_result(runtime.get().upload_data(&pointer, &source, &bytes));
+    } else {
+      check_transfer_result(runtime.get().readback_data(&pointer, &host, &bytes));
+    }
+    return;
+  }
+  const auto analysis = storage::analyze_dense_storage_layout(*memory.dense_layout);
+  if (!analysis || !analysis.properties.single_record_stride_compatible ||
+      analysis.properties.record_stride <= 0)
+    throw MemoryBindingError("Host ndarray transfer requires a positive uniform record view");
+  const auto count = analysis.properties.item_count;
+  const auto width = capi::ndarray_storage_layout(array).element_bytes;
+  const auto stride = uint64_t(analysis.properties.record_stride);
+#ifdef TI_WITH_LLVM
+  if (taichi::arch_is_cpu(runtime.arch)) {
+    auto &device = static_cast<cpu::CpuDevice &>(runtime.get());
+    auto *data = static_cast<char *>(device.get_alloc_info(memory.allocation).ptr) + memory.byte_offset;
+    auto *buffer = static_cast<char *>(host);
+    for (uint64_t i = 0; i < count; ++i)
+      if (upload)
+        std::memcpy(data + i * stride, buffer + i * width, width);
+      else
+        std::memcpy(buffer + i * width, data + i * stride, width);
+    return;
+  }
+#endif
+#ifdef TI_WITH_CUDA
+  if (runtime.arch == taichi::Arch::cuda) {
+    auto &device = static_cast<cuda::CudaDevice &>(runtime.get());
+    auto *address = static_cast<char *>(device.get_alloc_info(memory.allocation).ptr) + memory.byte_offset;
+    CUDA_MEMCPY3D copy{};
+    copy.srcMemoryType = upload ? ::CU_MEMORYTYPE_HOST : ::CU_MEMORYTYPE_DEVICE;
+    copy.dstMemoryType = upload ? ::CU_MEMORYTYPE_DEVICE : ::CU_MEMORYTYPE_HOST;
+    copy.srcHost = upload ? host : nullptr;
+    copy.dstHost = upload ? nullptr : host;
+    copy.srcDevice = upload ? 0 : address;
+    copy.dstDevice = upload ? address : 0;
+    copy.srcPitch = upload ? width : stride;
+    copy.dstPitch = upload ? stride : width;
+    copy.srcHeight = copy.dstHeight = count;
+    copy.WidthInBytes = width;
+    copy.Height = count;
+    copy.Depth = 1;
+    auto guard = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().memcpy_3d(&copy);
+    return;
+  }
+#endif
+  throw MemoryBindingError("Strided ndarray transfers require CPU/CUDA");
+}
 }  // namespace
+
+void ti_copy_ndarray_from_host_ext(TiRuntime runtime, const TiNdArray *array,
+                                   const void *source, uint64_t size) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(array);
+  transfer_ndarray(*reinterpret_cast<Runtime *>(runtime), *array,
+                  const_cast<void *>(source), size, true);
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_copy_ndarray_to_host_ext(TiRuntime runtime, void *target,
+                                 const TiNdArray *array, uint64_t size) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(array);
+  transfer_ndarray(*reinterpret_cast<Runtime *>(runtime), *array, target, size, false);
+  TI_CAPI_TRY_CATCH_END();
+}
 
 void ti_copy_memory_from_host_ext(TiRuntime runtime,
                                   const TiMemorySlice *dst_memory,

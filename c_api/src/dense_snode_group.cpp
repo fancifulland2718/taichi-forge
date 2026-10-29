@@ -180,13 +180,11 @@ TiNdArray LlvmRuntime::dense_snode_group_member(TiMemory handle,
   array.elem_type = dtype;
   array.elem_shape = element_shape;
   uint64_t offset = anchor->offset_bytes_in_parent_cell;
+  uint64_t record_stride = lanes * width;
   if (parent->type == SNodeType::dense) {
-    // A rank-zero member has no inter-record stride. Adjacent siblings do
-    // not make its contiguous lanes noncompact; their offsets still come
-    // from the instantiated SNode layout. Arrays retain the compact ABI gate.
-    if (parent->parent != group->root.get() ||
-        (anchor->num_active_indices != 0 && parent->cell_size_bytes != lanes * width))
-      throw MemoryBindingError("Dense member is not a qualified compact record");
+    if (parent->parent != group->root.get())
+      throw MemoryBindingError("Dense member is not a qualified uniform record");
+    record_stride = parent->cell_size_bytes;
     offset += parent->offset_bytes_in_parent_cell;
     array.shape.dim_count = anchor->num_active_indices;
     if (array.shape.dim_count > 16)
@@ -196,12 +194,35 @@ TiNdArray LlvmRuntime::dense_snode_group_member(TiMemory handle,
   } else if (parent != group->root.get()) {
     throw MemoryBindingError("Dense member must belong to a simple dense or rank-zero root");
   }
-  const auto bytes = ndarray_storage_layout(array).bytes;
+  ndarray_storage_layout(array);  // Validate logical shape/products independently.
+  auto layout = std::make_shared<storage::DenseStorageLayoutSpec>();
+  layout->scalar_type = scalar_type;
+  layout->index_shape.assign(array.shape.dims, array.shape.dims + array.shape.dim_count);
+  layout->element_shape.assign(element_shape.dims, element_shape.dims + element_shape.dim_count);
+  auto strides = [](const std::vector<int64_t> &shape, uint64_t stride) {
+    std::vector<int64_t> result(shape.size());
+    for (std::size_t i = shape.size(); i-- > 0;) {
+      if (stride > uint64_t(std::numeric_limits<int64_t>::max()) ||
+          (shape[i] && stride > uint64_t(std::numeric_limits<int64_t>::max()) / shape[i]))
+        throw MemoryBindingError("Dense member stride exceeds native address range");
+      result[i] = stride;
+      stride *= shape[i];
+    }
+    return result;
+  };
+  layout->index_strides_bytes = strides(layout->index_shape, record_stride);
+  layout->element_strides_bytes = strides(layout->element_shape, width);
+  const auto analysis = storage::analyze_dense_storage_layout(*layout);
+  if (!analysis || !analysis.properties.single_record_stride_compatible ||
+      analysis.properties.reachable_begin != 0)
+    throw MemoryBindingError("Dense member has an unqualified record mapping");
+  const auto bytes = uint64_t(analysis.properties.reachable_end);
   const auto source = get_memory(handle);
   if (offset > source.size || bytes > source.size - offset)
     throw MemoryBindingError("Dense member exceeds its compiled root allocation");
   array.memory = register_memory(source.allocation, bytes, false, offset, {},
-                                  offset, false, group->storage);
+                                  offset, false, group->storage,
+                                  analysis.properties.ndarray_abi_compatible ? nullptr : layout);
   return array;
 }
 

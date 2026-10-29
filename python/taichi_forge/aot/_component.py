@@ -311,8 +311,11 @@ class DenseField:
         from taichi_forge.lang._storage_view import describe_storage
 
         description = describe_storage(field)
-        if not description.supported or not description.properties["ndarray_abi_compatible"]:
-            raise TaichiCompilationError("Dense component Field requires a qualified compact SNode member")
+        if not description.supported or not (
+            description.properties["ndarray_abi_compatible"]
+            or description.properties["single_record_stride_compatible"]
+        ):
+            raise TaichiCompilationError("Dense component Field requires a qualified uniform-record SNode member")
         return description
 
 
@@ -543,6 +546,7 @@ class Component:
         declarations, sources, roots, fields, borrowed = {}, {}, {}, [], []
         inherited_dimensions, record_options, constraints = {}, {}, {}
         derived_attributes = set()
+        namespaces, record_shapes, record_extents = {}, {}, {}
 
         def root_of(field, name):
             nodes = tuple(member.ptr.snode() for member in field._get_field_members())
@@ -556,6 +560,7 @@ class Component:
                 raise TaichiCompilationError("Normal resource records must form a bounded acyclic declaration tree")
             if registry is None:
                 registry = _member(current, "_forge_resource_declarations")
+            namespaces[id(registry)] = prefix
 
             def qualify(expression):
                 op, *args = expression
@@ -619,11 +624,29 @@ class Component:
                 raise ValueError("Normal resource IDs cannot use the reserved __extent_ prefix")
             sources[_capture_id((*prefix, name))] = declaration["source"]
             shape = []
+            namespace = getattr(field, "_logical_shape_namespace", None)
+            shape_prefix = prefix
+            if namespace is not None:
+                if id(namespace) not in namespaces:
+                    raise TaichiCompilationError("Record Field dimensions require their original declaration scope")
+                shape_prefix = namespaces[id(namespace)]
+
+            def qualify_shape(expression):
+                op, *args = expression
+                if op == "dim":
+                    return (op, _capture_id((*shape_prefix, args[0])))
+                return expression if op == "const" else (op, *(qualify_shape(arg) for arg in args))
+
             for extent in declaration["shape"]:
                 if isinstance(extent, Extent):
-                    identifier = "__extent_" + _digest(extent.expression)
-                    members[identifier] = Dimension(expression=extent.expression)
-                    sources[_capture_id((*prefix, identifier))] = declaration["source"]
+                    expression = qualify_shape(extent.expression) if namespace is not None else extent.expression
+                    identifier = "__extent_" + _digest(expression)
+                    if namespace is not None:
+                        record_extents[identifier] = Dimension(expression=expression)
+                        sources[identifier] = declaration["source"]
+                    else:
+                        members[identifier] = Dimension(expression=expression)
+                        sources[_capture_id((*prefix, identifier))] = declaration["source"]
                     shape.append(identifier)
                 else:
                     shape.append(extent)
@@ -633,6 +656,8 @@ class Component:
             # The normal declaration identity, not a tree/object/instance ID.
             group = "snode:" + min(roots[root_id])
             members[name] = DenseField(dtype, tuple(shape), group)
+            if namespace is not None:
+                record_shapes[_capture_id((*prefix, name))] = tuple(shape)
 
         def complete(members, additions, prefix=()):
             result = {}
@@ -669,6 +694,11 @@ class Component:
 
         result = cls(**complete(declarations, values))
         flattened = dict(result.declarations)
+        flattened.update(record_extents)
+        result._paths = MappingProxyType({**result._paths, **{name: (name,) for name in record_extents}})
+        for name, shape in record_shapes.items():
+            field = flattened[name]
+            flattened[name] = DenseField(field.dtype, shape, field.group)
         for name, expression in inherited_dimensions.items():
             flattened[name] = Dimension("active", expression=expression)
         result._declarations = MappingProxyType(flattened)

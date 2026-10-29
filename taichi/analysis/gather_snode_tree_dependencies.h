@@ -21,6 +21,7 @@ struct KernelRuntimeDependencies {
   SNodeRelocationStructure structures{SNodeRelocationStructure::none};
   bool may_trigger_hash_overflow{false};
   std::uint32_t runtime_state{runtime_state_known};
+  std::vector<std::vector<int>> runtime_affine_arrays;
 };
 KernelRuntimeDependencies gather_kernel_runtime_dependencies(IRNode &ir);
 

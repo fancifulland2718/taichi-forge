@@ -15,7 +15,8 @@ class KernelImpl : public aot::Kernel {
                       KernelLaunchHandle handle,
                       Arch target_arch,
                       const std::string &kernel_name,
-                      const LLVM::KernelCallContract &kernel_data)
+                      const LLVM::KernelCallContract &kernel_data,
+                      std::vector<std::vector<int>> affine_arrays = {})
       : launcher_(launcher), handle_(handle) {
     TI_ASSERT(launcher_ != nullptr);
     TI_ASSERT(handle_.get_launch_id() >= 0);
@@ -31,6 +32,7 @@ class KernelImpl : public aot::Kernel {
     args_size = kernel_data.args_size;
     arch = target_arch;
     name = kernel_name;
+    runtime_affine_arrays = std::move(affine_arrays);
   }
 
   void launch(LaunchContextBuilder &ctx) override {
@@ -47,6 +49,7 @@ class KernelImpl : public aot::Kernel {
       : launcher_(source.launcher_), handle_(source.handle_),
         device_range_tasks_(std::move(range_tasks)) {
     static_cast<CallableBase &>(*this) = static_cast<const CallableBase &>(source);
+    runtime_affine_arrays = source.runtime_affine_arrays;
     name = entry_name;
   }
 

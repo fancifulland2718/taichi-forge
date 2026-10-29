@@ -199,16 +199,29 @@ paths. Sibling blocks require declared dimension provenance; logical groups
 cannot split or merge physical roots. Attribute aliases of the same member share
 one physical parameter. Calls bind existing zero-copy Field views, retaining the
 original root, offsets and owner. They neither copy members into independent
-Ndarrays nor mutate module root pointers. This first slice requires qualified
-compact members while preserving the full root in the schema.
+Ndarrays nor mutate module root pointers. Qualified compact and interleaved
+record members preserve the full root in the schema.
 
-`scope.struct_field(members, shape=())` declares a normal flat rank-zero AOS
-StructField. Members use the existing Record/DenseField capture path; aliases
-share an actual argument. Consumers preserve the complete record through the
-same SNode layout rules and bind each instance at the actual member offsets.
-CPU/CUDA tests cover vector/matrix members, ordinary JIT equivalence and two
-interleaved instances in one loaded module. Nested structs, record arrays,
-gradients, SoA and whole-struct element indexing are not qualified by this API.
+`scope.struct_field(members, shape=...)` declares a normal flat AOS StructField,
+including rank-zero state and arrays with declared dynamic extents. Members use
+the existing Record/DenseField capture path; aliases share an actual argument.
+Dimensions retain their original declaration scope, including through aliases.
+Consumers preserve the complete record through the same SNode layout rules and
+bind each instance at the actual member offsets and record strides. CPU/CUDA
+tests cover scalar/vector/matrix members, ordinary JIT and borrowed storage,
+and different-size instances sharing loaded code. Packed Host buffers transfer
+only the selected logical elements; neighboring members and inactive tails stay
+intact. Raw packed-memory access cannot reinterpret a strided member handle.
+Loaded LLVM entries must also carry compiler-proven runtime-stride inputs.
+These facts come from the existing IR dependency pass and are preserved in
+bitcode and checksummed deployment metadata, including PTX/cubin artifacts.
+An old or packed-specialized entry cannot acquire this ability by changing its
+binding metadata: rebuild using an affine view exemplar or component capture.
+Legacy Graph calls cannot represent these views; use the qualified Kernel or
+complete ExecutionPlan path. Unqualified real-function/shared-staged cases are
+rejected conservatively. Packed bindings retain their existing behavior.
+Nested structs, nested dense trees, component SoA, gradients and whole-struct
+element indexing are not qualified by this API; Vulkan needs separate admission.
 
 `test_aot_component_dense.py` compares the same numerical definition with ordinary
 JIT on CPU/CUDA. It covers new capacities, range/Field-shape/full-Field iteration,
@@ -225,7 +238,9 @@ is allocated once and zeroed through the LLVM allocator. Numerical addressing
 uses arguments, without registering or switching fixed module root pointers.
 
 `group.member(paths, dtype, element_shape=...)` validates root-relative place
-paths, element types and compact layout, returning finite views of that root.
+paths, element types and compact or positive uniform-record layout, returning
+finite views of that root. Contiguous element lanes may share a larger record;
+the existing affine argument ABI carries its authoritative index strides.
 Paths will come from compiler-produced contracts, not application per-kernel
 field tables. Groups reuse existing memory handles, borrowed leases and prepared
 retirement. Closing is currently cold: wait, revoke all aliases, then release

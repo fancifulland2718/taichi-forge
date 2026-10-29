@@ -584,6 +584,24 @@ class Api:
             setattr(self, name, function)
         self._completion_timing_loaded = True
 
+    def load_ndarray_transfers(self):
+        if hasattr(self, "_ndarray_transfers_available"):
+            return self._ndarray_transfers_available
+        declarations = {
+            "ti_copy_ndarray_from_host_ext": ([Handle, C.POINTER(NdArray), C.c_void_p, C.c_uint64], None),
+            "ti_copy_ndarray_to_host_ext": ([Handle, C.c_void_p, C.POINTER(NdArray), C.c_uint64], None),
+        }
+        try:
+            functions = {name: getattr(self.library, name) for name in declarations}
+        except AttributeError:
+            self._ndarray_transfers_available = False
+            return False
+        for name, function in functions.items():
+            function.argtypes, function.restype = declarations[name]
+            setattr(self, name, function)
+        self._ndarray_transfers_available = True
+        return True
+
     def load_dense_snode_groups(self):
         if getattr(self, "_dense_snode_groups_loaded", False):
             return

@@ -396,6 +396,9 @@ class ResourceScope:
             member._logical_resource_declaration = dict(identity=identity, shape=shape, source=source)
             if isinstance(field, StructField):
                 field._forge_resource_declarations["fields"][identity] = dict(member._logical_resource_declaration)
+                # The record is a storage namespace, not a new dimension
+                # declaration site. Aliases retain this lexical provenance.
+                member._logical_shape_namespace = self._registry
             if self._builder is not None:
                 # Keep the complete declared layout unit, without retaining its
                 # Python owner. Native SNode capture still checks actual placement.
@@ -421,20 +424,20 @@ class ResourceScope:
         return self._create(Matrix.field, args, kwargs)
 
     def struct_field(self, members, **kwargs):
-        """Declare a flat rank-zero AOS record at its normal allocation site.
+        """Declare a flat AOS record at its normal allocation site.
 
         Member Field access and aliases retain the original shared placement.
-        Struct element indexing and strided record-array deployment require
-        separate lowering/ABI qualification.
+        Member arrays retain the native record stride. Whole Struct element
+        indexing and nested records require separate lowering qualification.
         """
         from taichi_forge.lang.enums import Layout
         from taichi_forge.lang.struct import Struct, StructType
 
         if (
-            kwargs.get("shape") != ()
+            kwargs.get("shape") is None
             or kwargs.get("layout", Layout.AOS) != Layout.AOS
             or any(kwargs.get(key) for key in ("offset", "needs_grad", "needs_dual"))
             or any(isinstance(dtype, StructType) for dtype in members.values())
         ):
-            raise ValueError("ResourceScope struct_field currently requires a flat rank-zero plain AOS record")
+            raise ValueError("ResourceScope struct_field requires a flat plain AOS record with an explicit shape")
         return self._create(Struct.field, (members,), kwargs)

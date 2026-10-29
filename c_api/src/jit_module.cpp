@@ -1,4 +1,7 @@
 #include "jit_module.h"
+#ifdef TI_WITH_LLVM
+#include "taichi/runtime/llvm/array_layout_abi.h"
+#endif
 
 #include <atomic>
 #include <cstring>
@@ -117,7 +120,9 @@ class CudaJitKernel final : public llvm_aot::KernelImpl,
                              name,
                              static_cast<const LLVM::CompiledKernelData &>(
                                  kernel.execution->compiled())
-                                 .get_internal_data()),
+                                 .get_internal_data(),
+                             LLVM::runtime_affine_arrays(*static_cast<const LLVM::CompiledKernelData &>(
+                                 kernel.execution->compiled()).get_internal_data().compiled_data.module)),
         JitInvocation(*this, kernel) {
   }
 };

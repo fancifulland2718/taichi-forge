@@ -476,7 +476,10 @@ class Runtime:
                 raise
 
     def import_dense_view(self, view):
-        """Borrow a compact managed dense view without copying.
+        """Borrow a managed dense view without copying.
+
+        CPU/CUDA also accept positive uniform-record views with contiguous
+        scalar/vector/matrix elements; logical transfers retain record stride.
 
         Tree destruction drains dependent prepared users and revokes all
         aliases before freeing the root. The imported handle remains closeable.
@@ -843,7 +846,19 @@ class NdArray:
                 pointer = C.c_char_p(source)
             else:
                 pointer = (C.c_char * self.nbytes).from_buffer(view)
-            if to_device:
+            if not isinstance(self.dtype, StructLayout) and runtime._api.load_ndarray_transfers():
+                descriptor = self._descriptor(runtime)
+                if to_device:
+                    runtime._api.call(
+                        runtime._api.ti_copy_ndarray_from_host_ext,
+                        runtime._handle, C.byref(descriptor), pointer, self.nbytes,
+                    )
+                else:
+                    runtime._api.call(
+                        runtime._api.ti_copy_ndarray_to_host_ext,
+                        runtime._handle, pointer, C.byref(descriptor), self.nbytes,
+                    )
+            elif to_device:
                 runtime._api.call(
                     runtime._api.ti_copy_memory_from_host_ext,
                     runtime._handle,

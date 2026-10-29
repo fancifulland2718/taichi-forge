@@ -80,6 +80,8 @@ TiMemory ExecutionResourceStorage::view(TiMemory parent,
   // Metadata-only aliasing preserves the synchronization owner. Every actual
   // consumer must still opt into a prepared access epoch at its binding site.
   const auto source = runtime_.get_memory(parent, true);
+  if (source.dense_layout)
+    throw MemoryBindingError("Packed execution views cannot reinterpret strided storage");
   if (offset > source.size || bytes > source.size - offset ||
       offset > std::numeric_limits<uint64_t>::max() - source.base_offset ||
       offset > std::numeric_limits<uint64_t>::max() - source.byte_offset)

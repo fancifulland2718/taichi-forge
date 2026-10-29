@@ -492,11 +492,23 @@ AotRuntimeClient::NdarrayImport AotRuntimeClient::import_dense_view(
     throw std::invalid_argument("Dense view belongs to another backend/device");
   borrowed->owner = std::move(owner);
   borrowed->external_access = std::move(binding.external_access);
+  std::shared_ptr<storage::DenseStorageLayoutSpec> layout;
+  if (!descriptor.properties().ndarray_abi_compatible) {
+    layout = std::make_shared<storage::DenseStorageLayoutSpec>();
+    layout->scalar_type = descriptor.scalar_type();
+    layout->index_shape = descriptor.index_shape();
+    layout->index_strides_bytes = descriptor.index_strides_bytes();
+    layout->element_shape = descriptor.element_shape();
+    layout->element_strides_bytes = descriptor.element_strides_bytes();
+    // The retained window already begins at the first logical element.
+    layout->byte_offset = 0;
+  }
   const auto handle = state.runtime->register_memory(
       binding.allocation, binding.byte_size, false, binding.byte_offset, {},
-      binding.byte_offset, false, std::move(borrowed));
+      binding.byte_offset, false, std::move(borrowed), std::move(layout));
   std::get<0>(result) = reinterpret_cast<std::uintptr_t>(handle);
-  std::get<1>(result) = binding.byte_size;
+  std::get<1>(result) = descriptor.properties().scalar_count *
+                        data_type_size(descriptor.scalar_type());
   return result;
 }
 

@@ -6121,11 +6121,20 @@ Program::DenseStorageBorrow Program::borrow_dense_storage(
                   owner.kind != storage::StorageOwnerKind::kExternalManaged),
       "Dense storage borrowing requires a live managed range");
   const auto &properties = descriptor.properties();
+  const bool record_view =
+      (arch_is_cpu(compile_config().arch) || compile_config().arch == Arch::cuda) &&
+      owner.kind == storage::StorageOwnerKind::kSNodePayload &&
+      properties.single_record_stride_compatible &&
+      properties.record_stride > 0 && !properties.has_negative_stride &&
+      properties.uniqueness == storage::StorageMappingUniqueness::kProvenUnique;
   TI_ERROR_IF(
-      !properties.ndarray_abi_compatible || !properties.compact_contiguous ||
-          !properties.element_contiguous || !properties.canonical_aos ||
+      !(properties.ndarray_abi_compatible && properties.compact_contiguous &&
+        properties.canonical_aos) && !record_view,
+      "Dense storage borrowing requires a compact read-write AOS range or a qualified SNode record");
+  TI_ERROR_IF(
+      !properties.element_contiguous ||
           descriptor.access() != storage::StorageAccess::kReadWrite,
-      "Dense storage borrowing requires a compact read-write AOS range");
+      "Dense storage borrowing requires a compact read-write AOS range or a qualified SNode record");
   NdarrayLaunchLeases arrays;
   ExternalDenseStorageLaunchLeases external;
   const auto binding =

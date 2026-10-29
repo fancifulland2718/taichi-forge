@@ -218,6 +218,8 @@ void ti_export_cpu_memory(TiRuntime runtime,
   capi::LlvmRuntime *llvm_runtime =
       static_cast<capi::LlvmRuntime *>((Runtime *)runtime);
   const auto range = llvm_runtime->get_memory(memory);
+  if (range.dense_layout)
+    throw MemoryBindingError("Raw CPU interop cannot describe a strided ndarray view");
 
   auto &device = llvm_runtime->get();
   auto &cpu_device = static_cast<taichi::lang::cpu::CpuDevice &>(device);
@@ -281,6 +283,8 @@ void ti_export_cuda_memory(TiRuntime runtime,
 
   auto *llvm_runtime = static_cast<capi::LlvmRuntime *>((Runtime *)runtime);
   const auto range = llvm_runtime->get_memory(memory);
+  if (range.dense_layout)
+    throw MemoryBindingError("Raw CUDA interop cannot describe a strided ndarray view");
 
   auto &device = llvm_runtime->get();
   auto &cuda_device = static_cast<taichi::lang::cuda::CudaDevice &>(device);

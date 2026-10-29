@@ -1183,11 +1183,20 @@ TI_DLL_EXPORT TiMemory TI_API_CALL ti_create_dense_snode_group_ext(
 TI_DLL_EXPORT void TI_API_CALL ti_get_dense_snode_group_layout_ext(
     TiRuntime runtime, TiMemory group, uint64_t *size, char *json);
 // paths_json is an ordered list of root-relative scalar-place child paths.
-// Qualified compact members only; aliases share the group's storage lifetime.
+// Compact or positive uniform-record members; aliases share the group lifetime.
+// Strided member memory must be accessed with the logical ndarray transfers.
 // Each returned memory handle must be freed, including after group retirement.
 TI_DLL_EXPORT void TI_API_CALL ti_get_dense_snode_group_member_ext(
     TiRuntime runtime, TiMemory group, const char *paths_json,
     TiDataType dtype, const TiNdShape *element_shape, TiNdArray *array);
+
+// Logical packed Host IO for primitive/tensor ndarrays. Registered record strides
+// remain authoritative; neighboring members are neither read nor overwritten.
+// Both calls wait for preceding work and require exactly the logical byte size.
+TI_DLL_EXPORT void TI_API_CALL ti_copy_ndarray_from_host_ext(
+    TiRuntime runtime, const TiNdArray *array, const void *source, uint64_t size);
+TI_DLL_EXPORT void TI_API_CALL ti_copy_ndarray_to_host_ext(
+    TiRuntime runtime, void *target, const TiNdArray *array, uint64_t size);
 
 // Function `ti_free_memory` (1.4.0)
 //

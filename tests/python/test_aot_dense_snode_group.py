@@ -1,10 +1,14 @@
 import ctypes as C
+import json
+import zipfile
 
 import numpy as np
 import pytest
 
 import taichi_forge as ti
 from taichi_forge_runtime.aot import AotError, Runtime
+from taichi_forge_runtime.aot import _c_api as abi
+from taichi_forge._lib import core
 from tests import test_utils
 from tests.python.test_dense_snode_schema import _group
 
@@ -135,4 +139,111 @@ def test_group_members_bind_loaded_code_and_retire_prepared_users(tmp_path):
                 pa.run()
             pb.run()
             np.testing.assert_array_equal(np.frombuffer(bx.read(), np.float32), 2 * np.arange(1, 114))
+    producer.destroy()
+
+
+def _interleaved_group(n):
+    before, after = ti.field(ti.i32), ti.field(ti.i32)
+    vector, matrix = ti.Vector.field(3, ti.f32), ti.Matrix.field(2, 2, ti.f64)
+    builder = ti.FieldsBuilder()
+    block = builder.dense(ti.ij, (n, 3))
+    block.place(before, vector, matrix, after)
+    schema = core.DenseSNodeSchema.capture(builder.ptr, [(block.ptr, 0, "N")])
+    tree = builder.finalize()
+    return schema, tree, builder.ptr
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_interleaved_members_transfer_logical_elements_without_touching_neighbors():
+    schema, producer, _ = _interleaved_group(7)
+    with Runtime("cpu" if ti.cfg.arch == ti.cpu else "cuda") as runtime:
+        with runtime.dense_snode_group(schema.to_json(), {"N": 37}) as group:
+            _, expected_tree, root = _interleaved_group(37)
+            assert group.layout["nodes"] == _compiled_nodes(root)
+            expected_tree.destroy()
+            before = group.member([[0, 0]], "i32")
+            vector = group.member([[0, i] for i in range(1, 4)], "f32", element_shape=(3,))
+            matrix = group.member([[0, i] for i in range(4, 8)], "f64", element_shape=(2, 2))
+            after = group.member([[0, 8]], "i32")
+            alias = group.member([[0, i] for i in range(1, 4)], "f32", element_shape=(3,))
+            before.write(np.full((37, 3), 71, dtype=np.int32))
+            after.write(np.full((37, 3), 73, dtype=np.int32))
+            vector_data = np.arange(37 * 3 * 3, dtype=np.float32)
+            matrix_data = np.arange(37 * 3 * 4, dtype=np.float64)
+            vector.write(vector_data)
+            matrix.write(matrix_data)
+            np.testing.assert_array_equal(np.frombuffer(alias.read(), np.float32), vector_data)
+            np.testing.assert_array_equal(np.frombuffer(matrix.read(), np.float64), matrix_data)
+            assert (np.frombuffer(before.read(), np.int32) == 71).all()
+            assert (np.frombuffer(after.read(), np.int32) == 73).all()
+            # Legacy packed transfers and forged shape/type must fail before IO.
+            raw = abi.MemorySlice(vector._memory._handle, 0, vector.nbytes)
+            output = (C.c_char * vector.nbytes)()
+            with pytest.raises(AotError, match="logical ndarray"):
+                runtime._api.call(runtime._api.ti_copy_memory_to_host_ext, runtime._handle, output, C.byref(raw))
+            for change in ("shape", "type"):
+                descriptor = vector._descriptor(runtime)
+                if change == "shape":
+                    descriptor.shape.dims[0] -= 1
+                else:
+                    descriptor.elem_type = before._code
+                with pytest.raises(AotError, match="differs"):
+                    runtime._api.call(runtime._api.ti_copy_ndarray_to_host_ext, runtime._handle, output,
+                                      C.byref(descriptor), vector.nbytes)
+        with pytest.raises(AotError, match="retired"):
+            alias.read()
+    producer.destroy()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_interleaved_first_member_uses_kernel_strides_and_rejects_packed_graph(tmp_path):
+    @ti.kernel
+    def increment(x: ti.types.ndarray(ti.i32, 2)):
+        for i, j in x:
+            x[i, j] += i * 3 + j
+
+    schema, producer, _ = _interleaved_group(7)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(increment, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x", ti.i32, ndim=2))
+    # Component tests cover bitcode; exercise the metadata-only CUDA code path.
+    exported = ti.aot.Module(artifact_format="ptx" if ti.cfg.arch == ti.cuda else "bc")
+    exported.add_kernel(increment)
+    exemplar = ti.ndarray(ti.i32, (14, 3))
+    exported.add_kernel(increment, name="affine", template_args={
+        "x": ti.experimental.ndarray_view(exemplar, slices=(slice(0, 14, 2), slice(None)))
+    })
+    exported.add_graph("increment", builder.compile())
+    archive = tmp_path / "interleaved.tcm"
+    exported.archive(str(archive))
+    if ti.cfg.arch == ti.cpu:
+        # The loader must not accept a changed stride qualification independently
+        # of the compiled ABI. Reuse this small artifact; no second compilation.
+        corrupted = tmp_path / "missing_layout_checksum.tcm"
+        with zipfile.ZipFile(archive) as source, zipfile.ZipFile(corrupted, "w") as target:
+            for name in source.namelist():
+                payload = source.read(name)
+                if name == "aot_metadata.json":
+                    metadata = json.loads(payload)
+                    assert metadata["kernel_runtime_affine_arrays"]
+                    metadata["array_layout_sha256"] = ""
+                    payload = json.dumps(metadata).encode()
+                target.writestr(name, payload)
+        with Runtime("cpu") as runtime:
+            with pytest.raises(AotError, match="layout qualification checksum"):
+                runtime.load_module(corrupted)
+    with Runtime("cpu" if ti.cfg.arch == ti.cpu else "cuda") as runtime:
+        module = runtime.load_module(archive)
+        with runtime.dense_snode_group(schema.to_json(), {"N": 37}) as group:
+            first = group.member([[0, 0]], "i32")
+            neighbor = group.member([[0, i] for i in range(1, 4)], "f32", element_shape=(3,))
+            neighbor.write(np.full(37 * 3 * 3, 17, dtype=np.float32))
+            with pytest.raises(AotError, match="compiler-proven runtime stride"):
+                module.kernel("increment")(first)
+            module.kernel("affine")(first)
+            np.testing.assert_array_equal(np.frombuffer(first.read(), np.int32), np.arange(37 * 3))
+            bound = module.graph("increment").bind(dict(x=first))
+            for operation in (bound, bound.prepare):
+                with pytest.raises(AotError, match="Strided views require"):
+                    operation()
+            np.testing.assert_array_equal(np.frombuffer(neighbor.read(), np.float32), np.full(37 * 3 * 3, 17))
     producer.destroy()

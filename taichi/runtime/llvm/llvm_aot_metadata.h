@@ -93,6 +93,8 @@ struct LlvmAotMetadata {
   std::map<std::string, std::uint32_t> kernel_runtime_state;
   std::map<std::string, unsigned> kernel_sparse_runtime_view_abis;
   std::string runtime_state_sha256;
+  std::map<std::string, std::vector<std::vector<int>>> kernel_runtime_affine_arrays;
+  std::string array_layout_sha256;
   std::map<std::string, std::string> kernel_aliases;
   std::vector<aot::DeviceRangeDispatch> device_range_dispatch;
   std::string kernel_entry_sha256;
@@ -110,6 +112,8 @@ struct LlvmAotMetadata {
             kernel_runtime_state,
             kernel_sparse_runtime_view_abis,
             runtime_state_sha256,
+            kernel_runtime_affine_arrays,
+            array_layout_sha256,
             kernel_aliases,
             device_range_dispatch,
             kernel_entry_sha256);

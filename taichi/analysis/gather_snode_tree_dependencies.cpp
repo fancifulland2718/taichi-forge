@@ -1,6 +1,7 @@
 #include "taichi/analysis/gather_snode_tree_dependencies.h"
 
 #include <algorithm>
+#include <map>
 #include <unordered_set>
 
 #include "taichi/ir/frontend_ir.h"
@@ -18,6 +19,9 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
  public:
   explicit SNodeTreeDependencyCollector(bool include_source = false)
       : include_source_(include_source) {
+  }
+  void collect_array_layouts() {
+    collect_array_layouts_ = true;
   }
 
   void visit(FuncCallStmt *stmt) override {
@@ -109,8 +113,23 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
   }
   void visit(ExternalFuncCallStmt *) override {
     runtime_state_ |= runtime_state_external;
+    array_layouts_known_ = false;
+  }
+  void visit(ExternalPtrStmt *stmt) override {
+    if (!collect_array_layouts_) return;
+    const auto *argument = stmt->base_ptr->cast<ArgLoadStmt>();
+    if (!argument) {
+      array_layouts_known_ = false;
+      return;
+    }
+    const bool affine = stmt->runtime_affine && stmt->byte_stride == 0;
+    auto [entry, inserted] = array_layouts_.emplace(argument->arg_id, affine);
+    if (!inserted)
+      entry->second &= affine;
   }
   void visit(InternalFuncStmt *stmt) override {
+    // Internal pointer consumers need a separate argument-layout proof.
+    array_layouts_known_ = false;
     if (stmt->with_runtime_context)
       runtime_state_ |= runtime_state_external;
   }
@@ -141,8 +160,18 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
            (may_trigger_hash_overflow_ ? runtime_state_error : 0u);
   }
 
+  std::vector<std::vector<int>> runtime_affine_arrays() const {
+    std::vector<std::vector<int>> result;
+    if (array_layouts_known_)
+      for (const auto &[argument, affine] : array_layouts_)
+        if (affine) result.push_back(argument);
+    return result;
+  }
+
  private:
   void visit_function(Function *func) {
+    // Independent function arguments require their own caller mapping proof.
+    array_layouts_known_ = false;
     // Field roots used only by a callee still belong to the caller's binding
     // table and lifetime contract. Mark before visiting to handle recursion.
     if (visited_functions_.insert(func).second) {
@@ -197,6 +226,9 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
       SNodeRelocationStructure::none};
   bool may_trigger_hash_overflow_{false};
   std::uint32_t runtime_state_{runtime_state_known};
+  bool array_layouts_known_{true};
+  bool collect_array_layouts_{false};
+  std::map<std::vector<int>, bool> array_layouts_;
 };
 
 bool tree_contains_non_dense_snode(const SNode &node) {
@@ -218,9 +250,11 @@ std::vector<int> gather_snode_tree_dependencies(const Kernel &kernel) {
 
 KernelRuntimeDependencies gather_kernel_runtime_dependencies(IRNode &ir) {
   SNodeTreeDependencyCollector collector;
+  collector.collect_array_layouts();
   ir.accept(&collector);
   return {collector.result(), collector.relocation_structures(),
-          collector.may_trigger_hash_overflow(), collector.runtime_state()};
+          collector.may_trigger_hash_overflow(), collector.runtime_state(),
+          collector.runtime_affine_arrays()};
 }
 
 std::vector<int> gather_snode_tree_dependencies(IRNode &ir) {
