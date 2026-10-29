@@ -1042,8 +1042,15 @@ class _Capture:
             if not getattr(value, "_is_taichi_function", False) or _definition(value) != definition:
                 return f"method {name!r}"
         for (function, name), definition in self.functions.items():
-            variables = inspect.getclosurevars(function)
-            value = {**variables.globals, **variables.nonlocals}.get(name)
+            # getclosurevars only examines the outer code's co_names. A
+            # comprehension can read a global helper solely from its nested
+            # code object (e.g. matrix inverse's E), which the AST did capture.
+            # Resolve that recorded name in the real lexical environment.
+            cells = dict(zip(function.__code__.co_freevars, function.__closure__ or ()))
+            try:
+                value = cells[name].cell_contents if name in cells else function.__globals__.get(name)
+            except ValueError:  # An emptied nonlocal cell invalidates the guard.
+                return f"function {name!r} in {function.__qualname__}"
             if not _dsl_function(value) or _definition(value) != definition:
                 return f"function {name!r} in {function.__qualname__}"
         return None

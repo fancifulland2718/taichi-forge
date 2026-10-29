@@ -10,6 +10,40 @@ from tests import test_utils
 from tests.python.test_aot_component_dense import _DenseModel, _environment
 
 
+@ti.func
+def _comprehension_helper(value):
+    return value + 1
+
+
+@ti.func
+def _replacement_helper(value):
+    return value + 5
+
+
+@ti.data_oriented
+class _ComprehensionModel(_DenseModel):
+    @ti.kernel
+    def step(self):
+        self.v[0] = ti.Vector([_comprehension_helper(i) for i in ti.static(range(3))])
+        matrix = ti.Matrix([[2., 0., 0.], [0., 4., 0.], [0., 0., 8.]])
+        self.v[1] = matrix.inverse() @ ti.Vector([2., 8., 24.])
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_comprehension_helpers_use_actual_lexical_dependency_guards(monkeypatch):
+    model = _ComprehensionModel(3, 3)
+    env = _environment()
+    original = env.compile(model.step)
+    assert env.compile(model.step) is original
+    original.run(env, model)
+    np.testing.assert_array_equal(model.v.to_numpy()[:2], [[1, 2, 3], [1, 2, 3]])
+    monkeypatch.setitem(globals(), "_comprehension_helper", _replacement_helper)
+    replacement = env.compile(model.step)
+    assert replacement is not original and replacement.semantic_key != original.semantic_key
+    replacement.run(env, model)
+    np.testing.assert_array_equal(model.v.to_numpy()[:2], [[5, 6, 7], [1, 2, 3]])
+
+
 @ti.kernel
 def _owner_helper(solver: ti.template(), counter: ti.types.ndarray(ti.i32, 1), reverse: ti.template()):
     for i in range(solver.active):
