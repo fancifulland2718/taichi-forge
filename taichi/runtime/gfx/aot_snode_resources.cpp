@@ -3,6 +3,9 @@
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
+#include <map>
+#include "taichi/codegen/spirv/snode_struct_compiler.h"
+#include "taichi/ir/snode.h"
 
 namespace taichi::lang::gfx {
 namespace {
@@ -10,6 +13,17 @@ namespace {
 using liong::json::JsonArray;
 using liong::json::JsonObject;
 using liong::json::JsonValue;
+
+bool is_dense_tree(const SNode *node, bool plain_storage = false) {
+  if (node->need_activation() ||
+      (plain_storage && node->type != SNodeType::root &&
+       node->type != SNodeType::dense && node->type != SNodeType::place))
+    return false;
+  for (const auto &child : node->ch)
+    if (!is_dense_tree(child.get(), plain_storage))
+      return false;
+  return true;
+}
 
 template <typename T>
 T read_integer(const JsonValue &value) {
@@ -109,6 +123,46 @@ const std::vector<JsonValue> &array(const JsonObject &object,
 }
 
 }  // namespace
+
+AotSNodeTreeResources::StorageKind AotSNodeTreeResources::classify_storage(
+    const SNode *root) {
+  if (!root)
+    throw std::invalid_argument("Missing compiled SNode root");
+  return !is_dense_tree(root) ? StorageKind::Sparse
+      : is_dense_tree(root, true) ? StorageKind::PlainDense
+                                 : StorageKind::PackedDense;
+}
+
+AotSNodeTreeResources AotSNodeTreeResources::from_compiled(
+    int tree_id, const spirv::CompiledSNodeStructs &compiled) {
+  AotSNodeTreeResources result;
+  result.producer_tree_id = tree_id;
+  result.storage_kind = classify_storage(compiled.root);
+  result.resources = describe_snode_tree_resources(compiled);
+  result.validate();
+  return result;
+}
+
+std::string AotSNodeTreeResources::normalized_layout_json() const {
+  validate();
+  auto normalized = *this;
+  normalized.producer_tree_id = 0;
+  std::map<int, int> ids;
+  for (int &id : normalized.resources.snode_ids) {
+    const int local = static_cast<int>(ids.size());
+    ids.emplace(id, local);
+    id = local;
+  }
+  for (auto &pool : normalized.resources.pointer_pools) {
+    auto &c = pool.contract;
+    c.snode_id = ids.at(c.snode_id);
+    if (c.pool_buffer_binding_id >= 0)
+      c.pool_buffer_binding_id = ids.at(c.pool_buffer_binding_id);
+  }
+  for (auto &watch : normalized.resources.hash_watches)
+    watch.snode_id = ids.at(watch.snode_id);
+  return liong::json::print(liong::json::serialize(normalized));
+}
 
 void AotSNodeTreeResources::validate() const {
   if (producer_tree_id < 0 || resources.snode_ids.empty())

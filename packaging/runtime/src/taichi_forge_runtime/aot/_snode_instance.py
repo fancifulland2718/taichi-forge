@@ -8,7 +8,7 @@ from ._runtime import NativeResource
 class SNodeInstance(NativeResource):
     """Empty fixed-tree state; numerical initialization uses existing entries.
 
-    CPU prepared calls and CUDA independent domains bind private state. Allocate
+    CPU/Vulkan prepared calls and CUDA independent domains bind private state. Allocate
     CUDA instances before preparing sparse views. Shape/tree schema
     stay fixed; active state and values belong to the instance.
     """
@@ -22,8 +22,8 @@ class SNodeInstance(NativeResource):
         runtime = module._runtime
         with runtime._lock:
             module._check()
-            if runtime.arch not in ("cpu", "x64", "arm64", "cuda"):
-                raise NotImplementedError("SNode instances require CPU/CUDA")
+            if runtime.arch not in ("cpu", "x64", "arm64", "cuda", "vulkan"):
+                raise NotImplementedError("SNode instances require CPU/CUDA/Vulkan")
             runtime._api.load_snode_instances(runtime.arch)
             if plan is None:
                 handle = runtime._api.call(
@@ -49,7 +49,11 @@ class SNodeInstance(NativeResource):
 
     @property
     def info(self):
-        """Read actual code/state tree mappings and generations, never mutate them."""
+        """Read code/state mappings; LLVM also exposes its tree generations.
+
+        Vulkan tree IDs are diagnostic mappings, not submission handles. The
+        native resource registry controls instance lifetime and invalidation.
+        """
         runtime = self._runtime
         with runtime._lock:
             self._check()

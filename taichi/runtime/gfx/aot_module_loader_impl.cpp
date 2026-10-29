@@ -557,6 +557,37 @@ class AotModuleImpl : public aot::Module {
     return result;
   }
 
+  std::unique_ptr<AotSNodeInstance> instantiate_all(std::shared_ptr<aot::Module> code) {
+    std::vector<std::string> entries;
+    for (const auto &[name, index] : kernel_indices_)
+      entries.push_back(name);
+    return instantiate(std::move(code), entries);
+  }
+
+  std::string fixed_layouts(const std::vector<std::string> &entries) const {
+    if (is_corrupted())
+      throw std::invalid_argument("Invalid GFX AOT module");
+    std::set<int> trees;
+    for (const auto &name : entries) {
+      const auto found = kernel_indices_.find(name);
+      if (found == kernel_indices_.end())
+        throw std::invalid_argument("Unknown fixed SNode layout entry: " + name);
+      const auto &used = ti_aot_data_.kernel_metadata[found->second].used_snode_tree_ids;
+      trees.insert(used.begin(), used.end());
+    }
+    liong::json::JsonArray result;
+    for (int tree : trees) {
+      if (static_cast<std::size_t>(tree) >= ti_aot_data_.snode_tree_resources.size())
+        throw std::invalid_argument("Missing authoritative GFX fixed SNode layout");
+      liong::json::JsonObject entry;
+      entry.inner.emplace("tree", tree);
+      entry.inner.emplace("layout", liong::json::parse(
+          ti_aot_data_.snode_tree_resources[tree].normalized_layout_json()));
+      result.inner.emplace_back(std::move(entry));
+    }
+    return liong::json::print(liong::json::JsonValue(std::move(result)));
+  }
+
   std::unique_ptr<aot::CompiledGraph> get_graph(
       const std::string &name) override {
     auto it = graphs_.find(name);
@@ -758,6 +789,21 @@ std::unique_ptr<AotSNodeInstance> make_aot_snode_instance(
   if (!module)
     throw std::invalid_argument("SNode instances require a GFX AOT code owner");
   return module->instantiate(std::move(code), entries);
+}
+
+std::string fixed_snode_plan_layouts(
+    aot::Module *module, const std::vector<std::string> &entries) {
+  auto *gfx = dynamic_cast<AotModuleImpl *>(module);
+  if (!gfx)
+    throw std::invalid_argument("Fixed SNode layouts require a GFX AOT module");
+  return gfx->fixed_layouts(entries);
+}
+
+std::unique_ptr<AotSNodeInstance> make_aot_snode_instance(std::shared_ptr<aot::Module> code) {
+  auto *module = dynamic_cast<AotModuleImpl *>(code.get());
+  if (!module)
+    throw std::invalid_argument("SNode instances require a GFX AOT code owner");
+  return module->instantiate_all(std::move(code));
 }
 
 }  // namespace gfx

@@ -305,7 +305,7 @@ def test_coordinate_field_transfers_share_fixed_component_templates():
     np.testing.assert_array_equal(values.to_numpy(), [[7, 8, 9], [10, 11, 12]])
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, vulkan_sparse_experimental=True)
 def test_fixed_snode_normal_component_graph_exports_and_instantiates(tmp_path):
     spare = _SparseState(32)
     state = _SparseGraphState()
@@ -323,6 +323,15 @@ def test_fixed_snode_normal_component_graph_exports_and_instantiates(tmp_path):
     environment = Component.from_owner(state)
     root = environment.compile_graph(state.record)
     assert root.contract["version"] == 7
+    if ti.cfg.arch == ti.vulkan:
+        # The allocation projection ignores producer object/node identities,
+        # while preserving actual allocator capacity, offsets and policy.
+        same = _SparseState()
+        program = ti.lang.impl.get_runtime().prog
+        normalized = lambda field: json.loads(program._fixed_snode_tree_layout(
+            field._get_field_members()[0].ptr.snode().get_snode_tree_id()))
+        assert normalized(same.grid) == normalized(state.grid)
+        assert normalized(spare.grid) != normalized(state.grid)
     assert len(root.contract["fixed_groups"]) == len(root.contract["groups"]) == 1
     assert len(root.contract["entries"]) == 2
     assert any("group" in effect for entry in root.contract["compilation"]["entries"] for effect in entry["effects"]), root.contract["compilation"]

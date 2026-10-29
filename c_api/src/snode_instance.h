@@ -1,10 +1,14 @@
 #pragma once
-#ifdef TI_WITH_LLVM
-
+#include <set>
 #include "taichi_core_impl.h"
-#include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #include "taichi/runtime/native_resource.h"
+#ifdef TI_WITH_LLVM
+#include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #include "taichi/runtime/cpu/sparse_runtime_view.h"
+#endif
+#ifdef TI_WITH_VULKAN
+#include "taichi/runtime/gfx/aot_module_loader_impl.h"
+#endif
 
 namespace capi {
 
@@ -16,24 +20,32 @@ class SNodeInstance final : public taichi::lang::NativeResource {
   ~SNodeInstance() override;
   void initialize(const std::set<std::string> *entries = nullptr);
   void validate_owner(AotModule &module) const;
+  taichi::lang::aot::Kernel *kernel_view(const std::string &entry) const;
+#ifdef TI_WITH_LLVM
   std::vector<LlvmSparseRuntimeViewBinding> bindings_for(
       taichi::lang::LlvmRuntimeExecutor &executor,
       const std::vector<int> &code_trees) const;
-  std::string info() const;
   std::shared_ptr<taichi::lang::cpu::SparseRuntimeView> cpu_view(
       const std::vector<int> &code_trees) const;
+#endif
+  std::string info() const;
   taichi::Arch arch() const override;
   taichi::lang::Device &device() const override;
   std::size_t workspace_bytes() const override { return 0; }
 
  private:
   std::shared_ptr<taichi::lang::aot::Module> code_;
-  taichi::lang::LLVM::LlvmAotModule *module_;
-  taichi::lang::LlvmRuntimeExecutor *executor_;
+  taichi::lang::Device *device_;
+#ifdef TI_WITH_LLVM
+  taichi::lang::LLVM::LlvmAotModule *module_{nullptr};
+  taichi::lang::LlvmRuntimeExecutor *executor_{nullptr};
   std::vector<int> reserved_;
   std::vector<taichi::lang::LLVM::SNodeTreeLayout> states_;
   std::vector<LlvmSparseRuntimeViewBinding> bindings_;
+#endif
+#ifdef TI_WITH_VULKAN
+  std::unique_ptr<taichi::lang::gfx::AotSNodeInstance> gfx_instance_;
+#endif
 };
 
 }  // namespace capi
-#endif

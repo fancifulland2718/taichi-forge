@@ -457,7 +457,8 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     bool cpu_bounded_range,
     const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeResource>>
         &resources,
-    bool prepared_external_access) {
+    bool prepared_external_access,
+    taichi::lang::aot::Kernel *instance_kernel) {
   TI_CAPI_ARGUMENT_NULL_RV(kernel);
   if (arg_count > 0) {
     TI_CAPI_ARGUMENT_NULL_RV(args);
@@ -471,7 +472,10 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
   }
 
   const auto &kernel_binding = runtime2.get_kernel(kernel);
-  auto ti_kernel = kernel_binding.kernel;
+  // A validated SNode instance supplies an ABI-identical resource view. The
+  // original public handle still owns layout reflection and admission; no
+  // module entry or shared pointer is changed to select the instance.
+  auto ti_kernel = instance_kernel ? instance_kernel : kernel_binding.kernel;
   for (const auto &[index, resource] : resources) {
     if (index >= arg_count || !resource)
       throw MemoryBindingError("Invalid managed kernel resource argument");

@@ -13,24 +13,6 @@
 
 namespace taichi::lang {
 namespace gfx {
-namespace {
-
-bool is_dense_tree(const SNode *node, bool plain_storage = false) {
-  if (node->need_activation() ||
-      (plain_storage && node->type != SNodeType::root &&
-       node->type != SNodeType::dense && node->type != SNodeType::place)) {
-    return false;
-  }
-  for (const auto &child : node->ch) {
-    if (!is_dense_tree(child.get(), plain_storage)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-}  // namespace
-
 AotModuleBuilderImpl::AotModuleBuilderImpl(
     const std::vector<spirv::CompiledSNodeStructs> &compiled_structs,
     KernelCompilationManager &compilation_manager,
@@ -45,6 +27,22 @@ AotModuleBuilderImpl::AotModuleBuilderImpl(
   for (const auto &pair : caps.to_inner()) {
     ti_aot_data_.required_caps[to_string(pair.first)] = pair.second;
   }
+}
+
+std::map<int, int> AotModuleBuilderImpl::exported_snode_tree_bindings() const {
+  std::set<int> referenced;
+  for (const auto &metadata : ti_aot_data_.kernel_metadata)
+    referenced.insert(metadata.used_snode_tree_ids.begin(), metadata.used_snode_tree_ids.end());
+  for (const auto &field : ti_aot_data_.fields)
+    referenced.insert(field.snode_tree_id);
+  std::map<int, int> result;
+  for (int tree : referenced) {
+    TI_ERROR_IF(tree < 0 || static_cast<std::size_t>(tree) >= compiled_structs_.size() ||
+                    !compiled_structs_[tree].root,
+                "GFX AOT references inactive SNodeTree {}.", tree);
+    result.emplace(tree, static_cast<int>(result.size()));
+  }
+  return result;
 }
 
 std::string AotModuleBuilderImpl::write_spv_file(
@@ -84,23 +82,11 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
     artifact.kernel_aliases = ti_aot_data_.kernel_aliases;
     artifact.fields = ti_aot_data_.fields;
     artifact.required_caps = ti_aot_data_.required_caps;
-    std::set<int> referenced;
-    for (const auto &metadata : artifact.kernel_metadata) {
-      referenced.insert(metadata.used_snode_tree_ids.begin(),
-                        metadata.used_snode_tree_ids.end());
-    }
-    for (const auto &field : artifact.fields) {
-      referenced.insert(field.snode_tree_id);
-    }
-    std::map<int, int> module_ids;
+    const auto module_ids = exported_snode_tree_bindings();
     bool sparse_resources = false;
-    for (int tree_id : referenced) {
-      TI_ERROR_IF(tree_id < 0 ||
-                      static_cast<size_t>(tree_id) >= compiled_structs_.size() ||
-                      !compiled_structs_[tree_id].root,
-                  "GFX AOT references inactive SNodeTree {}.", tree_id);
-      sparse_resources |= !is_dense_tree(compiled_structs_[tree_id].root);
-      module_ids.emplace(tree_id, static_cast<int>(artifact.root_buffer_sizes.size()));
+    for (const auto &[tree_id, local] : module_ids) {
+      sparse_resources |= AotSNodeTreeResources::classify_storage(
+          compiled_structs_[tree_id].root) == AotSNodeTreeResources::StorageKind::Sparse;
       artifact.root_buffer_sizes.push_back(compiled_structs_[tree_id].root_size);
     }
     if (!artifact.root_buffer_sizes.empty()) {
@@ -110,17 +96,9 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
       TI_ERROR_IF(config_.arch != Arch::vulkan,
                   "Sparse GFX AOT resource reconstruction requires Vulkan");
       artifact.metadata_version = 6;
-      for (int tree_id : referenced) {
+      for (const auto &[tree_id, local] : module_ids) {
         const auto &compiled = compiled_structs_[tree_id];
-        AotSNodeTreeResources entry;
-        entry.producer_tree_id = tree_id;
-        using Kind = AotSNodeTreeResources::StorageKind;
-        entry.storage_kind = !is_dense_tree(compiled.root) ? Kind::Sparse
-                             : is_dense_tree(compiled.root, true)
-                                 ? Kind::PlainDense
-                                 : Kind::PackedDense;
-        entry.resources = describe_snode_tree_resources(compiled);
-        entry.validate();
+        auto entry = AotSNodeTreeResources::from_compiled(tree_id, compiled);
         artifact.snode_tree_resources.push_back(std::move(entry));
       }
     }
@@ -129,7 +107,8 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
       TI_ERROR_IF(id == module_ids.end(),
                   "AOT initial root state references unexported tree {}.",
                   producer);
-      TI_ERROR_IF(!is_dense_tree(compiled_structs_[producer].root, true),
+      TI_ERROR_IF(AotSNodeTreeResources::classify_storage(compiled_structs_[producer].root) !=
+                      AotSNodeTreeResources::StorageKind::PlainDense,
                   "AOT initial root state requires plain dense storage.");
       auto local = entry;
       local.tree_id = id->second;

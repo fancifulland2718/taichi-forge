@@ -321,7 +321,9 @@ The standalone Runtime now exposes `module.snode_instance()` and
 `module.prepare_execution(plan, bindings, execution_domain=domain,
 snode_instance=state)`. The state owns empty clones of the module's fixed trees,
 retains the exact loaded code/prototype owner, and reports actual code/state tree
-IDs and generations through read-only `state.info`. Preparation derives an
+IDs through read-only `state.info`; LLVM also reports tree generations. Vulkan
+IDs are diagnostic mappings, while native-resource epochs control lifetime.
+Preparation derives an
 immutable mapping for the kernels actually used by the plan. Numerical
 initialization and control continue through the original ExecutionPlan; mutable
 submission parameters remain supported on CUDA. CPU uses the same call without
@@ -330,6 +332,13 @@ directory and execute synchronously through the existing CPU launcher. The
 module's shared pointers and registered code are never switched between states.
 Fixed module-root array aliases cannot
 be mixed with this instance binding.
+
+Vulkan uses private Kernel resource views sharing the loaded executable
+pipelines. Its default-domain preparation and additional-queue domains reuse
+the existing ABI binder, sparse admission and completion leases. Queries project
+the same validated resource recipes used by JIT/AOT reconstruction, normalizing
+only binding identities; allocator sizes, offsets, capacities and policies stay
+intact. Component export uses the native artifact's final tree relocation map.
 
 Normal declarations can retain a fixed sparse placement without changing the
 numerical kernel or helper signatures:
@@ -455,9 +464,12 @@ implicit Field/helper capture, source-binding guards, stable deployable identity
 and runtime-only entry consumption on CPU/CUDA. A normal mixed sparse/dense Graph
 additionally covers automatic export, tree relocation after later exports, native
 layout tampering rejection, empty and distinct states under one loaded module,
-independent closure, and allocation of only the actual plan dependencies. Public
-Vulkan instance calls, sparse components in real applications and steady-state
-performance remain unqualified.
+independent closure, and allocation of only the actual plan dependencies. The
+mixed pointer/dense case now also qualifies Vulkan source-isolated component
+consumption, equivalent native layout queries, default calls, and two additional
+compute queues with interleaved accepted work and independent instance close.
+Other Vulkan sparse layouts, real application components and steady-state
+performance require separate qualification.
 
 `test_aot_component_dense.py` compares the same numerical definition with ordinary
 JIT on CPU/CUDA. It covers new capacities, range/Field-shape/full-Field iteration,

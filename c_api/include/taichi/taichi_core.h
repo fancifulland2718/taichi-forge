@@ -1514,7 +1514,7 @@ ti_probe_native_resource_ext(TiRuntime runtime,
                              uint32_t version,
                              TiNativeOperationAvailabilityExt *availability);
 
-// Cold, empty fixed-tree state for one loaded CPU/CUDA AOT module. The handle uses
+// Cold, empty fixed-tree state for one loaded CPU/CUDA/Vulkan AOT module. The handle uses
 // native-resource retirement and retains the exact loaded code owner. It does
 // not copy live values or activation. Allocate before borrowing sparse views.
 TI_DLL_EXPORT TiNativeResource TI_API_CALL
@@ -1530,14 +1530,15 @@ TI_DLL_EXPORT void TI_API_CALL
 ti_get_aot_snode_plan_layouts_ext(
     TiRuntime runtime, TiAotModule module, uint64_t description_size,
     const char *description, uint64_t *size, char *json);
-// JSON array of immutable code/state tree IDs and generations. These are
-// observations, not consumer-supplied rebinding descriptors.
+// JSON array of code/state tree IDs, plus LLVM tree generations. GFX IDs are
+// diagnostic mappings; native-resource epochs own the instance lifetime.
+// These observations are not consumer-supplied rebinding descriptors.
 TI_DLL_EXPORT void TI_API_CALL
 ti_get_aot_snode_instance_info_ext(TiRuntime runtime, TiNativeResource instance,
                                   uint64_t *size, char *json);
 
-// Synchronous CPU preparation over the same loaded code, with instance-owned
-// tree state. CUDA uses the independent-domain entry declared in taichi_cuda.h.
+// Default-domain CPU/Vulkan preparation with instance-owned tree state.
+// Independent-domain entries are declared in taichi_cuda.h / taichi_vulkan.h.
 TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
 ti_prepare_execution_plan_snode_instance_ext(
     TiRuntime runtime, TiAotModule module, uint64_t description_size,

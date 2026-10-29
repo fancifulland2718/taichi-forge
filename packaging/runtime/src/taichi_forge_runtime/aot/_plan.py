@@ -804,7 +804,9 @@ class ExecutionPlan:
                 suffix = (len(names), names)
             if snode_instance is not None:
                 function = (runtime._api.ti_prepare_execution_plan_snode_instance_on_domain_ext
-                            if runtime.arch == "cuda" else runtime._api.ti_prepare_execution_plan_snode_instance_ext)
+                            if runtime.arch == "cuda" else
+                            runtime._api.ti_prepare_execution_plan_snode_instance_on_vulkan_domain_ext
+                            if vulkan_domain else runtime._api.ti_prepare_execution_plan_snode_instance_ext)
                 suffix += (snode_instance._handle,)
             handle = runtime._api.call(
                 function,

@@ -286,6 +286,16 @@ ti_prepare_execution_plan_on_vulkan_domain_ext(
     uint32_t binding_count, const TiNamedNdArrayBinding *bindings,
     uint32_t parameter_count, const char *const *parameter_names);
 
+// Private instance bindings share the existing domain admission and leases.
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_execution_plan_snode_instance_on_vulkan_domain_ext(
+    TiRuntime runtime, TiAotModule module, TiVulkanExecutionDomain domain,
+    uint64_t description_size, const char *description,
+    uint32_t arg_count, const TiNamedArgument *args,
+    uint32_t binding_count, const TiNamedNdArrayBinding *bindings,
+    uint32_t parameter_count, const char *const *parameter_names,
+    TiNativeResource snode_instance);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

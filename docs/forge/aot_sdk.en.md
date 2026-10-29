@@ -5397,8 +5397,11 @@ descriptor sets; module-wide pointers are never switched between instances.
 The instance retains its code owner and uses cold synchronized retirement.
 A Vulkan pointer+dense test covers two roots, aliases, activation, traversal,
 deactivation, interleaved calls and independent close, including unchanged
-pipeline count. This native facility does not yet qualify Vulkan fixed-SNode
-components through the Python SDK or independent execution queues.
+pipeline count. The Runtime also exposes these views through
+`module.snode_instance(plan=plan)` and component instantiation, including
+additional-queue preparation. A mixed pointer/dense component has passed
+runtime-only isolated consumption and two-queue instance retirement. Other
+sparse layouts and real application components require separate qualification.
 
 Vulkan ndarray kernels using descriptor addressing now export GFX metadata 7.
 Ordinary and fixed execution align the descriptor base down and pass separate

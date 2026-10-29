@@ -123,7 +123,7 @@ def _consume_isolated(folder, tmp_path, mode="instances"):
     # Use only the runtime package's matching embedded bitcode, not a developer
     # tree inherited from the producer test process.
     environment["TI_LIB_DIR"] = str(package / "taichi_forge_runtime/_lib/runtime")
-    backend = "cpu" if ti.cfg.arch == ti.cpu else "cuda"
+    backend = "cpu" if ti.cfg.arch == ti.cpu else ti.cfg.arch.name
     result = subprocess.run([sys.executable, "-I", "-S", str(consumer), str(folder), backend, mode],
                             cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr

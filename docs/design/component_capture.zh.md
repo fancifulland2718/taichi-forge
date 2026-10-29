@@ -290,11 +290,17 @@ pointer/dense 的激活、遍历、deactivate、独立退休及单根/多根绑�
 公开 Runtime 现提供 `module.snode_instance()`，并可通过
 `module.prepare_execution(plan, bindings, execution_domain=domain, snode_instance=state)`
 准备实例调用。状态持有该模块固定树的空克隆及实际 loaded code/prototype 租约；
-只读 `state.info` 查询真实代码/状态树 ID 和代际。准备时按 Plan 实际 Kernel 闭包
+只读 `state.info` 查询真实代码/状态树 ID；LLVM 另提供树代际，Vulkan ID 仅为诊断映射，
+实例寿命由 native-resource 代际管理。准备时按 Plan 实际 Kernel 闭包
 建立不可变映射，初始化和控制沿原 ExecutionPlan，CUDA 仍支持逐提交可变参数。
 CPU 使用同一接口但省略 `execution_domain`：prepared 调用上下文持有独立且不可变的
 Runtime 目录，通过现有 CPU launcher 同步执行，不切换模块共享指针或注册代码。
 固定 module-root 数组别名不得混入此实例调用。
+
+Vulkan 使用各实例独立的 Kernel 资源视图，共享已加载的 executable pipeline。
+主队列与额外队列准备均复用已有 ABI binder、稀疏准入和完成租约。布局查询投影
+JIT/AOT 重建使用的同一资源配方，只归一化绑定身份，保留分配大小、偏移、容量及
+allocator 策略；组件导出直接使用原生归档最终的树重定位映射。
 
 正常资源声明可以保留固定 Sparse placement，数值 Kernel/helper 签名不变：
 
@@ -397,8 +403,10 @@ CUDA 在途 Module 关闭；CPU 另覆盖循环、其他 view 存活期间分配
 `test_aot_component_sparse.py` 另在 CPU/CUDA 覆盖正常固定 placement、隐式 Field/helper
 捕获、源绑定保护、稳定部署身份及仅含 Runtime 的入口消费。混合 Sparse/Dense 正常
 Graph 另验证自动导出、后续导出导致的树 ID 重定位、布局篡改拒绝、同一 Module 双实例
-空状态/不同输入/独立关闭及冷准备时只分配实际依赖。公开 Vulkan 实例调用、真实应用
-中的 Sparse 组件和稳态性能仍未取得资格。
+空状态/不同输入/独立关闭及冷准备时只分配实际依赖。其中混合 pointer/dense 用例现已
+通过 Vulkan 无私有源码组件消费、同源原生布局查询、主队列调用，以及两个额外 compute
+queue 的交错已接受工作和独立实例关闭。其他 Vulkan Sparse 布局、真实应用组件及稳态
+性能仍需各自取得资格。
 
 真实 GeoPhys 正常构造现已提供有限 RNE 数值证据：CPU/CUDA 上 3/7/5 刚体、不同拓扑、
 质量、qpos/qvel 和重力复用原 `_rne_bias_force`，与普通 JIT 对照；静止链另检查解析重力矩。

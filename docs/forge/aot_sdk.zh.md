@@ -4090,8 +4090,9 @@ SNode 资源配方重建选定入口闭包的空私有状态。实例 Kernel vie
 可执行 pipeline 对象，各自持有资源绑定和 descriptor set，不通过切换模块级指针
 选择实例。实例保留代码 owner，退休沿用冷同步路径。Vulkan pointer+dense 小例已
 验证两个根、别名、激活、遍历、停用、交错调用和独立关闭，且 pipeline 数量不随
-实例增加。该原生能力尚不代表 Python SDK 的 Vulkan 固定 SNode 组件或独立执行
-队列已取得资格。
+实例增加。Runtime 现通过 `module.snode_instance(plan=plan)` 和组件实例化接入
+这些视图，支持额外队列准备；混合 pointer/dense 组件已通过仅含 Runtime 的隔离
+消费和双队列实例退休。其他稀疏布局及真实应用组件仍需各自取得资格。
 
 使用 descriptor 寻址的 Vulkan ndarray kernel 现在导出 GFX metadata 7。普通调用和
 固定执行会将 descriptor 基址向下对齐，再分别传入数据/梯度的字节偏移；满足元素对齐的

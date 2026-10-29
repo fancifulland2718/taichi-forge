@@ -565,6 +565,11 @@ class Api:
             declarations["ti_prepare_execution_plan_snode_instance_ext"] = (
                 [Handle, Handle, C.c_uint64, C.c_char_p, UInt,
                  C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding), Handle], Handle)
+        if arch == "vulkan":
+            declarations["ti_prepare_execution_plan_snode_instance_on_vulkan_domain_ext"] = (
+                [Handle, Handle, Handle, C.c_uint64, C.c_char_p, UInt,
+                 C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding), UInt,
+                 C.POINTER(C.c_char_p), Handle], Handle)
         try:
             functions = {name: getattr(self.library, name) for name in declarations}
         except AttributeError as error:

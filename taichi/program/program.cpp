@@ -640,7 +640,14 @@ std::string Program::fixed_snode_tree_layout_json(int tree_id) const {
     return liong::json::print(liong::json::serialize(layout));
   }
 #endif
-  throw std::invalid_argument("Fixed component SNode layouts require CPU/CUDA");
+#ifdef TI_WITH_VULKAN
+  if (compile_config_.arch == Arch::vulkan) {
+    auto *gfx = dynamic_cast<GfxProgramImpl *>(program_impl_.get());
+    if (gfx)
+      return gfx->fixed_snode_tree_layout_json(tree_id);
+  }
+#endif
+  throw std::invalid_argument("Fixed component SNode layouts require CPU/CUDA/Vulkan");
 }
 
 bool Program::prepare_relocatable_kernel_template(

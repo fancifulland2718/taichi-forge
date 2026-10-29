@@ -5,6 +5,7 @@
 #include "execution_domain.h"
 #include "execution_domain_binding.h"
 #include "vulkan_execution_domain.h"
+#include "snode_instance.h"
 
 #include <algorithm>
 #include <functional>
@@ -23,7 +24,6 @@
 #include "taichi/runtime/native_kernel_result.h"
 #include "taichi/program/runtime_fault.h"
 #ifdef TI_WITH_LLVM
-#include "snode_instance.h"
 #include "taichi/runtime/cpu/kernel_launcher.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #endif
@@ -166,9 +166,7 @@ struct PreparedExecution {
   // Declared before backend recordings so owned buffers are destroyed last.
   std::shared_ptr<ExecutionResourceStorage> resources;
   std::vector<std::shared_ptr<NativeResource>> native_resources;
-#ifdef TI_WITH_LLVM
   std::shared_ptr<SNodeInstance> snode_instance;
-#endif
   // Direct-kernel preparations expose one latest-result frame. A completion
   // ticket does not snapshot it; each replay overwrites the same binding.
   std::shared_ptr<NativeKernelResultStorage> kernel_result;
@@ -228,9 +226,7 @@ struct PreparedExecution {
   }
 
   void release_native_resources() {
-#ifdef TI_WITH_LLVM
     snode_instance.reset();
-#endif
     kernel_result.reset();
     result_valid = false;
     while (!native_resources.empty())
@@ -1493,9 +1489,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
   const auto &resource_description =
       rebinding ? family->frame_resources : plan.resources;
   if (snode_instance) {
-    if (family || (!arch_is_cpu(rt.arch) &&
+    if (family || (!arch_is_cpu(rt.arch) && rt.arch != taichi::Arch::vulkan &&
                    (rt.arch != taichi::Arch::cuda || !domain)))
-      throw MemoryBindingError("SNode instance binding requires CPU or an independent CUDA execution domain");
+      throw MemoryBindingError("SNode instance binding requires CPU/Vulkan or an independent CUDA execution domain");
     for (auto index : resource_description.order)
       if (std::holds_alternative<aot::ExecutionResources::ModuleArray>(
               resource_description.declarations.at(index).value))
@@ -1571,7 +1567,6 @@ static TiPreparedExecution prepare_execution_plan_impl(
   prepared->owner = &mod;
   prepared->family = family;
   prepared->domain = domain;
-#ifdef TI_WITH_LLVM
   if (snode_instance) {
     prepared->snode_instance = std::dynamic_pointer_cast<capi::SNodeInstance>(
         rt.native_resource_registry().get(snode_instance));
@@ -1583,10 +1578,6 @@ static TiPreparedExecution prepare_execution_plan_impl(
     prepared->external_resources.push_back(snode_instance);
     prepared->replay_external_resources.insert(snode_instance);
   }
-#else
-  if (snode_instance)
-    throw MemoryBindingError("SNode instances require an LLVM runtime");
-#endif
   prepared->submission_values.resize(parameter_count);
   for (uint32_t i = 0; i < parameter_count; ++i)
     prepared->submission_widths.push_back(
@@ -2362,7 +2353,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
             kernel_args.data(), static_cast<uint32_t>(kernel_bindings.size()),
             kernel_bindings.data(),
             kernel->bounded_range && !kernel->bounded_range->cuda,
-            kernel_resources, bool(domain));
+            kernel_resources, bool(domain),
+            prepared->snode_instance ? prepared->snode_instance->kernel_view(kernel->entry) : nullptr);
         if (!bound)
           return false;
         std::vector<SubmissionParameterPatch> patches;
@@ -2674,7 +2666,6 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
                                      binding_count, bindings, {});
 }
 
-#ifdef TI_WITH_LLVM
 TiPreparedExecution ti_prepare_execution_plan_snode_instance_ext(
     TiRuntime runtime, TiAotModule module, uint64_t description_size,
     const char *description, uint32_t arg_count, const TiNamedArgument *args,
@@ -2683,15 +2674,15 @@ TiPreparedExecution ti_prepare_execution_plan_snode_instance_ext(
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   TI_CAPI_ARGUMENT_NULL_RV(snode_instance);
-  if (!taichi::arch_is_cpu(reinterpret_cast<Runtime *>(runtime)->arch))
-    throw MemoryBindingError("Synchronous SNode instance binding requires CPU");
+  const auto arch = reinterpret_cast<Runtime *>(runtime)->arch;
+  if (!taichi::arch_is_cpu(arch) && arch != taichi::Arch::vulkan)
+    throw MemoryBindingError("Default-domain SNode instance binding requires CPU/Vulkan");
   return prepare_execution_plan_impl(
       runtime, module, description_size, description, arg_count, args,
       binding_count, bindings, {}, {}, 0, nullptr, snode_instance);
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
 }
-#endif
 
 #ifdef TI_WITH_CUDA
 TiPreparedExecution ti_prepare_execution_plan_snode_instance_on_domain_ext(
@@ -2765,6 +2756,25 @@ TiPreparedExecution ti_prepare_execution_plan_parameters_on_domain_ext(
 #endif
 
 #ifdef TI_WITH_VULKAN
+TiPreparedExecution ti_prepare_execution_plan_snode_instance_on_vulkan_domain_ext(
+    TiRuntime runtime, TiAotModule module, TiVulkanExecutionDomain domain,
+    uint64_t description_size, const char *description,
+    uint32_t arg_count, const TiNamedArgument *args,
+    uint32_t binding_count, const TiNamedNdArrayBinding *bindings,
+    uint32_t parameter_count, const char *const *parameter_names,
+    TiNativeResource snode_instance) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(domain);
+  TI_CAPI_ARGUMENT_NULL_RV(snode_instance);
+  return prepare_execution_plan_impl(
+      runtime, module, description_size, description, arg_count, args,
+      binding_count, bindings, {},
+      std::make_shared<capi::PreparedExecutionDomain>(capi::get_execution_domain(domain)),
+      parameter_count, parameter_names, snode_instance);
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
+}
+
 TiPreparedExecution ti_prepare_execution_plan_on_vulkan_domain_ext(
     TiRuntime runtime, TiAotModule module, TiVulkanExecutionDomain domain,
     uint64_t description_size, const char *description,

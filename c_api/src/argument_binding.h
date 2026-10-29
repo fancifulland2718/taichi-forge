@@ -97,7 +97,8 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     bool cpu_bounded_range = false,
     const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeResource>>
         &resources = {},
-    bool prepared_external_access = false);
+    bool prepared_external_access = false,
+    taichi::lang::aot::Kernel *instance_kernel = nullptr);
 std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
     Runtime &runtime,
     TiComputeGraph graph,

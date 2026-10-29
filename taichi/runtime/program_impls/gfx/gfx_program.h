@@ -138,6 +138,8 @@ class GfxProgramImpl : public ProgramImpl {
 
   DeviceCapabilityConfig get_device_caps() override;
 
+  std::string fixed_snode_tree_layout_json(int tree_id) const;
+
  protected:
   std::unique_ptr<KernelCompiler> make_kernel_compiler() override;
   std::unique_ptr<KernelLauncher> make_kernel_launcher() override;

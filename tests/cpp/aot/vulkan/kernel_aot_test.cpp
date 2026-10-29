@@ -86,6 +86,7 @@ TEST(GfxAotTest, VulkanSNodeInstancesShareCodeAndIsolateState) {
   const auto original_bindings = original->params().root_buffer_bindings;
   EXPECT_THROW(gfx::make_aot_snode_instance(code, {"activate", "missing"}),
                std::invalid_argument);
+  EXPECT_THROW(gfx::make_aot_snode_instance(code, {}), std::invalid_argument);
   EXPECT_EQ(runtime.debug_registered_kernel_count(), registrations);
 
   auto left = gfx::make_aot_snode_instance(code, names);

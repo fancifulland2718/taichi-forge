@@ -58,6 +58,11 @@ class TI_DLL_EXPORT AotSNodeInstance {
 TI_DLL_EXPORT std::unique_ptr<AotSNodeInstance> make_aot_snode_instance(
     std::shared_ptr<aot::Module> code,
     const std::vector<std::string> &entries);
+TI_DLL_EXPORT std::unique_ptr<AotSNodeInstance> make_aot_snode_instance(
+    std::shared_ptr<aot::Module> code);
+
+TI_DLL_EXPORT std::string fixed_snode_plan_layouts(
+    aot::Module *module, const std::vector<std::string> &entries);
 
 }  // namespace gfx
 }  // namespace taichi::lang

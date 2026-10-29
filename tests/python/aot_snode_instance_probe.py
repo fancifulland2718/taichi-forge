@@ -377,8 +377,13 @@ def check_component(folder, backend):
     from taichi_forge_runtime.aot import Runtime, Scalar
     from taichi_forge_runtime.aot._component import _control_identity
 
-    with Runtime(backend) as runtime:
+    vulkan_domain = backend == "vulkan" and os.environ.get("FORGE_AOT_TEST_VULKAN_DOMAIN") == "1"
+    device_index = int(os.environ.get("TI_VISIBLE_DEVICE", "0")) if backend == "vulkan" else 0
+    with Runtime(backend, device_index=device_index) as runtime:
         module = runtime.load_module(folder)
+        if backend == "vulkan":
+            with module.snode_instance() as whole:
+                assert len(whole.info) == 2  # Explicitly unfiltered module closure.
         component = module.component("step")
         contract = component.contract
         assert len(contract["fixed_groups"]) == len(contract["groups"]) == 1
@@ -405,13 +410,16 @@ def check_component(folder, backend):
             assert len(state._fixed_state.info) == 1
         outputs = [runtime.ndarray("i32", 16) for _ in states]
         domain = runtime.execution_domain(capacity=1, instance_capacity=1) if backend == "cuda" else None
+        domains = ([runtime.execution_domain(capacity=2, instance_capacity=2, gpu_timing=True)
+                    for _ in states] if vulkan_domain else [domain, domain])
 
         def run(index, active, offset, bump, drop=0):
+            selected_domain = domains[index]
             with states[index].prepare(values=dict(active=active, offset=offset, bump=bump),
                                        arguments=dict(out=outputs[index], drop=drop),
-                                       execution_domain=domain) as call:
+                                       execution_domain=selected_domain) as call:
                 call.initialize()
-                if domain:
+                if selected_domain:
                     ticket = call.submit()
                     ticket.wait()
                     ticket.close()
@@ -428,11 +436,32 @@ def check_component(folder, backend):
         assert values(outputs[1]) == list(range(103, 112)) + [3] * 3 + [0] * 4
         run(0, 0, 0, 1, drop=1)
         assert values(outputs[0]) == [0] * 4 + [17] + [3] * 3 + [0] * 8
+        if vulkan_domain:
+            calls = [state.prepare(values=dict(active=0, offset=0, bump=index + 2),
+                                   arguments=dict(out=outputs[index], drop=0), execution_domain=domains[index])
+                     for index, state in enumerate(states)]
+            for call in calls:
+                call.initialize()
+            tickets = [call.submit() for call in calls]
+            # Both device submissions are accepted before either completion
+            # wait. Closing one instance drains only its dependent owners.
+            states[0].close()
+            for ticket in tickets:
+                ticket.wait()
+                ticket.close()
+            assert values(outputs[0]) == [0] * 4 + [19] + [5] * 3 + [0] * 8
+            assert values(outputs[1]) == list(range(106, 115)) + [6] * 3 + [0] * 4
+            for call in calls:
+                call.close()
+            print("VULKAN_SNODE_DOMAINS", [item.info for item in domains])
         states[0].close()
         run(1, 0, 0, 1)
         states[1].close()
         if domain:
             domain.close()
+        if vulkan_domain:
+            for item in domains:
+                item.close()
 
 
 def check_struct(folder, backend, clear=False):

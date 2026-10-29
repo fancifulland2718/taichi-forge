@@ -12,6 +12,13 @@ namespace taichi::lang {
 GfxProgramImpl::GfxProgramImpl(CompileConfig &config) : ProgramImpl(config) {
 }
 
+std::string GfxProgramImpl::fixed_snode_tree_layout_json(int tree_id) const {
+  const auto &layouts = runtime_ ? snode_tree_mgr_->get_compiled_structs()
+                                 : aot_compiled_snode_structs_;
+  return gfx::AotSNodeTreeResources::from_compiled(tree_id, layouts.at(tree_id))
+      .normalized_layout_json();
+}
+
 // 2026-05-02 §13.4: chunked allocator emits a SPIR-V descriptor array
 // (kChunkedArrayPtr) at the NodeAllocatorPool binding regardless of
 // max_chunks; that binding only exists when independent_pool=true. Force
