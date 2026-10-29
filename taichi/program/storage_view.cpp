@@ -1245,8 +1245,13 @@ DenseStorageBuildResult describe_dense_field_storage(
       invalid.reason = StorageFailureReason::kUnsupportedLayout;
       return invalid;
     }
-    if (components.size() > 1 &&
-        component->offset_bytes_in_parent_cell != lane * scalar_size) {
+    // A packed element can be a member of a larger record. Its lanes are
+    // contiguous relative to the anchor, not necessarily to the parent cell.
+    if (component->offset_bytes_in_parent_cell <
+            anchor->offset_bytes_in_parent_cell ||
+        component->offset_bytes_in_parent_cell -
+                anchor->offset_bytes_in_parent_cell !=
+            lane * scalar_size) {
       invalid.reason = StorageFailureReason::kUnsupportedLayout;
       return invalid;
     }
@@ -1262,9 +1267,7 @@ DenseStorageBuildResult describe_dense_field_storage(
       return invalid;
     }
   }
-  if (lane_count != components.size() ||
-      (components.size() > 1 && static_cast<std::uint64_t>(record_stride) !=
-                                    scalar_size * components.size())) {
+  if (lane_count != components.size()) {
     invalid.reason = StorageFailureReason::kUnsupportedLayout;
     return invalid;
   }

@@ -76,6 +76,7 @@ never falls back to staging when qualification fails.
 | Qualified root-dense scalar, Vector, or Matrix field | Yes | Yes | Yes | Direct binding of the SNode root allocation and byte offset |
 | Positive-stride, rank-preserving `slices` | Yes | Yes | Yes | Direct affine addressing; no pack, copy, or temporary allocation |
 | Padded dense field | Qualified | Qualified | Qualified | Accepted when element storage is contiguous and writable addresses are proven unique |
+| Contiguous Vector/Matrix members of a dense StructField | Verified | Verified | Not yet verified | Preserves root-relative member offsets and full record strides; actual rank-zero and rank-one reads/writes are tested |
 | Bitmasked, pointer, dynamic, hash, or bit-packed SNode | No | No | No | Not a dense affine view |
 | Negative stride, broadcast, overlap, axis permutation, or integer indexing | No | No | No | Requires a different read/scatter contract |
 | StructNdarray member stride | No | No | No | Described by the shared storage model and accepted only by record-stride-aware consumers |

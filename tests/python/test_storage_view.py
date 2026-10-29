@@ -126,6 +126,75 @@ def test_storage_view_rejects_sparse_field_without_materializing():
         tree.destroy()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_packed_struct_field_members_preserve_offsets_and_record_stride():
+    vec3 = ti.types.vector(3, ti.f32)
+    mat2 = ti.types.matrix(2, 2, ti.f32)
+    members = dict(before=ti.i32, vector=vec3, matrix=mat2, after=ti.i32)
+    scalar_record = ti.Struct.field(members, shape=())
+    array_records = ti.Struct.field(members, shape=5)
+
+    @ti.kernel
+    def update_one(vector: ti.types.ndarray(dtype=vec3, ndim=0), matrix: ti.types.ndarray(dtype=mat2, ndim=0)):
+        vector[None] += vec3(1, 2, 3)
+        matrix[None] += mat2([[1, 2], [3, 4]])
+
+    @ti.kernel
+    def update_many(vector: ti.types.ndarray(dtype=vec3, ndim=1), matrix: ti.types.ndarray(dtype=mat2, ndim=1)):
+        for i in vector:
+            vector[i] += vec3(i + 1, 2, 3)
+            matrix[i] += mat2([[1, 2], [3, i + 4]])
+
+    for record, shape in ((scalar_record, ()), (array_records, (5,))):
+        record.before.fill(123)
+        record.after.fill(456)
+        record.vector.fill(10)
+        record.matrix.fill(20)
+        before = describe_storage(record.before)
+        vector = describe_storage(record.vector)
+        matrix = describe_storage(record.matrix)
+        assert vector.supported and matrix.supported
+        assert vector.descriptor.byte_offset - before.descriptor.byte_offset == 4
+        assert matrix.descriptor.byte_offset - before.descriptor.byte_offset == 16
+        assert tuple(vector.descriptor.element_strides_bytes) == (4,)
+        assert tuple(matrix.descriptor.element_strides_bytes) == (8, 4)
+        assert vector.properties["ndarray_abi_compatible"] == (shape == ())
+        if shape:
+            assert tuple(vector.descriptor.index_strides_bytes) == (36,)
+            assert tuple(matrix.descriptor.index_strides_bytes) == (36,)
+        # Passing views tests actual address resolution, not just description.
+        views = (ti.experimental.ndarray_view(record.vector), ti.experimental.ndarray_view(record.matrix))
+        if shape:
+            update_many(*views)
+            expected_vector = np.full((5, 3), (11, 12, 13), dtype=np.float32)
+            expected_vector[:, 0] += np.arange(5)
+            expected_matrix = np.broadcast_to([[21, 22], [23, 24]], (5, 2, 2)).copy()
+            expected_matrix[:, 1, 1] += np.arange(5)
+        else:
+            update_one(*views)
+            expected_vector, expected_matrix = [11, 12, 13], [[21, 22], [23, 24]]
+        np.testing.assert_array_equal(record.vector.to_numpy(), expected_vector)
+        np.testing.assert_array_equal(record.matrix.to_numpy(), expected_matrix)
+        np.testing.assert_array_equal(record.before.to_numpy(), np.full(shape, 123))
+        np.testing.assert_array_equal(record.after.to_numpy(), np.full(shape, 456))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_packed_field_description_still_rejects_noncontiguous_lanes():
+    vector = ti.Vector.field(3, ti.f32)
+    gap = ti.field(ti.f32)
+    builder = ti.FieldsBuilder()
+    node = builder.dense(ti.i, 3)
+    node.place(vector.get_scalar_field(0), gap, vector.get_scalar_field(1), vector.get_scalar_field(2))
+    tree = builder.finalize()
+    try:
+        description = describe_storage(vector)
+        assert not description.supported
+        assert description.failure_reason == "kUnsupportedLayout"
+    finally:
+        tree.destroy()
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_storage_view_ndarray_owner_rejects_reused_registry_slot():
     old = ti.ndarray(ti.f32, shape=8)

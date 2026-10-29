@@ -71,6 +71,7 @@ kernel annotation 匹配；该 view 不公开 gradient storage。
 | 合格的 root-dense scalar、Vector 或 Matrix field | 支持 | 支持 | 支持 | 直接绑定 SNode root allocation 与 byte offset |
 | 保持 rank 的正步长 `slices` | 支持 | 支持 | 支持 | direct affine addressing，不 pack、copy 或分配临时 storage |
 | Padded dense field | 资格验证 | 资格验证 | 资格验证 | element storage contiguous 且可证明 writable address 唯一时接受 |
+| Dense StructField 的连续 Vector/Matrix 成员 | 已验证 | 已验证 | 待验证 | 保留成员相对根偏移及完整 record stride；rank-0 与 rank-1 实际读写已验证 |
 | Bitmasked、pointer、dynamic、hash、bit-packed SNode | 不支持 | 不支持 | 不支持 | 不属于 dense affine view |
 | 负 stride、broadcast、overlap、axis permutation 或 integer indexing | 不支持 | 不支持 | 不支持 | 需要不同的 read/scatter 合同 |
 | StructNdarray member stride | 不支持 | 不支持 | 不支持 | 由共享 storage 模型描述，仅由理解 record stride 的 consumer 接受 |
