@@ -101,11 +101,12 @@ class ResourceScope:
 
     def __setattr__(self, name, value):
         from taichi_forge.lang.field import Field
+        from taichi_forge.lang.struct import StructField
 
         if self._read_only:
             raise TypeError("A declared record scope cannot modify its existing members")
         setattr(self._owner, name, value)
-        if isinstance(value, Field):
+        if isinstance(value, Field) and not isinstance(value, StructField):
             declaration = getattr(value, "_logical_resource_declaration", None)
             if declaration is not None:
                 if declaration["identity"] is None:
@@ -296,15 +297,26 @@ class ResourceScope:
             field = factory(*args, **{**kwargs, "shape": None})
             self._builder.dense(impl.index_nd(len(concrete)), concrete).place(field)
         caller = inspect.currentframe().f_back.f_back
-        field._logical_resource_declaration = dict(
-            identity=None, shape=shape, source=(caller.f_code.co_filename, caller.f_lineno)
-        )
-        if self._builder is not None:
-            # Keep the complete declared layout unit, without retaining its
-            # Python owner. Native SNode capture still checks actual placement.
-            group = self._builder._resource_declaration_members
-            group.append(field)
-            field._logical_resource_group = group
+        source = (caller.f_code.co_filename, caller.f_lineno)
+        from taichi_forge.lang.struct import StructField
+
+        if isinstance(field, StructField):
+            # The normal StructField remains a record namespace; its actual
+            # scalar/vector/matrix members enter the existing Field contract.
+            field._forge_resource_declarations = {"fields": {}, "dimensions": {}, "records": {}}
+            members = field.field_dict.items()
+        else:
+            members = ((None, field),)
+        for identity, member in members:
+            member._logical_resource_declaration = dict(identity=identity, shape=shape, source=source)
+            if isinstance(field, StructField):
+                field._forge_resource_declarations["fields"][identity] = dict(member._logical_resource_declaration)
+            if self._builder is not None:
+                # Keep the complete declared layout unit, without retaining its
+                # Python owner. Native SNode capture still checks actual placement.
+                group = self._builder._resource_declaration_members
+                group.append(member)
+                member._logical_resource_group = group
         del caller
         return field
 
@@ -322,3 +334,22 @@ class ResourceScope:
         from taichi_forge.lang.matrix import Matrix
 
         return self._create(Matrix.field, args, kwargs)
+
+    def struct_field(self, members, **kwargs):
+        """Declare a flat rank-zero AOS record at its normal allocation site.
+
+        Member Field access and aliases retain the original shared placement.
+        Struct element indexing and strided record-array deployment require
+        separate lowering/ABI qualification.
+        """
+        from taichi_forge.lang.enums import Layout
+        from taichi_forge.lang.struct import Struct, StructType
+
+        if (
+            kwargs.get("shape") != ()
+            or kwargs.get("layout", Layout.AOS) != Layout.AOS
+            or any(kwargs.get(key) for key in ("offset", "needs_grad", "needs_dual"))
+            or any(isinstance(dtype, StructType) for dtype in members.values())
+        ):
+            raise ValueError("ResourceScope struct_field currently requires a flat rank-zero plain AOS record")
+        return self._create(Struct.field, (members,), kwargs)

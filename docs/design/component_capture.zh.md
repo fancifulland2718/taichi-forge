@@ -170,6 +170,12 @@ TCM hash 保持不变，产物无模型数据载荷及固定根依赖。该探�
 编译缓存命中和原 owner 绑定时再次验证，包括嵌套 Record 的来源路径。CPU/CUDA
 门槛覆盖新容量/零数量、原循环与消费端布局，以及失败后修正重试。
 
+`scope.struct_field(members, shape=())` 声明正常的扁平 rank-zero AOS
+StructField。成员沿既有 Record/DenseField 路径自动捕获，原成员别名共用实际参数；
+消费者以同一 SNode 布局规则保留整个记录，按成员的真实偏移绑定各实例。CPU/CUDA
+已验证向量/矩阵成员、普通 JIT 对照和同模块两个实例的交错执行。此入口暂不支持
+嵌套 struct、记录数组、梯度或 SoA；结构元素整体索引仍不在该捕获资格内。
+
 真实 GeoPhys 正常构造现已提供有限 RNE 数值证据：CPU/CUDA 上 3/7/5 刚体、不同拓扑、
 质量、qpos/qvel 和重力复用原 `_rne_bias_force`，与普通 JIT 对照；静止链另检查解析重力矩。
 正常资源分组先隔离 body 状态、广义动力学和 bias-force 工作区，所有路径共用这些分组；

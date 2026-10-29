@@ -181,7 +181,11 @@ TiNdArray LlvmRuntime::dense_snode_group_member(TiMemory handle,
   array.elem_shape = element_shape;
   uint64_t offset = anchor->offset_bytes_in_parent_cell;
   if (parent->type == SNodeType::dense) {
-    if (parent->parent != group->root.get() || parent->cell_size_bytes != lanes * width)
+    // A rank-zero member has no inter-record stride. Adjacent siblings do
+    // not make its contiguous lanes noncompact; their offsets still come
+    // from the instantiated SNode layout. Arrays retain the compact ABI gate.
+    if (parent->parent != group->root.get() ||
+        (anchor->num_active_indices != 0 && parent->cell_size_bytes != lanes * width))
       throw MemoryBindingError("Dense member is not a qualified compact record");
     offset += parent->offset_bytes_in_parent_cell;
     array.shape.dim_count = anchor->num_active_indices;

@@ -178,6 +178,14 @@ original root, offsets and owner. They neither copy members into independent
 Ndarrays nor mutate module root pointers. This first slice requires qualified
 compact members while preserving the full root in the schema.
 
+`scope.struct_field(members, shape=())` declares a normal flat rank-zero AOS
+StructField. Members use the existing Record/DenseField capture path; aliases
+share an actual argument. Consumers preserve the complete record through the
+same SNode layout rules and bind each instance at the actual member offsets.
+CPU/CUDA tests cover vector/matrix members, ordinary JIT equivalence and two
+interleaved instances in one loaded module. Nested structs, record arrays,
+gradients, SoA and whole-struct element indexing are not qualified by this API.
+
 `test_aot_component_dense.py` compares the same numerical definition with ordinary
 JIT on CPU/CUDA. It covers new capacities, range/Field-shape/full-Field iteration,
 vector/matrix elements, aliases, empty active ranges and capacity-tail sentinels.
