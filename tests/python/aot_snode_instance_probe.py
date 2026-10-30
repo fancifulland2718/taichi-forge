@@ -350,11 +350,6 @@ def check_capture(folder, backend):
         for index in (0, 1):
             run(index, 0, 0, 0)
             assert values(outputs[index]) == [0] * 16
-        # Reading an inactive coordinate must not activate its pointer block:
-        # the original struct-for would otherwise increment that block here.
-        assert states[0].resource("grid").read_at([(15,)]) == array.array("i", [0]).tobytes()
-        run(0, 0, 0, 1)
-        assert values(outputs[0]) == [0] * 16
         run(0, 5, 10, 2)
         assert values(outputs[0]) == list(range(12, 17)) + [2] * 3 + [0] * 8
         run(1, 9, 100, 3)
@@ -433,6 +428,12 @@ def check_component(folder, backend):
             assert values(outputs[index]) == [0] * 16
         # The component's verified cold transfer entries belong to the same
         # instance closure, without adding the separately exported spare tree.
+        # Coordinate I/O belongs to ComponentInstance, not the raw SNode state
+        # used by check_capture. An inactive read must not activate its block:
+        # otherwise the following original struct-for would increment it.
+        assert states[0].resource("grid").read_at([(15,)]) == array.array("i", [0]).tobytes()
+        run(0, 0, 0, 1)
+        assert values(outputs[0]) == [0] * 16
         states[0].resource("grid").write_at([(0,)], struct.pack("=i", 41))
         assert struct.unpack("=i", states[0].resource("alias").read_at([(0,)])) == (41,)
         assert struct.unpack("=i", states[1].resource("grid").read_at([(0,)])) == (0,)
