@@ -220,6 +220,13 @@ TCM hash 保持不变，产物无模型数据载荷及固定根依赖。该探�
 和行号不进入语义 Key。定义指纹使用不可变字节码内容，避免 marshal 引用编码随前端
 解析变化导致的伪失效；Matrix 内部 DSL 函数与应用 helper 使用相同依赖 guard。
 
+正常哈希容量向上取 2 的幂可声明为
+`scope.power_of_two_dim("capacity", (scope.dim("count") * 2).maximum(2))`。
+该接口检查原整数属性；消费端通过共用维度求值器从 `count` 派生容量，不能独立覆盖。
+最小值为零时结果为一；沿用现有计数/地址整数边界，不增加模型规模预算。
+旧 Runtime 会拒绝未知的 `ceil_pow2` 关系。CPU/CUDA 冻结消费已检查新容量、掩码和
+同根成员偏移；应用自身的哈希发布算法仍需单独验证。
+
 正常构造已经计算出的容量可用 `scope.derived_dim("rows", facts * 6)` 声明关系，
 其中 `facts` 来自同一 scope 的 `dim` 或 `derived_dim`。它保留原整数属性并验证
 其值，不负责赋值；循环读取 `self.rows` 和 Field 布局使用相同派生合同。消费者

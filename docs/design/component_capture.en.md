@@ -578,6 +578,15 @@ the semantic key. Definition guards hash immutable bytecode contents rather than
 marshal reference encoding, which can change during frontend inspection.
 Internal Matrix DSL functions participate in the same dependency guards.
 
+Use `scope.power_of_two_dim("capacity", (scope.dim("count") * 2).maximum(2))`
+for a normal hash capacity rounded up to a power of two. The existing integer
+attribute is checked; the consumer derives it from `count` through the shared
+dimension evaluator and cannot override it independently. A minimum of zero
+rounds to one. Existing count/address integer limits still apply; this adds no
+model-size budget. An older runtime rejects the unknown `ceil_pow2` relation.
+CPU/CUDA frozen-consumer tests cover changed capacities, masks and same-root
+member offsets; application hash publication still needs its own qualification.
+
 Use `scope.derived_dim("rows", facts * 6)` to relate a capacity already computed
 by the normal constructor. `facts` comes from `dim` or `derived_dim` in that scope.
 This declaration validates the existing integer attribute without assigning it.

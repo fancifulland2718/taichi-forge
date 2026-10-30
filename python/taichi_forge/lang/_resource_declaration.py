@@ -279,6 +279,20 @@ class ResourceScope:
         del caller
         return Extent(("dim", name))
 
+    def power_of_two_dim(self, name, minimum):
+        """Relate an existing capacity to the smallest power of two >= minimum.
+
+        Zero rounds to one. The constructor still computes the ordinary value;
+        deployment reuses the same checked relation, not a consumer override.
+        """
+        if not isinstance(minimum, Extent):
+            raise TypeError("A power-of-two dimension requires a declared Extent minimum")
+        result = self.derived_dim(name, Extent(("ceil_pow2", minimum.expression)))
+        caller = inspect.currentframe().f_back
+        self._registry["dimensions"][name] = (caller.f_code.co_filename, caller.f_lineno)
+        del caller
+        return result
+
     def record(self, name, value, *, optional=False):
         """Declare an existing plain record without mutating or wrapping it.
 

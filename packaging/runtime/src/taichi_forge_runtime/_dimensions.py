@@ -16,6 +16,10 @@ def validate_extent(expression):
             valid = len(args) == 1 and isinstance(args[0], str) and args[0].isidentifier()
         elif op == "const":
             valid = len(args) == 1 and type(args[0]) is int and 0 <= args[0] <= 2**31 - 1
+        elif op == "ceil_pow2":
+            valid = len(args) == 1
+            if valid:
+                visit(args[0], depth + 1)
         else:
             valid = op in ("add", "mul", "max", "min", "floordiv") and len(args) == 2
             if valid:
@@ -46,7 +50,18 @@ def evaluate_extent(expression, resolve):
             return operator.index(resolve(args[0]))
         if op == "const":
             return args[0]
-        left, right = (evaluate(arg) for arg in args)
+        if op == "ceil_pow2":
+            minimum = evaluate(args[0])
+            if minimum < 0:
+                raise ValueError("A power-of-two dimension minimum must be nonnegative")
+            result = 1 << (max(1, minimum) - 1).bit_length()
+        else:
+            result = evaluate_binary(op, *(evaluate(arg) for arg in args))
+        if not 0 <= result <= 2**63 - 1:
+            raise ValueError("Dimension expression exceeds its nonnegative i64 intermediate range")
+        return result
+
+    def evaluate_binary(op, left, right):
         if op == "add":
             result = left + right
         elif op == "mul":
@@ -59,8 +74,6 @@ def evaluate_extent(expression, resolve):
             result = left // right
         else:
             raise ValueError("A dimension divisor must be positive")
-        if not 0 <= result <= 2**63 - 1:
-            raise ValueError("Dimension expression exceeds its nonnegative i64 intermediate range")
         return result
 
     return evaluate(expression)
