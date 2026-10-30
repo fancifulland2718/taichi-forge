@@ -1244,11 +1244,15 @@ class _Capture:
 
     def named_attribute(self, ctx, args, keywords):
         """Resolve builtin getattr through the same declared attribute path."""
-        if keywords or len(args) != 2 or type(args[1]) is not str:
+        if keywords or len(args) not in (2, 3) or type(args[1]) is not str:
             raise TaichiCompilationError(
-                "Component getattr requires a declared owner/record and a compile-time string name, without a default"
+                "Component getattr requires a declared owner/record and a compile-time string name"
             )
-        owner, name = args
+        # A default is unused for an existing declared attribute. Resolve via
+        # the normal capture path so neither undeclared values nor descriptors
+        # can be hidden by a fallback. Optional absence is not implicit static
+        # configuration; applications must declare that role explicitly.
+        owner, name = args[:2]
         if owner is self.owner:
             return self.attribute(ctx, name)
         if isinstance(owner, _RecordReference):

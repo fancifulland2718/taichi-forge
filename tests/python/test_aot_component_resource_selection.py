@@ -83,6 +83,21 @@ class _State:
     def default_value(self):
         getattr(self, "missing", self.current)[0] = 1
 
+    @ti.kernel
+    def declared_defaults(self):
+        target = ti.static(getattr(self, self.selected, None))
+        previous = ti.static(getattr(self.history, "previous", None))
+        for i in range(getattr(self, "count", 0)):
+            target[i] = previous[i] + getattr(self, "offset", -101)
+
+    @ti.kernel
+    def unsafe_getter_default(self):
+        getattr(self, "trap", self.current)[0] = 1
+
+    @ti.kernel
+    def undeclared_default(self):
+        self.current[0] = getattr(self, "getter_calls", -1)
+
     def record(self, builder):
         builder.dispatch(self.step)
 
@@ -141,7 +156,9 @@ def test_static_resource_selection_does_not_constant_fold_data_or_invoke_getters
         (owner.static_load, "compile-time"),
         (owner.dynamic_name, "compile-time string"),
         (owner.unsafe_getter, "descriptor|property"),
-        (owner.default_value, "without a default"),
+        (owner.default_value, "undeclared capture self.missing"),
+        (owner.unsafe_getter_default, "descriptor|property"),
+        (owner.undeclared_default, "undeclared capture self.getter_calls"),
     ):
         with pytest.raises(ti.TaichiCompilationError, match=message):
             env.compile(entry)
@@ -149,3 +166,18 @@ def test_static_resource_selection_does_not_constant_fold_data_or_invoke_getters
     code = env.compile(owner.step)
     code.run(env, owner)
     np.testing.assert_array_equal(owner.current.to_numpy(), [7, 8, 9])
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_getattr_default_preserves_declared_capture_and_static_guards():
+    first, second = _State(3), _State(17, 29)
+    env, other = _environment(first), _environment(second)
+    code = env.compile(first.declared_defaults)
+    assert other.compile(second.declared_defaults) is code
+    second.history.previous.from_numpy(np.arange(17, dtype=np.int32) * 2)
+    for execute in (lambda: code.run(other, second), second.declared_defaults):
+        second.current.fill(-19)
+        execute()
+        np.testing.assert_array_equal(second.current.to_numpy(), np.arange(17) * 2 + 29)
+    second.selected = "alias"
+    assert other.compile(second.declared_defaults) is not code
