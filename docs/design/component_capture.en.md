@@ -46,6 +46,17 @@ module alias. The compiler checks only the outer annotation role and its actual
 import binding; it does not evaluate type parameters, annotation calls or
 arbitrary Python getters. Replacing the import binding also invalidates reuse.
 
+Primitive dtype attributes can use `scope.static_dtype("precision", choices=(ti.f32, ti.f64))`
+at their normal selection site. Only existing AOT scalar types are qualified;
+builtin Python `float`/`int`, tensor types and arbitrary type objects are excluded.
+Actual reads contribute a typed `dtype` fact, separate from string configuration.
+An unused type selection adds no numerical dependency. Loaded consumers select it
+with `taichi_forge_runtime.aot.StaticDType("f64")`, which requires no DSL import.
+Producers keep the actual DSL type; consumer markers cannot replace it in captures.
+Changing precision selects different numerical code; dynamic model sizes can
+reuse that code. CPU/CUDA gates cover rounding differences, cache guards and frozen
+artifact consumption. This does not change backend support for the selected dtype.
+
 LLVM launches use the compiler-sized argument buffer through `RuntimeContext`;
 they are not limited to the historical 64 argument slots. Python launches and
 the C API now follow that storage contract, including loaded Kernel/Graph

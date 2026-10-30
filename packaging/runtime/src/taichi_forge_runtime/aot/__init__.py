@@ -15,6 +15,7 @@ from ._workspace import WorkspaceBusyError, WorkspaceLease, WorkspacePool
 from ._domain import Completion, ExecutionDomain, CudaExecutionDomain, VulkanExecutionDomain
 from ._struct import StructLayout, StructMember
 from ._snode_instance import SNodeInstance
+from .._static_values import StaticDType
 
 __all__ = ["AotError", "Runtime", "Module", "NativeResource", "NdArray", "Kernel", "Graph", "BoundCall", "PreparedCall", "Scalar", "ExecutionPlan", "SubmissionTicket", "WorkspaceBusyError", "WorkspaceLease", "WorkspacePool", "Completion", "ExecutionDomain", "CudaExecutionDomain", "VulkanExecutionDomain"]
 __all__ += ["CudaVulkanContextBinding", "configure_cuda_context", "cuda_context_info"]
@@ -22,3 +23,4 @@ __all__ += ["CudaExternalReadyGate", "VulkanExternalReadyGate", "VulkanExternalB
 __all__ += ["StructLayout", "StructMember"]
 __all__ += ["SNodeInstance"]
 __all__ += ["CompletionSet", "CompletionWaitResult"]
+__all__ += ["StaticDType"]

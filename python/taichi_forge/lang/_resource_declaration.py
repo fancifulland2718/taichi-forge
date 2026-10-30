@@ -190,6 +190,15 @@ class ResourceScope:
             raise ValueError("Normal static declarations require finite choices")
         self._declare_value(name, StaticValue(choices=choices, kernel_only=kernel_only))
 
+    def static_dtype(self, name, *, choices, kernel_only=False):
+        """Declare a primitive DSL type specialization at its normal selection site."""
+        from taichi_forge.aot._component import StaticValue, _static_value
+
+        choices = tuple(choices)
+        if any(_static_value(value)[0] != "dtype" for value in choices):
+            raise ValueError("Static dtype choices require actual qualified DSL primitive types")
+        self._declare_value(name, StaticValue(choices=choices, kernel_only=kernel_only))
+
     def dim(self, name):
         if not isinstance(name, str) or not name.isidentifier():
             raise ValueError("A dimension requires an explicit owner attribute name")

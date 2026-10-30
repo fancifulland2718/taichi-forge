@@ -30,6 +30,14 @@ module.archive("component.tcm")
 编译器只识别最外层角色并核对实际导入绑定，不执行类型参数、注解调用或任意 Python
 getter。导入绑定被替换后，同样不能复用原候选。
 
+原始 dtype 属性可在正常选择处使用
+`scope.static_dtype("precision", choices=(ti.f32, ti.f64))`。当前仅接受既有 AOT 标量类型，
+不包含 Python `float`/`int`、张量类型或任意类型对象。实际读取将独立的 `dtype` 标记纳入
+代码身份，与字符串配置区分；未用类型不增加数值依赖。消费端通过
+`taichi_forge_runtime.aot.StaticDType("f64")` 选择配置，无需导入 DSL；producer 仍使用真实
+DSL 类型，不能以消费端标记替换捕获。精度变化选择另一份代码，动态模型尺寸可复用该代码。
+CPU/CUDA 已验证舍入差异、缓存校验及冻结产物消费；此声明不扩大后端自身的 dtype 能力。
+
 `Component` 在组件层声明属性：`RuntimeValue` 支持标量和固定 vector/matrix，
 `Array` 支持完整的受管理 Ndarray，`StaticValue` 支持不可变标量/tuple 配置。
 可选 `StaticValue(choices=(...))` 声明有限部署配置域；它是准入约束，代码身份仍仅使用

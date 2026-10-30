@@ -31,7 +31,7 @@ from taichi_forge.lang.util import cook_dtype
 from taichi_forge.types import primitive_types
 from taichi_forge.types.ndarray_type import NdarrayType
 from taichi_forge.types._argument_descriptor import describe_element_type
-from taichi_forge_runtime._static_values import static_key
+from taichi_forge_runtime._static_values import StaticDType, static_key
 
 
 def _digest(value):
@@ -41,6 +41,12 @@ def _digest(value):
 def _static_value(value):
     # No repr(), object IDs, getters or user-defined serialization in a key.
     try:
+        if type(value) is StaticDType:
+            raise ValueError("StaticDType is consumer configuration; a producer capture requires the actual DSL dtype")
+        if type(value) is tuple:
+            return ("tuple", tuple(_static_value(item) for item in value))
+        if id(value) in primitive_types.type_ids and value is not int and value is not float and value is not bool:
+            return static_key(StaticDType(str(value)))
         return static_key(value)
     except ValueError as error:
         raise TaichiCompilationError(str(error)) from error
