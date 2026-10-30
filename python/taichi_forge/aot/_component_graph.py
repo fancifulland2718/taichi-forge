@@ -691,6 +691,16 @@ def compile_component_graph(component, record, *args, initializer=None, _build=N
             contract["version"] = max(contract["version"], 3)
             contract["required_capabilities"].append("component_static_choices_v1")
             contract["configuration"] = configuration
+        # Public provenance for normal Host model preparation. Attribute paths
+        # come from declarations, never from decoding a generated capture ID.
+        # Recording options belong to the root call, not to the model owner.
+        contract["compilation"]["configuration_sources"] = {
+            name: dict(
+                kind="recording_argument" if isinstance(capture._choices[name], RootOption) else "attribute",
+                path=list(component._paths[name]),
+            )
+            for name in configuration
+        }
         if _build is not None:
             _build.check_time("after backend compilation")
         field_io = _compile_fixed_field_io(component, capture.owner, contract, _build)

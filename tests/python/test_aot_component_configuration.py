@@ -1,6 +1,9 @@
 """Finite root admission is separate from actual per-kernel specialization."""
 
 import struct
+import json
+from types import SimpleNamespace
+from zipfile import ZipFile
 
 import numpy as np
 import pytest
@@ -10,6 +13,101 @@ from taichi_forge.lang import kernel_impl
 from taichi_forge_runtime.aot import Runtime
 from tests import test_utils
 from tests.python.test_aot_component_dense import _DenseModel, _environment
+
+
+@ti.data_oriented
+class _NestedConfiguration(_DenseModel):
+    def __init__(self, n):
+        super().__init__(n, n - 1)
+        self.options = SimpleNamespace(scale=True, capacity_stage=False)
+
+    @ti.kernel
+    def evaluate(self):
+        for i in range(self.active):
+            self.x[i] = self.gravity[0]
+            if ti.static(self.options.scale):
+                self.x[i] *= 2
+
+    def record(self, builder, *, repeat=1):
+        for _ in range(repeat):
+            builder.dispatch(self.evaluate)
+        if self.options.capacity_stage:
+            builder.dispatch(self.capacity_pass)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_configuration_sources_preserve_record_and_root_argument_provenance(tmp_path):
+    from taichi_forge.aot import RootOption
+    from taichi_forge.aot._component import Record
+
+    env = Component(**_environment().declarations,
+        options=Record(scale=StaticValue(choices=(False, True)),
+                       capacity_stage=StaticValue(choices=(False, True))),
+        repeat=RootOption(choices=(1, 2)))
+    model = _NestedConfiguration(7)
+    root = env.compile_graph(model.record, repeat=2)
+    sources = root.contract["compilation"]["configuration_sources"]
+    assert {tuple(spec["path"]) for spec in sources.values()} == {
+        ("options", "scale"), ("options", "capacity_stage"), ("repeat",)}
+    assert sources["repeat"] == dict(kind="recording_argument", path=["repeat"])
+    assert all(spec["kind"] == "attribute" for key, spec in sources.items() if key != "repeat")
+    module = ti.aot.Module()
+    root.export(module, "step")
+    artifact = tmp_path / "sources.tcm"
+    module.archive(str(artifact))
+    with Runtime("cpu") as runtime, runtime.load_module(artifact) as loaded:
+        component = loaded.component("step")
+        assert component.configuration_sources() == sources
+        observed = component.configuration_sources()
+        observed["repeat"]["path"].append("changed")
+        assert component.configuration_sources() == sources
+        # Ordinary new Host model and recording inputs, without generated-name
+        # parsing or copying selected values from the frozen artifact.
+        normal = SimpleNamespace(options=SimpleNamespace(scale=True, capacity_stage=False))
+        arguments = dict(repeat=2)
+        configuration = {}
+        for name, source in component.configuration_sources().items():
+            if source["kind"] == "recording_argument":
+                value = arguments[source["path"][0]]
+            else:
+                value = normal
+                for attribute in source["path"]:
+                    value = getattr(value, attribute)
+            configuration[name] = value
+        with component.instantiate(dict(capacity=13, active=11), configuration=configuration) as instance:
+            instance.initialize(zero=component.contract["resources"])
+            with instance.prepare(values=dict(gravity=[3, 0, 0])) as call:
+                call.run()
+            np.testing.assert_array_equal(np.frombuffer(instance.resource("x").read(), np.float32), [6]*11+[0]*2)
+        with pytest.raises(ValueError, match="different compiled variant"):
+            component.instantiate(dict(capacity=13, active=11), configuration={**configuration, "repeat": 1})
+
+    with ZipFile(artifact) as archive:
+        contents = {name: archive.read(name) for name in archive.namelist()}
+    for label, mutation, message in (
+        ("missing", lambda facts: facts.pop("repeat"), "cover the admitted inputs"),
+        ("invalid", lambda facts: facts["repeat"].update(path=["../repeat"]), "source path"),
+        ("kind", lambda facts: facts["repeat"].update(kind="getter"), "source path"),
+    ):
+        contract = json.loads(contents["components/step.json"])
+        mutation(contract["compilation"]["configuration_sources"])
+        changed = tmp_path / (label + ".tcm")
+        with ZipFile(changed, "w") as archive:
+            for name, payload in contents.items():
+                archive.writestr(name, json.dumps(contract) if name == "components/step.json" else payload)
+        with Runtime("cpu") as runtime, runtime.load_module(changed) as loaded:
+            with pytest.raises(ValueError, match=message):
+                loaded.component("step")
+    # Missing optional provenance does not invalidate an existing numerical ABI.
+    contract = json.loads(contents["components/step.json"])
+    del contract["compilation"]["configuration_sources"]
+    legacy = tmp_path / "legacy.tcm"
+    with ZipFile(legacy, "w") as archive:
+        for name, payload in contents.items():
+            archive.writestr(name, json.dumps(contract) if name == "components/step.json" else payload)
+    with Runtime("cpu") as runtime, runtime.load_module(legacy) as loaded:
+        with pytest.raises(ValueError, match="rebuild it"):
+            loaded.component("step").configuration_sources()
 
 
 @ti.data_oriented

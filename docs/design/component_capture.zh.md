@@ -542,6 +542,14 @@ consumer 在 `instantiate(dimensions, configuration=...)` 中声明正常模型�
 将四个未取得资格的算法开关明确限定为 False，独立消费者也检查该约束；不能只凭 shape
 接受另一算法的模型。模型拓扑数据与这些声明的一致性仍由正常模型准备层负责。
 
+`component.configuration_sources()` 查询每个准入输入的声明路径，例如
+`{"kind": "attribute", "path": ["time_plan", "substeps"]}`；普通构图参数的
+kind 为 `recording_argument`。消费者不必解码内部捕获 ID，也不应把 producer 的
+selected 值当作新模型输入。查询返回 `compilation.configuration_sources` 的副本，
+不遍历对象、执行 getter 或放宽变体校验。新 Graph 导出增加这项可选编译事实，
+数值 ABI 和代码身份不变；旧产物仍可加载，缺少来源时该查询明确要求重建。
+已提供的来源必须覆盖全部配置输入，并具有合法路径与类别。
+
 `RootOption(choices=(...))` 在同一声明环境中标明普通 recording 参数，例如
 `report_power`；取正常调用实参或签名默认值，不把它当作 `self` 数值捕获。它使用同一
 v3 配置合同，消费端选择后不再执行 Python 构图。正常组件的新增功率诊断已经通过

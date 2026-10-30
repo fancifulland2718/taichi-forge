@@ -161,6 +161,19 @@ class Component:
                             if dependency == key and static_key(read_static_key(value)) != selected:
                                 raise ValueError("Component configuration differs from compiled static dependencies")
                     self._configuration[key] = (selected, choices)
+            configuration_sources = contract.get("compilation", {}).get("configuration_sources")
+            if "configuration_sources" in contract.get("compilation", {}):
+                if not isinstance(configuration_sources, dict) or set(configuration_sources) != set(self._configuration):
+                    raise ValueError("Component configuration sources must cover the admitted inputs")
+                for source in configuration_sources.values():
+                    if (
+                        not isinstance(source, dict) or set(source) != {"kind", "path"}
+                        or source["kind"] not in ("attribute", "recording_argument")
+                        or not isinstance(source["path"], list) or not source["path"]
+                        or any(not isinstance(part, str) or not part.isidentifier() for part in source["path"])
+                        or source["kind"] == "recording_argument" and len(source["path"]) != 1
+                    ):
+                        raise ValueError("Invalid component configuration source path")
             if contract["version"] == 5 or contract["version"] >= 6 and contract["constraints"]:
                 capabilities.add("component_dimension_constraints_v1")
                 if not contract["constraints"]:
@@ -379,6 +392,19 @@ class Component:
                     if symbol in names and binding["kind"] == "value"},
             arguments={name: spec for name, spec in contract["explicit"].items() if name in names},
         )
+
+    def configuration_sources(self):
+        """Query declared Host attribute paths and normal recording arguments.
+
+        The consumer supplies its own model values under the returned input IDs.
+        Paths describe provenance; this query does not traverse Python objects,
+        execute getters, select variants or bypass instantiate's static checks.
+        Older artifacts remain loadable but must be rebuilt for this query.
+        """
+        sources = self.contract.get("compilation", {}).get("configuration_sources")
+        if sources is None:
+            raise ValueError("Artifact has no configuration source paths; rebuild it to query model provenance")
+        return sources
 
     def instantiate(self, dimensions, *, configuration=None):
         supplied = dict(configuration or {})

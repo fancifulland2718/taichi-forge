@@ -753,6 +753,17 @@ consumer. Shape compatibility alone cannot admit another algorithm. The normal
 model-preparation layer still owns consistency between topology data and these
 declarations.
 
+`component.configuration_sources()` queries each admitted input's declaration
+path, for example `{"kind": "attribute", "path": ["time_plan", "substeps"]}`.
+Normal root options use `kind="recording_argument"`. Consumers need not decode
+generated capture IDs or read the producer's selected values as new-model inputs.
+The query returns a copy of `compilation.configuration_sources`; it does not
+traverse objects, invoke getters or relax variant checks. New Graph exports
+include this optional compiler projection without changing numerical ABI or code
+identity. Old artifacts remain loadable, but the query requires rebuilding when
+the provenance is absent. Present provenance must cover all configuration inputs
+and contain valid paths and kinds.
+
 `RootOption(choices=(...))` declares a normal recording argument, such as
 `report_power`, in the same environment. Its value comes from normal call
 arguments or defaults, not a numerical `self` capture. It uses the same v3
