@@ -1189,28 +1189,22 @@ class ASTTransformer(Builder):
         return inner
 
     @staticmethod
-    def build_static_and(operands):
-        for operand in operands:
-            if not operand.ptr:
-                return operand.ptr
-        return operands[-1].ptr
-
-    @staticmethod
-    def build_static_or(operands):
-        for operand in operands:
-            if operand.ptr:
-                return operand.ptr
-        return operands[-1].ptr
-
-    @staticmethod
     def build_BoolOp(ctx, node):
-        build_stmts(ctx, node.values)
         if ctx.is_in_static_scope():
-            ops = {
-                ast.And: ASTTransformer.build_static_and,
-                ast.Or: ASTTransformer.build_static_or,
-            }
-        elif impl.get_runtime().short_circuit_operators:
+            # Python static expressions select operands before lowering them.
+            # An unreachable attribute/call must not execute or become a
+            # deployment capture (including a dynamic value in a dead arm).
+            is_and = isinstance(node.op, ast.And)
+            for index, value in enumerate(node.values):
+                build_stmt(ctx, value)
+                node.ptr = value.ptr
+                if index == len(node.values) - 1:
+                    break
+                if bool(node.ptr) != is_and:
+                    break
+            return node.ptr
+        build_stmts(ctx, node.values)
+        if impl.get_runtime().short_circuit_operators:
             ops = {
                 ast.And: ASTTransformer.build_bool_op(ti_ops.logical_and),
                 ast.Or: ASTTransformer.build_bool_op(ti_ops.logical_or),
