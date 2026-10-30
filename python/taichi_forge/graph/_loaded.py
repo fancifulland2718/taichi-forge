@@ -556,16 +556,19 @@ class LoadedComponentExecutable(LoadedPlanExecutable):
         self.validate_graph_lifetime()
         contract = component.contract
         self.component_name, self.name = contract["name"], contract["execution"]
-        self.plan, self.execution = component._plan, execution
+        self.plan, self.execution = component._replay_plan, execution
         self.digest = hashlib.sha256(self.plan.to_json().encode("utf8")).hexdigest()
         self.values, self.dimensions, self.explicit = dict(values or {}), dict(dimensions or {}), dict(arguments or {})
-        if set(self.values) != set(contract["values"]) or set(self.explicit) != set(contract["explicit"]):
+        inputs = component.inputs()
+        if set(self.values) != set(inputs["values"]) or set(self.explicit) != set(inputs["arguments"]):
             raise ValueError("Loaded component public value/argument symbols differ from its contract")
         active = {name for name, schema in contract["dimensions"].items() if len(schema) == 4 and schema[2] == "active"}
         if not set(self.dimensions) <= active or set(self.dimensions) & component._layout_dimensions:
             raise ValueError("Loaded component dimension symbols may only update non-layout active counts")
         self.arguments = dict(self.explicit)
         for slot, binding in contract["bindings"].items():
+            if slot not in self.plan.argument_names:
+                continue
             symbols = (
                 self.values if binding["kind"] == "value" else self.dimensions if binding["kind"] == "dimension" else {}
             )

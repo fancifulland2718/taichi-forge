@@ -345,17 +345,19 @@ class _GraphCapture:
 class _LifecycleExport:
     """Graph-node boundaries and their authoritative lowering projection."""
 
-    def __init__(self, initialization_nodes, setup_nodes=()):
+    def __init__(self, initialization_nodes, setup_nodes=(), operation_nodes=()):
         self.initialization_nodes = initialization_nodes
         self.setup_nodes = tuple(setup_nodes)
         self.setup_operations = ()
+        self.operation_nodes = tuple(operation_nodes)
+        self.operation_bindings = ()
 
 
 class ComponentGraph:
     """Frozen normal Graph plus its compiler-produced resource contract."""
 
     def __init__(self, graph, contract, array_types=None, fixed_dependencies=None, field_io=None,
-                 initialization_nodes=0, setup_nodes=()):
+                 initialization_nodes=0, setup_nodes=(), operation_nodes=()):
         self._graph = graph
         self._contract = json.dumps(contract, sort_keys=True)
         self._array_types = dict(array_types or {})
@@ -363,6 +365,7 @@ class ComponentGraph:
         self._field_io = dict(field_io or {})
         self._initialization_nodes = initialization_nodes
         self._setup_nodes = tuple(setup_nodes)
+        self._operation_nodes = tuple(operation_nodes)
 
     @property
     def contract(self):
@@ -371,7 +374,7 @@ class ComponentGraph:
     def export(self, module, name):
         if name in module._component_roots:
             raise ValueError(f"Duplicate component root {name!r}")
-        lifecycle = _LifecycleExport(self._initialization_nodes, self._setup_nodes)
+        lifecycle = _LifecycleExport(self._initialization_nodes, self._setup_nodes, self._operation_nodes)
         plan = module.add_execution_plan(name, self._graph, snapshot_state=False,
                                          _fixed_snode_dependencies=tuple(self._fixed_dependencies.values()),
                                          _component_lifecycle=lifecycle)
@@ -379,8 +382,10 @@ class ComponentGraph:
         if contract["version"] >= 8:
             contract["fixed_bindings"] = {}
             contract["field_io_bindings"] = {}
-        if contract["version"] == 9:
+        if contract["version"] >= 9:
             contract["setup_bindings"] = list(lifecycle.setup_operations)
+        if contract["version"] >= 10:
+            contract["operation_bindings"] = list(lifecycle.operation_bindings)
         try:
             if self._field_io:
                 contract["field_io_bindings"] = {}
@@ -413,8 +418,10 @@ class ComponentGraph:
                 module._graph_export_failed = True
                 raise TaichiCompilationError("Generic control components cannot capture producer state")
             facts = dict(plan=json.loads(plan.to_json()), semantic_key=contract["semantic_key"])
-            if contract["version"] == 9:
+            if contract["version"] >= 9:
                 facts["setup_bindings"] = contract["setup_bindings"]
+            if contract["version"] >= 10:
+                facts["operation_bindings"] = contract["operation_bindings"]
             contract["execution_fingerprint"] = _digest(facts)
         module._component_roots[name] = contract
         if self._fixed_dependencies:
@@ -662,13 +669,14 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     return contract
 
 
-def compile_component_graph(component, record, *args, initializer=None, setup=None, _build=None, **kwargs):
+def compile_component_graph(component, record, *args, initializer=None, setup=None, operations=None, _build=None, **kwargs):
     from taichi_forge.graph import GraphBuilder
 
     capture = _GraphCapture(component, record, args, kwargs, _build)
     builder = GraphBuilder(_capture_recipe_sources=False, _component_capture=capture)
     initialization_nodes = ()
     setup_nodes = []
+    operation_nodes = []
     if setup is not None:
         from collections.abc import Mapping
 
@@ -696,6 +704,23 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
         initialization_nodes = tuple(builder._nodes)
         if len(initialization_nodes) <= (setup_nodes[-1][1] if setup_nodes else 0):
             raise TaichiCompilationError("Component initializer must record a nonempty normal Graph")
+    if operations is not None:
+        from collections.abc import Mapping
+
+        if initializer is None or not isinstance(operations, Mapping) or not operations:
+            raise ValueError("Component operations require named normal recordings and an initializer")
+        for name, entry in operations.items():
+            if not isinstance(name, str) or not name.isidentifier():
+                raise ValueError("Component operation names must be identifiers")
+            if not callable(entry) or getattr(entry, "__self__", None) is not capture.owner:
+                raise TaichiCompilationError("Component operations require normal recordings with the same owner")
+            entry(builder)
+            builder._flush_graph_builder()
+            end = len(builder._nodes)
+            if end <= (operation_nodes[-1][1] if operation_nodes else len(initialization_nodes)):
+                raise TaichiCompilationError("Component operations must record nonempty normal Graphs")
+            operation_nodes.append((name, end))
+    operation_prefix = tuple(builder._nodes) if operation_nodes else ()
     record(builder, *args, **kwargs)
     contract = capture.finish(builder)
     if _build is not None:
@@ -707,6 +732,9 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
             or len(graph._spec.nodes) == len(initialization_nodes)
         ):
             raise TaichiCompilationError("Component lifecycle requires a preserved initialization/replay boundary")
+        if operation_nodes and (len(graph._spec.nodes) <= operation_nodes[-1][1]
+                or tuple(graph._spec.nodes[:len(operation_prefix)]) != operation_prefix):
+            raise TaichiCompilationError("Component operations require preserved boundaries and nonempty default replay")
         contract = _complete_compiler_contract(graph, contract, capture, lifecycle=bool(initialization_nodes))
         # Host choices remain part of admission even if no numerical entry uses
         # them. Explicit kernel-only policy follows the final compiler closure,
@@ -755,13 +783,18 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
                 contract["version"] = 9
                 contract["lifecycle"]["setup_nodes"] = setup_nodes
                 contract["required_capabilities"].append("component_cold_setup_v1")
+            if operation_nodes:
+                contract["version"] = 10
+                contract["lifecycle"].setdefault("setup_nodes", [])
+                contract["lifecycle"]["operation_nodes"] = operation_nodes
+                contract["required_capabilities"].append("component_named_operations_v1")
         if contract["version"] >= 4:
             from taichi_forge_runtime.aot._component import _control_identity
 
             contract["semantic_key"] = _control_identity(contract)
         fixed = {group: capture.fixed_dependencies[group] for group in contract.get("fixed_groups", {})}
         return ComponentGraph(graph, contract, capture.array_types, fixed, field_io,
-                              len(initialization_nodes), setup_nodes)
+                              len(initialization_nodes), setup_nodes, operation_nodes)
     except BaseException:
         graph.close()
         raise

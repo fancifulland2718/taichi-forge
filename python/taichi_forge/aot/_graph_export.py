@@ -277,6 +277,8 @@ def export_graph(
             context.operations = context.operations[boundary:]
             component_lifecycle.setup_operations = tuple(
                 (name, operation_ends[end - 1]) for name, end in component_lifecycle.setup_nodes)
+            component_lifecycle.operation_bindings = tuple(
+                (name, operation_ends[end - 1] - boundary) for name, end in component_lifecycle.operation_nodes)
         submission_recipe = None
         if getattr(binding_factory, "__dict__", {}).get("_export_aot_submission") is not None:
             submission_recipe = binding_factory._export_aot_submission(spec, operation_ends)
@@ -292,14 +294,17 @@ def export_graph(
 
         constraints = export_constraints(spec, context.binding, additional=context.binding_constraints)
         if component_initialization_nodes:
-            from taichi_forge_runtime.aot._component_lifecycle import split_component_lifecycle, split_component_setup
+            from taichi_forge_runtime.aot._component_lifecycle import (
+                split_component_lifecycle, split_component_setup, split_component_operations)
 
             try:
-                initial, _ = split_component_lifecycle(ExecutionPlan(
+                initial, replay = split_component_lifecycle(ExecutionPlan(
                     context.operations, initialization=context.initialization,
                     resources=context.resources, constraints=constraints or None))
                 if component_lifecycle.setup_operations:
                     split_component_setup(initial, component_lifecycle.setup_operations)
+                if component_lifecycle.operation_bindings:
+                    split_component_operations(replay, component_lifecycle.operation_bindings)
             except ValueError as error:
                 raise TaichiRuntimeError(str(error)) from error
         if context.storage_recipe is not None:

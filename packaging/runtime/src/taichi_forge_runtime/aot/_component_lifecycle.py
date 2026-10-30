@@ -83,3 +83,50 @@ def split_component_setup(initializer, boundaries):
     result = {name: ExecutionPlan(ops, constraints=rules or None)
               for (name, ops), rules in zip(phases, constraints)}
     return {name: plan for name, plan in result.items() if name is not None}, result[None]
+
+
+def split_component_operations(replay, boundaries):
+    """Select normal operation regions using existing Plan reference validation.
+
+    State shared across entries must be instance-owned. Private zero scratch
+    belongs to exactly one entry; sharing it across separately prepared calls
+    would otherwise silently change its lifetime and initialization semantics.
+    """
+    document = json.loads(replay.to_json())
+    if set(document) - {"version", "operations", "constraints", "resources"}:
+        raise ValueError("Component operation recipes require shared-lifetime qualification")
+    operations = document["operations"]
+    start, names, phases = 0, set(), []
+    if not isinstance(boundaries, (list, tuple)) or not boundaries:
+        raise ValueError("Invalid component operation boundary")
+    for item in boundaries:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ValueError("Invalid component operation boundary")
+        name, end = item
+        if (not isinstance(name, str) or not name.isidentifier() or name in names
+                or type(end) is not int or not start < end < len(operations)):
+            raise ValueError("Invalid component operation boundary")
+        names.add(name)
+        phases.append((name, operations[start:end]))
+        start = end
+    phases.append((None, operations[start:]))
+    raw = [ExecutionPlan(ops) for _, ops in phases]
+    resources = [[] for _ in phases]
+    for resource in document.get("resources", []):
+        selected = [i for i, plan in enumerate(raw) if resource["name"] in plan.argument_names]
+        if len(selected) != 1:
+            raise ValueError("Component operations cannot share Plan-private resources; use instance-owned state")
+        resources[selected[0]].append(resource)
+    plans = [ExecutionPlan(ops, resources=private or None)
+             for (_, ops), private in zip(phases, resources)]
+    constraints = [[] for _ in plans]
+    for requirement in document.get("constraints", []):
+        refs = validate_constraints([requirement], replay._retained_argument_names)
+        selected = [i for i, plan in enumerate(plans) if refs <= plan._retained_argument_names]
+        if not selected:
+            raise ValueError("Component operation cross-phase constraint requires shared-lifetime qualification")
+        for index in selected:
+            constraints[index].append(requirement)
+    result = {name: ExecutionPlan(ops, resources=private or None, constraints=rules or None)
+              for (name, ops), private, rules in zip(phases, resources, constraints)}
+    return {name: plan for name, plan in result.items() if name is not None}, result[None]

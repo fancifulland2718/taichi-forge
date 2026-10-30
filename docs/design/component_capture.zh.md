@@ -649,3 +649,24 @@ native ABI 继续共用。
 readiness/冷边界拒绝、reset 和错误分界拒绝。GeoPhys 另在冻结 CUDA PGS 完整步验证
 原体数据解包，故意污染质量输出以证明 setup 实际执行；不扩大为全部刚体构造、资源族
 或后端组合的资格。
+
+
+### 同一实例的正常命名操作
+
+`compile_graph(record, initializer=finish, operations={"refresh": refresh})`
+把同一 owner 的其他正常录制入口纳入组件。名称对应完整正常操作，而非逐个 Kernel；
+默认 replay 仍是 `record`，不会执行 `refresh`。编译器收集资源并集，通过原 Graph
+lowering 投影分界。v10 合同要求 `component_named_operations_v1`，实际分界纳入
+执行 fingerprint；当前要求显式最终 initializer。
+
+`component.operation_entries` 查询名称，`component.inputs(operation="refresh")`
+查询该入口实际所需值/参数。`instance.prepare(operation="refresh", values=...)`
+返回普通 prepared call，与其他调用共用实例资源及有序执行域，保留原 native 租约和
+不可变绑定。prepare/调用不会隐式初始化、改动 readiness 或切换模块共享指针。
+实例关闭/reset 仍须退休其所有调用。loaded Graph 的默认调用只查询默认 replay ABI，
+不要求仅被其他入口或 initializer 使用的参数。
+
+绑定约束完整保留在适用入口；跨独立 prepared 入口的约束拒绝。Plan 私有 scratch
+必须只属于一个入口，跨入口持久共享状态须在实例资源中声明。未知名称和被修改的
+lowering 分界拒绝。CPU/CUDA 门槛覆盖不同尺寸实例、状态保留、冷准备兼容、loaded
+默认调用及上述失败输入；其他资源/后端组合仍须分别取得资格。

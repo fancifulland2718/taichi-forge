@@ -942,3 +942,31 @@ readiness and cold-boundary rejection, reset, and corrupted boundary rejection.
 GeoPhys additionally verifies its original body decoder in a frozen CUDA PGS
 full step, with poisoned mass outputs proving that setup executes. This does not
 qualify every rigid constructor, resource family or backend combination.
+
+
+### Named normal operations on one instance
+
+`compile_graph(record, initializer=finish, operations={"refresh": refresh})`
+exports additional normal recordings under the same component owner. Names identify
+whole normal operations, not individual kernels. The default replay remains `record`;
+it does not execute `refresh`. The compiler collects their resource union once and
+projects boundaries through the existing Graph lowering. Contract v10 requires
+`component_named_operations_v1` and authenticates the lowered boundaries in its
+execution fingerprint. This currently requires an explicit final initializer.
+
+`component.operation_entries` lists names; `component.inputs(operation="refresh")`
+queries only that operation's value/argument requirements. Call
+`instance.prepare(operation="refresh", values=...)` to obtain an ordinary prepared
+call. It shares the instance's resources and ordered execution domain with the
+other calls, retaining the same native leases and immutable bindings. Preparation
+and invocation do not implicitly rerun initialization, alter readiness or replace
+module-level pointers. Closing/resetting an instance still retires all its calls.
+Loaded Graph composition queries the default replay's ABI, so an input used only
+by a named operation or initializer is not required by default dispatch.
+
+Whole binding constraints stay attached to each applicable entry. A requirement
+spanning separately prepared entries rejects; Plan-private scratch must belong to
+exactly one entry. Persistent shared work belongs in instance resource declarations.
+Unknown names and modified lowered boundaries reject. CPU/CUDA gates cover independent
+sizes, retained state, setup compatibility, loaded default dispatch and these failures.
+Other resource/backend combinations retain their separate qualification requirements.
