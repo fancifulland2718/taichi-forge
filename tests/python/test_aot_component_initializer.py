@@ -57,8 +57,22 @@ class _InitializedState:
 
     def record_private(self, builder):
         scratch = builder.private_ndarray("scratch", ti.i32, (1,))
+        builder.dispatch(self.replay_scratch_kernel, scratch)
+
+    @ti.kernel
+    def replay_scratch_kernel(self, scratch: ti.types.ndarray(ti.i32, 1)):
+        scratch[0] += self.bump
+        for i in range(8):
+            self.state[i] += scratch[0]
+
+    def record_shared_initializer(self, builder):
+        scratch = builder.private_ndarray("scratch", ti.i32, (1,))
+        self.shared_scratch = scratch
         builder.dispatch(self.scratch_kernel, scratch)
-        self.record(builder)
+        self.record_initialize(builder)
+
+    def record_shared_replay(self, builder):
+        builder.dispatch(self.replay_scratch_kernel, self.shared_scratch)
 
     def record_empty(self, builder):
         pass
@@ -72,10 +86,56 @@ def test_initializer_rejects_wrong_owner_empty_and_unqualified_private_lifetimes
         component.compile_graph(state.record, initializer=other.record_initialize)
     with pytest.raises(ti.TaichiCompilationError, match="nonempty"):
         component.compile_graph(state.record, initializer=state.record_empty)
-    root = component.compile_graph(state.record_private, initializer=state.record_initialize)
+    root = component.compile_graph(state.record_shared_replay, initializer=state.record_shared_initializer)
     with pytest.raises(ti.TaichiRuntimeError, match="shared-lifetime qualification"):
         root.export(ti.aot.Module(), "step")
     root._graph.close()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_initializer_preserves_replay_private_scratch_and_instance_reset(tmp_path):
+    state = _InitializedState(False)
+    root = Component.from_owner(state).compile_graph(state.record_private, initializer=state.record_initialize)
+    module = ti.aot.Module(ti.lang.impl.current_cfg().arch)
+    plan = root.export(module, "step")
+    document = json.loads(plan.to_json())
+    assert len(document["resources"]) == 1
+    assert document["resources"][0]["zero_initialize"]
+    artifact = tmp_path / "private_replay"
+    module.save(str(artifact))
+    arch = "cuda" if ti.lang.impl.current_cfg().arch == ti.cuda else "x64"
+    ti.reset()
+    with Runtime(arch) as runtime, runtime.load_module(artifact) as loaded:
+        component = loaded.component("step")
+        assert set(component.inputs(initialization=True)["values"]) == {"seed"}
+        assert set(component.inputs()["values"]) == {"bump"}
+        with component.instantiate({}) as first, component.instantiate({}) as second:
+            for instance, offset in ((first, 10), (second, 100)):
+                instance.initialize(dict(initial=struct.pack("<8i", *range(offset, offset + 8))), zero=["state"])
+                instance.initialize_state(values=dict(seed=3))
+
+            def advance(instance, repeats):
+                with instance.prepare(values=dict(bump=2)) as call:
+                    with pytest.raises(RuntimeError, match="cold boundary"):
+                        instance.initialize_state(values=dict(seed=99), reset=True)
+                    call.initialize()
+                    for _ in range(repeats):
+                        call.run()
+                    runtime.wait()
+
+            def read(instance):
+                return struct.unpack("<8i", instance.resource("state").read())
+
+            advance(first, 2)  # Same prepare retains scratch: +2 then +4.
+            advance(second, 1)
+            advance(first, 1)  # New prepare resets scratch only: +2.
+            assert read(first) == tuple(range(21, 29))
+            assert read(second) == tuple(range(105, 113))
+            first.initialize_state(values=dict(seed=1), reset=True)
+            assert read(first) == tuple(range(11, 19))
+            first.close()
+            advance(second, 1)
+            assert read(second) == tuple(range(107, 115))
 
 
 @pytest.mark.parametrize("sparse", [False, True])

@@ -351,19 +351,12 @@ class Component:
             self._initializer_plan = None
             self._replay_plan = plan
             if contract["version"] == 8:
-                from ._plan import ExecutionPlan
+                from ._component_lifecycle import split_component_lifecycle
 
-                if (not document.get("initialization") or any(document.get(key) for key in (
-                        "resources", "gradients", "constraints", "binding_strategy", "submission_recipe", "storage_recipe"))):
-                    raise ValueError("Component initializer requires qualified instance-owned resources")
                 # Both phases are projections of the validated native Plan.
                 # Keep the full Plan for native tree-closure instantiation.
                 # A fresh replay preparation never reruns the model initializer.
-                self._initializer_plan = ExecutionPlan(document["initialization"])
-                replay_document = dict(document)
-                replay_document.pop("initialization")
-                replay_document.pop("version")
-                self._replay_plan = ExecutionPlan(**replay_document)
+                self._initializer_plan, self._replay_plan = split_component_lifecycle(plan)
             self._module, self._plan = module, plan
             self._contract_json = json.dumps(contract)
             self._aliases = aliases

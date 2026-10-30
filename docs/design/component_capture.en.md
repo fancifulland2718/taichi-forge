@@ -834,9 +834,14 @@ Failure does not mark success or promise rollback of accepted numerical writes.
 Dense/array explicit initialization prerequisites remain: write effects alone do
 not prove that a numerical initializer covers every element.
 
-This slice qualifies instance-owned Dense/fixed-SNode resources. Initializers
-combined with Plan-private resources, cross-phase binding constraints or special
-submission/storage recipes reject pending shared-lifetime qualification. Existing
+This slice qualifies instance-owned Dense/fixed-SNode resources and replay-only
+compact, zero-initialized Plan-private ndarrays. The existing Plan reference
+closure proves that initialization cannot access those private buffers; they
+retain preparation-local allocation and retirement, including a fresh scratch
+state after repreparation. Export and Runtime use the same phase check. Private
+resources referenced by initialization, other private resource kinds, cross-phase
+binding constraints and special submission/storage recipes still reject pending
+shared-lifetime qualification. Existing
 components without model initialization retain their behavior. Tests cover an
 initializer-only root, two instances, repreparation, reset, close isolation and
 Runtime-only consumption; this is not complete GeoPhys model preparation or

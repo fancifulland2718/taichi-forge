@@ -267,13 +267,20 @@ def export_graph(
             if (type(component_initialization_nodes) is not int
                     or not 0 < component_initialization_nodes < len(operation_ends)):
                 raise TaichiRuntimeError("Component initialization must precede a nonempty replay region")
-            if (context.initialization or context.resources or binding_strategy is not None
+            if (context.initialization or binding_strategy is not None
                     or context.storage_recipe is not None or gradients or argument_resources):
                 raise TaichiRuntimeError(
                     "Component instance initializers with Plan-private resources/recipes require shared-lifetime qualification")
             boundary = operation_ends[component_initialization_nodes - 1]
             context.initialization = context.operations[:boundary]
             context.operations = context.operations[boundary:]
+            from taichi_forge_runtime.aot._component_lifecycle import split_component_lifecycle
+
+            try:
+                split_component_lifecycle(ExecutionPlan(
+                    context.operations, initialization=context.initialization, resources=context.resources))
+            except ValueError as error:
+                raise TaichiRuntimeError(str(error)) from error
         submission_recipe = None
         if getattr(binding_factory, "__dict__", {}).get("_export_aot_submission") is not None:
             submission_recipe = binding_factory._export_aot_submission(spec, operation_ends)
