@@ -187,3 +187,75 @@ def test_derived_record_paths_keep_their_original_source_guard():
     other.buffers.facts = 15
     with pytest.raises(ti.TaichiCompilationError, match="self.buffers.facts.*declared at"):
         code.run(other_env, other)
+
+
+@ti.data_oriented
+class _DefinitionConstants:
+    OFFSET = 3
+    UNUSED = 17
+
+    def __init__(self, count, mode=True):
+        self.count, self.mode = count, mode
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        scope.constant("OFFSET")
+        scope.constant("OFFSET")  # Repeated identical declarations remain legal.
+        scope.constant("UNUSED")
+        scope.static("mode", choices=(False, True))
+        scope.output = scope.field(ti.i32, shape=scope.dim("count"))
+        self.tree = builder.finalize()
+
+    @ti.kernel
+    def evaluate(self):
+        for i in range(self.count):
+            self.output[i] = self.OFFSET
+            if ti.static(self.mode):
+                self.output[i] += 2
+
+    def record(self, builder):
+        builder.dispatch(self.evaluate)
+
+    def mutate_definition(self, builder):
+        self.record(builder)
+        self.UNUSED += 1
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_definition_constants_specialize_code_without_consumer_configuration(tmp_path):
+    from taichi_forge_runtime.aot import Runtime
+
+    first, other = _DefinitionConstants(3), _DefinitionConstants(7)
+    other.UNUSED = 19
+    env, other_env = Component.from_owner(first), Component.from_owner(other)
+    root = env.compile_graph(first.record)
+    reused = other_env.compile_graph(other.record)
+    assert root.contract["semantic_key"] == reused.contract["semantic_key"]
+    assert set(root.contract["configuration"]) == {"mode"}
+    assert dict(root.contract["entries"][0]["static"])["OFFSET"] == ["int", 3]
+    assert "UNUSED" not in dict(root.contract["entries"][0]["static"])
+    original = env.compile(first.evaluate)
+    other.OFFSET = 5
+    changed = other_env.compile(other.evaluate)
+    assert changed is not original
+    changed.run(other_env, other)
+    np.testing.assert_array_equal(other.output.to_numpy(), 7)
+    with pytest.raises(ValueError, match="different value declaration"):
+        ti.experimental.ResourceScope(first).static("OFFSET", choices=(3,))
+    with pytest.raises(ti.TaichiCompilationError, match="definition constants changed"):
+        env.compile_graph(first.mutate_definition)
+
+    module = ti.aot.Module()
+    root.export(module, "step")
+    artifact = tmp_path / "constant.tcm"
+    module.archive(str(artifact))
+    arch = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(arch) as runtime, runtime.load_module(artifact) as loaded:
+        component = loaded.component("step")
+        with pytest.raises(ValueError, match="configuration inputs differ"):
+            component.instantiate(dict(count=11), configuration=dict(mode=True, OFFSET=3))
+        with component.instantiate(dict(count=11), configuration=dict(mode=True)) as instance:
+            instance.initialize(zero=component.contract["resources"])
+            with instance.prepare() as call:
+                call.run()
+            np.testing.assert_array_equal(np.frombuffer(instance.resource("output").read(), np.int32), 5)

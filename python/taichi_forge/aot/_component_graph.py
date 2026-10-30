@@ -45,6 +45,12 @@ class _GraphCapture:
         self.array_types = {}
         self._array_values = {}
         self._members = {}
+        self._constants = tuple(
+            name for name, declaration in component.declarations.items()
+            if isinstance(declaration, StaticValue) and declaration.choices is None
+            and self.owner is not None and component.available(self.owner, name)
+        )
+        self._constant_snapshot = self._constant_values()
         self._choices = {
             name: declaration
             for name, declaration in component.declarations.items()
@@ -73,6 +79,9 @@ class _GraphCapture:
                     "its configuration must be frozen before Python graph construction"
                 )
             self.configuration = self._configuration()
+
+    def _constant_values(self):
+        return {name: _static_value(self.component.read(self.owner, name)) for name in self._constants}
 
     def _configuration(self):
         return {
@@ -293,6 +302,8 @@ class _GraphCapture:
             raise TaichiCompilationError("Component native regions require separate qualification")
         if self.configuration != self._configuration():
             raise TaichiCompilationError("Component configuration changed while recording its Graph; retry")
+        if self._constant_snapshot != self._constant_values():
+            raise TaichiCompilationError("Component definition constants changed while recording its Graph; retry")
         # Detect declaration/static mutation over the whole normal recording.
         for code in self.codes:
             if not code.matches(self.component, self.owner):

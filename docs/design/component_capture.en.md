@@ -123,6 +123,17 @@ and frozen Runtime consumption. Compiler facts expose `record_presence` and
 `test_aot_component_records.py` cover new dimensions, aliases, presence variants,
 unused members, rejected getters and Runtime consumption.
 
+Use `scope.constant("JOINT_KIND")` for an immutable numerical definition such as
+an enum code or a fixed algorithm coefficient. It is not a model configuration
+input: consumers do not supply it to `instantiate`. Actual reads retain its typed
+value in Kernel identity and producer cache guards; changing a used definition
+requires rebuilding the affected code. Unused constants do not change numerical
+identity. Recording rejects definition changes during Graph construction.
+Model-dependent choices still require `scope.static(..., choices=...)`, and
+runtime quantities require `scope.value`; declaring them constant would specialize
+the artifact rather than make them dynamic. CPU/CUDA tests in
+`test_resource_declaration.py` cover these distinctions and frozen consumption.
+
 Builtin `getattr(owner_or_record, static_name)` resolves through this same
 declaration path. It accepts two positional arguments, a compile-time string
 name and a declared owner/record; defaults and arbitrary Python getters are not

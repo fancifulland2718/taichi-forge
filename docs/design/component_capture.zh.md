@@ -91,6 +91,14 @@ Python Host 读取，也不推导容量约束。
 内部 ID 来恢复原属性路径。`test_aot_component_records.py` 覆盖 CPU/CUDA 的新尺寸、
 别名、存在性变体、未使用成员、getter 拒绝和 Runtime 消费。
 
+枚举编号、固定算法系数等不可变数值定义可用 `scope.constant("JOINT_KIND")`
+声明。它不属于模型配置，消费者不必向 `instantiate` 提供其值；实际读取仍将带类型
+的值纳入 Kernel 身份与 producer 缓存 guard，修改已使用定义需要重建相关代码。
+未使用常量不改变数值代码身份，Graph 记录期间修改定义会被拒绝。
+模型相关选择仍使用 `scope.static(..., choices=...)`，运行时量使用 `scope.value`；
+把它们声明为常量会特化产物，并不会得到动态计算。
+`test_resource_declaration.py` 在 CPU/CUDA 上验证这些区别及冻结后的消费。
+
 内建 `getattr(owner_or_record, static_name)` 复用同一声明解析路径：只接受两个位置
 参数、编译期字符串名称及已声明 owner/record，不支持默认值或任意 Python getter。
 `ti.static` 选择已声明的 Field/Array 只建立资源别名，不采集存储快照；shape、内容和

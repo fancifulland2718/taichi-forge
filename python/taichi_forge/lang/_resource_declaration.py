@@ -156,7 +156,8 @@ class ResourceScope:
             if previous.schema != declaration.schema or (
                 isinstance(declaration, StaticValue)
                 and (
-                    tuple(map(_static_value, previous.choices)) != tuple(map(_static_value, declaration.choices))
+                    (None if previous.choices is None else tuple(map(_static_value, previous.choices)))
+                    != (None if declaration.choices is None else tuple(map(_static_value, declaration.choices)))
                     or previous.kernel_only != declaration.kernel_only
                 )
             ):
@@ -189,6 +190,17 @@ class ResourceScope:
         if choices is None:
             raise ValueError("Normal static declarations require finite choices")
         self._declare_value(name, StaticValue(choices=choices, kernel_only=kernel_only))
+
+    def constant(self, name):
+        """Declare a compile-time definition, not a consumer configuration input.
+
+        Actual numerical users retain the value in their specialization and
+        cache guards. Changing it requires rebuilding code. Model-dependent
+        choices must instead use static(..., choices=...) or runtime values.
+        """
+        from taichi_forge.aot._component import StaticValue
+
+        self._declare_value(name, StaticValue())
 
     def static_dtype(self, name, *, choices, kernel_only=False):
         """Declare a primitive DSL type specialization at its normal selection site."""
