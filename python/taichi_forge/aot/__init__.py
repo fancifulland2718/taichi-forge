@@ -10,6 +10,20 @@ from taichi_forge.aot.conventions.gfxruntime140 import GfxRuntime140
 from taichi_forge.aot.module import Module
 
 
+# Load capture support only when requested. Ordinary JIT/Module imports do not
+# need the declaration compiler or variant builder, and application producers
+# should not depend on their private implementation module paths.
+_component_exports = {
+    "Component": "._component",
+    "StaticValue": "._component",
+    "RootOption": "._component",
+    "BuildBudget": "._component_variants",
+    "ComponentBuildError": "._component_variants",
+    "Variant": "._component_variants",
+    "build_variants": "._component_variants",
+}
+
+
 def borrow_runtime():
     """Load AOT code on the current CPU/CUDA/Vulkan Program's backend.
 
@@ -92,4 +106,14 @@ def __getattr__(name):
         from taichi_forge_runtime.aot import ExecutionPlan
 
         return ExecutionPlan
+    if name in _component_exports:
+        from importlib import import_module
+
+        value = getattr(import_module(_component_exports[name], __name__), name)
+        globals()[name] = value
+        return value
     raise AttributeError(name)
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_component_exports) | {"ExecutionPlan"})

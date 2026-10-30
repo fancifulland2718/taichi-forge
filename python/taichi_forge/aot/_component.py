@@ -1,4 +1,4 @@
-"""Internal component capture compiler (public SDK API is not frozen yet).
+"""Component capture implementation behind the public ``ti.aot.Component``.
 
 The declaration environment describes a component, not a kernel signature.
 The normal frontend appends only captures that an entry actually references.

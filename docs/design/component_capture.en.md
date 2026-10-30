@@ -1,7 +1,7 @@
 # Component capture compiler: initial implementation
 
-`taichi_forge.aot._component` is an internal producer-side API. It compiles the
-original decorated method through the normal AST transformer; it does not parse
+Producers use the public `ti.aot.Component` entry; `_component` remains its
+implementation module. It compiles the original decorated method through the normal AST transformer; it does not parse
 the application a second time or create a numerical wrapper.
 
 `Component` declarations describe the owner's attributes. `RuntimeValue` supports
@@ -9,7 +9,28 @@ scalar and fixed vector/matrix values, `Array` supports whole managed Ndarrays,
 and `StaticValue` accepts immutable scalar/tuple configuration. Entry arguments
 support scalars, fixed vectors/matrices and managed scalar/tensor/StructNdarrays
 without gradients.
-The public SDK API is not frozen.
+Declare resources, dimensions, and value roles at normal allocation sites with
+`ti.experimental.ResourceScope`, then collect them with
+`ti.aot.Component.from_owner(owner)`. The declaration protocol remains experimental;
+the per-layout, backend, capture, and control qualifications below still apply.
+Exposing the producer entry does not expand these qualifications.
+
+```python
+component = ti.aot.Component.from_owner(owner)
+root = component.compile_graph(owner.record_step, initializer=owner.record_initialize)
+module = ti.aot.Module()
+root.export(module, "step")
+module.archive("component.tcm")
+```
+
+The recording methods are the application's normal JIT Graph definitions.
+Build finite normal configurations with public `ti.aot.Variant` and
+`ti.aot.build_variants`. Optional `ti.aot.BuildBudget` axes default to `None`;
+catch `ti.aot.ComponentBuildError` to inspect an incomplete build report.
+`ti.aot.StaticValue` can narrow a normal static domain, and `ti.aot.RootOption`
+declares Host recording options. Standalone consumers use
+`taichi_forge_runtime.aot.Runtime` with `module.component(name)` or
+`module.component_variants(name)`; they do not import these producer types.
 
 Module constants can opt into static capture with an evaluated `typing.Final`
 annotation, for example `MATERIAL_ID: Final[int] = 3`. Only immutable scalars

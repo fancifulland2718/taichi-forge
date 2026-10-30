@@ -1,7 +1,25 @@
 # 组件捕获编译器：首个实现切片
 
-`taichi_forge.aot._component` 是内部 producer API，公共 SDK 接口尚未冻结。
+producer 使用公开的 `ti.aot.Component`；`_component` 保留为实现模块。
 它沿正常 AST transformer 编译原有装饰方法，不重跑前端发现捕获，也不生成数值包装函数。
+在正常分配处用 `ti.experimental.ResourceScope` 声明资源/维度/值角色，再使用
+`ti.aot.Component.from_owner(owner)` 收集声明。该实验性声明协议和本文逐项资格边界
+继续有效，公开导出入口并不扩大任意 Python 捕获、布局、后端或控制组合的支持范围。
+
+```python
+component = ti.aot.Component.from_owner(owner)
+root = component.compile_graph(owner.record_step, initializer=owner.record_initialize)
+module = ti.aot.Module()
+root.export(module, "step")
+module.archive("component.tcm")
+```
+
+这里的 `record_step`/`record_initialize` 是应用同时用于正常 JIT Graph 的执行定义。
+有限正常配置构建使用公开的 `ti.aot.Variant`、`ti.aot.build_variants`，可选
+`ti.aot.BuildBudget` 默认各轴为 `None`；失败捕获 `ti.aot.ComponentBuildError` 并查询报告。
+`ti.aot.StaticValue` 可收窄正常声明的合法静态域，`ti.aot.RootOption` 声明 Host 构图选项。
+消费端继续通过独立 `taichi_forge_runtime.aot.Runtime` 的 `module.component(name)` 或
+`module.component_variants(name)` 查询及实例化，不导入这些 producer 类型。
 
 模块常量可通过已求值的 `typing.Final` 注解显式声明静态角色，例如
 `MATERIAL_ID: Final[int] = 3`，值限于不可变标量和元组。普通 JIT 数值表达式保持原样；

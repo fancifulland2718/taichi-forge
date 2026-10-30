@@ -6,8 +6,7 @@ from zipfile import ZipFile
 
 import pytest
 import taichi_forge as ti
-from taichi_forge.aot._component import Component, RootOption
-from taichi_forge.aot._component_variants import BuildBudget, ComponentBuildError, Variant, build_variants
+from taichi_forge.aot import BuildBudget, Component, ComponentBuildError, RootOption, Variant, build_variants
 from taichi_forge.lang import kernel_impl
 from taichi_forge_runtime.aot import Runtime
 from tests import test_utils
