@@ -102,8 +102,7 @@ def test_borrow_preserves_source_siblings_without_retaining_owner(tmp_path):
         assert {tuple(source["path"]) for source in sources["dimensions"].values()} == {
             ("capacity",), ("padding",), ("active",)}
         for source in sources["resources"]["payload"].values():
-            assert source["kind"] == "borrowed_group_member"
-            assert source["member"] == "payload"
+            assert source["kind"] == "attribute"
             assert source["path"] in (["state"], ["alias"])
         with component.instantiate({"capacity": 23, "padding": 13, "active": 21}) as instance:
             instance.initialize(zero=["payload"])
@@ -112,6 +111,46 @@ def test_borrow_preserves_source_siblings_without_retaining_owner(tmp_path):
             assert struct.unpack("<23f", instance.resource("payload").read()) == tuple(
                 list(np.arange(21) * 3 + 1) + [0, 0]
             )
+
+
+@ti.data_oriented
+class _PairConsumer(_Consumer):
+    def __init__(self, source):
+        super().__init__(source, 5)
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow("padding_state", source.prefix,
+                     dimensions={"n": scope.dim("capacity"), "m": scope.dim("padding")})
+
+    @ti.kernel
+    def copy_prefix(self):
+        self.padding_state[0] = self.state[0]
+
+    def record(self, builder):
+        super().record(builder)
+        builder.dispatch(self.copy_prefix)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_borrow_sources_keep_anchor_paths_for_distinct_members(tmp_path):
+    owner = _PairConsumer(_Source(7, 3))
+    root = Component.from_owner(owner).compile_graph(owner.record)
+    module = ti.aot.Module()
+    root.export(module, "pair")
+    path = tmp_path / "pair.tcm"
+    module.archive(str(path))
+    ti.reset()
+    with Runtime("cpu") as runtime, runtime.load_module(path) as loaded:
+        component = loaded.component("pair")
+        sources = component.input_sources()["resources"]["prefix"].values()
+        assert dict(kind="attribute", path=["padding_state"]) in sources
+        # Virtual siblings affect the layout but are not additional inputs.
+        # In particular, the payload anchor cannot supply the prefix data.
+        assert all(source == dict(kind="attribute", path=["padding_state"]) for source in sources)
+        with component.instantiate(dict(capacity=23, padding=13, active=21)) as instance:
+            instance.initialize(zero=component.contract["resources"])
+            with instance.prepare() as prepared:
+                prepared.run()
+            assert struct.unpack("<13f", instance.resource("prefix").read()) == (1,) + (0,) * 12
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

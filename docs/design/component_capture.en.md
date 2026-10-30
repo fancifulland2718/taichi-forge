@@ -768,7 +768,8 @@ and contain valid paths and kinds.
 `resources` from the actual compiled closure. Dimensions include only base
 inputs; derived extents keep their expressions in `contract`. Each resource maps
 all its aliases to normal declaration paths, so nested owners do not require
-decoding generated IDs. A borrowed member has `kind="borrowed_group_member"`,
+decoding generated IDs. A borrowed alias that directly names its member keeps an
+attribute path. An indirect sibling reference has `kind="borrowed_group_member"`,
 an anchor `path` and its original `member` identity; the anchor is not necessarily
 that member. This is provenance, not a Python evaluator or an automatic binding
 table. Normal model preparation supplies the input data and checks model validity.

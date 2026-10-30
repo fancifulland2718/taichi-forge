@@ -740,7 +740,9 @@ def _input_sources(component, contract):
     def source(name, *, fixed=False):
         borrowed = component._borrowed_reads.get(name)
         if borrowed is not None:
-            anchor, _, member, _ = borrowed
+            anchor, anchor_member, member, _ = borrowed
+            if member == anchor_member:
+                return dict(kind="attribute", path=list(anchor))
             return dict(kind="borrowed_group_member", path=list(anchor), member=member)
         path = component._paths.get(name)
         if path is None and fixed:

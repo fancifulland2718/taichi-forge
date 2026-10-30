@@ -553,7 +553,8 @@ selected 值当作新模型输入。查询返回 `compilation.configuration_sour
 `component.input_sources()` 同样从实际编译闭包查询 `dimensions`、`values` 和
 `resources`。维度仅列需要消费者提供的基础输入，派生 extent 继续使用 `contract`
 中的表达式。每个资源为全部别名提供正常声明路径，嵌套 owner 不需要解码内部 ID。
-借用成员用 `kind="borrowed_group_member"` 分别记录锚点 `path` 与原 `member`
+借用别名若直接指向该成员，保留属性路径；间接兄弟成员用 `kind="borrowed_group_member"`
+分别记录锚点 `path` 与原 `member`
 身份，锚点不一定就是该成员。这是来源查询，不执行 Python 求值或自动绑定；正常模型
 准备层提供数据并检查模型有效性。加载器验证角色/别名覆盖与来源结构；旧产物仍可加载，
 缺少该可选投影时查询要求重建。CPU/CUDA 验证覆盖冻结后的新尺寸/值、嵌套 Field/数组、
