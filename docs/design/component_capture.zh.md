@@ -21,12 +21,14 @@ module.archive("component.tcm")
 消费端继续通过独立 `taichi_forge_runtime.aot.Runtime` 的 `module.component(name)` 或
 `module.component_variants(name)` 查询及实例化，不导入这些 producer 类型。
 
-模块常量可通过已求值的 `typing.Final` 注解显式声明静态角色，例如
+模块常量可通过 `typing.Final` 注解显式声明静态角色，例如
 `MATERIAL_ID: Final[int] = 3`，值限于不可变标量和元组。普通 JIT 数值表达式保持原样；
 入口及嵌套 helper 的实际读取才将带类型的值纳入代码身份和可查询的 `constants`。
 候选复用和发布前重新检查声明和值，重绑定常量会使 producer 缓存失效，不沿用旧数值
-代码；未使用常量不增加 ABI 或身份依赖。未声明全局值、可变对象、同名闭包值以及
-延迟求值的字符串注解仍拒绝，不执行注解字符串或任意 Python getter。
+代码；未使用常量不增加 ABI 或身份依赖。未声明全局值、可变对象和同名闭包值仍拒绝。
+`from __future__ import annotations` 的延迟注解支持导入的 `Final` 及 `typing` 模块别名；
+编译器只识别最外层角色并核对实际导入绑定，不执行类型参数、注解调用或任意 Python
+getter。导入绑定被替换后，同样不能复用原候选。
 
 `Component` 在组件层声明属性：`RuntimeValue` 支持标量和固定 vector/matrix，
 `Array` 支持完整的受管理 Ndarray，`StaticValue` 支持不可变标量/tuple 配置。

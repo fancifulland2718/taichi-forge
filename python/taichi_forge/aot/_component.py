@@ -6,6 +6,7 @@ Dense SNode groups require the shared layout/instantiation contract and are
 deliberately not converted to unrelated ndarrays here.
 """
 
+import ast
 import hashlib
 import inspect
 import json
@@ -49,12 +50,26 @@ def _final_global(function, name):
     """Read an explicit module Final role without evaluating annotations/getters.
 
     A lexical closure cannot borrow a same-named module declaration. Deferred
-    string annotations require separate qualification; never eval them here.
+    annotations identify only the outer Final role; no annotation expression,
+    type parameter, descriptor or subscription is evaluated.
     """
     annotations = function.__globals__.get("__annotations__", {})
     if name in function.__code__.co_freevars or type(annotations) is not dict:
         return False
     annotation = annotations.get(name)
+    if type(annotation) is str:
+        try:
+            expression = ast.parse(annotation, mode="eval").body
+        except SyntaxError:
+            return False
+        if isinstance(expression, ast.Subscript):
+            expression = expression.value
+        if isinstance(expression, ast.Name):
+            return function.__globals__.get(expression.id) is Final
+        if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+            module = function.__globals__.get(expression.value.id)
+            return module is sys.modules.get("typing") and expression.attr == "Final"
+        return False
     return annotation is Final or get_origin(annotation) is Final
 
 

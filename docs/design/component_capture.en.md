@@ -32,7 +32,7 @@ declares Host recording options. Standalone consumers use
 `taichi_forge_runtime.aot.Runtime` with `module.component(name)` or
 `module.component_variants(name)`; they do not import these producer types.
 
-Module constants can opt into static capture with an evaluated `typing.Final`
+Module constants can opt into static capture with a `typing.Final`
 annotation, for example `MATERIAL_ID: Final[int] = 3`. Only immutable scalars
 and tuples are accepted. Original JIT expressions remain unchanged; actual
 reads in the entry and nested helpers contribute their typed values to code
@@ -40,8 +40,11 @@ identity and the queryable `constants` facts. Candidate reuse and publication
 recheck both the declaration and value, so rebinding a constant invalidates the
 producer cache rather than silently reusing old numerical code. Unused constants
 add no ABI inputs or identity dependencies. Unannotated globals, mutable values,
-same-named closure captures and deferred string annotations remain rejected;
-the compiler does not evaluate annotation strings or arbitrary Python getters.
+and same-named closure captures remain rejected. Deferred annotations from
+`from __future__ import annotations` support imported `Final` and a `typing`
+module alias. The compiler checks only the outer annotation role and its actual
+import binding; it does not evaluate type parameters, annotation calls or
+arbitrary Python getters. Replacing the import binding also invalidates reuse.
 
 LLVM launches use the compiler-sized argument buffer through `RuntimeContext`;
 they are not limited to the historical 64 argument slots. Python launches and
