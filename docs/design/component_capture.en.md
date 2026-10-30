@@ -764,6 +764,19 @@ identity. Old artifacts remain loadable, but the query requires rebuilding when
 the provenance is absent. Present provenance must cover all configuration inputs
 and contain valid paths and kinds.
 
+`component.input_sources()` similarly returns `dimensions`, `values` and
+`resources` from the actual compiled closure. Dimensions include only base
+inputs; derived extents keep their expressions in `contract`. Each resource maps
+all its aliases to normal declaration paths, so nested owners do not require
+decoding generated IDs. A borrowed member has `kind="borrowed_group_member"`,
+an anchor `path` and its original `member` identity; the anchor is not necessarily
+that member. This is provenance, not a Python evaluator or an automatic binding
+table. Normal model preparation supplies the input data and checks model validity.
+The loader checks complete role/alias coverage and source structure. Old artifacts
+without this optional projection remain loadable but require rebuilding for the
+query. CPU/CUDA tests consume frozen nested fields and arrays at new extents and
+values, preserve aliases, exclude unused declarations and reject malformed paths.
+
 `RootOption(choices=(...))` declares a normal recording argument, such as
 `report_power`, in the same environment. Its value comes from normal call
 arguments or defaults, not a numerical `self` capture. It uses the same v3

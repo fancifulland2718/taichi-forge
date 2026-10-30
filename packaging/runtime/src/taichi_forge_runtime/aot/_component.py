@@ -54,6 +54,43 @@ def _dimensions(declarations, supplied):
     return result
 
 
+def _validate_input_sources(contract):
+    sources = contract["compilation"]["input_sources"]
+    expected = dict(
+        dimensions={name for name, schema in contract["dimensions"].items() if len(schema) == 4},
+        values=set(contract["values"]), resources=set(contract["resources"]),
+    )
+    if not isinstance(sources, dict) or set(sources) != set(expected):
+        raise ValueError("Invalid component input source roles")
+    for role, names in expected.items():
+        if not isinstance(sources[role], dict) or set(sources[role]) != names:
+            raise ValueError(f"Component input sources must cover {role}")
+
+    def validate(source, *, resource=False):
+        if not isinstance(source, dict):
+            raise ValueError("Invalid component input source path")
+        kind = source.get("kind")
+        keys = {"kind", "path"}
+        if resource and kind == "borrowed_group_member":
+            keys.add("member")
+            if not isinstance(source.get("member"), str) or not source["member"]:
+                raise ValueError("Invalid component borrowed input member")
+        elif kind != "attribute":
+            raise ValueError("Invalid component input source kind")
+        if (set(source) != keys or not isinstance(source.get("path"), list) or not source["path"]
+                or any(not isinstance(part, str) or not part.isidentifier() for part in source["path"])):
+            raise ValueError("Invalid component input source path")
+
+    for role in ("dimensions", "values"):
+        for source in sources[role].values():
+            validate(source)
+    for name, aliases in sources["resources"].items():
+        if not isinstance(aliases, dict) or set(aliases) != set(contract["resources"][name]["aliases"]):
+            raise ValueError("Component input sources must cover resource aliases")
+        for source in aliases.values():
+            validate(source, resource=True)
+
+
 class Component:
     """Loaded component code and immutable compiler-produced resource facts.
 
@@ -275,6 +312,8 @@ class Component:
                     if alias in aliases and aliases[alias] != key:
                         raise ValueError("Component resource aliases conflict")
                     aliases[alias] = key
+            if "input_sources" in contract.get("compilation", {}):
+                _validate_input_sources(contract)
             plan = module.execution_plan(contract["execution"])
             self._fixed_layouts = {}
             if fixed_groups:
@@ -407,6 +446,19 @@ class Component:
         sources = self.contract.get("compilation", {}).get("configuration_sources")
         if sources is None:
             raise ValueError("Artifact has no configuration source paths; rebuild it to query model provenance")
+        return sources
+
+    def input_sources(self):
+        """Query normal sources of base dimensions, dynamic values and resources.
+
+        Resource entries retain every declared alias. Borrowed members identify
+        the anchor path and the original member separately; the anchor is not
+        necessarily the requested member. Derived dimensions remain expressions
+        in ``contract``. This returns a copy and never evaluates Python objects.
+        """
+        sources = self.contract.get("compilation", {}).get("input_sources")
+        if sources is None:
+            raise ValueError("Artifact has no input source paths; rebuild it to query model provenance")
         return sources
 
     def instantiate(self, dimensions, *, configuration=None):

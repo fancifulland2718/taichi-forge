@@ -98,6 +98,13 @@ def test_borrow_preserves_source_siblings_without_retaining_owner(tmp_path):
     ti.reset()
     with Runtime(backend) as runtime:
         component = runtime.load_module(path).component("borrowed")
+        sources = component.input_sources()
+        assert {tuple(source["path"]) for source in sources["dimensions"].values()} == {
+            ("capacity",), ("padding",), ("active",)}
+        for source in sources["resources"]["payload"].values():
+            assert source["kind"] == "borrowed_group_member"
+            assert source["member"] == "payload"
+            assert source["path"] in (["state"], ["alias"])
         with component.instantiate({"capacity": 23, "padding": 13, "active": 21}) as instance:
             instance.initialize(zero=["payload"])
             with instance.prepare() as prepared:

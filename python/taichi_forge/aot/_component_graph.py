@@ -707,6 +707,7 @@ def compile_component_graph(component, record, *args, initializer=None, _build=N
         if _build is not None:
             _build.check_time("after backend compilation")
         field_io = _compile_fixed_field_io(component, capture.owner, contract, _build)
+        contract["compilation"]["input_sources"] = _input_sources(component, contract)
         if initialization_nodes:
             # Version 8 adds lifecycle to the same compiler projection. Empty
             # optional resource families stay empty, rather than acquiring a
@@ -728,6 +729,37 @@ def compile_component_graph(component, record, *args, initializer=None, _build=N
     except BaseException:
         graph.close()
         raise
+
+
+def _input_sources(component, contract):
+    """Project normal declaration paths after pruning the compiled closure."""
+    # Fixed Field I/O additionally exposes readable dotted aliases. They were
+    # created from these paths, not by decoding compiler-generated identities.
+    readable = {".".join(path): path for path in component._paths.values()}
+
+    def source(name, *, fixed=False):
+        borrowed = component._borrowed_reads.get(name)
+        if borrowed is not None:
+            anchor, _, member, _ = borrowed
+            return dict(kind="borrowed_group_member", path=list(anchor), member=member)
+        path = component._paths.get(name)
+        if path is None and fixed:
+            path = readable.get(name)
+        if path is None:
+            raise TaichiCompilationError(f"Missing component declaration source for {name!r}")
+        return dict(kind="attribute", path=list(path))
+
+    return dict(
+        # Derived extents are evaluated from their authoritative expressions.
+        # A synthetic extent identity is not an attribute on a model object.
+        dimensions={name: source(name) for name, schema in contract["dimensions"].items() if len(schema) == 4},
+        values={name: source(name) for name in contract["values"]},
+        resources={
+            name: {alias: source(alias, fixed=resource.get("kind") == "fixed_snode")
+                   for alias in resource["aliases"]}
+            for name, resource in contract["resources"].items()
+        },
+    )
 
 
 def _compile_fixed_field_io(component, owner, contract, build=None):
