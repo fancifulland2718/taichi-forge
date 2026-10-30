@@ -446,13 +446,15 @@ class ResourceScope:
             members = ((None, field),)
         for identity, member in members:
             member._logical_resource_declaration = dict(identity=identity, shape=shape, source=source)
+            # A Field alias in another declared child keeps the allocation
+            # site's dimension namespace, just like a StructField member.
+            member._logical_shape_namespace = self._registry
             if placement is not None:
                 member._logical_resource_declaration["storage"] = "fixed_snode"
             if isinstance(field, StructField):
                 field._forge_resource_declarations["fields"][identity] = dict(member._logical_resource_declaration)
                 # The record is a storage namespace, not a new dimension
                 # declaration site. Aliases retain this lexical provenance.
-                member._logical_shape_namespace = self._registry
             if self._builder is not None:
                 # Keep the complete declared layout unit, without retaining its
                 # Python owner. Native SNode capture still checks actual placement.

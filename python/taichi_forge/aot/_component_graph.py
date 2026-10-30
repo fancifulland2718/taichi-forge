@@ -17,6 +17,7 @@ from taichi_forge.aot._component import (
     _digest,
     _static_value,
     _dimension_value,
+    _capture_id,
 )
 from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang.exception import TaichiCompilationError
@@ -106,8 +107,10 @@ class _GraphCapture:
             expected_templates[name] = owner
         if self.owner is None:
             self.owner = owner
-        if self.owner is None or owner is not None and owner is not self.owner:
-            raise TaichiCompilationError("A component Graph root requires one declared resource owner")
+        if self.owner is None:
+            raise TaichiCompilationError("A component Graph root requires a declared resource owner")
+        if owner is not None:
+            self.component._entry_owner_path(self.owner, owner)
         owner = self.owner
         managed_symbols = set()
         normalized = []
@@ -179,7 +182,8 @@ class _GraphCapture:
                 if identity is None:
                     field = self.component.read(owner, name)
                     normal = getattr(field, "_logical_resource_declaration", None)
-                    identity = normal["identity"] if normal else name
+                    path = self.component._paths[name]
+                    identity = _capture_id((*path[:-1], normal["identity"])) if normal else name
                     if identity in self.resources:
                         raise TaichiCompilationError(f"Component resource identity collision: {identity!r}")
                     self._members[member_key] = identity

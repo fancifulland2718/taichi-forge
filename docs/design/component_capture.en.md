@@ -784,6 +784,21 @@ full initialization/constraint/provenance projections and complete C lifetimes
 remain in progress. Wheels and whole-engine qualification remain in E; this
 batch builder is not a cross-platform or distributed compilation service.
 
+A normal component Graph can dispatch original kernels belonging to explicitly
+declared child resource owners. Assignment through `ResourceScope`, for example
+`scope.worker = worker`, supplies the declaration edge. A child entry must have
+exactly one path from the root; undeclared or ambiguous owners reject. Nested
+`ti.func` calls retain their qualified paths and definition guards. Different
+children can use the same local resource names; shared Fields keep their
+allocation-site dimension namespace and one actual SNode group.
+
+This uses ordinary Graph lowering and the existing instance call bindings, with
+no module pointer switching or extra execution interpreter. CPU/CUDA tests
+cover sequential child calls, shared storage, distinct private state, new sizes
+and interleaved instances of one loaded module. Independent child dimensions
+and borrowed foreign layouts still need explicit compatible relations; this
+does not automatically qualify a complete multi-solver application.
+
 An original initializer recording can join the same owner's step recording:
 `component.compile_graph(owner.record_step, initializer=owner.record_initialize)`.
 Both phases share capture and resource closure, including initializer-only SNode

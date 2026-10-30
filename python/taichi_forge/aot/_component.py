@@ -970,6 +970,19 @@ class Component:
         self._paths = MappingProxyType(paths)
         self._borrowed_reads = MappingProxyType(reads)
 
+    def _entry_owner_path(self, owner, entry_owner):
+        if entry_owner is owner:
+            return ()
+        paths = [self._paths[name] for name, declaration in self.declarations.items()
+                 if isinstance(declaration, Record) and self.available(owner, name)
+                 and self.read(owner, name) is entry_owner]
+        if len(paths) != 1:
+            raise TaichiCompilationError(
+                "A component entry owner requires exactly one declared resource record path; "
+                f"found {len(paths)}"
+            )
+        return paths[0]
+
     def compile(self, entry, *args, owner=None, template_args=None):
         from taichi_forge.lang.kernel_impl import _process_args, TaichiCallableTemplateMapper
         from taichi_forge.lang._ndarray import Ndarray
@@ -979,17 +992,19 @@ class Component:
         kernel = getattr(entry, "_primal", None)
         bound_owner = getattr(entry, "_kernel_owner", None)
         owner = bound_owner if owner is None else owner
-        if kernel is None or owner is None or bound_owner is not None and bound_owner is not owner:
+        if kernel is None or owner is None:
             raise TypeError("Component.compile requires a decorated kernel and its declared owner")
+        entry_owner = owner if bound_owner is None else bound_owner
+        entry_path = self._entry_owner_path(owner, entry_owner)
         if kernel.autodiff_mode.name != "NONE":
             raise TaichiCompilationError("Component capture autodiff is not qualified")
         templates = {} if template_args is None else dict(template_args)
         slots = set(kernel.template_slot_locations)
         if bound_owner is not None:
             name = kernel.arguments[0].name
-            if name in templates and templates[name] is not owner:
+            if name in templates and templates[name] is not entry_owner:
                 raise TaichiCompilationError("Component template owner differs from its bound method")
-            templates[name] = owner
+            templates[name] = entry_owner
         expected = {kernel.arguments[i].name for i in slots}
         if set(templates) != expected:
             raise TaichiCompilationError("Component template_args must exactly name the kernel's template parameters")
@@ -1001,7 +1016,7 @@ class Component:
         resource_templates = {}
         for i, (argument, value) in enumerate(zip(kernel.arguments, call_args)):
             if i in slots:
-                if value is not owner and isinstance(value, (Field, SNode)):
+                if value is not entry_owner and isinstance(value, (Field, SNode)):
                     if isinstance(value, SNode):
                         name, depth = self._template_snode(owner, value, argument.name)
                     else:
@@ -1013,7 +1028,8 @@ class Component:
                     template_facts.append((i, "resource", None))
                 else:
                     template_facts.append(
-                        (i, "owner" if value is owner else "static", None if value is owner else _static_value(value))
+                        (i, "owner" if value is entry_owner else "static",
+                         (entry_path or None) if value is entry_owner else _static_value(value))
                     )
                 features.append(None)
             elif isinstance(argument.annotation, NdarrayType):
@@ -1043,7 +1059,7 @@ class Component:
                 ):
                     code.validate_bindings(self, owner)
                     return code
-            context = _Capture(self, owner, kernel, signature)
+            context = _Capture(self, owner, kernel, signature, entry_path)
             # No self identity or runtime value enters the template mapper.
             key = (kernel.func, "component_" + str(len(kernel._component_candidates)), kernel.autodiff_mode)
             kernel.materialize(key=key, args=call_args, arg_features=tuple(features), for_aot=True, deployment=context)
@@ -1098,7 +1114,7 @@ class Component:
 
 
 class _Capture:
-    def __init__(self, component, owner, kernel, call_signature):
+    def __init__(self, component, owner, kernel, call_signature, entry_path=()):
         self.component = component
         self.declarations = dict(component.declarations)
         self.owner = owner
@@ -1111,6 +1127,12 @@ class _Capture:
         self.static_objects = {}
         self.objects = {}
         self.methods = {}
+        self.method_paths = {}
+        # These live objects exist only during lowering. Reusable code keeps
+        # declaration paths and definition guards, never child owner instances.
+        self._method_owners = []
+        if entry_path:
+            self._method_owners.append((component.read(owner, _capture_id(entry_path)), entry_path))
         self.functions = {}
         self.constants = {}
         self.entry_definition = _definition(kernel.func)
@@ -1125,6 +1147,11 @@ class _Capture:
         self.resource_templates = {}
 
     def resolve_template(self, ctx, value):
+        for child, path in self._method_owners:
+            if value is child:
+                for depth, part in enumerate(path):
+                    self.attribute(ctx, part, prefix=path[:depth])
+                return _RecordReference(path)
         if not isinstance(value, _ResourceTemplate):
             return value
         self.resource_templates[value.slot] = value.name if value.snode_depth is None else (value.name, value.snode_depth)
@@ -1157,10 +1184,14 @@ class _Capture:
         if isinstance(declaration, RootOption):
             raise TaichiCompilationError(f"Component {name!r} is a recording option, not a numerical owner capture")
         if declaration is None:
-            value = inspect.getattr_static(self.owner, name, None) if not prefix else None
-            if not prefix and getattr(value, "_is_taichi_function", False):
+            namespace = self.component.read(self.owner, _capture_id(prefix)) if prefix else self.owner
+            value = inspect.getattr_static(namespace, path[-1], None)
+            if getattr(value, "_is_taichi_function", False):
                 self.methods[name] = _definition(value)
-                return value.__get__(self.owner, type(self.owner))
+                self.method_paths[name] = path
+                if prefix and not any(child is namespace and source == prefix for child, source in self._method_owners):
+                    self._method_owners.append((namespace, prefix))
+                return value.__get__(namespace, type(namespace))
             raise TaichiCompilationError(
                 f"Component entry {self.kernel.func.__qualname__}: undeclared capture self.{'.'.join(path)}; "
                 "declare it as a runtime value, resource or static configuration"
@@ -1348,6 +1379,7 @@ class _Capture:
             "members": self.member_paths,
             "dimensions": {name: schema for name, schema in self.used.items() if schema[0] == "dimension"},
             "methods": sorted(self.methods.items()),
+            "method_paths": sorted(self.method_paths.items()),
             "functions": sorted((name, definition) for (_, name), definition in self.functions.items()),
             "declaration_sources": {
                 name: self.component._sources[name] for name in self.used if name in self.component._sources
@@ -1425,7 +1457,9 @@ class _Capture:
             if current != value:
                 return f"static global value {name!r} in {function.__qualname__}"
         for name, definition in self.methods.items():
-            value = inspect.getattr_static(owner, name, None)
+            path = self.method_paths[name]
+            namespace = component.read(owner, _capture_id(path[:-1])) if len(path) > 1 else owner
+            value = inspect.getattr_static(namespace, path[-1], None)
             if not getattr(value, "_is_taichi_function", False) or _definition(value) != definition:
                 return f"method {name!r}"
         for (function, name), definition in self.functions.items():
@@ -1458,6 +1492,7 @@ class _ComponentCode:
         self.static = dict(context.static)
         self.objects = dict(context.objects)
         self.methods = dict(context.methods)
+        self.method_paths = dict(context.method_paths)
         self.functions = dict(context.functions)
         self.constants = dict(context.constants)
         self.groups = dict(context.groups)
