@@ -203,9 +203,30 @@ class _SourceParent(_Parent):
         scope.right = _SourceWorker(self, 3.)
 
 
+class _ImplicitSourceWorker(_Worker):
+    def __init__(self, parent, gain):
+        super().__init__(parent, gain)
+        self.count = parent.n
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow("shared", parent.shared, source_scope=True, dimensions={"n": scope.dim("count")})
+
+    clear = _SourceWorker.clear
+
+
+class _ImplicitSourceParent(_SourceParent):
+    def __init__(self, n, padding):
+        self.n, self.padding = n, padding
+        scope = ti.experimental.ResourceScope(self)
+        scope.shared = scope.field(ti.f32, shape=scope.dim("n"))
+        scope.unrelated = scope.field(ti.i32, shape=scope.dim("padding"))
+        scope.left = _ImplicitSourceWorker(self, 2.)
+        scope.right = _ImplicitSourceWorker(self, 3.)
+
+
+@pytest.mark.parametrize("parent_type", (_SourceParent, _ImplicitSourceParent))
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_source_scope_borrow_keeps_layout_only_dimensions_and_unused_links(tmp_path):
-    model = _SourceParent(3, 5)
+def test_source_scope_borrow_keeps_layout_only_dimensions_and_unused_links(tmp_path, parent_type):
+    model = parent_type(3, 5)
     child = ti.aot.Component.from_owner(model.left)
     local = child.compile(model.left.clear)
     assert not local.contract["dimensions"]
@@ -213,7 +234,7 @@ def test_source_scope_borrow_keeps_layout_only_dimensions_and_unused_links(tmp_p
         child.compile(model.left.step)
     env = ti.aot.Component.from_owner(model)
     root = env.compile_graph(model.record)
-    other = _SourceParent(7, 13)
+    other = parent_type(7, 13)
     assert ti.aot.Component.from_owner(other).compile(other.left.step, owner=other) is env.compile(model.left.step, owner=model)
     assert child.compile(model.left.clear) is local  # rejected capture did not publish a partial entry
     assert "padding" in root.contract["dimensions"]

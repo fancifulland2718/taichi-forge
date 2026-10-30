@@ -345,7 +345,12 @@ class ResourceScope:
             raise TypeError("Resource borrow requires an attribute name and a Field")
         if type(source_scope) is not bool or (dimensions is None and not source_scope):
             raise TypeError("Resource borrow requires explicit dimensions or source_scope=True")
-        _source_members(field)
+        if source_scope:
+            declaration = getattr(field, "_logical_resource_declaration", None)
+            if declaration is None or declaration["identity"] is None:
+                raise ValueError("Source-scope borrows require an existing normal Field declaration")
+        else:
+            _source_members(field)
         mapping = {}
         for source, target in ({} if dimensions is None else dimensions).items():
             if not isinstance(source, str) or not source.isidentifier() or not isinstance(target, Extent):
@@ -364,7 +369,8 @@ class ResourceScope:
             candidate = inspect.getattr_static(self._owner, alias, None)
             if isinstance(candidate, MemberDescriptorType):
                 candidate = candidate.__get__(self._owner, type(self._owner))
-            if getattr(candidate, "_logical_resource_group", None) is field._logical_resource_group:
+            source_group = getattr(field, "_logical_resource_group", None)
+            if source_group is not None and getattr(candidate, "_logical_resource_group", None) is source_group:
                 group = previous["group"]
                 break
         caller = inspect.currentframe().f_back

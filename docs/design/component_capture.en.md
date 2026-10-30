@@ -848,3 +848,9 @@ helper capture pipeline as bound methods; cached code retains paths, not Python
 objects. Unused parameters add no resource dependencies. Undeclared or ambiguous
 objects reject. CPU/CUDA tests cover cache reuse, frozen-module new-size
 instances, shared resources and interleaved instance execution.
+
+Source-scope borrowing also accepts declared Dense Fields on the default SNode
+root. The component root must contain the original Field declaration. The borrow
+reuses its existing group and shape contract, including native layout completeness
+checks; no storage regrouping or separate layout recipe is introduced. A missing
+source remains acceptable only while the link is unused.

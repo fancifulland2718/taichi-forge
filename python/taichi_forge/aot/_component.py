@@ -875,7 +875,8 @@ class Component:
         for name, expression in inherited_dimensions.items():
             flattened[name] = Dimension("active", expression=expression)
         result._declarations = MappingProxyType(flattened)
-        result._project_borrowed(borrowed, roots, sources, visible_dimensions, constraints)
+        visible_fields = [(field, _capture_id((*prefix, name))) for _, prefix, name, field, _, _ in fields]
+        result._project_borrowed(borrowed, roots, sources, visible_dimensions, constraints, visible_fields)
         result._sources = MappingProxyType(sources)
         result._derived_attributes = frozenset(derived_attributes)
         result._constraints = MappingProxyType(constraints)
@@ -909,7 +910,7 @@ class Component:
         check_constraints(constraints, lambda name: _dimension_value(self, owner, name), sources, entry=entry)
         return constraints, dimensions, sources
 
-    def _project_borrowed(self, borrowed, roots, sources, visible_dimensions, constraints):
+    def _project_borrowed(self, borrowed, roots, sources, visible_dimensions, constraints, visible_fields):
         """Complete layout dependencies from source declarations, not a new ABI.
 
         Virtual members are used only by the existing native group capture.
@@ -927,17 +928,9 @@ class Component:
 
         for path, anchor, binding, root_id in sorted(borrowed, key=lambda item: item[0]):
             try:
-                members = _source_members(anchor)
                 identity = anchor._logical_resource_declaration["identity"]
                 if identity != binding["identity"]:
                     raise ValueError("source Field was replaced without redeclaration")
-                dependencies = {
-                    dim
-                    for field in members.values()
-                    for extent in field._logical_resource_declaration["shape"]
-                    if isinstance(extent, Extent)
-                    for dim in extent_dependencies(extent.expression)
-                }
                 source_scope = binding.get("source_scope", False)
                 if source_scope and root_id not in visible_dimensions:
                     # This is an explicitly linked external resource, not an
@@ -947,6 +940,18 @@ class Component:
                     declarations[name] = _SourceScopeRequired(binding["source"])
                     paths[name], sources[name] = path, binding["source"]
                     continue
+                source_name = next((name for field, name in visible_fields if field is anchor), None)
+                if source_scope:
+                    if source_name is None:
+                        raise ValueError("source-scope borrow requires the original Field declaration in the root")
+                    dependencies = set(visible_dimensions[root_id])
+                else:
+                    members = _source_members(anchor)
+                    dependencies = {
+                        dim for field in members.values()
+                        for extent in field._logical_resource_declaration["shape"]
+                        if isinstance(extent, Extent) for dim in extent_dependencies(extent.expression)
+                    }
                 if (not source_scope and dependencies != binding["dimensions"].keys()) or (
                     source_scope and not binding["dimensions"].keys() <= dependencies
                 ):
@@ -983,6 +988,17 @@ class Component:
                                 source=binding["source"],
                             )
                     mapping = source_mapping
+                if source_scope:
+                    # The visible allocation already has its authoritative
+                    # group, shape expressions and native layout validation.
+                    # This also covers declared default-root Dense Fields;
+                    # no inferred group membership or parallel recipe is needed.
+                    source = declarations[source_name]
+                    if not isinstance(source, DenseField):
+                        raise ValueError("source-scope borrowing currently requires a Dense Field")
+                    name = _capture_id(path)
+                    declarations[name], paths[name], sources[name] = source, path, binding["source"]
+                    continue
                 if root_id in mappings and mappings[root_id] != mapping:
                     raise ValueError("aliases of one source group have conflicting dimension relations")
                 first = root_id not in mappings
