@@ -57,12 +57,54 @@ class _Parent:
         builder.append(sequence)
 
 
+@ti.kernel
+def _step_worker(worker: ti.template()):
+    for i in worker.shared:
+        worker.shared[i] += worker.increment()
+    worker.local[None] += worker.gain
+
+
+class _TemplateParent(_Parent):
+    def record(self, builder):
+        builder.dispatch(self.tick)
+        sequence = builder.create_sequential()
+        sequence.dispatch(_step_worker, template_args={"worker": self.left})
+        sequence.dispatch(_step_worker, template_args={"worker": self.right})
+        builder.append(sequence)
+
+
+@ti.kernel
+def _ignore_worker(worker: ti.template()) -> ti.i32:
+    return 7
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_nested_template_record_keeps_path_and_only_actual_dependencies():
+    class Envelope:
+        def __init__(self, n):
+            ti.experimental.ResourceScope(self).inner = _Parent(n)
+
+    first, second = Envelope(3), Envelope(19)
+    env, other = ti.aot.Component.from_owner(first), ti.aot.Component.from_owner(second)
+    code = env.compile(_step_worker, owner=first, template_args={"worker": first.inner.left})
+    assert other.compile(_step_worker, owner=second, template_args={"worker": second.inner.left}) is code
+    code.run(other, second)
+    np.testing.assert_array_equal(second.inner.shared.to_numpy(), 2.)
+    unused = env.compile(_ignore_worker, owner=first, template_args={"worker": first.inner.left})
+    assert env.compile(_ignore_worker, owner=first, template_args={"worker": first.inner.right}) is unused
+    assert not unused.contract["captures"]
+    assert not unused.contract["groups"]
+
+
+@pytest.mark.parametrize("parent_type", (_Parent, _TemplateParent))
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_child_graph_preserves_shared_roots_and_independent_instances(tmp_path):
-    first, second = _Parent(3), _Parent(19, 5., 7.)
+def test_child_graph_preserves_shared_roots_and_independent_instances(tmp_path, parent_type):
+    first, second = parent_type(3), parent_type(19, 5., 7.)
     env, other = ti.aot.Component.from_owner(first), ti.aot.Component.from_owner(second)
     child_code = env.compile(first.left.step, owner=first)
     assert other.compile(second.left.step, owner=second) is child_code
+    template_code = env.compile(_step_worker, owner=first, template_args={"worker": first.left})
+    assert other.compile(_step_worker, owner=second, template_args={"worker": second.left}) is template_code
     child_code.run(other, second)
     np.testing.assert_array_equal(second.shared.to_numpy(), 5)
     np.testing.assert_array_equal(second.left.local.to_numpy(), 5)
@@ -117,10 +159,14 @@ def test_child_entry_rejects_undeclared_and_ambiguous_owners():
     env = ti.aot.Component.from_owner(root)
     with pytest.raises(ti.TaichiCompilationError, match="exactly one declared.*found 0"):
         env.compile(stranger.left.step, owner=root)
+    with pytest.raises(ti.TaichiCompilationError, match="immutable"):
+        env.compile(_step_worker, owner=root, template_args={"worker": stranger.left})
     ti.experimental.ResourceScope(root).alias = root.left
     env = ti.aot.Component.from_owner(root)
     with pytest.raises(ti.TaichiCompilationError, match="exactly one declared.*found 2"):
         env.compile(root.left.step, owner=root)
+    with pytest.raises(ti.TaichiCompilationError, match="exactly one declared resource record path"):
+        env.compile(_step_worker, owner=root, template_args={"worker": root.left})
 
 
 class _BorrowedWorker(_Worker):

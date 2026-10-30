@@ -1068,6 +1068,7 @@ class Component:
         resource_templates = {}
         for i, (argument, value) in enumerate(zip(kernel.arguments, call_args)):
             if i in slots:
+                record = self._template_record(owner, value) if value is not entry_owner else None
                 if value is not entry_owner and isinstance(value, (Field, SNode)):
                     if isinstance(value, SNode):
                         name, depth = self._template_snode(owner, value, argument.name)
@@ -1078,6 +1079,13 @@ class Component:
                     # Only actual uses select resource bindings below. An unused
                     # declared Field template must not specialize the entry.
                     template_facts.append((i, "resource", None))
+                elif record is not None:
+                    # Free kernels accept declared namespaces just like bound
+                    # child methods. Resolve actual uses through the same AST
+                    # capture path; never retain the live object in cached code.
+                    resource_templates[i] = record
+                    call_args[i] = _ResourceTemplate(i, record)
+                    template_facts.append((i, "record", None))
                 else:
                     template_facts.append(
                         (i, "owner" if value is entry_owner else "static",
@@ -1118,6 +1126,16 @@ class Component:
             code = _ComponentCode(kernel, key, context)
             kernel._component_candidates.append(code)
             return code
+
+    def _template_record(self, owner, value):
+        if value is None:
+            return None  # Optional absence is an ordinary immutable template.
+        names = [name for name, declaration in self.declarations.items()
+                 if isinstance(declaration, Record) and self.available(owner, name)
+                 and self.read(owner, name) is value]
+        if len(names) > 1:
+            raise TaichiCompilationError("A component template record requires exactly one declared resource record path")
+        return names[0] if names else None
 
     def _template_resource(self, owner, value, argument):
         # Search only explicit declarations, never arbitrary owner attributes.
@@ -1212,7 +1230,7 @@ class _Capture:
         # does, including optional records and borrowed source namespaces.
         for depth in range(1, len(path)):
             self.attribute(ctx, path[depth - 1], prefix=path[: depth - 1])
-        field = self.attribute(ctx, value.name)
+        field = self.attribute(ctx, path[-1], prefix=path[:-1])
         if value.snode_depth is None:
             return field
         node = field.snode

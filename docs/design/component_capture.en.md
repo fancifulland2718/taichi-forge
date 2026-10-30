@@ -841,3 +841,10 @@ components without model initialization retain their behavior. Tests cover an
 initializer-only root, two instances, repreparation, reset, close isolation and
 Runtime-only consumption; this is not complete GeoPhys model preparation or
 qualification of all backends.
+
+Free kernels may also receive declared child records through `ti.template()`
+parameters, including nested declaration paths. They use the same attribute and
+helper capture pipeline as bound methods; cached code retains paths, not Python
+objects. Unused parameters add no resource dependencies. Undeclared or ambiguous
+objects reject. CPU/CUDA tests cover cache reuse, frozen-module new-size
+instances, shared resources and interleaved instance execution.
