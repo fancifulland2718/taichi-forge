@@ -4371,6 +4371,9 @@ python python/taichi_forge/tools/_host_wheel.py --spec release.json --output whe
     "simulation/py.typed": "public/py.typed",
     "simulation/settings.json": "public/settings.json",
     "simulation/aot/cuda/application.tcm": "artifacts/application.tcm"
+  },
+  "examples": {
+    "simulation/sdk/examples/scene.py": "public/examples/scene.py"
   }
 }
 ```
@@ -4383,8 +4386,16 @@ entry points；不填写源码发现用的`[tool.setuptools]`。readme/license�
 
 setuptools生成正确的原生wheel标签、`METADATA`、`WHEEL`和`RECORD`，已核验宿主清单
 保留在`.dist-info/forge-host.json`。构建脚本和编译缓存不进入消费包。工具校验全部产物
-哈希，拒绝未声明文件、源码、目标冲突和不匹配的ABI/平台；公开文件清单不能夹带Forge
+哈希，拒绝未声明文件、未经允许的源码、目标冲突和不匹配的ABI/平台；公开文件清单不能夹带Forge
 或其他原生runtime库。
+
+可选的 `examples` 映射显式分发可阅读的 Python 场景/教程脚本，目标须位于已编译宿主
+命名空间的 `examples/` 子目录。脚本作为 wheel 文件安装，不编译或写入 TCM；不能替换
+已编译模块、别名或包初始化器。普通 `files` 仍拒绝 `.py`，示例路径和哈希单独记录于
+`forge-host.json` 的 `public_examples`。producer 负责审阅示例的公开 API 与依赖闭包，
+复制脚本本身不证明其算法或后端已经取得资格。文档、图片等经 `files` 分发并保留相对
+目录，例如 `simulation/sdk/docs/guide.md`。用户通过发行文件清单或 `importlib.resources`
+定位安装资源；会生成输出的示例先复制到可写目录再运行。
 
 宿主闭包也包括按需导入的模块与包资源。对使用
 `importlib.resources.files(__package__)` 的原生渲染器，显式把已编译的 `.spv` 文件

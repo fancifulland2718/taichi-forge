@@ -122,7 +122,8 @@ def host_payload(layout):
 def release_inputs(filename):
     filename = Path(filename).resolve()
     spec = _load(filename)
-    if set(spec) != {"version", "host_layout", "project", "files"} or spec["version"] != 1:
+    required = {"version", "host_layout", "project", "files"}
+    if not required <= set(spec) or set(spec) - required - {"examples"} or spec["version"] != 1:
         raise ValueError("Unsupported host wheel specification")
     root = filename.parent
     layout = (root / _relative(spec["host_layout"])).resolve()
@@ -166,6 +167,32 @@ def release_inputs(filename):
             raise ValueError(f"Conflicting wheel destination: {target}")
         source = _inside(root, relative)
         payload[key] = dict(file=target, source=source, sha256=_hash(source.read_bytes()))
+    # Readable examples are intentional public source, not host modules or TCM
+    # inputs. Keep this opt-in separate from the source-free resource channel.
+    examples = {}
+    compiled_names = {os.path.normcase(item["name"]) for item in manifest["modules"]}
+    compiled_names.update(os.path.normcase(name) for name in manifest.get("aliases", {}))
+    for target, relative in spec.get("examples", {}).items():
+        path = PurePosixPath(_relative(target))
+        if (
+            path.parts[0] not in roots
+            or "examples" not in path.parts[1:-1]
+            or path.suffix != ".py"
+            or path.name == "__init__.py"
+        ):
+            raise ValueError(f"Public examples require .py files in a host examples directory: {target}")
+        module_name = os.path.normcase(".".join(path.with_suffix("").parts))
+        if any(name == module_name or name.startswith(module_name + ".") for name in compiled_names):
+            raise ValueError(f"Public example conflicts with a compiled host module: {target}")
+        key = os.path.normcase(target)
+        if key in payload:
+            raise ValueError(f"Conflicting wheel destination: {target}")
+        source = _inside(root, relative)
+        digest = _hash(source.read_bytes())
+        payload[key] = dict(file=target, source=source, sha256=digest)
+        examples[target] = digest
+    if examples:
+        manifest = {**manifest, "public_examples": examples}
     project = _inside(root, spec["project"])
     try:
         import tomllib

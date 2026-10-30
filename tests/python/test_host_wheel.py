@@ -77,3 +77,48 @@ def test_host_release_keeps_native_abi_and_metadata_owner_explicit(tmp_path):
         stream.write('\n[tool.setuptools]\npackages=["private"]\n')
     with pytest.raises(ValueError, match="source-discovery"):
         wheel.release_inputs(path)
+
+
+def test_readable_examples_are_explicit_and_preserved_in_wheel(tmp_path):
+    from zipfile import ZipFile
+
+    path, spec, _ = inputs(tmp_path)
+    source = b"# Public scene example, not a numerical definition.\nprint('example')\n"
+    (tmp_path / "scene.py").write_bytes(source)
+    spec["examples"] = {"pkg/sdk/examples/scene.py": "scene.py"}
+    (tmp_path / "guide.md").write_text("[Scene](../examples/scene.py)\n", encoding="utf-8")
+    spec["files"]["pkg/sdk/docs/guide.md"] = "guide.md"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    result = wheel.build(path, tmp_path / "wheels")
+    with ZipFile(result["wheel"]) as archive:
+        assert archive.read("pkg/sdk/examples/scene.py") == source
+        assert archive.read("pkg/sdk/docs/guide.md") == (tmp_path / "guide.md").read_bytes()
+        metadata = next(name for name in archive.namelist() if name.endswith("/forge-host.json"))
+        assert json.loads(archive.read(metadata))["public_examples"] == {
+            "pkg/sdk/examples/scene.py": hashlib.sha256(source).hexdigest()
+        }
+    # The same source still cannot enter through the ordinary resource channel.
+    spec["files"]["pkg/private.py"] = "scene.py"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot introduce source"):
+        wheel.release_inputs(path)
+
+
+@pytest.mark.parametrize("target", ["pkg/core.py", "other/examples/run.py", "pkg/examples/core.pyc",
+                                   "pkg/examples/__init__.py", "pkg/examples/../core.py"])
+def test_public_examples_cannot_replace_host_sources(tmp_path, target):
+    path, spec, _ = inputs(tmp_path)
+    spec["examples"] = {target: "api.pyi"}
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(ValueError):
+        wheel.release_inputs(path)
+
+
+def test_public_example_cannot_shadow_compiled_alias(tmp_path):
+    path, spec, manifest = inputs(tmp_path)
+    manifest["aliases"] = {"pkg.examples.scene": {"target": "pkg", "registered_by": "pkg"}}
+    (tmp_path / "layout/host-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    spec["examples"] = {"pkg/examples/scene.py": "api.pyi"}
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(ValueError, match="conflicts with a compiled host module"):
+        wheel.release_inputs(path)

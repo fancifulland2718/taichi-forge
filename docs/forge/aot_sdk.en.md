@@ -5772,6 +5772,9 @@ python python/taichi_forge/tools/_host_wheel.py --spec release.json --output whe
     "simulation/py.typed": "public/py.typed",
     "simulation/settings.json": "public/settings.json",
     "simulation/aot/cuda/application.tcm": "artifacts/application.tcm"
+  },
+  "examples": {
+    "simulation/sdk/examples/scene.py": "public/examples/scene.py"
   }
 }
 ```
@@ -5788,9 +5791,21 @@ are copied from the project directory.
 Setuptools generates native wheel tags, `METADATA`, `WHEEL` and `RECORD`; the
 verified host manifest is retained in `.dist-info/forge-host.json`. Generated
 build scripts and compiler caches stay outside the wheel. The tool checks every
-payload hash and rejects undeclared files, source, destination collisions and
+payload hash and rejects undeclared files, unapproved source, destination collisions and
 incompatible host ABIs/platforms. The public-file list cannot vendor Forge or
 other native runtime libraries.
+
+The optional `examples` map explicitly includes readable Python scene/tutorial
+scripts under an `examples/` directory in a compiled host namespace. It does not
+compile or insert them into a TCM. These files cannot replace compiled modules,
+aliases or package initializers; `files` still rejects `.py` source. Example
+paths and hashes are recorded as `public_examples` in `forge-host.json`. The
+producer must review their public API and dependency closure; copying an example
+does not qualify its algorithms or backend. Include documentation and example
+assets through `files`, preserving relative paths, for example
+`simulation/sdk/docs/guide.md`. Locate installed resources through distribution
+file records or `importlib.resources`, and copy examples to a writable directory
+before running scripts that create output.
 
 The host closure includes lazy imports and package resources. For native
 renderers using `importlib.resources.files(__package__)`, add compiled `.spv`
