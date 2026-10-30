@@ -840,12 +840,17 @@ closure proves that initialization cannot access those private buffers; they
 retain preparation-local allocation and retirement, including a fresh scratch
 state after repreparation. Export and Runtime use the same phase check. Private
 resources referenced by initialization, other private resource kinds, cross-phase
-binding constraints and special submission/storage recipes still reject pending
+binding constraints that cannot be validated wholly in either phase and special
+submission/storage recipes still reject pending
 shared-lifetime qualification. Existing
 components without model initialization retain their behavior. Tests cover an
 initializer-only root, two instances, repreparation, reset, close isolation and
 Runtime-only consumption; this is not complete GeoPhys model preparation or
 qualification of all backends.
+
+Binding constraints are projected using the existing validator's reference
+sets. Each requirement stays intact in every phase that retains all its
+bindings; layout and disjointness checks are neither weakened nor dropped.
 
 Free kernels may also receive declared child records through `ti.template()`
 parameters, including nested declaration paths. They use the same attribute and

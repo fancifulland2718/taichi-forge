@@ -7,10 +7,13 @@ def validate_constraints(constraints, used):
     if not isinstance(constraints, list):
         raise ValueError("Execution constraints must be a list")
 
+    references = set()
+
     def binding(value):
         _name(value)
         if value not in used:
             raise ValueError(f"Constraint references unused binding: {value}")
+        references.add(value)
 
     def integer(value, *, positive=False):
         if type(value) is not int or not int(positive) <= value <= 0x7FFFFFFFFFFFFFFF:
@@ -88,3 +91,4 @@ def validate_constraints(constraints, used):
                     _name(port)
         else:
             raise ValueError("Unsupported execution constraint")
+    return references

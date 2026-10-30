@@ -3,6 +3,7 @@
 import json
 
 from ._plan import ExecutionPlan
+from ._constraints import validate_constraints
 
 
 def split_component_lifecycle(plan):
@@ -15,7 +16,7 @@ def split_component_lifecycle(plan):
     """
     document = json.loads(plan.to_json())
     if not document.get("initialization") or any(document.get(key) for key in (
-            "gradients", "constraints", "binding_strategy", "submission_recipe", "storage_recipe")):
+            "gradients", "binding_strategy", "submission_recipe", "storage_recipe")):
         raise ValueError("Component initializer requires qualified instance-owned resources")
     resources = document.get("resources", [])
     allowed = {"kind", "name", "dtype", "shape", "element_shape", "zero_initialize"}
@@ -33,4 +34,22 @@ def split_component_lifecycle(plan):
     replay = dict(document)
     replay.pop("initialization")
     replay.pop("version")
+    constraints = replay.pop("constraints", [])
+    replay_plan = ExecutionPlan(**replay)
+    initial_constraints, replay_constraints = [], []
+    for constraint in constraints:
+        # Collect references through the authoritative validator, including
+        # access groups and aliases. A requirement is copied whole, never
+        # weakened into per-phase fragments or silently dropped.
+        references = validate_constraints([constraint], plan._retained_argument_names)
+        in_initial = references <= initializer._retained_argument_names
+        in_replay = references <= replay_plan._retained_argument_names
+        if not in_initial and not in_replay:
+            raise ValueError("Component cross-phase binding constraint requires shared-lifetime qualification")
+        if in_initial:
+            initial_constraints.append(constraint)
+        if in_replay:
+            replay_constraints.append(constraint)
+    initializer = ExecutionPlan(document["initialization"], constraints=initial_constraints or None)
+    replay["constraints"] = replay_constraints or None
     return initializer, ExecutionPlan(**replay)

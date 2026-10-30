@@ -16,6 +16,26 @@ from taichi_forge_runtime.aot import Runtime
 from tests import test_utils
 
 
+def test_lifecycle_projects_whole_binding_constraints_and_rejects_cross_phase_requirements():
+    from taichi_forge_runtime.aot import ExecutionPlan
+    from taichi_forge_runtime.aot._component_lifecycle import split_component_lifecycle
+
+    initial = [dict(kind="kernel", entry="initialize", arguments=["seed", "state"])]
+    replay = [dict(kind="kernel", entry="step", arguments=["state", "scratch"])]
+    resources = [dict(kind="ndarray", name="scratch", dtype="i32", shape=[1], zero_initialize=True)]
+    constraints = [dict(kind="array_layout", array="state", minimum_shape=[8], record_bytes=4, alignment=4),
+                   dict(kind="disjoint", left="state", right="scratch")]
+    init_plan, replay_plan = split_component_lifecycle(ExecutionPlan(
+        replay, initialization=initial, resources=resources, constraints=constraints))
+    assert json.loads(init_plan.to_json())["constraints"] == constraints[:1]
+    assert json.loads(replay_plan.to_json())["constraints"] == constraints
+    assert "resources" not in json.loads(init_plan.to_json())
+    cross = dict(kind="disjoint", left="seed", right="scratch")
+    with pytest.raises(ValueError, match="cross-phase binding constraint"):
+        split_component_lifecycle(ExecutionPlan(
+            replay, initialization=initial, resources=resources, constraints=[cross]))
+
+
 @ti.data_oriented
 class _InitializedState:
     def __init__(self, sparse):

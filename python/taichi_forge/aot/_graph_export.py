@@ -274,13 +274,6 @@ def export_graph(
             boundary = operation_ends[component_initialization_nodes - 1]
             context.initialization = context.operations[:boundary]
             context.operations = context.operations[boundary:]
-            from taichi_forge_runtime.aot._component_lifecycle import split_component_lifecycle
-
-            try:
-                split_component_lifecycle(ExecutionPlan(
-                    context.operations, initialization=context.initialization, resources=context.resources))
-            except ValueError as error:
-                raise TaichiRuntimeError(str(error)) from error
         submission_recipe = None
         if getattr(binding_factory, "__dict__", {}).get("_export_aot_submission") is not None:
             submission_recipe = binding_factory._export_aot_submission(spec, operation_ends)
@@ -295,9 +288,15 @@ def export_graph(
         from taichi_forge.graph._lowering_constraints import export_constraints
 
         constraints = export_constraints(spec, context.binding, additional=context.binding_constraints)
-        if component_initialization_nodes and constraints:
-            raise TaichiRuntimeError(
-                "Component instance initializers with cross-phase Plan binding constraints require qualification")
+        if component_initialization_nodes:
+            from taichi_forge_runtime.aot._component_lifecycle import split_component_lifecycle
+
+            try:
+                split_component_lifecycle(ExecutionPlan(
+                    context.operations, initialization=context.initialization,
+                    resources=context.resources, constraints=constraints or None))
+            except ValueError as error:
+                raise TaichiRuntimeError(str(error)) from error
         if context.storage_recipe is not None:
             if not context._buffer_only_kernels:
                 raise TaichiRuntimeError("AOT storage rings require ordinary buffer dispatches")
