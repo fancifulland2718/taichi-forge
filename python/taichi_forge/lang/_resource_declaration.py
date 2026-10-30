@@ -230,13 +230,19 @@ class ResourceScope:
         roles = set().union(*(self._registry.get(kind, {}) for kind in ("fields", "arrays", "dimensions", "values", "borrowed")))
         validate_constraints({name: spec}, self._registry["dimensions"].keys(), roles)
         if self._owner is not None:
-            check_constraints({name: spec}, lambda key: operator.index(getattr(self._owner, key)))
+            check_constraints({name: spec}, self._normal_dimension)
         constraints = self._registry.setdefault("constraints", {})
         if name in constraints and constraints[name]["spec"] != spec:
             raise ValueError(f"Dimension constraint {name!r} already has another declaration")
         caller = inspect.currentframe().f_back
         constraints.setdefault(name, dict(spec=spec, source=(caller.f_code.co_filename, caller.f_lineno)))
         del caller
+
+    def _normal_dimension(self, name):
+        inherited = self._registry.get("inherited_dimensions", {}).get(name)
+        if inherited is not None:
+            return self._parent._normal_dimension(inherited[1])
+        return operator.index(getattr(self._owner, name))
 
     def derived_dim(self, name, expression):
         """Relate an existing count to declared counts without changing it.
@@ -261,9 +267,7 @@ class ResourceScope:
             if key in pending:
                 value = evaluate_extent(pending[key], lambda dependency: resolve(dependency, (*visiting, key)))
             elif key in self._registry.get("inherited_dimensions", {}):
-                parent_name = self._registry["inherited_dimensions"][key][1]
-                value = operator.index(getattr(self._parent._owner, parent_name))
-                return value
+                return self._normal_dimension(key)
             else:
                 return operator.index(getattr(self._owner, key))
             if value != operator.index(getattr(self._owner, key)):

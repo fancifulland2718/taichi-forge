@@ -1,6 +1,7 @@
 """Algorithm bounds follow actual resource use and precede allocation/submission."""
 
 import struct
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
@@ -8,6 +9,55 @@ import taichi_forge as ti
 from taichi_forge.aot._component import Component
 from taichi_forge_runtime.aot import Runtime
 from tests import test_utils
+
+
+@dataclass(frozen=True)
+class _Counts:
+    active: int
+
+
+@ti.data_oriented
+class _ParentBoundedModel:
+    def __init__(self, capacity, active):
+        self.capacity = capacity
+        scope = ti.experimental.ResourceScope(self)
+        record = scope.record("state", _Counts(active))
+        record.require_le("parent_capacity", record.dim("active"), record.parent_dim("capacity"), when="active")
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        scope.output = scope.field(ti.i32, shape=scope.dim("capacity"))
+        self.tree = builder.finalize()
+
+    @ti.kernel
+    def step(self):
+        for i in range(self.state.active):
+            self.output[i] = i + 1
+
+    def record(self, builder):
+        builder.dispatch(self.step)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_record_constraints_resolve_parent_dimensions_before_and_after_export(tmp_path):
+    with pytest.raises(ValueError, match="parent_capacity.*5 > 4"):
+        _ParentBoundedModel(4, 5)
+    model = _ParentBoundedModel(4, 3)
+    env = Component.from_owner(model)
+    root = env.compile_graph(model.record)
+    module = ti.aot.Module()
+    root.export(module, "parent_bounded")
+    artifact = tmp_path / "parent_bounded.tcm"
+    module.archive(str(artifact))
+    active = next(name for name in root.contract["dimensions"] if env._paths.get(name) == ("state", "active"))
+    with Runtime("cpu") as runtime:
+        component = runtime.load_module(artifact).component("parent_bounded")
+        with pytest.raises(ValueError, match="parent_capacity.*8 > 7"):
+            component.instantiate({"capacity": 7, active: 8})
+        with component.instantiate({"capacity": 7, active: 5}) as instance:
+            instance.initialize(zero=component.contract["resources"])
+            with instance.prepare() as call:
+                call.run()
+            assert struct.unpack("<7i", instance.resource("output").read()) == (1, 2, 3, 4, 5, 0, 0)
 
 
 @ti.data_oriented
