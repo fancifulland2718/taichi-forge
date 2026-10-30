@@ -774,6 +774,9 @@ def _input_sources(component, contract):
     readable = {".".join(path): path for path in component._paths.values()}
 
     def source(name, *, fixed=False):
+        allocation = component._source_scope_paths.get(name)
+        if allocation is not None:
+            return dict(kind="attribute", path=list(allocation))
         borrowed = component._borrowed_reads.get(name)
         if borrowed is not None:
             anchor, anchor_member, member, _ = borrowed

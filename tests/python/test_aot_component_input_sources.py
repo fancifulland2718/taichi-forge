@@ -58,6 +58,60 @@ def _read_path(model, source):
     return value
 
 
+@ti.data_oriented
+class _SourceBorrower:
+    def __init__(self, parent):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow("input", parent.seed, source_scope=True)
+
+    @ti.kernel
+    def step(self):
+        for i in self.input:
+            self.input[i] += 5
+
+
+class _SourceOwner:
+    def __init__(self, n):
+        self.n = n
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        scope.seed = scope.field(ti.i32, shape=scope.dim("n"))
+        scope.unused = scope.field(ti.i32, shape=scope.dim("n"))
+        self.tree = builder.finalize()
+        scope.child = _SourceBorrower(self)
+
+    def record(self, builder):
+        builder.dispatch(self.child.step)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_child_only_source_borrow_projects_original_initializer_path(tmp_path):
+    owner = _SourceOwner(3)
+    root = Component.from_owner(owner).compile_graph(owner.record)
+    assert len(root.contract["resources"]) == 1  # unused sibling remains layout-only
+    module = ti.aot.Module()
+    root.export(module, "step")
+    artifact = tmp_path / "source_borrow.tcm"
+    module.archive(str(artifact))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime, runtime.load_module(artifact) as loaded:
+        component = loaded.component("step")
+        sources = component.input_sources()
+        resource, aliases = next(iter(sources["resources"].items()))
+        assert all(source == dict(kind="attribute", path=["seed"]) for source in aliases.values())
+        for n in (11, 17):
+            model = dict(n=n, seed=np.arange(n, dtype=np.int32))
+            dimensions = {name: _read_path(model, source) for name, source in sources["dimensions"].items()}
+            payload = _read_path(model, next(iter(aliases.values())))
+            with component.instantiate(dimensions) as instance:
+                instance.initialize({resource: payload.tobytes()})
+                with instance.prepare() as prepared:
+                    prepared.run()
+                np.testing.assert_array_equal(np.frombuffer(instance.resource(resource).read(), np.int32),
+                                              model["seed"] + 5)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_frozen_nested_inputs_use_public_paths_not_encoded_ids(tmp_path):
     owner = _Model(3)

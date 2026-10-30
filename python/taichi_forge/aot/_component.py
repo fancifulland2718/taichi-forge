@@ -566,7 +566,8 @@ class Component:
     is supplied by the application. Graph export follows separately.
     """
 
-    __slots__ = ("_declarations", "_sources", "_paths", "_borrowed_reads", "_derived_attributes", "_constraints")
+    __slots__ = ("_declarations", "_sources", "_paths", "_borrowed_reads", "_source_scope_paths",
+                 "_derived_attributes", "_constraints")
 
     def __init__(self, **declarations):
         flattened, paths = {}, {}
@@ -624,6 +625,7 @@ class Component:
         self._paths = MappingProxyType(paths)
         self._sources = MappingProxyType({})
         self._borrowed_reads = MappingProxyType({})
+        self._source_scope_paths = MappingProxyType({})
         self._derived_attributes = frozenset()
         self._constraints = MappingProxyType({})
 
@@ -919,6 +921,7 @@ class Component:
         from taichi_forge.lang.matrix import VectorType
 
         declarations, paths, reads, mappings = dict(self.declarations), dict(self._paths), {}, {}
+        source_scope_paths = {}
 
         def rewrite(expression, mapping):
             op, *args = expression
@@ -998,6 +1001,10 @@ class Component:
                         raise ValueError("source-scope borrowing currently requires a Dense Field")
                     name = _capture_id(path)
                     declarations[name], paths[name], sources[name] = source, path, binding["source"]
+                    # Keep numerical access through the borrower, but expose
+                    # initialization at the visible allocation site even when
+                    # no kernel directly captures that site's attribute.
+                    source_scope_paths[name] = paths[source_name]
                     continue
                 if root_id in mappings and mappings[root_id] != mapping:
                     raise ValueError("aliases of one source group have conflicting dimension relations")
@@ -1037,6 +1044,7 @@ class Component:
         self._declarations = MappingProxyType(declarations)
         self._paths = MappingProxyType(paths)
         self._borrowed_reads = MappingProxyType(reads)
+        self._source_scope_paths = MappingProxyType(source_scope_paths)
 
     def _entry_owner_path(self, owner, entry_owner):
         if entry_owner is owner:
