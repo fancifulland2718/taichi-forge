@@ -799,6 +799,14 @@ and interleaved instances of one loaded module. Independent child dimensions
 and borrowed foreign layouts still need explicit compatible relations; this
 does not automatically qualify a complete multi-solver application.
 
+When a source allocation and its borrower are both declared under the root,
+the allocation site's dimension and SNode layout remain authoritative. Explicit
+borrow mappings become equality constraints checked during compilation and
+consumer preparation; equal producer integers never establish this relation.
+The borrowed member and source therefore refer to one instance allocation,
+while private child resources retain separate ownership. CPU/CUDA tests cover
+new capacities and reject inconsistent child counts before execution.
+
 An original initializer recording can join the same owner's step recording:
 `component.compile_graph(owner.record_step, initializer=owner.record_initialize)`.
 Both phases share capture and resource closure, including initializer-only SNode

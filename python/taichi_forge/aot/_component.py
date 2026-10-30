@@ -745,6 +745,21 @@ class Component:
             return members
 
         declarations = collect(owner)
+        # A visible allocation site names its group, regardless of aliases in
+        # child records. Borrow-only components retain their existing identity.
+        visible_dimensions, visible_roots = {}, {}
+        for _, prefix, name, field, declaration, root_id in fields:
+            namespace = getattr(field, "_logical_shape_namespace", None)
+            source_prefix = namespaces.get(id(namespace), prefix)
+            visible_roots.setdefault(root_id, set()).add(".".join((*source_prefix, declaration["identity"])))
+            dimensions = visible_dimensions.setdefault(root_id, {})
+            for extent in declaration["shape"]:
+                if isinstance(extent, Extent):
+                    for dependency in extent_dependencies(extent.expression):
+                        expression = ("dim", _capture_id((*source_prefix, dependency)))
+                        if dimensions.setdefault(dependency, expression) != expression:
+                            raise TaichiCompilationError("A source group has conflicting dimension declaration sites")
+        roots.update(visible_roots)
         for members, prefix, name, array, declaration in arrays:
             namespace = getattr(array, "_logical_shape_namespace", None)
             if id(namespace) not in namespaces:
@@ -855,7 +870,7 @@ class Component:
         for name, expression in inherited_dimensions.items():
             flattened[name] = Dimension("active", expression=expression)
         result._declarations = MappingProxyType(flattened)
-        result._project_borrowed(borrowed, roots, sources)
+        result._project_borrowed(borrowed, roots, sources, visible_dimensions, constraints)
         result._sources = MappingProxyType(sources)
         result._derived_attributes = frozenset(derived_attributes)
         result._constraints = MappingProxyType(constraints)
@@ -889,7 +904,7 @@ class Component:
         check_constraints(constraints, lambda name: _dimension_value(self, owner, name), sources, entry=entry)
         return constraints, dimensions, sources
 
-    def _project_borrowed(self, borrowed, roots, sources):
+    def _project_borrowed(self, borrowed, roots, sources, visible_dimensions, constraints):
         """Complete layout dependencies from source declarations, not a new ABI.
 
         Virtual members are used only by the existing native group capture.
@@ -931,6 +946,27 @@ class Component:
                 mapping = {
                     name: rewrite(expression, target_dimensions) for name, expression in binding["dimensions"].items()
                 }
+                if root_id in visible_dimensions:
+                    source_mapping = visible_dimensions[root_id]
+                    if set(source_mapping) != dependencies:
+                        raise ValueError("visible source group has incomplete dimension provenance")
+                    # The borrow declaration promises this relation; equality
+                    # is checked, never inferred from producer integer values.
+                    # Reuse the original source layout for both owners.
+                    for dimension, expression in mapping.items():
+                        source_expression = source_mapping[dimension]
+                        if expression == source_expression:
+                            continue
+                        for side, left, right in (
+                            ("source", expression, source_expression),
+                            ("target", source_expression, expression),
+                        ):
+                            key = "borrow_" + _digest((path, dimension, side))
+                            constraints[key] = dict(
+                                spec=dict(left=left, right=right, when=_capture_id(path)),
+                                source=binding["source"],
+                            )
+                    mapping = source_mapping
                 if root_id in mappings and mappings[root_id] != mapping:
                     raise ValueError("aliases of one source group have conflicting dimension relations")
                 first = root_id not in mappings
