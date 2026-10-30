@@ -183,3 +183,16 @@ Vanilla Taichi 1.7.4 primarily records ordinary kernel dispatches. Forge keeps
 that model, then adds backend planning and native primitive replay under the
 same public entry point. Unsupported optimized paths fall back instead of
 changing graph semantics.
+# Private storage in repeated regions
+
+Use `builder.create_sequential(private_scope=True)` when a reusable recorder
+declares private ndarrays with local names. Each such region receives distinct,
+deterministic names within its parent recording, so repeated or nested recordings
+can both declare `region.private_ndarray("scratch", ti.i32, ())` without sharing
+storage. Pass the returned symbol when a descendant deliberately uses an outer
+resource. Children inherit the scope unless they request their own.
+
+The default remains `private_scope=False`. This option changes private naming;
+it does not change control lowering, ordering, allocation lifetime, or device
+admission. Create composed regions from the same builder; independently recorded
+graphs still need their existing composition and binding contracts.

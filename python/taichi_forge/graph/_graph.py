@@ -16450,6 +16450,24 @@ def _bind_managed_array_arguments(builder, arguments):
     return tuple(result)
 
 
+def _new_sequential_region(builder, private_scope):
+    if type(private_scope) is not bool:
+        raise TypeError("private_scope must be a bool")
+    prefix = builder._private_scope_prefix
+    if private_scope:
+        ordinal = builder._private_scope_state[0]
+        builder._private_scope_state[0] += 1
+        prefix = f"__ti_private_region_{ordinal}__"
+    return Sequential(
+        _declared_private_bindings=builder._declared_private_bindings,
+        _capture_recipe_sources=builder._capture_recipe_sources,
+        _recipe_task_facts=builder._recipe_task_facts,
+        _component_capture=builder._component_capture,
+        _private_scope_state=builder._private_scope_state,
+        _private_scope_prefix=prefix,
+    )
+
+
 class Sequential:
 
     def __init__(
@@ -16459,8 +16477,12 @@ class Sequential:
         _capture_recipe_sources=True,
         _recipe_task_facts=None,
         _component_capture=None,
+        _private_scope_state=None,
+        _private_scope_prefix="",
     ):
         self._component_capture = _component_capture
+        self._private_scope_state = [0] if _private_scope_state is None else _private_scope_state
+        self._private_scope_prefix = _private_scope_prefix
         # Share declarations while recording; append freezes referenced owners.
         self._declared_private_bindings = (
             {} if _declared_private_bindings is None else _declared_private_bindings
@@ -16543,10 +16565,12 @@ class Sequential:
     ):
         """Declare private address-stable storage for this recorded region."""
 
+        if not isinstance(name, str) or not name:
+            raise TaichiRuntimeError("Graph private ndarray name must be nonempty")
         if isinstance(shape, int):
             shape = (shape,)
         return self._bind_internal_ndarray(
-            name,
+            self._private_scope_prefix + name,
             dtype,
             shape,
             exclusive_submission=exclusive_submission,
@@ -16566,14 +16590,14 @@ class Sequential:
         self._fixed_runtime_args[name] = value
         return Arg(ArgKind.SCALAR, name, dtype)
 
-    def create_sequential(self):
-        """Create a child recording with the same resource and compile context."""
-        return Sequential(
-            _declared_private_bindings=self._declared_private_bindings,
-            _capture_recipe_sources=self._capture_recipe_sources,
-            _recipe_task_facts=self._recipe_task_facts,
-            _component_capture=self._component_capture,
-        )
+    def create_sequential(self, *, private_scope=False):
+        """Create a child; private_scope gives its private arrays fresh stable names.
+
+        Children inherit this scope unless they request another. Symbols returned
+        by private_ndarray remain explicit references when passed to descendants.
+        Scope ordinals belong to this recording, never to Python owner addresses.
+        """
+        return _new_sequential_region(self, private_scope)
 
     def dispatch(self, kernel_fn, *args, template_args=None, label=None):
         label = _normalize_dispatch_label(label)
@@ -17195,6 +17219,8 @@ class GraphBuilder:
         self._runtime_graph_native_action_manifests = []
         self._active_bounded_publication = None
         self._declared_private_bindings = {}
+        self._private_scope_state = [0]
+        self._private_scope_prefix = ""
         self._graph_memory_sources = []
         self._graph_offload_fusion_sources = []
         self._graph_sparse_traversal_sources = []
@@ -18313,13 +18339,9 @@ class GraphBuilder:
         )
         self._dispatch_count += 1
 
-    def create_sequential(self):
-        return Sequential(
-            _declared_private_bindings=self._declared_private_bindings,
-            _capture_recipe_sources=self._capture_recipe_sources,
-            _recipe_task_facts=self._recipe_task_facts,
-            _component_capture=self._component_capture,
-        )
+    def create_sequential(self, *, private_scope=False):
+        """Create a region, optionally isolating names of its private arrays."""
+        return _new_sequential_region(self, private_scope)
 
     def append(self, node):
         # TODO: support appending dispatch node as well.

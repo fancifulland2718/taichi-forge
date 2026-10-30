@@ -150,3 +150,14 @@ launch 开销，graph 收益通常较低。
 Vanilla Taichi 1.7.4 主要记录普通 kernel dispatch。Forge 保留该模型，并在同一公开入口
 下增加后端 execution planning 与 native primitive replay。不支持的优化路径会回退，而
 不是改变 graph 语义。
+# 重复区域中的私有存储
+
+可复用录制函数需要按局部名称声明私有 ndarray 时，使用
+`builder.create_sequential(private_scope=True)`。同一父录制中的各区域获得独立且
+确定的名称，重复或嵌套区域都可声明 `region.private_ndarray("scratch", ti.i32, ())`，
+不会因此共享存储。子区域需要使用外层资源时，显式传递原返回符号；未申请新作用域的
+子区域继承当前作用域。
+
+默认仍为 `private_scope=False`。此选项只处理私有名称，不改变控制 lowering、顺序、
+分配寿命或设备资格。组合区域应由同一个 builder 创建；独立录制的 Graph 仍遵守
+原有组合及绑定合同。
