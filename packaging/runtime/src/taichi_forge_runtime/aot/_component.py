@@ -127,6 +127,8 @@ class Component:
                 capabilities.add("component_instance_initializer_v1")
             if any(resource.get("kind") == "ndarray" for resource in contract["resources"].values()):
                 capabilities.add("component_array_storage_v1")
+            if any(resource.get("initialization") == "zero" for resource in contract["resources"].values()):
+                capabilities.add("component_zero_initial_state_v1")
             if any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
                 capabilities.add("component_explicit_ndarray_v1")
             if contract["version"] >= 2:
@@ -265,7 +267,8 @@ class Component:
                         and resource.get("effects_precision") == "compiler_proven"
                         and resource.get("access") in ("none", "read", "write", "read_write", "atomic")
                     )
-                    or resource.get("initialization") != ("empty_activation_and_zero_values" if fixed else "consumer_explicit")
+                    or resource.get("initialization") not in (
+                        ("empty_activation_and_zero_values",) if fixed else ("consumer_explicit", "zero"))
                 ):
                     raise ValueError("Invalid component resource contract")
                 for alias in (key, *resource["aliases"]):
@@ -487,6 +490,12 @@ class ComponentInstance:
                     self._resources[name] = view
                     if view.shape != shape:
                         raise ValueError("Native SNode layout differs from the component extent declaration")
+                # Only the allocation site's explicit model policy supplies
+                # these initial values. Never infer zero from producer bytes,
+                # read/write effects or a resource's name. Reprepare does not
+                # revisit this construction boundary or reset persistent state.
+                self._initialize(None, zero=[name for name, resource in contract["resources"].items()
+                                             if resource["initialization"] == "zero"])
         except BaseException:
             self.close()
             raise

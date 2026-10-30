@@ -886,3 +886,16 @@ root. The component root must contain the original Field declaration. The borrow
 reuses its existing group and shape contract, including native layout completeness
 checks; no storage regrouping or separate layout recipe is introduced. A missing
 source remains acceptable only while the link is unused.
+
+Normal `ResourceScope` allocation can explicitly declare `initialization="zero"`
+for a scope or an individual Field/ndarray. The default remains
+`"consumer_explicit"`; a Field can override a zero scope for required model input.
+The compiler projects the actual allocation policy into each captured resource,
+including aliases, and requires `component_zero_initial_state_v1`. New instances
+zero only these declared resources through their own bindings. Producer contents
+are never sampled. Preparing again preserves persistent state; an explicit cold
+reset can still use `initialize(zero=[...])` followed by the normal initializer.
+Zero is not inferred from write effects and does not establish complete coverage
+by a numerical initializer. Fixed SNode placement retains its existing empty
+activation contract. CPU/CUDA checks cover new capacities, required model input,
+two instances, reprepare and cold reset; no native ABI or layout rule changes.

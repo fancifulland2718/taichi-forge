@@ -78,11 +78,14 @@ class ResourceScope:
     their existing storage contracts.
     """
 
-    def __init__(self, owner, *, builder=None):
+    def __init__(self, owner, *, builder=None, initialization="consumer_explicit"):
+        if initialization not in ("consumer_explicit", "zero"):
+            raise ValueError("Resource initialization must be 'consumer_explicit' or 'zero'")
         if isinstance(owner, ResourceScope):
             owner = owner._owner
         object.__setattr__(self, "_owner", owner)
         object.__setattr__(self, "_builder", builder)
+        object.__setattr__(self, "_initialization", initialization)
         object.__setattr__(self, "_read_only", False)
         object.__setattr__(self, "_parent", None)
         if not hasattr(owner, "_forge_resource_declarations"):
@@ -413,7 +416,12 @@ class ResourceScope:
         if self._read_only:
             raise TypeError("A declared record scope describes existing resources; it cannot allocate Fields")
         kwargs = dict(kwargs)
+        initialization = kwargs.pop("initialization", self._initialization)
+        if initialization not in ("consumer_explicit", "zero"):
+            raise ValueError("Resource initialization must be 'consumer_explicit' or 'zero'")
         placement = kwargs.pop("placement", None)
+        if placement is not None and initialization != "consumer_explicit":
+            raise ValueError("Fixed SNode placement retains its empty activation initialization contract")
         shape = kwargs.get("shape")
         if shape is None:
             raise ValueError("ResourceScope Field factories require an explicit shape")
@@ -474,7 +482,8 @@ class ResourceScope:
         else:
             members = ((None, field),)
         for identity, member in members:
-            member._logical_resource_declaration = dict(identity=identity, shape=shape, source=source)
+            member._logical_resource_declaration = dict(
+                identity=identity, shape=shape, source=source, initialization=initialization)
             # A Field alias in another declared child keeps the allocation
             # site's dimension namespace, just like a StructField member.
             member._logical_shape_namespace = self._registry
@@ -498,7 +507,7 @@ class ResourceScope:
 
         return self._create(field, args, kwargs)
 
-    def ndarray(self, dtype, *, shape):
+    def ndarray(self, dtype, *, shape, initialization=None):
         """Declare a normal independent array, retaining its logical extents.
 
         StructNdarray keeps the existing fixed AoS element layout. A surrounding
@@ -508,6 +517,10 @@ class ResourceScope:
 
         if self._read_only:
             raise TypeError("A declared record scope cannot allocate arrays")
+        if initialization is None:
+            initialization = self._initialization
+        if initialization not in ("consumer_explicit", "zero"):
+            raise ValueError("Resource initialization must be 'consumer_explicit' or 'zero'")
         shape = shape if isinstance(shape, tuple) else (shape,)
         if any(not isinstance(item, Extent) and type(item) is not int for item in shape):
             raise TypeError("Array extents require declared dimensions or explicit integer constants")
@@ -518,7 +531,8 @@ class ResourceScope:
         array = ndarray(dtype, shape=concrete)
         caller = inspect.currentframe().f_back
         array._logical_resource_declaration = dict(
-            identity=None, shape=shape, source=(caller.f_code.co_filename, caller.f_lineno))
+            identity=None, shape=shape, source=(caller.f_code.co_filename, caller.f_lineno),
+            initialization=initialization)
         array._logical_shape_namespace = self._registry
         del caller
         return array

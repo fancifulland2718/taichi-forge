@@ -205,7 +205,7 @@ class _GraphCapture:
                         aliases=[],
                         access="read_write",
                         effects_precision="conservative",
-                        initialization="consumer_explicit",
+                        initialization=(normal or {}).get("initialization", "consumer_explicit"),
                     )
                 for alias, location in contract["members"].items():
                     if (
@@ -284,7 +284,8 @@ class _GraphCapture:
             self.array_types[layout] = declaration.dtype
         resource = dict(kind="ndarray", shape=declaration.shape,
             dtype=str(element.scalar_type) if not layout else "struct", element_shape=element.shape, layout=layout,
-            aliases=sorted(aliases), access="read_write", effects_precision="conservative", initialization="consumer_explicit")
+            aliases=sorted(aliases), access="read_write", effects_precision="conservative",
+            initialization=getattr(value, "_logical_resource_declaration", {}).get("initialization", "consumer_explicit"))
         previous = self.resources.get(identity)
         if previous is not None:
             if {k: v for k, v in previous.items() if k != "aliases"} != {k: v for k, v in resource.items() if k != "aliases"}:
@@ -548,6 +549,8 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     if not any(value.get("kind") == "ndarray" for value in contract["resources"].values()):
         contract["required_capabilities"] = [name for name in contract["required_capabilities"]
                                              if name != "component_array_storage_v1"]
+    if any(value["initialization"] == "zero" for value in contract["resources"].values()):
+        contract["required_capabilities"].append("component_zero_initial_state_v1")
     accesses, uncertain, entries, task_cache = {}, set(), [], {}
     for node, code, entry in zip(nodes, codes, contract["entries"]):
         effects = []

@@ -609,3 +609,12 @@ CPU/CUDA 验证缓存复用、冻结模块的新尺寸实例、共享资源和�
 源作用域借用也支持原本位于默认 SNode 根上的已声明 Dense Field。组件根必须包含
 原字段声明；借用直接引用已生成的组/shape 合同，原 native 布局完整性检查继续生效。
 无需为借用重排原资源或另建布局配方。独立导出且源不可见时，仍只允许未使用的链接。
+
+正常 `ResourceScope` 可在作用域或单个 Field/ndarray 分配处显式声明
+`initialization="zero"`。默认仍为 `"consumer_explicit"`；零初态作用域中的模型输入
+可逐项覆盖为显式初始化。编译器把原分配策略投影到实际捕获资源及其别名，要求
+`component_zero_initial_state_v1`。新实例只通过自己的绑定清零已声明资源，不采样
+producer 内容。重新 prepare 保留持久状态；显式冷 reset 可先用
+`initialize(zero=[...])`，再执行正常 initializer。写 effects 不用于推断零初态或
+数值初始化的完整覆盖；固定 SNode placement 保留原空激活合同。CPU/CUDA 已覆盖
+新容量、必需模型输入、双实例、重新 prepare 与冷 reset；native ABI 和布局规则未变。
