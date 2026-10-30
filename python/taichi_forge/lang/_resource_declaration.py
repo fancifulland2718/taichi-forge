@@ -329,20 +329,25 @@ class ResourceScope:
         self._registry.setdefault("inherited_dimensions", {})[alias] = ("dim", name)
         return Extent(("dim", alias))
 
-    def borrow(self, name, field, *, dimensions):
+    def borrow(self, name, field, *, dimensions=None, source_scope=False):
         """Bind an existing Field and explicitly relate its whole source group.
 
         The target retains the original Field and storage ownership. This is a
         normal binding declaration, independent of kernels/export. Source
         dimensions include layout-only siblings, not just this Field's shape.
+        source_scope=True instead requires the original allocation scope in
+        the component root. Its layout remains authoritative; dimensions then
+        supplies only the explicit target relations that need checking.
         """
         from taichi_forge.lang.field import Field
 
         if not isinstance(name, str) or not name.isidentifier() or not isinstance(field, Field):
             raise TypeError("Resource borrow requires an attribute name and a Field")
+        if type(source_scope) is not bool or (dimensions is None and not source_scope):
+            raise TypeError("Resource borrow requires explicit dimensions or source_scope=True")
         _source_members(field)
         mapping = {}
-        for source, target in dimensions.items():
+        for source, target in ({} if dimensions is None else dimensions).items():
             if not isinstance(source, str) or not source.isidentifier() or not isinstance(target, Extent):
                 raise TypeError("Borrowed dimension mappings require source names and declared target extents")
             validate_extent(target.expression)
@@ -369,6 +374,8 @@ class ResourceScope:
             dimensions=mapping,
             source=(caller.f_code.co_filename, caller.f_lineno),
         )
+        if source_scope:
+            declaration["source_scope"] = True
         del caller
         if self._read_only:
             if getattr(self._owner, name) is not field:

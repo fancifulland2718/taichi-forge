@@ -145,6 +145,11 @@ def _member(owner, name):
 
 
 @dataclass(frozen=True)
+class _SourceScopeRequired:
+    source: tuple
+
+
+@dataclass(frozen=True)
 class RuntimeValue:
     dtype: object
 
@@ -933,7 +938,18 @@ class Component:
                     if isinstance(extent, Extent)
                     for dim in extent_dependencies(extent.expression)
                 }
-                if dependencies != binding["dimensions"].keys():
+                source_scope = binding.get("source_scope", False)
+                if source_scope and root_id not in visible_dimensions:
+                    # This is an explicitly linked external resource, not an
+                    # implicit capture. Unused links do not affect a smaller
+                    # component's ABI; actual use needs the allocation scope.
+                    name = _capture_id(path)
+                    declarations[name] = _SourceScopeRequired(binding["source"])
+                    paths[name], sources[name] = path, binding["source"]
+                    continue
+                if (not source_scope and dependencies != binding["dimensions"].keys()) or (
+                    source_scope and not binding["dimensions"].keys() <= dependencies
+                ):
                     raise ValueError(
                         f"whole source group dimensions require {sorted(dependencies)!r}; "
                         f"received {sorted(binding['dimensions'])!r}"
@@ -1217,6 +1233,12 @@ class _Capture:
         path = (*prefix, name)
         name = _capture_id(path)
         declaration = self.declarations.get(name)
+        if isinstance(declaration, _SourceScopeRequired):
+            raise TaichiCompilationError(
+                f"Component entry {self.kernel.func.__qualname__}: resource self.{'.'.join(path)} "
+                f"requires its declared allocation scope in the component root; "
+                f"link declared at {declaration.source!r}. Include that scope or provide a complete dimension mapping."
+            )
         if isinstance(declaration, RootOption):
             raise TaichiCompilationError(f"Component {name!r} is a recording option, not a numerical owner capture")
         if declaration is None:

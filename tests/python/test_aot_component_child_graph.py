@@ -134,6 +134,62 @@ class _BorrowedWorker(_Worker):
         scope.borrow("shared", parent.shared, dimensions={"n": scope.dim("count")})
 
 
+class _SourceWorker(_BorrowedWorker):
+    def __init__(self, parent, gain):
+        super().__init__(parent, gain)
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow("shared", parent.shared, source_scope=True, dimensions={"n": scope.dim("count")})
+
+    @ti.kernel
+    def clear(self):
+        self.local[None] = 0
+
+
+class _SourceParent(_Parent):
+    def __init__(self, n, padding):
+        self.n, self.padding = n, padding
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        scope.shared = scope.field(ti.f32, shape=scope.dim("n"))
+        scope.unrelated = scope.field(ti.i32, shape=scope.dim("padding"))
+        self.tree = builder.finalize()
+        scope.left = _SourceWorker(self, 2.)
+        scope.right = _SourceWorker(self, 3.)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_source_scope_borrow_keeps_layout_only_dimensions_and_unused_links(tmp_path):
+    model = _SourceParent(3, 5)
+    child = ti.aot.Component.from_owner(model.left)
+    local = child.compile(model.left.clear)
+    assert not local.contract["dimensions"]
+    with pytest.raises(ti.TaichiCompilationError, match="requires its declared allocation scope"):
+        child.compile(model.left.step)
+    env = ti.aot.Component.from_owner(model)
+    root = env.compile_graph(model.record)
+    other = _SourceParent(7, 13)
+    assert ti.aot.Component.from_owner(other).compile(other.left.step, owner=other) is env.compile(model.left.step, owner=model)
+    assert child.compile(model.left.clear) is local  # rejected capture did not publish a partial entry
+    assert "padding" in root.contract["dimensions"]
+    module = ti.aot.Module()
+    root.export(module, "source_parent")
+    path = tmp_path / "source_parent.tcm"
+    module.archive(str(path))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime:
+        component = runtime.load_module(path).component("source_parent")
+        dims = {"n": 19, "padding": 37, _capture_id(("left", "count")): 19, _capture_id(("right", "count")): 19}
+        values = {_capture_id((side, "gain")): value for side, value in (("left", 2.), ("right", 3.))}
+        with component.instantiate(dims) as instance:
+            instance.initialize(zero=component.contract["resources"])
+            with instance.prepare(values=values) as prepared:
+                prepared.run()
+            np.testing.assert_array_equal(np.frombuffer(instance.resource("shared").read(), dtype=np.float32), 6)
+            with pytest.raises(ValueError, match="Dimension constraint"):
+                instance.prepare(values=values, dimensions={_capture_id(("left", "count")): 20})
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_child_borrow_uses_source_layout_and_checks_explicit_dimension_relation(tmp_path):
     model = _Parent(3, worker_type=_BorrowedWorker)

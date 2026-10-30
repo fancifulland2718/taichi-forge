@@ -807,6 +807,16 @@ The borrowed member and source therefore refer to one instance allocation,
 while private child resources retain separate ownership. CPU/CUDA tests cover
 new capacities and reject inconsistent child counts before execution.
 
+`scope.borrow(name, field, source_scope=True, dimensions=...)` links to the
+original allocation scope already declared in the component root. This avoids
+making a child restate layout-only sibling dimensions. The optional mapping
+expresses target equalities; the complete layout still comes from the source.
+When that allocation scope is absent, actual numerical capture rejects with
+the declaration location. An unused link does not block a smaller component
+or enter its ABI. Existing complete dimension mappings still support standalone
+borrowers. CPU/CUDA tests cover both modes, new layout-only capacities and
+pre-execution rejection of mismatched target counts.
+
 An original initializer recording can join the same owner's step recording:
 `component.compile_graph(owner.record_step, initializer=owner.record_initialize)`.
 Both phases share capture and resource closure, including initializer-only SNode
