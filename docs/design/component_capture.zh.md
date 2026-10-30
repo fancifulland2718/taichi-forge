@@ -628,3 +628,24 @@ producer 内容。重新 prepare 保留持久状态；显式冷 reset 可先用
 `initialize(zero=[...])`，再执行正常 initializer。写 effects 不用于推断零初态或
 数值初始化的完整覆盖；固定 SNode placement 保留原空激活合同。CPU/CUDA 已覆盖
 新容量、必需模型输入、双实例、重新 prepare 与冷 reset；native ABI 和布局规则未变。
+
+正常冷模型准备若在 Host 响应修正之前需要设备计算，可用
+`compile_graph(record, initializer=finish, setup={"body": unpack})` 将原录制入口
+纳入同一个组件。每个入口属于根 owner、内容非空，后面保留非空的最终初始化阶段。
+这不增加逐核签名适配或执行解释器。实际 operation 分界来自原 Graph lowering；v9
+合同要求 `component_cold_setup_v1`，分界纳入执行 fingerprint 校验，数值定义与
+native ABI 继续共用。
+
+`component.setup_entries` 查询名称，`component.inputs(setup="body")` 查询该入口
+的值/参数；`instance.run_setup("body", values=...)` 在冷边界完成原设备计算，允许
+正常 Host 在下一入口或 `initialize_state()` 前读取/修正资源。每个 setup 只要求
+其实际引用的资源已初始化，最终 readiness 仍要求所有声明资源完整。单独执行 setup
+不会允许步进；ready 后必须明确 `reset=True` 才能重做 setup，且会撤销 readiness。
+已接受执行失败时步进保持禁用，不承诺数值回滚。正常 Host 构造器负责调用顺序与模型
+有效性，重新 prepare 和 reset 不会自动重做 setup 或补造模型数据。
+
+约束完整投影到适用阶段；跨冷入口、尚无相应生命周期资格的约束明确拒绝，原 initializer/
+私有工作区限制继续生效。CPU/CUDA Dense 验证两个准备入口、Host 修正、不同尺寸实例、
+readiness/冷边界拒绝、reset 和错误分界拒绝。GeoPhys 另在冻结 CUDA PGS 完整步验证
+原体数据解包，故意污染质量输出以证明 setup 实际执行；不扩大为全部刚体构造、资源族
+或后端组合的资格。

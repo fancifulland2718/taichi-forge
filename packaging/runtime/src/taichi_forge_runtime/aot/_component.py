@@ -14,7 +14,7 @@ def _control_identity(contract):
     """Canonical compiler-fact projection; no layout or execution interpretation."""
     ignored = {
         "semantic_key", "compilation", "configuration", "name", "execution",
-        "execution_entries", "execution_fingerprint", "target", "fixed_bindings", "field_io_bindings",
+        "execution_entries", "execution_fingerprint", "target", "fixed_bindings", "field_io_bindings", "setup_bindings",
     }
     facts = {key: value for key, value in contract.items() if key not in ignored}
     facts["required_capabilities"] = [
@@ -129,21 +129,23 @@ class Component:
                 "execution_entries",
                 "target",
             }
-            if contract.get("version") in (2, 3, 4, 5, 6, 7, 8):
+            if contract.get("version") in (2, 3, 4, 5, 6, 7, 8, 9):
                 required.add("compilation")
-            if contract.get("version") in (3, 4, 5, 6, 7, 8):
+            if contract.get("version") in (3, 4, 5, 6, 7, 8, 9):
                 required.add("configuration")
-            if contract.get("version") in (4, 5, 6, 7, 8):
+            if contract.get("version") in (4, 5, 6, 7, 8, 9):
                 required.update(("control", "internal_arguments", "execution_fingerprint"))
-            if contract.get("version") in (5, 6, 7, 8):
+            if contract.get("version") in (5, 6, 7, 8, 9):
                 required.add("constraints")
-            if contract.get("version") in (6, 7, 8):
+            if contract.get("version") in (6, 7, 8, 9):
                 required.update(("fixed_groups", "fixed_bindings"))
-            if contract.get("version") in (7, 8):
+            if contract.get("version") in (7, 8, 9):
                 required.update(("field_io", "field_io_bindings"))
-            if contract.get("version") == 8:
+            if contract.get("version") in (8, 9):
                 required.add("lifecycle")
-            if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7, 8) or contract["name"] != name:
+            if contract.get("version") == 9:
+                required.add("setup_bindings")
+            if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
             if contract["version"] >= 7 and contract["field_io"]:
@@ -153,9 +155,25 @@ class Component:
                 if not fixed_groups or set(fixed_groups) & set(contract["groups"]):
                     raise ValueError("Fixed SNode component groups must have distinct declared identities")
                 capabilities.add("component_fixed_snode_groups_v1")
-            if contract["version"] == 8:
+            if contract["version"] in (8, 9):
                 lifecycle = contract["lifecycle"]
-                if (set(lifecycle) != {"initialization_nodes", "initialization", "reprepare"}
+                lifecycle_keys = {"initialization_nodes", "initialization", "reprepare"}
+                if contract["version"] == 9:
+                    lifecycle_keys.add("setup_nodes")
+                    nodes, start, names = lifecycle.get("setup_nodes"), 0, set()
+                    if not isinstance(nodes, list) or not nodes:
+                        raise ValueError("Invalid component setup nodes")
+                    for item in nodes:
+                        if not isinstance(item, list) or len(item) != 2:
+                            raise ValueError("Invalid component setup nodes")
+                        label, end = item
+                        if (not isinstance(label, str) or not label.isidentifier() or label in names
+                                or type(end) is not int or not start < end < lifecycle.get("initialization_nodes", 0)):
+                            raise ValueError("Invalid component setup nodes")
+                        names.add(label)
+                        start = end
+                    capabilities.add("component_cold_setup_v1")
+                if (set(lifecycle) != lifecycle_keys
                         or type(lifecycle["initialization_nodes"]) is not int or lifecycle["initialization_nodes"] <= 0
                         or lifecycle["initialization"] != "explicit_instance" or lifecycle["reprepare"] != "preserve_state"):
                     raise ValueError("Invalid component instance lifecycle")
@@ -339,9 +357,12 @@ class Component:
             document = json.loads(plan.to_json())
             operations = document["operations"]
             if contract["version"] >= 4:
+                execution_facts = dict(plan=document, semantic_key=contract["semantic_key"])
+                if contract["version"] == 9:
+                    execution_facts["setup_bindings"] = contract["setup_bindings"]
                 fingerprint = hashlib.sha256(
                     json.dumps(
-                        dict(plan=document, semantic_key=contract["semantic_key"]),
+                        execution_facts,
                         sort_keys=True, separators=(",", ":"),
                     ).encode()
                 ).hexdigest()
@@ -403,15 +424,22 @@ class Component:
                                 closure["operations"].append(operation)
                                 selected.add(operation["entry"])
                 self._instance_plan = ExecutionPlan(**closure)
+            self._setup_plans = {}
             self._initializer_plan = None
             self._replay_plan = plan
-            if contract["version"] == 8:
+            if contract["version"] in (8, 9):
                 from ._component_lifecycle import split_component_lifecycle
 
                 # Both phases are projections of the validated native Plan.
                 # Keep the full Plan for native tree-closure instantiation.
                 # A fresh replay preparation never reruns the model initializer.
                 self._initializer_plan, self._replay_plan = split_component_lifecycle(plan)
+                if contract["version"] == 9:
+                    from ._component_lifecycle import split_component_setup
+                    self._setup_plans, self._initializer_plan = split_component_setup(
+                        self._initializer_plan, contract["setup_bindings"])
+                    if list(self._setup_plans) != [name for name, _ in contract["lifecycle"]["setup_nodes"]]:
+                        raise ValueError("Component setup bindings differ from the declared entries")
             self._module, self._plan = module, plan
             self._contract_json = json.dumps(contract)
             self._aliases = aliases
@@ -421,9 +449,18 @@ class Component:
         self._module._check()
         return json.loads(self._contract_json)
 
-    def inputs(self, *, initialization=False):
+    @property
+    def setup_entries(self):
+        """Names of original cold preparation recordings exported with this root."""
+        self._module._check()
+        return tuple(self._setup_plans)
+
+    def inputs(self, *, initialization=False, setup=None):
         """Query external values/arguments needed by one lifecycle phase."""
-        plan = self._initializer_plan if initialization else self._replay_plan
+        if setup is not None and initialization:
+            raise ValueError("Choose setup or final initialization, not both")
+        plan = (self._setup_plan(setup) if setup is not None
+                else self._initializer_plan if initialization else self._replay_plan)
         if plan is None:
             raise ValueError("Component has no registered instance initializer")
         contract = self.contract
@@ -434,6 +471,12 @@ class Component:
                     if symbol in names and binding["kind"] == "value"},
             arguments={name: spec for name, spec in contract["explicit"].items() if name in names},
         )
+
+    def _setup_plan(self, name):
+        self._module._check()
+        if not isinstance(name, str) or name not in self._setup_plans:
+            raise ValueError(f"Unknown component setup entry {name!r}")
+        return self._setup_plans[name]
 
     def configuration_sources(self):
         """Query declared Host attribute paths and normal recording arguments.
@@ -698,6 +741,20 @@ class ComponentInstance:
         initializer may have written state; replay stays disabled until a
         successful retry. No numerical writes are transactionally rolled back.
         """
+        return self._run_cold_plan(self._component._initializer_plan, values=values,
+                                   dimensions=dimensions, arguments=arguments, reset=reset, finish=True)
+
+    def run_setup(self, name, *, values=None, dimensions=None, arguments=None, reset=False):
+        """Complete one original cold preparation entry on this instance.
+
+        Host model preparation may read/adjust resources between calls. This
+        never makes the model ready; initialize_state() remains the final gate.
+        No interpreter, host callback or module-global pointer swap is involved.
+        """
+        return self._run_cold_plan(self._component._setup_plan(name), values=values,
+                                   dimensions=dimensions, arguments=arguments, reset=reset, finish=False)
+
+    def _run_cold_plan(self, plan, *, values, dimensions, arguments, reset, finish):
         from contextlib import ExitStack, closing
 
         component = self._component
@@ -705,7 +762,7 @@ class ComponentInstance:
         with self._close_lock:
             with runtime._lock:
                 self._check()
-                if component._initializer_plan is None:
+                if plan is None:
                     raise ValueError("Component has no registered instance initializer")
                 if type(reset) is not bool:
                     raise TypeError("reset must be a bool")
@@ -713,16 +770,19 @@ class ComponentInstance:
                     raise RuntimeError("State initialization requires closing prepared calls at a cold boundary")
                 if self._model_initialized and not reset:
                     raise ValueError("Component state is already initialized; use reset=True explicitly")
-                if self._initialized != set(self._resources):
+                required = (set(self._resources) if finish else {
+                    binding["name"] for symbol, binding in component.contract["bindings"].items()
+                    if symbol in plan.argument_names and binding["kind"] == "resource"})
+                if not required <= self._initialized:
                     raise ValueError("Component resources require explicit consumer initialization before state initialization")
-                bindings = self._bindings(component._initializer_plan, values, dimensions, arguments)
+                bindings = self._bindings(plan, values, dimensions, arguments)
                 self._transfer_active = True
             try:
                 with ExitStack() as owners:
                     domain = (owners.enter_context(runtime.execution_domain(capacity=1, instance_capacity=1))
                               if runtime.arch == "cuda" else None)
                     call = owners.enter_context(component._module.prepare_execution(
-                        component._initializer_plan, bindings, execution_domain=domain, snode_instance=self._fixed_state))
+                        plan, bindings, execution_domain=domain, snode_instance=self._fixed_state))
                     with runtime._lock:
                         self._model_initialized = False
                     call.initialize()
@@ -732,7 +792,7 @@ class ComponentInstance:
                         with closing(call.submit()) as ticket:
                             ticket.wait()
                 with runtime._lock:
-                    self._model_initialized = True
+                    self._model_initialized = finish
             finally:
                 with runtime._lock:
                     self._transfer_active = False

@@ -215,7 +215,7 @@ def export_graph(
     resource_bindings=None,
     argument_resources=None,
     fixed_snode_dependencies=(),
-    component_initialization_nodes=0,
+    component_lifecycle=None,
 ):
     """Preflight the entire region before publishing any module definitions."""
     with graph._lifecycle_lock:
@@ -263,6 +263,7 @@ def export_graph(
             fixed_snode_dependencies=fixed_snode_dependencies,
         )
         operation_ends = lower_frozen_graph(context, graph)
+        component_initialization_nodes = component_lifecycle.initialization_nodes if component_lifecycle else 0
         if component_initialization_nodes:
             if (type(component_initialization_nodes) is not int
                     or not 0 < component_initialization_nodes < len(operation_ends)):
@@ -274,6 +275,8 @@ def export_graph(
             boundary = operation_ends[component_initialization_nodes - 1]
             context.initialization = context.operations[:boundary]
             context.operations = context.operations[boundary:]
+            component_lifecycle.setup_operations = tuple(
+                (name, operation_ends[end - 1]) for name, end in component_lifecycle.setup_nodes)
         submission_recipe = None
         if getattr(binding_factory, "__dict__", {}).get("_export_aot_submission") is not None:
             submission_recipe = binding_factory._export_aot_submission(spec, operation_ends)
@@ -289,12 +292,14 @@ def export_graph(
 
         constraints = export_constraints(spec, context.binding, additional=context.binding_constraints)
         if component_initialization_nodes:
-            from taichi_forge_runtime.aot._component_lifecycle import split_component_lifecycle
+            from taichi_forge_runtime.aot._component_lifecycle import split_component_lifecycle, split_component_setup
 
             try:
-                split_component_lifecycle(ExecutionPlan(
+                initial, _ = split_component_lifecycle(ExecutionPlan(
                     context.operations, initialization=context.initialization,
                     resources=context.resources, constraints=constraints or None))
+                if component_lifecycle.setup_operations:
+                    split_component_setup(initial, component_lifecycle.setup_operations)
             except ValueError as error:
                 raise TaichiRuntimeError(str(error)) from error
         if context.storage_recipe is not None:

@@ -589,7 +589,7 @@ class Module:
         resource_bindings=None,
         argument_resources=None,
         _fixed_snode_dependencies=(),
-        _component_initialization_nodes=0,
+        _component_lifecycle=None,
     ):
         """Export ordered loaded-kernel/copy/fill commands with symbolic storage.
 
@@ -705,7 +705,7 @@ class Module:
                 resource_bindings=resource_bindings,
                 argument_resources=argument_resources,
                 fixed_snode_dependencies=_fixed_snode_dependencies,
-                component_initialization_nodes=_component_initialization_nodes,
+                component_lifecycle=_component_lifecycle,
             )
         elif not isinstance(plan, ExecutionPlan):
             raise TypeError("Expected an ExecutionPlan or compiled Graph")

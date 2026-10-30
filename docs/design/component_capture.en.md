@@ -913,3 +913,32 @@ Zero is not inferred from write effects and does not establish complete coverage
 by a numerical initializer. Fixed SNode placement retains its existing empty
 activation contract. CPU/CUDA checks cover new capacities, required model input,
 two instances, reprepare and cold reset; no native ABI or layout rule changes.
+
+Normal cold model preparation can also contain device work before Host response
+adjustments. `compile_graph(record, initializer=finish, setup={"body": unpack})`
+exports those original recordings into the same component. Each recording must
+belong to the root owner, be nonempty and precede a nonempty final initializer.
+This is not a per-kernel signature adapter or a new execution interpreter.
+The existing Graph lowering supplies actual operation boundaries; v9 contracts
+include `component_cold_setup_v1`, with boundaries checked against the execution
+fingerprint. Numerical definitions and native ABI remain shared.
+
+`component.setup_entries` queries names; `component.inputs(setup="body")` queries
+that entry's values/arguments. `instance.run_setup("body", values=...)` completes
+the original device work on that instance at a cold boundary, allowing normal
+Host reads/uploads before the next entry or `initialize_state()`. Each setup
+requires its own referenced resources to be initialized, while final readiness
+still requires all declared resources. Setup alone does not enable replay.
+After readiness, setup requires explicit `reset=True` and invalidates readiness;
+an accepted execution failure leaves replay disabled. No rollback is promised.
+The normal Host constructor owns entry ordering and model validity. Reprepare
+and reset do not automatically repeat setup or invent missing model data.
+
+Plan constraints remain whole in each applicable phase; requirements spanning
+distinct cold entries without an existing qualified lifetime contract reject.
+Existing initializer/private-workspace restrictions continue to apply. CPU/CUDA
+Dense tests cover two setup entries, Host adjustment, distinct instance sizes,
+readiness and cold-boundary rejection, reset, and corrupted boundary rejection.
+GeoPhys additionally verifies its original body decoder in a frozen CUDA PGS
+full step, with poisoned mass outputs proving that setup executes. This does not
+qualify every rigid constructor, resource family or backend combination.

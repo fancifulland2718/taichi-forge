@@ -1198,6 +1198,8 @@ class Component:
         initializer= registers another normal recording on the same owner.
         Its capture joins this root; numerical initialization belongs to the
         consumer instance, never to each newly prepared replay call.
+        setup={name: normal_recording} optionally exports cold preparation
+        entries before that final initializer, sharing the same instance.
         """
         from taichi_forge.aot._component_graph import compile_component_graph
 

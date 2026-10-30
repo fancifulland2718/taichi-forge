@@ -53,3 +53,33 @@ def split_component_lifecycle(plan):
     initializer = ExecutionPlan(document["initialization"], constraints=initial_constraints or None)
     replay["constraints"] = replay_constraints or None
     return initializer, ExecutionPlan(**replay)
+
+
+def split_component_setup(initializer, boundaries):
+    """Project cold entry points; Host preparation keeps its normal ordering."""
+    document = json.loads(initializer.to_json())
+    operations = document["operations"]
+    start, names, phases = 0, set(), []
+    for item in boundaries:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ValueError("Invalid component setup boundary")
+        name, end = item
+        if (not isinstance(name, str) or not name.isidentifier() or name in names
+                or type(end) is not int or not start < end < len(operations)):
+            raise ValueError("Invalid component setup boundary")
+        names.add(name)
+        phases.append((name, operations[start:end]))
+        start = end
+    phases.append((None, operations[start:]))
+    plans = [(name, ExecutionPlan(ops)) for name, ops in phases]
+    constraints = [[] for _ in plans]
+    for requirement in document.get("constraints", []):
+        refs = validate_constraints([requirement], initializer._retained_argument_names)
+        selected = [i for i, (_, plan) in enumerate(plans) if refs <= plan._retained_argument_names]
+        if not selected:
+            raise ValueError("Component setup cross-phase constraint requires shared-lifetime qualification")
+        for index in selected:
+            constraints[index].append(requirement)
+    result = {name: ExecutionPlan(ops, constraints=rules or None)
+              for (name, ops), rules in zip(phases, constraints)}
+    return {name: plan for name, plan in result.items() if name is not None}, result[None]
