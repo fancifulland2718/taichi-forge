@@ -1144,6 +1144,11 @@ class Component:
         for name, declaration in sorted(self.declarations.items()):
             if not isinstance(declaration, (DenseField, FixedSNodeField)):
                 continue
+            if name != _capture_id(self._paths[name]):
+                # Borrow projection includes layout-only siblings. They are
+                # not declared numerical entry points and must not hide the
+                # original resource name from a Field template's contract.
+                continue
             try:
                 if self.available(owner, name) and self.read(owner, name) is value:
                     return name

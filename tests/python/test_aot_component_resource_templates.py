@@ -22,7 +22,7 @@ def _copy(owner: ti.template(), source: ti.template(), target: ti.template(),
 
 @ti.data_oriented
 class _State:
-    def __init__(self, count):
+    def __init__(self, count, borrowed=False):
         self.count = count
         builder = ti.FieldsBuilder()
         scope = ti.experimental.ResourceScope(self, builder=builder)
@@ -30,6 +30,8 @@ class _State:
         scope.y = scope.field(ti.i32, shape=scope.dim("count"))
         scope.alias_x = scope.x
         self.tree = builder.finalize()
+        if borrowed:
+            scope.borrow("alias_x", self.x, dimensions={"count": scope.dim("count")})
         extra = ti.FieldsBuilder()
         spare = ti.experimental.ResourceScope(self, builder=extra)
         spare.unused_a = spare.field(ti.f32, shape=11)
@@ -51,9 +53,10 @@ def _compile(state, *, reverse=False, inplace=False, alternate_unused=False):
             unused=state.unused_b if alternate_unused else state.unused_a, increment=1))
 
 
+@pytest.mark.parametrize("borrowed", (False, True))
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_field_templates_reuse_declared_resources_and_frozen_instance_bindings(tmp_path):
-    first, other = _State(3), _State(37)
+def test_field_templates_reuse_declared_resources_and_frozen_instance_bindings(tmp_path, borrowed):
+    first, other = _State(3, borrowed), _State(37, borrowed)
     code = _compile(first)
     assert _compile(other, alternate_unused=True) is code
     assert len(code.contract["groups"]) == 1
@@ -77,6 +80,7 @@ def test_field_templates_reuse_declared_resources_and_frozen_instance_bindings(t
 
     root = Component.from_owner(first).compile_graph(first.record)
     assert len(root.contract["groups"]) == 1 and len(root.contract["resources"]) == 2
+    assert all(not name.startswith("__borrowed_") for name in root.contract["resources"])
     module = ti.aot.Module()
     root.export(module, "copy_pair")
     archive = tmp_path / "templates.tcm"
