@@ -1195,3 +1195,11 @@ The backup group identity follows its own ownership path while its dimensions
 can originate at the source owner. Newly built group names may change; existing
 frozen artifacts continue to use their versioned contracts. CPU/CUDA gates cover
 independent record copies, code reuse at 3/19 elements and frozen consumption at 37.
+
+
+Declared resource records and non-owning owner references can pass through
+unannotated `ti.func` arguments and local aliases. The frontend retains their
+lexical declaration path, not a scalar or serialized Python owner. Subsequent
+member access still collects resources, method definitions and dependencies.
+CPU/CUDA gates cover ordinary JIT, cross-instance cache reuse, new capacities
+after freezing, and rejection after owner-link retargeting.

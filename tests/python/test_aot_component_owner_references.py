@@ -6,6 +6,12 @@ from taichi_forge_runtime.aot import Runtime
 from tests import test_utils
 
 
+@ti.func
+def _forward_record(owner, i):
+    alias = owner
+    alias.increment(i)
+
+
 @ti.data_oriented
 class _Stage:
     def __init__(self, motion):
@@ -14,7 +20,7 @@ class _Stage:
     @ti.kernel
     def step(self):
         for i in range(self.motion.n):
-            self.motion.increment(i)
+            _forward_record(self.motion, i)
 
 
 @ti.data_oriented

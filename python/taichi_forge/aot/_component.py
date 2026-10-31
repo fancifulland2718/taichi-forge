@@ -468,6 +468,12 @@ class _OwnerSequence(Record):
 class _RecordReference:
     path: tuple
 
+    def _ti_expr_init(self):
+        # This is a lexical declaration path, not a scalar or a Python owner.
+        # Inline function arguments and local aliases retain that same path;
+        # subsequent member access still goes through the capture contract.
+        return self
+
     def __bool__(self):
         raise TaichiCompilationError("A declared record is a namespace; test its presence with 'is not None'")
 
