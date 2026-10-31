@@ -30,6 +30,26 @@ class _TypedState:
             value[0, 0], value[1, 1] = i + 1, i + 2
             self.matrix[i] = value
 
+    @ti.func
+    def load_reference(self, field, index):
+        return field[index]
+
+    @ti.func
+    def store_reference(self, field, index, value):
+        field[index] = value
+
+    @ti.func
+    def update_reference(self, field, index):
+        value = self.load_reference(field, index)
+        self.store_reference(field, index, value + 1)
+
+    @ti.kernel
+    def update_references(self):
+        for i in range(self.count):
+            self.update_reference(self.scalar, i)
+            self.update_reference(self.vector, i)
+            self.update_reference(self.matrix, i)
+
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_captured_dtype_is_static_metadata_not_a_sample_value():
@@ -51,3 +71,30 @@ def test_captured_dtype_is_static_metadata_not_a_sample_value():
             expected = np.zeros((count, 2, 2), dtype=host_type)
             expected[:, 0, 0], expected[:, 1, 1] = index + 1, index + 2
             np.testing.assert_array_equal(state.matrix.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_captured_fields_remain_references_in_unannotated_inline_parameters():
+    first = _TypedState(3, ti.f32)
+    code = Component.from_owner(first).compile(first.update_references)
+    state = _TypedState(37, ti.f32)
+    environment = Component.from_owner(state)
+    assert environment.compile(state.update_references) is code
+    for execute in (lambda: code.run(environment, state), state.update_references):
+        for field in (state.scalar, state.vector, state.matrix):
+            field.fill(41)
+        execute()
+        for field in (state.scalar, state.vector, state.matrix):
+            np.testing.assert_array_equal(field.to_numpy(), 42)
+
+    # Explicit ndarray arguments use the same borrowed-reference semantics;
+    # this must not rely on a component-specific tag or a template annotation.
+    @ti.kernel
+    def ordinary_array(array: ti.types.ndarray(ti.f32, 1)):
+        for i in range(array.shape[0]):
+            first.update_reference(array, i)
+
+    array = ti.ndarray(ti.f32, 5)
+    array.fill(7)
+    ordinary_array(array)
+    np.testing.assert_array_equal(array.to_numpy(), 8)

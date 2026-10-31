@@ -150,8 +150,10 @@ def expr_init(rhs):
 
 
 @taichi_scope
-def expr_init_func(rhs):  # temporary solution to allow passing in fields as arguments
-    if isinstance(rhs, Field):
+def expr_init_func(rhs):
+    # Storage arguments are references, including Fields lowered to an array
+    # view by component capture. Copying the view as a scalar loses that ABI.
+    if isinstance(rhs, (Field, AnyArray)):
         return rhs
     return expr_init(rhs)
 
