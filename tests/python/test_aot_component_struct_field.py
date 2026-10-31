@@ -151,6 +151,63 @@ def test_struct_members_keep_distinct_initialization_policies(tmp_path):
             np.testing.assert_array_equal(np.frombuffer(instance.resource(matrix).read(), np.float32).reshape(7, 2, 2), expected)
 
 
+class _RepeatedMembers:
+    def __init__(self, count):
+        self.count = count
+        scope = ti.experimental.ResourceScope(self)
+        for name in ("first", "second"):
+            setattr(scope, name, scope.struct_field(dict(active=ti.i32),
+                shape=scope.dim("count"), layout=ti.Layout.SOA, initialization="zero"))
+
+
+@ti.data_oriented
+class _BorrowedMembers:
+    def __init__(self, count):
+        scope = ti.experimental.ResourceScope(self)
+        scope.storage = _RepeatedMembers(count)
+        scope.borrow("first_active", self.storage.first.active, source_scope=True)
+        scope.borrow("second_active", self.storage.second.active, source_scope=True)
+
+    @ti.kernel
+    def first(self):
+        for i in self.first_active:
+            self.first_active[i] += 1
+
+    @ti.kernel
+    def second(self):
+        for i in self.second_active:
+            self.second_active[i] += 10
+
+    def record(self, builder):
+        builder.dispatch(self.first)
+        builder.dispatch(self.second)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_borrowed_record_members_use_the_allocation_namespace(tmp_path):
+    producer = _BorrowedMembers(3)
+    root = Component.from_owner(producer).compile_graph(producer.record)
+    module = ti.aot.Module()
+    root.export(module, "members")
+    artifact = tmp_path / "members.tcm"
+    module.archive(str(artifact))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime:
+        component = runtime.load_module(artifact).component("members")
+        first = component.resource_name(["storage", "first", "active"])
+        second = component.resource_name(["storage", "second", "active"])
+        assert first != second
+        inputs = component.input_sources()["dimensions"]
+        dimensions = {name: 7 for name in inputs}
+        with component.instantiate(dimensions) as instance:
+            with instance.prepare() as call:
+                call.run()
+                runtime.wait()
+            np.testing.assert_array_equal(np.frombuffer(instance.resource(first).read(), np.int32), np.ones(7))
+            np.testing.assert_array_equal(np.frombuffer(instance.resource(second).read(), np.int32), np.full(7, 10))
+
+
 @pytest.mark.parametrize("layout", [ti.Layout.AOS, ti.Layout.SOA], ids=["aos", "soa"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_record_component_preserves_layout_and_instance_state(tmp_path, layout):

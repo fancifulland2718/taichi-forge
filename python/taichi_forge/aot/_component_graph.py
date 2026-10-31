@@ -200,7 +200,10 @@ class _GraphCapture:
                 if identity is None:
                     field = self.component.read(owner, name)
                     normal = getattr(field, "_logical_resource_declaration", None)
-                    path = self.component._paths[name]
+                    # A flattened borrower can alias a member of a nested
+                    # record. Its leaf name is only unique at the allocation
+                    # site, not in the borrower's namespace.
+                    path = self.component._source_scope_paths.get(name, self.component._paths[name])
                     identity = _capture_id((*path[:-1], normal["identity"])) if normal else name
                     if identity in self.resources:
                         raise TaichiCompilationError(f"Component resource identity collision: {identity!r}")
