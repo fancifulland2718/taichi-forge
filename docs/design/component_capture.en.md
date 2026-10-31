@@ -1144,3 +1144,15 @@ control policy and order. Cross-phase fusion without a qualified boundary map
 still rejects. CPU/CUDA gates cover repeated while operations and root/nested
 private names. Existing restrictions on Plan-private initializer resources
 remain in force.
+
+Normal stages can declare a non-owning back-reference with
+`scope.owner_reference("motion", motion)`. Collection resolves the target to one
+ownership path in the same component root; outside or ambiguously owned targets
+reject. References do not recursively declare resources, allocate another root,
+or introduce module-level mutable bindings. Original methods and nested helpers
+follow the referenced owner's existing declarations. Only references actually
+used by a Kernel enter its dependency identity; candidate reuse and recording
+completion validate the relationship again. Retargeting a live reference does
+not silently redirect compiled code. Deployment uses the resulting ordinary
+resource/value ABI and retains no producer Python object. CPU/CUDA tests cover
+parent/child links, new-size consumption and invalid retargeting.

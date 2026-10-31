@@ -437,6 +437,19 @@ class Record:
         return ("record", self.optional)
 
 
+@dataclass(frozen=True)
+class _OwnerReference:
+    target_path: tuple
+
+    @property
+    def schema(self):
+        return ("owner_reference", self.target_path)
+
+    def matches(self, component, owner, name):
+        target = component.read(owner, _capture_id(self.target_path)) if self.target_path else owner
+        return component.read(owner, name) is target
+
+
 class _OwnerSequence(Record):
     """A fixed Host composition of declared owners; no device subscript ABI."""
 
@@ -629,7 +642,7 @@ class Component:
                     not name.isidentifier()
                     or name.startswith("__record_")
                     or name.startswith("__borrowed_")
-                    or not isinstance(declaration, (RuntimeValue, Array, StaticValue, Dimension, DenseField, FixedSNodeField, Record))
+                    or not isinstance(declaration, (RuntimeValue, Array, StaticValue, Dimension, DenseField, FixedSNodeField, Record, _OwnerReference))
                 ):
                     raise TypeError("Component declarations require attribute IDs and supported declaration types")
                 path = (*prefix, name)
@@ -740,6 +753,7 @@ class Component:
         inherited_dimensions, record_options, constraints, owner_sequences = {}, {}, {}, {}
         derived_attributes = set()
         namespaces, record_shapes, record_extents, array_declarations = {}, {}, {}, {}
+        declared_owners, owner_references = [], []
 
         def root_of(field, name):
             nodes = tuple(member.ptr.snode() for member in field._get_field_members())
@@ -753,6 +767,8 @@ class Component:
                 raise TaichiCompilationError("Normal resource records must form a bounded acyclic declaration tree")
             if registry is None:
                 registry = _member(current, "_forge_resource_declarations")
+            if current is not None:
+                declared_owners.append((current, prefix))
             namespaces[id(registry)] = prefix
 
             def qualify(expression):
@@ -769,7 +785,7 @@ class Component:
                     source=constraint["source"],
                 )
             occupied = set()
-            for kind in ("fields", "arrays", "dimensions", "records", "borrowed", "values", "owner_sequences"):
+            for kind in ("fields", "arrays", "dimensions", "records", "borrowed", "values", "owner_sequences", "owner_references"):
                 names = registry.get(kind, {}).keys()
                 if occupied.intersection(names):
                     raise ValueError(f"Conflicting normal declaration roles: {sorted(occupied.intersection(names))!r}")
@@ -826,9 +842,19 @@ class Component:
                     f"item_{index}": collect(value, (*path, f"item_{index}"), (*ancestors, current))
                     for index, value in enumerate(values)
                 }
+            for name, source in registry.get("owner_references", {}).items():
+                owner_references.append((members, prefix, name, _member(current, name)))
+                sources[_capture_id((*prefix, name))] = source
             return members
 
         declarations = collect(owner)
+        for members, prefix, name, target in owner_references:
+            paths = [path for candidate, path in declared_owners if candidate is target]
+            if len(paths) != 1:
+                raise TaichiCompilationError(
+                    f"Owner reference {'.'.join((*prefix, name))!r} requires exactly one "
+                    f"declared ownership path in this component root; found {len(paths)}")
+            members[name] = _OwnerReference(paths[0])
         # A visible allocation site names its group, regardless of aliases in
         # child records. Borrow-only components retain their existing identity.
         visible_dimensions, visible_roots = {}, {}
@@ -1385,6 +1411,10 @@ class _Capture:
                 "declare it as a runtime value, resource or static configuration"
             )
         self.used[name] = declaration.schema
+        if isinstance(declaration, _OwnerReference):
+            if not declaration.matches(self.component, self.owner, name):
+                raise TaichiCompilationError(f"Component owner reference {'.'.join(path)!r} changed; rebuild declarations")
+            return _RecordReference(declaration.target_path)
         if isinstance(declaration, Record):
             present = self.component.read(self.owner, name) is not None
             if not present and not declaration.optional:
@@ -1578,6 +1608,9 @@ class _Capture:
                 objects=sorted(self.objects.items()),
                 access_paths={name: self.component._paths[name] for name in self.used},
             )
+        references = sorted((name, schema[1]) for name, schema in self.used.items() if schema[0] == "owner_reference")
+        if references:
+            self.contract["owner_references"] = references
         if self.constants:
             self.contract["constants"] = sorted(
                 (function.__module__, function.__qualname__, name, value)
@@ -1602,6 +1635,8 @@ class _Capture:
             declaration = component.declarations.get(name)
             if declaration is None or declaration.schema != schema:
                 return f"declaration {name!r}"
+            if isinstance(declaration, _OwnerReference) and not declaration.matches(component, owner, name):
+                return f"owner reference {name!r}"
             if isinstance(declaration, Dimension):
                 _dimension_value(component, owner, name)
             if isinstance(declaration, Array):

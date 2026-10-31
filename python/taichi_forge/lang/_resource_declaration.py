@@ -344,6 +344,28 @@ class ResourceScope:
             object.__setattr__(child, key, item)
         return child
 
+    def owner_reference(self, name, value):
+        """Declare a non-owning link to an owner in the same component root.
+
+        Its unique ownership path is resolved when the root is collected. The
+        normal object can therefore refer back to a parent under construction;
+        this does not recursively declare that parent's resources again.
+        """
+        if not isinstance(name, str) or not name.isidentifier() or value is None:
+            raise TypeError("An owner reference requires an attribute name and a non-null owner")
+        if any(name in self._registry.get(kind, {}) for kind in
+               ("fields", "arrays", "dimensions", "records", "borrowed", "values", "owner_sequences")):
+            raise ValueError(f"Normal attribute {name!r} already has another declaration role")
+        if self._read_only:
+            if getattr(self._owner, name) is not value:
+                raise ValueError("An owner reference must refer to its existing member")
+        else:
+            setattr(self._owner, name, value)
+        caller = inspect.currentframe().f_back
+        self._registry.setdefault("owner_references", {})[name] = (
+            caller.f_code.co_filename, caller.f_lineno)
+        del caller
+
     def owner_sequence(self, name, values):
         """Declare an existing list/tuple of normal resource owners.
 
@@ -357,7 +379,7 @@ class ResourceScope:
             if inspect.getattr_static(value, "_forge_resource_declarations", None) is None:
                 raise ValueError("Owner sequence entries require normal resource declarations")
         if any(name in self._registry.get(kind, {}) for kind in
-               ("fields", "arrays", "dimensions", "records", "borrowed", "values")):
+               ("fields", "arrays", "dimensions", "records", "borrowed", "values", "owner_references")):
             raise ValueError(f"Normal attribute {name!r} already has another declaration role")
         if self._read_only:
             if getattr(self._owner, name) is not values:
