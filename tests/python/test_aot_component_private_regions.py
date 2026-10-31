@@ -46,8 +46,9 @@ class _Model:
         self.output[1] = scratch[None]
 
     def record(self, builder):
+        container = builder.create_sequential(private_scope=True)
         for _ in range(2):
-            outer = builder.create_sequential(private_scope=True)
+            outer = container.create_sequential(private_scope=True)
             a = outer.private_ndarray("scratch", ti.i32, ())
             counter = outer.private_ndarray("counter", ti.i32, ())
             outer.dispatch(_seed7, a)
@@ -62,7 +63,8 @@ class _Model:
             outer.while_loop(condition, inner, predicate=a, counter=counter,
                              max_iterations=1, masked_execution=True)
             outer.dispatch(self.first, a, template_args={"self": self})
-            builder.append(outer)
+            container.append(outer)
+        builder.append(container)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
@@ -104,3 +106,27 @@ def test_private_region_option_is_explicit_and_inherits_scope():
     assert a.name.removesuffix("first") == b.name.removesuffix("second")
     with pytest.raises(ti.TaichiRuntimeError, match="nonempty"):
         outer.private_ndarray("", ti.i32, ())
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_sequence_append_is_a_snapshot_and_rejects_conflicts_atomically():
+    model = _Model()
+    builder = ti.graph.GraphBuilder()
+    parent = builder.create_sequential()
+    scratch = parent.private_ndarray("scratch", ti.i32, ())
+    child = parent.create_sequential()
+    child.dispatch(_seed7, scratch)
+    parent.append(child)
+    child.dispatch(_seed11, scratch)  # Must not change the appended recording.
+    conflict = builder.create_sequential()
+    conflict.private_ndarray("unrelated", ti.i32, ())
+    conflict.private_ndarray("scratch", ti.i32, ())
+    with pytest.raises(ti.TaichiRuntimeError, match="conflicting fixed"):
+        parent.append(conflict)
+    assert "unrelated" not in parent._fixed_runtime_args
+    with pytest.raises(ti.TaichiRuntimeError, match="distinct Sequential"):
+        parent.append(parent)
+    parent.dispatch(model.first, scratch, template_args={"self": model})
+    builder.append(parent)
+    builder.compile().run({})
+    assert model.output[0] == 7

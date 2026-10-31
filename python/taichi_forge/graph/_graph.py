@@ -16601,6 +16601,18 @@ class Sequential:
         """
         return _new_sequential_region(self, private_scope)
 
+    def append(self, node):
+        """Append a snapshot of a child recording, retaining its private bindings.
+
+        Sequential composition adds no control level. Existing structured nodes
+        retain their conditions, scope, native recipes and lifetime owners.
+        """
+        if not isinstance(node, Sequential) or node is self:
+            raise TaichiRuntimeError("Sequential.append expects a distinct Sequential")
+        if node._component_capture is not self._component_capture:
+            raise TaichiRuntimeError("Appended sequence belongs to a different component capture")
+        return self._extend_recorded_sequence(node)
+
     def dispatch(self, kernel_fn, *args, template_args=None, label=None):
         label = _normalize_dispatch_label(label)
         if self._component_capture is not None:
@@ -16909,6 +16921,12 @@ class Sequential:
                 "Structured native Graph sequence bindings do not match its "
                 "public schema: " + "; ".join(details)
             )
+        self._extend_recorded_sequence(sequence)
+        self._lifetime_leases.append(executable)
+        return self
+
+    def _extend_recorded_sequence(self, sequence):
+        # Validate all bindings before publishing any part of this recording.
         for name, value in sequence._fixed_runtime_args.items():
             existing = self._fixed_runtime_args.get(name)
             if existing is not None and existing is not value:
@@ -16921,7 +16939,7 @@ class Sequential:
                         "Structured native actions provide conflicting fixed "
                         f"binding {name!r}"
                     )
-            self._fixed_runtime_args[name] = value
+        self._fixed_runtime_args.update(sequence._fixed_runtime_args)
         offset = len(self._items)
         self._kernel_configuration_sources.update(
             (offset + index, source)
@@ -16929,11 +16947,12 @@ class Sequential:
         )
         self._items.extend(sequence._items)
         self._ir_nodes.extend(sequence._ir_nodes)
+        self._dispatches.extend(sequence._dispatches)
+        self._dispatch_labels.extend(sequence._dispatch_labels)
         self._runtime_arg_names.update(sequence._runtime_arg_names)
         self._recording_runtime_arg_names.update(sequence._recording_runtime_arg_names)
         self._derived_runtime_arg_names.update(sequence._derived_runtime_arg_names)
         self._lifetime_leases.extend(sequence._lifetime_leases)
-        self._lifetime_leases.append(executable)
         self._temporary_actions.extend(sequence._temporary_actions)
         self._source_native_count += sequence._source_native_count
         self._native_action_manifests.extend(sequence._native_action_manifests)
