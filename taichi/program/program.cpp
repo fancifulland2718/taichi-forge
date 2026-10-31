@@ -9,6 +9,7 @@
 #include "taichi/runtime/runtime_client.h"
 #include "taichi/codegen/cpu/codegen_cpu.h"
 #include "taichi/struct/struct.h"
+#include "taichi/struct/dense_snode_schema.h"
 #include "taichi/runtime/program_impls/opengl/opengl_program.h"
 #include "taichi/runtime/program_impls/metal/metal_program.h"
 #include "taichi/platform/cuda/detect_cuda.h"
@@ -6033,7 +6034,11 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
     SNode *anchor = find_snode(tree->root(), owner.anchor_snode_id);
     TI_ERROR_IF(anchor == nullptr || anchor->type != SNodeType::place,
                 "Dense storage binding anchor is no longer available");
-    const DevicePtr field_ptr = get_dense_field_device_ptr(anchor);
+    const DevicePtr field_ptr =
+        arch_is_cpu(compile_config().arch) || compile_config().arch == Arch::cuda
+            ? get_snode_tree_device_ptr(tree_id).get_ptr(
+                  dense_snode_member_layout(*anchor).offset)
+            : get_dense_field_device_ptr(anchor);
     const std::uint64_t payload_begin = owner.snode_payload_byte_begin;
     const std::uint64_t payload_end = owner.snode_payload_byte_end;
     TI_ERROR_IF(field_ptr.offset != payload_begin,
@@ -6145,8 +6150,9 @@ Program::DenseStorageBorrow Program::borrow_dense_storage(
   const bool record_view =
       (arch_is_cpu(compile_config().arch) || compile_config().arch == Arch::cuda) &&
       owner.kind == storage::StorageOwnerKind::kSNodePayload &&
-      properties.single_record_stride_compatible &&
-      properties.record_stride > 0 && !properties.has_negative_stride &&
+      (properties.single_record_stride_compatible ||
+       properties.compact_contiguous) &&
+      properties.element_contiguous && !properties.has_negative_stride &&
       properties.uniqueness == storage::StorageMappingUniqueness::kProvenUnique;
   TI_ERROR_IF(
       !(properties.ndarray_abi_compatible && properties.compact_contiguous &&

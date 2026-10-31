@@ -215,24 +215,13 @@ TiNdArray Runtime::dense_snode_group_member(TiMemory handle,
       throw MemoryBindingError(
           "Dense member components are not contiguous in the same SNode");
   }
-  auto *parent = anchor->parent;
-  uint64_t offset = anchor->offset_bytes_in_parent_cell;
-  uint64_t record_stride = element_layout.element_bytes;
-  if (parent->type == SNodeType::dense) {
-    if (parent->parent != group->root.get())
-      throw MemoryBindingError(
-          "Dense member is not a qualified uniform record");
-    record_stride = parent->cell_size_bytes;
-    offset += parent->offset_bytes_in_parent_cell;
-    array.shape.dim_count = anchor->num_active_indices;
-    if (array.shape.dim_count > 16)
-      throw MemoryBindingError("Dense member rank exceeds the argument ABI");
-    for (uint32_t i = 0; i < array.shape.dim_count; ++i)
-      array.shape.dims[i] = anchor->shape_along_axis(i);
-  } else if (parent != group->root.get()) {
-    throw MemoryBindingError(
-        "Dense member must belong to a simple dense or rank-zero root");
-  }
+  const auto member_layout = dense_snode_member_layout(*anchor);
+  const uint64_t offset = member_layout.offset;
+  array.shape.dim_count = member_layout.shape.size();
+  if (array.shape.dim_count > 16)
+    throw MemoryBindingError("Dense member rank exceeds the argument ABI");
+  for (uint32_t i = 0; i < array.shape.dim_count; ++i)
+    array.shape.dims[i] = member_layout.shape[i];
   capi::ndarray_storage_layout(
       array);  // Validate logical shape/products independently.
   auto layout = std::make_shared<storage::DenseStorageLayoutSpec>();
@@ -254,10 +243,14 @@ TiNdArray Runtime::dense_snode_group_member(TiMemory handle,
     }
     return result;
   };
-  layout->index_strides_bytes = strides(layout->index_shape, record_stride);
+  layout->index_strides_bytes = member_layout.strides;
   layout->element_strides_bytes = strides(layout->element_shape, width);
   const auto analysis = storage::analyze_dense_storage_layout(*layout);
-  if (!analysis || !analysis.properties.single_record_stride_compatible ||
+  if (!analysis || !analysis.properties.element_contiguous ||
+      !(analysis.properties.single_record_stride_compatible ||
+        analysis.properties.compact_contiguous) ||
+      analysis.properties.has_negative_stride ||
+      analysis.properties.uniqueness != storage::StorageMappingUniqueness::kProvenUnique ||
       analysis.properties.reachable_begin != 0)
     throw MemoryBindingError("Dense member has an unqualified record mapping");
   const auto bytes = uint64_t(analysis.properties.reachable_end);

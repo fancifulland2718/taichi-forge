@@ -10,6 +10,7 @@
 #include "taichi/ir/type_utils.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
+#include "taichi/struct/dense_snode_schema.h"
 
 namespace taichi::lang::storage {
 namespace {
@@ -1215,26 +1216,18 @@ DenseStorageBuildResult describe_dense_field_storage(
   }
 
   SNode *parent = anchor->parent;
-  SNode *root_child = nullptr;
-  std::int64_t record_stride = static_cast<std::int64_t>(scalar_size);
-  if (parent != nullptr && parent->type == SNodeType::root) {
-    root_child = anchor;
-  } else if (parent != nullptr && parent->type == SNodeType::dense &&
-             parent->parent != nullptr &&
-             parent->parent->type == SNodeType::root) {
-    root_child = parent;
-    if (parent->cell_size_bytes >
-        static_cast<std::size_t>((std::numeric_limits<std::int64_t>::max)())) {
-      invalid.reason = StorageFailureReason::kArithmeticOverflow;
-      return invalid;
-    }
-    record_stride = static_cast<std::int64_t>(parent->cell_size_bytes);
-  } else {
+  DenseSNodeMemberLayout member_layout;
+  try {
+    member_layout = dense_snode_member_layout(*anchor);
+  } catch (const std::invalid_argument &) {
     invalid.reason = StorageFailureReason::kUnsupportedLayout;
     return invalid;
   }
-
-  const int tree_id = root_child->parent->get_snode_tree_id();
+  if (member_layout.shape != index_shape) {
+    invalid.reason = StorageFailureReason::kInvalidShape;
+    return invalid;
+  }
+  const int tree_id = anchor->get_snode_tree_id();
   std::vector<int> component_ids;
   component_ids.reserve(components.size());
   for (std::size_t lane = 0; lane < components.size(); ++lane) {
@@ -1285,7 +1278,12 @@ DenseStorageBuildResult describe_dense_field_storage(
   }
   std::size_t field_offset = 0;
   try {
-    field_offset = program.get_dense_field_device_ptr(anchor).offset;
+    // CPU/CUDA StructCompiler offsets and strides are shared with consumer
+    // Dense groups. Keep the existing GFX pointer qualification unchanged.
+    field_offset = arch_is_cpu(program.compile_config().arch) ||
+                           program.compile_config().arch == Arch::cuda
+                       ? member_layout.offset
+                       : program.get_dense_field_device_ptr(anchor).offset;
   } catch (...) {
     invalid.reason = StorageFailureReason::kUnsupportedLayout;
     return invalid;
@@ -1302,9 +1300,8 @@ DenseStorageBuildResult describe_dense_field_storage(
   layout.element_shape = element_shape;
   layout.byte_offset = static_cast<std::int64_t>(field_offset);
   layout.access = access;
-  if (!canonical_strides(index_shape, record_stride,
-                         &layout.index_strides_bytes) ||
-      !canonical_strides(element_shape, static_cast<std::int64_t>(scalar_size),
+  layout.index_strides_bytes = member_layout.strides;
+  if (!canonical_strides(element_shape, static_cast<std::int64_t>(scalar_size),
                          &layout.element_strides_bytes)) {
     invalid.reason = StorageFailureReason::kArithmeticOverflow;
     return invalid;

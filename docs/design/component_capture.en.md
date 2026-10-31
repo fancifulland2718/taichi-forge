@@ -237,8 +237,26 @@ The native `DenseSNodeSchema` is the next layout building block. It records the
 original root/dense/place construction and scalar placement order, replacing only
 explicitly identified dense axes with dimension parameters. It stores no live
 node IDs, producer offsets, addresses or model values. Serialization uses the
-existing native type/JSON contracts. The first layout family excludes nested
-dense, sparse, quantized, Morton, index-offset and ambient layouts.
+existing native type/JSON contracts. The initial family covered a single Dense
+level. The CPU/CUDA extension below adds a qualified nested family; sparse,
+quantized, Morton, index-offset and ambient layouts remain excluded.
+
+CPU/CUDA now qualify ordered Dense paths that introduce each axis exactly once,
+including the trees produced by `order="kij"` and `"lijk"`. The frontend associates
+dimension provenance with native local extractors. Field descriptors and consumer
+member views share the compiled offset/stride projection, preserving physical
+placement. Repeated tiled axes remain rejected. Members must be packed axis
+permutations or existing uniform records; arbitrary affine layouts with holes
+are not included. Unique mapping, nonnegative strides and capacity remain mandatory.
+This nested family has not been qualified on Vulkan.
+
+Cold Host transfers pack/unpack a physically contiguous permutation once and use
+one bulk transfer, without element-by-element GPU copies or writes to neighbors.
+Execution uses the existing affine Kernel ABI. The ordered Dense component test
+compares ordinary JIT, captured execution, and frozen-code consumers at new sizes,
+including node layouts, scalar/vector storage, borrowing, two instances of one
+loaded module, and cross-level index-product overflow rejection. These mechanism
+gates do not qualify the complete staggered TGS solver or its performance.
 
 Instantiation calls the original `SNode::dense`/`insert_children` constructors,
 then `Program::add_snode_tree` invokes the existing backend StructCompiler and

@@ -11,6 +11,16 @@
 
 namespace taichi::lang {
 
+// Affine projection of a compiled Dense tree. Each logical axis must be
+// introduced exactly once along the leaf path; tiled/repeated axes need a
+// different addressing contract. Byte facts come from the StructCompiler.
+struct DenseSNodeMemberLayout {
+  std::uint64_t offset{0};
+  std::vector<std::int64_t> shape;
+  std::vector<std::int64_t> strides;
+};
+DenseSNodeMemberLayout dense_snode_member_layout(const SNode &leaf);
+
 // A parameterized construction recipe, NOT a second byte-layout calculator.
 // instantiate() calls the same SNode constructors as FieldsBuilder. The owner
 // then runs its normal StructCompiler and allocator on the resulting tree.

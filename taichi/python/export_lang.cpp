@@ -6027,6 +6027,15 @@ void export_lang(py::module &m) {
            })
       .def("num_active_indices",
            [](SNode *snode) { return snode->num_active_indices; })
+      .def("get_local_dense_axes", [](SNode *snode) {
+        std::vector<int> axes;
+        if (snode->type == SNodeType::dense) {
+          for (int axis = 0; axis < taichi_max_num_indices; ++axis)
+            if (snode->extractors[axis].active)
+              axes.push_back(axis);
+        }
+        return axes;
+      })
       .def_readonly("cell_size_bytes", &SNode::cell_size_bytes)
       .def_readonly("offset_bytes_in_parent_cell",
                     &SNode::offset_bytes_in_parent_cell);

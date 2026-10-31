@@ -27,6 +27,45 @@ bool supported_scalar(DataType dtype) {
 
 }  // namespace
 
+DenseSNodeMemberLayout dense_snode_member_layout(const SNode &leaf) {
+  require(leaf.type == SNodeType::place && leaf.parent,
+          "Dense member requires a placed scalar leaf");
+  DenseSNodeMemberLayout layout;
+  std::map<int, std::int64_t> strides;
+  for (auto *node = &leaf; node->type != SNodeType::root;
+       node = node->parent) {
+    require(node->parent && !node->is_bit_level && !node->_morton &&
+                node->index_offsets.empty() && !node->has_ambient,
+            "Dense member requires plain Dense storage");
+    const auto limit = std::uint64_t(std::numeric_limits<std::int64_t>::max());
+    require(node->offset_bytes_in_parent_cell <= limit - layout.offset,
+            "Dense member offset exceeds native address range");
+    layout.offset += node->offset_bytes_in_parent_cell;
+    if (node == &leaf)
+      continue;
+    require(node->type == SNodeType::dense,
+            "Dense member requires only Dense ancestors");
+    for (int axis = 0; axis < taichi_max_num_indices; ++axis) {
+      const auto &extractor = node->extractors[axis];
+      if (!extractor.active)
+        continue;
+      require(extractor.acc_shape > 0 &&
+                  node->cell_size_bytes <= limit / extractor.acc_shape,
+              "Dense member stride exceeds native address range");
+      require(strides.emplace(axis, node->cell_size_bytes * extractor.acc_shape)
+                  .second,
+              "Dense member repeated axes require non-affine addressing");
+    }
+  }
+  for (int i = 0; i < leaf.num_active_indices; ++i) {
+    const auto found = strides.find(leaf.physical_index_position[i]);
+    require(found != strides.end(), "Dense member axis lacks a layout source");
+    layout.shape.push_back(leaf.shape_along_axis(i));
+    layout.strides.push_back(found->second);
+  }
+  return layout;
+}
+
 DenseSNodeSchema DenseSNodeSchema::capture(
     const SNode &root,
     const std::vector<Parameter> &parameters) {
@@ -107,10 +146,8 @@ void DenseSNodeSchema::validate() const {
       require(node.type == SNodeType::dense || node.type == SNodeType::place,
               "Dense schema supports only dense and scalar place nodes");
       const auto parent_type = nodes[node.parent].type;
-      require(parent_type == SNodeType::root ||
-                  (parent_type == SNodeType::dense &&
-                   node.type == SNodeType::place),
-              "Dense schema currently supports root/dense/place and root/place");
+      require(parent_type == SNodeType::root || parent_type == SNodeType::dense,
+              "Dense schema requires root or Dense parents");
     }
     require(node.type != SNodeType::place || supported_scalar(node.dtype),
             "Dense schema place requires a supported scalar dtype");
@@ -126,6 +163,11 @@ void DenseSNodeSchema::validate() const {
       require(extent.parameter.empty() ? extent.constant > 0
                                        : extent.constant == 0,
               "Dense schema extent must be either a positive constant or a parameter");
+      for (int ancestor : ancestors) {
+        for (const auto &outer : nodes[ancestor].extents)
+          require(outer.axis != extent.axis,
+                  "Dense schema repeated axes require non-affine addressing");
+      }
     }
     ancestors.push_back(static_cast<int>(i));
   }
@@ -138,8 +180,9 @@ std::unique_ptr<SNode> DenseSNodeSchema::instantiate(
   // use i32; allowing an overflowing product would corrupt address mapping.
   std::set<std::string> used_dimensions;
   std::vector<std::vector<int>> sizes(nodes.size());
+  std::vector<int64_t> path_products(nodes.size(), 1);
   for (size_t i = 0; i < nodes.size(); ++i) {
-    int64_t product = 1;
+    int64_t product = nodes[i].parent < 0 ? 1 : path_products[nodes[i].parent];
     for (const auto &extent : nodes[i].extents) {
       int value = extent.constant;
       if (!extent.parameter.empty()) {
@@ -153,6 +196,7 @@ std::unique_ptr<SNode> DenseSNodeSchema::instantiate(
       product *= value;
       sizes[i].push_back(value);
     }
+    path_products[i] = product;
   }
   require(used_dimensions.size() == dimensions.size(),
           "Unknown Dense schema dimension binding");

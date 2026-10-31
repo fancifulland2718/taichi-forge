@@ -97,7 +97,7 @@ def test_schema_rejects_unknown_dimensions_and_unqualified_layouts():
     builder = ti.FieldsBuilder()
     outer = builder.dense(ti.i, 2)
     outer.dense(ti.i, 4).place(field)
-    with pytest.raises(ValueError, match="root/dense/place"):
+    with pytest.raises(ValueError, match="repeated axes"):
         core.DenseSNodeSchema.capture(builder.ptr, [])
     builder.finalize().destroy()
     producer.destroy()

@@ -166,8 +166,21 @@ context 绑定实际值。普通 JIT 保留原特化路径。
 
 原生 `DenseSNodeSchema` 提供下一步的布局基础：记录原 root/dense/place 构造及标量
 放置顺序，仅把显式指定的 dense 轴替换为维度参数。不保存实际节点 ID、producer
-offset、地址或模型数据；序列化复用现有 native 类型/JSON 合同。首个布局族排除嵌套
-dense、Sparse、量化、Morton、索引 offset 和 ambient 布局。
+offset、地址或模型数据；序列化复用现有 native 类型/JSON 合同。初期仅包含单层 Dense；
+当前 CPU/CUDA 的有序轴扩展见下段。Sparse、量化、Morton、索引 offset 和 ambient
+不进入本参数化 Dense 合同。
+
+CPU/CUDA 现已取得每条祖先路径各轴只引入一次的有序 Dense 资格，包含
+`order="kij"` / `"lijk"` 所生成的多层树。前端用原生局部 axis extractor 关联维度来源；
+Field 描述与消费端成员视图共用编译后的 offset/stride 投影，保留原物理布局。
+重复轴的分块寻址仍拒绝；成员须为物理连续的轴重排或已有均匀记录布局，不扩大为任意
+带空洞的 affine 布局。唯一映射、非负步长及容量检查保持有效。Vulkan 的多层布局尚未资格化。
+
+物理连续的重排成员在冷初始化/读回时进行一次 Host 重排和一次整块传输，不逐元素
+调用 GPU 拷贝，也不覆盖相邻字段。执行期沿既有 affine Kernel ABI，不新增 Host 调度。
+`test_aot_component_ordered_dense.py` 对照正常 JIT、捕获执行和冻结代码消费，核对新尺寸的
+逐节点布局、scalar/vector、零复制借用、同模块双实例隔离及跨层索引乘积溢出拒绝。
+这项机制资格不等于完整 staggered TGS 求解器或其性能已经通过。
 
 实例化调用原 `SNode::dense`/`insert_children` 构造，再经 `Program::add_snode_tree`
 进入原后端 StructCompiler 与分配器。CPU/CUDA 的字节大小、成员偏移仍由原 LLVM 类型

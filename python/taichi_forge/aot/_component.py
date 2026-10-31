@@ -368,8 +368,14 @@ class DenseField:
         if not description.supported or not (
             description.properties["ndarray_abi_compatible"]
             or description.properties["single_record_stride_compatible"]
+            or (
+                description.properties["element_contiguous"]
+                and description.properties["compact_contiguous"]
+                and not description.properties["has_negative_stride"]
+                and description.properties["uniqueness"] == "kProvenUnique"
+            )
         ):
-            raise TaichiCompilationError("Dense component Field requires a qualified uniform-record SNode member")
+            raise TaichiCompilationError("Dense component Field requires a qualified affine SNode member")
         return description
 
 
@@ -493,17 +499,33 @@ def _dense_group(component, owner, group):
             if declaration.shape and parent.type != core.SNodeType.dense:
                 raise TaichiCompilationError(f"Resource {name!r} is not a simple dense member")
             physical_axes = node.get_physical_index_position()[: len(declaration.shape)]
+            # order= builds one Dense level per axis. Keep each declaration
+            # attached to the level that actually introduces that axis, using
+            # native extractor facts rather than inferring it from equal sizes.
+            axis_nodes = {}
+            ancestor = parent
+            while ancestor.type != core.SNodeType.root:
+                if ancestor.type != core.SNodeType.dense:
+                    raise TaichiCompilationError(f"Resource {name!r} requires only Dense ancestors")
+                for axis in ancestor.get_local_dense_axes():
+                    if axis in axis_nodes:
+                        raise TaichiCompilationError(
+                            f"Resource {name!r} repeats axis {axis}; tiled axes require non-affine addressing"
+                        )
+                    axis_nodes[axis] = ancestor
+                ancestor = ancestor.parent
             for axis, extent in zip(physical_axes, declaration.shape):
-                key = (parent.id, axis)
+                axis_node = axis_nodes[axis]
+                key = (axis_node.id, axis)
                 if key in axes and axes[key][1] != extent:
                     raise TaichiCompilationError(f"Conflicting dimension provenance in group {group!r}")
-                axes[key] = (parent, extent)
+                axes[key] = (axis_node, extent)
     paths = {}
 
     def visit(node, path):
         paths[node.id] = path
         if node.type == core.SNodeType.dense:
-            for axis in node.get_physical_index_position()[: node.num_active_indices()]:
+            for axis in node.get_local_dense_axes():
                 if (node.id, axis) not in axes:
                     raise TaichiCompilationError(f"Group {group!r} has an undeclared sibling extent at {path}")
         for index in range(node.get_num_ch()):

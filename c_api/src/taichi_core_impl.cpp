@@ -871,6 +871,50 @@ void transfer_ndarray(Runtime &runtime, const TiNdArray &array, void *host,
     return;
   }
   const auto analysis = storage::analyze_dense_storage_layout(*memory.dense_layout);
+  if (analysis && analysis.properties.compact_contiguous &&
+      analysis.properties.element_contiguous &&
+      !analysis.properties.has_negative_stride &&
+      !analysis.properties.single_record_stride_compatible &&
+      (taichi::arch_is_cpu(runtime.arch) || runtime.arch == taichi::Arch::cuda)) {
+    // Ordered Dense axes are physically packed but logically permuted. Pack
+    // once on the Host and perform one bulk transfer at this cold boundary,
+    // rather than issuing one driver copy per logical element. Never use this
+    // path for a view with holes: neighboring record members must stay intact.
+    const auto width = capi::ndarray_storage_layout(array).element_bytes;
+    const auto count = analysis.properties.item_count;
+    const auto &view = *memory.dense_layout;
+    std::vector<char> packed(size);
+    auto *buffer = static_cast<char *>(host);
+    auto reorder = [&] {
+      for (uint64_t item = 0; item < count; ++item) {
+        uint64_t index = item, offset = 0;
+        for (std::size_t axis = view.index_shape.size(); axis-- > 0;) {
+          offset += (index % view.index_shape[axis]) * view.index_strides_bytes[axis];
+          index /= view.index_shape[axis];
+        }
+        if (upload)
+          std::memcpy(packed.data() + offset, buffer + item * width, width);
+        else
+          std::memcpy(buffer + item * width, packed.data() + offset, width);
+      }
+    };
+    if (upload)
+      reorder();
+    auto pointer = memory.allocation.get_ptr(memory.byte_offset);
+    size_t bytes = size;
+    RhiResult status;
+    if (upload) {
+      const void *source = packed.data();
+      status = runtime.get().upload_data(&pointer, &source, &bytes);
+    } else {
+      void *destination = packed.data();
+      status = runtime.get().readback_data(&pointer, &destination, &bytes);
+    }
+    check_transfer_result(status);
+    if (!upload && status == RhiResult::success)
+      reorder();
+    return;
+  }
   if (!analysis || !analysis.properties.single_record_stride_compatible ||
       analysis.properties.record_stride <= 0)
     throw MemoryBindingError("Host ndarray transfer requires a positive uniform record view");
