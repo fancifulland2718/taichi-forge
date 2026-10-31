@@ -1203,3 +1203,19 @@ lexical declaration path, not a scalar or serialized Python owner. Subsequent
 member access still collects resources, method definitions and dependencies.
 CPU/CUDA gates cover ordinary JIT, cross-instance cache reuse, new capacities
 after freezing, and rejection after owner-link retargeting.
+
+
+### Named operations with Host-initialized state
+
+A normal component whose initial state is fully supplied by declared Host inputs
+or zero-initialized resources may export `operations={...}` without a numerical
+`initializer`. Contract version 11 records `initialization="host_data"`; existing
+initializer/setup contracts retain their version and behavior. Each required
+consumer resource must still be initialized before any operation is prepared.
+
+Operations and default replay remain projections of the same validated
+ExecutionPlan. Per-entry private resources and whole constraints keep the
+existing lifetime qualification; the default replay never executes an operation
+implicitly. No synthetic initializer, extra numerical launch, or module-global
+instance pointer is introduced. CPU/CUDA tests cover different-size instances,
+missing initial inputs, malformed lifecycle metadata and loaded Graph replay.

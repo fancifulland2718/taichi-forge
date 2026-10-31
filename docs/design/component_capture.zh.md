@@ -873,3 +873,16 @@ CPU/CUDA 验证覆盖标量/向量/矩阵记录的独立副本、3→19 代码�
 别名。前端保留的是同一声明路径，不把 Python owner 作为标量或产物载荷；后续
 成员访问继续收集资源、方法定义和依赖。CPU/CUDA 检查覆盖普通 JIT、跨实例缓存
 复用、冻结后新容量，以及 owner 链替换后的拒绝。
+
+
+### 使用 Host 初态的命名操作
+
+正常组件的初态全部由已声明的 Host 输入或零初始化资源提供时，可以不指定数值
+`initializer` 而导出 `operations={...}`。合同版本 11 记录
+`initialization="host_data"`；已有 initializer/setup 合同保留原版本及语义。
+所有必需消费端资源仍须在准备任何调用之前初始化。
+
+命名操作和默认 replay 仍从同一已验证 ExecutionPlan 分离；私有资源、完整约束及
+跨阶段生命周期资格不放宽。默认 replay 不隐式执行命名操作，不引入合成 initializer、
+额外数值 launch 或模块共享实例指针。CPU/CUDA 已验证不同尺寸实例、缺失初态拒绝、
+错误生命周期元数据及 loaded Graph replay。

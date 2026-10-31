@@ -851,7 +851,7 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
         # Each entry is independently prepared after ordinary Plan splitting.
         # Repeated normal recordings may declare identical local scratch names;
         # their allocations must neither collide nor cross lifecycle phases.
-        if initializer is not None:
+        if initializer is not None or operations is not None:
             with builder._private_recording_scope():
                 entry(builder, *phase_args, **phase_kwargs)
         else:
@@ -895,8 +895,8 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
     if operations is not None:
         from collections.abc import Mapping
 
-        if initializer is None or not isinstance(operations, Mapping) or not operations:
-            raise ValueError("Component operations require named normal recordings and an initializer")
+        if not isinstance(operations, Mapping) or not operations:
+            raise ValueError("Component operations require named normal recordings")
         for name, entry in operations.items():
             if not isinstance(name, str) or not name.isidentifier():
                 raise ValueError("Component operation names must be identifiers")
@@ -932,7 +932,8 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
             raise TaichiCompilationError("Component lifecycle requires a preserved initialization/replay boundary")
         if operation_nodes and not preserved_prefix(operation_prefix):
             raise TaichiCompilationError("Component operations require preserved boundaries and nonempty default replay")
-        contract = _complete_compiler_contract(graph, contract, capture, lifecycle=bool(initialization_nodes))
+        contract = _complete_compiler_contract(graph, contract, capture,
+                                               lifecycle=bool(initialization_nodes or operation_nodes))
         # Host choices remain part of admission even if no numerical entry uses
         # them. Explicit kernel-only policy follows the final compiler closure,
         # including dead-region pruning, rather than the whole owner registry.
@@ -986,7 +987,7 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
                  *(source for aliases in sources["resources"].values() for source in aliases.values())]
         if sequences or any(type(part) is int for source in paths for part in source["path"]):
             contract["required_capabilities"].append("component_owner_sequence_sources_v1")
-        if initialization_nodes:
+        if initialization_nodes or operation_nodes:
             # Version 8 adds lifecycle to the same compiler projection. Empty
             # optional resource families stay empty, rather than acquiring a
             # synthetic fixed tree just to use an initializer.
@@ -996,17 +997,21 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
             if "component_control_v1" not in contract["required_capabilities"]:
                 contract["required_capabilities"].append("component_control_v1")
             contract["lifecycle"] = dict(initialization_nodes=len(initialization_nodes),
-                                         initialization="explicit_instance", reprepare="preserve_state")
-            contract["required_capabilities"].append("component_instance_initializer_v1")
+                                         initialization="explicit_instance" if initialization_nodes else "host_data",
+                                         reprepare="preserve_state")
+            if initialization_nodes:
+                contract["required_capabilities"].append("component_instance_initializer_v1")
             if setup_nodes:
                 contract["version"] = 9
                 contract["lifecycle"]["setup_nodes"] = setup_nodes
                 contract["required_capabilities"].append("component_cold_setup_v1")
             if operation_nodes:
-                contract["version"] = 10
+                contract["version"] = 10 if initialization_nodes else 11
                 contract["lifecycle"].setdefault("setup_nodes", [])
                 contract["lifecycle"]["operation_nodes"] = operation_nodes
                 contract["required_capabilities"].append("component_named_operations_v1")
+                if not initialization_nodes:
+                    contract["required_capabilities"].append("component_host_initialized_operations_v1")
         if contract["version"] >= 4:
             from taichi_forge_runtime.aot._component import _control_identity
 

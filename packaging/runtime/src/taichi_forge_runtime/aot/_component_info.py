@@ -79,23 +79,23 @@ def _validate_header(contract, name):
         "execution_entries",
         "target",
     }
-    if contract.get("version") in (2, 3, 4, 5, 6, 7, 8, 9, 10):
+    if contract.get("version") in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
         required.add("compilation")
-    if contract.get("version") in (3, 4, 5, 6, 7, 8, 9, 10):
+    if contract.get("version") in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         required.add("configuration")
-    if contract.get("version") in (4, 5, 6, 7, 8, 9, 10):
+    if contract.get("version") in (4, 5, 6, 7, 8, 9, 10, 11):
         required.update(("control", "internal_arguments", "execution_fingerprint"))
-    if contract.get("version") in (5, 6, 7, 8, 9, 10):
+    if contract.get("version") in (5, 6, 7, 8, 9, 10, 11):
         required.add("constraints")
-    if contract.get("version") in (6, 7, 8, 9, 10):
+    if contract.get("version") in (6, 7, 8, 9, 10, 11):
         required.update(("fixed_groups", "fixed_bindings"))
-    if contract.get("version") in (7, 8, 9, 10):
+    if contract.get("version") in (7, 8, 9, 10, 11):
         required.update(("field_io", "field_io_bindings"))
-    if contract.get("version") in (8, 9, 10):
+    if contract.get("version") in (8, 9, 10, 11):
         required.add("lifecycle")
-    if contract.get("version") in (9, 10):
+    if contract.get("version") in (9, 10, 11):
         required.add("setup_bindings")
-    if contract.get("version") == 10:
+    if contract.get("version") in (10, 11):
         required.add("operation_bindings")
     host_resource_capability = "component_host_resources_v1" in contract.get("required_capabilities", ())
     if host_resource_capability:
@@ -103,7 +103,7 @@ def _validate_header(contract, name):
     private_shape_capability = "component_private_array_extents_v1" in contract.get("required_capabilities", ())
     if private_shape_capability:
         required.add("private_shapes")
-    if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10) or contract["name"] != name:
+    if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11) or contract["name"] != name:
         raise ValueError("Unsupported component contract")
 
 

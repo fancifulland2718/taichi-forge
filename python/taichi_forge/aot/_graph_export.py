@@ -264,15 +264,16 @@ def export_graph(
         )
         operation_ends = lower_frozen_graph(context, graph)
         component_initialization_nodes = component_lifecycle.initialization_nodes if component_lifecycle else 0
-        if component_initialization_nodes:
+        component_operation_nodes = component_lifecycle.operation_nodes if component_lifecycle else ()
+        if component_initialization_nodes or component_operation_nodes:
             if (type(component_initialization_nodes) is not int
-                    or not 0 < component_initialization_nodes < len(operation_ends)):
+                    or not 0 <= component_initialization_nodes < len(operation_ends)):
                 raise TaichiRuntimeError("Component initialization must precede a nonempty replay region")
             if (context.initialization or binding_strategy is not None
                     or context.storage_recipe is not None or gradients or argument_resources):
                 raise TaichiRuntimeError(
                     "Component instance initializers with Plan-private resources/recipes require shared-lifetime qualification")
-            boundary = operation_ends[component_initialization_nodes - 1]
+            boundary = operation_ends[component_initialization_nodes - 1] if component_initialization_nodes else 0
             context.initialization = context.operations[:boundary]
             context.operations = context.operations[boundary:]
             component_lifecycle.setup_operations = tuple(
@@ -293,16 +294,18 @@ def export_graph(
         from taichi_forge.graph._lowering_constraints import export_constraints
 
         constraints = export_constraints(spec, context.binding, additional=context.binding_constraints)
-        if component_initialization_nodes:
+        if component_initialization_nodes or component_operation_nodes:
             from taichi_forge_runtime.aot._component_lifecycle import (
                 split_component_lifecycle, split_component_setup, split_component_operations)
 
             try:
-                initial, replay = split_component_lifecycle(ExecutionPlan(
-                    context.operations, initialization=context.initialization,
-                    resources=context.resources, constraints=constraints or None))
-                if component_lifecycle.setup_operations:
-                    split_component_setup(initial, component_lifecycle.setup_operations)
+                replay = ExecutionPlan(
+                    context.operations, initialization=context.initialization or None,
+                    resources=context.resources, constraints=constraints or None)
+                if component_initialization_nodes:
+                    initial, replay = split_component_lifecycle(replay)
+                    if component_lifecycle.setup_operations:
+                        split_component_setup(initial, component_lifecycle.setup_operations)
                 if component_lifecycle.operation_bindings:
                     split_component_operations(replay, component_lifecycle.operation_bindings)
             except ValueError as error:

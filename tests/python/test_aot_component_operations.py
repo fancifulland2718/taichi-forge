@@ -93,10 +93,11 @@ def test_named_operation_preserves_history_and_instance_bindings(tmp_path):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_loaded_graph_uses_only_default_operation_inputs(tmp_path):
+@pytest.mark.parametrize("host_initialized", [False, True])
+def test_loaded_graph_uses_only_default_operation_inputs(tmp_path, host_initialized):
     owner = _Model(3)
     root = ti.aot.Component.from_owner(owner).compile_graph(owner.record,
-        initializer=owner.finalize, operations=dict(adjust=owner.adjust))
+        initializer=None if host_initialized else owner.finalize, operations=dict(adjust=owner.adjust))
     module = ti.aot.Module()
     root.export(module, "model")
     artifact = tmp_path / "loaded_operations.tcm"
@@ -107,8 +108,11 @@ def test_loaded_graph_uses_only_default_operation_inputs(tmp_path):
     with ti.aot.borrow_runtime() as runtime, runtime.load_module(artifact) as loaded:
         component = loaded.component("model")
         with component.instantiate(dict(n=11)) as state:
-            state.initialize(dict(later=np.full(11, 20, np.int32)))
-            state.initialize_state()
+            if host_initialized:
+                state.initialize(dict(state=np.full(11, 20, np.int32)))
+            else:
+                state.initialize(dict(later=np.full(11, 20, np.int32)))
+                state.initialize_state()
             graph = ti.graph.GraphBuilder().dispatch_loaded_component(state).compile()
             try:
                 # The other operation's bias is neither required nor executed.
@@ -119,3 +123,48 @@ def test_loaded_graph_uses_only_default_operation_inputs(tmp_path):
                 np.testing.assert_array_equal(np.frombuffer(state.resource("state").read(), np.int32), 22)
             finally:
                 graph.close()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_host_initialized_operations_keep_required_inputs_and_instance_state(tmp_path):
+    owner = _Model(3)
+    root = ti.aot.Component.from_owner(owner).compile_graph(owner.record,
+        operations=dict(refresh=owner.finalize))
+    assert root.contract['version'] == 11
+    module = ti.aot.Module()
+    root.export(module, 'model')
+    artifact = tmp_path / 'host_operations.tcm'
+    module.archive(str(artifact))
+    backend = 'cuda' if ti.cfg.arch == ti.cuda else 'cpu'
+    ti.reset()
+    with Runtime(backend) as runtime, runtime.load_module(artifact) as loaded:
+        code = loaded.component('model')
+        assert code.setup_entries == () and code.operation_entries == ('refresh',)
+        assert code.contract['lifecycle']['initialization'] == 'host_data'
+        with pytest.raises(ValueError, match='no registered instance initializer'):
+            code.inputs(initialization=True)
+        with code.instantiate(dict(n=11)) as first, code.instantiate(dict(n=17)) as second:
+            with pytest.raises(ValueError, match='explicit consumer initialization'):
+                first.prepare()
+            for instance, n in ((first, 11), (second, 17)):
+                instance.initialize(dict(later=np.full(n, 10, np.int32), state=np.arange(n, dtype=np.int32)))
+            with first.prepare() as step, second.prepare() as other, first.prepare(operation='refresh') as refresh:
+                step.run()
+                other.run()
+                refresh.run()
+                step.run()
+                np.testing.assert_array_equal(np.frombuffer(first.resource('state').read(), np.int32), 11)
+                np.testing.assert_array_equal(np.frombuffer(second.resource('state').read(), np.int32), np.arange(17)+1)
+
+    if backend == 'cpu':
+        with ZipFile(artifact) as archive:
+            payloads = {name: archive.read(name) for name in archive.namelist()}
+        contract = json.loads(payloads['components/model.json'])
+        contract['lifecycle']['initialization_nodes'] = -1
+        changed = tmp_path / 'invalid_host_lifecycle.tcm'
+        with ZipFile(changed, 'w') as archive:
+            for name, payload in payloads.items():
+                archive.writestr(name, json.dumps(contract) if name == 'components/model.json' else payload)
+        with Runtime('cpu') as runtime, runtime.load_module(changed) as loaded:
+            with pytest.raises(ValueError, match='Invalid component instance lifecycle'):
+                loaded.component('model')

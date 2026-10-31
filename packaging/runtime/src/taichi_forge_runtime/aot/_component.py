@@ -167,10 +167,10 @@ class Component:
                 if not fixed_groups or set(fixed_groups) & set(contract["groups"]):
                     raise ValueError("Fixed SNode component groups must have distinct declared identities")
                 capabilities.add("component_fixed_snode_groups_v1")
-            if contract["version"] in (8, 9, 10):
+            if contract["version"] in (8, 9, 10, 11):
                 lifecycle = contract["lifecycle"]
                 lifecycle_keys = {"initialization_nodes", "initialization", "reprepare"}
-                if contract["version"] in (9, 10):
+                if contract["version"] in (9, 10, 11):
                     lifecycle_keys.add("setup_nodes")
                     nodes, start, names = lifecycle.get("setup_nodes"), 0, set()
                     if not isinstance(nodes, list) or (not nodes and contract["version"] == 9):
@@ -186,7 +186,7 @@ class Component:
                         start = end
                     if nodes:
                         capabilities.add("component_cold_setup_v1")
-                if contract["version"] == 10:
+                if contract["version"] in (10, 11):
                     lifecycle_keys.add("operation_nodes")
                     nodes = lifecycle.get("operation_nodes")
                     start, names = lifecycle.get("initialization_nodes", 0), set()
@@ -202,13 +202,20 @@ class Component:
                         names.add(label)
                         start = end
                     capabilities.add("component_named_operations_v1")
+                host_initialized = contract["version"] == 11
+                initialization_nodes = lifecycle.get("initialization_nodes")
+                valid_initialization = type(initialization_nodes) is int and (
+                    initialization_nodes == 0 if host_initialized else initialization_nodes > 0)
                 if (set(lifecycle) != lifecycle_keys
-                        or type(lifecycle["initialization_nodes"]) is not int or lifecycle["initialization_nodes"] <= 0
-                        or lifecycle["initialization"] != "explicit_instance" or lifecycle["reprepare"] != "preserve_state"):
+                        or not valid_initialization
+                        or lifecycle.get("initialization") != ("host_data" if host_initialized else "explicit_instance")
+                        or host_initialized and lifecycle.get("setup_nodes")
+                        or lifecycle["reprepare"] != "preserve_state"):
                     raise ValueError("Invalid component instance lifecycle")
                 if not fixed_groups and contract["fixed_bindings"]:
                     raise ValueError("Component without fixed groups cannot contain fixed bindings")
-                capabilities.add("component_instance_initializer_v1")
+                capabilities.add("component_host_initialized_operations_v1" if host_initialized
+                                 else "component_instance_initializer_v1")
             if any(resource.get("kind") == "ndarray" for resource in contract["resources"].values()):
                 capabilities.add("component_array_storage_v1")
             if any(resource.get("initialization") == "zero" for resource in contract["resources"].values()):
@@ -384,9 +391,9 @@ class Component:
             operations = document["operations"]
             if contract["version"] >= 4:
                 execution_facts = dict(plan=document, semantic_key=contract["semantic_key"])
-                if contract["version"] in (9, 10):
+                if contract["version"] in (9, 10, 11):
                     execution_facts["setup_bindings"] = contract["setup_bindings"]
-                if contract["version"] == 10:
+                if contract["version"] in (10, 11):
                     execution_facts["operation_bindings"] = contract["operation_bindings"]
                 fingerprint = hashlib.sha256(
                     json.dumps(
@@ -463,13 +470,13 @@ class Component:
                 # Keep the full Plan for native tree-closure instantiation.
                 # A fresh replay preparation never reruns the model initializer.
                 self._initializer_plan, self._replay_plan = split_component_lifecycle(plan)
-                if contract["version"] in (9, 10):
+                if contract["version"] in (9, 10, 11):
                     from ._component_lifecycle import split_component_setup
                     self._setup_plans, self._initializer_plan = split_component_setup(
                         self._initializer_plan, contract["setup_bindings"])
                     if list(self._setup_plans) != [name for name, _ in contract["lifecycle"]["setup_nodes"]]:
                         raise ValueError("Component setup bindings differ from the declared entries")
-            if contract["version"] == 10:
+            if contract["version"] in (10, 11):
                 from ._component_lifecycle import split_component_operations
                 self._operation_plans, self._replay_plan = split_component_operations(
                     self._replay_plan, contract["operation_bindings"])
