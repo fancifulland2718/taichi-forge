@@ -11,6 +11,51 @@ from taichi_forge_runtime.aot import Runtime
 from tests import test_utils
 
 
+@ti.data_oriented
+class _ChunkModel:
+    def __init__(self, jobs, candidates):
+        self.jobs, self.candidates = jobs, candidates
+        self.chunks = max(1, min(jobs, (jobs + 31) // 32 + candidates - 1))
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        j, c = scope.dim("jobs"), scope.dim("candidates")
+        chunks = scope.derived_dim("chunks", j.minimum((j + 31) // 32 + c - 1).maximum(1))
+        scope.output = scope.field(ti.i32, shape=chunks)
+        self.tree = builder.finalize()
+
+    @ti.kernel
+    def step(self):
+        for i in range(self.chunks):
+            self.output[i] = i + 1
+
+    def record(self, builder):
+        builder.dispatch(self.step)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_subtracted_extent_controls_frozen_layout_and_rejects_underflow(tmp_path, monkeypatch):
+    model = _ChunkModel(33, 2)
+    model.step()
+    np.testing.assert_array_equal(model.output.to_numpy(), [1, 2, 3])
+    root = Component.from_owner(model).compile_graph(model.record)
+    module = ti.aot.Module()
+    root.export(module, "chunks")
+    artifact = tmp_path / "chunks.tcm"
+    module.archive(str(artifact))
+    with Runtime("cpu") as runtime:
+        component = runtime.load_module(artifact).component("chunks")
+        with component.instantiate({"jobs": 97, "candidates": 3}) as instance:
+            instance.initialize(zero=component.contract["resources"])
+            with instance.prepare() as call:
+                call.run()
+            assert struct.unpack("<6i", instance.resource("output").read()) == (1, 2, 3, 4, 5, 6)
+        allocations = []
+        monkeypatch.setattr(runtime, "dense_snode_group", lambda *a, **kw: allocations.append(1))
+        with pytest.raises(ValueError, match="nonnegative"):
+            component.instantiate({"jobs": 0, "candidates": 0})
+        assert allocations == []  # max(1) must not hide an invalid intermediate.
+
+
 @dataclass(frozen=True)
 class _Counts:
     active: int

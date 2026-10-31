@@ -662,6 +662,12 @@ Used attributes are checked again on cache hits and owner binding, including
 nested Record paths. CPU/CUDA gates cover new capacities, zero counts, consumer
 layout and original loop behavior, plus recovery after rejected declarations.
 
+Extent expressions support subtraction, for example
+`(jobs + 31) // 32 + candidates - 1`. Every intermediate must remain in the
+nonnegative i64 range; an enclosing `maximum(1)` cannot hide underflow. A CPU
+gate checks frozen new-size loops/layout and rejection before allocation.
+Older runtimes reject the unknown `sub` expression.
+
 Normal algorithm validity conditions can declare
 `scope.require_le("merge_coverage", scope.dim("count"), covered_items, when="scratch")`.
 Bounds must reflect the selected code/layout, not arbitrary SDK-wide size caps.

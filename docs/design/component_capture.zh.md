@@ -282,6 +282,10 @@ TCM hash 保持不变，产物无模型数据载荷及固定根依赖。该探�
 编译缓存命中和原 owner 绑定时再次验证，包括嵌套 Record 的来源路径。CPU/CUDA
 门槛覆盖新容量/零数量、原循环与消费端布局，以及失败后修正重试。
 
+维度表达式支持减法，例如 `(jobs + 31) // 32 + candidates - 1`。每个中间结果
+仍必须落在非负 i64 范围；外层 `maximum(1)` 不会掩盖下溢。CPU 门槛验证冻结后
+新尺寸的循环与布局，以及分配前拒绝下溢。旧 Runtime 会拒绝未知的 `sub` 表达式。
+
 正常算法的有效范围可用
 `scope.require_le("merge_coverage", scope.dim("count"), covered_items, when="scratch")`
 声明。边界应来自所选代码/布局的真实条件，不能随意设置 SDK 全局规模上限。

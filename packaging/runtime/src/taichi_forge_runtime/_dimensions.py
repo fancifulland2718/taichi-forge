@@ -21,7 +21,7 @@ def validate_extent(expression):
             if valid:
                 visit(args[0], depth + 1)
         else:
-            valid = op in ("add", "mul", "max", "min", "floordiv") and len(args) == 2
+            valid = op in ("add", "sub", "mul", "max", "min", "floordiv") and len(args) == 2
             if valid:
                 for argument in args:
                     visit(argument, depth + 1)
@@ -64,6 +64,8 @@ def evaluate_extent(expression, resolve):
     def evaluate_binary(op, left, right):
         if op == "add":
             result = left + right
+        elif op == "sub":
+            result = left - right
         elif op == "mul":
             result = left * right
         elif op == "max":

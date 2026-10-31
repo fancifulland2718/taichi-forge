@@ -35,6 +35,9 @@ class Extent:
 
     __radd__ = __add__
 
+    def __sub__(self, other):
+        return self._binary("sub", other)
+
     def __mul__(self, other):
         return self._binary("mul", other)
 
