@@ -172,6 +172,13 @@ def make_matrix_with_shape(arr, shape, dt):
 
 
 def make_matrix(arr, dt=None):
+    if isinstance(arr, expr.Expr) and arr.is_tensor():
+        shape = arr.get_shape()
+        # A constructor creates a tensor value, even when its input is an
+        # existing lvalue or a component runtime-vector capture. Keep the
+        # ordinary copy/cast semantics instead of aliasing its storage.
+        elements = [impl.subscript(None, arr, *index) for index in product(*(range(n) for n in shape))]
+        return make_matrix_with_shape(elements, shape, arr.element_type() if dt is None else cook_dtype(dt))
     if len(arr) == 0:
         # the only usage of an empty vector is to serve as field indices
         shape = [0]
