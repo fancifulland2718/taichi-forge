@@ -1,5 +1,6 @@
 #include "taichi_core_impl.h"
 
+#include <algorithm>
 #include <atomic>
 #include <limits>
 
@@ -147,11 +148,18 @@ const Runtime::KernelBinding &Runtime::get_kernel_value_arguments(
       auto tree = value_tree(logical, layout, leaf);
       if (leaf != layout.members.size())
         throw MemoryBindingError("Inconsistent value argument layout");
+      // The next argument's alignment may add unrelated trailing padding.
+      // Expose the actual value span so identical layouts can share a Plan
+      // input even when their neighbours differ. Internal padding is retained.
+      std::size_t payload_size = 0;
+      for (const auto &member : layout.members)
+        payload_size = std::max(payload_size, member.offset + member.size);
       values.inner.emplace_back(JsonObject{
           {"index", JsonValue(index)},
-          {"buffer_size", JsonValue(end - offset)},
+          {"buffer_size", JsonValue(payload_size)},
           {"value", std::move(tree)}});
-      windows.emplace(index, KernelBinding::ValueWindow{offset, end - offset});
+      windows.emplace(index, KernelBinding::ValueWindow{offset, end - offset,
+                                                       payload_size});
     }
   }
   JsonObject description{

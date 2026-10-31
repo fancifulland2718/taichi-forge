@@ -163,6 +163,7 @@ class Runtime {
     struct ValueWindow {
       std::size_t offset;
       std::size_t size;
+      std::size_t payload_size;
     };
     mutable std::string argument_layout;
     mutable std::map<uint32_t, ValueWindow> value_arguments;

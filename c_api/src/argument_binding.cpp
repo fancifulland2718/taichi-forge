@@ -798,11 +798,17 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
           throw MemoryBindingError("Argument has no exported pure value layout");
         const auto &window = found->second;
         const auto &value = arg.value.value;
-        if (value.size != window.size || (value.size && !value.data))
+        // Existing C clients may still supply the complete compiled window.
+        // New reflection excludes only trailing padding, never member slots.
+        if ((value.size != window.payload_size && value.size != window.size) ||
+            (value.size && !value.data))
           throw MemoryBindingError("Value storage must match the compiled argument size");
+        if (window.size > value.size)
+          std::memset(builder.get_context().arg_buffer + window.offset + value.size,
+                      0, window.size - value.size);
         if (value.size)
           std::memcpy(builder.get_context().arg_buffer + window.offset,
-                      value.data, window.size);
+                      value.data, value.size);
         break;
       }
       case TI_ARGUMENT_TYPE_TENSOR: {

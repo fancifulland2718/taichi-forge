@@ -2096,6 +2096,14 @@ cannot carry resource handles or ArgPacks and does not extend ordinary CGraph
 input types. Value parameters are constants in an explicitly
 exported adjoint; ndarray gradients keep their existing bindings and ownership.
 
+Argument `buffer_size` covers the actual members and their internal padding;
+it excludes trailing padding introduced by the following argument's alignment.
+Identical value layouts can therefore share a Plan input at different argument
+positions. Native binding also accepts the previous complete-window size for C
+client compatibility and zeroes omitted trailing padding. Other sizes reject;
+type, shape and member-offset compatibility checks remain unchanged. Return and
+ArgPack layout contracts are unaffected.
+
 Producer-side ordinary `Graph.run()` accepts
 `ti.graph.Arg(ti.graph.ArgKind.ARGPACK, "pack", pack_type)` on CPU/CUDA/Vulkan,
 with a Python ArgPack supplied at execution. Member ndarray dtype/rank must be

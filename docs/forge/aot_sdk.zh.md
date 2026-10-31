@@ -1641,6 +1641,11 @@ launch/prepare 在返回前复制载荷。此形式不能携带资源句柄或 A
 CGraph 的输入类型。显式导出的伴随中，按值参数作为常量使用；
 ndarray 梯度仍沿用既有绑定与所有权。
 
+参数 `buffer_size` 覆盖实际成员及内部 padding，不包含后一个参数的对齐造成的尾部
+空隙。因此，成员布局相同的值可在不同入口/参数位置共用同一个 Plan 输入。原生绑定
+同时接受旧的完整参数窗口长度以兼容 C 调用方，并清零省略的尾部 padding；其他长度
+拒绝。类型、shape 和成员偏移的兼容检查不变，返回值及 ArgPack 布局合同不变。
+
 生产端普通 `Graph.run()` 在 CPU/CUDA/Vulkan 上接受
 `ti.graph.Arg(ti.graph.ArgKind.ARGPACK, "pack", pack_type)`，运行时传入对应的
 Python ArgPack。成员 ndarray 的 dtype/ndim 必须明确；嵌套成员及提升到根部的资源
