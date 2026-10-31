@@ -2344,8 +2344,14 @@ void export_lang(py::module &m) {
       .def("_debug_ordinary_launch_attribution",
            &Program::debug_ordinary_launch_attribution)
       .def("_runtime_statistics_snapshot", [](Program &program) {
-        const RuntimeStatisticsSnapshot snapshot =
-            program.runtime_statistics_snapshot();
+        RuntimeStatisticsSnapshot snapshot;
+        {
+          // A Graph transaction may retain the submission lock across Python
+          // native calls. Do not hold the GIL while waiting for that owner to
+          // finish; it must reacquire the GIL before releasing its transaction.
+          py::gil_scoped_release release;
+          snapshot = program.runtime_statistics_snapshot();
+        }
         auto optional_counter =
             [](const RuntimeOptionalCounter &counter) -> py::object {
           if (!counter.available) {

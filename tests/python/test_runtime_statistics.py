@@ -1,4 +1,8 @@
 import threading
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -7,6 +11,22 @@ import taichi_forge as ti
 from taichi_forge.algorithms import _algorithms as alg_impl
 from taichi_forge._lib import core as _ti_core
 from tests import test_utils
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_statistics_allows_python_transaction_owner_to_retire():
+    # A timeout is a failure, not a skip: holding the GIL in stats prevents
+    # the sleeping native-transaction owner from resuming and unlocking.
+    arch = ti.lang.impl.current_cfg().arch
+    name = "cpu" if arch == ti.cpu else str(arch).split(".")[-1]
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).with_name("runtime_statistics_concurrency_probe.py")), name],
+        env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+    )
+    log = result.stdout + result.stderr
+    assert result.returncode == 0, log
+    assert "STATS_DONE" in log and "PASS" in log, log
+    assert "Exception ignored" not in log, log
 
 
 @test_utils.test(arch=[ti.cpu])
