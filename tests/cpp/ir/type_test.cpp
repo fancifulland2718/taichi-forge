@@ -4,6 +4,39 @@
 
 namespace taichi::lang {
 
+TEST(Type, StructOffsetsPreserveImplicitAndDeclaredLayouts) {
+  auto &factory = TypeFactory::get_instance();
+  const auto *vector = factory.get_tensor_type({3}, PrimitiveType::f32);
+  const auto *implicit = factory.get_struct_type(
+      {{PrimitiveType::i8, "tag"}, {PrimitiveType::f64, "value"},
+       {vector, "vector"}})->as<StructType>();
+  EXPECT_EQ(implicit->get_element_offset({1}), 8);
+  EXPECT_EQ(implicit->get_element_offset({2, 2}), 24);
+
+  // A later explicit offset determines the policy for the entire structure,
+  // including earlier zero offsets. Do not stop at the queried member.
+  const auto *explicit_layout = factory.get_struct_type(
+      {{PrimitiveType::i32, "first"}, {PrimitiveType::i32, "second"},
+       {PrimitiveType::i32, "last", 32}})->as<StructType>();
+  EXPECT_EQ(explicit_layout->get_element_offset({1}), 0);
+  EXPECT_EQ(explicit_layout->get_element_offset({2}), 32);
+
+  const auto *pointer = factory.get_struct_type(
+      {{factory.get_pointer_type(PrimitiveType::f32), "data"}});
+  const auto *nested_pointer = factory.get_struct_type(
+      {{PrimitiveType::i32, "first"}, {PrimitiveType::i32, "second"},
+       {pointer, "nested"}})->as<StructType>();
+  EXPECT_EQ(nested_pointer->get_element_offset({1}), 0);
+  EXPECT_EQ(nested_pointer->get_element_offset({2, 0}), 0);
+
+  std::vector<AbstractDictionaryMember> members;
+  for (std::size_t i = 0; i < 512; ++i)
+    members.push_back({pointer, "array" + std::to_string(i), i * 16});
+  const auto *wide = factory.get_struct_type(members)->as<StructType>();
+  for (int i : {0, 1, 63, 511})
+    EXPECT_EQ(wide->get_element_offset({i, 0}), i * 16);
+}
+
 TEST(Type, TypeToString) {
   auto f16 = TypeFactory::get_instance().get_primitive_real_type(16);
   EXPECT_EQ(f16->to_string(), "f16");

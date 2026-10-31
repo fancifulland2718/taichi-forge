@@ -1,5 +1,7 @@
 #include "taichi/ir/type.h"
 
+#include <algorithm>
+
 #include "taichi/ir/type_factory.h"
 #include "taichi/ir/type_utils.h"
 
@@ -198,13 +200,14 @@ size_t StructType::get_element_offset(const std::vector<int> &indices) const {
       auto *struct_type = type_now->as<StructType>();
       const auto &elements = struct_type->elements_;
       TI_ASSERT(ind < (int)elements.size());
-      bool has_explicit_offsets = false;
-      bool has_pointer_elements = false;
-      for (const auto &element : elements) {
-        has_explicit_offsets |= element.offset != 0;
-        has_pointer_elements |= contains_pointer_type(element.type);
-      }
-      if (has_explicit_offsets || has_pointer_elements) {
+      // These are existential checks. Sized kernel ABIs normally prove this
+      // at the first pointer or nonzero offset; scanning every sibling for
+      // every argument makes wide captures needlessly quadratic.
+      const bool uses_declared_offsets = std::any_of(
+          elements.begin(), elements.end(), [](const auto &element) {
+            return element.offset != 0 || contains_pointer_type(element.type);
+          });
+      if (uses_declared_offsets) {
         offset += elements[ind].offset;
       } else {
         size_t implicit_offset = 0;

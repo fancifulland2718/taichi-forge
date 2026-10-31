@@ -512,6 +512,10 @@ Runtime 的 `module.component(name)` 查询不可变合同，`instantiate(dimens
 ExecutionPlan 和 PreparedCall，调用期没有新增 Python 计划解释器。固定向量/矩阵值复用
 native 调用 ABI 编码，命名值在所有使用入口的 ABI 必须相容。
 
+原生结构偏移查询在发现指针或显式偏移后立即采用声明布局，避免宽捕获 ABI 对每个
+参数反复扫描全部兄弟成员。隐式对齐布局沿用原规则；序列化 ABI、实例绑定和生命周期
+检查均不改变。
+
 每个 prepared 保存自己的资源与值绑定，不改写 Module 共享根指针；实例保留独立状态，
 共享同一加载代码 owner。CPU 普通执行与 CUDA 独立执行域已取得有限组件资格；使用
 `instance.prepare(..., execution_domain=domain)` 后先 `call.initialize()`，再以

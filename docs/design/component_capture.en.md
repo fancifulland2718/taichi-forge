@@ -707,6 +707,11 @@ dimensions=...)` binds through the existing ExecutionPlan and PreparedCall, with
 no new Python execution interpreter. Fixed vector/matrix values reuse native ABI
 encoding; every entry consuming a named value must have compatible value ABI.
 
+Native struct offset reflection stops once a pointer or explicit offset proves
+that the declared layout applies, avoiding repeated full sibling scans for wide
+captured ABIs. Implicit aligned layouts retain their original rule; this changes
+neither serialized ABI nor per-instance binding and lifetime checks.
+
 Each prepared call owns its resource/value bindings, without changing shared
 Module root pointers. Instances retain separate state under one loaded code
 owner. Ordinary CPU execution and independent CUDA domains are qualified for
