@@ -36,6 +36,22 @@ backend capabilities, dynamic resources and lifetimes. Missing provenance in an
 older artifact requires a rebuild before source-based selection. Inspection
 checks headers and static facts, not every layout or execution-plan fact.
 
+For Vulkan, `required_device_capabilities()` reads the module-wide requirements
+directly from native GFX `metadata.json`, including requirements of other entries
+in the same module. Use `check_device_capabilities(runtime.device_capabilities())`
+to filter cold candidates before loading. Missing levels are zero and unknown
+required capabilities cannot be ignored. These are distinct from component
+protocol `required_capabilities`; native load/prepare still perform admission.
+Other targets currently reject this query rather than reporting no requirements.
+Queries return copies of the inspection snapshot without loading a native library.
+
+For example, Vulkan `Module(caps=["spirv_has_atomic_float_add"])` explicitly
+requires native float atomic addition. Portable artifacts without that capability
+retain the existing CAS fallback. Performance comparisons must match physical
+devices and exported capabilities, not just the `vulkan` backend name. Applications
+may ship qualified target variants and select them during cold preparation;
+optimizing one profile must not silently raise every artifact's hardware requirements.
+
 The recording methods are the application's normal JIT Graph definitions.
 Build finite normal configurations with public `ti.aot.Variant` and
 `ti.aot.build_variants`. Optional `ti.aot.BuildBudget` axes default to `None`;

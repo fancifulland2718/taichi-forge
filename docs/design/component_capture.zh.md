@@ -24,6 +24,18 @@ module.archive("component.tcm")
 load、instantiate、prepare 仍检查原生入口、后端能力、动态资源和生命周期。
 缺少来源信息的旧产物需要重新导出后才能按模型来源选择。
 
+Vulkan 产物还提供 `required_device_capabilities()`，直接查询 native GFX
+`metadata.json` 的模块级要求；即使只选择一个组件，同模块其他入口的要求也保留。
+`check_device_capabilities(runtime.device_capabilities())` 可在加载前排除不匹配候选，
+缺少的能力按零级处理，未知必需能力不能忽略。这与组件协议的
+`required_capabilities` 不同，也不能替代 native load/prepare。其他目标暂不支持此查询，
+会明确报错，不能理解为没有设备要求。查询返回不可变快照的副本，不加载 native 库。
+
+例如 Vulkan 的 `Module(caps=["spirv_has_atomic_float_add"])` 显式要求原生浮点原子加法；
+未声明该能力的通用产物仍使用已有 CAS 回退。性能对照须核对物理设备与实际导出能力，
+不能只比较 `vulkan` 后端名。应用可以同时交付已验证的目标变体，在冷准备期明确选择；
+不应为提速悄悄提高所有产物的硬件要求。
+
 这里的 `record_step`/`record_initialize` 是应用同时用于正常 JIT Graph 的执行定义。
 有限正常配置构建使用公开的 `ti.aot.Variant`、`ti.aot.build_variants`，可选
 `ti.aot.BuildBudget` 默认各轴为 `None`；失败捕获 `ti.aot.ComponentBuildError` 并查询报告。

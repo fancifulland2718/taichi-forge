@@ -11,22 +11,46 @@ from zipfile import ZipFile
 from .._static_values import read_static_key, static_key
 
 
-def _read_contract(path, name):
-    from ._runtime import _name
-
-    _name(name)
+def _read_document(path, relative):
     path = Path(path).resolve(strict=True)
-    relative = "components/" + quote(name, safe="-_.") + ".json"
     if path.is_dir():
         payload = (path / relative).read_bytes()
     else:
         with ZipFile(path) as archive:
             if archive.namelist().count(relative) != 1:
-                raise ValueError(f"Component contract must occur exactly once: {name!r}")
+                raise ValueError(f"Artifact document must occur exactly once: {relative!r}")
             payload = archive.read(relative)
-    contract = json.loads(payload)
+    return json.loads(payload)
+
+
+def _read_contract(path, name):
+    from ._runtime import _name
+
+    _name(name)
+    contract = _read_document(path, "components/" + quote(name, safe="-_.") + ".json")
     _validate_header(contract, name)
     return contract
+
+
+def _read_device_requirements(path):
+    # GFX's serialized map is the native loader's authority, including entries
+    # other than the inspected component. Do not infer requirements from SPIR-V
+    # or copy them into a second component schema.
+    metadata = _read_document(path, "metadata.json")
+    entries = metadata.get("required_caps") if isinstance(metadata, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError("Artifact has no queryable device capability requirements; rebuild it")
+    result = {}
+    for entry in entries:
+        if (
+            not isinstance(entry, dict) or set(entry) != {"key", "value"}
+            or not isinstance(entry["key"], str) or not entry["key"]
+            or type(entry["value"]) is not int or not 0 <= entry["value"] <= 0xFFFFFFFF
+            or entry["key"] in result
+        ):
+            raise ValueError("Invalid module device capability requirements")
+        result[entry["key"]] = entry["value"]
+    return result
 
 
 def _validate_header(contract, name):
@@ -139,6 +163,7 @@ class ComponentInfo:
         self._sources_json = json.dumps(contract.get("compilation", {}).get("configuration_sources"))
         self._target = contract["target"]
         self._semantic_key = contract["semantic_key"]
+        self._device_requirements = _read_device_requirements(path) if self._target == "vulkan" else None
 
     @property
     def target(self):
@@ -157,6 +182,34 @@ class ComponentInfo:
         if sources is None:
             raise ValueError("Artifact has no configuration source paths; rebuild it to query model provenance")
         return sources
+
+    def required_device_capabilities(self):
+        """Return module-wide Vulkan requirements from native GFX metadata.
+
+        This is separate from component protocol capabilities. Other targets
+        currently have no equivalent query here; absence of a query must not
+        be interpreted as requiring no device capabilities.
+        """
+        if self._device_requirements is None:
+            raise NotImplementedError("Device requirement inspection currently supports Vulkan artifacts")
+        return dict(self._device_requirements)
+
+    def check_device_capabilities(self, capabilities):
+        """Filter cold candidates against Runtime.device_capabilities().
+
+        Missing capabilities have level zero. Native load/prepare still perform
+        admission; satisfying this query does not validate layouts or limits.
+        """
+        required = self.required_device_capabilities()
+        available = dict(capabilities)
+        if any(type(level) is not int or not 0 <= level <= 0xFFFFFFFF for level in available.values()):
+            raise ValueError("Device capability levels must be uint32 integers")
+        missing = [
+            f"{name}: requires {level}, available {available.get(name, 0)}"
+            for name, level in sorted(required.items()) if available.get(name, 0) < level
+        ]
+        if missing:
+            raise ValueError("Module device capabilities are not satisfied: " + "; ".join(missing))
 
     def check_configuration(self, configuration=None):
         """Check exact declared static inputs using instantiate's existing rule.
