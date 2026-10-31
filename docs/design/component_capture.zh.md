@@ -14,6 +14,16 @@ root.export(module, "step")
 module.archive("component.tcm")
 ```
 
+消费者可以在创建设备、加载原生代码之前，调用
+`taichi_forge_runtime.aot.inspect_component(path, "step")` 查询冻结产物。
+它接受 TCM 或导出目录；返回的 `ComponentInfo` 提供 `target`、`semantic_key`、
+副本形式的 `contract` 和 `configuration_sources()`。
+`check_configuration(normal_model_choices)` 复用实例化的静态输入精确匹配规则。
+配置值应来自正常 Host 模型准备，不能抄用产物的 selected 值。这使冷准备阶段可以
+选择产物而无需先加载所有候选模块。查询只验证头部与静态事实，不代表执行资格；
+load、instantiate、prepare 仍检查原生入口、后端能力、动态资源和生命周期。
+缺少来源信息的旧产物需要重新导出后才能按模型来源选择。
+
 这里的 `record_step`/`record_initialize` 是应用同时用于正常 JIT Graph 的执行定义。
 有限正常配置构建使用公开的 `ti.aot.Variant`、`ti.aot.build_variants`，可选
 `ti.aot.BuildBudget` 默认各轴为 `None`；失败捕获 `ti.aot.ComponentBuildError` 并查询报告。

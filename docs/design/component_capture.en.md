@@ -23,6 +23,19 @@ root.export(module, "step")
 module.archive("component.tcm")
 ```
 
+Consumers can inspect a frozen root before creating a device or loading native
+code with `taichi_forge_runtime.aot.inspect_component(path, "step")`. It accepts
+a TCM or exported directory. The returned `ComponentInfo` exposes `target`,
+`semantic_key`, a copied `contract`, and `configuration_sources()`;
+`check_configuration(normal_model_choices)` uses the same exact static-input
+rules as loaded-component instantiation. Derive those choices from the normal
+Host model, rather than copying the artifact's selected values. This supports
+cold artifact selection without loading every candidate module. It does not
+admit execution: load, instantiate and prepare still validate native entries,
+backend capabilities, dynamic resources and lifetimes. Missing provenance in an
+older artifact requires a rebuild before source-based selection. Inspection
+checks headers and static facts, not every layout or execution-plan fact.
+
 The recording methods are the application's normal JIT Graph definitions.
 Build finite normal configurations with public `ti.aot.Variant` and
 `ti.aot.build_variants`. Optional `ti.aot.BuildBudget` axes default to `None`;

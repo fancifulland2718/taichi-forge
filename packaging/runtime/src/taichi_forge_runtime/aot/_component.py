@@ -7,7 +7,7 @@ from types import MappingProxyType
 import weakref
 
 from .._dimensions import check_constraints, evaluate_extent, extent_dependencies, validate_constraints, validate_extent
-from .._static_values import read_static_key, static_key
+from ._component_info import _read_contract, _configuration, _check_configuration
 
 
 def _control_identity(contract):
@@ -99,62 +99,11 @@ class Component:
     """
 
     def __init__(self, module, name):
-        from urllib.parse import quote
-        from zipfile import ZipFile
-        from ._runtime import _name
-
-        _name(name)
         with module._runtime._lock:
             module._check()
-            relative = "components/" + quote(name, safe="-_.") + ".json"
-            if module._source_path.is_dir():
-                payload = (module._source_path / relative).read_bytes()
-            else:
-                with ZipFile(module._source_path) as archive:
-                    payload = archive.read(relative)
-            contract = json.loads(payload)
-            required = {
-                "version",
-                "groups",
-                "dimensions",
-                "resources",
-                "values",
-                "bindings",
-                "explicit",
-                "entries",
-                "required_capabilities",
-                "semantic_key",
-                "name",
-                "execution",
-                "execution_entries",
-                "target",
-            }
-            if contract.get("version") in (2, 3, 4, 5, 6, 7, 8, 9, 10):
-                required.add("compilation")
-            if contract.get("version") in (3, 4, 5, 6, 7, 8, 9, 10):
-                required.add("configuration")
-            if contract.get("version") in (4, 5, 6, 7, 8, 9, 10):
-                required.update(("control", "internal_arguments", "execution_fingerprint"))
-            if contract.get("version") in (5, 6, 7, 8, 9, 10):
-                required.add("constraints")
-            if contract.get("version") in (6, 7, 8, 9, 10):
-                required.update(("fixed_groups", "fixed_bindings"))
-            if contract.get("version") in (7, 8, 9, 10):
-                required.update(("field_io", "field_io_bindings"))
-            if contract.get("version") in (8, 9, 10):
-                required.add("lifecycle")
-            if contract.get("version") in (9, 10):
-                required.add("setup_bindings")
-            if contract.get("version") == 10:
-                required.add("operation_bindings")
-            host_resource_capability = "component_host_resources_v1" in contract.get("required_capabilities", ())
-            if host_resource_capability:
-                required.add("host_resources")
-            private_shape_capability = "component_private_array_extents_v1" in contract.get("required_capabilities", ())
-            if private_shape_capability:
-                required.add("private_shapes")
-            if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10) or contract["name"] != name:
-                raise ValueError("Unsupported component contract")
+            contract = _read_contract(module._source_path, name)
+            host_resource_capability = "component_host_resources_v1" in contract["required_capabilities"]
+            private_shape_capability = "component_private_array_extents_v1" in contract["required_capabilities"]
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
             if private_shape_capability:
                 capabilities.add("component_private_array_extents_v1")
@@ -264,35 +213,9 @@ class Component:
                     raise ValueError("Invalid component configuration domain")
                 if _control_identity(contract) != contract["semantic_key"]:
                     raise ValueError("Component control facts differ from their semantic identity")
-            if contract["version"] == 3 or (contract["version"] >= 4 and contract["configuration"]):
+            self._configuration = _configuration(contract)
+            if self._configuration:
                 capabilities.add("component_static_choices_v1")
-                if not isinstance(contract["configuration"], dict) or not contract["configuration"]:
-                    raise ValueError("Invalid component configuration domain")
-                for key, spec in contract["configuration"].items():
-                    if not key.isidentifier() or set(spec) != {"selected", "choices"} or not spec["choices"]:
-                        raise ValueError("Invalid component static choice declaration")
-                    selected = static_key(read_static_key(spec["selected"]))
-                    choices = tuple(static_key(read_static_key(value)) for value in spec["choices"])
-                    if len(set(choices)) != len(choices) or selected not in choices:
-                        raise ValueError("Component selected configuration is outside its domain")
-                    for entry in contract["entries"]:
-                        for dependency, value in entry["static"]:
-                            if dependency == key and static_key(read_static_key(value)) != selected:
-                                raise ValueError("Component configuration differs from compiled static dependencies")
-                    self._configuration[key] = (selected, choices)
-            configuration_sources = contract.get("compilation", {}).get("configuration_sources")
-            if "configuration_sources" in contract.get("compilation", {}):
-                if not isinstance(configuration_sources, dict) or set(configuration_sources) != set(self._configuration):
-                    raise ValueError("Component configuration sources must cover the admitted inputs")
-                for source in configuration_sources.values():
-                    if (
-                        not isinstance(source, dict) or set(source) != {"kind", "path"}
-                        or source["kind"] not in ("attribute", "recording_argument")
-                        or not isinstance(source["path"], list) or not source["path"]
-                        or any(not isinstance(part, str) or not part.isidentifier() for part in source["path"])
-                        or source["kind"] == "recording_argument" and len(source["path"]) != 1
-                    ):
-                        raise ValueError("Invalid component configuration source path")
             if contract["version"] == 5 or contract["version"] >= 6 and contract["constraints"]:
                 capabilities.add("component_dimension_constraints_v1")
                 if not contract["constraints"]:
@@ -620,20 +543,7 @@ class Component:
         return sources
 
     def instantiate(self, dimensions, *, configuration=None):
-        supplied = dict(configuration or {})
-        if set(supplied) != set(self._configuration):
-            raise ValueError(
-                "Component configuration inputs differ: "
-                f"missing={sorted(set(self._configuration)-set(supplied))}, "
-                f"extra={sorted(set(supplied)-set(self._configuration))}"
-            )
-        for name, value in supplied.items():
-            selected, choices = self._configuration[name]
-            actual = static_key(value)
-            if actual not in choices:
-                raise ValueError(f"Component configuration {name!r} is outside its declared domain")
-            if actual != selected:
-                raise ValueError(f"Component configuration {name!r} requires a different compiled variant")
+        _check_configuration(self._configuration, configuration)
         return ComponentInstance(self, dimensions)
 
 

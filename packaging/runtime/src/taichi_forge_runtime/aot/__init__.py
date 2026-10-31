@@ -24,3 +24,7 @@ __all__ += ["StructLayout", "StructMember"]
 __all__ += ["SNodeInstance"]
 __all__ += ["CompletionSet", "CompletionWaitResult"]
 __all__ += ["StaticDType"]
+
+from ._component_info import ComponentInfo, inspect_component
+
+__all__ += ["ComponentInfo", "inspect_component"]
