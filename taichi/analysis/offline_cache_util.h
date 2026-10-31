@@ -215,7 +215,8 @@ class Kernel;
 // 97 - Reserve SPIR-V RNG state outside compiler-owned global temporaries.
 // 98 - Include external tensor addressing and affine ABI in frontend identity.
 // 99 - Qualify CPU code for instance-owned sparse runtime views.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 99;
+// 100 - Retain affine array proofs across layout-independent CUDA intrinsics.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 100;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

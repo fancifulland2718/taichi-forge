@@ -34,6 +34,29 @@ class _Ordered:
     def record(self, builder):
         builder.dispatch(self.step)
 
+    @ti.kernel
+    def synchronized(self):
+        ti.loop_config(block_dim=32)
+        for i in range(self.count * 32):
+            lane = i % 32
+            value = ti.simt.warp.shfl_sync_i32(ti.u32(0xffffffff), i, 0)
+            ti.simt.block.sync()
+            ti.simt.grid.memfence()
+            if lane == 0:
+                self.a[0, 1, i // 32] = value + 1
+
+    @ti.kernel
+    def opaque(self):
+        for i in range(self.count):
+            ti.lang.impl.call_internal("do_nothing")
+            self.a[0, 1, i] = i + 1
+
+    def record_synchronized(self, builder):
+        builder.dispatch(self.synchronized)
+
+    def record_opaque(self, builder):
+        builder.dispatch(self.opaque)
+
 
 def _expected(count):
     i, j, k = np.indices((3, 2, count))
@@ -112,3 +135,29 @@ def test_ordered_dense_path_product_rejected_before_allocation():
     with pytest.raises(ValueError, match="i32 indexing range"):
         core.DenseSNodeSchema.from_json(schema).instantiate(program, dict.fromkeys(parameters, 2**30))
     assert program.get_active_snode_tree_ids() == before
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize("opaque", [False, True])
+def test_ordered_dense_internal_call_layout_proof(tmp_path, opaque):
+    from taichi_forge_runtime.aot import AotError
+
+    model = _Ordered(3)
+    root = Component.from_owner(model).compile_graph(
+        model.record_opaque if opaque else model.record_synchronized)
+    module = ti.aot.Module()
+    root.export(module, "step")
+    artifact = tmp_path / "synchronized.tcm"
+    module.archive(str(artifact))
+    with Runtime("cuda") as runtime, runtime.load_module(artifact) as loaded:
+        with loaded.component("step").instantiate(dict(count=37)) as instance:
+            if opaque:
+                with pytest.raises(AotError, match="compiler-proven runtime stride"):
+                    instance.prepare()
+            else:
+                with instance.prepare() as call:
+                    call.run()
+                actual = np.frombuffer(instance.resource("a").read(), np.int32).reshape(3, 2, 37)
+                expected = np.zeros_like(actual)
+                expected[0, 1] = np.arange(37) * 32 + 1
+                np.testing.assert_array_equal(actual, expected)

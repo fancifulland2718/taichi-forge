@@ -182,6 +182,10 @@ Field 描述与消费端成员视图共用编译后的 offset/stride 投影，�
 逐节点布局、scalar/vector、零复制借用、同模块双实例隔离及跨层索引乘积溢出拒绝。
 这项机制资格不等于完整 staggered TGS 求解器或其性能已经通过。
 
+已知 CUDA 同步及标量 warp 内建操作不解释数组描述符，因此保留编译器已有的 affine
+访问证明。未知内部调用、带 runtime context 的调用与指针消费仍保守拒绝。此分类只在
+编译期执行，不增加逐步运行检查；缺少证明的旧产物需要重新构建，加载器不能补贴标记。
+
 实例化调用原 `SNode::dense`/`insert_children` 构造，再经 `Program::add_snode_tree`
 进入原后端 StructCompiler 与分配器。CPU/CUDA 的字节大小、成员偏移仍由原 LLVM 类型
 及目标 DataLayout 决定，没有 Python padding 计算器。分配前校验版本、放置顺序、

@@ -15,6 +15,26 @@ namespace taichi::lang {
 namespace irpass::analysis {
 namespace {
 
+bool is_layout_independent_cuda_intrinsic(const InternalFuncStmt &stmt) {
+  // These intrinsics consume scalar lane values or impose ordering; none
+  // interprets an ndarray pointer/descriptor. Do not infer this from scalar
+  // argument types alone: other internal calls accept integer-encoded handles.
+  static const std::unordered_set<std::string> names{
+      "block_barrier", "block_barrier_and_i32", "block_barrier_or_i32",
+      "block_barrier_count_i32", "grid_memfence", "warp_barrier",
+      "cuda_all_sync_i32", "cuda_any_sync_i32", "cuda_uni_sync_i32",
+      "cuda_ballot_i32", "cuda_active_mask", "cuda_match_any_sync_i32",
+      "cuda_match_all_sync_i32", "cuda_shfl_sync_i32", "cuda_shfl_sync_f32",
+      "cuda_shfl_up_sync_i32", "cuda_shfl_up_sync_f32",
+      "cuda_shfl_down_sync_i32", "cuda_shfl_down_sync_f32",
+      "cuda_shfl_xor_sync_i32"};
+  return !stmt.with_runtime_context && names.count(stmt.func_name) &&
+         !stmt.ret_type.is_pointer() &&
+         std::none_of(stmt.args.begin(), stmt.args.end(), [](const Stmt *arg) {
+           return arg->ret_type.is_pointer();
+         });
+}
+
 class SNodeTreeDependencyCollector : public BasicStmtVisitor {
  public:
   explicit SNodeTreeDependencyCollector(bool include_source = false)
@@ -129,7 +149,8 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
   }
   void visit(InternalFuncStmt *stmt) override {
     // Internal pointer consumers need a separate argument-layout proof.
-    array_layouts_known_ = false;
+    if (!is_layout_independent_cuda_intrinsic(*stmt))
+      array_layouts_known_ = false;
     if (stmt->with_runtime_context)
       runtime_state_ |= runtime_state_external;
   }

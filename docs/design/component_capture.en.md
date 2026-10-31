@@ -258,6 +258,12 @@ including node layouts, scalar/vector storage, borrowing, two instances of one
 loaded module, and cross-level index-product overflow rejection. These mechanism
 gates do not qualify the complete staggered TGS solver or its performance.
 
+Known CUDA synchronization and scalar warp intrinsics preserve the compiler's
+affine-access proof: they do not interpret array descriptors. Unknown internal
+calls, runtime-context calls and pointer consumers remain conservative. This is
+a compilation-time classification; it adds no per-step runtime check. Artifacts
+exported without this proof must be rebuilt rather than relabeled by the loader.
+
 Instantiation calls the original `SNode::dense`/`insert_children` constructors,
 then `Program::add_snode_tree` invokes the existing backend StructCompiler and
 allocator. On CPU/CUDA, the original LLVM types and target DataLayout determine
