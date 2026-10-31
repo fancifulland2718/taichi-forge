@@ -796,3 +796,10 @@ lowering 后的 Plan 核对。仅提供 shape 的资源进入布局/资源闭包
 `component_owner_sequence_sources_v1`，旧 Runtime 明确拒绝；没有新增 native 布局
 或执行解释器。CPU/CUDA 门槛覆盖跨尺寸复用、独立实例、编译 guard、错误组成拒绝
 以及沿用既有的设备下标拒绝。Vulkan 仍需单独取得运行资格。
+
+`component.resource_name(["simulator", "solvers", 0, "state"])` 将已声明的
+来源路径解析为规范资源 ID；`instance.resource_from_source(path)` 返回该实例的
+原资源对象。别名返回同一对象，不同实例保持独立存储。对于来源种类
+`borrowed_group_member`，必须显式传入查询返回的 `member=`，不能把锚点当成兄弟成员。
+未知或有歧义的来源拒绝。索引只从已有编译器事实生成，不执行 Python getter、改变
+绑定或切换模块级指针，也不增加每次调用的布局分析。

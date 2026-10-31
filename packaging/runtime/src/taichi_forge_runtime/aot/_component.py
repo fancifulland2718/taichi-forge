@@ -89,6 +89,18 @@ def _validate_input_sources(contract):
             raise ValueError("Component input sources must cover resource aliases")
         for source in aliases.values():
             validate(source, resource=True)
+    _resource_source_index(sources)
+
+
+def _resource_source_index(sources):
+    result = {}
+    for name, aliases in sources["resources"].items():
+        for source in aliases.values():
+            key = (tuple(source["path"]), source.get("member"))
+            previous = result.setdefault(key, name)
+            if previous != name:
+                raise ValueError("Component input source refers to different resources")
+    return result
 
 
 class Component:
@@ -466,6 +478,9 @@ class Component:
             self._module, self._plan = module, plan
             self._contract_json = json.dumps(contract)
             self._aliases = aliases
+            source_facts = contract.get("compilation", {}).get("input_sources")
+            self._resource_sources = None if source_facts is None else MappingProxyType(
+                _resource_source_index(source_facts))
             # Native resource kinds are immutable for this loaded code owner.
             # Cold uploads must not deserialize the entire component (including
             # all execution entries and layout schemas) once per supplied Field.
@@ -547,6 +562,26 @@ class Component:
         if sources is None:
             raise ValueError("Artifact has no input source paths; rebuild it to query model provenance")
         return sources
+
+    def resource_name(self, path, *, member=None):
+        """Resolve a declared source to its canonical resource identifier.
+
+        ``path`` is an explicit attribute/owner-sequence path, not a dotted
+        expression. For a borrowed-group source, pass its queried ``member``;
+        the anchor path alone is not the requested member. No Python object is
+        traversed and no resource is allocated or rebound by this cold query.
+        """
+        self._module._check()
+        if type(path) not in (list, tuple) or not _valid_source_path(list(path), indexed=True):
+            raise ValueError("Resource source requires an explicit attribute/index path")
+        if member is not None and (not isinstance(member, str) or not member):
+            raise ValueError("Borrowed resource source member must be a nonempty string")
+        if self._resource_sources is None:
+            raise ValueError("Artifact has no input source paths; rebuild it to query model provenance")
+        try:
+            return self._resource_sources[(tuple(path), member)]
+        except KeyError:
+            raise KeyError(f"Unknown component resource source {path!r}, member={member!r}") from None
 
     def instantiate(self, dimensions, *, configuration=None):
         _check_configuration(self._configuration, configuration)
@@ -659,6 +694,11 @@ class ComponentInstance:
         if key not in self._resources:
             raise NotImplementedError("Sparse resources retain SNode storage; use original component entries to initialize/read values")
         return self._resources[key]
+
+    def resource_from_source(self, path, *, member=None):
+        """Return this instance's existing resource for a declared source path."""
+        self._check()
+        return self.resource(self._component.resource_name(path, member=member))
 
     def initialize(self, data=None, *, zero=()):
         with self._component._module._runtime._lock:

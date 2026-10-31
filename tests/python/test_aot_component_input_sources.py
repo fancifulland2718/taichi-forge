@@ -10,6 +10,18 @@ from taichi_forge_runtime.aot import Runtime
 from tests import test_utils
 
 
+def test_source_lookup_distinguishes_borrowed_members_from_the_anchor():
+    from taichi_forge_runtime.aot._component import _resource_source_index
+
+    sources = {"resources": {
+        "anchor": {"a": dict(kind="attribute", path=["binding"])},
+        "sibling": {"s": dict(kind="borrowed_group_member", path=["binding"], member="other")},
+    }}
+    index = _resource_source_index(sources)
+    assert index[(("binding",), None)] == "anchor"
+    assert index[(("binding",), "other")] == "sibling"
+
+
 @ti.data_oriented
 class _Child:
     def __init__(self, n):
@@ -129,6 +141,15 @@ def test_frozen_nested_inputs_use_public_paths_not_encoded_ids(tmp_path):
         assert {tuple(source["path"]) for source in sources["values"].values()} == {("child", "gain"), ("offset",)}
         seed_id = next(name for name, aliases in sources["resources"].items()
                        if any(source["path"] == ["shared"] for source in aliases.values()))
+        assert component.resource_name(("child", "seed")) == seed_id
+        assert component.resource_name(["shared"]) == seed_id
+        for invalid in ("child.seed", (), ("child", True), ("child", -1), ("child.seed",)):
+            with pytest.raises(ValueError, match="explicit attribute/index path"):
+                component.resource_name(invalid)
+        with pytest.raises(KeyError, match="Unknown component resource source"):
+            component.resource_name(("child", "missing"))
+        with pytest.raises(KeyError, match="Unknown component resource source"):
+            component.resource_name(("shared",), member="not-an-anchor")
         assert {tuple(source["path"]) for source in sources["resources"][seed_id].values()} == {
             ("shared",), ("child", "seed")}
         assert any(len(schema) == 5 for schema in component.contract["dimensions"].values())
@@ -144,6 +165,8 @@ def test_frozen_nested_inputs_use_public_paths_not_encoded_ids(tmp_path):
             state_id = next(name for name, aliases in sources["resources"].items()
                             if any(source["path"] == ["child", "state"] for source in aliases.values()))
             with component.instantiate(dimensions) as instance:
+                assert instance.resource_from_source(("shared",)) is instance.resource(seed_id)
+                assert instance.resource_from_source(("child", "seed")) is instance.resource(seed_id)
                 instance.initialize(payloads)
                 with instance.prepare(values=values) as prepared:
                     prepared.run()
@@ -156,7 +179,7 @@ def test_frozen_nested_inputs_use_public_paths_not_encoded_ids(tmp_path):
     if backend == "cpu":
         with ZipFile(artifact) as archive:
             payloads = {name: archive.read(name) for name in archive.namelist()}
-        for case in ("dimensions", "aliases", "path", "legacy"):
+        for case in ("dimensions", "aliases", "path", "ambiguous", "legacy"):
             contract = json.loads(payloads["components/step.json"])
             sources = contract["compilation"]["input_sources"]
             if case == "dimensions":
@@ -165,6 +188,9 @@ def test_frozen_nested_inputs_use_public_paths_not_encoded_ids(tmp_path):
                 sources["resources"][seed_id].popitem()
             elif case == "path":
                 next(iter(sources["values"].values()))["path"] = ["not.an.attribute"]
+            elif case == "ambiguous":
+                other = next(name for name in sources["resources"] if name != seed_id)
+                next(iter(sources["resources"][other].values()))["path"] = ["shared"]
             else:
                 contract["compilation"].pop("input_sources")
             path = tmp_path / f"{case}.tcm"
@@ -175,6 +201,8 @@ def test_frozen_nested_inputs_use_public_paths_not_encoded_ids(tmp_path):
                 if case == "legacy":
                     with pytest.raises(ValueError, match="rebuild"):
                         loaded.component("step").input_sources()
+                    with pytest.raises(ValueError, match="rebuild"):
+                        loaded.component("step").resource_name(("shared",))
                 else:
                     with pytest.raises(ValueError, match="input source"):
                         loaded.component("step")

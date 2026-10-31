@@ -1115,3 +1115,12 @@ require `component_owner_sequence_sources_v1`; older runtimes reject the new
 contract. No new native resource layout or execution interpreter is introduced.
 CPU/CUDA gates cover cross-size reuse, independent instances, compilation guards,
 wrong composition rejection and the existing non-indexable-device restriction.
+
+`component.resource_name(["simulator", "solvers", 0, "state"])` resolves a
+declared source path to its canonical resource ID. The instance convenience
+`instance.resource_from_source(path)` returns that instance's existing resource;
+aliases return the same object, while another instance keeps its own storage.
+For `borrowed_group_member` provenance, pass the queried `member=` explicitly:
+an anchor path alone never means a sibling member. Unknown or ambiguous sources
+reject. These queries use a read-only index of existing compiler facts, do not
+evaluate Python getters, and do not change bindings or module pointers.

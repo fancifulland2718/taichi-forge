@@ -112,9 +112,15 @@ def test_owner_sequence_exports_actual_closure_and_explicit_source_indices(tmp_p
                     source = next(iter(aliases.values()))
                     index = source["path"][1]
                     assert source["path"] == ["solvers", index, "state"]
+                    assert component.resource_name(source["path"]) == name
+                    assert a.resource_from_source(source["path"]) is a.resource(name)
+                    assert b.resource_from_source(source["path"]) is b.resource(name)
+                    assert a.resource_from_source(source["path"]) is not b.resource_from_source(source["path"])
                     np.testing.assert_array_equal(np.frombuffer(a.resource(name).read(), np.float32), 2 * (3 + index))
                     np.testing.assert_array_equal(np.frombuffer(b.resource(name).read(), np.float32), 3 + index)
             a.close()
+            with pytest.raises(RuntimeError, match="closed"):
+                a.resource_from_source(("solvers", 0, "state"))
             with b.prepare(values=values) as call:
                 call.run()
 
