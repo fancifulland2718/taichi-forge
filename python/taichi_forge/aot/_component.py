@@ -1281,7 +1281,7 @@ class Component:
     def compile_graph(self, record, *args, **kwargs):
         """Compile a normal Graph recording with automatic captured inputs.
 
-        initializer= registers another normal recording on the same owner.
+        initializer= registers a normal recording on the root or a declared child owner.
         Its capture joins this root; numerical initialization belongs to the
         consumer instance, never to each newly prepared replay call.
         setup={name: normal_recording} optionally exports cold preparation

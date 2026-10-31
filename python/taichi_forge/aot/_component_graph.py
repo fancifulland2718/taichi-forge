@@ -843,6 +843,17 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
     initialization_nodes = ()
     setup_nodes = []
     operation_nodes = []
+
+    def validate_lifecycle_owner(entry, role):
+        owner = getattr(entry, "__self__", None)
+        if not callable(entry) or owner is None or capture.owner is None:
+            raise TaichiCompilationError(
+                f"Component {role} requires a bound normal recording in the declared owner closure")
+        # Keep the root environment for hidden inputs, choices and effects.
+        # The child method only records into the existing builder; it cannot
+        # supply a different resource environment or rebind shared code.
+        component._entry_owner_path(capture.owner, owner)
+
     if setup is not None:
         from collections.abc import Mapping
 
@@ -851,8 +862,7 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
         for name, entry in setup.items():
             if not isinstance(name, str) or not name.isidentifier():
                 raise ValueError("Component setup names must be identifiers")
-            if not callable(entry) or getattr(entry, "__self__", None) is not capture.owner:
-                raise TaichiCompilationError("Component setup requires normal recordings with the same owner")
+            validate_lifecycle_owner(entry, "setup")
             entry(builder)
             builder._flush_graph_builder()
             end = len(builder._nodes)
@@ -860,8 +870,7 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
                 raise TaichiCompilationError("Component setup must record a nonempty normal Graph")
             setup_nodes.append((name, end))
     if initializer is not None:
-        if not callable(initializer) or getattr(initializer, "__self__", None) is not capture.owner:
-            raise TaichiCompilationError("Component initializer requires a normal recording with the same owner")
+        validate_lifecycle_owner(initializer, "initializer")
         initializer(builder)
         # Flush through the ordinary Graph compiler. This keeps the lifecycle
         # boundary outside any CGraph fusion/flattening; operation counts come
@@ -878,8 +887,7 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
         for name, entry in operations.items():
             if not isinstance(name, str) or not name.isidentifier():
                 raise ValueError("Component operation names must be identifiers")
-            if not callable(entry) or getattr(entry, "__self__", None) is not capture.owner:
-                raise TaichiCompilationError("Component operations require normal recordings with the same owner")
+            validate_lifecycle_owner(entry, "operation")
             entry(builder)
             builder._flush_graph_builder()
             end = len(builder._nodes)

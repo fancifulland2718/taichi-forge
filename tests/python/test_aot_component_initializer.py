@@ -102,7 +102,7 @@ class _InitializedState:
 def test_initializer_rejects_wrong_owner_empty_and_unqualified_private_lifetimes():
     state, other = _InitializedState(False), _InitializedState(False)
     component = Component.from_owner(state)
-    with pytest.raises(ti.TaichiCompilationError, match="same owner"):
+    with pytest.raises(ti.TaichiCompilationError, match="declared"):
         component.compile_graph(state.record, initializer=other.record_initialize)
     with pytest.raises(ti.TaichiCompilationError, match="nonempty"):
         component.compile_graph(state.record, initializer=state.record_empty)

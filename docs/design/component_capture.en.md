@@ -1124,3 +1124,11 @@ For `borrowed_group_member` provenance, pass the queried `member=` explicitly:
 an anchor path alone never means a sibling member. Unknown or ambiguous sources
 reject. These queries use a read-only index of existing compiler facts, do not
 evaluate Python getters, and do not change bindings or module pointers.
+
+
+Lifecycle recordings (`setup`, `initializer`, and `operations`) may be bound to
+the root or a uniquely declared child owner, including an owner-sequence member.
+They record directly into the root's existing capture environment, so resources,
+static guards, effects and phase boundaries retain the same authority. An owner
+outside that closure or reachable through ambiguous owner paths rejects. No
+forwarding method on the root or separate numerical wrapper is required.

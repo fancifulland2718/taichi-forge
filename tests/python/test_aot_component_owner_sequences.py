@@ -31,6 +31,9 @@ class _Solver:
         for i in range(self.n):
             self.state[i] += self.increment()
 
+    def record_tick(self, builder):
+        builder.dispatch(self.tick)
+
 
 @ti.data_oriented
 class _World:
@@ -153,3 +156,38 @@ def test_owner_sequence_rejects_undeclared_mutation_and_device_indexing():
         ti.aot.Component.from_owner(root)
     scope.owner_sequence("solvers", root.solvers)
     assert len(ti.aot.Component.from_owner(root).compile_graph(root.record).contract["entries"]) == 3
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_declared_child_lifecycle_recordings_keep_the_root_environment(tmp_path):
+    owner = _World(3)
+    root = ti.aot.Component.from_owner(owner).compile_graph(owner.record,
+        setup={"first": owner.solvers[0].record_tick},
+        initializer=owner.solvers[1].record_tick,
+        operations={"first": owner.solvers[0].record_tick})
+    module = ti.aot.Module()
+    root.export(module, "world")
+    path = tmp_path / "lifecycle.tcm"
+    module.archive(str(path))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime, runtime.load_module(path) as loaded:
+        component = loaded.component("world")
+        config = {name: 2 if source["kind"] == "sequence_length" else 1
+                  for name, source in component.configuration_sources().items()}
+        inputs = component.input_sources()
+        for n in (7, 37):
+            dims = {name: n + source["path"][1] for name, source in inputs["dimensions"].items()}
+            values = {name: 3. + source["path"][1] for name, source in inputs["values"].items()}
+            phase_values = lambda **phase: {name: values[name] for name in component.inputs(**phase)["values"]}
+            with component.instantiate(dims, configuration=config) as instance:
+                instance.initialize(zero=component.contract["resources"])
+                instance.run_setup("first", values=phase_values(setup="first"))
+                instance.initialize_state(values=phase_values(initialization=True))
+                with instance.prepare(values=phase_values()) as call:
+                    call.run()
+                with instance.prepare(operation="first", values=phase_values(operation="first")) as call:
+                    call.run()
+                for i, expected in ((0, 9.), (1, 8.)):
+                    actual = instance.resource_from_source(("solvers", i, "state"))
+                    np.testing.assert_array_equal(np.frombuffer(actual.read(), np.float32), expected)
