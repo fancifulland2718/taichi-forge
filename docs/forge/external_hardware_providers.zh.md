@@ -695,6 +695,22 @@ builder.append_native(query, admission="explicit")
 
 <a id="optix-face-rules"></a>
 
+#### 固定查询绑定与提交
+
+支持 fixed-query revision 1 的 adapter 可在 Graph binding 准备阶段固定 opaque typed
+与紧凑遮挡查询的指针和参数，包括候选面规则。JIT prepared query 与原生执行计划消费
+同一 provider 扩展；各绑定仍独立拥有参数和借用存储的生命周期。暖态 replay 不重复
+上传 launch 参数；带有原生调用 shim 的运行时也不再通过 Python 回调进入 provider。
+旧 adapter 保留已有有序查询路径。Alpha-mask、opacity micromap 与 legacy float4
+查询继续使用原路径。
+
+固定的是绑定地址与查询配置，ray 内容及 IAS refit 仍是设备输入。更换输入/输出存储
+使用 `bindings.update(...)` 重新准备，改变 ray 数量需要重新录制。scene 关闭前会
+退休其 prepared query，旧 callable 随后拒绝执行；被动显存报告包含绑定拥有的常驻参数
+和面规则描述。直接 `recording.execute(...)` 保留临时参数路径，避免逐次创建/销毁
+固定查询导致同步。该机制仍使用有序 `optixLaunch`，**不支持 CUDA stream capture**，
+也不代表整个混合 Graph 只有一次 launch；完成帧收益需要在实际应用中测量。
+
 #### OptiX 候选面规则（0.7.0）
 
 `record_typed(..., face_rules=...)` 与 `record_occlusion(..., face_rules=...)`

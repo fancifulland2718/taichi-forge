@@ -1385,7 +1385,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
         return effects
 
     def execute(self, bindings):
-        return self.prepare_graph_execute(bindings)()
+        return self.prepare_graph_execute(bindings, _fixed_query=False)()
 
     def _binding_descriptions(self, bindings):
         specs = [
@@ -1465,10 +1465,15 @@ class OptixRayQueryRecording(BackendCommandRecording):
             textures.append(texture)
         return values, descriptions, textures
 
-    def prepare_graph_execute(self, bindings):
+    def prepare_graph_execute(self, bindings, *, _fixed_query=True):
         validate_exact_bindings(self, bindings, "OptiX ray query")
         self.validate_graph_lifetime()
         descriptions = self._binding_descriptions(bindings)
+        from ._optix_fixed_query import prepare_fixed_query
+
+        fixed = prepare_fixed_query(self, bindings, descriptions) if _fixed_query else None
+        if fixed is not None:
+            return fixed
         if self.alpha_masks is not None or self._occlusion or self.face_rules is not None:
             return self._prepare_alpha_execute(bindings, descriptions)
         values = tuple(bindings[name] for name in self.binding_names)
@@ -2619,11 +2624,14 @@ class OptixInstanceScene:
     def _graph_provider_memory_dependencies(self):
         if not ray_resource_resident(self):
             return ()
-        return (*dict.fromkeys(self._topology), self.provider)
+        return (*dict.fromkeys(self._topology), self.provider, *tuple(getattr(self, "_fixed_queries", ())))
 
     def close(self):
         if self._scene is None:
             return None
+        from ._optix_fixed_query import close_fixed_queries
+
+        close_fixed_queries(self)
         scene = self._scene
         if runtime_generation_matches(self):
             self._runtime_prog.synchronize()
@@ -2874,11 +2882,14 @@ class OptixTriangleScene:
         return self._local_memory_report()
 
     def _graph_provider_memory_dependencies(self):
-        return (self.provider,) if ray_resource_resident(self) else ()
+        return (self.provider, *tuple(getattr(self, "_fixed_queries", ()))) if ray_resource_resident(self) else ()
 
     def close(self):
         if self._scene is None:
             return None
+        from ._optix_fixed_query import close_fixed_queries
+
+        close_fixed_queries(self)
         scene = self._scene
         if runtime_generation_matches(self):
             self._runtime_prog.synchronize()

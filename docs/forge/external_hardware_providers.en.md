@@ -890,6 +890,27 @@ It remains runtime-ordered, not CUDA Graph capture. Older adapters without the
 
 <a id="optix-face-rules"></a>
 
+#### Fixed query bindings and submission
+
+Adapters with fixed-query revision 1 can freeze pointers and parameters for opaque
+typed and compact occlusion queries, including candidate face rules, while preparing
+a Graph binding. JIT prepared queries and native execution plans consume the same
+provider extension; each binding still owns its parameters and borrowed-storage
+lifetime independently. Warm replay does not upload launch parameters again. Runtimes
+with the native call shim also avoid entering the provider through a Python callback.
+Older adapters retain the existing ordered query path. Alpha masks, opacity micromaps
+and legacy float4 queries retain their existing paths.
+
+The addresses and query configuration are fixed; ray contents and IAS refits remain
+device inputs. Replace input/output storage through `bindings.update(...)` to prepare
+new bindings, and record again when the ray count changes. Closing a scene retires
+its prepared queries; old callables then reject execution. Passive memory reports
+include resident binding-owned parameters and face descriptors. Direct
+`recording.execute(...)` retains the temporary-parameter path to avoid synchronization
+from creating and destroying a fixed query on every call. This mechanism still uses
+ordered `optixLaunch` and **does not support CUDA stream capture**. It does not imply
+one launch for an entire mixed Graph; measure completed-frame gains in the application.
+
 #### OptiX candidate face rules (0.7.0)
 
 Both `record_typed(..., face_rules=...)` and `record_occlusion(..., face_rules=...)`

@@ -59,12 +59,18 @@ def test_compact_occlusion_prepared_graph_updates_and_lifetime(instanced, monkey
         graph = builder.compile()
         bound = graph.bind(dict(rays=rays, occluded=flags, result=result))
         assert bound.fast_path_qualified
+        fixed = bool(int(provider._loaded.api.info.features) & (1 << 21))
+        if fixed:
+            assert len(scene._fixed_queries) == 1
 
         def no_prepare(*args, **kwargs):
             raise AssertionError("compact query rebuilt storage during replay")
 
         with monkeypatch.context() as patched:
             patched.setattr(_optix, "_ray_storage", no_prepare)
+            if fixed and all(query.native is not None for query in scene._fixed_queries):
+                # Replay must not call back into Python to enter the provider.
+                patched.setattr(_optix, "_invoke_checked", no_prepare)
             for _ in range(3):
                 graph.submit(bound).wait()
         np.testing.assert_array_equal(result.to_numpy(), [7, 0, 0, 0])
@@ -77,8 +83,27 @@ def test_compact_occlusion_prepared_graph_updates_and_lifetime(instanced, monkey
         with pytest.raises(RuntimeError, match="ray count"):
             recording.prepare_graph_execute(dict(rays=rays, occluded=ti.ndarray(ti.i32, 3)))
         prepared = recording.prepare_graph_execute(dict(rays=rays, occluded=ti.ndarray(ti.i32, (4, 1))))
+        if fixed:
+            from taichi_forge.hardware._optix_fixed_query import _PreparedQuery
+
+            assert isinstance(prepared, _PreparedQuery)
+            parameters = [item for item in scene.memory_report().components
+                          if item.name.endswith("immutable_query_parameters") and item.resident]
+            assert parameters and all(item.requested_bytes == 48 for item in parameters)
         prepared()
         ti.sync()
+        if fixed:
+            from taichi_forge.hardware import _optix_fixed_query
+
+            # Capability restriction exercises the existing old-adapter path;
+            # it is not a claim to have loaded another vendor binary.
+            with monkeypatch.context() as patched:
+                patched.setattr(_optix_fixed_query, "_api", lambda provider: None)
+                fallback = recording.prepare_graph_execute(dict(rays=rays, occluded=replacement))
+                assert isinstance(fallback, _optix._PreparedOptixCall)
+                fallback()
+                ti.sync()
+                np.testing.assert_array_equal(replacement.to_numpy(), [1, 0, 0, 0])
         graph.close()
         graph = None
         scene.close()

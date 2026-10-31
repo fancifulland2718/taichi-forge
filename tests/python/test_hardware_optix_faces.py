@@ -196,6 +196,8 @@ def test_shared_gas_faces_graph_refit_rebind_and_retirement(monkeypatch):
             dict(transforms=transforms, rays=rays, hits=hits, hit_indices=ids, occluded=flags, faces=table)
         )
         assert bound.fast_path_qualified
+        if int(provider._loaded.api.info.features) & (1 << 21):
+            assert len(scene._fixed_queries) == 2
         # IAS owns the native GAS and its primitive numbering after owner close.
         gas.close()
         variants = [
