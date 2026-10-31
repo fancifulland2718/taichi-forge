@@ -1182,3 +1182,16 @@ rejected; complete closure checks reject other ownership cycles. This does not
 relocate existing Fields, rebind in-flight instances, or support moving a child
 with inherited dimensions to an undeclared parent path. CPU/CUDA gates cover
 code reuse from 3 to 19 elements and a frozen artifact instantiated at 37.
+
+
+`scope.field_like(source, initialization="zero", layout=ti.Layout.SOA)` allocates
+independent dense backup storage during normal construction, retaining the source
+symbolic shape provenance and element types. It neither aliases the data nor
+copies producer values or freezes the producer capacity. The source declaration
+scope must be visible in the complete component root. Undeclared and fixed-SNode
+sources are rejected. This supports scalar/vector/matrix Fields and flat Structs
+with implicit dense allocation, not sparse activation or arbitrary tree cloning.
+The backup group identity follows its own ownership path while its dimensions
+can originate at the source owner. Newly built group names may change; existing
+frozen artifacts continue to use their versioned contracts. CPU/CUDA gates cover
+independent record copies, code reuse at 3/19 elements and frozen consumption at 37.

@@ -877,8 +877,12 @@ class Component:
         visible_dimensions, visible_roots = {}, {}
         for _, prefix, name, field, declaration, root_id in fields:
             namespace = getattr(field, "_logical_shape_namespace", None)
+            if declaration.get("require_shape_source") and id(namespace) not in namespaces:
+                raise TaichiCompilationError("A field_like allocation requires its original shape source in the component root")
             source_prefix = namespaces.get(id(namespace), prefix)
-            visible_roots.setdefault(root_id, set()).add(".".join((*source_prefix, declaration["identity"])))
+            # Allocation identity belongs to this member's owning path. The
+            # shape namespace may belong to another owner (e.g. a checkpoint).
+            visible_roots.setdefault(root_id, set()).add(".".join((*prefix, name)))
             # One physical root may contain fields allocated by several normal
             # owners. Equal leaf names do not give their dimensions one origin.
             dimensions = visible_dimensions.setdefault(root_id, {}).setdefault(source_prefix, {})

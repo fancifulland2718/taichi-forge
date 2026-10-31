@@ -586,6 +586,66 @@ class ResourceScope:
 
         return self._create(field, args, kwargs)
 
+    def field_like(self, source, *, initialization=None, layout=None):
+        """Allocate independent dense storage with a declared source's shape.
+
+        The new Field retains the source dimension namespace, not its concrete
+        producer capacity. Its placement and ownership are independent. The
+        source allocation must be visible in the captured component closure.
+        """
+        from taichi_forge.lang import impl
+        from taichi_forge.lang.enums import Layout
+        from taichi_forge.lang.field import Field
+        from taichi_forge.lang.matrix import MatrixField, Vector, Matrix
+        from taichi_forge.lang.struct import Struct, StructField
+
+        if self._read_only or self._builder is not None:
+            raise ValueError("field_like requires a writable implicit dense allocation scope")
+        if not isinstance(source, Field):
+            raise TypeError("field_like requires an ordinary declared Field")
+        layout = Layout.AOS if layout is None else layout
+        if layout not in (Layout.AOS, Layout.SOA):
+            raise ValueError("field_like requires an AOS or SOA dense layout")
+        initialization = self._initialization if initialization is None else initialization
+        if initialization not in ("consumer_explicit", "zero"):
+            raise ValueError("Resource initialization must be 'consumer_explicit' or 'zero'")
+        sources = source.field_dict if isinstance(source, StructField) else {None: source}
+        for member in sources.values():
+            declaration = getattr(member, "_logical_resource_declaration", None)
+            if declaration is None or declaration.get("storage") is not None:
+                raise ValueError("field_like requires declared dense members, not a fixed or undeclared SNode")
+            if getattr(member, "_logical_shape_namespace", None) is None:
+                raise ValueError("field_like requires the original dimension declaration namespace")
+
+        if isinstance(source, StructField):
+            from taichi_forge.types import vector, matrix
+            types = {name: (vector(member.n, member.dtype) if member.ndim == 1 else
+                           matrix(member.n, member.m, member.dtype)) if isinstance(member, MatrixField)
+                     else member.dtype for name, member in sources.items()}
+            field = Struct.field(types, shape=source.shape, layout=layout)
+            field._forge_resource_declarations = {"fields": {}, "dimensions": {}, "records": {}}
+            targets = field.field_dict
+        elif isinstance(source, MatrixField):
+            field = (Vector.field(source.n, source.dtype, shape=source.shape, layout=layout)
+                     if source.ndim == 1 else Matrix.field(source.n, source.m, source.dtype,
+                                                          shape=source.shape, layout=layout))
+            targets = {None: field}
+        else:
+            field = impl.field(source.dtype, shape=source.shape)
+            targets = {None: field}
+        caller = inspect.currentframe().f_back
+        location = (caller.f_code.co_filename, caller.f_lineno)
+        del caller
+        for name, target in targets.items():
+            original = sources[name]
+            target._logical_resource_declaration = dict(identity=name,
+                shape=original._logical_resource_declaration["shape"], source=location,
+                initialization=initialization, require_shape_source=True)
+            target._logical_shape_namespace = original._logical_shape_namespace
+            if isinstance(field, StructField):
+                field._forge_resource_declarations["fields"][name] = dict(target._logical_resource_declaration)
+        return field
+
     def ndarray(self, dtype, *, shape, initialization=None):
         """Declare a normal independent array, retaining its logical extents.
 

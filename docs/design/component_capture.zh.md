@@ -857,3 +857,13 @@ stride。CPU/CUDA 门槛在新的 SOA/AOS 尺寸下对比正常 JIT 的记录复
 自拥有会被拒绝；其他循环关系仍由完整组件闭包检查拒绝。该入口不改变已有 Field
 的布局，不为在途实例重绑，也不支持移动带父维度的子对象到另一未声明的父路径。
 CPU/CUDA 门槛覆盖 3→19 的代码复用和冻结后 37 元素的新实例，输出尾部正确。
+
+
+`scope.field_like(source, initialization="zero", layout=ti.Layout.SOA)` 在正常构造时
+分配独立 Dense 备份，保留 source 的符号 shape 来源和元素类型。它不共享数据，
+不复制 producer 值，也不把 producer 容量写成新常量。源分配的声明作用域必须在
+完整组件根中可见；未声明或 fixed-SNode 源显式拒绝。本期允许普通 scalar/vector/
+matrix 和扁平 Struct，使用隐式 Dense 分配；不承诺复制 Sparse 激活或自定义树结构。
+备份的组身份按自身拥有路径命名，维度来源仍可属于原资源 owner。新构建产物的组
+名称可能因此改变；原已冻结产物继续按自己的版本化合同消费。
+CPU/CUDA 验证覆盖标量/向量/矩阵记录的独立副本、3→19 代码复用与冻结后 37 元素消费。
