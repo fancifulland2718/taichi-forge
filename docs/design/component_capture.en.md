@@ -1132,3 +1132,15 @@ They record directly into the root's existing capture environment, so resources,
 static guards, effects and phase boundaries retain the same authority. An owner
 outside that closure or reachable through ambiguous owner paths rejects. No
 forwarding method on the root or separate numerical wrapper is required.
+
+Each independently recorded lifecycle phase uses the existing Graph private
+scope. Reusing a normal recording in the main step and a named operation does
+not merge identically named scratch, predicates or counters. Root
+`private_ndarray()` declarations and child Sequential regions inherit that
+phase scope; explicit instance resources and arguments retain their sharing.
+Structured materialization may clone execution objects, but phase boundaries
+still require a one-to-one immutable IR match, including dispatch identities,
+control policy and order. Cross-phase fusion without a qualified boundary map
+still rejects. CPU/CUDA gates cover repeated while operations and root/nested
+private names. Existing restrictions on Plan-private initializer resources
+remain in force.

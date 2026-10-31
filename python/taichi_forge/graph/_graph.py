@@ -6,6 +6,7 @@ import time
 import warnings
 import weakref
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -16451,14 +16452,18 @@ def _bind_managed_array_arguments(builder, arguments):
     return tuple(result)
 
 
+def _allocate_private_scope_prefix(builder):
+    ordinal = builder._private_scope_state[0]
+    builder._private_scope_state[0] += 1
+    return f"__ti_private_region_{ordinal}__"
+
+
 def _new_sequential_region(builder, private_scope):
     if type(private_scope) is not bool:
         raise TypeError("private_scope must be a bool")
     prefix = builder._private_scope_prefix
     if private_scope:
-        ordinal = builder._private_scope_state[0]
-        builder._private_scope_state[0] += 1
-        prefix = f"__ti_private_region_{ordinal}__"
+        prefix = _allocate_private_scope_prefix(builder)
     return Sequential(
         _declared_private_bindings=builder._declared_private_bindings,
         _capture_recipe_sources=builder._capture_recipe_sources,
@@ -17256,6 +17261,21 @@ class GraphBuilder:
         self._graph_reduction_sources = []
         self._graph_native_algorithm_sources = []
 
+    @contextmanager
+    def _private_recording_scope(self):
+        """Isolate a complete normal recording using existing region names.
+
+        Used for independently callable component lifecycle phases. Explicit
+        resource arguments remain shared; only new private declarations and
+        their child regions inherit this scope.
+        """
+        previous = self._private_scope_prefix
+        self._private_scope_prefix = _allocate_private_scope_prefix(self)
+        try:
+            yield
+        finally:
+            self._private_scope_prefix = previous
+
     def private_ndarray(
         self,
         name,
@@ -17268,6 +17288,7 @@ class GraphBuilder:
 
         if not isinstance(name, str) or not name:
             raise ValueError("Graph private ndarray name must be nonempty")
+        name = self._private_scope_prefix + name
         if name in self._declared_private_bindings:
             raise TaichiRuntimeError(
                 f"Graph private binding {name!r} is already defined"

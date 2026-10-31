@@ -844,6 +844,16 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
     setup_nodes = []
     operation_nodes = []
 
+    def record_phase(entry, *phase_args, **phase_kwargs):
+        # Each entry is independently prepared after ordinary Plan splitting.
+        # Repeated normal recordings may declare identical local scratch names;
+        # their allocations must neither collide nor cross lifecycle phases.
+        if initializer is not None:
+            with builder._private_recording_scope():
+                entry(builder, *phase_args, **phase_kwargs)
+        else:
+            entry(builder, *phase_args, **phase_kwargs)
+
     def validate_lifecycle_owner(entry, role):
         owner = getattr(entry, "__self__", None)
         if not callable(entry) or owner is None or capture.owner is None:
@@ -863,7 +873,7 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
             if not isinstance(name, str) or not name.isidentifier():
                 raise ValueError("Component setup names must be identifiers")
             validate_lifecycle_owner(entry, "setup")
-            entry(builder)
+            record_phase(entry)
             builder._flush_graph_builder()
             end = len(builder._nodes)
             if end <= (setup_nodes[-1][1] if setup_nodes else 0):
@@ -871,7 +881,7 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
             setup_nodes.append((name, end))
     if initializer is not None:
         validate_lifecycle_owner(initializer, "initializer")
-        initializer(builder)
+        record_phase(initializer)
         # Flush through the ordinary Graph compiler. This keeps the lifecycle
         # boundary outside any CGraph fusion/flattening; operation counts come
         # from the existing lowering, not the number of captured kernels.
@@ -888,27 +898,36 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
             if not isinstance(name, str) or not name.isidentifier():
                 raise ValueError("Component operation names must be identifiers")
             validate_lifecycle_owner(entry, "operation")
-            entry(builder)
+            record_phase(entry)
             builder._flush_graph_builder()
             end = len(builder._nodes)
             if end <= (operation_nodes[-1][1] if operation_nodes else len(initialization_nodes)):
                 raise TaichiCompilationError("Component operations must record nonempty normal Graphs")
             operation_nodes.append((name, end))
     operation_prefix = tuple(builder._nodes) if operation_nodes else ()
-    record(builder, *args, **kwargs)
+    record_phase(record, *args, **kwargs)
     capture.retain_host_resources(host_resources)
     contract = capture.finish(builder)
     if _build is not None:
         _build.check_time("before backend compilation")
     graph = builder.compile()
     try:
+        def preserved_prefix(recorded):
+            # Structured materialization clones mutable execution nodes. The
+            # immutable IR, including dispatch labels and control policy, must
+            # still match one-for-one at each recorded phase boundary. Refuse
+            # fusion/reordering across phases without a qualified boundary map.
+            actual = graph._spec.nodes
+            return len(actual) > len(recorded) and all(
+                old is new or old.ir_node == new.ir_node
+                for old, new in zip(recorded, actual)
+            )
+
         if initialization_nodes and (
-            tuple(graph._spec.nodes[:len(initialization_nodes)]) != initialization_nodes
-            or len(graph._spec.nodes) == len(initialization_nodes)
+            not preserved_prefix(initialization_nodes)
         ):
             raise TaichiCompilationError("Component lifecycle requires a preserved initialization/replay boundary")
-        if operation_nodes and (len(graph._spec.nodes) <= operation_nodes[-1][1]
-                or tuple(graph._spec.nodes[:len(operation_prefix)]) != operation_prefix):
+        if operation_nodes and not preserved_prefix(operation_prefix):
             raise TaichiCompilationError("Component operations require preserved boundaries and nonempty default replay")
         contract = _complete_compiler_contract(graph, contract, capture, lifecycle=bool(initialization_nodes))
         # Host choices remain part of admission even if no numerical entry uses
