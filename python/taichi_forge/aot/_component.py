@@ -472,6 +472,23 @@ class _RecordReference:
         raise TaichiCompilationError("A declared record is a namespace; test its presence with 'is not None'")
 
 
+class _DenseStructFieldOperand:
+    """Lower a whole record through its already captured member views."""
+
+    def __init__(self, members, methods):
+        self.members, self.methods = members, methods
+
+    def __getitem__(self, indices):
+        from taichi_forge.lang import impl
+        from taichi_forge.lang.struct import _IntermediateStruct
+
+        if not isinstance(indices, tuple):
+            indices = (indices,)
+        entries = {name: impl.subscript(None, view, *indices) for name, view in self.members.items()}
+        entries["__struct_methods"] = self.methods
+        return _IntermediateStruct(entries)
+
+
 @dataclass(frozen=True)
 class _ResourceTemplate:
     slot: int
@@ -1497,12 +1514,12 @@ class _Capture:
             self.expressions[name] = declaration.declare("__capture_" + name)
         return self.expressions[name]
 
-    def field_operand(self, ctx, value):
-        """Resolve a declared fixed StructField into the ordinary Field lowering.
+    def field_operand(self, ctx, value, *, for_loop=False):
+        """Resolve a declared StructField into the ordinary member lowering.
 
-        Member-first access remains lazy. Whole-record indexing builds all
-        member references in impl.subscript, so those declarations must be
-        captured before handing the original StructField to that same path.
+        Member-first access remains lazy. Whole-record indexing builds the
+        normal intermediate Struct from captured member references. Fixed
+        SNode records retain the original Field lowering and activation rules.
         """
         if not isinstance(value, _RecordReference):
             return value
@@ -1512,11 +1529,17 @@ class _Capture:
         if not isinstance(field, StructField):
             raise TaichiCompilationError("A declared record namespace is not an indexable or iterable Field")
         names = tuple(field.field_dict)
-        if not names or any(
-            not isinstance(self.declarations.get(_capture_id((*value.path, name))), FixedSNodeField)
-            for name in names
-        ):
-            raise TaichiCompilationError("Whole StructField indexing/traversal requires declared fixed SNode members")
+        declarations = [self.declarations.get(_capture_id((*value.path, name))) for name in names]
+        if names and all(isinstance(declaration, DenseField) for declaration in declarations):
+            # Struct members have one logical index domain. Traverse that
+            # domain using the first member's dynamic descriptor; record loads
+            # and stores use each member's own authoritative offset/stride.
+            if for_loop:
+                return self.attribute(ctx, names[0], prefix=value.path)
+            members = {name: self.attribute(ctx, name, prefix=value.path) for name in names}
+            return _DenseStructFieldOperand(members, field.struct_methods)
+        if not names or not all(isinstance(declaration, FixedSNodeField) for declaration in declarations):
+            raise TaichiCompilationError("Whole StructField indexing/traversal requires declared dense or fixed SNode members")
         for name in names:
             self.attribute(ctx, name, prefix=value.path)
         return field

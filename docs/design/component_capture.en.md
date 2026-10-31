@@ -1162,3 +1162,10 @@ namespace, not every equal leaf name in that physical root. The complete root
 still retains all owners' qualified layout dependencies and placement order.
 CPU/CUDA checks vary both owners' extents independently and reject inconsistent
 borrow relations before execution.
+
+Whole-record indexing of a declared dense `StructField` uses the existing
+Struct value and assignment semantics over its captured member views. Plain
+and grouped traversal use the runtime extent; each member retains its original
+SNode placement and stride. CPU/CUDA gates compare whole-record copies, stores
+and helper calls with normal JIT at new sizes for SOA and AOS. Fixed sparse
+records retain their existing SNode activation and traversal path.

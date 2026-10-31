@@ -842,3 +842,8 @@ ABI，不保存 producer Python 对象。CPU/CUDA 门槛覆盖父子回指、新
 维度名按锚点的原分配命名空间解析，不合并整根内同名的维度。完整根仍保留所有
 所有者的限定布局依赖与 placement 顺序。CPU/CUDA 门槛分别改变两个所有者的
 extent，并在执行前拒绝不一致的借用关系。
+
+已声明的 Dense `StructField` 支持整体记录索引，沿捕获成员视图使用原 Struct 值
+与赋值语义。普通及 grouped 遍历使用运行时 extent，各成员保留原 SNode 放置与
+stride。CPU/CUDA 门槛在新的 SOA/AOS 尺寸下对比正常 JIT 的记录复制、整体回写
+和 helper 调用。固定 Sparse 记录继续使用原 SNode 激活与遍历路径。

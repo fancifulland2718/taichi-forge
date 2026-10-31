@@ -160,6 +160,60 @@ class _RepeatedMembers:
                 shape=scope.dim("count"), layout=ti.Layout.SOA, initialization="zero"))
 
 
+@ti.data_oriented
+class _WholeRecordArray(_RecordArray):
+    @ti.func
+    def advance_record(self, value, i):
+        value.vector += ti.Vector([1, 2, 3])
+        value.matrix[1, 0] = value.vector[2] + i
+        value.after = value.before + 5
+        return value
+
+    @ti.kernel
+    def step(self):
+        for i in self.state:
+            value = self.state[i]
+            self.state[i] = self.advance_record(value, i)
+        for index in ti.grouped(self.state):
+            self.state[index].before += 1
+
+
+@pytest.mark.parametrize("layout", [ti.Layout.SOA, ti.Layout.AOS])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_whole_dense_record_keeps_dynamic_traversal_and_value_semantics(tmp_path, layout):
+    producer = _WholeRecordArray(3, 3, layout)
+    code = Component.from_owner(producer).compile_graph(producer.record)
+    reference = _WholeRecordArray(11, 11, layout)
+    for member in reference.state.field_dict.values():
+        member.fill(0)
+    reference.step()
+    reference.step()
+    expected = reference.state.to_numpy()
+    module = ti.aot.Module()
+    code.export(module, "step")
+    artifact = tmp_path / "whole_record.tcm"
+    module.archive(str(artifact))
+    arch = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(arch) as runtime:
+        component = runtime.load_module(artifact).component("step")
+        with component.instantiate({"capacity": 11}) as instance:
+            instance.initialize(zero=component.contract["resources"])
+            with instance.prepare() as call:
+                call.run()
+                call.run()
+                runtime.wait()
+            for name, values in expected.items():
+                resource = instance.resource(component.resource_name(["state", name]))
+                actual = np.frombuffer(resource.read(), values.dtype).reshape(values.shape)
+                np.testing.assert_array_equal(actual, values)
+            # The last new record is visited, and the first loop copies values
+            # while the second loop writes directly through the record view.
+            np.testing.assert_array_equal(expected["vector"][-1], [2, 4, 6])
+            assert expected["matrix"][-1, 1, 0] == 16
+            assert expected["before"][-1] == 2 and expected["after"][-1] == 6
+
+
 class _SharedRootOwner:
     def __init__(self, n):
         self.n = n

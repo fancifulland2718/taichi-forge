@@ -1507,7 +1507,7 @@ class ASTTransformer(Builder):
                 target = targets[0]
                 loop_var = build_stmt(ctx, node.iter)
                 if ctx.deployment is not None:
-                    loop_var = ctx.deployment.field_operand(ctx, loop_var)
+                    loop_var = ctx.deployment.field_operand(ctx, loop_var, for_loop=True)
                 loop_indices = expr.make_var_list(size=len(loop_var.shape), ast_builder=ctx.ast_builder)
                 expr_group = expr.make_expr_group(loop_indices)
                 impl.begin_frontend_struct_for(ctx.ast_builder, expr_group, loop_var)
@@ -1522,7 +1522,7 @@ class ASTTransformer(Builder):
                     ctx.create_variable(name, var)
                 loop_var = node.iter.ptr
                 if ctx.deployment is not None:
-                    loop_var = ctx.deployment.field_operand(ctx, loop_var)
+                    loop_var = ctx.deployment.field_operand(ctx, loop_var, for_loop=True)
                 expr_group = expr.make_expr_group(*_vars)
                 impl.begin_frontend_struct_for(ctx.ast_builder, expr_group, loop_var)
                 build_stmts(ctx, node.body)
