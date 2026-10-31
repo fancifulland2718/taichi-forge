@@ -720,7 +720,7 @@ lowering 分界拒绝。CPU/CUDA 门槛覆盖不同尺寸实例、状态保留�
 ### 组件中的原生排序
 
 正常 `primitive_sequence().sort(...)` 经 `append_native()` 进入组件时，
-编译器复用既有排序导出校验，将已声明的独立 Ndarray 解析为实例资源。
+编译器复用既有排序导出校验，将已声明的独立 Ndarray 或合格的 Dense Field 解析为实例资源。
 支持单键、稳定升序、精确精度及 NaN-last 的原生路径；键/值的类型、布局、
 排序策略和工作区仍按原算法校验。其他 native 操作、未声明数组及未取得资格
 的视图明确拒绝。组件录制不执行 `prewarm=True` 请求中的数值操作。
@@ -736,6 +736,13 @@ CPU/CUDA 门槛覆盖根顺序及顺序子区域、7 元素产物绑定 257/519 
 CUDA 路径检查实际 prepared 的 `cuda_graph` 执行类型；条件循环、外部
 Vulkan 排序 provider 和其他原生算法仍须各自取得资格。这不代表刚体 SAP
 完整根或其性能已通过应用验收。
+
+Dense Field 路径额外要求 `component_native_dense_sort_v1`。复用原 SNode 组/成员合同和
+实例视图，保留同根布局、布局兄弟依赖及原生读写 effects；即使没有数值 Kernel 读取
+排序数组，它们仍进入资源闭包。不拆成独立 Ndarray，也不保留 producer 地址。
+CPU/CUDA/Vulkan 已验证紧凑一维 u32 键/i32 值，7 元素导出、257/519 元素实例、
+稳定 NumPy 顺序、重复调用及关闭隔离。原生工作区仍由现有 ExecutionPlan 按实例长度
+准备；该局部门槛不代表任意非紧凑/Sparse 视图、其他原生算子或整个应用已通过。
 
 ### Graph 私有工作区使用资源 extent
 

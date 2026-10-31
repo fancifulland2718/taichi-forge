@@ -127,10 +127,14 @@ class Component:
                             continue
                         binding = contract["bindings"].get(symbol, {})
                         resource = contract["resources"].get(binding.get("name"), {})
-                        if (binding.get("kind") != "resource" or resource.get("kind") != "ndarray"
+                        if (binding.get("kind") != "resource" or resource.get("kind") not in (None, "ndarray")
                                 or len(resource.get("shape", ())) != 1
                                 or port == "keys" and resource.get("element_shape")):
                             raise ValueError("Component native sort requires declared one-dimensional arrays")
+                        if resource.get("kind") is None:
+                            # The ordinary group/member checks below remain
+                            # authoritative; this is not a new storage layout.
+                            capabilities.add("component_native_dense_sort_v1")
             if native_sort:
                 capabilities.add("component_native_sort_v1")
             host_resources = contract.get("host_resources", [])

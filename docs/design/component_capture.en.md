@@ -1034,6 +1034,23 @@ accepts declared Dense Fields only; undeclared Fields and unsupported storage
 kinds reject. CPU/CUDA tests cover dynamic independent group extents, rank-zero
 state, unchanged Kernel ABI/code, two instances and malformed retention metadata.
 
+### Native sorting of Dense Field instances
+
+Component capture of `primitive_sequence().sort(...)` also accepts declared,
+packed one-dimensional Dense Fields. It uses the existing SNode group/member
+contract and instance views, retaining layout-only siblings and native read/write
+effects even when no captured kernel accesses the sorted arrays. It does not
+flatten their allocation into independent Ndarrays or retain producer pointers.
+The ordinary native sort exporter still validates dtype, packed storage, stable
+ordering, strategy and workspace. Required capability
+`component_native_dense_sort_v1` distinguishes this resource combination.
+
+CPU/CUDA/Vulkan tests cover scalar u32 keys/i32 values, a shared root, production
+at 7 elements and instances at 257/519, stable NumPy results, repeated calls and
+independent closure. Native scratch is prepared from each instance's length by
+the existing ExecutionPlan. This does not qualify arbitrary sparse/strided
+views, other native primitives, every execution domain or whole applications.
+
 ### Resource extents for Graph-private scratch
 
 Normal Graph recording can declare scratch using

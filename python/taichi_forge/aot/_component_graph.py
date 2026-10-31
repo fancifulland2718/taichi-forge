@@ -302,11 +302,19 @@ class _GraphCapture:
 
     def native_array(self, value):
         aliases = [name for name, declaration in self.component.declarations.items()
-                   if isinstance(declaration, Array) and self.component.available(self.owner, name)
+                   if isinstance(declaration, (Array, DenseField)) and self.component.available(self.owner, name)
                    and self.component.read(self.owner, name) is value]
         if not aliases:
-            raise TaichiCompilationError("Component native arrays require normal ResourceScope ndarray declarations")
-        return self._array_argument(self.component.declarations[aliases[0]], aliases).name
+            raise TaichiCompilationError("Component native arrays require declared Dense Fields or Ndarrays")
+        declaration = self.component.declarations[aliases[0]]
+        if isinstance(declaration, Array):
+            return self._array_argument(declaration, aliases).name
+        # Keep the normal SNode group, including layout-only siblings. Native
+        # operations use the same instance views as captured kernel arguments;
+        # their existing producer/Runtime storage checks still apply.
+        for alias in aliases:
+            self._shape_values[alias] = (value, tuple(value.shape))
+        return self._retain_dense_resources((value,), host_visible=False)[0]
 
     def array_extent(self, value):
         """Project a normal declared array for shape-only private allocation."""
@@ -775,12 +783,14 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
         if code.objects:
             entries[-1]["record_presence"] = dict(code.contract["objects"])
             entries[-1]["capture_paths"] = code.contract["access_paths"]
+    native_dense = False
     for node in native_nodes:
         for effect in node.effects:
             binding = contract["bindings"].get(effect.resource)
             if binding is None or binding["kind"] != "resource":
                 raise TaichiCompilationError("Component native effect has no declared resource")
             name = binding["name"]
+            native_dense |= contract["resources"][name].get("kind") is None
             previous = accesses.get(name)
             accesses[name] = effect.access if previous is None else _merge_parallel_access(previous, effect.access)
     for name, resource in contract["resources"].items():
@@ -792,6 +802,8 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     contract["required_capabilities"].append("component_compiler_facts_v1")
     if native_nodes:
         contract["required_capabilities"].append("component_native_sort_v1")
+    if native_dense:
+        contract["required_capabilities"].append("component_native_dense_sort_v1")
     if has_control or "internal_arguments" in contract or constraints or fixed_groups or lifecycle:
         contract["version"] = 5 if constraints else 4
         contract["control"] = control
