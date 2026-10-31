@@ -503,6 +503,8 @@ queue 的交错已接受工作和独立实例关闭。其他 Vulkan Sparse 布�
 
 Runtime 的 `module.component(name)` 查询不可变合同，`instantiate(dimensions)` 使用
 原生权威 SNode 规则创建独立根；`initialize(data, zero=...)` 明确提供模型数据或零值。
+冷写入复用加载时验证的不可变资源种类集合，不再为每个字段解析整份公开契约；公开
+查询仍返回独立副本。Sparse 拒绝、别名去重、实例状态与冷边界检查继续逐次执行。
 版本 2 合同从已编译 Graph 投影实际资源读写；未知 effects 仍保守标为读写，版本 1
 继续可读。所有被引用资源仍要求显式初始化：只写不代表覆盖完整容量，不能据此跳过
 尾部初始化。没有把 producer live state 写入 TCM。运行时参数与资源由

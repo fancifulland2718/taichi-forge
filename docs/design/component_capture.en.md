@@ -694,6 +694,10 @@ performance evidence for this new component capture path.
 Runtime `module.component(name)` queries the immutable contract;
 `instantiate(dimensions)` creates independent roots using authoritative native
 SNode rules. `initialize(data, zero=...)` explicitly supplies model data or zeros.
+Cold uploads reuse immutable resource-kind qualifications validated at load time,
+without decoding the complete public contract for every Field. Public queries
+still return independent copies; sparse rejection, alias uniqueness, instance
+state and cold-boundary checks remain active on each initialization.
 Version 2 projects resource access from the compiled Graph; unknown effects stay
 conservative and version 1 remains readable. Every referenced resource still
 requires initialization: write-only access does not prove full-capacity coverage

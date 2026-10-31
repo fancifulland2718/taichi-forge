@@ -112,6 +112,45 @@ def test_initializer_rejects_wrong_owner_empty_and_unqualified_private_lifetimes
     root._graph.close()
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize("sparse", [False, True])
+def test_cold_upload_uses_validated_resource_kinds_without_contract_decoding(tmp_path, monkeypatch, sparse):
+    state = _InitializedState(sparse)
+    root = Component.from_owner(state).compile_graph(state.record, initializer=state.record_initialize)
+    module = ti.aot.Module()
+    root.export(module, "step")
+    artifact = tmp_path / "initialization.tcm"
+    module.archive(str(artifact))
+    with Runtime("cpu") as runtime, runtime.load_module(artifact) as loaded:
+        component = loaded.component("step")
+        with component.instantiate({}) as instance:
+            public = component.contract
+            # Caller-owned query results cannot change upload qualification.
+            for resource in public["resources"].values():
+                resource["kind"] = "ndarray" if sparse else "fixed_snode"
+            def decoded(_):
+                raise AssertionError("Cold upload decoded the whole public contract")
+            with monkeypatch.context() as patch:
+                patch.setattr(type(component), "contract", property(decoded))
+                if sparse:
+                    with pytest.raises(ValueError, match="Sparse model data"):
+                        instance.initialize(dict(initial=bytes(32)))
+                    with pytest.raises(ValueError, match="Sparse reset"):
+                        instance.initialize(zero=["state"])
+                else:
+                    instance.initialize(dict(initial=struct.pack("<8i", *range(8))), zero=["state"])
+                    with pytest.raises(ValueError, match="aliased"):
+                        instance.initialize(dict(initial=bytes(32)), zero=["initial"])
+                    assert struct.unpack("<8i", instance.resource("initial").read()) == tuple(range(8))
+            if not sparse:
+                instance.initialize_state(values=dict(seed=3))
+                with instance.prepare(values=dict(bump=2)) as call:
+                    with pytest.raises(RuntimeError, match="cold boundary"):
+                        instance.initialize(zero=["state"])
+                    call.run()
+                assert struct.unpack("<8i", instance.resource("state").read()) == tuple(range(5, 13))
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_initializer_preserves_replay_private_scratch_and_instance_reset(tmp_path):
     state = _InitializedState(False)

@@ -509,6 +509,13 @@ class Component:
             self._module, self._plan = module, plan
             self._contract_json = json.dumps(contract)
             self._aliases = aliases
+            # Native resource kinds are immutable for this loaded code owner.
+            # Cold uploads must not deserialize the entire component (including
+            # all execution entries and layout schemas) once per supplied Field.
+            self._dense_upload_resources = frozenset(
+                name for name, resource in contract["resources"].items()
+                if resource.get("kind") != "fixed_snode"
+            )
 
     @property
     def contract(self):
@@ -720,14 +727,14 @@ class ComponentInstance:
         selected = {}
         for name, value in dict(data or {}).items():
             key = self._component._aliases[name]
-            if key not in self._resources or self._component.contract["resources"][key].get("kind") == "fixed_snode":
+            if key not in self._resources or key not in self._component._dense_upload_resources:
                 raise ValueError("Sparse model data must use a declared numerical initializer, not a dense byte upload")
             if key in selected:
                 raise ValueError("Initialization repeats an aliased component resource")
             selected[key] = value
         for name in zero:
             key = self._component._aliases[name]
-            if key not in self._resources or self._component.contract["resources"][key].get("kind") == "fixed_snode":
+            if key not in self._resources or key not in self._component._dense_upload_resources:
                 raise ValueError("Sparse reset requires the original component reset entry or a new empty instance")
             if key in selected:
                 raise ValueError("Initialization repeats an aliased component resource")
