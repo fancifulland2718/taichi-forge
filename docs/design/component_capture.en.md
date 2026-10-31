@@ -1169,3 +1169,16 @@ and grouped traversal use the runtime extent; each member retains its original
 SNode placement and stride. CPU/CUDA gates compare whole-record copies, stores
 and helper calls with normal JIT at new sizes for SOA and AOS. Fixed sparse
 records retain their existing SNode activation and traversal path.
+
+
+`parent.child("observations", owner, builder=...)` creates a writable declaration
+scope for a normal child resource owner and records its ownership edge. The child
+keeps its own Field/dimension namespace and original SNode layout. Its
+`parent_dim("count")` can participate in `derived_dim` and Field shapes, so a
+parent loop and child storage share one consumer dimension rather than accepting
+two inconsistent capacities. `record` continues to describe read-only records.
+Conflicting roles, replacing an owned child, and direct self-ownership are
+rejected; complete closure checks reject other ownership cycles. This does not
+relocate existing Fields, rebind in-flight instances, or support moving a child
+with inherited dimensions to an undeclared parent path. CPU/CUDA gates cover
+code reuse from 3 to 19 elements and a frozen artifact instantiated at 37.

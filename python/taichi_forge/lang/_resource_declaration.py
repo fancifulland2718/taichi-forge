@@ -392,10 +392,31 @@ class ResourceScope:
         )
         del caller
 
+    def child(self, name, owner, *, builder=None, initialization="consumer_explicit"):
+        """Construct an owned resource scope with explicit parent dimensions.
+
+        Unlike ``record``, this scope allocates the child's ordinary Fields and
+        uses its own declaration namespace. It never copies the parent's layout.
+        """
+        if self._read_only or not isinstance(name, str) or not name.isidentifier() or owner is None:
+            raise TypeError("A child resource scope requires a writable parent, a name and an owner")
+        if owner is self._owner:
+            raise ValueError("A child resource scope cannot own its parent")
+        occupied = set().union(*(self._registry.get(kind, {}) for kind in
+            ("fields", "arrays", "dimensions", "values", "borrowed", "owner_sequences", "owner_references")))
+        if name in occupied or name in self._registry.get("record_declarations", {}):
+            raise ValueError(f"Normal attribute {name!r} already has another declaration role")
+        if name in self._registry["records"] and getattr(self._owner, name) is not owner:
+            raise ValueError("An existing child resource owner cannot be replaced")
+        child = ResourceScope(owner, builder=builder, initialization=initialization)
+        object.__setattr__(child, "_parent", self)
+        setattr(self, name, owner)
+        return child
+
     def parent_dim(self, name):
-        """Explicitly relate a read-only record's layout to its parent count."""
+        """Explicitly relate a record or child layout to its parent count."""
         if self._parent is None:
-            raise ValueError("parent_dim requires a declared record scope")
+            raise ValueError("parent_dim requires a declared record or child scope")
         self._parent.dim(name)
         alias = "__parent_" + name
         self._registry["dimensions"][alias] = self._parent._registry["dimensions"][name]

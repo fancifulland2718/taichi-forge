@@ -847,3 +847,13 @@ extent，并在执行前拒绝不一致的借用关系。
 与赋值语义。普通及 grouped 遍历使用运行时 extent，各成员保留原 SNode 放置与
 stride。CPU/CUDA 门槛在新的 SOA/AOS 尺寸下对比正常 JIT 的记录复制、整体回写
 和 helper 调用。固定 Sparse 记录继续使用原 SNode 激活与遍历路径。
+
+
+`parent.child("observations", owner, builder=...)` 为正常子资源 owner 创建可写声明
+作用域，同时登记唯一的拥有关系。子资源仍使用自己的字段/维度命名空间及原 SNode
+布局；`child.parent_dim("count")` 可参与 `derived_dim` 和原 Field 的 shape。
+这使父循环与子存储共用同一动态尺寸，消费端不用重复绑定两个可能矛盾的容量。
+已有 `record` 继续描述只读普通数据记录。冲突角色、替换已登记子 owner 以及直接
+自拥有会被拒绝；其他循环关系仍由完整组件闭包检查拒绝。该入口不改变已有 Field
+的布局，不为在途实例重绑，也不支持移动带父维度的子对象到另一未声明的父路径。
+CPU/CUDA 门槛覆盖 3→19 的代码复用和冻结后 37 元素的新实例，输出尾部正确。

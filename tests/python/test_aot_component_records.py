@@ -152,6 +152,71 @@ class _DeclaredBuffers:
 
 
 @ti.data_oriented
+class _ParentLayout:
+    def __init__(self, count):
+        from types import SimpleNamespace
+
+        self.count = count
+        scope = ti.experimental.ResourceScope(self)
+        self.observation = SimpleNamespace(count=count)
+        builder = ti.FieldsBuilder()
+        child = scope.child("observation", self.observation, builder=builder)
+        child.derived_dim("count", child.parent_dim("count"))
+        child.values = child.field(ti.i32, shape=child.dim("count"), initialization="zero")
+        self.tree = builder.finalize()
+
+    @ti.kernel
+    def step(self):
+        for i in range(self.count):
+            self.observation.values[i] = i + self.observation.count
+
+    def record(self, builder):
+        builder.dispatch(self.step)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_owned_child_layout_inherits_parent_dimension_without_duplicate_binding(tmp_path):
+    first, second = _ParentLayout(3), _ParentLayout(19)
+    environment, other = Component.from_owner(first), Component.from_owner(second)
+    code = environment.compile(first.step)
+    assert other.compile(second.step) is code
+    code.run(other, second)
+    np.testing.assert_array_equal(second.observation.values.to_numpy(), np.arange(19) + 19)
+    graph = environment.compile_graph(first.record)
+    module = ti.aot.Module()
+    graph.export(module, "step")
+    path = tmp_path / "child.tcm"
+    module.archive(str(path))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime:
+        component = runtime.load_module(path).component("step")
+        assert list(component.input_sources()["dimensions"]) == ["count"]
+        with component.instantiate({"count": 37}) as instance:
+            instance.initialize()
+            with instance.prepare() as prepared:
+                prepared.run()
+            name = next(iter(component.contract["resources"]))
+            assert struct.unpack("<37i", instance.resource(name).read()) == tuple(range(37, 74))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_child_scope_rejects_conflicting_ownership():
+    from types import SimpleNamespace
+
+    owner = SimpleNamespace(count=3)
+    scope = ti.experimental.ResourceScope(owner)
+    scope.dim("count")
+    with pytest.raises(ValueError, match="another declaration role"):
+        scope.child("count", SimpleNamespace())
+    with pytest.raises(ValueError, match="cannot own"):
+        scope.child("loop", owner)
+    scope.child("data", SimpleNamespace())
+    with pytest.raises(ValueError, match="cannot be replaced"):
+        scope.child("data", SimpleNamespace())
+
+
+@ti.data_oriented
 class _DeclaredModel(_Model):
     def __init__(self, capacity, active, gain=2):
         self.capacity = capacity
