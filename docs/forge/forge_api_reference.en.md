@@ -2556,6 +2556,17 @@ retain the original grid. The descriptor never reads device memory. CPU keeps
 its existing scheduler; CUDA/Vulkan can also eliminate the serial transport of
 immutable begin/end expressions. Mutable prepared parameters retain the compiled
 envelope when they overlap any bound input.
+
+CUDA's `empty_group_elision="cuda_block_collective"` retains the participating
+lanes of shared-memory operations and verified block/warp synchronization,
+shuffles and ballot/all votes. It removes whole empty blocks only when immutable
+host bounds are nonnegative, ordered and aligned to the selected block size.
+The block size and computation inside productive blocks remain unchanged. Empty
+ranges retain one block; larger workloads retain grid-stride coverage. Unknown
+calls, physical-thread queries, BLS, auxiliary regions and TLS combinations remain
+conservative. This proof does not qualify device-range controllers, Vulkan, or
+capture updates with mutable bounds.
+
 See the [0.7.0 upgrade guidance](release_notes.en.md#070) for the current LLVM/GFX
 metadata, JIT cache and native ABI versions used by task layouts and entry policies.
 Re-export older candidate artifacts and use a paired frontend and runtime package.

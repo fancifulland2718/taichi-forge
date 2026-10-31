@@ -90,6 +90,48 @@ TEST(RangeCollectiveProof, RequiresNeutralCompilerReductionAndKnownSlots) {
     }
   }
 }
+
+TEST(RangeCollectiveProof, CudaSharedBlocksRequireImmutableAlignedHostBounds) {
+  OffloadedStmt task(OffloadedTaskType::range_for, Arch::cuda, nullptr);
+  task.const_begin = true;
+  task.end_offset = 4;
+  task.block_dim = 32;
+  task.host_launch_range = HostRangeBounds{{0, {}, false}, {1, {0}, false}};
+  task.body->insert(std::make_unique<AllocaStmt>(
+      std::vector<int>{32}, PrimitiveType::f32, true));
+  task.body->insert(std::make_unique<InternalFuncStmt>(
+      "block_barrier", std::vector<Stmt *>{}, nullptr, false));
+  auto *shuffle = task.body->push_back<InternalFuncStmt>(
+      "cuda_shfl_sync_f32", std::vector<Stmt *>{}, nullptr, false)
+                      ->as<InternalFuncStmt>();
+  const auto bounds = describe_launch_range_for_bounds(task);
+  EXPECT_EQ(bounds->empty_group_elision, EmptyRangeGroupProof::cuda_block_collective);
+  EXPECT_TRUE(bounds->uses_host_launch_grid());
+  EXPECT_FALSE(bounds->supports_device_dispatch());
+  for (const auto count : {0, 32, 96, 32 * 9000}) {
+    EXPECT_EQ(bounds->launch_grid(8160, 32, &count, sizeof(count)),
+              std::max(1, std::min(8160, count / 32)));
+  }
+  for (const auto count : {-32, 1, 33, 95})
+    EXPECT_EQ(bounds->launch_grid(8160, 32, &count, sizeof(count)), 8160);
+  const std::int32_t count = 96;
+  const std::vector<std::pair<std::uint64_t, std::uint64_t>> patches{{0, 4}};
+  EXPECT_EQ(bounds->launch_grid(8160, 32, &count, 4, &patches), 8160);
+  EXPECT_EQ(bounds->launch_grid(8160, 32, &count, 3), 8160);
+  auto shifted = *bounds;
+  shifted.host_launch->begin.factor = 1;
+  EXPECT_EQ(shifted.launch_grid(8160, 32, &count, 4), 8160);
+  for (const auto &name : {"future_intrinsic", "cudaGridDim", "workgroupBarrier"}) {
+    shuffle->func_name = name;
+    EXPECT_FALSE(describe_launch_range_for_bounds(task)->uses_host_launch_grid());
+  }
+  shuffle->func_name = "cuda_shfl_sync_f32";
+  shuffle->with_runtime_context = true;
+  EXPECT_FALSE(describe_launch_range_for_bounds(task)->uses_host_launch_grid());
+  shuffle->with_runtime_context = false;
+  task.device = Arch::vulkan;
+  EXPECT_FALSE(describe_launch_range_for_bounds(task)->uses_host_launch_grid());
+}
 }  // namespace taichi::lang
 
 #ifdef TI_WITH_VULKAN

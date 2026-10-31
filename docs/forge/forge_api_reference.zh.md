@@ -2091,6 +2091,14 @@ host 边界选择也覆盖受支持 scalar/shape 边界与常量的加、减、�
 后续钳制不能掩盖之前的溢出。不支持或发生溢出的边界沿用原 grid，描述求值不读取
 设备内存。CPU 保留现有调度；CUDA/Vulkan 还可消除不可变起止表达式的串行传递。
 prepared 参数可变且与任一边界输入重叠时，保留编译时的启动容量。
+
+CUDA 的 `empty_group_elision="cuda_block_collective"` 表示局部共享内存及已验证的
+block/warp 同步、shuffle、ballot/all 投票仍保持原参与线程。只有不可变 Host 边界
+为非负、有序且两端按 block 大小对齐时，才删除完整的空 block；block 大小和
+有效 block 内的计算顺序不变。空范围保留一个 block，超过饱和容量的工作仍由
+grid-stride 覆盖。未知调用、物理线程查询、BLS、辅助区域和与 TLS 的组合保持保守。
+此证明不授予设备范围控制器资格，也不放宽 Vulkan 或可变边界 capture 的限制。
+
 当前 task 布局与入口策略使用的 LLVM/GFX metadata、JIT cache 和原生 ABI 版本见
 [0.7.0 升级说明](release_notes.zh.md#070)。旧候选产物需要重新导出并使用配对的前端/runtime 包。
 

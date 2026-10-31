@@ -30,6 +30,7 @@ enum class EmptyRangeGroupProof {
   local_storage,
   sparse_topology,
   compiler_tls_reduction,
+  cuda_block_collective,
 };
 
 inline const char *empty_range_group_proof_name(EmptyRangeGroupProof proof) {
@@ -52,6 +53,8 @@ inline const char *empty_range_group_proof_name(EmptyRangeGroupProof proof) {
       return "sparse_topology";
     case EmptyRangeGroupProof::compiler_tls_reduction:
       return "compiler_tls_reduction";
+    case EmptyRangeGroupProof::cuda_block_collective:
+      return "cuda_block_collective";
   }
   return nullptr;
 }
@@ -228,7 +231,9 @@ struct RangeForBounds {
            end.kind != RangeBoundKind::unknown;
   }
   bool uses_host_launch_grid() const {
-    return host_launch.has_value() && can_elide_empty_groups();
+    return host_launch.has_value() &&
+           (can_elide_empty_groups() ||
+            empty_group_elision == EmptyRangeGroupProof::cuda_block_collective);
   }
 
   bool valid() const {
@@ -253,6 +258,16 @@ struct RangeForBounds {
             host_launch->end.reads(offset, bytes))
           return baseline;
       }
+    }
+    if (empty_group_elision == EmptyRangeGroupProof::cuda_block_collective) {
+      // Preserve complete cooperating lane groups. These bounds come from the
+      // immutable invocation image; device-range dispatch remains unqualified.
+      // Only whole empty blocks disappear, never a productive block or lane.
+      const auto first = host_launch->begin.evaluate(arguments, argument_bytes);
+      const auto last = host_launch->end.evaluate(arguments, argument_bytes);
+      if (block <= 0 || !first || !last || *first < 0 || *last < *first ||
+          *first % block || *last % block)
+        return baseline;
     }
     return host_launch->grid(baseline, block, arguments, argument_bytes);
   }

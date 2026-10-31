@@ -8,6 +8,22 @@
 
 namespace taichi::lang {
 
+// These intrinsics communicate only within the original CUDA block/warp.
+// In particular, grid-size queries, async copies, unknown calls and physical
+// thread identity are not admitted by this list.
+inline bool is_cuda_local_collective(const InternalFuncStmt &call) {
+  if (call.with_runtime_context)
+    return false;
+  const auto &name = call.func_name;
+  return name == "block_barrier" || name == "block_barrier_and_i32" ||
+         name == "block_barrier_or_i32" || name == "block_barrier_count_i32" ||
+         name == "warp_barrier" || name == "cuda_ballot_i32" ||
+         name == "cuda_all_sync_i32" || name == "cuda_shfl_sync_i32" ||
+         name == "cuda_shfl_sync_f32" || name == "cuda_shfl_up_sync_i32" ||
+         name == "cuda_shfl_up_sync_f32" || name == "cuda_shfl_down_sync_i32" ||
+         name == "cuda_shfl_down_sync_f32" || name == "cuda_shfl_xor_sync_i32";
+}
+
 // A code-generation fact, independent of whether a caller selects device range
 // dispatch. Keep unknown intrinsics/calls conservative: their physical-thread
 // or workspace contract is not described by an ordinary grid-stride loop.
@@ -29,9 +45,14 @@ inline EmptyRangeGroupProof describe_empty_range_group_elision(
   if (has_tls && !describe_range_reduction_slots(task, reductions))
     return EmptyRangeGroupProof::auxiliary_region;
   auto proof = EmptyRangeGroupProof::independent_iterations;
+  bool cuda_collective = false;
   irpass::analysis::any_statement(task.body.get(), [&](Stmt *stmt) {
-    if (stmt->is<InternalFuncStmt>() || stmt->is<ExternalFuncCallStmt>() ||
-        stmt->is<FuncCallStmt>())
+    if (auto *call = stmt->cast<InternalFuncStmt>()) {
+      if (task.device == Arch::cuda && !has_tls && is_cuda_local_collective(*call))
+        cuda_collective = true;
+      else
+        proof = EmptyRangeGroupProof::unproven_call;
+    } else if (stmt->is<ExternalFuncCallStmt>() || stmt->is<FuncCallStmt>())
       proof = EmptyRangeGroupProof::unproven_call;
     else if (stmt->is<GlobalThreadIndexStmt>() ||
              stmt->is<BlockCornerIndexStmt>() || stmt->is<LoopLinearIndexStmt>() ||
@@ -46,8 +67,12 @@ inline EmptyRangeGroupProof describe_empty_range_group_elision(
     else if (stmt->is<SNodeOpStmt>())
       proof = EmptyRangeGroupProof::sparse_topology;
     if (auto *allocation = stmt->cast<AllocaStmt>())
-      if (allocation->is_shared)
-        proof = EmptyRangeGroupProof::local_storage;
+      if (allocation->is_shared) {
+        if (task.device == Arch::cuda && !has_tls)
+          cuda_collective = true;
+        else
+          proof = EmptyRangeGroupProof::local_storage;
+      }
     if (auto *lookup = stmt->cast<SNodeLookupStmt>()) {
       if (lookup->snode->type != SNodeType::dense &&
           lookup->snode->type != SNodeType::root)
@@ -55,6 +80,8 @@ inline EmptyRangeGroupProof describe_empty_range_group_elision(
     }
     return proof != EmptyRangeGroupProof::independent_iterations;
   });
+  if (cuda_collective && proof == EmptyRangeGroupProof::independent_iterations)
+    return EmptyRangeGroupProof::cuda_block_collective;
   return has_tls && proof == EmptyRangeGroupProof::independent_iterations
              ? EmptyRangeGroupProof::compiler_tls_reduction
              : proof;
