@@ -862,7 +862,9 @@ class Component:
             namespace = getattr(field, "_logical_shape_namespace", None)
             source_prefix = namespaces.get(id(namespace), prefix)
             visible_roots.setdefault(root_id, set()).add(".".join((*source_prefix, declaration["identity"])))
-            dimensions = visible_dimensions.setdefault(root_id, {})
+            # One physical root may contain fields allocated by several normal
+            # owners. Equal leaf names do not give their dimensions one origin.
+            dimensions = visible_dimensions.setdefault(root_id, {}).setdefault(source_prefix, {})
             for extent in declaration["shape"]:
                 if isinstance(extent, Extent):
                     for dependency in extent_dependencies(extent.expression):
@@ -982,7 +984,7 @@ class Component:
             flattened[name] = Dimension("active", expression=expression)
         result._declarations = MappingProxyType(flattened)
         visible_fields = [(field, _capture_id((*prefix, name))) for _, prefix, name, field, _, _ in fields]
-        result._project_borrowed(borrowed, roots, sources, visible_dimensions, constraints, visible_fields)
+        result._project_borrowed(borrowed, roots, sources, visible_dimensions, constraints, visible_fields, namespaces)
         result._sources = MappingProxyType(sources)
         result._derived_attributes = frozenset(derived_attributes)
         result._constraints = MappingProxyType(constraints)
@@ -1016,7 +1018,7 @@ class Component:
         check_constraints(constraints, lambda name: _dimension_value(self, owner, name), sources, entry=entry)
         return constraints, dimensions, sources
 
-    def _project_borrowed(self, borrowed, roots, sources, visible_dimensions, constraints, visible_fields):
+    def _project_borrowed(self, borrowed, roots, sources, visible_dimensions, constraints, visible_fields, namespaces):
         """Complete layout dependencies from source declarations, not a new ABI.
 
         Virtual members are used only by the existing native group capture.
@@ -1051,7 +1053,11 @@ class Component:
                 if source_scope:
                     if source_name is None:
                         raise ValueError("source-scope borrow requires the original Field declaration in the root")
-                    dependencies = set(visible_dimensions[root_id])
+                    source_prefix = namespaces.get(id(getattr(anchor, "_logical_shape_namespace", None)))
+                    source_mapping = visible_dimensions[root_id].get(source_prefix)
+                    if source_mapping is None:
+                        raise ValueError("source-scope borrow requires its original dimension declaration site")
+                    dependencies = set(source_mapping)
                 else:
                     members = _source_members(anchor)
                     dependencies = {
@@ -1075,7 +1081,10 @@ class Component:
                     name: rewrite(expression, target_dimensions) for name, expression in binding["dimensions"].items()
                 }
                 if root_id in visible_dimensions:
-                    source_mapping = visible_dimensions[root_id]
+                    source_prefix = namespaces.get(id(getattr(anchor, "_logical_shape_namespace", None)))
+                    source_mapping = visible_dimensions[root_id].get(source_prefix)
+                    if source_mapping is None:
+                        raise ValueError("visible source group is missing its original dimension declaration site")
                     if set(source_mapping) != dependencies:
                         raise ValueError("visible source group has incomplete dimension provenance")
                     # The borrow declaration promises this relation; equality

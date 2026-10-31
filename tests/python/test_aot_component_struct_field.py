@@ -160,6 +160,65 @@ class _RepeatedMembers:
                 shape=scope.dim("count"), layout=ti.Layout.SOA, initialization="zero"))
 
 
+class _SharedRootOwner:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.i32, shape=scope.dim("n"), initialization="zero")
+
+
+@ti.data_oriented
+class _SharedRootComposition:
+    def __init__(self):
+        self.first_count, self.second_count = 3, 3
+        scope = ti.experimental.ResourceScope(self)
+        scope.first = _SharedRootOwner(self.first_count)
+        scope.second = _SharedRootOwner(self.second_count)
+        scope.borrow("first_values", self.first.values, source_scope=True,
+                     dimensions={"n": scope.dim("first_count")})
+        scope.borrow("second_values", self.second.values, source_scope=True,
+                     dimensions={"n": scope.dim("second_count")})
+
+    @ti.kernel
+    def step(self):
+        for i in range(self.first_count):
+            self.first_values[i] = i + 10
+        for i in range(self.second_count):
+            self.second_values[i] = i + 20
+
+    def record(self, builder):
+        builder.dispatch(self.step)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_one_physical_root_keeps_multiple_dimension_namespaces(tmp_path):
+    owner = _SharedRootComposition()
+    code = Component.from_owner(owner).compile_graph(owner.record)
+    assert len(code.contract["groups"]) == 1
+    module = ti.aot.Module()
+    code.export(module, "step")
+    artifact = tmp_path / "namespaces.tcm"
+    module.archive(str(artifact))
+    arch = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(arch) as runtime:
+        component = runtime.load_module(artifact).component("step")
+        sources = component.input_sources()
+        counts = {("first", "n"): 7, ("second", "n"): 11,
+                  ("first_count",): 7, ("second_count",): 11}
+        dimensions = {name: counts[tuple(source["path"])] for name, source in sources["dimensions"].items()}
+        wrong = dict(dimensions, first_count=11)
+        with pytest.raises(ValueError, match="Dimension constraint"):
+            component.instantiate(wrong)
+        with component.instantiate(dimensions) as instance:
+            with instance.prepare() as call:
+                call.run()
+                runtime.wait()
+            for child, count, offset in (("first", 7, 10), ("second", 11, 20)):
+                resource = instance.resource(component.resource_name([child, "values"]))
+                np.testing.assert_array_equal(np.frombuffer(resource.read(), np.int32), np.arange(count) + offset)
+
+
 @ti.data_oriented
 class _BorrowedMembers:
     def __init__(self, count):

@@ -1156,3 +1156,9 @@ completion validate the relationship again. Retargeting a live reference does
 not silently redirect compiled code. Deployment uses the resulting ordinary
 resource/value ABI and retains no producer Python object. CPU/CUDA tests cover
 parent/child links, new-size consumption and invalid retargeting.
+An original SNode root can contain allocations from several declared owners.
+Dimension names in a `source_scope` borrow refer to the anchor's allocation
+namespace, not every equal leaf name in that physical root. The complete root
+still retains all owners' qualified layout dependencies and placement order.
+CPU/CUDA checks vary both owners' extents independently and reject inconsistent
+borrow relations before execution.
