@@ -1208,6 +1208,9 @@ class Component:
         consumer instance, never to each newly prepared replay call.
         setup={name: normal_recording} optionally exports cold preparation
         entries before that final initializer, sharing the same instance.
+        host_resources= selects declared Dense Fields needed by normal public
+        state APIs even when no numerical entry accesses them. They keep native
+        layout/initialization contracts and do not enter any Kernel ABI.
         """
         from taichi_forge.aot._component_graph import compile_component_graph
 

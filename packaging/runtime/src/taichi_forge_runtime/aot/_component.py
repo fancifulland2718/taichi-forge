@@ -147,9 +147,21 @@ class Component:
                 required.add("setup_bindings")
             if contract.get("version") == 10:
                 required.add("operation_bindings")
+            host_resource_capability = "component_host_resources_v1" in contract.get("required_capabilities", ())
+            if host_resource_capability:
+                required.add("host_resources")
             if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
+            host_resources = contract.get("host_resources", [])
+            if host_resource_capability:
+                if (not isinstance(host_resources, list) or not host_resources
+                        or any(not isinstance(name, str) for name in host_resources)
+                        or len(host_resources) != len(set(host_resources))
+                        or any(name not in contract["resources"] or contract["resources"][name].get("kind") is not None
+                               for name in host_resources)):
+                    raise ValueError("Invalid component Host-visible resources")
+                capabilities.add("component_host_resources_v1")
             if contract["version"] >= 7 and contract["field_io"]:
                 capabilities.add("component_field_coordinates_v1")
             fixed_groups = contract.get("fixed_groups", {})
@@ -421,7 +433,7 @@ class Component:
                     raise ValueError("Invalid component symbolic binding")
                 used[kind].add(key)
             bound_resources = {name for name, resource in contract["resources"].items() if resource.get("kind") != "fixed_snode"}
-            if used["resource"] != bound_resources or used["value"] != set(contract["values"]):
+            if used["resource"] | set(host_resources) != bound_resources or used["value"] != set(contract["values"]):
                 raise ValueError("Component contains unreferenced resource/value requirements")
             self._field_io = {}
             if contract["version"] >= 7:

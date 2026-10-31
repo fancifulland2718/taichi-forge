@@ -18,6 +18,7 @@ from taichi_forge.aot._component import (
     _static_value,
     _dimension_value,
     _capture_id,
+    _dense_group,
 )
 from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang.exception import TaichiCompilationError
@@ -37,6 +38,7 @@ class _GraphCapture:
         self.fixed_dependencies = {}
         self.dimensions = {}
         self.resources = {}
+        self.host_resources = set()
         self.bindings = {}
         self.values = {}
         self.explicit = {}
@@ -296,6 +298,58 @@ class _GraphCapture:
         self.bindings[symbol_name] = dict(kind="resource", name=identity)
         return self.symbols.setdefault(symbol_name, Arg(ArgKind.NDARRAY, symbol_name, declaration.dtype, ndim=declaration.ndim))
 
+    def retain_host_resources(self, resources):
+        """Keep explicitly published normal state without adding kernel inputs.
+
+        These are normal declared Dense Fields, not producer snapshots. Layout
+        and dimensions still come from the same native SNode schema projection.
+        """
+        groups = {}
+        for field in resources:
+            aliases = [name for name, declaration in self.component.declarations.items()
+                       if isinstance(declaration, DenseField)
+                       and self.component.available(self.owner, name)
+                       and self.component.read(self.owner, name) is field]
+            if not aliases:
+                raise TaichiCompilationError("Host-visible resources require declared Dense Fields on this component")
+            declaration = self.component.declarations[aliases[0]]
+            group = declaration.group
+            if group not in groups:
+                groups[group] = _dense_group(self.component, self.owner, group)
+            schema, members, dimensions, _ = groups[group]
+            if self.groups.setdefault(group, schema) != schema:
+                raise TaichiCompilationError("Host-visible resource layout changed during recording")
+            def dimension(name):
+                from taichi_forge.lang._resource_declaration import extent_dependencies
+                spec = self.component.declarations[name]
+                _dimension_value(self.component, self.owner, name)
+                self.dimensions[name] = spec.schema
+                for dependency in extent_dependencies(spec.expression) if spec.expression else ():
+                    dimension(dependency)
+                if spec.capacity:
+                    dimension(spec.capacity)
+            for name in dimensions:
+                dimension(name)
+            paths = members[aliases[0]]
+            key = json.dumps((group, paths), sort_keys=True)
+            identity = self._members.get(key)
+            if identity is None:
+                name = aliases[0]
+                normal = getattr(field, "_logical_resource_declaration", None)
+                path = self.component._paths[name]
+                identity = _capture_id((*path[:-1], normal["identity"])) if normal else name
+                if identity in self.resources:
+                    raise TaichiCompilationError("Host-visible resource identity collision")
+                self._members[key] = identity
+                self.resources[identity] = dict(group=group, paths=paths,
+                    dtype=declaration.schema[1][1], element_shape=declaration.schema[1][2],
+                    shape=declaration.shape, aliases=[], access="read_write",
+                    effects_precision="conservative",
+                    initialization=(normal or {}).get("initialization", "consumer_explicit"))
+            resource = self.resources[identity]
+            resource["aliases"] = sorted(set(resource["aliases"]) | set(aliases))
+            self.host_resources.add(identity)
+
     def finish(self, builder):
         if not self.codes:
             raise TaichiCompilationError("Component roots require a nonempty captured dispatch closure")
@@ -338,6 +392,9 @@ class _GraphCapture:
             facts["required_capabilities"].append("component_array_storage_v1")
         if self.fixed_groups:
             facts["fixed_groups"] = self.fixed_groups
+        if self.host_resources:
+            facts["host_resources"] = sorted(self.host_resources)
+            facts["required_capabilities"].append("component_host_resources_v1")
         facts["semantic_key"] = _digest(facts)
         return facts
 
@@ -533,6 +590,7 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     for key, kind in (("resources", "resource"), ("values", "value")):
         required = {value["name"] for value in contract["bindings"].values() if value["kind"] == kind}
         if kind == "resource":
+            required.update(capture.host_resources)
             required.update(name for name, resource in contract["resources"].items()
                             if resource.get("kind") == "fixed_snode" and resource["group"] in fixed_groups)
         contract[key] = {name: value for name, value in contract[key].items() if name in required}
@@ -554,6 +612,12 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
             for extent in resource["shape"]:
                 if isinstance(extent, str):
                     require_dimension(extent)
+    # Layout-only siblings and Host-only groups can have independent extents.
+    for schema in contract["groups"].values():
+        for node in json.loads(schema)["nodes"]:
+            for extent in node["extents"]:
+                if extent["parameter"]:
+                    require_dimension(extent["parameter"])
     contract["dimensions"] = {
         name: value for name, value in contract["dimensions"].items() if name in required_dimensions
     }
@@ -669,7 +733,8 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     return contract
 
 
-def compile_component_graph(component, record, *args, initializer=None, setup=None, operations=None, _build=None, **kwargs):
+def compile_component_graph(component, record, *args, initializer=None, setup=None, operations=None,
+                            host_resources=(), _build=None, **kwargs):
     from taichi_forge.graph import GraphBuilder
 
     capture = _GraphCapture(component, record, args, kwargs, _build)
@@ -722,6 +787,7 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
             operation_nodes.append((name, end))
     operation_prefix = tuple(builder._nodes) if operation_nodes else ()
     record(builder, *args, **kwargs)
+    capture.retain_host_resources(host_resources)
     contract = capture.finish(builder)
     if _build is not None:
         _build.check_time("before backend compilation")

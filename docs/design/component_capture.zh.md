@@ -670,3 +670,16 @@ lowering 投影分界。v10 合同要求 `component_named_operations_v1`，实�
 必须只属于一个入口，跨入口持久共享状态须在实例资源中声明。未知名称和被修改的
 lowering 分界拒绝。CPU/CUDA 门槛覆盖不同尺寸实例、状态保留、冷准备兼容、loaded
 默认调用及上述失败输入；其他资源/后端组合仍须分别取得资格。
+
+### 无数值依赖的公开 Host 状态
+
+`compile_graph(record, host_resources=(owner.history, ...))` 显式保留正常公开
+状态/观察接口使用的已声明 Dense Field。布局、兄弟维度、成员路径和初始化仍由
+原 native SNode schema 决定；不采样 producer 值，不增加 Graph 参数、Kernel ABI
+槽位、dispatch 或数值代码依赖。未被计算访问的资源保留 `none` 编译器 effects。
+
+增量合同扩展 `component_host_resources_v1` 列出保留资源身份；消费端核对这些
+名称，继续拒绝其他无引用的资源要求，旧 Runtime 拒绝未知必需扩展。传输、初始化、
+独立实例及退休复用既有机制。当前只接受已声明 Dense Field；未声明 Field 或其他
+存储种类明确拒绝。CPU/CUDA 覆盖独立动态组维度、rank-0 状态、Kernel ABI/代码
+不变、双实例及非法保留元数据。
