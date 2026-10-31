@@ -163,12 +163,16 @@ class _ParentLayout:
         child = scope.child("observation", self.observation, builder=builder)
         child.derived_dim("count", child.parent_dim("count"))
         child.values = child.field(ti.i32, shape=child.dim("count"), initialization="zero")
+        child.direct = child.field(ti.i32, shape=child.parent_dim("count"), initialization="zero")
+        child.array = child.ndarray(ti.i32, shape=child.parent_dim("count"), initialization="zero")
         self.tree = builder.finalize()
 
     @ti.kernel
     def step(self):
         for i in range(self.count):
-            self.observation.values[i] = i + self.observation.count
+            self.observation.direct[i] = i
+            self.observation.array[i] = self.observation.direct[i]
+            self.observation.values[i] = self.observation.array[i] + self.observation.count
 
     def record(self, builder):
         builder.dispatch(self.step)
@@ -196,8 +200,8 @@ def test_owned_child_layout_inherits_parent_dimension_without_duplicate_binding(
             instance.initialize()
             with instance.prepare() as prepared:
                 prepared.run()
-            name = next(iter(component.contract["resources"]))
-            assert struct.unpack("<37i", instance.resource(name).read()) == tuple(range(37, 74))
+            resource = instance.resource_from_source(("observation", "values"))
+            assert struct.unpack("<37i", resource.read()) == tuple(range(37, 74))
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

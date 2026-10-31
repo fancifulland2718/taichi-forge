@@ -524,7 +524,7 @@ class ResourceScope:
                 raise ValueError("Fixed SNode placement shape differs from the declared Field shape")
         concrete = tuple(
             (
-                evaluate_extent(item.expression, lambda name: getattr(self._owner, name))
+                evaluate_extent(item.expression, self._normal_dimension)
                 if isinstance(item, Extent)
                 else item
             )
@@ -603,7 +603,7 @@ class ResourceScope:
         shape = shape if isinstance(shape, tuple) else (shape,)
         if any(not isinstance(item, Extent) and type(item) is not int for item in shape):
             raise TypeError("Array extents require declared dimensions or explicit integer constants")
-        concrete = tuple(evaluate_extent(item.expression, lambda name: getattr(self._owner, name))
+        concrete = tuple(evaluate_extent(item.expression, self._normal_dimension)
                          if isinstance(item, Extent) else item for item in shape)
         if any(not 0 <= value <= 2**31 - 1 for value in concrete):
             raise ValueError("Array extents must fit the nonnegative i32 indexing domain")
