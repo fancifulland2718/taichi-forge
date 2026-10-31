@@ -367,6 +367,7 @@ def export_graph(
                 (set(spec.runtime_arg_names) - source_resources.used)
                 | source_arrays.used
                 | resource_inputs.used_names
+                | context.private_extent_inputs
                 | (gradient_names - context.private_bindings.keys())
             )
             if set(plan.argument_names) != expected_names:

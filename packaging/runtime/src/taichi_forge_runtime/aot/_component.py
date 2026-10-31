@@ -150,9 +150,14 @@ class Component:
             host_resource_capability = "component_host_resources_v1" in contract.get("required_capabilities", ())
             if host_resource_capability:
                 required.add("host_resources")
+            private_shape_capability = "component_private_array_extents_v1" in contract.get("required_capabilities", ())
+            if private_shape_capability:
+                required.add("private_shapes")
             if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
+            if private_shape_capability:
+                capabilities.add("component_private_array_extents_v1")
             pending = [contract.get("control", {})]
             native_sort = False
             while pending:
@@ -412,6 +417,29 @@ class Component:
                 if effect_groups != set(fixed_groups):
                     raise ValueError("Fixed SNode component effects do not cover its group closure")
             document = json.loads(plan.to_json())
+            if private_shape_capability:
+                shapes = contract["private_shapes"]
+                private = {item["name"]: item for item in document.get("resources", ())}
+                if not isinstance(shapes, dict) or not shapes:
+                    raise ValueError("Invalid component private array shapes")
+                for symbol, shape in shapes.items():
+                    descriptor = contract.get("internal_arguments", {}).get(symbol)
+                    resource = private.get(symbol, {})
+                    if (not descriptor or descriptor[0] != "ndarray"
+                            or resource.get("kind") != "ndarray" or resource.get("shape") != shape
+                            or not isinstance(shape, list)
+                            or not any(isinstance(extent, dict) for extent in shape)):
+                        raise ValueError("Component private array shape differs from its execution plan")
+                    for extent in shape:
+                        if not isinstance(extent, dict):
+                            continue  # The existing Plan parser validates fixed extents.
+                        binding = contract["bindings"].get(extent.get("array"), {})
+                        source = contract["resources"].get(binding.get("name"), {})
+                        if (set(extent) != {"array", "axis"} or binding.get("kind") != "resource"
+                                or source.get("kind") not in (None, "ndarray")
+                                or type(extent["axis"]) is not int
+                                or not 0 <= extent["axis"] < len(source.get("shape", ()))):
+                            raise ValueError("Component private array has an invalid extent source")
             operations = document["operations"]
             if contract["version"] >= 4:
                 execution_facts = dict(plan=document, semantic_key=contract["semantic_key"])

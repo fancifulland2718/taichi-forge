@@ -47,6 +47,7 @@ class _GraphCapture:
         self.symbols = {}
         self.array_types = {}
         self._array_values = {}
+        self._shape_values = {}
         self._members = {}
         self._constants = tuple(
             name for name, declaration in component.declarations.items()
@@ -307,6 +308,22 @@ class _GraphCapture:
             raise TaichiCompilationError("Component native arrays require normal ResourceScope ndarray declarations")
         return self._array_argument(self.component.declarations[aliases[0]], aliases).name
 
+    def array_extent(self, value):
+        """Project a normal declared array for shape-only private allocation."""
+        from taichi_forge.lang._ndarray import Ndarray
+
+        aliases = [name for name, declaration in self.component.declarations.items()
+                   if isinstance(declaration, (Array, DenseField))
+                   and self.component.available(self.owner, name)
+                   and self.component.read(self.owner, name) is value]
+        if not aliases:
+            raise TaichiCompilationError("ArrayExtent requires a declared component Dense Field or Ndarray")
+        for alias in aliases:
+            self._shape_values[alias] = (value, tuple(value.shape))
+        if isinstance(value, Ndarray):
+            return self.native_array(value)
+        return self._retain_dense_resources((value,), host_visible=False)[0]
+
     def native(self, executable):
         # Concrete providers opt in; inherited hooks cannot hide extra behavior.
         convert = type(executable).__dict__.get("_capture_component")
@@ -322,7 +339,12 @@ class _GraphCapture:
         These are normal declared Dense Fields, not producer snapshots. Layout
         and dimensions still come from the same native SNode schema projection.
         """
-        groups = {}
+        self._retain_dense_resources(resources, host_visible=True)
+
+    def _retain_dense_resources(self, resources, *, host_visible):
+        from taichi_forge.graph._graph import Arg, ArgKind
+
+        groups, symbols = {}, []
         for field in resources:
             aliases = [name for name, declaration in self.component.declarations.items()
                        if isinstance(declaration, DenseField)
@@ -341,7 +363,7 @@ class _GraphCapture:
                 from taichi_forge.lang._resource_declaration import extent_dependencies
                 spec = self.component.declarations[name]
                 _dimension_value(self.component, self.owner, name)
-                self.dimensions[name] = spec.schema
+                self.dimensions[name] = json.loads(json.dumps(spec.schema))
                 for dependency in extent_dependencies(spec.expression) if spec.expression else ():
                     dimension(dependency)
                 if spec.capacity:
@@ -366,7 +388,15 @@ class _GraphCapture:
                     initialization=(normal or {}).get("initialization", "consumer_explicit"))
             resource = self.resources[identity]
             resource["aliases"] = sorted(set(resource["aliases"]) | set(aliases))
-            self.host_resources.add(identity)
+            if host_visible:
+                self.host_resources.add(identity)
+            else:
+                symbol_name = "__component_resource_" + _digest((group, paths))
+                self.bindings[symbol_name] = dict(kind="resource", name=identity)
+                self.symbols.setdefault(symbol_name, Arg(ArgKind.NDARRAY, symbol_name,
+                                                         declaration.dtype, ndim=len(declaration.shape)))
+                symbols.append(symbol_name)
+        return symbols
 
     def finish(self, builder):
         if not self.codes:
@@ -379,6 +409,9 @@ class _GraphCapture:
         for code in self.codes:
             if not code.matches(self.component, self.owner):
                 raise TaichiCompilationError("Component dependencies changed while recording its Graph")
+        for alias, (value, shape) in self._shape_values.items():
+            if self.component.read(self.owner, alias) is not value or tuple(value.shape) != shape:
+                raise TaichiCompilationError("Component array extent source changed while recording its Graph")
         for identity, value in self._array_values.items():
             for alias in self.resources[identity]["aliases"]:
                 if self.component.read(self.owner, alias) is not value:
@@ -610,6 +643,16 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
         contract.pop("fixed_groups", None)
     used_symbols = {symbol for entry in entries_in_order for symbol in entry["arguments"]}
     used_symbols.update(binding.name for node in native_nodes for binding in node.bindings)
+    private_shapes = {
+        name: requirement.deployment_shape()
+        for name, requirement in graph._spec.fixed_runtime_args.items()
+        if name in used_symbols and getattr(requirement, "shape_bindings", ())
+    }
+    if private_shapes:
+        contract["private_shapes"] = private_shapes
+        contract["required_capabilities"].append("component_private_array_extents_v1")
+        used_symbols.update(value["array"] for shape in private_shapes.values()
+                            for value in shape if isinstance(value, dict))
     for key in ("bindings", "explicit", "internal_arguments"):
         if key in contract:
             contract[key] = {name: value for name, value in contract[key].items() if name in used_symbols}

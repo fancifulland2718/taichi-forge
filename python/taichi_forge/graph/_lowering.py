@@ -56,6 +56,7 @@ class GraphLoweringContext:
         self._native_export_facts = {}
         self.bounded_extents = {}
         self.private_bindings = {}
+        self.private_extent_inputs = set()
         self._private_names = {}
         self._private_allocators = {}
         self._scalar_values = {}
@@ -261,6 +262,7 @@ class GraphLoweringContext:
                 raise TaichiRuntimeError("AOT private ndarray requires a supported scalar element type")
             if core.data_type_size(dtype) != owner.element_bytes:
                 raise TaichiRuntimeError("AOT private ndarray element size differs from its declaration")
+            self.private_extent_inputs.update(source[0] for source in owner.shape_bindings if source)
             self._private_names[name] = self._resource(
                 # A frozen declaration can be shared by distinct compiled
                 # instances. Only aliases of the actual instance allocation
@@ -269,7 +271,7 @@ class GraphLoweringContext:
                 dict(
                     kind="ndarray",
                     dtype=element_type,
-                    shape=owner.shape,
+                    shape=owner.deployment_shape(),
                     element_shape=dtype.shape(),
                     zero_initialize=True,
                     **(
@@ -278,6 +280,9 @@ class GraphLoweringContext:
                         else {}
                     ),
                 ),
+                # Dynamic shape names are part of the component's queryable
+                # private-resource contract. Keep them stable through lowering.
+                name=name if owner.shape_bindings else None,
             )
             self.private_bindings[name] = owner
         return captured

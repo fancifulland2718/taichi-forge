@@ -726,3 +726,18 @@ CPU/CUDA 门槛覆盖根顺序及顺序子区域、7 元素产物绑定 257/519 
 CUDA 路径检查实际 prepared 的 `cuda_graph` 执行类型；条件循环、外部
 Vulkan 排序 provider 和其他原生算法仍须各自取得资格。这不代表刚体 SAP
 完整根或其性能已通过应用验收。
+
+### Graph 私有工作区使用资源 extent
+
+正常 Graph 录制可以使用
+`region.private_ndarray("previous", ti.f32, (ti.graph.ArrayExtent(owner.velocity), 6))`。
+`ArrayExtent(array, axis=0)` 引用已声明 Dense Field 或完整 Ndarray 的逻辑索引轴，
+不包含 vector/matrix 元素轴。普通 Graph 使用当前 shape；组件捕获保留资源引用，
+原 ExecutionResources 分配器在 prepare 时读取消费实例的 extent，不在途改变分配。
+
+必需扩展 `component_private_array_extents_v1` 公开 `private_shapes`，并与实际
+lowering 后的 Plan 核对。仅提供 shape 的资源进入布局/资源闭包，不扩大 Kernel ABI，
+也不虚构数值读写。作用域私有存储的所有权与独占提交规则保持不变。不支持的来源及
+未声明资源明确拒绝；私有 extent 沿用既有正数分配合同。CPU/CUDA 门槛覆盖 7 元素
+导出、11/37 元素实例、重复私有区域、交错调用及非法 shape 元数据；这些结果不代表
+应用条件求解器已取得资格。

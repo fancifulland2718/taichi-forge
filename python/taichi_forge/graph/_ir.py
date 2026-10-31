@@ -105,6 +105,9 @@ class InternalNdarrayRequirement:
     shape: tuple
     element_bytes: int
     exclusive_submission: bool = False
+    # Component capture resolves these to existing public array bindings.
+    # The concrete shape remains the normal producer Graph allocation.
+    shape_bindings: tuple = ()
 
     def __post_init__(self):
         shape = tuple(int(value) for value in self.shape)
@@ -113,6 +116,18 @@ class InternalNdarrayRequirement:
         if self.element_bytes <= 0:
             raise ValueError("Graph internal ndarray element size must be positive")
         object.__setattr__(self, "shape", shape)
+        bindings = tuple(self.shape_bindings)
+        if bindings and (len(bindings) != len(shape) or any(
+                value is not None and (not isinstance(value, tuple) or len(value) != 2
+                    or not isinstance(value[0], str) or not value[0]
+                    or type(value[1]) is not int or value[1] < 0)
+                for value in bindings)):
+            raise ValueError("Invalid Graph private array shape bindings")
+        object.__setattr__(self, "shape_bindings", bindings)
+
+    def deployment_shape(self):
+        return [dict(array=source[0], axis=source[1]) if source else extent
+                for extent, source in zip(self.shape, self.shape_bindings or (None,) * len(self.shape))]
 
     @property
     def storage_bytes(self):

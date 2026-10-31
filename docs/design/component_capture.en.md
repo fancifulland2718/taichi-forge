@@ -1020,3 +1020,22 @@ instance resource transfers, initialization and retirement apply. This currently
 accepts declared Dense Fields only; undeclared Fields and unsupported storage
 kinds reject. CPU/CUDA tests cover dynamic independent group extents, rank-zero
 state, unchanged Kernel ABI/code, two instances and malformed retention metadata.
+
+### Resource extents for Graph-private scratch
+
+Normal Graph recording can declare scratch using
+`region.private_ndarray("previous", ti.f32, (ti.graph.ArrayExtent(owner.velocity), 6))`.
+`ArrayExtent(array, axis=0)` refers to a logical index axis of a declared Dense
+Field or whole Ndarray, excluding vector/matrix element axes. Ordinary Graphs use
+the current shape. Component capture retains the resource reference, and the
+existing ExecutionResources allocator obtains the extent from each consumer
+instance at prepare time. This does not resize an in-flight allocation.
+
+The required extension `component_private_array_extents_v1` exposes `private_shapes`
+and validates them against the lowered Plan. Shape-only sources remain part of the
+resource/layout closure without widening Kernel ABIs or claiming numerical access.
+Existing scoped private-storage ownership and exclusive-submission rules apply.
+Unsupported sources and undeclared resources reject; private extents remain positive
+under the existing allocation contract. CPU/CUDA gates cover 7-element production,
+11/37-element instances, repeated private regions, interleaved calls and malformed
+shape metadata. These gates do not qualify an application's conditional solver.

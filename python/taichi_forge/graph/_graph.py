@@ -19,6 +19,7 @@ from taichi_forge._contracts import (
     STRUCTURED_CONTROL_SCHEMA_VERSION,
 )
 from taichi_forge.aot.utils import produce_injected_args_for_graph
+from taichi_forge.graph._array_extent import ArrayExtent, private_array_shape
 from taichi_forge.lang import enums, impl, kernel_impl, ops
 from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray, StructNdarray
 from taichi_forge.lang._storage_view import (
@@ -389,7 +390,6 @@ def _align_up(value, alignment):
 
 _GraphInternalNdarraySpec = InternalNdarrayRequirement
 
-
 class GraphOwnedNdarray(InternalNdarrayRequirement):
     """Declarative storage materialized separately by each Graph instance.
 
@@ -400,7 +400,7 @@ class GraphOwnedNdarray(InternalNdarrayRequirement):
     prevent overlapping replay from aliasing the same allocation.
     """
 
-    def __init__(self, dtype, shape, *, exclusive_submission=True):
+    def __init__(self, dtype, shape, *, exclusive_submission=True, shape_bindings=()):
         if isinstance(shape, int):
             shape = (shape,)
         super().__init__(
@@ -408,6 +408,7 @@ class GraphOwnedNdarray(InternalNdarrayRequirement):
             tuple(shape),
             _ti_core.data_type_size(dtype),
             bool(exclusive_submission),
+            shape_bindings,
         )
 
 
@@ -16546,12 +16547,13 @@ class Sequential:
             raise TaichiRuntimeError(
                 f"Graph internal binding {name!r} is already defined"
             )
-        shape = tuple(int(value) for value in shape)
+        shape, shape_bindings = private_array_shape(shape, self._component_capture)
         self._fixed_runtime_args[name] = InternalNdarrayRequirement(
             dtype,
             shape,
             _ti_core.data_type_size(dtype),
             bool(exclusive_submission),
+            shape_bindings,
         )
         return Arg(ArgKind.NDARRAY, name, dtype, ndim=len(shape))
 
@@ -17251,10 +17253,12 @@ class GraphBuilder:
             raise TaichiRuntimeError(
                 f"Graph private binding {name!r} is already defined"
             )
+        shape, shape_bindings = private_array_shape(shape, self._component_capture)
         requirement = GraphOwnedNdarray(
             dtype,
             shape,
             exclusive_submission=exclusive_submission,
+            shape_bindings=shape_bindings,
         )
         symbolic = Arg(
             ArgKind.NDARRAY,
@@ -21123,6 +21127,7 @@ __all__ = [
     "GraphExecutionReport",
     "BoundedDispatchCapabilities",
     "GraphOwnedNdarray",
+    "ArrayExtent",
     "BoundedDispatchHandle",
     "HostBoundedDispatchHandle",
     "BoundedDispatchSnapshot",
