@@ -1902,7 +1902,6 @@ class Kernel:
         tmps = []
         callbacks = []
 
-        actual_argument_slot = 0
         launch_ctx = t_kernel.make_launch_context()
         if _grid_residency_waves is not None:
             launch_ctx._set_cuda_grid_residency_waves(_grid_residency_waves)
@@ -1910,11 +1909,6 @@ class Kernel:
             launch_ctx._set_cuda_range_work_per_thread_target(
                 _range_work_per_thread_target
             )
-        # LLVM launches use the callable's sized argument buffer through
-        # RuntimeContext, not the historical fixed 64-slot argument array.
-        # Keep the existing guard for other backends until qualified there.
-        max_arg_num = None if _ti_core.arch_uses_llvm(impl.current_cfg().arch) else 64
-        exceed_max_arg_num = False
 
         def set_arg_ndarray(indices, v):
             v_primal = v.arr
@@ -2208,11 +2202,7 @@ class Kernel:
 
         def recursive_set_args(needed, provided, v, indices):
             in_argpack = len(indices) > 1
-            nonlocal actual_argument_slot, exceed_max_arg_num, set_later_list
-            if max_arg_num is not None and actual_argument_slot >= max_arg_num:
-                exceed_max_arg_num = True
-                return 0
-            actual_argument_slot += 1
+            nonlocal set_later_list
             if isinstance(needed, ArgPackType):
                 if not isinstance(v, ArgPack):
                     raise TaichiRuntimeTypeError.get(
@@ -2368,11 +2358,6 @@ class Kernel:
 
         for i, (set_arg_func, params) in enumerate(set_later_list):
             set_arg_func((len(args) - template_num + i,), *params)
-
-        if exceed_max_arg_num:
-            raise TaichiRuntimeError(
-                f"The number of elements in kernel arguments is too big! Do not exceed {max_arg_num} on {_ti_core.arch_name(impl.current_cfg().arch)} backend."
-            )
 
         try:
             prog = impl.get_runtime().prog

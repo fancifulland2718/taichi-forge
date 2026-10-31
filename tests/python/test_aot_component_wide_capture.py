@@ -1,10 +1,11 @@
-"""Sized LLVM argument buffers carry wide captures without truncation."""
+"""Sized backend argument buffers carry wide captures without truncation."""
 
 import numpy as np
+import pytest
 
 import taichi_forge as ti
 from taichi_forge.aot._component import Component, RuntimeValue
-from taichi_forge_runtime.aot import Runtime
+from taichi_forge_runtime.aot import AotError, Runtime
 from tests import test_utils
 
 
@@ -98,7 +99,7 @@ class _WideState:
         builder.dispatch(self.fill)
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_wide_capture_normal_launch_and_loaded_instances(tmp_path):
     first, second = _WideState(3, 5), _WideState(17, 19)
     env = Component.from_owner(first, offset=RuntimeValue(ti.i32))
@@ -115,7 +116,7 @@ def test_wide_capture_normal_launch_and_loaded_instances(tmp_path):
     root.export(module, "wide")
     path = tmp_path / "wide.tcm"
     module.archive(str(path))
-    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    backend = {ti.cpu: "cpu", ti.cuda: "cuda", ti.vulkan: "vulkan"}[ti.cfg.arch]
     ti.reset()
     with Runtime(backend) as runtime:
         component = runtime.load_module(path).component("wide")
@@ -148,7 +149,7 @@ def test_large_argpack_member_count_uses_sized_argument_storage():
     assert total(pack) == -17
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_loaded_graph_named_arguments_use_exported_abi(tmp_path):
     from taichi_forge_runtime.aot import Scalar
 
@@ -164,12 +165,16 @@ def test_loaded_graph_named_arguments_use_exported_abi(tmp_path):
     exported.add_graph("wide", builder.compile())
     path = tmp_path / "named.tcm"
     exported.archive(str(path))
-    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    backend = {ti.cpu: "cpu", ti.cuda: "cuda", ti.vulkan: "vulkan"}[ti.cfg.arch]
     ti.reset()
     with Runtime(backend) as runtime:
         graph = runtime.load_module(path).graph("wide")
         array = runtime.ndarray("i32", 72)
         arguments = dict(out=array, **{"value" + str(i): Scalar("i32", i) for i in range(72)})
+        with pytest.raises(AotError, match="exported Graph ABI"):
+            graph.run(dict(arguments, unknown=Scalar("i32", 0)))
+        with pytest.raises(AotError, match="exported Graph ABI"):
+            graph.prepare(dict(arguments, value71=Scalar("f32", 71.0)))
         graph.run(arguments)
         np.testing.assert_array_equal(np.frombuffer(array.read(), dtype=np.int32), np.arange(72) + 5)
         array.write(bytes(72 * 4))

@@ -463,13 +463,9 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
   if (arg_count > 0) {
     TI_CAPI_ARGUMENT_NULL_RV(args);
   }
-  // LLVM uses the exported callable's sized argument buffer. Its ABI count
-  // check below remains authoritative; it has no fixed 64-slot storage.
-  if (!taichi::arch_uses_llvm(runtime2.arch) &&
-      arg_count > taichi_max_num_args_total) {
-    ti_set_last_error(TI_ERROR_ARGUMENT_OUT_OF_RANGE, "arg_count");
-    return nullptr;
-  }
+  // Both LLVM and GFX use the exported callable's sized argument buffer.
+  // Validate against that ABI after ArgPack expansion below; the historical
+  // 64-slot limit does not describe either backend's argument storage.
 
   const auto &kernel_binding = runtime2.get_kernel(kernel);
   // A validated SNode instance supplies an ABI-identical resource view. The
@@ -861,11 +857,8 @@ std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
   if (arg_count > 0) {
     TI_CAPI_ARGUMENT_NULL_RV(args);
   }
-  if (!taichi::arch_uses_llvm(runtime2.arch) &&
-      arg_count > taichi_max_num_args_total) {
-    ti_set_last_error(TI_ERROR_ARGUMENT_OUT_OF_RANGE, "arg_count");
-    return nullptr;
-  }
+  // Named Graph inputs are a map shared by its dispatches, not a fixed-size
+  // kernel argument array. Each dispatch retains its exported ABI validation.
 
   const auto &graph_binding = runtime2.get_graph(compute_graph);
   auto &graph = *graph_binding.graph;
