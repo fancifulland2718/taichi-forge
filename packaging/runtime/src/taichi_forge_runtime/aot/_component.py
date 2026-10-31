@@ -153,6 +153,32 @@ class Component:
             if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10) or contract["name"] != name:
                 raise ValueError("Unsupported component contract")
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
+            pending = [contract.get("control", {})]
+            native_sort = False
+            while pending:
+                region = pending.pop()
+                pending.extend(region.get("children", ()))
+                if region.get("kind") != "native_sort":
+                    continue
+                native_sort = True
+                operations = region.get("operations")
+                if set(region) != {"kind", "operations"} or not isinstance(operations, list) or not operations:
+                    raise ValueError("Invalid component native sort definition")
+                for operation in operations:
+                    if (operation.get("kind") != "sort" or not {"kind", "keys"} <= set(operation)
+                            or set(operation) - {"kind", "keys", "values"}):
+                        raise ValueError("Invalid component native sort operation")
+                    for port, symbol in operation.items():
+                        if port == "kind":
+                            continue
+                        binding = contract["bindings"].get(symbol, {})
+                        resource = contract["resources"].get(binding.get("name"), {})
+                        if (binding.get("kind") != "resource" or resource.get("kind") != "ndarray"
+                                or len(resource.get("shape", ())) != 1
+                                or port == "keys" and resource.get("element_shape")):
+                            raise ValueError("Component native sort requires declared one-dimensional arrays")
+            if native_sort:
+                capabilities.add("component_native_sort_v1")
             host_resources = contract.get("host_resources", [])
             if host_resource_capability:
                 if (not isinstance(host_resources, list) or not host_resources

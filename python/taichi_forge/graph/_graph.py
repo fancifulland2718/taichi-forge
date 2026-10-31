@@ -16761,6 +16761,8 @@ class Sequential:
         The provider retains responsibility for its submission/completion contract.
         """
         executable = compile_native_graph_node(node)
+        if self._component_capture is not None:
+            return self._append_native_executable(self._component_capture.native(executable))
         if prewarm:
             executable.prewarm()
         return self._append_native_executable(executable)
@@ -18455,6 +18457,9 @@ class GraphBuilder:
             raise TaichiRuntimeError(
                 "Graph native admission must be 'explicit' or 'auto'"
             )
+        if self._component_capture is not None:
+            executable = self._component_capture.native(compile_native_graph_node(node))
+            return self._append_native_executable(executable, admission=admission)
         describe = None if prewarm else getattr(node, "_graph_recipe_description", None)
         executable = None if describe is None else describe()
         if executable is None:

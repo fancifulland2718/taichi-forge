@@ -683,3 +683,23 @@ lowering 分界拒绝。CPU/CUDA 门槛覆盖不同尺寸实例、状态保留�
 独立实例及退休复用既有机制。当前只接受已声明 Dense Field；未声明 Field 或其他
 存储种类明确拒绝。CPU/CUDA 覆盖独立动态组维度、rank-0 状态、Kernel ABI/代码
 不变、双实例及非法保留元数据。
+
+### 组件中的原生排序
+
+正常 `primitive_sequence().sort(...)` 经 `append_native()` 进入组件时，
+编译器复用既有排序导出校验，将已声明的独立 Ndarray 解析为实例资源。
+支持单键、稳定升序、精确精度及 NaN-last 的原生路径；键/值的类型、布局、
+排序策略和工作区仍按原算法校验。其他 native 操作、未声明数组及未取得资格
+的视图明确拒绝。组件录制不执行 `prewarm=True` 请求中的数值操作。
+
+控制合同携带排序及读写依赖，要求 `component_native_sort_v1`。
+原 ExecutionPlan `sort` 在 prepare 时按实例数组的实际长度建立排序调用和
+工作区，不保存 producer 的长度、数组地址或 workspace，不切换模块共享指针。
+准备失败沿原 Runtime 事务清理；已准备调用继续遵守执行域容量与完成票据规则。
+录制所得 native 定义供组件导出使用，不作为独立 JIT 执行对象。
+
+CPU/CUDA 门槛覆盖根顺序及顺序子区域、7 元素产物绑定 257/519 元素、稳定
+排序的 NumPy 对照、异步实例交错与关闭隔离、长度不匹配时的失败释放。
+CUDA 路径检查实际 prepared 的 `cuda_graph` 执行类型；条件循环、外部
+Vulkan 排序 provider 和其他原生算法仍须各自取得资格。这不代表刚体 SAP
+完整根或其性能已通过应用验收。

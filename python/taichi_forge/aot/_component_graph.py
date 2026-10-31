@@ -33,6 +33,7 @@ class _GraphCapture:
         self.build = build
         self.codes = []
         self.dispatches = {}
+        self.natives = {}
         self.groups = {}
         self.fixed_groups = {}
         self.fixed_dependencies = {}
@@ -298,6 +299,23 @@ class _GraphCapture:
         self.bindings[symbol_name] = dict(kind="resource", name=identity)
         return self.symbols.setdefault(symbol_name, Arg(ArgKind.NDARRAY, symbol_name, declaration.dtype, ndim=declaration.ndim))
 
+    def native_array(self, value):
+        aliases = [name for name, declaration in self.component.declarations.items()
+                   if isinstance(declaration, Array) and self.component.available(self.owner, name)
+                   and self.component.read(self.owner, name) is value]
+        if not aliases:
+            raise TaichiCompilationError("Component native arrays require normal ResourceScope ndarray declarations")
+        return self._array_argument(self.component.declarations[aliases[0]], aliases).name
+
+    def native(self, executable):
+        # Concrete providers opt in; inherited hooks cannot hide extra behavior.
+        convert = type(executable).__dict__.get("_capture_component")
+        if convert is None:
+            raise TaichiCompilationError(f"Component native capture is not qualified for {type(executable).__name__}")
+        definition = convert(executable, self)
+        self.natives[definition.graph_ir_node.name] = definition
+        return definition
+
     def retain_host_resources(self, resources):
         """Keep explicitly published normal state without adding kernel inputs.
 
@@ -353,8 +371,6 @@ class _GraphCapture:
     def finish(self, builder):
         if not self.codes:
             raise TaichiCompilationError("Component roots require a nonempty captured dispatch closure")
-        if builder._runtime_graph_source_native_count:
-            raise TaichiCompilationError("Component native regions require separate qualification")
         if self.configuration != self._configuration():
             raise TaichiCompilationError("Component configuration changed while recording its Graph; retry")
         if self._constant_snapshot != self._constant_values():
@@ -495,6 +511,7 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     """
     from taichi_forge.graph._ir import (
         DispatchNode,
+        NativeCallNode,
         GraphAccess,
         SequentialRegion,
         WhileRegion,
@@ -508,6 +525,7 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     for name in set(contract["explicit"]) & set(graph._spec.fixed_runtime_args):
         contract.setdefault("internal_arguments", {})[name] = contract["explicit"].pop(name)
     nodes = []
+    native_nodes = []
     entries_in_order, codes = [], []
     has_control = False
     skipped = 0
@@ -529,6 +547,13 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
             return dict(kind="kernel", semantic_key=code.semantic_key, arguments=entry["arguments"])
         elif isinstance(node, SequentialRegion):
             return dict(kind="sequence", children=[visit(child) for child in node.children])
+        elif isinstance(node, NativeCallNode):
+            definition = capture.natives.get(node.name)
+            if definition is None or node != definition.graph_ir_node:
+                raise TaichiCompilationError("Component Graph contains an unqualified native definition")
+            has_control = True
+            native_nodes.append(node)
+            return dict(kind="native_sort", operations=definition.operations)
         elif isinstance(node, WhileRegion):
             has_control = True
             facts = graph_ir_to_dict(node)
@@ -584,6 +609,7 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     else:
         contract.pop("fixed_groups", None)
     used_symbols = {symbol for entry in entries_in_order for symbol in entry["arguments"]}
+    used_symbols.update(binding.name for node in native_nodes for binding in node.bindings)
     for key in ("bindings", "explicit", "internal_arguments"):
         if key in contract:
             contract[key] = {name: value for name, value in contract[key].items() if name in used_symbols}
@@ -706,6 +732,14 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
         if code.objects:
             entries[-1]["record_presence"] = dict(code.contract["objects"])
             entries[-1]["capture_paths"] = code.contract["access_paths"]
+    for node in native_nodes:
+        for effect in node.effects:
+            binding = contract["bindings"].get(effect.resource)
+            if binding is None or binding["kind"] != "resource":
+                raise TaichiCompilationError("Component native effect has no declared resource")
+            name = binding["name"]
+            previous = accesses.get(name)
+            accesses[name] = effect.access if previous is None else _merge_parallel_access(previous, effect.access)
     for name, resource in contract["resources"].items():
         if name not in uncertain and accesses.get(name) != GraphAccess.OPAQUE:
             access = accesses.get(name)
@@ -713,6 +747,8 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
             resource["effects_precision"] = "compiler_proven"
     contract["version"] = 2
     contract["required_capabilities"].append("component_compiler_facts_v1")
+    if native_nodes:
+        contract["required_capabilities"].append("component_native_sort_v1")
     if has_control or "internal_arguments" in contract or constraints or fixed_groups or lifecycle:
         contract["version"] = 5 if constraints else 4
         contract["control"] = control
