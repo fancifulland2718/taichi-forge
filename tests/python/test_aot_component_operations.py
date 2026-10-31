@@ -139,6 +139,9 @@ def test_host_initialized_operations_keep_required_inputs_and_instance_state(tmp
     ti.reset()
     with Runtime(backend) as runtime, runtime.load_module(artifact) as loaded:
         code = loaded.component('model')
+        assert code.runtime is runtime
+        with pytest.raises(AttributeError):
+            code.runtime = object()
         assert code.setup_entries == () and code.operation_entries == ('refresh',)
         assert code.contract['lifecycle']['initialization'] == 'host_data'
         with pytest.raises(ValueError, match='no registered instance initializer'):

@@ -886,3 +886,7 @@ CPU/CUDA 验证覆盖标量/向量/矩阵记录的独立副本、3→19 代码�
 跨阶段生命周期资格不放宽。默认 replay 不隐式执行命名操作，不引入合成 initializer、
 额外数值 launch 或模块共享实例指针。CPU/CUDA 已验证不同尺寸实例、缺失初态拒绝、
 错误生命周期元数据及 loaded Graph replay。
+
+`Component.runtime` 只读返回经有效性检查的所属 Runtime。Host 接口若同时接收
+用于等待或临时分配的 Runtime，应核对对象身份；后端或设备 UUID 相同不代表同一
+Runtime owner。查询不转移 Runtime 所有权。

@@ -497,6 +497,16 @@ class Component:
             )
 
     @property
+    def runtime(self):
+        """Borrow the owning Runtime for identity checks and cold allocations.
+
+        Ownership remains with the caller that loaded the module. Matching
+        backends or device UUIDs do not make different Runtime owners equal.
+        """
+        self._module._check()
+        return self._module._runtime
+
+    @property
     def contract(self):
         self._module._check()
         return json.loads(self._contract_json)

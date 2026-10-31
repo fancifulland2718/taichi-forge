@@ -1219,3 +1219,8 @@ existing lifetime qualification; the default replay never executes an operation
 implicitly. No synthetic initializer, extra numerical launch, or module-global
 instance pointer is introduced. CPU/CUDA tests cover different-size instances,
 missing initial inputs, malformed lifecycle metadata and loaded Graph replay.
+
+`Component.runtime` is a checked, read-only reference to its owning Runtime. Use
+identity checks when a Host adapter also accepts a Runtime for completion or
+temporary allocations; equal backends/device UUIDs do not imply the same owner.
+The property does not transfer Runtime ownership.
