@@ -87,11 +87,15 @@ def test_record_declaration_rejects_unqualified_layout_before_allocation():
         explicit.struct_field(dict(value=ti.f32), shape=(), layout=ti.Layout.SOA)
     # Reject before allocating unplaced fields or mutating the builder.
     assert not builder.root._get_children()
+    for policy, error in (({"missing": "zero"}, ValueError), ({"value": "sample"}, ValueError), ([], TypeError)):
+        with pytest.raises(error, match="member initialization"):
+            explicit.struct_field(dict(value=ti.f32), shape=(), member_initialization=policy)
+    assert not builder.root._get_children()
 
 
 @ti.data_oriented
 class _RecordArray:
-    def __init__(self, capacity, active, layout=ti.Layout.AOS):
+    def __init__(self, capacity, active, layout=ti.Layout.AOS, member_initialization=None):
         self.capacity, self.active = capacity, active
         builder = None if layout == ti.Layout.SOA else ti.FieldsBuilder()
         scope = ti.experimental.ResourceScope(self, builder=builder)
@@ -99,7 +103,7 @@ class _RecordArray:
         scope.dim("active")
         scope.state = scope.struct_field(
             dict(before=ti.i32, vector=ti.types.vector(3, ti.f32), matrix=ti.types.matrix(2, 2, ti.f32), after=ti.i32),
-            shape=capacity_dim, layout=layout,
+            shape=capacity_dim, layout=layout, member_initialization=member_initialization,
         )
         scope.alias = self.state.vector
         self.tree = None if builder is None else builder.finalize()
@@ -116,6 +120,35 @@ class _RecordArray:
 
     def record(self, builder):
         builder.dispatch(self.step)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_struct_members_keep_distinct_initialization_policies(tmp_path):
+    producer = _RecordArray(3, 3, ti.Layout.SOA, {"matrix": "zero"})
+    root = Component.from_owner(producer).compile_graph(producer.record)
+    module = ti.aot.Module()
+    root.export(module, "mixed")
+    artifact = tmp_path / "mixed.tcm"
+    module.archive(str(artifact))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime:
+        component = runtime.load_module(artifact).component("mixed")
+        vector = component.resource_name(["state", "vector"])
+        matrix = component.resource_name(["state", "matrix"])
+        assert component.resource_name(["alias"]) == vector
+        assert component.contract["resources"][vector]["initialization"] == "consumer_explicit"
+        assert component.contract["resources"][matrix]["initialization"] == "zero"
+        with component.instantiate({"capacity": 7, "active": 5}) as instance:
+            with pytest.raises((ValueError, RuntimeError), match="initializ"):
+                instance.prepare()
+            instance.initialize({vector: np.full((7, 3), 10, np.float32).tobytes()})
+            with instance.prepare() as call:
+                call.run()
+                runtime.wait()
+            expected = np.zeros((7, 2, 2), np.float32)
+            expected[:5, 1, 1] = 13
+            np.testing.assert_array_equal(np.frombuffer(instance.resource(matrix).read(), np.float32).reshape(7, 2, 2), expected)
 
 
 @pytest.mark.parametrize("layout", [ti.Layout.AOS, ti.Layout.SOA], ids=["aos", "soa"])

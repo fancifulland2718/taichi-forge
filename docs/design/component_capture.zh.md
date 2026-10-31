@@ -823,3 +823,10 @@ CPU/CUDA 门槛覆盖重复 while 操作和根/嵌套同名工作区。初始化
 数组视图与普通显式 ndarray 一样按引用传递，嵌套 helper 的写入作用于原资源，
 不会把视图复制成标量。CPU/CUDA 门槛覆盖 scalar/vector/matrix 元素和新尺寸；
 这不改变标量/局部矩阵值参数的复制语义，也不扩大 `real_func` 的调用资格。
+
+正常 `ResourceScope.struct_field(..., member_initialization={"scratch": "zero"})`
+可以为指定成员覆盖组的初始化政策；未列出的成员沿用原 `consumer_explicit` 或
+`zero`。该映射只表达初态责任，保留原 Struct/SNode 布局、别名和寻址。未知成员、
+非法政策在分配前拒绝；固定 Sparse placement 仍使用原空激活合同。已有 Runtime
+按每个资源的原初始化字段执行，不新增 ABI 或逐次调用工作。CPU/CUDA 门槛验证
+required 成员未初始化时拒绝，zero 成员无需 Host 零数组上传，并覆盖动态新尺寸。

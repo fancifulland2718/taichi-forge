@@ -7,6 +7,7 @@ explicit builder preserves the caller's normal SNode ownership boundary.
 
 import inspect
 import operator
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MemberDescriptorType
 
@@ -80,6 +81,8 @@ class ResourceScope:
     The API is experimental; simple dense Fields and whole managed arrays use
     their existing storage contracts.
     """
+
+    struct_member_initialization = True
 
     def __init__(self, owner, *, builder=None, initialization="consumer_explicit"):
         if initialization not in ("consumer_explicit", "zero"):
@@ -441,7 +444,7 @@ class ResourceScope:
         registry.setdefault("borrowed", {})[name] = declaration
         return field
 
-    def _create(self, factory, args, kwargs):
+    def _create(self, factory, args, kwargs, *, member_initialization=None):
         if self._read_only:
             raise TypeError("A declared record scope describes existing resources; it cannot allocate Fields")
         kwargs = dict(kwargs)
@@ -449,7 +452,10 @@ class ResourceScope:
         if initialization not in ("consumer_explicit", "zero"):
             raise ValueError("Resource initialization must be 'consumer_explicit' or 'zero'")
         placement = kwargs.pop("placement", None)
-        if placement is not None and initialization != "consumer_explicit":
+        if placement is not None and (
+            initialization != "consumer_explicit"
+            or any(value != "consumer_explicit" for value in (member_initialization or {}).values())
+        ):
             raise ValueError("Fixed SNode placement retains its empty activation initialization contract")
         shape = kwargs.get("shape")
         if shape is None:
@@ -512,7 +518,8 @@ class ResourceScope:
             members = ((None, field),)
         for identity, member in members:
             member._logical_resource_declaration = dict(
-                identity=identity, shape=shape, source=source, initialization=initialization)
+                identity=identity, shape=shape, source=source,
+                initialization=(member_initialization or {}).get(identity, initialization))
             # A Field alias in another declared child keeps the allocation
             # site's dimension namespace, just like a StructField member.
             member._logical_shape_namespace = self._registry
@@ -576,13 +583,15 @@ class ResourceScope:
 
         return self._create(Matrix.field, args, kwargs)
 
-    def struct_field(self, members, **kwargs):
+    def struct_field(self, members, *, member_initialization=None, **kwargs):
         """Declare a flat record at its normal allocation site.
 
         Member Field access and aliases retain the original shared placement.
         Implicit-root SOA uses Struct.field's ordinary per-member placement;
         explicit groups/placement currently require AOS. Whole Struct element
         indexing requires fixed-SNode capture; nested records are unqualified.
+        ``member_initialization`` overrides the scope/record policy for named
+        members without changing their normal placement or allocation.
         """
         from taichi_forge.lang.enums import Layout
         from taichi_forge.lang.struct import Struct, StructType
@@ -594,4 +603,12 @@ class ResourceScope:
             or any(isinstance(dtype, StructType) for dtype in members.values())
         ):
             raise ValueError("ResourceScope struct_field requires a flat plain record with an explicit shape")
-        return self._create(Struct.field, (members,), kwargs)
+        if member_initialization is not None:
+            if not isinstance(member_initialization, Mapping):
+                raise TypeError("Struct member initialization requires a mapping")
+            member_initialization = dict(member_initialization)
+            if any(name not in members for name in member_initialization):
+                raise ValueError("Struct member initialization names an unknown member")
+            if any(value not in ("consumer_explicit", "zero") for value in member_initialization.values()):
+                raise ValueError("Struct member initialization must be 'consumer_explicit' or 'zero'")
+        return self._create(Struct.field, (members,), kwargs, member_initialization=member_initialization)
