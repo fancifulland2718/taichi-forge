@@ -106,6 +106,20 @@ def test_compact_occlusion_prepared_graph_updates_and_lifetime(instanced, monkey
                 np.testing.assert_array_equal(replacement.to_numpy(), [1, 0, 0, 0])
         graph.close()
         graph = None
+        # A consumer can retain the legacy Graph route even with a capable adapter.
+        from taichi_forge.hardware import _optix_fixed_query
+        with monkeypatch.context() as patched:
+            patched.setattr(_optix_fixed_query, "prepare_fixed_query", no_prepare)
+            disabled = scene.record_occlusion(4, graph_fixed_query=False)
+            builder = ti.graph.GraphBuilder()
+            builder.append_native(disabled, admission="explicit")
+            graph = builder.compile()
+            graph.submit(graph.bind(dict(rays=rays, occluded=replacement))).wait()
+            np.testing.assert_array_equal(replacement.to_numpy(), [1, 0, 0, 0])
+            with pytest.raises(TypeError, match="graph_fixed_query"):
+                scene.record_occlusion(4, graph_fixed_query=1)
+        graph.close()
+        graph = None
         scene.close()
         with pytest.raises(RuntimeError, match="closed"):
             prepared()

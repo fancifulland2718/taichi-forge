@@ -147,6 +147,13 @@ def test_face_candidates_continue_and_clear_misses(instanced, triangle_count, po
             shadow()
             ti.sync()
         _check(hits, ids, flags, expected)
+        from taichi_forge.hardware import _optix_fixed_query
+        with monkeypatch.context() as patched:
+            patched.setattr(_optix_fixed_query, "prepare_fixed_query", no_prepare)
+            legacy = scene.record_typed(len(_RAYS), face_rules=face_rules, graph_fixed_query=False)
+            legacy.prepare_graph_execute(dict(rays=rays, hits=hits, hit_indices=ids, **bindings))()
+            ti.sync()
+        _check(hits, ids, flags, expected)
         # Reuse every output buffer after a hit; misses must overwrite all lanes.
         misses = _RAYS.copy()
         misses[:, 0] = 4

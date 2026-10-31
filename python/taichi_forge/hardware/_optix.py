@@ -1157,8 +1157,12 @@ class OptixRayQueryRecording(BackendCommandRecording):
         alpha_masks=None,
         face_rules=None,
         any_hit=False,
+        graph_fixed_query=True,
         _occlusion=False,
     ):
+        if not isinstance(graph_fixed_query, bool):
+            raise TypeError("OptiX graph_fixed_query must be a bool")
+        self.graph_fixed_query = graph_fixed_query
         if not isinstance(scene, (OptixTriangleScene, OptixInstanceScene)):
             raise TypeError("OptiX ray query recording requires an OptiX scene")
         if _occlusion:
@@ -1471,7 +1475,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
         descriptions = self._binding_descriptions(bindings)
         from ._optix_fixed_query import prepare_fixed_query
 
-        fixed = prepare_fixed_query(self, bindings, descriptions) if _fixed_query else None
+        fixed = prepare_fixed_query(self, bindings, descriptions) if _fixed_query and self.graph_fixed_query else None
         if fixed is not None:
             return fixed
         if self.alpha_masks is not None or self._occlusion or self.face_rules is not None:
@@ -2484,6 +2488,7 @@ class OptixInstanceScene:
         alpha_masks=None,
         face_rules=None,
         any_hit=False,
+        graph_fixed_query=True,
     ):
         """Record typed hits, optionally filtering each instance's alpha mask.
 
@@ -2503,9 +2508,11 @@ class OptixInstanceScene:
             alpha_masks=alpha_masks,
             face_rules=face_rules,
             any_hit=any_hit,
+            graph_fixed_query=graph_fixed_query,
         )
 
-    def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None, face_rules=None):
+    def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None, face_rules=None,
+                         graph_fixed_query=True):
         """Write one i32/u32 flag per ray: 1 for an accepted hit, 0 for a miss.
 
         Fixed bindings accept contiguous scalar (N,) or (N,1) storage. Optional
@@ -2524,6 +2531,7 @@ class OptixInstanceScene:
             face_rules=face_rules,
             any_hit=True,
             _occlusion=True,
+            graph_fixed_query=graph_fixed_query,
         )
 
     def trace_typed(self, rays, hits, hit_indices):
@@ -2763,6 +2771,7 @@ class OptixTriangleScene:
         alpha_masks=None,
         face_rules=None,
         any_hit=False,
+        graph_fixed_query=True,
     ):
         """Record f32 (t,u,v,0) and i32/u32 (primitive,instance,custom,hit).
 
@@ -2783,9 +2792,11 @@ class OptixTriangleScene:
             alpha_masks=alpha_masks,
             face_rules=face_rules,
             any_hit=any_hit,
+            graph_fixed_query=graph_fixed_query,
         )
 
-    def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None, face_rules=None):
+    def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None, face_rules=None,
+                         graph_fixed_query=True):
         """Write one i32/u32 flag per ray without producing full hit records.
 
         Output is contiguous scalar (N,) or (N,1) storage: 1 for the first
@@ -2803,6 +2814,7 @@ class OptixTriangleScene:
             face_rules=face_rules,
             any_hit=True,
             _occlusion=True,
+            graph_fixed_query=graph_fixed_query,
         )
 
     def trace_typed(self, rays, hits, hit_indices):

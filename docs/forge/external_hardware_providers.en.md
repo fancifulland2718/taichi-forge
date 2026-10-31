@@ -892,6 +892,11 @@ It remains runtime-ordered, not CUDA Graph capture. Older adapters without the
 
 #### Fixed query bindings and submission
 
+`record_typed(..., graph_fixed_query=False)` and
+`record_occlusion(..., graph_fixed_query=False)` explicitly retain the legacy JIT
+Graph submission path, including on capable adapters. The default is `True`.
+This is a JIT binding policy; it does not change query results or AOT plan lowering.
+
 Adapters with fixed-query revision 1 can freeze pointers and parameters for opaque
 typed and compact occlusion queries, including candidate face rules, while preparing
 a Graph binding. JIT prepared queries and native execution plans consume the same

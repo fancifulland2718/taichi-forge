@@ -697,6 +697,11 @@ builder.append_native(query, admission="explicit")
 
 #### 固定查询绑定与提交
 
+`record_typed(..., graph_fixed_query=False)` 与
+`record_occlusion(..., graph_fixed_query=False)` 可显式保留旧 JIT Graph 提交路径，
+即使 adapter 支持固定查询也不自动启用。默认值为 `True`；该参数只控制 JIT binding
+策略，不改变查询语义或 AOT 执行计划的 lowering。
+
 支持 fixed-query revision 1 的 adapter 可在 Graph binding 准备阶段固定 opaque typed
 与紧凑遮挡查询的指针和参数，包括候选面规则。JIT prepared query 与原生执行计划消费
 同一 provider 扩展；各绑定仍独立拥有参数和借用存储的生命周期。暖态 replay 不重复
