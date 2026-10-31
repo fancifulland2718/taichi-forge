@@ -223,3 +223,40 @@ def test_legacy_import_of_same_frontend_is_a_dsl_module():
     assert code.run(environment, owner, 13) == 13.0
     with pytest.raises(ti.TaichiCompilationError, match="undeclared global/closure capture 'unrelated'"):
         environment.compile(owner.invalid, 7)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, fast_math=False)
+def test_svd_intrinsic_results_are_inline_arguments_not_model_captures():
+    @ti.data_oriented
+    class Model:
+        def __init__(self, matrices):
+            self.source = ti.Matrix.ndarray(3, 3, ti.f32, len(matrices))
+            self.u = ti.Matrix.ndarray(3, 3, ti.f32, len(matrices))
+            self.s = ti.Matrix.ndarray(3, 3, ti.f32, len(matrices))
+            self.v = ti.Matrix.ndarray(3, 3, ti.f32, len(matrices))
+            self.source.from_numpy(matrices)
+
+        @ti.kernel
+        def decompose(self):
+            for i in range(self.source.shape[0]):
+                self.u[i], self.s[i], self.v[i] = ti.svd(self.source[i])
+
+    matrix = ti.types.matrix(3, 3, ti.f32)
+    environment = Component(**{name: Array(matrix, 1) for name in ("source", "u", "s", "v")})
+    matrices = np.array([[[1, .3, -.2], [0, 1.2, .1], [.1, 0, .8]],
+                         np.diag([-.5, 2., 1.5]), np.diag([0., 1., 1.])], dtype=np.float32)
+    owners = [Model(matrices[:1]), Model(matrices)]
+    code = environment.compile(owners[0].decompose)
+    assert environment.compile(owners[1].decompose) is code
+    assert {capture[0] for capture in code.contract["captures"]} == {"source", "u", "s", "v"}
+    for owner in owners:
+        code.run(environment, owner)
+        u, s, v = (getattr(owner, name).to_numpy() for name in ("u", "s", "v"))
+        source = owner.source.to_numpy()
+        np.testing.assert_allclose(u @ s @ v.transpose(0, 2, 1), source, atol=2e-5, rtol=2e-5)
+        identity = np.broadcast_to(np.eye(3), u.shape)
+        np.testing.assert_allclose(u.transpose(0, 2, 1) @ u, identity, atol=2e-5)
+        np.testing.assert_allclose(v.transpose(0, 2, 1) @ v, identity, atol=2e-5)
+        expected = np.linalg.svd(source, compute_uv=False)
+        actual = np.sort(np.abs(np.diagonal(s, axis1=1, axis2=2)), axis=1)[:, ::-1]
+        np.testing.assert_allclose(actual, expected, atol=2e-5, rtol=2e-5)

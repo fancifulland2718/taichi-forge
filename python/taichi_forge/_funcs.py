@@ -157,6 +157,22 @@ def _svd2d(A, dt):
     return U, Matrix([[s1, ops.cast(0, dt)], [ops.cast(0, dt), s2]], dt=dt), V
 
 
+@func
+def _svd3d_result(dt: template(), entries: template()):
+    # These are expressions produced by this invocation of the SVD intrinsic,
+    # not Python closure state. Pass them through the normal inline ABI so a
+    # deployment capture does not mistake them for undeclared model constants.
+    U = Matrix.zero(dt, 3, 3)
+    V = Matrix.zero(dt, 3, 3)
+    sigma = Matrix.zero(dt, 3, 3)
+    for i in static(range(3)):
+        for j in static(range(3)):
+            U[i, j] = entries[i * 3 + j]
+            V[i, j] = entries[9 + i * 3 + j]
+        sigma[i, i] = entries[18 + i]
+    return U, sigma, V
+
+
 def _svd3d(A, dt, iters=None):
     """Perform singular value decomposition (A=USV^T) for 3x3 matrix.
 
@@ -182,23 +198,7 @@ def _svd3d(A, dt, iters=None):
     else:
         rets = get_runtime().compiling_callable.ast_builder().sifakis_svd_f64(A.ptr, iters)
     assert len(rets) == 21
-    U_entries = rets[:9]
-    V_entries = rets[9:18]
-    sig_entries = rets[18:]
-
-    @func
-    def get_result():
-        U = Matrix.zero(dt, 3, 3)
-        V = Matrix.zero(dt, 3, 3)
-        sigma = Matrix.zero(dt, 3, 3)
-        for i in static(range(3)):
-            for j in static(range(3)):
-                U[i, j] = U_entries[i * 3 + j]
-                V[i, j] = V_entries[i * 3 + j]
-            sigma[i, i] = sig_entries[i]
-        return U, sigma, V
-
-    return get_result()
+    return _svd3d_result(dt, rets)
 
 
 @func
