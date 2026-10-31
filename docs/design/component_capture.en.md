@@ -1091,3 +1091,27 @@ Unsupported sources and undeclared resources reject; private extents remain posi
 under the existing allocation contract. CPU/CUDA gates cover 7-element production,
 11/37-element instances, repeated private regions, interleaved calls and malformed
 shape metadata. These gates do not qualify an application's conditional solver.
+
+
+### Declared Host owner sequences
+
+`scope.owner_sequence("solvers", self.solvers)` exposes a normal plain list or
+tuple of already declared resource owners. The compiler follows each owner's
+existing declarations and original SNode groups; it does not build a second
+application dispatch table. Declare the collection again after changing its
+composition, and finish ordinary lazy resource preparation before capture.
+Changing membership while recording is rejected, including same-length reorder.
+
+This is a Host composition namespace, not a device-indexable container. Each
+Kernel retains only its actual dependencies; adding an unrelated owner or changing
+another owner's configuration does not widen that Kernel's ABI or code identity.
+The Graph separately admits the used collection length as a static configuration.
+`configuration_sources()` reports `kind="sequence_length"`; the caller supplies
+its actual model composition length to the existing configuration admission.
+
+Source paths contain attribute-name strings and explicit nonnegative integer
+positions, for example `["simulator", "solvers", 0, "n_bodies"]`. These queries
+require `component_owner_sequence_sources_v1`; older runtimes reject the new
+contract. No new native resource layout or execution interpreter is introduced.
+CPU/CUDA gates cover cross-size reuse, independent instances, compilation guards,
+wrong composition rejection and the existing non-indexable-device restriction.

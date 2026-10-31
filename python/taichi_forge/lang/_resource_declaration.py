@@ -146,7 +146,7 @@ class ResourceScope:
 
         if not isinstance(name, str) or not name.isidentifier():
             raise ValueError("A value declaration requires an explicit owner attribute name")
-        if any(name in self._registry.get(kind, {}) for kind in ("fields", "arrays", "dimensions", "records", "borrowed")):
+        if any(name in self._registry.get(kind, {}) for kind in ("fields", "arrays", "dimensions", "records", "borrowed", "owner_sequences")):
             raise ValueError(f"Normal attribute {name!r} already has a resource or dimension role")
         # Validate the existing contract without wrapping/replacing normal JIT
         # values or evaluating arbitrary Python descriptors. An absent optional
@@ -340,6 +340,32 @@ class ResourceScope:
         for key, item in dict(_owner=value, _builder=None, _registry=registry, _read_only=True, _parent=self).items():
             object.__setattr__(child, key, item)
         return child
+
+    def owner_sequence(self, name, values):
+        """Declare an existing list/tuple of normal resource owners.
+
+        The sequence is a Host composition namespace, not a device array or a
+        new storage owner. Re-declare after changing its composition. Entries
+        keep their own declarations and ordinary resource lifetimes.
+        """
+        if not isinstance(name, str) or not name.isidentifier() or type(values) not in (list, tuple):
+            raise TypeError("Owner sequences require an attribute name and a plain list/tuple")
+        for value in values:
+            if inspect.getattr_static(value, "_forge_resource_declarations", None) is None:
+                raise ValueError("Owner sequence entries require normal resource declarations")
+        if any(name in self._registry.get(kind, {}) for kind in
+               ("fields", "arrays", "dimensions", "records", "borrowed", "values")):
+            raise ValueError(f"Normal attribute {name!r} already has another declaration role")
+        if self._read_only:
+            if getattr(self._owner, name) is not values:
+                raise ValueError("An owner sequence must refer to its existing member")
+        else:
+            setattr(self._owner, name, values)
+        caller = inspect.currentframe().f_back
+        self._registry.setdefault("owner_sequences", {})[name] = dict(
+            length=len(values), source=(caller.f_code.co_filename, caller.f_lineno)
+        )
+        del caller
 
     def parent_dim(self, name):
         """Explicitly relate a read-only record's layout to its parent count."""

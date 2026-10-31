@@ -777,3 +777,22 @@ lowering 后的 Plan 核对。仅提供 shape 的资源进入布局/资源闭包
 未声明资源明确拒绝；私有 extent 沿用既有正数分配合同。CPU/CUDA 门槛覆盖 7 元素
 导出、11/37 元素实例、重复私有区域、交错调用及非法 shape 元数据；这些结果不代表
 应用条件求解器已取得资格。
+
+
+### 正常 Host 所有者序列
+
+`scope.owner_sequence("solvers", self.solvers)` 显式声明普通 list/tuple 中的已声明
+资源所有者。编译器沿各对象原有声明与 SNode 组收集闭包，不维护另一份应用执行表。
+集合组成改变后应重新声明；冻结组件前先完成正常惰性资源准备。构图期间增删或
+同长度重排成员均会被拒绝。
+
+这是 Host 组成命名空间，不提供设备动态下标。每个 Kernel 只保留实际依赖，新增
+无关所有者或改变另一个所有者的静态配置不会扩大其 ABI 或改变代码身份。Graph
+另行把实际使用的集合长度纳入已有静态准入；`configuration_sources()` 返回
+`kind="sequence_length"`，消费者提供真实模型的组成数量，不能直接沿用 producer 值。
+
+来源路径由属性名字符串和明确的非负整数位置组成，例如
+`["simulator", "solvers", 0, "n_bodies"]`。新查询合同要求
+`component_owner_sequence_sources_v1`，旧 Runtime 明确拒绝；没有新增 native 布局
+或执行解释器。CPU/CUDA 门槛覆盖跨尺寸复用、独立实例、编译 guard、错误组成拒绝
+以及沿用既有的设备下标拒绝。Vulkan 仍需单独取得运行资格。

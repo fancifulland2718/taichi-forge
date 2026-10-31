@@ -7,7 +7,7 @@ from types import MappingProxyType
 import weakref
 
 from .._dimensions import check_constraints, evaluate_extent, extent_dependencies, validate_constraints, validate_extent
-from ._component_info import _read_contract, _configuration, _check_configuration
+from ._component_info import _read_contract, _configuration, _check_configuration, _valid_source_path
 
 
 def _control_identity(contract):
@@ -77,8 +77,8 @@ def _validate_input_sources(contract):
                 raise ValueError("Invalid component borrowed input member")
         elif kind != "attribute":
             raise ValueError("Invalid component input source kind")
-        if (set(source) != keys or not isinstance(source.get("path"), list) or not source["path"]
-                or any(not isinstance(part, str) or not part.isidentifier() for part in source["path"])):
+        if (set(source) != keys or not _valid_source_path(source.get("path"), indexed=(
+                "component_owner_sequence_sources_v1" in contract["required_capabilities"]))):
             raise ValueError("Invalid component input source path")
 
     for role in ("dimensions", "values"):
@@ -105,6 +105,8 @@ class Component:
             host_resource_capability = "component_host_resources_v1" in contract["required_capabilities"]
             private_shape_capability = "component_private_array_extents_v1" in contract["required_capabilities"]
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
+            if "component_owner_sequence_sources_v1" in contract["required_capabilities"]:
+                capabilities.add("component_owner_sequence_sources_v1")
             if private_shape_capability:
                 capabilities.add("component_private_array_extents_v1")
             pending = [contract.get("control", {})]

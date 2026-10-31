@@ -134,6 +134,13 @@ def _code_definition(code):
 
 def _member(owner, name):
     # Deployment compilation must not execute arbitrary properties/descriptors.
+    if type(owner) in (list, tuple):
+        if not name.startswith("item_") or not name[5:].isdigit():
+            raise TaichiCompilationError("Owner sequences only expose declared item positions")
+        try:
+            return owner[int(name[5:])]
+        except IndexError as error:
+            raise TaichiCompilationError("Owner sequence composition changed; rebuild its declaration") from error
     descriptor = inspect.getattr_static(owner, name)
     if isinstance(descriptor, MemberDescriptorType):
         # Built-in slots read stored state; properties/custom descriptors can
@@ -430,6 +437,20 @@ class Record:
         return ("record", self.optional)
 
 
+class _OwnerSequence(Record):
+    """A fixed Host composition of declared owners; no device subscript ABI."""
+
+    @property
+    def schema(self):
+        # A child Kernel only depends on its traversed namespace. Collection
+        # length belongs to the recorded Graph's static admission contract.
+        return ("owner_sequence",)
+
+    def validate(self, value):
+        if type(value) not in (list, tuple) or len(value) != len(self.members):
+            raise TaichiCompilationError("Owner sequence composition changed; rebuild its declaration")
+
+
 @dataclass(frozen=True)
 class _RecordReference:
     path: tuple
@@ -667,9 +688,32 @@ class Component:
             except (AttributeError, KeyError, ValueError) as error:
                 raise TaichiCompilationError(f"Borrowed resource {'.'.join(anchor_path)!r}: {error}") from error
             return field
+        prefix = ()
         for part in self._paths.get(name, (name,)):
             owner = _member(owner, part)
+            prefix = (*prefix, part)
+            declaration = self.declarations.get(_capture_id(prefix))
+            if isinstance(declaration, _OwnerSequence):
+                declaration.validate(owner)
         return owner
+
+    def source_path(self, path):
+        """Project attribute names and explicit integer sequence positions."""
+        result = []
+        for index, part in enumerate(path):
+            parent = self.declarations.get(_capture_id(path[:index])) if index else None
+            result.append(int(part[5:]) if isinstance(parent, _OwnerSequence) else part)
+        return result
+
+    def _validate_owner_sequences(self, owner):
+        for name, declaration in self.declarations.items():
+            if isinstance(declaration, _OwnerSequence) and self.available(owner, name):
+                declaration.validate(self.read(owner, name))
+
+    def _owner_sequence_snapshot(self, owner):
+        self._validate_owner_sequences(owner)
+        return {name: tuple(self.read(owner, name)) for name, declaration in self.declarations.items()
+                if isinstance(declaration, _OwnerSequence) and self.available(owner, name)}
 
     def available(self, owner, name):
         for part in self._paths.get(name, (name,))[:-1]:
@@ -693,7 +737,7 @@ class Component:
 
         impl.get_runtime().materialize(for_aot=True)
         declarations, sources, roots, fields, borrowed, arrays = {}, {}, {}, [], [], []
-        inherited_dimensions, record_options, constraints = {}, {}, {}
+        inherited_dimensions, record_options, constraints, owner_sequences = {}, {}, {}, {}
         derived_attributes = set()
         namespaces, record_shapes, record_extents, array_declarations = {}, {}, {}, {}
 
@@ -725,7 +769,7 @@ class Component:
                     source=constraint["source"],
                 )
             occupied = set()
-            for kind in ("fields", "arrays", "dimensions", "records", "borrowed", "values"):
+            for kind in ("fields", "arrays", "dimensions", "records", "borrowed", "values", "owner_sequences"):
                 names = registry.get(kind, {}).keys()
                 if occupied.intersection(names):
                     raise ValueError(f"Conflicting normal declaration roles: {sorted(occupied.intersection(names))!r}")
@@ -771,6 +815,17 @@ class Component:
                     (*ancestors, current),
                     registry.get("record_declarations", {}).get(name),
                 )
+            for name, declaration in registry.get("owner_sequences", {}).items():
+                values = _member(current, name)
+                if type(values) not in (list, tuple) or len(values) != declaration["length"]:
+                    raise TaichiCompilationError("Owner sequence composition changed; redeclare before capture")
+                path = (*prefix, name)
+                owner_sequences[_capture_id(path)] = declaration["length"]
+                sources[_capture_id(path)] = declaration["source"]
+                members[name] = {
+                    f"item_{index}": collect(value, (*path, f"item_{index}"), (*ancestors, current))
+                    for index, value in enumerate(values)
+                }
             return members
 
         declarations = collect(owner)
@@ -864,7 +919,8 @@ class Component:
                     )
                     if not isinstance(overlay, Record):
                         raise TypeError(f"Normal resource record {name!r} requires Record value declarations")
-                    result[name] = Record(
+                    record_type = _OwnerSequence if _capture_id((*prefix, name)) in owner_sequences else Record
+                    result[name] = record_type(
                         optional=overlay.optional, **complete(declaration, overlay.members, (*prefix, name))
                     )
                 else:

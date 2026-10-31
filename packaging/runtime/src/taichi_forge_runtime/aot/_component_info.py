@@ -11,6 +11,15 @@ from zipfile import ZipFile
 from .._static_values import read_static_key, static_key
 
 
+def _valid_source_path(path, *, indexed=False):
+    # Attribute segments remain identifiers; integers explicitly denote a
+    # position in a declared ordinary owner sequence. Never evaluate a getter.
+    return (isinstance(path, list) and bool(path)
+            and isinstance(path[0], str) and path[0].isidentifier()
+            and all(isinstance(part, str) and part.isidentifier()
+                    or indexed and type(part) is int and part >= 0 for part in path))
+
+
 def _read_document(path, relative):
     path = Path(path).resolve(strict=True)
     if path.is_dir():
@@ -122,9 +131,11 @@ def _configuration(contract):
         for source in configuration_sources.values():
             if (
                 not isinstance(source, dict) or set(source) != {"kind", "path"}
-                or source["kind"] not in ("attribute", "recording_argument")
-                or not isinstance(source["path"], list) or not source["path"]
-                or any(not isinstance(part, str) or not part.isidentifier() for part in source["path"])
+                or source["kind"] not in ("attribute", "recording_argument", "sequence_length")
+                or source["kind"] == "sequence_length" and
+                    "component_owner_sequence_sources_v1" not in contract["required_capabilities"]
+                or not _valid_source_path(source["path"], indexed=(
+                    "component_owner_sequence_sources_v1" in contract["required_capabilities"]))
                 or source["kind"] == "recording_argument" and len(source["path"]) != 1
             ):
                 raise ValueError("Invalid component configuration source path")

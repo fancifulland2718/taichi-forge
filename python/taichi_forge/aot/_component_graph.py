@@ -30,6 +30,9 @@ class _GraphCapture:
     def __init__(self, component, record, args=(), kwargs=None, build=None):
         self.component = component
         self.owner = getattr(record, "__self__", None)
+        if self.owner is not None:
+            component._validate_owner_sequences(self.owner)
+        self._owner_sequences = None if self.owner is None else component._owner_sequence_snapshot(self.owner)
         self.build = build
         self.codes = []
         self.dispatches = {}
@@ -122,6 +125,8 @@ class _GraphCapture:
             self.owner = owner
         if self.owner is None:
             raise TaichiCompilationError("A component Graph root requires a declared resource owner")
+        if self._owner_sequences is None:
+            self._owner_sequences = self.component._owner_sequence_snapshot(self.owner)
         if owner is not None:
             self.component._entry_owner_path(self.owner, owner)
         owner = self.owner
@@ -407,6 +412,11 @@ class _GraphCapture:
         return symbols
 
     def finish(self, builder):
+        self.component._validate_owner_sequences(self.owner)
+        for name, previous in (self._owner_sequences or {}).items():
+            current = self.component.read(self.owner, name)
+            if len(current) != len(previous) or any(a is not b for a, b in zip(current, previous)):
+                raise TaichiCompilationError("Owner sequence members changed while recording its Graph; retry")
         if not self.codes:
             raise TaichiCompilationError("Component roots require a nonempty captured dispatch closure")
         if self.configuration != self._configuration():
@@ -902,6 +912,21 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
             for name, spec in capture.configuration.items()
             if not capture._choices[name].kernel_only or name in used_static
         }
+        # Collection membership is a normal Host algorithm choice. Reuse
+        # static admission for its length, without adding a Kernel argument.
+        used_names = set(contract["dimensions"]) | set(contract["values"])
+        used_names.update(alias for resource in contract["resources"].values() for alias in resource["aliases"])
+        used_names.update(name for code in capture.codes for name in code.objects)
+        used_paths = [component._source_scope_paths.get(name, component._paths.get(name, ())) for name in used_names]
+        sequences = {
+            name: values for name, values in (capture._owner_sequences or {}).items()
+            if any(path[:len(component._paths[name])] == component._paths[name] for path in used_paths)
+        }
+        if sequences:
+            from taichi_forge.aot._component import _static_value
+            for name, values in sequences.items():
+                value = _static_value(len(values))
+                configuration[name] = dict(selected=value, choices=[value])
         if configuration:
             # Admission describes the whole normal root, including Python choices
             # which may alter its dispatch sequence. It never widens a kernel ABI
@@ -915,8 +940,9 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
         # Recording options belong to the root call, not to the model owner.
         contract["compilation"]["configuration_sources"] = {
             name: dict(
-                kind="recording_argument" if isinstance(capture._choices[name], RootOption) else "attribute",
-                path=list(component._paths[name]),
+                kind=("sequence_length" if name in sequences else
+                      "recording_argument" if isinstance(capture._choices[name], RootOption) else "attribute"),
+                path=component.source_path(component._paths[name]),
             )
             for name in configuration
         }
@@ -924,6 +950,12 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
             _build.check_time("after backend compilation")
         field_io = _compile_fixed_field_io(component, capture.owner, contract, _build)
         contract["compilation"]["input_sources"] = _input_sources(component, contract)
+        sources = contract["compilation"]["input_sources"]
+        paths = [*contract["compilation"]["configuration_sources"].values(),
+                 *sources["dimensions"].values(), *sources["values"].values(),
+                 *(source for aliases in sources["resources"].values() for source in aliases.values())]
+        if sequences or any(type(part) is int for source in paths for part in source["path"]):
+            contract["required_capabilities"].append("component_owner_sequence_sources_v1")
         if initialization_nodes:
             # Version 8 adds lifecycle to the same compiler projection. Empty
             # optional resource families stay empty, rather than acquiring a
@@ -966,19 +998,19 @@ def _input_sources(component, contract):
     def source(name, *, fixed=False):
         allocation = component._source_scope_paths.get(name)
         if allocation is not None:
-            return dict(kind="attribute", path=list(allocation))
+            return dict(kind="attribute", path=component.source_path(allocation))
         borrowed = component._borrowed_reads.get(name)
         if borrowed is not None:
             anchor, anchor_member, member, _ = borrowed
             if member == anchor_member:
-                return dict(kind="attribute", path=list(anchor))
-            return dict(kind="borrowed_group_member", path=list(anchor), member=member)
+                return dict(kind="attribute", path=component.source_path(anchor))
+            return dict(kind="borrowed_group_member", path=component.source_path(anchor), member=member)
         path = component._paths.get(name)
         if path is None and fixed:
             path = readable.get(name)
         if path is None:
             raise TaichiCompilationError(f"Missing component declaration source for {name!r}")
-        return dict(kind="attribute", path=list(path))
+        return dict(kind="attribute", path=component.source_path(path))
 
     return dict(
         # Derived extents are evaluated from their authoritative expressions.
