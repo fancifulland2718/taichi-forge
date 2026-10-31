@@ -142,6 +142,40 @@ class _NestedModel:
         builder.dispatch(self.step)
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_large_constraint_collection_preserves_tail_validation(tmp_path):
+    from taichi_forge_runtime._dimensions import validate_constraints
+
+    model = _BoundedModel(4, 3, budget=16)
+    scope = ti.experimental.ResourceScope(model)
+    for index in range(1100):
+        scope.require_le(f"relation_{index}", scope.dim("active"), scope.dim("capacity"), when="output")
+    scope.require_le("tail_capacity", scope.dim("padding"), scope.dim("capacity"), when="output")
+    root = Component.from_owner(model).compile_graph(model.record)
+    constraints = root.contract["constraints"]
+    assert len(constraints) == 1104
+    invalid = {**constraints, "tail_invalid": dict(left=("dim", "capacity"), right=("const", 8), when="absent")}
+    with pytest.raises(ValueError, match="tail_invalid.*unused trigger"):
+        validate_constraints(invalid, root.contract["dimensions"].keys(), {"output"})
+    invalid["tail_invalid"]["when"] = "output"
+    invalid["tail_invalid"]["left"] = ("dim", "undeclared")
+    with pytest.raises(ValueError, match="tail_invalid.*declared dimensions"):
+        validate_constraints(invalid, root.contract["dimensions"].keys(), {"output"})
+    module = ti.aot.Module()
+    root.export(module, "large")
+    artifact = tmp_path / "large.tcm"
+    module.archive(str(artifact))
+    with Runtime("cpu") as runtime:
+        component = runtime.load_module(artifact).component("large")
+        with pytest.raises(ValueError, match="tail_capacity.*8 > 7"):
+            component.instantiate({"capacity": 7, "active": 5, "padding": 8})
+        with component.instantiate({"capacity": 7, "active": 5, "padding": 0}) as instance:
+            instance.initialize(zero=component.contract["resources"])
+            with instance.prepare() as call:
+                call.run()
+            assert struct.unpack("<7i", instance.resource("output").read()) == (1, 2, 3, 4, 5, 0, 0)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_constraints_guard_real_calls_and_frozen_instances(tmp_path, monkeypatch):
     first, second = _BoundedModel(4, 3), _BoundedModel(7, 5, budget=16)

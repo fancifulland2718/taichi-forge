@@ -95,8 +95,12 @@ def extent_dependencies(expression):
 
 
 def validate_constraints(constraints, dimensions, triggers):
-    """Validate a bounded conjunction of declared dimension inequalities."""
-    if not isinstance(constraints, dict) or len(constraints) > 1024:
+    """Validate declared inequalities without limiting component composition.
+
+    Each expression is independently bounded and checked below. The number of
+    relations grows with legitimate resource borrowing, not an ABI capacity.
+    """
+    if not isinstance(constraints, dict):
         raise ValueError("Invalid component dimension constraints")
     for name, spec in constraints.items():
         if (
