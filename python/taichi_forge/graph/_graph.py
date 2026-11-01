@@ -13185,6 +13185,12 @@ class _GraphSpec:
             key = self.instance_key()
         return _GraphInstance(self, key)
 
+    def _invalidate_runtime(self):
+        # A builder or frozen definition can outlive its Graph wrapper. Its
+        # cached native executables must retire before the Device registry,
+        # even when the wrapper has already left the runtime's weak registry.
+        self.invalidate_runtime()
+
     def invalidate_runtime(self, preserve_executables=False):
         self._temporary_binding_cache.clear()
         self._memory_recipe_binding_cache.clear()
@@ -19437,6 +19443,7 @@ class Graph:
         self._runtime_valid = True
         self._run_impl = self._instance.run_impl
         impl.get_runtime().register_runtime_object(self)
+        impl.get_runtime().register_runtime_object(self._spec)
         # Cold owner association, not a replay validator. A provider that owns
         # addresses embedded in recorded device commands can retire this Graph
         # before freeing its resources. Owners keep weak references only.
