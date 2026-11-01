@@ -44,6 +44,10 @@ class _State:
         builder.dispatch(_copy, template_args=dict(owner=self, source=self.y, target=self.alias_x,
                                                    unused=self.unused_b, increment=2))
 
+    def record_gather(self, builder):
+        result = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, 2)
+        builder.dispatch(_gather_columns, result, template_args=dict(fields=(self.x, self.y)))
+
 
 def _compile(state, *, reverse=False, inplace=False, alternate_unused=False):
     return Component.from_owner(state).compile(
@@ -114,3 +118,84 @@ def test_field_template_rejects_unregistered_and_foreign_resources_without_poiso
     code = _compile(state)
     code.run(environment, state)
     np.testing.assert_array_equal(state.y.to_numpy(), 20)
+
+
+@ti.kernel
+def _gather_columns(fields: ti.template(), output: ti.types.ndarray(dtype=ti.i32, ndim=2)):
+    for row in range(output.shape[0]):
+        for column, source in ti.static(enumerate(fields)):
+            output[row, column] = _read(source, row)
+
+
+@ti.kernel
+def _gather_selected(fields: ti.template(), output: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    for row in range(output.shape[0]):
+        output[row] = _read(fields[0][0], row) + fields[1]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_tuple_field_templates_gather_without_capturing_unused_elements(tmp_path):
+    first, other = _State(3), _State(37)
+    env, second = Component.from_owner(first), Component.from_owner(other)
+    output = ti.ndarray(ti.i32, shape=37)
+    arguments = lambda state, unused, increment=2: dict(
+        fields=((state.x, unused), increment))
+    selected = env.compile(_gather_selected, output, owner=first,
+                           template_args=arguments(first, first.unused_a))
+    assert second.compile(_gather_selected, output, owner=other,
+                          template_args=arguments(other, other.unused_b)) is selected
+    assert len(selected.contract["resource_templates"]) == 1
+    assert len(selected.contract["groups"]) == 1
+    assert len(selected.contract["members"]) == 1
+    other.x.from_numpy(np.arange(37, dtype=np.int32))
+    selected.run(second, other, output)
+    np.testing.assert_array_equal(output.to_numpy(), np.arange(37) + 2)
+    assert second.compile(_gather_selected, output, owner=other,
+                          template_args=arguments(other, other.unused_b, 3)) is not selected
+    # Resource order is semantic even though the tuple holds no owner identity.
+    packed = ti.ndarray(ti.i32, shape=(37, 2))
+    original = second.compile(_gather_columns, packed, owner=other,
+                              template_args=dict(fields=(other.x, other.y)))
+    other.y.from_numpy(np.arange(37, dtype=np.int32) + 100)
+    original.run(second, other, packed)
+    expected = np.stack((np.arange(37), np.arange(37) + 100), axis=1)
+    np.testing.assert_array_equal(packed.to_numpy(), expected)
+    _gather_columns((other.x, other.y), packed)
+    np.testing.assert_array_equal(packed.to_numpy(), expected)
+    swapped = second.compile(_gather_columns, packed, owner=other,
+                             template_args=dict(fields=(other.y, other.x)))
+    assert swapped is not original
+    foreign = _State(3)
+    with pytest.raises(ti.TaichiCompilationError, match="fields.*declared resource of this owner"):
+        env.compile(_gather_selected, output, owner=first,
+                    template_args=dict(fields=((foreign.x, first.unused_a), 2)))
+    assert env.compile(_gather_selected, output, owner=first,
+                       template_args=arguments(first, first.unused_a)) is selected
+
+    root = env.compile_graph(first.record_gather)
+    module = ti.aot.Module()
+    root.export(module, "gather")
+    artifact = tmp_path / "tuple_fields.tcm"
+    module.archive(str(artifact))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime, runtime.load_module(artifact) as loaded:
+        component = loaded.component("gather")
+        with component.instantiate(dict(count=7)) as a, component.instantiate(dict(count=43)) as b:
+            outputs = []
+            try:
+                for state, n in ((a, 7), (b, 43)):
+                    state.initialize({"x": np.arange(n, dtype=np.int32).tobytes(),
+                                      "y": (np.arange(n, dtype=np.int32) + 100).tobytes()})
+                    outputs.append(runtime.ndarray("i32", (n, 2)))
+                with a.prepare(arguments=dict(output=outputs[0])) as pa, \
+                        b.prepare(arguments=dict(output=outputs[1])) as pb:
+                    pa.run()
+                    pb.run()
+                    pa.run()
+                    for n, result in zip((7, 43), outputs):
+                        np.testing.assert_array_equal(np.frombuffer(result.read(), np.int32).reshape(n, 2),
+                                                      np.stack((np.arange(n), np.arange(n) + 100), axis=1))
+            finally:
+                for result in outputs:
+                    result.close()

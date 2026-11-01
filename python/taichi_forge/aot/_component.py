@@ -497,7 +497,8 @@ class _DenseStructFieldOperand:
 
 @dataclass(frozen=True)
 class _ResourceTemplate:
-    slot: int
+    # Argument slot followed by static tuple indices. No live resource owner.
+    slot: tuple
     name: str
     snode_depth: int = None
 
@@ -1202,8 +1203,6 @@ class Component:
     def compile(self, entry, *args, owner=None, template_args=None):
         from taichi_forge.lang.kernel_impl import _process_args, TaichiCallableTemplateMapper
         from taichi_forge.lang._ndarray import Ndarray
-        from taichi_forge.lang.field import Field
-        from taichi_forge.lang.snode import SNode
 
         kernel = getattr(entry, "_primal", None)
         bound_owner = getattr(entry, "_kernel_owner", None)
@@ -1232,29 +1231,9 @@ class Component:
         resource_templates = {}
         for i, (argument, value) in enumerate(zip(kernel.arguments, call_args)):
             if i in slots:
-                record = self._template_record(owner, value) if value is not entry_owner else None
-                if value is not entry_owner and isinstance(value, (Field, SNode)):
-                    if isinstance(value, SNode):
-                        name, depth = self._template_snode(owner, value, argument.name)
-                    else:
-                        name, depth = self._template_resource(owner, value, argument.name), None
-                    resource_templates[i] = name if depth is None else (name, depth)
-                    call_args[i] = _ResourceTemplate(i, name, depth)
-                    # Only actual uses select resource bindings below. An unused
-                    # declared Field template must not specialize the entry.
-                    template_facts.append((i, "resource", None))
-                elif record is not None:
-                    # Free kernels accept declared namespaces just like bound
-                    # child methods. Resolve actual uses through the same AST
-                    # capture path; never retain the live object in cached code.
-                    resource_templates[i] = record
-                    call_args[i] = _ResourceTemplate(i, record)
-                    template_facts.append((i, "record", None))
-                else:
-                    template_facts.append(
-                        (i, "owner" if value is entry_owner else "static",
-                         (entry_path or None) if value is entry_owner else _static_value(value))
-                    )
+                call_args[i], fact = self._template_argument(
+                    owner, entry_owner, entry_path, value, (i,), argument.name, resource_templates)
+                template_facts.append((i, *fact))
                 features.append(None)
             elif isinstance(argument.annotation, NdarrayType):
                 if not isinstance(value, Ndarray):
@@ -1290,6 +1269,35 @@ class Component:
             code = _ComponentCode(kernel, key, context)
             kernel._component_candidates.append(code)
             return code
+
+    def _template_argument(self, owner, entry_owner, entry_path, value, slot, argument, resources):
+        from taichi_forge.lang.field import Field
+        from taichi_forge.lang.snode import SNode
+
+        if value is entry_owner:
+            return value, ("owner", entry_path or None)
+        record = self._template_record(owner, value)
+        if isinstance(value, (Field, SNode)):
+            if isinstance(value, SNode):
+                name, depth = self._template_snode(owner, value, argument)
+            else:
+                name, depth = self._template_resource(owner, value, argument), None
+            resources[slot] = name if depth is None else (name, depth)
+            return _ResourceTemplate(slot, name, depth), ("resource", None)
+        if record is not None:
+            resources[slot] = record
+            return _ResourceTemplate(slot, record), ("record", None)
+        if type(value) is tuple:
+            elements = [self._template_argument(
+                owner, entry_owner, entry_path, item, (*slot, index), f"{argument}[{index}]", resources)
+                for index, item in enumerate(value)]
+            # Keep old all-static signatures. Resource leaves are resolved only
+            # when selected by the normal AST, not when len/iteration sees the
+            # tuple. Unused resource identity/type must not contaminate the ABI.
+            if all(fact[0] == "static" for _, fact in elements):
+                return value, ("static", _static_value(value))
+            return tuple(item for item, _ in elements), ("tuple", tuple(fact for _, fact in elements))
+        return value, ("static", _static_value(value))
 
     def _template_record(self, owner, value):
         if value is None:
@@ -1658,7 +1666,9 @@ class _Capture:
                 (function.__module__, function.__qualname__, name, value)
                 for (function, name), value in self.constants.items())
         if self.resource_templates:
-            self.contract["resource_templates"] = sorted(self.resource_templates.items())
+            self.contract["resource_templates"] = [
+                (path[0] if len(path) == 1 else path, binding)
+                for path, binding in sorted(self.resource_templates.items())]
         if self.fixed_groups:
             self.contract.update(fixed_groups=self.fixed_groups, fixed_members=self.fixed_members,
                                  fixed_captures=[(name, self.used[name]) for name in self.fixed_members])

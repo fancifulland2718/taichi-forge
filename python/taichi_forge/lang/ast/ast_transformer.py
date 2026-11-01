@@ -244,6 +244,8 @@ class ASTTransformer(Builder):
         if ctx.deployment is not None:
             value = ctx.deployment.field_operand(ctx, value)
         node.ptr = impl.subscript(ctx.ast_builder, value, *node.slice.ptr)
+        if ctx.deployment is not None:
+            node.ptr = ctx.deployment.resolve_template(ctx, node.ptr)
         return node.ptr
 
     @staticmethod

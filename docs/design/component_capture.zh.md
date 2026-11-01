@@ -137,6 +137,12 @@ temporal-contact 入口的泛化/加载调用也与普通 JIT 一致，完整 TG
 资源 ABI，也不因选择了另一无关资源而特化代码。实际模板到资源的映射进入代码
 合同，交换 source/target 不会误用旧绑定；未声明或其他 owner 的 Field 明确拒绝。
 CPU/CUDA 已验证内联 helper、别名、新尺寸及冻结 Graph 在同模块双实例中的交错调用。
+不可变 tuple 模板也可包含上述资源、已声明记录及静态值，并允许嵌套 tuple。
+原前端的静态索引、解包与静态遍历选择资源时才生成捕获；读取 tuple 长度不会把
+全部成员加入数值 ABI。tuple 结构和静态值参与特化，实际使用元素的声明路径参与
+绑定身份，未使用资源的替换不会产生新代码。普通可变 list 与未声明资源仍拒绝。
+CPU/CUDA 门槛覆盖嵌套选择、静态遍历、交换元素、未使用成员替换、错误 owner、
+普通 JIT 对照，以及冻结打包读取 Graph 的不同尺寸双实例交错调用。
 GeoPhys 原 CUDA 归并排序阶段也通过新容量消费及独立稳定顺序参考，完整 TGS 根仍未完成。
 
 `ResourceScope.borrow(name, field, dimensions={...})` 声明正常外部 Field 绑定，
