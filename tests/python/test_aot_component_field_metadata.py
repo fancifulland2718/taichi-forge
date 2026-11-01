@@ -1,6 +1,7 @@
 """Captured Field scalar dtype survives lowering and inline helper calls."""
 
 import numpy as np
+import pytest
 import taichi_forge as ti
 from taichi_forge.aot._component import Component
 from tests import test_utils
@@ -98,3 +99,38 @@ def test_captured_fields_remain_references_in_unannotated_inline_parameters():
     array.fill(7)
     ordinary_array(array)
     np.testing.assert_array_equal(array.to_numpy(), 8)
+
+
+@ti.kernel
+def _pack_fields(fields: ti.template(), offsets: ti.template(), output: ti.types.ndarray(ndim=2)):
+    for row in range(output.shape[0]):
+        for column in ti.static(range(len(fields))):
+            if ti.static(hasattr(fields[column], 'n')):
+                for axis in ti.static(range(getattr(fields[column], 'n'))):
+                    output[row, offsets[column] + axis] = fields[column][row][axis]
+            else:
+                output[row, offsets[column]] = fields[column][row]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_tuple_fields_preserve_qualified_element_introspection():
+    for dtype in (ti.i32, ti.f32):
+        state = _TypedState(7, dtype)
+        state.populate()
+        array = ti.ndarray(dtype, (7, 4))
+        env = Component.from_owner(state)
+        code = env.compile(_pack_fields, array, owner=state,
+                           template_args=dict(fields=(state.scalar, state.vector), offsets=(0, 1)))
+        expected = np.column_stack((state.scalar.to_numpy(), state.vector.to_numpy()))
+        for execute in (lambda: code.run(env, state, array),
+                        lambda: _pack_fields((state.scalar, state.vector), (0, 1), array)):
+            execute()
+            np.testing.assert_array_equal(array.to_numpy(), expected)
+
+    @ti.kernel
+    def unqualified(owner: ti.template()):
+        if ti.static(hasattr(owner, 'scalar')):
+            owner.scalar[0] = 1
+
+    with pytest.raises(ti.TaichiCompilationError, match="hasattr requires a captured Field"):
+        env.compile(unqualified, owner=state, template_args=dict(owner=state))

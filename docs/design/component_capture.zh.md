@@ -131,6 +131,10 @@ temporal-contact 入口的泛化/加载调用也与普通 JIT 一致，完整 TG
 捕获后的 `Field.dtype` 保留声明的标量分量类型，包含向量/矩阵 Field 及内联 helper
 参数。它受原类型/ABI 合同保护：改变 dtype 选择不同代码，合法 extent 改变可复用
 代码；这项静态元数据不使 shape 或内容变为静态。
+Dense Field 的固定元素元数据 `n/m/ndim` 也随声明保留。`hasattr`/`getattr` 可查询
+已捕获 Field 的 `dtype/n/m/ndim`，例如原打包 helper 用 `hasattr(field, 'n')`
+区分 scalar 与 vector；scalar 不伪造 vector 维度。该资格只涉及已验证的元素类型，
+不允许用 `hasattr` 执行 owner getter、探测未声明配置或静态化动态 Field shape。
 
 普通 Kernel 的 `ti.template()` Field 参数可以引用组件 owner 已声明的 Dense Field，
 包含已声明别名。首次使用时接入原捕获/隐藏参数路径；未使用的 Field 模板不增加

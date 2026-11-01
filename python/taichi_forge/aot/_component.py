@@ -362,6 +362,11 @@ class DenseField:
         # matrix Fields) on its lowered reference. The declaration/ABI already
         # guards this static metadata; shape and storage stay runtime inputs.
         reference.dtype = cook_dtype(self.dtype.dtype if isinstance(self.dtype, MatrixType) else self.dtype)
+        reference._component_field_metadata = {"dtype": reference.dtype}
+        if isinstance(self.dtype, MatrixType):
+            shape = self.dtype.get_shape()
+            reference.n, reference.m, reference.ndim = shape[0], shape[1] if len(shape) == 2 else 1, len(shape)
+            reference._component_field_metadata.update(n=reference.n, m=reference.m, ndim=reference.ndim)
         return reference
 
     @property
@@ -1562,9 +1567,9 @@ class _Capture:
             self.attribute(ctx, name, prefix=value.path)
         return field
 
-    def named_attribute(self, ctx, args, keywords):
+    def named_attribute(self, ctx, args, keywords, *, presence=False):
         """Resolve builtin getattr through the same declared attribute path."""
-        if keywords or len(args) not in (2, 3) or type(args[1]) is not str:
+        if keywords or len(args) not in ((2,) if presence else (2, 3)) or type(args[1]) is not str:
             raise TaichiCompilationError(
                 "Component getattr requires a declared owner/record and a compile-time string name"
             )
@@ -1573,6 +1578,21 @@ class _Capture:
         # can be hidden by a fallback. Optional absence is not implicit static
         # configuration; applications must declare that role explicitly.
         owner, name = args[:2]
+        from taichi_forge.lang.any_array import AnyArray
+
+        if type(owner) is AnyArray and "_component_field_metadata" in vars(owner):
+            if name not in ("dtype", "n", "m", "ndim"):
+                raise TaichiCompilationError("Component Field introspection requires qualified static element metadata")
+            metadata = owner._component_field_metadata
+            if presence:
+                return name in metadata
+            if name in metadata:
+                return metadata[name]
+            if len(args) == 3:
+                return args[2]
+            raise TaichiCompilationError(f"Component scalar Field has no element metadata {name!r}")
+        if presence:
+            raise TaichiCompilationError("Component hasattr requires a captured Field's static element metadata")
         if owner is self.owner:
             return self.attribute(ctx, name)
         if isinstance(owner, _RecordReference):
