@@ -946,3 +946,16 @@ producer 只有一个元素的交错视图，只要 cell stride 大于元素字�
 SNode schema 与原生 StructCompiler 决定；现有 native 参数绑定会拒绝把 strided
 资源传给没有 runtime-stride 能力的代码。资源组所有权、别名、动态 extent 和安全的
 实例级调用绑定保持原合同。
+
+
+### 显式声明的交错 Dense placement
+
+`cell = scope.dense(ti.i, scope.dim("count"))` 创建正常 Dense 节点并保留维度来源。
+多个 scoped Field 工厂通过 `placement=cell` 放在同一节点，shape 表达式必须一致。
+原交错顺序保留，scratch 可声明零初始化；样本值相等的不同维度不能相互替代。
+
+分配、成员偏移和 stride 仍由 native Dense schema 与 StructCompiler 决定，没有
+增加 Python 布局解释器或 Runtime ABI。原始 SNode 的 placement 保留固定树合同，
+包括 Sparse 激活初始化。跨声明命名空间、创建后尺寸变化或 shape 关系冲突均在
+新增 Field 前拒绝。CPU/CUDA 已验证单元素扩到 37、向量/标量交错、后续 Dense 块、
+replay 未访问的哨兵、别名及稳定语义身份。

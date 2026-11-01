@@ -72,6 +72,13 @@ def _source_members(field):
     return members
 
 
+@dataclass(frozen=True)
+class _DeclaredDensePlacement:
+    node: object
+    shape: tuple
+    namespace: object
+
+
 class ResourceScope:
     """Declare normal owner attributes while constructing ordinary Fields.
 
@@ -487,6 +494,27 @@ class ResourceScope:
         registry.setdefault("borrowed", {})[name] = declaration
         return field
 
+    def dense(self, indices, shape):
+        """Declare one normal Dense cell shared by multiple Field members.
+
+        Keep extent provenance before placing members. Native SNode capture and
+        StructCompiler remain authoritative for offsets, strides and allocation.
+        Raw ``placement=`` nodes retain their fixed-tree contract.
+        """
+        if self._read_only:
+            raise TypeError("A record scope cannot allocate Dense placements")
+        from taichi_forge.lang import impl
+
+        shape = shape if isinstance(shape, tuple) else (shape,)
+        if not shape or any(not isinstance(item, Extent) and type(item) is not int for item in shape):
+            raise TypeError("Dense placement extents require declared dimensions or integer constants")
+        concrete = tuple(evaluate_extent(item.expression, self._normal_dimension)
+                         if isinstance(item, Extent) else item for item in shape)
+        if any(not 0 < value <= 2**31 - 1 for value in concrete):
+            raise ValueError("Dense placement extents must be positive i32 values")
+        builder = self._builder if self._builder is not None else impl._root_fb
+        return _DeclaredDensePlacement(builder.dense(indices, concrete), shape, self._registry)
+
     def _create(self, factory, args, kwargs, *, member_initialization=None):
         if self._read_only:
             raise TypeError("A declared record scope describes existing resources; it cannot allocate Fields")
@@ -495,7 +523,13 @@ class ResourceScope:
         if initialization not in ("consumer_explicit", "zero"):
             raise ValueError("Resource initialization must be 'consumer_explicit' or 'zero'")
         placement = kwargs.pop("placement", None)
-        if placement is not None and (
+        declared_dense = isinstance(placement, _DeclaredDensePlacement)
+        dense_declaration = placement if declared_dense else None
+        if declared_dense:
+            if placement.namespace is not self._registry:
+                raise ValueError("Dense placement belongs to another declaration namespace")
+            placement = placement.node
+        if placement is not None and not declared_dense and (
             initialization != "consumer_explicit"
             or any(value != "consumer_explicit" for value in (member_initialization or {}).values())
         ):
@@ -518,9 +552,11 @@ class ResourceScope:
                 root = root.parent
             if root.id != builder.ptr.id:
                 raise ValueError("Fixed SNode placement belongs to another FieldsBuilder")
-            if any(isinstance(item, Extent) for item in shape):
+            if declared_dense and shape != dense_declaration.shape:
+                raise ValueError("Dense placement requires the same declared extent relations")
+            if not declared_dense and any(isinstance(item, Extent) for item in shape):
                 raise ValueError("Fixed SNode schema cannot use dynamic extents; declare active counts separately")
-            if tuple(placement.shape) != shape:
+            if not declared_dense and tuple(placement.shape) != shape:
                 raise ValueError("Fixed SNode placement shape differs from the declared Field shape")
         concrete = tuple(
             (
@@ -532,6 +568,8 @@ class ResourceScope:
         )
         if any(not 0 < value <= 2**31 - 1 for value in concrete):
             raise ValueError("Resource Field extents must be positive i32 values")
+        if declared_dense and tuple(placement.shape) != concrete:
+            raise ValueError("Dense placement shape changed after its declaration")
         if self._builder is None and placement is None:
             field = factory(*args, **{**kwargs, "shape": concrete})
         else:
@@ -566,7 +604,7 @@ class ResourceScope:
             # A Field alias in another declared child keeps the allocation
             # site's dimension namespace, just like a StructField member.
             member._logical_shape_namespace = self._registry
-            if placement is not None:
+            if placement is not None and not declared_dense:
                 member._logical_resource_declaration["storage"] = "fixed_snode"
             if isinstance(field, StructField):
                 field._forge_resource_declarations["fields"][identity] = dict(member._logical_resource_declaration)

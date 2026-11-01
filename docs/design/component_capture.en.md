@@ -1256,3 +1256,20 @@ The original SNode schema and native StructCompiler still determine instance
 allocation, offsets and strides. Existing native argument binding rejects a
 strided resource passed to code without runtime-stride support. Group ownership,
 aliases, dynamic extents and independent instance bindings are unchanged.
+
+
+### Declared interleaved Dense placement
+
+`cell = scope.dense(ti.i, scope.dim("count"))` creates a normal Dense node while
+retaining its dimension provenance. Pass the same cell through `placement=cell`
+to several scoped Field factories, with identical shape expressions. This keeps
+their original interleaved placement and permits zero-initialized scratch. Equal
+sample sizes from different dimension declarations are not interchangeable.
+
+Native Dense schema capture and StructCompiler still determine allocation,
+member offsets and strides. The placement introduces no Python layout evaluator
+or new runtime ABI. Raw SNode placement keeps its fixed-tree contract, including
+Sparse activation initialization. A placement from another declaration namespace,
+changed extent, or conflicting shape expression is rejected before adding a Field.
+CPU/CUDA gates cover singleton-to-37 growth, vector/scalar interleaving, a following
+Dense block, an untouched replay sentinel, aliases, and stable semantic identity.
