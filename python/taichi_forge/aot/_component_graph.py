@@ -149,7 +149,13 @@ class _GraphCapture:
             entry,
             *(value for i, value in enumerate(injected) if i not in kernel.template_slot_locations),
             owner=owner,
-            template_args=expected_templates,
+            # Normal Graph also accepts ndarray/ArgPack ABI exemplars in
+            # template_args. Injection above validates and places those in
+            # their runtime slots; only real ti.template slots are static.
+            template_args={
+                kernel.arguments[i].name: expected_templates[kernel.arguments[i].name]
+                for i in kernel.template_slot_locations
+            },
         )
         if self.build is not None:
             self.build.admit_kernel(code)
