@@ -736,15 +736,17 @@ lowering 分界拒绝。CPU/CUDA 门槛覆盖不同尺寸实例、状态保留�
 ### 无数值依赖的公开 Host 状态
 
 `compile_graph(record, host_resources=(owner.history, ...))` 显式保留正常公开
-状态/观察接口使用的已声明 Dense Field。布局、兄弟维度、成员路径和初始化仍由
+状态/观察接口使用的已声明 Dense Field 和 managed Ndarray。Field 布局、兄弟维度、成员路径和初始化仍由
 原 native SNode schema 决定；不采样 producer 值，不增加 Graph 参数、Kernel ABI
 槽位、dispatch 或数值代码依赖。未被计算访问的资源保留 `none` 编译器 effects。
 
 增量合同扩展 `component_host_resources_v1` 列出保留资源身份；消费端核对这些
 名称，继续拒绝其他无引用的资源要求，旧 Runtime 拒绝未知必需扩展。传输、初始化、
-独立实例及退休复用既有机制。当前只接受已声明 Dense Field；未声明 Field 或其他
-存储种类明确拒绝。CPU/CUDA 覆盖独立动态组维度、rank-0 状态、Kernel ABI/代码
-不变、双实例及非法保留元数据。
+独立实例及退休复用既有机制。Ndarray 保留原有类型、shape、别名合同，并要求
+增量能力 `component_host_array_resources_v1`。仅 Host 使用的数组不增加数值绑定；
+已被 Kernel/native 使用的数组保留其原 effects。未声明资源或不支持的存储种类
+明确拒绝。CPU/CUDA 覆盖独立动态数组长度、向量元素、组维度、rank-0 状态、
+Kernel ABI/代码不变、双实例及非法保留元数据。
 
 `host_resource_sets={"snapshot": (...), "diagnostics": (...)}` 可进一步命名正常
 Host 发布闭包。集合允许重叠和为空，其并集加入 `host_resources`，不重复分配存储，

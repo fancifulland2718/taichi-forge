@@ -272,7 +272,7 @@ class _GraphCapture:
         self.codes.append(code)
         return builder
 
-    def _array_argument(self, declaration, aliases):
+    def _array_argument(self, declaration, aliases, *, bind=True):
         from taichi_forge.graph._graph import Arg, ArgKind
         from taichi_forge.lang._resource_declaration import extent_dependencies
 
@@ -311,6 +311,8 @@ class _GraphCapture:
                 raise TaichiCompilationError(f"Incompatible component array identity {identity!r}")
             resource["aliases"] = sorted(set(previous["aliases"]) | set(resource["aliases"]))
         self.resources[identity] = resource
+        if not bind:
+            return identity
         symbol_name = "__component_resource_" + _digest(("ndarray", identity))
         self.bindings[symbol_name] = dict(kind="resource", name=identity)
         return self.symbols.setdefault(symbol_name, Arg(ArgKind.NDARRAY, symbol_name, declaration.dtype, ndim=declaration.ndim))
@@ -359,10 +361,10 @@ class _GraphCapture:
     def retain_host_resources(self, resources):
         """Keep explicitly published normal state without adding kernel inputs.
 
-        These are normal declared Dense Fields, not producer snapshots. Layout
-        and dimensions still come from the same native SNode schema projection.
+        Dense Fields keep their SNode layout; managed arrays keep their ordinary
+        array contract. Neither publication captures producer values.
         """
-        self._retain_dense_resources(resources, host_visible=True)
+        return self._retain_host_resources(resources)
 
     def retain_host_resource_sets(self, resource_sets):
         """Name normal Host publication closures over the same resource facts."""
@@ -375,7 +377,22 @@ class _GraphCapture:
         for name, resources in resource_sets.items():
             if not isinstance(name, str) or not name or name.strip() != name:
                 raise ValueError("Host resource set names must be nonempty strings without outer whitespace")
-            self.host_resource_sets[name] = sorted(set(self._retain_dense_resources(resources, host_visible=True)))
+            self.host_resource_sets[name] = sorted(set(self._retain_host_resources(resources)))
+
+    def _retain_host_resources(self, resources):
+        identities, fields = [], []
+        for value in resources:
+            aliases = [name for name, declaration in self.component.declarations.items()
+                       if isinstance(declaration, Array) and self.component.available(self.owner, name)
+                       and self.component.read(self.owner, name) is value]
+            if aliases:
+                identity = self._array_argument(self.component.declarations[aliases[0]], aliases, bind=False)
+                self.host_resources.add(identity)
+                identities.append(identity)
+            else:
+                fields.append(value)
+        identities.extend(self._retain_dense_resources(fields, host_visible=True))
+        return identities
 
     def _retain_dense_resources(self, resources, *, host_visible):
         from taichi_forge.graph._graph import Arg, ArgKind
@@ -387,7 +404,7 @@ class _GraphCapture:
                        and self.component.available(self.owner, name)
                        and self.component.read(self.owner, name) is field]
             if not aliases:
-                raise TaichiCompilationError("Host-visible resources require declared Dense Fields on this component")
+                raise TaichiCompilationError("Host-visible resources require declared Dense Fields or Ndarrays on this component")
             declaration = self.component.declarations[aliases[0]]
             group = declaration.group
             if group not in groups:
@@ -486,6 +503,8 @@ class _GraphCapture:
         if self.host_resources:
             facts["host_resources"] = sorted(self.host_resources)
             facts["required_capabilities"].append("component_host_resources_v1")
+            if any(self.resources[name].get("kind") == "ndarray" for name in self.host_resources):
+                facts["required_capabilities"].append("component_host_array_resources_v1")
         if self.host_resource_sets:
             facts["host_resource_sets"] = dict(sorted(self.host_resource_sets.items()))
             facts["required_capabilities"].append("component_host_resource_sets_v1")

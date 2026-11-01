@@ -155,14 +155,18 @@ class Component:
             if native_sort:
                 capabilities.add("component_native_sort_v1")
             host_resources = contract.get("host_resources", [])
+            host_array_capability = "component_host_array_resources_v1" in contract["required_capabilities"]
             if host_resource_capability:
                 if (not isinstance(host_resources, list) or not host_resources
                         or any(not isinstance(name, str) for name in host_resources)
                         or len(host_resources) != len(set(host_resources))
-                        or any(name not in contract["resources"] or contract["resources"][name].get("kind") is not None
+                        or any(name not in contract["resources"] or contract["resources"][name].get("kind") not in
+                               ((None, "ndarray") if host_array_capability else (None,))
                                for name in host_resources)):
                     raise ValueError("Invalid component Host-visible resources")
                 capabilities.add("component_host_resources_v1")
+                if host_array_capability:
+                    capabilities.add("component_host_array_resources_v1")
             if "component_host_resource_sets_v1" in contract["required_capabilities"]:
                 resource_sets = contract.get("host_resource_sets")
                 if (not isinstance(resource_sets, dict) or not resource_sets

@@ -1042,7 +1042,7 @@ Other resource/backend combinations retain their separate qualification requirem
 ### Public Host state without numerical dependencies
 
 `compile_graph(record, host_resources=(owner.history, ...))` retains declared
-Dense Fields used by normal public state/observation APIs. The existing native
+Dense Fields and managed Ndarrays used by normal public state/observation APIs. The existing native
 SNode schema supplies group layout, sibling extent dependencies, member paths
 and initialization; producer values are never included. These resources do not
 add Graph arguments, Kernel ABI slots, dispatches or numerical code dependencies.
@@ -1051,9 +1051,12 @@ Kernel effects remain compiler facts (`none` for unaccessed state).
 The additive `component_host_resources_v1` contract extension lists the retained
 resource identities explicitly. Consumers validate these names and reject other
 unreferenced requirements; older runtimes reject the required extension. Existing
-instance resource transfers, initialization and retirement apply. This currently
-accepts declared Dense Fields only; undeclared Fields and unsupported storage
-kinds reject. CPU/CUDA tests cover dynamic independent group extents, rank-zero
+instance resource transfers, initialization and retirement apply. Managed Ndarrays
+retain the existing array type/shape/alias contract and require the additive
+`component_host_array_resources_v1` capability. Host-only arrays add no numerical
+bindings; arrays already used by kernels/native operations retain their original
+effects. Undeclared resources and unsupported storage kinds reject. CPU/CUDA tests
+cover independent dynamic array lengths, vector elements, group extents, rank-zero
 state, unchanged Kernel ABI/code, two instances and malformed retention metadata.
 
 `host_resource_sets={"snapshot": (...), "diagnostics": (...)}` additionally names
