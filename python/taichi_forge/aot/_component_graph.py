@@ -612,6 +612,7 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
         GraphAccess,
         SequentialRegion,
         WhileRegion,
+        IfRegion,
         _merge_parallel_access,
         graph_ir_to_dict,
     )
@@ -684,8 +685,18 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
                 },
                 "children": children,
             }
+        elif isinstance(node, IfRegion):
+            has_control = True
+            facts = graph_ir_to_dict(node)
+            # Preserve branch order and an absent else branch. Both reachable
+            # branches contribute resources/effects; the producer predicate
+            # must never prune a consumer's dynamic computation.
+            return {
+                **{key: facts[key] for key in ("kind", "predicate", "control_inputs", "has_else")},
+                "children": [visit(child) for child in node.children],
+            }
         else:
-            raise TaichiCompilationError("Component compiler facts require qualified sequential/while regions")
+            raise TaichiCompilationError("Component compiler facts require qualified sequential/while/if regions")
 
     control = visit(graph._spec.ir_root)
     if len(nodes) + skipped != len(capture.codes):

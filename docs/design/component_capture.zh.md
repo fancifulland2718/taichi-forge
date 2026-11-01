@@ -1,5 +1,10 @@
 # 组件捕获编译器：首个实现切片
 
+普通 Graph 的 `if_then_else` 也可进入组件闭包：条件、then 和可选 else 按原 IR
+顺序参与代码身份、资源和 effects 收集，不按 producer 的条件值裁剪分支。
+CPU/CUDA 定向门槛覆盖冻结后动态换分支、不同尺寸的独立实例、无 else 和
+Plan 分支篡改拒绝；沿用既有 Graph lowering，不扩大嵌套 native 控制的资格。
+
 producer 使用公开的 `ti.aot.Component`；`_component` 保留为实现模块。
 它沿正常 AST transformer 编译原有装饰方法，不重跑前端发现捕获，也不生成数值包装函数。
 在正常分配处用 `ti.experimental.ResourceScope` 声明资源/维度/值角色，再使用
