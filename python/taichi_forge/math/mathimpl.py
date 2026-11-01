@@ -3,6 +3,7 @@
 Math functions for glsl-like functions and other stuff.
 """
 import math
+from typing import Final
 
 from taichi_forge.lang import impl, ops
 from taichi_forge.lang.impl import static, zero
@@ -31,12 +32,12 @@ from taichi_forge.types.primitive_types import f64, u32, u64
 
 cfg = impl.default_cfg
 
-e = math.e
+e: Final[float] = math.e
 """The mathematical constant e = 2.718281….
 Directly imported from the Python standard library `math`.
 """
 
-pi = math.pi
+pi: Final[float] = math.pi
 """The mathematical constant π = 3.141592….
 Directly imported from the Python standard library `math`.
 """

@@ -17,6 +17,49 @@ UNDECLARED = 7
 MUTABLE: Final = [1, 2]
 
 
+@ti.data_oriented
+class _Angles:
+    def __init__(self, count):
+        scope = ti.experimental.ResourceScope(self)
+        self.count = count
+        scope.output = scope.vector_field(2, ti.f32, shape=scope.dim("count"))
+
+    @ti.kernel
+    def convert(self):
+        for i in self.output:
+            self.output[i] = ti.Vector([
+                ti.math.radians(15.0 * i), ti.math.degrees(0.125 * i)
+            ])
+
+    def record(self, builder):
+        builder.dispatch(self.convert, template_args={"self": self})
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_standard_angle_helpers_export_with_library_constant_guards(tmp_path):
+    producer = _Angles(3)
+    environment = Component.from_owner(producer)
+    code = environment.compile(producer.convert)
+    assert {item[2] for item in code.contract["constants"]} == {"pi"}
+    assert environment.compile(producer.convert) is code
+    module = ti.aot.Module()
+    environment.compile_graph(producer.record).export(module, "angles")
+    artifact = tmp_path / "angles.tcm"
+    module.archive(str(artifact))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime:
+        component = runtime.load_module(artifact).component("angles")
+        with component.instantiate(dict(count=17)) as instance:
+            instance.initialize(zero=("output",))
+            with instance.prepare() as call:
+                call.run()
+            actual = np.frombuffer(instance.resource("output").read(), np.float32).reshape(17, 2)
+            expected = np.stack((np.deg2rad(np.arange(17) * 15.0),
+                                 np.rad2deg(np.arange(17) * 0.125)), axis=1)
+            np.testing.assert_allclose(actual, expected, rtol=2e-7, atol=2e-7)
+
+
 @ti.func
 def _material_value(i):
     return MATERIAL + FACTORS[0] + i
