@@ -890,3 +890,20 @@ CPU/CUDA 验证覆盖标量/向量/矩阵记录的独立副本、3→19 代码�
 `Component.runtime` 只读返回经有效性检查的所属 Runtime。Host 接口若同时接收
 用于等待或临时分配的 Runtime，应核对对象身份；后端或设备 UUID 相同不代表同一
 Runtime owner。查询不转移 Runtime 所有权。
+
+
+### Graph 内部常量标量的身份与作用域
+
+`GraphBuilder.private_scalar(name, dtype, value)` 和 `Sequential.private_scalar` 将
+普通 Python 数值绑定为不可变的内部参数。子区域继承既有 private_scope 命名空间；
+多个区域可独立使用相同局部名。它不创建可变设备状态，也不替代模型的 runtime value。
+
+实际使用的内部标量通过 `component_private_scalar_values_v1` / `private_scalars`
+进入组件身份；dtype/位模式由现有 Plan 的同一个编码函数产生。f32 舍入后相同的值
+保持相同身份，值真正改变则改变组件身份，未使用的声明在原死代码裁剪后不参与身份。
+数值 Kernel 的身份仍只反映其实际编译依赖，绑定常量不强制重复生成相同 Kernel。
+
+Runtime 核对内部标量集合、类型和实际 Plan 编码；旧产物继续保持原兼容合同，但旧的
+语义 key 不会被追溯修正，涉及内部常量的产物应重新构建。该修复来自 SAP 组件化中的
+最小反例：原绑定 1/2 的不同计算曾得到同一组件 key。CPU/CUDA 验证普通 Graph、冻结
+加载、新尺寸、作用域隔离、f32 编码一致和合同/Plan 不匹配拒绝。

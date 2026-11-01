@@ -103,6 +103,8 @@ def _validate_header(contract, name):
     private_shape_capability = "component_private_array_extents_v1" in contract.get("required_capabilities", ())
     if private_shape_capability:
         required.add("private_shapes")
+    if "component_private_scalar_values_v1" in contract.get("required_capabilities", ()):
+        required.add("private_scalars")
     if set(contract) != required or contract["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11) or contract["name"] != name:
         raise ValueError("Unsupported component contract")
 

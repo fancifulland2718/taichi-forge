@@ -18,6 +18,16 @@ def _snapshot(value):
     return json.loads(json.dumps(value, allow_nan=False, sort_keys=True))
 
 
+def fixed_scalar_resource(name, dtype, value):
+    """Use the same scalar encoding for Plan resources and compiler facts."""
+    try:
+        if dtype in ("f16", "f32"):
+            value = ctypes.c_float(float(value)).value
+        return Scalar(dtype, value).resource(name)
+    except (ValueError, TypeError, OverflowError, struct.error) as error:
+        raise TaichiRuntimeError(f"AOT fixed scalar {name!r} cannot be encoded as {dtype}") from error
+
+
 class GraphLoweringContext:
     """Shared cold construction state, without a module or export transaction.
 
@@ -350,15 +360,7 @@ class GraphLoweringContext:
         symbol = (arg.name, dtype)
         if symbol in self._scalar_symbols:
             return self._scalar_symbols[symbol]
-        value = self._scalar_values[arg.name]
-        try:
-            if dtype in ("f16", "f32"):
-                # F32 matches Graph's C++ cast, including overflow to infinity;
-                # F16 also uses a float32 payload in the AOT scalar ABI.
-                value = ctypes.c_float(float(value)).value
-            resource = Scalar(dtype, value).resource(arg.name)
-        except (ValueError, TypeError, OverflowError, struct.error) as error:
-            raise TaichiRuntimeError(f"AOT fixed scalar {arg.name!r} cannot be encoded as {dtype}") from error
+        resource = fixed_scalar_resource(arg.name, dtype, self._scalar_values[arg.name])
         identity = (dtype, resource["bits"])
         name = self._scalar_resources.get(identity)
         if name is None:

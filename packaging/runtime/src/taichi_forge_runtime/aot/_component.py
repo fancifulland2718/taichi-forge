@@ -121,6 +121,9 @@ class Component:
                 capabilities.add("component_owner_sequence_sources_v1")
             if private_shape_capability:
                 capabilities.add("component_private_array_extents_v1")
+            private_scalar_capability = "component_private_scalar_values_v1" in contract["required_capabilities"]
+            if private_scalar_capability:
+                capabilities.add("component_private_scalar_values_v1")
             pending = [contract.get("control", {})]
             native_sort = False
             while pending:
@@ -365,6 +368,20 @@ class Component:
                 if effect_groups != set(fixed_groups):
                     raise ValueError("Fixed SNode component effects do not cover its group closure")
             document = json.loads(plan.to_json())
+            if private_scalar_capability:
+                scalars = contract["private_scalars"]
+                scalar_symbols = {name: descriptor for name, descriptor in
+                                  contract.get("internal_arguments", {}).items() if descriptor[0] == "scalar"}
+                encoded = {(item["dtype"], item["bits"]) for item in document.get("resources", ())
+                           if item.get("kind") == "scalar"}
+                if not isinstance(scalars, dict) or not scalars or set(scalars) != set(scalar_symbols):
+                    raise ValueError("Component private scalar facts must cover internal scalar arguments")
+                for symbol, value in scalars.items():
+                    if (not isinstance(value, dict) or set(value) != {"dtype", "bits"}
+                            or value["dtype"] != scalar_symbols[symbol][1][1]
+                            or not isinstance(value["bits"], str)
+                            or (value["dtype"], value["bits"]) not in encoded):
+                        raise ValueError("Component private scalar differs from its execution plan")
             if private_shape_capability:
                 shapes = contract["private_shapes"]
                 private = {item["name"]: item for item in document.get("resources", ())}

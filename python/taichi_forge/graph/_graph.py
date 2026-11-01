@@ -16583,6 +16583,21 @@ class Sequential:
             exclusive_submission=exclusive_submission,
         )
 
+    def private_scalar(self, name, dtype, value):
+        """Bind an immutable scalar in this recording scope (not device state)."""
+        from taichi_forge.graph._lowering import fixed_scalar_resource
+
+        if not isinstance(name, str) or not name:
+            raise ValueError("Graph private scalar name must be nonempty")
+        if type(value) not in (bool, int, float):
+            raise TypeError("Graph private scalar requires a Python numeric value")
+        name = self._private_scope_prefix + name
+        if name in self._fixed_runtime_args or name in self._declared_private_bindings:
+            raise TaichiRuntimeError(f"Graph private binding {name!r} is already defined")
+        symbolic = Arg(ArgKind.SCALAR, name, dtype)
+        fixed_scalar_resource(name, str(symbolic.dtype()), value)
+        return self._bind_internal_scalar(name, dtype, value)
+
     def _bind_internal_scalar(self, name, dtype, value):
         """Bind one private immutable scalar for a provider sequence."""
 
@@ -17275,6 +17290,22 @@ class GraphBuilder:
             yield
         finally:
             self._private_scope_prefix = previous
+
+    def private_scalar(self, name, dtype, value):
+        """Bind an immutable scalar in this recording scope (not device state)."""
+        from taichi_forge.graph._lowering import fixed_scalar_resource
+
+        if not isinstance(name, str) or not name:
+            raise ValueError("Graph private scalar name must be nonempty")
+        if type(value) not in (bool, int, float):
+            raise TypeError("Graph private scalar requires a Python numeric value")
+        name = self._private_scope_prefix + name
+        symbolic = Arg(ArgKind.SCALAR, name, dtype)
+        fixed_scalar_resource(name, str(symbolic.dtype()), value)
+        if name in self._runtime_graph_fixed_args or name in self._declared_private_bindings:
+            raise TaichiRuntimeError(f"Graph private binding {name!r} is already defined")
+        self._bind_internal_runtime_arg(symbolic, value)
+        return symbolic
 
     def private_ndarray(
         self,

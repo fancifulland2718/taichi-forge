@@ -677,6 +677,20 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     for key in ("bindings", "explicit", "internal_arguments"):
         if key in contract:
             contract[key] = {name: value for name, value in contract[key].items() if name in used_symbols}
+    # Immutable private scalar values affect the recorded computation even
+    # though they do not specialize the numerical Kernel. Share Plan's typed
+    # encoding (including f32 rounding and signed zero), after dead-code pruning.
+    from taichi_forge.graph._lowering import fixed_scalar_resource
+
+    private_scalars = {}
+    for name, descriptor in contract.get("internal_arguments", {}).items():
+        if descriptor[0] == "scalar":
+            resource = fixed_scalar_resource(
+                name, descriptor[1][1], graph._spec.fixed_runtime_args[name])
+            private_scalars[name] = {key: resource[key] for key in ("dtype", "bits")}
+    if private_scalars:
+        contract["private_scalars"] = private_scalars
+        contract["required_capabilities"].append("component_private_scalar_values_v1")
     for key, kind in (("resources", "resource"), ("values", "value")):
         required = {value["name"] for value in contract["bindings"].values() if value["kind"] == kind}
         if kind == "resource":
