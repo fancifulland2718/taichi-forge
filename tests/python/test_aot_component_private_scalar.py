@@ -33,6 +33,16 @@ class ScalarRoot:
         child.dispatch(self.add, child.private_scalar("value", ti.i32, 2), template_args={"self": self})
         builder.append(child)
 
+    def setup(self, builder):
+        self.shared = builder.private_scalar("shared", ti.i32, 2)
+        builder.dispatch(self.add, self.shared)
+
+    def initialize(self, builder):
+        builder.dispatch(self.add, self.shared)
+
+    def repeat(self, builder):
+        builder.dispatch(self.add, self.shared)
+
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
@@ -99,3 +109,25 @@ def test_private_scalar_rejects_mutable_and_duplicate_bindings():
             scope.private_scalar("mutable", ti.i32, [1])
         with pytest.raises(ValueError, match="nonempty"):
             scope.private_scalar("", ti.i32, 1)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_private_scalar_survives_setup_initialization_and_operation_projection(tmp_path):
+    owner = ScalarRoot(3)
+    root = ti.aot.Component.from_owner(owner).compile_graph(
+        owner.repeat, initializer=owner.initialize, setup={"first": owner.setup},
+        operations={"extra": owner.repeat})
+    module = ti.aot.Module()
+    root.export(module, "phases")
+    target = tmp_path / "phases.tcm"
+    module.archive(str(target))
+    backend = "cpu" if ti.cfg.arch == ti.cpu else "cuda"
+    with Runtime(backend) as runtime, runtime.load_module(target) as loaded:
+        with loaded.component("phases").instantiate(dict(count=11)) as state:
+            state.initialize()
+            state.run_setup("first")
+            state.initialize_state()
+            with state.prepare() as call, state.prepare(operation="extra") as extra:
+                call.run()
+                extra.run()
+            assert struct.unpack("<11f", state.resource("x").read()) == (8.0,) * 11

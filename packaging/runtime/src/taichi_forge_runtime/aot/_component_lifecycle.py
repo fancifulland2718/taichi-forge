@@ -9,7 +9,7 @@ from ._constraints import validate_constraints
 def split_component_lifecycle(plan):
     """Keep model initialization separate from preparation-owned replay scratch.
 
-    Initializers may only reference caller/instance bindings. Replay-only compact
+    Initializers may reference caller/instance bindings and immutable scalars. Replay-only compact
     ndarrays retain the ordinary Plan allocation and retirement contract. Shared
     scratch, native resources, recipes and cross-phase constraints need their own
     lifetime qualification; do not silently reconstruct them for each phase.
@@ -20,13 +20,14 @@ def split_component_lifecycle(plan):
         raise ValueError("Component initializer requires qualified instance-owned resources")
     resources = document.get("resources", [])
     allowed = {"kind", "name", "dtype", "shape", "element_shape", "zero_initialize"}
-    if any(resource.get("kind") != "ndarray" or set(resource) - allowed
-           or resource.get("zero_initialize") is not True for resource in resources):
+    if any(resource.get("kind") != "scalar" and (
+            resource.get("kind") != "ndarray" or set(resource) - allowed
+            or resource.get("zero_initialize") is not True) for resource in resources):
         raise ValueError("Component initializer private resources require shared-lifetime qualification")
     # The existing Plan validator collects references through nested controls,
     # launch descriptors and native operations. Do not scan kernel source here.
     initializer = ExecutionPlan(document["initialization"])
-    private = {resource["name"] for resource in resources}
+    private = {resource["name"] for resource in resources if resource["kind"] != "scalar"}
     shared = private.intersection(initializer.argument_names)
     if shared:
         raise ValueError("Component initializer references Plan-private resources requiring "
@@ -35,6 +36,14 @@ def split_component_lifecycle(plan):
     replay.pop("initialization")
     replay.pop("version")
     constraints = replay.pop("constraints", [])
+    initial_resources = [resource for resource in resources
+                         if resource["name"] in initializer.argument_names]
+    # Immutable typed values may be copied into independent phase Plans. Mutable
+    # scratch still has a single owner; it cannot cross the initialization boundary.
+    replay_refs = ExecutionPlan(replay["operations"]).argument_names
+    replay["resources"] = [resource for resource in resources
+                           if resource["kind"] != "scalar" or resource["name"] in replay_refs]
+    initializer = ExecutionPlan(document["initialization"], resources=initial_resources or None)
     replay_plan = ExecutionPlan(**replay)
     initial_constraints, replay_constraints = [], []
     for constraint in constraints:
@@ -50,7 +59,8 @@ def split_component_lifecycle(plan):
             initial_constraints.append(constraint)
         if in_replay:
             replay_constraints.append(constraint)
-    initializer = ExecutionPlan(document["initialization"], constraints=initial_constraints or None)
+    initializer = ExecutionPlan(document["initialization"], resources=initial_resources or None,
+                                constraints=initial_constraints or None)
     replay["constraints"] = replay_constraints or None
     return initializer, ExecutionPlan(**replay)
 
@@ -72,6 +82,13 @@ def split_component_setup(initializer, boundaries):
         start = end
     phases.append((None, operations[start:]))
     plans = [(name, ExecutionPlan(ops)) for name, ops in phases]
+    private = document.get("resources", [])
+    if any(resource["kind"] != "scalar" for resource in private):
+        raise ValueError("Component setup private resources require shared-lifetime qualification")
+    resources = [[resource for resource in private if resource["name"] in plan.argument_names]
+                 for _, plan in plans]
+    plans = [(name, ExecutionPlan(ops, resources=values or None))
+             for (name, ops), values in zip(phases, resources)]
     constraints = [[] for _ in plans]
     for requirement in document.get("constraints", []):
         refs = validate_constraints([requirement], initializer._retained_argument_names)
@@ -80,8 +97,8 @@ def split_component_setup(initializer, boundaries):
             raise ValueError("Component setup cross-phase constraint requires shared-lifetime qualification")
         for index in selected:
             constraints[index].append(requirement)
-    result = {name: ExecutionPlan(ops, constraints=rules or None)
-              for (name, ops), rules in zip(phases, constraints)}
+    result = {name: ExecutionPlan(ops, resources=values or None, constraints=rules or None)
+              for (name, ops), values, rules in zip(phases, resources, constraints)}
     return {name: plan for name, plan in result.items() if name is not None}, result[None]
 
 
@@ -114,9 +131,10 @@ def split_component_operations(replay, boundaries):
     resources = [[] for _ in phases]
     for resource in document.get("resources", []):
         selected = [i for i, plan in enumerate(raw) if resource["name"] in plan.argument_names]
-        if len(selected) != 1:
+        if len(selected) != 1 and resource["kind"] != "scalar":
             raise ValueError("Component operations cannot share Plan-private resources; use instance-owned state")
-        resources[selected[0]].append(resource)
+        for index in selected:
+            resources[index].append(resource)
     plans = [ExecutionPlan(ops, resources=private or None)
              for (_, ops), private in zip(phases, resources)]
     constraints = [[] for _ in plans]
