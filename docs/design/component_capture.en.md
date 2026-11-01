@@ -1236,3 +1236,23 @@ missing initial inputs, malformed lifecycle metadata and loaded Graph replay.
 identity checks when a Host adapter also accepts a Runtime for completion or
 temporary allocations; equal backends/device UUIDs do not imply the same owner.
 The property does not transfer Runtime ownership.
+
+### Compact addressing for extent-invariant Dense members
+
+On CPU/CUDA, component capture can use the existing compact ndarray access ABI
+for qualified rank-zero members and one-dimensional, single-level Dense cells
+containing only scalar place nodes. The compiler reads the actual byte stride
+and element layout from the native storage description. It also checks that the
+cell's structure cannot depend on an extent; it does not infer a general layout
+from the producer's current shape or `compact_contiguous` flag.
+
+An interleaved view with one producer element still retains affine access when
+its cell stride exceeds the element width. A cell containing a dimensioned
+child also retains affine access. More complex layouts and Vulkan keep the
+existing path. This optimization does not expand storage qualification.
+
+The per-entry capture contract records `dense_access` as part of code identity.
+The original SNode schema and native StructCompiler still determine instance
+allocation, offsets and strides. Existing native argument binding rejects a
+strided resource passed to code without runtime-stride support. Group ownership,
+aliases, dynamic extents and independent instance bindings are unchanged.

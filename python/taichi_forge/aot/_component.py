@@ -13,6 +13,7 @@ import json
 import operator
 import sys
 from dataclasses import dataclass
+from math import prod
 from types import CodeType, MappingProxyType, MemberDescriptorType, ModuleType
 from typing import Final, get_origin
 
@@ -353,11 +354,13 @@ class DenseField:
             raise ValueError("DenseField extents must be dimension IDs or positive static integers")
         return ("dense_field", RuntimeValue(self.dtype).schema, self.shape, self.group)
 
-    def declare(self, name):
+    def declare(self, name, *, runtime_affine=True):
         from taichi_forge._lib import core
 
         element = self.dtype.tensor_type if isinstance(self.dtype, MatrixType) else cook_dtype(self.dtype)
-        reference = kernel_arguments.decl_ndarray_arg(element, len(self.shape), name, False, core.BoundaryMode.UNSAFE)
+        reference = kernel_arguments.decl_ndarray_arg(
+            element, len(self.shape), name, False, core.BoundaryMode.UNSAFE, runtime_affine=runtime_affine
+        )
         # Preserve Field.dtype (the scalar component type, also for vector and
         # matrix Fields) on its lowered reference. The declaration/ABI already
         # guards this static metadata; shape and storage stay runtime inputs.
@@ -389,6 +392,39 @@ class DenseField:
         ):
             raise TaichiCompilationError("Dense component Field requires a qualified affine SNode member")
         return description
+
+
+def _extent_invariant_compact_member(field, description):
+    """Prove a narrow compact access family using native layout facts.
+
+    A single Dense level whose children are all scalar places has a cell type
+    independent of every declared extent. Its native byte stride therefore
+    stays fixed when the same schema is instantiated with another size. Root
+    siblings may move the member's base, which the ordinary group view handles.
+    Never infer this from compact_contiguous alone: a one-element interleaved
+    view can be compact at the producer but strided at the consumer.
+    """
+    from taichi_forge._lib import core
+
+    # Qualify other layout compilers separately before enabling their fast path.
+    if impl.current_cfg().arch.name not in ("x64", "arm64", "cuda"):
+        return False
+    descriptor = description.descriptor
+    if not description.properties["element_contiguous"]:
+        return False
+    rank = len(descriptor.index_shape)
+    if rank == 0:
+        return True  # Only contiguous element lanes; no index strides exist.
+    if rank != 1:
+        return False
+    leaf = field._get_field_members()[0].ptr.snode()
+    parent = leaf.parent
+    if parent.type != core.SNodeType.dense or parent.parent.type != core.SNodeType.root:
+        return False
+    if any(parent.get_ch(i).type != core.SNodeType.place for i in range(parent.get_num_ch())):
+        return False
+    element_bytes = core.data_type_size(descriptor.scalar_type) * prod(descriptor.element_shape)
+    return tuple(descriptor.index_strides_bytes) == (element_bytes,)
 
 
 @dataclass(frozen=True)
@@ -1396,6 +1432,7 @@ class _Capture:
         self.contract = None
         self.groups = {}
         self.member_paths = {}
+        self.dense_access = {}
         self.resource_aliases = {}
         self.bound_group_roots = {}
         self.fixed_groups = {}
@@ -1517,7 +1554,7 @@ class _Capture:
                         self.expressions[name] = self.expressions[canonical]
                         return self.expressions[name]
             elif isinstance(declaration, DenseField):
-                declaration.validate(value)
+                dense_description = declaration.validate(value)
             if isinstance(declaration, DenseField):
                 schema, members, dimensions, root_id = _dense_group(self.component, self.owner, declaration.group)
                 other_group = self.bound_group_roots.setdefault(root_id, declaration.group)
@@ -1534,7 +1571,12 @@ class _Capture:
                     self.expressions[name] = self.expressions[canonical]
                     return self.expressions[name]
             self.dynamic.append(name)
-            self.expressions[name] = declaration.declare("__capture_" + name)
+            if isinstance(declaration, DenseField):
+                compact = _extent_invariant_compact_member(value, dense_description)
+                self.dense_access[name] = "compact" if compact else "affine"
+                self.expressions[name] = declaration.declare("__capture_" + name, runtime_affine=not compact)
+            else:
+                self.expressions[name] = declaration.declare("__capture_" + name)
         return self.expressions[name]
 
     def field_operand(self, ctx, value, *, for_loop=False):
@@ -1678,6 +1720,8 @@ class _Capture:
                 objects=sorted(self.objects.items()),
                 access_paths={name: self.component._paths[name] for name in self.used},
             )
+        if self.dense_access:
+            self.contract["dense_access"] = sorted(self.dense_access.items())
         references = sorted((name, schema[1]) for name, schema in self.used.items() if schema[0] == "owner_reference")
         if references:
             self.contract["owner_references"] = references

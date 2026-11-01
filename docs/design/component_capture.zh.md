@@ -930,3 +930,19 @@ Runtime 核对内部标量集合、类型和实际 Plan 编码；旧产物继续
 不可变标量可以由 setup、initializer、命名操作和 replay 共同引用；阶段投影保留
 各自实际使用的类型/位模式，不要求调用方重新绑定，也不改变其组件身份。可变的
 Plan-private scratch 仍须满足原共享寿命资格，不能依照常量规则复制或重新初始化。
+
+### extent 不影响 cell 布局时的紧凑寻址
+
+CPU/CUDA 组件捕获对已有资格的 rank-0 成员，以及只有标量 place 子节点的一维单层
+Dense cell，可使用现有紧凑 Ndarray 寻址 ABI。编译器读取原生存储描述中的实际字节
+stride 与元素布局，同时确认 cell 结构不依赖 extent；不能只看 producer 当前 shape
+或 `compact_contiguous` 标志就断言任意新尺寸仍然紧凑。
+
+producer 只有一个元素的交错视图，只要 cell stride 大于元素字节数，就仍使用 affine
+寻址。cell 含有带维度的子节点时也保留原路径。复杂布局和 Vulkan 暂不启用此优化，
+原有存储资格不因优化而扩大。
+
+每入口捕获合同将 `dense_access` 纳入代码身份。实例分配、偏移和 stride 仍由同一
+SNode schema 与原生 StructCompiler 决定；现有 native 参数绑定会拒绝把 strided
+资源传给没有 runtime-stride 能力的代码。资源组所有权、别名、动态 extent 和安全的
+实例级调用绑定保持原合同。

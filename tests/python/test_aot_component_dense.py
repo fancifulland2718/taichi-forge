@@ -69,6 +69,8 @@ def test_original_fields_preserve_groups_aliases_and_dynamic_ranges():
     env = _environment()
     code = env.compile(producer.active_pass)
     capacity_code = env.compile(producer.capacity_pass)
+    assert set(dict(code.contract["dense_access"]).values()) == {"compact"}
+    assert set(dict(capacity_code.contract["dense_access"]).values()) == {"compact"}
     assert len(code.contract["groups"]) == 2
     assert code.contract["members"]["x"] == code.contract["members"]["alias_x"]
     assert sum(name in ("x", "alias_x") for name in code.dynamic) == 1
