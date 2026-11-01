@@ -35,12 +35,18 @@ def test_host_state_is_explicit_independent_and_absent_from_kernel_abi(tmp_path)
     model = Model(3, 5)
     component = ti.aot.Component.from_owner(model)
     ordinary = component.compile_graph(model.record)
-    root = component.compile_graph(model.record, host_resources=(model.history, model.counter, model.history))
+    root = component.compile_graph(model.record, host_resource_sets={
+        "snapshot": (model.history,),
+        "diagnostics": (model.history, model.counter, model.history),
+        "disabled": (),
+    })
     first, second = ordinary.contract, root.contract
     assert first["entries"] == second["entries"]
     assert first["bindings"] == second["bindings"]
     assert "history" not in first["resources"]
     assert set(second["host_resources"]) == {"history", "counter"}
+    assert second["host_resource_sets"] == {
+        "snapshot": ["history"], "diagnostics": ["counter", "history"], "disabled": []}
     assert second["resources"]["history"]["access"] == "none"
     assert second["resources"]["history"]["effects_precision"] == "compiler_proven"
     undeclared = ti.field(ti.i32, shape=1)
@@ -54,6 +60,10 @@ def test_host_state_is_explicit_independent_and_absent_from_kernel_abi(tmp_path)
     ti.reset()
     with Runtime(backend) as runtime, runtime.load_module(artifact) as loaded:
         code = loaded.component("state")
+        assert code.contract["host_resource_sets"] == second["host_resource_sets"]
+        copied = code.contract
+        copied["host_resource_sets"]["snapshot"].append("counter")
+        assert code.contract["host_resource_sets"]["snapshot"] == ["history"]
         with code.instantiate(dict(n=7, m=11)) as a, code.instantiate(dict(n=13, m=17)) as b:
             for instance, m in ((a, 11), (b, 17)):
                 with pytest.raises(ValueError, match="initialization"):
@@ -70,6 +80,16 @@ def test_host_state_is_explicit_independent_and_absent_from_kernel_abi(tmp_path)
     with ZipFile(artifact) as archive:
         payloads = {name: archive.read(name) for name in archive.namelist()}
     contract = json.loads(payloads["components/state.json"])
+    for index, invalid in enumerate(({"snapshot": ["state"]}, {"snapshot": ["history", "history"]},
+                                     {" snapshot": []}, {"snapshot": "history"})):
+        changed = tmp_path / f"bad-set-{index}.tcm"
+        with ZipFile(changed, "w") as archive:
+            for name, payload in payloads.items():
+                archive.writestr(name, json.dumps({**contract, "host_resource_sets": invalid})
+                                 if name == "components/state.json" else payload)
+        with Runtime(backend) as runtime, runtime.load_module(changed) as loaded:
+            with pytest.raises(ValueError, match="Host resource sets"):
+                loaded.component("state")
     contract["host_resources"].append("missing")
     changed = tmp_path / "bad.tcm"
     with ZipFile(changed, "w") as archive:
@@ -78,3 +98,22 @@ def test_host_state_is_explicit_independent_and_absent_from_kernel_abi(tmp_path)
     with Runtime(backend) as runtime, runtime.load_module(changed) as loaded:
         with pytest.raises(ValueError, match="Host-visible resources"):
             loaded.component("state")
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_empty_host_publication_set_does_not_retain_unused_state(tmp_path):
+    model = Model(3, 5)
+    component = ti.aot.Component.from_owner(model)
+    for invalid in ([], {"": ()}, {" trailing ": ()}):
+        with pytest.raises(ValueError, match="Host resource set"):
+            component.compile_graph(model.record, host_resource_sets=invalid)
+    root = component.compile_graph(model.record, host_resource_sets={"optional": ()})
+    assert "host_resources" not in root.contract
+    assert "history" not in root.contract["resources"]
+    module = ti.aot.Module()
+    root.export(module, "empty")
+    artifact = tmp_path / "empty.tcm"
+    module.archive(str(artifact))
+    ti.reset()
+    with Runtime("cpu") as runtime, runtime.load_module(artifact) as loaded:
+        assert loaded.component("empty").contract["host_resource_sets"] == {"optional": []}

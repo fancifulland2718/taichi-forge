@@ -1056,6 +1056,15 @@ accepts declared Dense Fields only; undeclared Fields and unsupported storage
 kinds reject. CPU/CUDA tests cover dynamic independent group extents, rank-zero
 state, unchanged Kernel ABI/code, two instances and malformed retention metadata.
 
+`host_resource_sets={"snapshot": (...), "diagnostics": (...)}` additionally names
+normal Host publication closures. Sets may overlap or be empty; their union joins
+`host_resources` without duplicating storage or widening numerical Kernel ABIs.
+The additive `component_host_resource_sets_v1` capability preserves these sets in
+the queryable contract, so a consumer can validate its snapshot closure separately
+from extra diagnostic resources. Members must refer to retained resource identities;
+unknown, duplicate or unretained references reject. Set names do not define execution
+phases, access permissions, initialization policy or a second resource layout.
+
 ### Native sorting of Dense Field instances
 
 Component capture of `primitive_sequence().sort(...)` also accepts declared,

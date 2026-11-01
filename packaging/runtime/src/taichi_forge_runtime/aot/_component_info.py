@@ -100,6 +100,8 @@ def _validate_header(contract, name):
     host_resource_capability = "component_host_resources_v1" in contract.get("required_capabilities", ())
     if host_resource_capability:
         required.add("host_resources")
+    if "component_host_resource_sets_v1" in contract.get("required_capabilities", ()):
+        required.add("host_resource_sets")
     private_shape_capability = "component_private_array_extents_v1" in contract.get("required_capabilities", ())
     if private_shape_capability:
         required.add("private_shapes")

@@ -746,6 +746,13 @@ lowering 分界拒绝。CPU/CUDA 门槛覆盖不同尺寸实例、状态保留�
 存储种类明确拒绝。CPU/CUDA 覆盖独立动态组维度、rank-0 状态、Kernel ABI/代码
 不变、双实例及非法保留元数据。
 
+`host_resource_sets={"snapshot": (...), "diagnostics": (...)}` 可进一步命名正常
+Host 发布闭包。集合允许重叠和为空，其并集加入 `host_resources`，不重复分配存储，
+也不扩大数值 Kernel ABI。增量能力 `component_host_resource_sets_v1` 在可查询合同中
+保留各集合，使消费端能独立校验 snapshot 闭包与额外诊断资源。成员必须引用已保留
+资源身份，未知、重复或未保留引用均拒绝。集合名称不定义执行阶段、访问权限、
+初始化政策或另一份资源布局。
+
 ### 组件中的原生排序
 
 正常 `primitive_sequence().sort(...)` 经 `append_native()` 进入组件时，

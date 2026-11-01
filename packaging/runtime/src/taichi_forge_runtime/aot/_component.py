@@ -163,6 +163,19 @@ class Component:
                                for name in host_resources)):
                     raise ValueError("Invalid component Host-visible resources")
                 capabilities.add("component_host_resources_v1")
+            if "component_host_resource_sets_v1" in contract["required_capabilities"]:
+                resource_sets = contract.get("host_resource_sets")
+                if (not isinstance(resource_sets, dict) or not resource_sets
+                        or any(not isinstance(name, str) or not name or name.strip() != name
+                               for name in resource_sets)):
+                    raise ValueError("Invalid component Host resource sets")
+                for members in resource_sets.values():
+                    if (not isinstance(members, list)
+                            or any(not isinstance(member, str) for member in members)
+                            or len(members) != len(set(members))
+                            or not set(members) <= set(host_resources)):
+                        raise ValueError("Component Host resource sets must reference retained resources")
+                capabilities.add("component_host_resource_sets_v1")
             if contract["version"] >= 7 and contract["field_io"]:
                 capabilities.add("component_field_coordinates_v1")
             fixed_groups = contract.get("fixed_groups", {})

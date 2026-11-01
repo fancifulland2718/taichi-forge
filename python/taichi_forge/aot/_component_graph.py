@@ -43,6 +43,7 @@ class _GraphCapture:
         self.dimensions = {}
         self.resources = {}
         self.host_resources = set()
+        self.host_resource_sets = {}
         self.bindings = {}
         self.values = {}
         self.explicit = {}
@@ -363,6 +364,19 @@ class _GraphCapture:
         """
         self._retain_dense_resources(resources, host_visible=True)
 
+    def retain_host_resource_sets(self, resource_sets):
+        """Name normal Host publication closures over the same resource facts."""
+        from collections.abc import Mapping
+
+        if resource_sets is None:
+            return
+        if not isinstance(resource_sets, Mapping):
+            raise ValueError("Host resource sets require a mapping of names to declared resources")
+        for name, resources in resource_sets.items():
+            if not isinstance(name, str) or not name or name.strip() != name:
+                raise ValueError("Host resource set names must be nonempty strings without outer whitespace")
+            self.host_resource_sets[name] = sorted(set(self._retain_dense_resources(resources, host_visible=True)))
+
     def _retain_dense_resources(self, resources, *, host_visible):
         from taichi_forge.graph._graph import Arg, ArgKind
 
@@ -412,6 +426,7 @@ class _GraphCapture:
             resource["aliases"] = sorted(set(resource["aliases"]) | set(aliases))
             if host_visible:
                 self.host_resources.add(identity)
+                symbols.append(identity)
             else:
                 symbol_name = "__component_resource_" + _digest((group, paths))
                 self.bindings[symbol_name] = dict(kind="resource", name=identity)
@@ -471,6 +486,9 @@ class _GraphCapture:
         if self.host_resources:
             facts["host_resources"] = sorted(self.host_resources)
             facts["required_capabilities"].append("component_host_resources_v1")
+        if self.host_resource_sets:
+            facts["host_resource_sets"] = dict(sorted(self.host_resource_sets.items()))
+            facts["required_capabilities"].append("component_host_resource_sets_v1")
         facts["semantic_key"] = _digest(facts)
         return facts
 
@@ -858,7 +876,7 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
 
 
 def compile_component_graph(component, record, *args, initializer=None, setup=None, operations=None,
-                            host_resources=(), _build=None, **kwargs):
+                            host_resources=(), host_resource_sets=None, _build=None, **kwargs):
     from taichi_forge.graph import GraphBuilder
 
     capture = _GraphCapture(component, record, args, kwargs, _build)
@@ -930,6 +948,7 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
     operation_prefix = tuple(builder._nodes) if operation_nodes else ()
     record_phase(record, *args, **kwargs)
     capture.retain_host_resources(host_resources)
+    capture.retain_host_resource_sets(host_resource_sets)
     contract = capture.finish(builder)
     if _build is not None:
         _build.check_time("before backend compilation")
