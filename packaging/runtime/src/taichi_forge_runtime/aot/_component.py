@@ -3,6 +3,7 @@
 import hashlib
 import json
 import threading
+from copy import deepcopy
 from types import MappingProxyType
 import weakref
 
@@ -525,6 +526,17 @@ class Component:
                     raise ValueError("Component operation bindings differ from the declared entries")
             self._module, self._plan = module, plan
             self._contract_json = json.dumps(contract)
+            # Retain only validated binding facts for repeated phase preparation.
+            # Public queries still return independent copies; decoding the full
+            # compilation/layout document on each prepare is unnecessarily costly.
+            self._binding_contract = {
+                key: contract[key] for key in
+                ("name", "dimensions", "bindings", "values", "explicit")
+            }
+            self._binding_contract["constraints"] = contract.get("constraints", {})
+            self._binding_contract["compilation"] = {
+                "constraint_sources": contract.get("compilation", {}).get("constraint_sources")
+            }
             self._aliases = aliases
             source_facts = contract.get("compilation", {}).get("input_sources")
             self._resource_sources = None if source_facts is None else MappingProxyType(
@@ -574,20 +586,21 @@ class Component:
 
     def inputs(self, *, initialization=False, setup=None, operation=None):
         """Query external values/arguments needed by one lifecycle phase."""
+        self._module._check()
         if sum((setup is not None, bool(initialization), operation is not None)) > 1:
             raise ValueError("Choose setup, final initialization or operation, not both")
         plan = (self._setup_plan(setup) if setup is not None
                 else self._initializer_plan if initialization else self._operation_plan(operation))
         if plan is None:
             raise ValueError("Component has no registered instance initializer")
-        contract = self.contract
+        contract = self._binding_contract
         names = set(plan.argument_names)
-        return dict(
+        return deepcopy(dict(
             values={binding["name"]: contract["values"][binding["name"]]
                     for symbol, binding in contract["bindings"].items()
                     if symbol in names and binding["kind"] == "value"},
             arguments={name: spec for name, spec in contract["explicit"].items() if name in names},
-        )
+        ))
 
     def _setup_plan(self, name):
         self._module._check()
@@ -823,7 +836,7 @@ class ComponentInstance:
         updates = dict(dimensions or {})
         if set(updates) & self._component._layout_dimensions:
             raise ValueError("Changing layout dimensions requires a new component instance")
-        contract = self._component.contract
+        contract = self._component._binding_contract
         resolved = _dimensions(contract["dimensions"], {**self._inputs, **updates})
         check_constraints(
             contract.get("constraints", {}), resolved.__getitem__,

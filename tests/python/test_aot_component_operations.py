@@ -1,5 +1,6 @@
 """Named normal recordings share safe instance bindings with default replay."""
 import json
+from unittest.mock import PropertyMock, patch
 from zipfile import ZipFile
 
 import numpy as np
@@ -59,6 +60,18 @@ def test_named_operation_preserves_history_and_instance_bindings(tmp_path):
                 state.initialize(dict(seed=np.arange(n, dtype=np.int32), later=np.full(n, 20, np.int32)))
                 state.run_setup("unpack", values=dict(gain=5))
                 state.initialize_state()
+            # Phase preparation must not deserialize the entire public document.
+            # Mutating its small input projection must not affect later bindings.
+            expected_inputs = code.inputs(operation="adjust")
+            with patch.object(type(code), "contract", new_callable=PropertyMock,
+                              side_effect=AssertionError("full contract queried during prepare")):
+                inputs = code.inputs(operation="adjust")
+                inputs["values"]["bias"][1] = "f64"
+                assert code.inputs(operation="adjust") == expected_inputs
+                with first.prepare(operation="adjust", values=dict(bias=0)) as prepared:
+                    prepared.run()
+                with pytest.raises(ValueError, match="inputs differ"):
+                    first.prepare(operation="adjust", values={})
             with first.prepare() as step, first.prepare(operation="adjust", values=dict(bias=7)) as adjust, \
                     first.prepare(operation="refresh") as refresh, second.prepare() as other:
                 step.run()
