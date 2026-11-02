@@ -1177,6 +1177,15 @@ completion validate the relationship again. Retargeting a live reference does
 not silently redirect compiled code. Deployment uses the resulting ordinary
 resource/value ABI and retains no producer Python object. CPU/CUDA tests cover
 parent/child links, new-size consumption and invalid retargeting.
+`scope.owner_dim("motion", "count")` relates this owner's layout or `derived_dim`
+to a declared non-owning owner's normal dimension. The target requires a unique
+ownership path in the same component root. Its dimension remains authoritative:
+the consumer binds it once, without a second capacity input or a fabricated Field
+alias. Named derived dimensions are supported; internal `parent_dim`/`owner_dim`
+aliases are not valid targets. Unused source dimensions do not enter Kernel code
+identity. CPU/CUDA tests cover new-size loops, layouts and tails, plus rejection
+of missing or ambiguous ownership and stale normal relations.
+
 An original SNode root can contain allocations from several declared owners.
 Dimension names in a `source_scope` borrow refer to the anchor's allocation
 namespace, not every equal leaf name in that physical root. The complete root

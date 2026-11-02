@@ -854,7 +854,7 @@ class Component:
         inherited_dimensions, record_options, constraints, owner_sequences = {}, {}, {}, {}
         derived_attributes = set()
         namespaces, record_shapes, record_extents, array_declarations = {}, {}, {}, {}
-        declared_owners, owner_references = [], []
+        declared_owners, owner_references, referenced_dimensions = [], [], []
 
         def root_of(field, name):
             nodes = tuple(member.ptr.snode() for member in field._get_field_members())
@@ -902,6 +902,14 @@ class Component:
                 sources[_capture_id((*prefix, name))] = source
             for name, expression in registry.get("inherited_dimensions", {}).items():
                 inherited_dimensions[_capture_id((*prefix, name))] = ("dim", _capture_id((*prefix[:-1], expression[1])))
+            for name, (reference, dimension) in registry.get("referenced_dimensions", {}).items():
+                if reference not in registry.get("owner_references", {}):
+                    raise TaichiCompilationError(f"Owner dimension {name!r} requires its declared owner reference")
+                target = _member(current, reference)
+                target_registry = _member(target, "_forge_resource_declarations")
+                if dimension not in target_registry["dimensions"]:
+                    raise TaichiCompilationError(f"Referenced owner dimension {reference}.{dimension} is no longer declared")
+                referenced_dimensions.append((prefix, name, reference, dimension))
             for name, declaration in registry.get("arrays", {}).items():
                 array = _member(current, name)
                 if getattr(array, "_logical_resource_declaration", None) != declaration:
@@ -956,6 +964,7 @@ class Component:
             return members
 
         declarations = collect(owner)
+        reference_paths = {}
         for members, prefix, name, target in owner_references:
             paths = [path for candidate, path in declared_owners if candidate is target]
             if len(paths) != 1:
@@ -963,6 +972,12 @@ class Component:
                     f"Owner reference {'.'.join((*prefix, name))!r} requires exactly one "
                     f"declared ownership path in this component root; found {len(paths)}")
             members[name] = _OwnerReference(paths[0])
+            reference_paths[(*prefix, name)] = paths[0]
+        for prefix, name, reference, dimension in referenced_dimensions:
+            path = reference_paths.get((*prefix, reference))
+            if path is None:
+                raise TaichiCompilationError(f"Owner dimension {reference}.{dimension} has no ownership path")
+            inherited_dimensions[_capture_id((*prefix, name))] = ("dim", _capture_id((*path, dimension)))
         # A visible allocation site names its group, regardless of aliases in
         # child records. Borrow-only components retain their existing identity.
         visible_dimensions, visible_roots = {}, {}

@@ -267,10 +267,22 @@ class ResourceScope:
         constraints.setdefault(name, dict(spec=spec, source=(caller.f_code.co_filename, caller.f_lineno)))
         del caller
 
-    def _normal_dimension(self, name):
+    def _normal_dimension(self, name, visiting=()):
+        key = (id(self._registry), name)
+        if key in visiting:
+            raise ValueError(f"Cyclic owner dimension {name!r}")
+        visiting = (*visiting, key)
         inherited = self._registry.get("inherited_dimensions", {}).get(name)
         if inherited is not None:
-            return self._parent._normal_dimension(inherited[1])
+            return self._parent._normal_dimension(inherited[1], visiting)
+        referenced = self._registry.get("referenced_dimensions", {}).get(name)
+        if referenced is not None:
+            owner, dimension = referenced
+            target = getattr(self._owner, owner)
+            registry = inspect.getattr_static(target, "_forge_resource_declarations", None)
+            if registry is None or dimension not in registry["dimensions"]:
+                raise ValueError(f"Owner dimension {owner}.{dimension} no longer has its declaration")
+            return ResourceScope(target)._normal_dimension(dimension, visiting)
         return operator.index(getattr(self._owner, name))
 
     def derived_dim(self, name, expression):
@@ -295,7 +307,8 @@ class ResourceScope:
                 raise ValueError(f"Cyclic derived dimension {key!r}")
             if key in pending:
                 value = evaluate_extent(pending[key], lambda dependency: resolve(dependency, (*visiting, key)))
-            elif key in self._registry.get("inherited_dimensions", {}):
+            elif (key in self._registry.get("inherited_dimensions", {})
+                  or key in self._registry.get("referenced_dimensions", {})):
                 return self._normal_dimension(key)
             else:
                 return operator.index(getattr(self._owner, key))
@@ -433,6 +446,37 @@ class ResourceScope:
         alias = "__parent_" + name
         self._registry["dimensions"][alias] = self._parent._registry["dimensions"][name]
         self._registry.setdefault("inherited_dimensions", {})[alias] = ("dim", name)
+        return Extent(("dim", alias))
+
+    def owner_dim(self, reference, name):
+        """Use a declared non-owning owner's dimension in this owner's layout.
+
+        The referenced owner must have one ownership path in the component.
+        This creates a dimension relation, never another consumer input, Field
+        alias, or copied layout. The target's dimension declaration stays authoritative.
+        """
+        if (not isinstance(reference, str) or reference not in self._registry.get("owner_references", {})
+                or not isinstance(name, str) or not name.isidentifier()):
+            raise ValueError("owner_dim requires a declared owner_reference and dimension name")
+        target = getattr(self._owner, reference)
+        registry = inspect.getattr_static(target, "_forge_resource_declarations", None)
+        if registry is None or name not in registry["dimensions"]:
+            raise ValueError(f"Referenced owner dimension {reference}.{name} is not declared")
+        if (name in registry.get("inherited_dimensions", {})
+                or name in registry.get("referenced_dimensions", {})):
+            raise ValueError("owner_dim requires a named normal dimension, not an internal dimension alias")
+        value = ResourceScope(target)._normal_dimension(name)
+        if not 0 <= value <= 2**31 - 1:
+            raise ValueError(f"Referenced owner dimension {reference}.{name} is outside the i32 count range")
+        alias = f"__owner_{len(reference)}_{reference}_{name}"
+        relation = (reference, name)
+        previous = self._registry.get("referenced_dimensions", {}).get(alias)
+        if alias in self._registry["dimensions"] and previous != relation:
+            raise ValueError(f"Owner dimension alias {alias!r} conflicts with another declaration")
+        caller = inspect.currentframe().f_back
+        self._registry["dimensions"].setdefault(alias, (caller.f_code.co_filename, caller.f_lineno))
+        self._registry.setdefault("referenced_dimensions", {})[alias] = relation
+        del caller
         return Extent(("dim", alias))
 
     def borrow(self, name, field, *, dimensions=None, source_scope=False):
