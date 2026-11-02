@@ -815,7 +815,29 @@ CPU/CUDA 已验证 sequence compact 的 Field/Ndarray 路径；CUDA 验证 prepa
 非零负 flags、空筛选、输出尾部保留、关闭隔离及错误容量准备失败后的资源清理。
 prepared sort 另有稳定顺序及 bitwise 策略拒绝门槛。CUDA prepared 检查实际 `cuda_graph`
 执行类型；此处未增加物理提交性能测量，也未验证新 compact 路径的 Vulkan 资格。
-连续去重、OGC 全部候选流程及其生产性能仍需后续接通与验收。
+OGC 全部候选流程及其生产性能仍需应用侧接通与验收。
+
+### 连续去重的组件 Graph 展开
+
+正常 `unique`/`unique_by_key` sequence 和 `prepare_unique`/`prepare_unique_by_key`
+recording 在组件录制时展开为原 `rle_mark_boundaries_ndarray` Kernel 与共享 native compact。
+没有新的数值实现或运行期 Host 去重循环。标记数组使用现有顺序私有区域和 `ArrayExtent`
+配方，按消费实例的键容量准备；多次操作分别拥有私有 flags，多列共用一次 prefix。
+
+`size=None` 保留“使用当前实例完整容量”的意图；显式整数前缀保持该固定值，即使它
+碰巧等于 producer 容量。固定前缀进入原私有标量合同，并由组件维度约束拒绝容量不足
+的消费实例。零前缀写回 count=0，不修改输出尾部。资源/extent 的参数来自同一声明，
+原 helper 仍走正常编译和调用 ABI，不能通过伪造保留名称传入未声明资源。
+
+native 读取 Graph-owned 数组要求 `component_native_private_arrays_v1`；工作区形状和
+类型由原 Graph/ExecutionPlan 校验。CPU/CUDA 验证 sequence 的 Field/Ndarray 整数键及
+i32 payload；CUDA prepared 路径另验证 vector3 f32 payload。保留各正常 API 的既有类型
+限制，不因一个入口覆盖更广就扩大另一个入口。prepared 源 plan 关闭后录制仍拒绝。
+
+验证覆盖重复键的首项保留（并非全局去重）、新尺寸 257/519、两次私有区域、异步双实例、
+固定/空前缀和容量失败清理，以及 compact→sort→unique 的稳定首项与空包哨兵语义。
+CUDA 双实例记录实际 `cuda_graph` 类型；不据此声称已测得物理提交性能。新增路径尚未
+取得 Vulkan 应用资格，RLE lengths 和其他原生组合仍按各自能力拒绝或继续资格化。
 
 ### Graph 私有工作区使用资源 extent
 

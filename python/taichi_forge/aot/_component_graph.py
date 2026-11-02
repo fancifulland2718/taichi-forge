@@ -38,6 +38,8 @@ class _GraphCapture:
         self.codes = []
         self.dispatches = {}
         self.natives = {}
+        self.native_constraints = {}
+        self.native_constraint_sources = {}
         self.groups = {}
         self.fixed_groups = {}
         self.fixed_dependencies = {}
@@ -135,6 +137,12 @@ class _GraphCapture:
         managed_symbols = set()
         normalized = []
         for value in args:
+            name = getattr(value, "name", None)
+            if name is not None and value is self.symbols.get(name):
+                # Compiler-generated resource/dimension arguments may feed a
+                # shared ordinary helper. An invented reserved name is still
+                # rejected below; only this capture's exact symbol is admitted.
+                managed_symbols.add(name)
             if isinstance(value, Ndarray):
                 matches = [name for name, declaration in self.component.declarations.items()
                            if isinstance(declaration, Array) and self.component.available(owner, name)
@@ -358,6 +366,47 @@ class _GraphCapture:
         definition = convert(executable, self)
         self.natives[definition.graph_ir_node.name] = definition
         return definition
+
+    def append_native(self, builder, executable, **options):
+        expand = type(executable).__dict__.get("_record_component_graph")
+        if expand is not None:
+            return expand(executable, builder, self, **options)
+        return builder._append_native_executable(self.native(executable), **options)
+
+    def append_native_definition(self, builder, definition, **options):
+        self.natives[definition.graph_ir_node.name] = definition
+        return builder._append_native_executable(definition, **options)
+
+    def resource_argument(self, value):
+        return self.symbols[self.native_array(value)]
+
+    def resource_extent_argument(self, builder, value, *, name="capacity"):
+        from taichi_forge.graph._graph import Arg, ArgKind
+        from taichi_forge.types.primitive_types import i32
+
+        symbol = self.native_array(value)
+        resource = self.resources[self.bindings[symbol]["name"]]
+        if len(resource["shape"]) != 1:
+            raise TaichiCompilationError("Native helper requires a one-dimensional declared resource")
+        extent = resource["shape"][0]
+        if type(extent) is int:
+            return builder.private_scalar(name, i32, extent)
+        argument = "__component_dimension_" + extent
+        self.bindings[argument] = dict(kind="dimension", name=extent)
+        return self.symbols.setdefault(argument, Arg(ArgKind.SCALAR, argument, i32))
+
+    def require_resource_extent(self, value, minimum, *, source):
+        symbol = self.native_array(value)
+        identity = self.bindings[symbol]["name"]
+        resource = self.resources[identity]
+        extent = resource["shape"][0]
+        if type(extent) is int:
+            if extent < minimum:
+                raise TaichiCompilationError("Native prefix exceeds its declared resource extent")
+            return
+        name = "native_prefix_" + _digest((identity, minimum))
+        self.native_constraints[name] = dict(left=["const", minimum], right=["dim", extent], when=identity)
+        self.native_constraint_sources[name] = list(source)
 
     def retain_host_resources(self, resources):
         """Keep explicitly published normal state without adding kernel inputs.
@@ -787,6 +836,8 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
         capture.owner, used_declarations, entry=capture._root_name
     )
     contract["dimensions"].update(constraint_dimensions)
+    constraints.update(capture.native_constraints)
+    constraint_sources.update(capture.native_constraint_sources)
     if not any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
         contract["required_capabilities"] = [
             name for name in contract["required_capabilities"] if name != "component_explicit_ndarray_v1"
@@ -867,9 +918,16 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
             entries[-1]["record_presence"] = dict(code.contract["objects"])
             entries[-1]["capture_paths"] = code.contract["access_paths"]
     native_dense = False
+    native_private = False
     for node in native_nodes:
         for effect in node.effects:
             binding = contract["bindings"].get(effect.resource)
+            private = contract.get("internal_arguments", {}).get(effect.resource)
+            if binding is None and private and private[0] == "ndarray":
+                # The original Graph owns this scratch and its shape recipe;
+                # native use does not turn it into public instance state.
+                native_private = True
+                continue
             if binding is None or binding["kind"] != "resource":
                 raise TaichiCompilationError("Component native effect has no declared resource")
             name = binding["name"]
@@ -892,6 +950,8 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
         contract["required_capabilities"].append("component_native_dense_sort_v1")
     if native_primitives:
         contract["required_capabilities"].append("component_native_primitives_v1")
+    if native_private:
+        contract["required_capabilities"].append("component_native_private_arrays_v1")
     if has_control or "internal_arguments" in contract or constraints or fixed_groups or lifecycle:
         contract["version"] = 5 if constraints else 4
         contract["control"] = control

@@ -2825,6 +2825,11 @@ class _PrimitiveSequenceGraphExecutable(NativeGraphExecutable):
 
         return capture_sequence(self.sequence, capture)
 
+    def _record_component_graph(self, builder, capture, **options):
+        from taichi_forge.algorithms._component_unique import record_sequence
+
+        return record_sequence(self.sequence, builder, capture, **options)
+
     @property
     def debug_info(self):
         return {

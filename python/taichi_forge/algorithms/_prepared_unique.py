@@ -87,6 +87,11 @@ class _UniqueExecutable(NativeGraphExecutable):
     def __init__(self, plan):
         self._plan = plan
 
+    def _record_component_graph(self, builder, capture, **options):
+        from ._component_unique import record_prepared_unique
+
+        return record_prepared_unique(self._plan, builder, capture, **options)
+
     def recordable_root_actions(self, namespace):
         plan = self._plan
         plan._validate_lifetime()
@@ -136,6 +141,7 @@ class PreparedUniquePlan:
         capacity = int(descriptor.index_shape[0])
         if not 0 < capacity <= (1 << 31) - 1:
             raise ValueError("Prepared unique capacity must be positive and at most INT_MAX")
+        self._size_is_capacity = size is None
         if size is None:
             size = capacity
         if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= capacity:

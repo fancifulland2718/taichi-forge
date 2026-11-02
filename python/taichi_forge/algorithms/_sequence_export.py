@@ -735,10 +735,8 @@ def _compact(call, context):
     )
 
 
-def _consecutive(call, context):
-    from ._consecutive_definition import unique_helper
-    from taichi_forge.graph._graph import Arg, ArgKind
-    from taichi_forge_runtime.aot import Scalar
+def _consecutive_request(call):
+    from types import SimpleNamespace
     from . import _algorithms as algorithms
 
     keyed = call.kind == "unique_by_key"
@@ -772,16 +770,26 @@ def _consecutive(call, context):
             algorithms._check_rle_payload("AOT unique", keys, values, unique_values, ndarray_mode=ndarray_mode)
             inputs, outputs = (keys, values), (output, unique_values, count)
         algorithms._check_rle_storage_aliases("AOT unique", inputs, outputs)
+    return SimpleNamespace(keys=keys, output=output, count=count, capacity=capacity, size=size,
+                           columns=[(keys, output)] + ([(values, unique_values)] if keyed else []),
+                           rle=rle, lengths=lengths if rle else None)
+
+
+def _consecutive(call, context):
+    from ._consecutive_definition import unique_helper
+    from taichi_forge.graph._graph import Arg, ArgKind
+    from taichi_forge_runtime.aot import Scalar
+    from . import _algorithms as algorithms
+
+    request = _consecutive_request(call)
+    keys, count, capacity, size, rle = request.keys, request.count, request.capacity, request.size, request.rle
     count_name = context.retained_arrays.require(count)
     if size == 0:
         context.operations.append(dict(kind="fill32", destination=count_name, value=0, size_bytes=4))
         return
     key_name = context.retained_arrays.require(keys)
-    columns = [dict(values=key_name, output=context.retained_arrays.require(output))]
-    if keyed:
-        columns.append(
-            dict(values=context.retained_arrays.require(values), output=context.retained_arrays.require(unique_values))
-        )
+    columns = [dict(values=context.retained_arrays.require(values), output=context.retained_arrays.require(output))
+               for values, output in request.columns]
     # One complete head overwrite and one native prefix shared by all columns.
     # Scratch is reconstructed, not sampled from the producer workspace.
     flags = context._resource(object(), dict(kind="ndarray", dtype="i32", shape=[capacity]))
@@ -828,7 +836,7 @@ def _consecutive(call, context):
         )
         context.kernel(kernel.compiled_kernels[specialization], (
             Arg(ArgKind.NDARRAY, run_starts, algorithms.i32, ndim=1),
-            Arg(ArgKind.NDARRAY, context.retained_arrays.require(lengths), algorithms.i32, ndim=1),
+            Arg(ArgKind.NDARRAY, context.retained_arrays.require(request.lengths), algorithms.i32, ndim=1),
             Arg(ArgKind.NDARRAY, count_view, algorithms.i32, ndim=1),
             Arg(ArgKind.SCALAR, size_name, algorithms.i32),
             Arg(ArgKind.SCALAR, capacity_name, algorithms.i32),

@@ -143,6 +143,15 @@ class Component:
                     for port, symbol in operation_bindings(operation):
                         binding = contract["bindings"].get(symbol, {})
                         resource = contract["resources"].get(binding.get("name"), {})
+                        private = contract.get("internal_arguments", {}).get(symbol)
+                        if not binding and private and private[0] == "ndarray":
+                            if (len(private) != 6 or not isinstance(private[1], list) or len(private[1]) != 4
+                                    or type(private[2]) is not int or private[2] not in (0, 1)):
+                                raise ValueError("Invalid component native private array descriptor")
+                            resource = dict(kind="ndarray", dtype=private[1][1], element_shape=private[1][2],
+                                            shape=[None] * private[2])
+                            binding = dict(kind="resource")
+                            capabilities.add("component_native_private_arrays_v1")
                         if (binding.get("kind") != "resource" or resource.get("kind") not in (None, "ndarray")
                                 or len(resource.get("shape", ())) not in ((0, 1) if port == "count" else (1,))
                                 or port in ("keys", "flags", "count") and resource.get("element_shape")

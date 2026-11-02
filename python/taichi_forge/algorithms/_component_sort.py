@@ -14,13 +14,17 @@ from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeErr
 
 def capture_sequence(sequence, capture):
     from ._algorithms import PrimitiveSequence
-    from ._sequence_export import _compact, _sort
 
     if type(sequence) is not PrimitiveSequence or sequence._fused_plan is not None:
         raise TaichiCompilationError(
             "Component native capture requires an unfused qualified primitive sequence"
         )
-    calls = tuple(sequence._calls)
+    return capture_calls(tuple(sequence._calls), capture)
+
+
+def capture_calls(calls, capture):
+    from ._sequence_export import _compact, _sort
+
     if not calls or any(call.kind not in ("sort", "sort_by_key", "compact") for call in calls):
         raise TaichiCompilationError(
             "Component native capture currently qualifies single-key sort and compact sequences"
