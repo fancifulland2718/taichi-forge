@@ -642,8 +642,8 @@ class ResourceScope:
         from taichi_forge.lang.matrix import MatrixField, Vector, Matrix
         from taichi_forge.lang.struct import Struct, StructField
 
-        if self._read_only or self._builder is not None:
-            raise ValueError("field_like requires a writable implicit dense allocation scope")
+        if self._read_only:
+            raise ValueError("field_like requires a writable dense allocation scope")
         if not isinstance(source, Field):
             raise TypeError("field_like requires an ordinary declared Field")
         layout = Layout.AOS if layout is None else layout
@@ -665,16 +665,16 @@ class ResourceScope:
             types = {name: (vector(member.n, member.dtype) if member.ndim == 1 else
                            matrix(member.n, member.m, member.dtype)) if isinstance(member, MatrixField)
                      else member.dtype for name, member in sources.items()}
-            field = Struct.field(types, shape=source.shape, layout=layout)
+            field = self._create(Struct.field, (types,), dict(shape=source.shape, layout=layout, initialization=initialization))
             field._forge_resource_declarations = {"fields": {}, "dimensions": {}, "records": {}}
             targets = field.field_dict
         elif isinstance(source, MatrixField):
-            field = (Vector.field(source.n, source.dtype, shape=source.shape, layout=layout)
-                     if source.ndim == 1 else Matrix.field(source.n, source.m, source.dtype,
-                                                          shape=source.shape, layout=layout))
+            factory, args = ((Vector.field, (source.n, source.dtype)) if source.ndim == 1 else
+                             (Matrix.field, (source.n, source.m, source.dtype)))
+            field = self._create(factory, args, dict(shape=source.shape, layout=layout, initialization=initialization))
             targets = {None: field}
         else:
-            field = impl.field(source.dtype, shape=source.shape)
+            field = self._create(impl.field, (source.dtype,), dict(shape=source.shape, initialization=initialization))
             targets = {None: field}
         caller = inspect.currentframe().f_back
         location = (caller.f_code.co_filename, caller.f_lineno)
