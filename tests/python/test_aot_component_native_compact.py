@@ -50,12 +50,16 @@ class CompactModel:
         sequence.append_native(self.action)
         builder.append(sequence)
 
+    def record_auto(self, builder):
+        builder.dispatch(self.tick)
+        builder.append_native(self.action, admission="auto")
 
-def _exercise(tmp_path, form):
+
+def _exercise(tmp_path, form, *, auto=False):
     source = CompactModel(7, form)
-    root = ti.aot.Component.from_owner(source).compile_graph(source.record)
+    root = ti.aot.Component.from_owner(source).compile_graph(source.record_auto if auto else source.record)
     larger = CompactModel(19, form)
-    assert root.contract["semantic_key"] == ti.aot.Component.from_owner(larger).compile_graph(larger.record).contract["semantic_key"]
+    assert root.contract["semantic_key"] == ti.aot.Component.from_owner(larger).compile_graph(larger.record_auto if auto else larger.record).contract["semantic_key"]
     assert "component_native_primitives_v1" in root.contract["required_capabilities"]
     module = ti.aot.Module()
     root.export(module, "compact")
@@ -186,3 +190,40 @@ def test_component_prepared_sort_rejects_bitwise_policy():
     source.action = plan.record()
     with pytest.raises(ti.TaichiRuntimeError, match="NaNs-last"):
         ti.aot.Component.from_owner(source).compile_graph(source.record)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize("form", ("prepared", "persistent_columns"))
+def test_component_auto_admission_prepared_compact(tmp_path, form):
+    _exercise(tmp_path, form, auto=True)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize("wrong_backend", (False, True))
+def test_component_auto_admission_rejects_before_conversion(wrong_backend):
+    from taichi_forge.graph._native import NativeGraphExecutable, NativeGraphNode, DispatchGraphAction
+
+    @ti.kernel
+    def work():
+        pass
+
+    key = work._primal.ensure_compiled()
+    action = DispatchGraphAction(((work._primal.compiled_kernels[key], ()),), backends=("cpu",))
+
+    class Unqualified(NativeGraphExecutable):
+        @property
+        def recordable_action(self):
+            return action if wrong_backend else None
+
+        def _capture_component(self, capture):
+            raise AssertionError("Unqualified provider must not reach symbolic conversion")
+
+    class SourceNode(NativeGraphNode):
+        def compile(self):
+            return Unqualified()
+
+    source = CompactModel(7, "field")
+    def record(builder):
+        builder.append_native(SourceNode(), admission="auto")
+    with pytest.raises(ti.TaichiRuntimeError, match="Automatic native Graph admission rejected"):
+        ti.aot.Component.from_owner(source).compile_graph(record)

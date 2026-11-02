@@ -1025,3 +1025,11 @@ replay 未访问的哨兵、别名及稳定语义身份。
 默认对象比较的 `record == None` / `record != None` 同样可用于存在性判断，并使用
 既有的存在性和引用关系 guard。自定义 `__eq__` / `__ne__` 不会通过代理执行，
 会明确拒绝并建议使用 `is not None`；该资格在缓存命中和运行绑定时也重新检查。
+
+
+组件中的 `admission="auto"` 在转换之前检查原 provider 的 recordable action 与目标后端，
+复用普通 Graph 的同一准入函数；consecutive unique 检查原 compact action，head 保留为
+正常 dispatch，不为准入额外编译 producer 容量的 head。导出符号定义不伪造设备命令，
+消费者仍按实际实例资源准备 native operation，并由 execution domain 决定设备 capture
+资格。opaque provider 和错误后端在符号转换前拒绝；源码端通过 auto 不等于任意消费端
+执行域都已取得 capture 或性能资格。

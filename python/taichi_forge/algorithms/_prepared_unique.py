@@ -87,6 +87,14 @@ class _UniqueExecutable(NativeGraphExecutable):
     def __init__(self, plan):
         self._plan = plan
 
+    def _validate_component_auto_admission(self, backend):
+        from taichi_forge.graph._native import compile_native_graph_node, validate_native_auto_admission
+
+        self._plan._validate_lifetime()
+        # The head becomes a normal component dispatch. Check the same compact
+        # action as ordinary root expansion without compiling another fixed head.
+        validate_native_auto_admission(compile_native_graph_node(self._plan._compact.record()), backend)
+
     def _record_component_graph(self, builder, capture, **options):
         from ._component_unique import record_prepared_unique
 

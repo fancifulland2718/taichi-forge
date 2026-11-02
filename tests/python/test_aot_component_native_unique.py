@@ -49,8 +49,13 @@ class UniqueModel:
         for _ in range(2):
             builder.append_native(self.action)
 
+    def record_auto(self, builder):
+        builder.dispatch(self.tick)
+        for _ in range(2):
+            builder.append_native(self.action, admission="auto")
 
-def _exercise_unique(tmp_path, keyed, form):
+
+def _exercise_unique(tmp_path, keyed, form, *, auto=False):
     source = UniqueModel(7, keyed, form=form)
     vector_payload = form == "prepared"
     payload_dtype = np.float32 if vector_payload else np.int32
@@ -68,9 +73,9 @@ def _exercise_unique(tmp_path, keyed, form):
     source.plan.run()
     assert source.count.to_numpy().reshape(-1)[0] == 3
     np.testing.assert_array_equal(source.output.to_numpy()[:3], [5, 2, 5])
-    root = ti.aot.Component.from_owner(source).compile_graph(source.record)
+    root = ti.aot.Component.from_owner(source).compile_graph(source.record_auto if auto else source.record)
     other = UniqueModel(19, keyed, form=form)
-    assert root.contract["semantic_key"] == ti.aot.Component.from_owner(other).compile_graph(other.record).contract["semantic_key"]
+    assert root.contract["semantic_key"] == ti.aot.Component.from_owner(other).compile_graph(other.record_auto if auto else other.record).contract["semantic_key"]
     assert "component_native_private_arrays_v1" in root.contract["required_capabilities"]
     assert len(root.contract["private_shapes"]) == 2
     assert all(shape[0]["array"] in root.contract["bindings"] for shape in root.contract["private_shapes"].values())
@@ -252,3 +257,8 @@ def test_component_compact_sort_unique_sequence_preserves_order_and_empty_packet
                 np.testing.assert_array_equal(np.frombuffer(instance.resource("compact_count").read(), np.int32), [0])
                 np.testing.assert_array_equal(np.frombuffer(instance.resource("unique_count").read(), np.int32), [1])
                 np.testing.assert_array_equal(np.frombuffer(instance.resource("unique").read(), np.uint64), np.uint64(0xFFFFFFFFFFFFFFFF))
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_component_prepared_unique_auto_admission(tmp_path):
+    _exercise_unique(tmp_path, True, "prepared", auto=True)

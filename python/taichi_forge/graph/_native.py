@@ -21,6 +21,19 @@ from taichi_forge.graph._ir import (
 )
 
 
+def validate_native_auto_admission(executable, backend):
+    """Check the actual provider action before lowering or symbolic export."""
+    action = executable.recordable_action
+    if action is None or not action.supports_backend(backend):
+        manifest = native_action_manifest(executable, action)
+        raise TaichiRuntimeError(
+            "Automatic native Graph admission rejected a fragmented "
+            f"provider plan: {manifest.name}:"
+            f"{manifest.fragmentation_reason}. Use admission='explicit' "
+            "only for diagnostic segmented execution."
+        )
+
+
 class ProviderOwnedNdarrayBinding:
     """A non-owning Graph binding backed by a provider generation lease."""
 

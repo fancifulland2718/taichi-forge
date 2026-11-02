@@ -58,6 +58,7 @@ from taichi_forge.graph._native import (
     _CudaGraphCaptureRecipe,
     compile_native_graph_node,
     native_action_manifest,
+    validate_native_auto_admission,
 )
 from taichi_forge.graph._ir import (
     BoundedDomain,
@@ -18627,15 +18628,7 @@ class GraphBuilder:
                 return self
         if admission == "auto":
             backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
-            action = executable.recordable_action
-            if action is None or not action.supports_backend(backend):
-                manifest = native_action_manifest(executable, action)
-                raise TaichiRuntimeError(
-                    "Automatic native Graph admission rejected a fragmented "
-                    f"provider plan: {manifest.name}:"
-                    f"{manifest.fragmentation_reason}. Use admission='explicit' "
-                    "only for diagnostic segmented execution."
-                )
+            validate_native_auto_admission(executable, backend)
         self._active_bounded_publication = None
         self._flush_graph_builder()
         compiled = _CompiledNativeGraphNode(executable)

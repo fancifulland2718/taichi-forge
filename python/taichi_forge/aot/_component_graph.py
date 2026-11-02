@@ -368,6 +368,23 @@ class _GraphCapture:
         return definition
 
     def append_native(self, builder, executable, **options):
+        if options.get("admission") == "auto":
+            from taichi_forge.graph._graph import _backend_name
+            from taichi_forge.graph._native import validate_native_auto_admission
+            from taichi_forge._lib import core
+            from taichi_forge.lang import impl
+
+            backend = _backend_name(core.arch_name(impl.current_cfg().arch))
+            validate = type(executable).__dict__.get("_validate_component_auto_admission")
+            if validate is None:
+                validate_native_auto_admission(executable, backend)
+            else:
+                validate(executable, backend)
+            # Admission belongs to the concrete provider, not the exported
+            # symbolic definition (which deliberately has no producer command).
+            # Consumer preparation still validates its own native operations;
+            # device-only/capture admission remains the execution domain's job.
+            options = {**options, "admission": "explicit"}
         expand = type(executable).__dict__.get("_record_component_graph")
         if expand is not None:
             return expand(executable, builder, self, **options)
