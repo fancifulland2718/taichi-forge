@@ -770,7 +770,7 @@ Host 发布闭包。集合允许重叠和为空，其并集加入 `host_resource
 正常 `primitive_sequence().sort(...)` 或单键 `sort_by_key(...)` 经 `append_native()` 进入组件时，
 编译器复用既有排序导出校验，将已声明的独立 Ndarray 或合格的 Dense Field 解析为实例资源。
 支持单键、稳定升序、精确精度及 NaN-last 的原生路径；键/值的类型、布局、
-排序策略和工作区仍按原算法校验。其他 native 操作、未声明数组及未取得资格
+排序策略和工作区仍按原算法校验。尚未取得资格的 native 操作、未声明数组及未取得资格
 的视图明确拒绝。组件录制不执行 `prewarm=True` 请求中的数值操作。
 
 `sort_by_key` 接受直接键或单元素 list/tuple，继续复用普通 exporter 的同一校验及
@@ -795,6 +795,27 @@ Dense Field 路径额外要求 `component_native_dense_sort_v1`。复用原 SNod
 CPU/CUDA/Vulkan 已验证紧凑一维 u32 键/i32 值，7 元素导出、257/519 元素实例、
 稳定 NumPy 顺序、重复调用及关闭隔离。原生工作区仍由现有 ExecutionPlan 按实例长度
 准备；该局部门槛不代表任意非紧凑/Sparse 视图、其他原生算子或整个应用已通过。
+
+### 组件中的原生压缩及 prepared recording
+
+`primitive_sequence().compact(...)` 复用普通 exporter 的算法、存储及选定路径校验。
+`prepare_sort`、`prepare_compact` 和 `prepare_compact_columns` 的普通 recording，以及
+CUDA/Vulkan persistent recording，使用其已有 `NativeDefinition`/资源端口进行捕获。
+组件只保存声明资源引用，不保存 producer 长度、地址、命令或 scratch。消费端通过
+原 ExecutionPlan/native provider 按实例容量准备；多列继续共用一次 flag prefix。
+
+新增合同要求 `component_native_primitives_v1`。它只授权 NaNs-last 稳定排序和稳定
+compact；count 支持 rank-0 i32 Field 或一维 i32 数组，flags 必须是一维 i32，记录
+布局、容量、别名和对齐仍由原资源及 native 准备校验。旧 `native_sort` 合同保持兼容。
+效果暂按保守读写记录。普通 recording 要求源 plan 活跃；persistent recording 可以在
+源 plan 关闭后捕获，但仍必须属于当前 Runtime。任意硬件回调或继承的未知 hook 不获资格。
+
+CPU/CUDA 已验证 sequence compact 的 Field/Ndarray 路径；CUDA 验证 prepared 单列、
+异构多列和 persistent recording：7 元素导出后绑定 257/519 元素，两实例异步交错，
+非零负 flags、空筛选、输出尾部保留、关闭隔离及错误容量准备失败后的资源清理。
+prepared sort 另有稳定顺序及 bitwise 策略拒绝门槛。CUDA prepared 检查实际 `cuda_graph`
+执行类型；此处未增加物理提交性能测量，也未验证新 compact 路径的 Vulkan 资格。
+连续去重、OGC 全部候选流程及其生产性能仍需后续接通与验收。
 
 ### Graph 私有工作区使用资源 extent
 

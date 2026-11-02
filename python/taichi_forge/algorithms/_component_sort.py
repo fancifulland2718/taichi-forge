@@ -1,4 +1,4 @@
-"""Capture qualified sort definitions into the existing deployment lowering.
+"""Capture qualified native definitions into the existing deployment lowering.
 
 Only declaration identities cross this boundary. Neither producer arrays nor
 their workspace are retained by the exported component.
@@ -14,16 +14,16 @@ from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeErr
 
 def capture_sequence(sequence, capture):
     from ._algorithms import PrimitiveSequence
-    from ._sequence_export import _sort
+    from ._sequence_export import _compact, _sort
 
     if type(sequence) is not PrimitiveSequence or sequence._fused_plan is not None:
         raise TaichiCompilationError(
             "Component native capture requires an unfused qualified primitive sequence"
         )
     calls = tuple(sequence._calls)
-    if not calls or any(call.kind not in ("sort", "sort_by_key") for call in calls):
+    if not calls or any(call.kind not in ("sort", "sort_by_key", "compact") for call in calls):
         raise TaichiCompilationError(
-            "Component native capture currently qualifies single-key native sort only"
+            "Component native capture currently qualifies single-key sort and compact sequences"
         )
     for call in calls:
         if (
@@ -44,19 +44,53 @@ def capture_sequence(sequence, capture):
     for call in calls:
         # Reuse the ordinary exporter: exact ordering/NaN policy, native route,
         # packed storage, dtype, workspace and selected strategy validation.
-        _sort(call, context)
+        (_compact if call.kind == "compact" else _sort)(call, context)
+    return _ComponentSortDefinition(operations)
+
+
+def _capture_context(capture, operations):
+    def native(provider, operation, *, bindings, parameters=None, version=1):
+        operations.append(dict(kind="native", provider=provider, operation=operation,
+                               version=version, parameters=parameters or {}, bindings=bindings))
+
+    return SimpleNamespace(retained_arrays=SimpleNamespace(require=capture.native_array), native=native)
+
+
+def capture_prepared(plan, capture):
+    from ._prepared_export import export_prepared
+
+    operations = []
+    export_prepared(plan, _capture_context(capture, operations))
+    return _ComponentSortDefinition(operations)
+
+
+def capture_recording(recording, capture):
+    from taichi_forge.lang import impl
+
+    if impl.get_runtime().prog is not recording._program:
+        raise TaichiCompilationError("Persistent component primitive belongs to another runtime")
+    # The immutable recording keeps this definition after the source plan is
+    # closed. Only declared resource symbols survive, not its native command,
+    # producer workload dimensions or private recording scratch.
+    operations = []
+    recording._binding.lower(_capture_context(capture, operations))
     return _ComponentSortDefinition(operations)
 
 
 class _ComponentSortDefinition(NativeGraphExecutable):
     def __init__(self, operations):
         from taichi_forge.aot._component import _digest
+        from taichi_forge_runtime.aot._component_native import operation_bindings
 
         self._operations = json.dumps(operations, sort_keys=True)
         self.semantic_key = _digest(operations)
         self._names = tuple(
-            sorted({value for op in operations for key, value in op.items() if key != "kind"})
+            sorted({value for op in operations for _, value in operation_bindings(op)})
         )
+
+    @property
+    def control_kind(self):
+        return "native_sort" if all(op["kind"] == "sort" for op in self.operations) else "native_primitives"
 
     @property
     def operations(self):
@@ -81,14 +115,13 @@ class _ComponentSortDefinition(NativeGraphExecutable):
         )
 
     def _export_aot(self, context):
-        # Sort length and scratch are resolved by existing Runtime preparation
+        from taichi_forge_runtime.aot._component_native import map_operation_bindings
+
+        # Length and scratch are resolved by existing Runtime preparation
         # from this invocation's arrays, never from the producer's shape.
         for operation in self.operations:
             context.operations.append(
-                {
-                    key: value if key == "kind" else context.binding(value, resource=True)
-                    for key, value in operation.items()
-                }
+                map_operation_bindings(operation, lambda value: context.binding(value, resource=True))
             )
 
     def run(self, runtime_args=None):

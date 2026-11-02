@@ -653,7 +653,7 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
                 raise TaichiCompilationError("Component Graph contains an unqualified native definition")
             has_control = True
             native_nodes.append(node)
-            return dict(kind="native_sort", operations=definition.operations)
+            return dict(kind=definition.control_kind, operations=definition.operations)
         elif isinstance(node, WhileRegion):
             has_control = True
             facts = graph_ir_to_dict(node)
@@ -873,7 +873,8 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
             if binding is None or binding["kind"] != "resource":
                 raise TaichiCompilationError("Component native effect has no declared resource")
             name = binding["name"]
-            native_dense |= contract["resources"][name].get("kind") is None
+            native_dense |= (capture.natives[node.name].control_kind == "native_sort"
+                             and contract["resources"][name].get("kind") is None)
             previous = accesses.get(name)
             accesses[name] = effect.access if previous is None else _merge_parallel_access(previous, effect.access)
     for name, resource in contract["resources"].items():
@@ -883,10 +884,14 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
             resource["effects_precision"] = "compiler_proven"
     contract["version"] = 2
     contract["required_capabilities"].append("component_compiler_facts_v1")
-    if native_nodes:
+    legacy_sort = any(capture.natives[node.name].control_kind == "native_sort" for node in native_nodes)
+    native_primitives = any(capture.natives[node.name].control_kind == "native_primitives" for node in native_nodes)
+    if legacy_sort:
         contract["required_capabilities"].append("component_native_sort_v1")
-    if native_dense:
+    if legacy_sort and native_dense:
         contract["required_capabilities"].append("component_native_dense_sort_v1")
+    if native_primitives:
+        contract["required_capabilities"].append("component_native_primitives_v1")
     if has_control or "internal_arguments" in contract or constraints or fixed_groups or lifecycle:
         contract["version"] = 5 if constraints else 4
         contract["control"] = control

@@ -197,6 +197,11 @@ def _native_recording(plan):
     from taichi_forge.hardware._native_adapter import native_recording_node
 
     class PrimitiveRecording(BackendCommandRecording):
+        def _capture_component(self, capture):
+            from ._component_sort import capture_prepared
+
+            return capture_prepared(self._plan, capture)
+
         def __init__(self):
             super().__init__(
                 backend=plan._backend,

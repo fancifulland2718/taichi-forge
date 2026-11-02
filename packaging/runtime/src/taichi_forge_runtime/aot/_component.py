@@ -125,35 +125,33 @@ class Component:
             if private_scalar_capability:
                 capabilities.add("component_private_scalar_values_v1")
             pending = [contract.get("control", {})]
-            native_sort = False
+            from ._component_native import operation_bindings
             while pending:
                 region = pending.pop()
                 pending.extend(region.get("children", ()))
-                if region.get("kind") != "native_sort":
+                region_kind = region.get("kind")
+                if region_kind not in ("native_sort", "native_primitives"):
                     continue
-                native_sort = True
                 operations = region.get("operations")
                 if set(region) != {"kind", "operations"} or not isinstance(operations, list) or not operations:
-                    raise ValueError("Invalid component native sort definition")
+                    raise ValueError("Invalid component native definition")
+                capabilities.add("component_native_sort_v1" if region_kind == "native_sort"
+                                 else "component_native_primitives_v1")
                 for operation in operations:
-                    if (operation.get("kind") != "sort" or not {"kind", "keys"} <= set(operation)
-                            or set(operation) - {"kind", "keys", "values"}):
+                    if region_kind == "native_sort" and (not isinstance(operation, dict) or operation.get("kind") != "sort"):
                         raise ValueError("Invalid component native sort operation")
-                    for port, symbol in operation.items():
-                        if port == "kind":
-                            continue
+                    for port, symbol in operation_bindings(operation):
                         binding = contract["bindings"].get(symbol, {})
                         resource = contract["resources"].get(binding.get("name"), {})
                         if (binding.get("kind") != "resource" or resource.get("kind") not in (None, "ndarray")
-                                or len(resource.get("shape", ())) != 1
-                                or port == "keys" and resource.get("element_shape")):
-                            raise ValueError("Component native sort requires declared one-dimensional arrays")
-                        if resource.get("kind") is None:
+                                or len(resource.get("shape", ())) not in ((0, 1) if port == "count" else (1,))
+                                or port in ("keys", "flags", "count") and resource.get("element_shape")
+                                or port in ("flags", "count") and resource.get("dtype") != "i32"):
+                            raise ValueError("Component native operations require qualified declared arrays/counts")
+                        if region_kind == "native_sort" and resource.get("kind") is None:
                             # The ordinary group/member checks below remain
                             # authoritative; this is not a new storage layout.
                             capabilities.add("component_native_dense_sort_v1")
-            if native_sort:
-                capabilities.add("component_native_sort_v1")
             host_resources = contract.get("host_resources", [])
             host_array_capability = "component_host_array_resources_v1" in contract["required_capabilities"]
             if host_resource_capability:

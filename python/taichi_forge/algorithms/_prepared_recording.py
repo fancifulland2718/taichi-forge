@@ -22,6 +22,11 @@ class _CaptureRecipe(_CudaGraphCaptureRecipe):
 
 
 class _Recording(BackendCommandRecording):
+    def _capture_component(self, capture):
+        from ._component_sort import capture_recording
+
+        return capture_recording(self, capture)
+
     def __init__(self, plan, owner, fixed, arguments):
         super().__init__(
             backend=plan._backend,
@@ -83,6 +88,9 @@ class _Recording(BackendCommandRecording):
 
 
 class _VulkanRecording(_Recording):
+    def _capture_component(self, capture):
+        return super()._capture_component(capture)
+
     def prepare_graph_execute(self, bindings):
         # A baseline Graph also needs an actual prepared replay packet. The
         # whole-Graph binding-frame recipe can instead co-record our command

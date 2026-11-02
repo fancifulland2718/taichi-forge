@@ -69,6 +69,16 @@ def _resolve(value, recording):
 
 
 class HardwareRecordingExecutable(NativeGraphExecutable):
+    def _capture_component(self, capture):
+        # Concrete recordings must opt in; arbitrary hardware callbacks and
+        # inherited hooks are not deployable reconstruction descriptions.
+        convert = type(self._recording).__dict__.get("_capture_component")
+        if convert is None:
+            raise TaichiRuntimeError(
+                f"Component native capture is not qualified for {type(self._recording).__name__}"
+            )
+        return convert(self._recording, capture)
+
     def __init__(
         self,
         recording,
