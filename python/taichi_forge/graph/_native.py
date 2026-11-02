@@ -1060,12 +1060,14 @@ class NativeGraphExecutable:
         return None
 
     def recordable_root_actions(self, namespace):
-        """Optional cold expansion into kernel/native actions at Graph root.
+        """Optional cold expansion into ordered kernel/native actions.
 
-        Unlike a structured ``Sequential``, these actions may create recording
-        boundaries. The frontend supplies a graph-local deterministic namespace
+        These actions may create recording boundaries. A Sequential retains
+        those boundaries explicitly for later control-region admission; this
+        hook does not grant device-only conditional execution. The frontend
+        supplies a graph-local deterministic namespace
         for private bindings. Return compiled native executables, never execute
-        or submit a nested Graph. Structured control does not call this hook.
+        or submit a nested Graph.
         """
         return None
 

@@ -16841,6 +16841,20 @@ class Sequential:
         )
 
     def _append_native_executable(self, executable, *, allow_command_boundary=False):
+        # Expand composite providers before considering opaque Host fallback.
+        # Their head/native actions retain the same explicit issue boundaries;
+        # later conditional admission still sees and rejects those boundaries
+        # when a device-only control region was requested.
+        namespace = f"__native_sequence_{self._private_scope_state[0]}"
+        actions = executable.recordable_root_actions(namespace)
+        if actions is not None:
+            actions = tuple(actions)
+            if not actions:
+                raise TaichiRuntimeError("A native ordered expansion must contain an action")
+            self._private_scope_state[0] += 1
+            for action in actions:
+                self._append_native_executable(action, allow_command_boundary=True)
+            return self
         self._bind_declared_private_args(executable.graph_binding_symbols)
         structured = executable.recordable_sequence
         if structured is not None:

@@ -55,6 +55,35 @@ def test_prepared_compact_vector_subranges_and_changing_predicates(monkeypatch, 
         plan.run()
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False, vulkan_sparse_experimental=False)
+def test_prepared_unique_sequential_regions_keep_distinct_bindings():
+    builder = ti.graph.GraphBuilder()
+    plans, outputs, counts = [], [], []
+    for n, width in ((17, 3), (31, 2)):
+        keys, output = ti.ndarray(ti.i32, n), ti.ndarray(ti.i32, n)
+        count = ti.ndarray(ti.i32, 1)
+        keys.from_numpy((np.arange(n) // width).astype(np.int32))
+        plan = ti.algorithms.prepare_unique(keys, output, count)
+        plans.append(plan)
+        outputs.append(output)
+        counts.append(count)
+        sequence = builder.create_sequential()
+        sequence.append_native(plan.record())
+        builder.append(sequence)
+    graph = builder.compile()
+    try:
+        graph.run({})
+        for output, count, expected in zip(outputs, counts, (6, 16)):
+            assert count.to_numpy()[0] == expected
+            np.testing.assert_array_equal(output.to_numpy()[:expected], np.arange(expected))
+    finally:
+        graph.close()
+        for plan in plans:
+            plan.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        plan.run()
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_prepared_compact_columns_reuse_prefix_with_offset_views():
     n = 17
@@ -199,9 +228,31 @@ def test_prepared_unique_failures_reset_and_structured_boundary(monkeypatch):
     assert count.to_numpy()[0] == -1
     np.testing.assert_array_equal(keys.to_numpy(), np.arange(17))
     plan = ti.algorithms.prepare_unique(keys, output, count)
-    # Root expansion must not silently permit native compaction inside while/if.
-    with pytest.raises(RuntimeError, match="recordable"):
-        ti.graph.GraphBuilder().create_sequential().append_native(plan.record())
+    # A sequential region is an ordering boundary, not conditional control.
+    # Current Graph lowering supports the normal prepared expansion there.
+    builder = ti.graph.GraphBuilder()
+    sequence = builder.create_sequential()
+    sequence.append_native(plan.record())
+    builder.append(sequence)
+    graph = builder.compile()
+    graph.run({})
+    np.testing.assert_array_equal(output.to_numpy(), np.arange(17))
+    graph.close()
+
+    @ti.kernel
+    def condition(predicate: ti.types.ndarray(ti.i32, 1)):
+        predicate[0] = 1
+
+    conditional = ti.graph.GraphBuilder()
+    predicate = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "predicate", ti.i32, ndim=1)
+    check = conditional.create_sequential()
+    check.dispatch(condition, predicate)
+    body = conditional.create_sequential()
+    body.append_native(plan.record())
+    # Explicit device-required admission must still reject the Host boundary.
+    with pytest.raises(RuntimeError, match="native|portable|recordable"):
+        conditional.if_then_else(check, body, predicate=predicate, lowering_mode="native_required")
+        conditional.compile()
     plan.run()
     np.testing.assert_array_equal(output.to_numpy(), np.arange(17))
     ti.reset()
