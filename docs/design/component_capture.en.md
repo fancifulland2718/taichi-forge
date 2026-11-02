@@ -1130,6 +1130,16 @@ The Graph separately admits the used collection length as a static configuration
 `configuration_sources()` reports `kind="sequence_length"`; the caller supplies
 its actual model composition length to the existing configuration admission.
 
+Inside a Kernel, `for owner in ti.static(self.solvers)` unrolls this explicitly
+declared fixed composition. Members retain declaration paths; their Fields,
+dimensions and values keep their normal dynamic contracts. No Python owner is
+stored in the artifact. The iterating Kernel records the sequence length and
+checks it before cached member dependencies, including for an empty sequence.
+Adding or removing members recompiles that iterating Kernel; a Kernel called on
+one independent member keeps its existing reuse boundary. Device indexing still
+rejects. CPU/CUDA tests cover new-size reuse, changed/empty compositions and frozen
+artifact consumption at new dimensions.
+
 Source paths contain attribute-name strings and explicit nonnegative integer
 positions, for example `["simulator", "solvers", 0, "n_bodies"]`. These queries
 require `component_owner_sequence_sources_v1`; older runtimes reject the new

@@ -579,6 +579,8 @@ class ASTTransformer(Builder):
         keywords = dict(ChainMap(*[keyword.ptr for keyword in node.keywords]))
         func = node.func.ptr
         if ctx.deployment is not None:
+            if func is impl.static:
+                args = [ctx.deployment.static_operand(ctx, arg) for arg in args]
             if func is getattr or func is hasattr:
                 node.ptr = ctx.deployment.named_attribute(ctx, args, keywords, presence=func is hasattr)
                 return node.ptr

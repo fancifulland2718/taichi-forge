@@ -867,6 +867,12 @@ lowering 后的 Plan 核对。仅提供 shape 的资源进入布局/资源闭包
 另行把实际使用的集合长度纳入已有静态准入；`configuration_sources()` 返回
 `kind="sequence_length"`，消费者提供真实模型的组成数量，不能直接沿用 producer 值。
 
+Kernel 内可用 `for owner in ti.static(self.solvers)` 遍历这一显式声明的固定组成。
+展开保留成员的声明路径，Field、尺寸和值仍使用原动态合同；不把 Python owner 存入产物。
+该 Kernel 的实际依赖包含遍历长度，缓存先检查组成长度再检查成员，空集合也保留长度事实。
+只有实际遍历集合的 Kernel 因增删成员重新编译；单独调用某个成员的 Kernel 保持原复用边界。
+普通动态下标仍拒绝。CPU/CUDA 验证同长度的新尺寸复用、增删/空集合及冻结后新模型消费。
+
 来源路径由属性名字符串和明确的非负整数位置组成，例如
 `["simulator", "solvers", 0, "n_bodies"]`。新查询合同要求
 `component_owner_sequence_sources_v1`，旧 Runtime 明确拒绝；没有新增 native 布局

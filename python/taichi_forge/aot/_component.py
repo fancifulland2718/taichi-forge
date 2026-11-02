@@ -1479,6 +1479,7 @@ class _Capture:
         self.static_objects = {}
         self.objects = {}
         self.record_equalities = set()
+        self.owner_sequence_lengths = {}
         self.methods = {}
         self.method_paths = {}
         # These live objects exist only during lowering. Reusable code keeps
@@ -1640,6 +1641,24 @@ class _Capture:
                 self.expressions[name] = declaration.declare("__capture_" + name)
         return self.expressions[name]
 
+    def static_operand(self, ctx, value):
+        """Unroll only a declared fixed owner composition, never live Python objects."""
+        if not isinstance(value, _RecordReference):
+            return value
+        name = _capture_id(value.path)
+        declaration = self.declarations.get(name)
+        if not isinstance(declaration, _OwnerSequence):
+            return value
+        owners = self.component.read(self.owner, name)
+        declaration.validate(owners)
+        length = len(declaration.members)
+        previous = self.owner_sequence_lengths.setdefault(name, length)
+        if previous != length:
+            raise TaichiCompilationError("Owner sequence length changed during compilation; retry")
+        # Keep lexical paths and normal member lowering. Resources and scalar
+        # values remain dynamic; only this explicitly iterated composition is static.
+        return tuple(self.attribute(ctx, member, prefix=value.path) for member in declaration.members)
+
     def field_operand(self, ctx, value, *, for_loop=False):
         """Resolve a declared StructField into the ordinary member lowering.
 
@@ -1796,6 +1815,8 @@ class _Capture:
             )
         if self.record_equalities:
             self.contract["record_equalities"] = sorted(self.record_equalities)
+        if self.owner_sequence_lengths:
+            self.contract["owner_sequence_lengths"] = sorted(self.owner_sequence_lengths.items())
         if self.dense_access:
             self.contract["dense_access"] = sorted(self.dense_access.items())
         references = sorted((name, schema[1]) for name, schema in self.used.items() if schema[0] == "owner_reference")
@@ -1821,6 +1842,11 @@ class _Capture:
             layouts = _DenseLayoutValidation(component, owner)
         if _definition(self.kernel.func) != self.entry_definition:
             return "entry definition"
+        for name, length in self.owner_sequence_lengths.items():
+            declaration = component.declarations.get(name)
+            if not isinstance(declaration, _OwnerSequence) or len(declaration.members) != length:
+                return f"owner sequence length {name!r}"
+            declaration.validate(component.read(owner, name))
         for name, present in self.objects.items():
             if (component.read(owner, name) is not None) != present:
                 return f"record presence {name!r}"
@@ -1914,6 +1940,7 @@ class _ComponentCode:
         self.static = dict(context.static)
         self.objects = dict(context.objects)
         self.record_equalities = frozenset(context.record_equalities)
+        self.owner_sequence_lengths = dict(context.owner_sequence_lengths)
         self.methods = dict(context.methods)
         self.method_paths = dict(context.method_paths)
         self.functions = dict(context.functions)

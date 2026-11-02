@@ -51,6 +51,15 @@ class _World:
         self.solvers.reverse()
 
     @ti.kernel
+    def static_tick(self):
+        for solver in ti.static(self.solvers):
+            for i in range(solver.n):
+                solver.state[i] += solver.increment()
+
+    def record_static(self, builder):
+        builder.dispatch(self.static_tick)
+
+    @ti.kernel
     def device_index(self):
         self.solvers[0].state[0] += 1
 
@@ -191,3 +200,45 @@ def test_declared_child_lifecycle_recordings_keep_the_root_environment(tmp_path)
                 for i, expected in ((0, 9.), (1, 8.)):
                     actual = instance.resource_from_source(("solvers", i, "state"))
                     np.testing.assert_array_equal(np.frombuffer(actual.read(), np.float32), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_owner_sequence_static_iteration_uses_dynamic_members(tmp_path):
+    first, second = _World(3), _World(19)
+    for index, solver in enumerate(first.solvers):
+        solver.state.fill(index)
+    first.static_tick()
+    for index, solver in enumerate(first.solvers):
+        np.testing.assert_array_equal(solver.state.to_numpy(), index + 2.)
+    env = ti.aot.Component.from_owner(first)
+    code = env.compile(first.static_tick)
+    assert ti.aot.Component.from_owner(second).compile(second.static_tick) is code
+    assert code.contract["owner_sequence_lengths"] == [["solvers", 2]]
+    second.solvers.append(_Solver(5))
+    ti.experimental.ResourceScope(second).owner_sequence("solvers", second.solvers)
+    expanded = ti.aot.Component.from_owner(second)
+    assert expanded.compile(second.static_tick).semantic_key != code.semantic_key
+    second.solvers.clear()
+    ti.experimental.ResourceScope(second).owner_sequence("solvers", second.solvers)
+    assert ti.aot.Component.from_owner(second).compile(second.static_tick).contract["owner_sequence_lengths"] == [["solvers", 0]]
+    root = env.compile_graph(first.record_static)
+    module = ti.aot.Module()
+    root.export(module, "iterate")
+    artifact = tmp_path / "iterate.tcm"
+    module.archive(str(artifact))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime, runtime.load_module(artifact) as loaded:
+        component = loaded.component("iterate")
+        sources = component.input_sources()
+        dims = {name: 37 + source["path"][1] for name, source in sources["dimensions"].items()}
+        values = {name: 3. + source["path"][1] for name, source in sources["values"].items()}
+        config = {name: 2 if source["kind"] == "sequence_length" else 1
+                  for name, source in component.configuration_sources().items()}
+        with component.instantiate(dims, configuration=config) as instance:
+            instance.initialize(zero=component.contract["resources"])
+            with instance.prepare(values=values) as call:
+                call.run()
+            for i in range(2):
+                field = instance.resource_from_source(("solvers", i, "state"))
+                np.testing.assert_array_equal(np.frombuffer(field.read(), np.float32), i + 3.)
