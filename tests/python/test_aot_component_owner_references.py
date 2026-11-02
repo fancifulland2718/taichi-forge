@@ -125,6 +125,20 @@ class _OptionalMotion(_Motion):
                 self.optional.increment(i)
 
 
+    @ti.kernel
+    def optional_equality(self):
+        for i in self.data:
+            if ti.static(self.optional != None):
+                self.data[i] += 2
+            if ti.static(None == self.optional):
+                self.data[i] += 1
+
+    @ti.kernel
+    def invalid_equality(self):
+        if ti.static(self.optional == self.stage):
+            self.data[0] = 5
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_optional_owner_reference_presence_rebinding_and_identity():
     absent, other = _OptionalMotion(3), _OptionalMotion(7)
@@ -155,3 +169,27 @@ def test_optional_owner_reference_presence_rebinding_and_identity():
     scope.duplicate = absent.stage
     with pytest.raises(ti.TaichiCompilationError, match="ownership path.*found 2"):
         ti.aot.Component.from_owner(absent)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_optional_reference_none_equality_preserves_guards_and_rejects_overloads():
+    for linked in (False, True):
+        owner = _OptionalMotion(3, linked)
+        owner.optional_equality()
+        np.testing.assert_array_equal(owner.data.to_numpy(), np.full(3, 2 if linked else 1))
+        owner.data.fill(0)
+        component = ti.aot.Component.from_owner(owner)
+        code = component.compile(owner.optional_equality)
+        code.run(component, owner)
+        np.testing.assert_array_equal(owner.data.to_numpy(), np.full(3, 2 if linked else 1))
+        if linked:
+            with pytest.raises(ti.TaichiCompilationError, match="presence comparisons with None"):
+                component.compile(owner.invalid_equality)
+
+    class Overloaded(_OptionalMotion):
+        def __eq__(self, other):
+            return True
+
+    owner = Overloaded(3, True)
+    with pytest.raises(ti.TaichiCompilationError, match="default object comparison"):
+        ti.aot.Component.from_owner(owner).compile(owner.optional_equality)

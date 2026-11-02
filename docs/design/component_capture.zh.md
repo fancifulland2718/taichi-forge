@@ -969,3 +969,7 @@ SNode schema 与原生 StructCompiler 决定；现有 native 参数绑定会拒�
 包括 Sparse 激活初始化。跨声明命名空间、创建后尺寸变化或 shape 关系冲突均在
 新增 Field 前拒绝。CPU/CUDA 已验证单元素扩到 37、向量/标量交错、后续 Dense 块、
 replay 未访问的哨兵、别名及稳定语义身份。
+
+默认对象比较的 `record == None` / `record != None` 同样可用于存在性判断，并使用
+既有的存在性和引用关系 guard。自定义 `__eq__` / `__ne__` 不会通过代理执行，
+会明确拒绝并建议使用 `is not None`；该资格在缓存命中和运行绑定时也重新检查。

@@ -1281,3 +1281,9 @@ guard; a present target still needs exactly one owning path in the component
 root. Recollect/compile the component and prepare bindings after a presence
 change. Existing bindings reject retargeting. This does not add an external
 object to the closure or switch instances through a mutable module pointer.
+
+`record == None` and `record != None` also express presence when the record
+uses default object equality. The existing presence/reference guards remain
+active. Custom `__eq__` or `__ne__` is rejected with an `is not None` diagnostic,
+including after a cache hit or a binding change; proxy comparison never runs
+user equality code.

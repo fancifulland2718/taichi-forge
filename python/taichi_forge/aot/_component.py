@@ -1426,6 +1426,7 @@ class _Capture:
         self.static = {}
         self.static_objects = {}
         self.objects = {}
+        self.record_equalities = set()
         self.methods = {}
         self.method_paths = {}
         # These live objects exist only during lowering. Reusable code keeps
@@ -1697,8 +1698,19 @@ class _Capture:
 
     def check_record_comparison(self, left, right, operation):
         if isinstance(left, _RecordReference) or isinstance(right, _RecordReference):
-            if operation not in ("Is", "IsNot") or left is not None and right is not None:
+            if operation not in ("Is", "IsNot", "Eq", "NotEq") or left is not None and right is not None:
                 raise TaichiCompilationError("Declared records only support presence comparisons with None")
+            if operation in ("Eq", "NotEq"):
+                record = left if isinstance(left, _RecordReference) else right
+                self.record_equalities.add(record.path)
+                value = self.component.read(self.owner, _capture_id(record.path)) if record.path else self.owner
+                # Comparing a namespace proxy must not silently bypass a user
+                # equality overload. Default object comparison is a presence test.
+                for method in ("__eq__", "__ne__"):
+                    if inspect.getattr_static(type(value), method) is not getattr(object, method):
+                        raise TaichiCompilationError(
+                            "Declared record equality requires default object comparison; use 'is not None'"
+                        )
 
     def finish(self):
         self.component.constraint_facts(self.owner, self.used, entry=self.entry_definition[1])
@@ -1727,6 +1739,8 @@ class _Capture:
                 objects=sorted(self.objects.items()),
                 access_paths={name: self.component._paths[name] for name in self.used},
             )
+        if self.record_equalities:
+            self.contract["record_equalities"] = sorted(self.record_equalities)
         if self.dense_access:
             self.contract["dense_access"] = sorted(self.dense_access.items())
         references = sorted((name, schema[1]) for name, schema in self.used.items() if schema[0] == "owner_reference")
@@ -1753,6 +1767,11 @@ class _Capture:
         for name, present in self.objects.items():
             if (component.read(owner, name) is not None) != present:
                 return f"record presence {name!r}"
+        for path in self.record_equalities:
+            value = component.read(owner, _capture_id(path)) if path else owner
+            if any(inspect.getattr_static(type(value), method) is not getattr(object, method)
+                   for method in ("__eq__", "__ne__")):
+                return f"record equality {path!r}"
         arrays = {}
         for name, schema in self.used.items():
             declaration = component.declarations.get(name)
@@ -1837,6 +1856,7 @@ class _ComponentCode:
         self.used = dict(context.used)
         self.static = dict(context.static)
         self.objects = dict(context.objects)
+        self.record_equalities = frozenset(context.record_equalities)
         self.methods = dict(context.methods)
         self.method_paths = dict(context.method_paths)
         self.functions = dict(context.functions)
