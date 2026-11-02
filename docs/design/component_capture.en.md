@@ -1273,3 +1273,11 @@ Sparse activation initialization. A placement from another declaration namespace
 changed extent, or conflicting shape expression is rejected before adding a Field.
 CPU/CUDA gates cover singleton-to-37 growth, vector/scalar interleaving, a following
 Dense block, an untouched replay sentinel, aliases, and stable semantic identity.
+
+
+`scope.owner_reference("mesh", mesh, optional=True)` permits an absent link
+in normal construction. Absence uses the existing optional-record presence
+guard; a present target still needs exactly one owning path in the component
+root. Recollect/compile the component and prepare bindings after a presence
+change. Existing bindings reject retargeting. This does not add an external
+object to the closure or switch instances through a mutable module pointer.

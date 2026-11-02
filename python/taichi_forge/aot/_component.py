@@ -908,7 +908,14 @@ class Component:
                     for index, value in enumerate(values)
                 }
             for name, source in registry.get("owner_references", {}).items():
-                owner_references.append((members, prefix, name, _member(current, name)))
+                target = _member(current, name)
+                if target is None and registry.get("owner_reference_options", {}).get(name, False):
+                    # An absent non-owning link uses the existing optional-record
+                    # presence guard. No resource ownership or ABI is invented.
+                    members[name] = {}
+                    record_options[_capture_id((*prefix, name))] = True
+                else:
+                    owner_references.append((members, prefix, name, target))
                 sources[_capture_id((*prefix, name))] = source
             return members
 

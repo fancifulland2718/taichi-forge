@@ -109,3 +109,49 @@ def test_unused_reference_does_not_pollute_kernel_identity_or_allow_ambiguous_ow
         first_scope.owner_reference("data", first)
     with pytest.raises(TypeError, match="non-null"):
         first_scope.owner_reference("absent", None)
+
+
+@ti.data_oriented
+class _OptionalMotion(_Motion):
+    def __init__(self, n, linked=False):
+        super().__init__(n)
+        ti.experimental.ResourceScope(self).owner_reference("optional", self if linked else None, optional=True)
+
+    @ti.kernel
+    def optional_step(self):
+        for i in self.data:
+            self.data[i] += 1
+            if ti.static(self.optional is not None):
+                self.optional.increment(i)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_optional_owner_reference_presence_rebinding_and_identity():
+    absent, other = _OptionalMotion(3), _OptionalMotion(7)
+    env, other_env = ti.aot.Component.from_owner(absent), ti.aot.Component.from_owner(other)
+    code = env.compile(absent.optional_step)
+    assert other_env.compile(other.optional_step) is code
+    code.run(other_env, other)
+    np.testing.assert_array_equal(other.data.to_numpy(), np.ones(7))
+    linked = _OptionalMotion(5, linked=True)
+    linked_env = ti.aot.Component.from_owner(linked)
+    linked_code = linked_env.compile(linked.optional_step)
+    assert linked_code is not code
+    linked_code.run(linked_env, linked)
+    np.testing.assert_array_equal(linked.data.to_numpy(), np.full(5, 2))
+    # The same normal declaration may be rebound at a cold composition boundary.
+    scope = ti.experimental.ResourceScope(absent)
+    scope.owner_reference("optional", absent, optional=True)
+    with pytest.raises(ValueError, match="bindings do not match"):
+        code.run(env, absent)
+    rebound = ti.aot.Component.from_owner(absent)
+    assert rebound.compile(absent.optional_step) is linked_code
+    scope.owner_reference("optional", None, optional=True)
+    assert ti.aot.Component.from_owner(absent).compile(absent.optional_step) is code
+    scope.owner_reference("optional", other, optional=True)
+    with pytest.raises(ti.TaichiCompilationError, match="ownership path.*found 0"):
+        ti.aot.Component.from_owner(absent)
+    scope.owner_reference("optional", absent, optional=True)
+    scope.duplicate = absent.stage
+    with pytest.raises(ti.TaichiCompilationError, match="ownership path.*found 2"):
+        ti.aot.Component.from_owner(absent)

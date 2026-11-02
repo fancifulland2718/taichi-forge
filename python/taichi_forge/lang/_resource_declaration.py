@@ -90,6 +90,7 @@ class ResourceScope:
     """
 
     struct_member_initialization = True
+    optional_owner_references = True
 
     def __init__(self, owner, *, builder=None, initialization="consumer_explicit"):
         if initialization not in ("consumer_explicit", "zero"):
@@ -351,15 +352,18 @@ class ResourceScope:
             object.__setattr__(child, key, item)
         return child
 
-    def owner_reference(self, name, value):
+    def owner_reference(self, name, value, *, optional=False):
         """Declare a non-owning link to an owner in the same component root.
 
         Its unique ownership path is resolved when the root is collected. The
         normal object can therefore refer back to a parent under construction;
         this does not recursively declare that parent's resources again.
+        Optional references may be absent during normal construction. Presence
+        is a captured structural choice, not a mutable device pointer.
         """
-        if not isinstance(name, str) or not name.isidentifier() or value is None:
-            raise TypeError("An owner reference requires an attribute name and a non-null owner")
+        if (not isinstance(name, str) or not name.isidentifier() or type(optional) is not bool
+                or (value is None and not optional)):
+            raise TypeError("An owner reference requires an attribute name and a non-null owner unless optional=True")
         if any(name in self._registry.get(kind, {}) for kind in
                ("fields", "arrays", "dimensions", "records", "borrowed", "values", "owner_sequences")):
             raise ValueError(f"Normal attribute {name!r} already has another declaration role")
@@ -371,6 +375,7 @@ class ResourceScope:
         caller = inspect.currentframe().f_back
         self._registry.setdefault("owner_references", {})[name] = (
             caller.f_code.co_filename, caller.f_lineno)
+        self._registry.setdefault("owner_reference_options", {})[name] = optional
         del caller
 
     def owner_sequence(self, name, values):
