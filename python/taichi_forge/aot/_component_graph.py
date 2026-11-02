@@ -19,6 +19,7 @@ from taichi_forge.aot._component import (
     _dimension_value,
     _capture_id,
     _dense_group,
+    _DenseLayoutValidation,
 )
 from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang.exception import TaichiCompilationError
@@ -465,8 +466,9 @@ class _GraphCapture:
         if self._constant_snapshot != self._constant_values():
             raise TaichiCompilationError("Component definition constants changed while recording its Graph; retry")
         # Detect declaration/static mutation over the whole normal recording.
-        for code in self.codes:
-            if not code.matches(self.component, self.owner):
+        layouts = _DenseLayoutValidation(self.component, self.owner)
+        for code in dict.fromkeys(self.codes):
+            if not code.matches(self.component, self.owner, layouts=layouts):
                 raise TaichiCompilationError("Component dependencies changed while recording its Graph")
         for alias, (value, shape) in self._shape_values.items():
             if self.component.read(self.owner, alias) is not value or tuple(value.shape) != shape:

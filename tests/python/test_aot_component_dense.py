@@ -49,6 +49,20 @@ class _DenseModel:
         for i in self.v:
             self.v[i] = ti.Vector([i, i + 1, i + 2])
 
+    def record_repeated(self, builder):
+        for _ in range(4):
+            builder.dispatch(self.active_pass)
+            builder.dispatch(self.capacity_pass)
+
+    def record_changed_alias(self, builder):
+        builder.dispatch(self.active_pass)
+        previous = self.alias_x
+        try:
+            self.alias_x = self.y
+            builder.dispatch(self.active_pass)
+        finally:
+            self.alias_x = previous
+
 
 def _environment():
     return Component(
@@ -150,3 +164,89 @@ def test_group_cannot_be_split_or_infer_dimension_from_equal_values():
     scalar = Scalars()
     with pytest.raises(ti.TaichiCompilationError, match="cannot split the same SNode root"):
         Component(a=DenseField(ti.i32, (), "a"), b=DenseField(ti.i32, (), "b")).compile(scalar.step)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_dense_validation_projects_groups_once_per_operation(monkeypatch):
+    from collections import Counter
+    from taichi_forge.aot import _component, _component_graph
+
+    model, env = _DenseModel(7, 5), _environment()
+    projections = Counter()
+    project = _component._dense_group
+
+    def counted(component, owner, group):
+        projections[group] += 1
+        return project(component, owner, group)
+
+    monkeypatch.setattr(_component, "_dense_group", counted)
+    code = env.compile(model.active_pass)
+    # One snapshot for lowering, another for publication; five Field/alias
+    # captures must not each re-project their complete group.
+    assert projections == {"state": 2, "work": 2}
+    assert code.contract["members"]["x"] == code.contract["members"]["alias_x"]
+    env.compile(model.capacity_pass)
+    finish = _component_graph._GraphCapture.finish
+    finished = Counter()
+
+    def checked_finish(capture, builder):
+        projections.clear()
+        result = finish(capture, builder)
+        finished.update(projections)
+        return result
+
+    monkeypatch.setattr(_component_graph._GraphCapture, "finish", checked_finish)
+    graph = env.compile_graph(model.record_repeated)
+    try:
+        assert finished == {"state": 1, "work": 1}
+    finally:
+        graph._graph.close()
+
+    # Reusing the same declarations on a new owner still validates live roots,
+    # extents and aliases; no physical snapshot survives the operation.
+    other = _DenseModel(19, 17)
+    assert env.compile(other.active_pass) is code
+    code.run(env, other)
+    np.testing.assert_array_equal(other.x.to_numpy()[:17], np.full(17, -9))
+    np.testing.assert_array_equal(other.x.to_numpy()[17:], np.full(2, -11))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize("replace_whole_groups", [False, True])
+def test_dense_snapshot_revalidates_lowering_and_each_recorded_dispatch(monkeypatch, replace_whole_groups):
+    from taichi_forge.aot import _component
+
+    model, replacement, env = _DenseModel(7, 5), _DenseModel(7, 5), _environment()
+    original = _component._Capture.attribute
+    fields = ("x", "alias_x", "y", "v", "m") if replace_whole_groups else ("y",)
+    previous = {name: getattr(model, name) for name in fields}
+    changed = False
+
+    def mutate_after_capture(capture, ctx, name, **kwargs):
+        nonlocal changed
+        result = original(capture, ctx, name, **kwargs)
+        if name == "m" and not changed:
+            # Mutation after all Field captures must still be rejected at
+            # publication. Failed captures cannot populate reusable candidates.
+            for field in fields:
+                setattr(model, field, getattr(replacement, field))
+            changed = True
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_component._Capture, "attribute", mutate_after_capture)
+        with pytest.raises(ti.TaichiCompilationError, match="changed during compilation|one actual SNode root"):
+            env.compile(model.active_pass)
+    for field, value in previous.items():
+        setattr(model, field, value)
+    code = env.compile(model.active_pass)
+    assert env.compile(model.active_pass) is code
+
+    # Host recording changes an alias and then restores it. The intermediate
+    # dispatch must not reuse the first dispatch's layout validation snapshot.
+    with pytest.raises(ti.TaichiCompilationError, match="dependencies changed while recording"):
+        env.compile_graph(model.record_changed_alias)
+    assert env.compile(model.active_pass) is code
+    model.capacity += 1
+    with pytest.raises(ti.TaichiCompilationError, match="shape differs"):
+        env.compile(model.active_pass)

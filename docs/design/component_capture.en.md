@@ -15,6 +15,15 @@ Declare resources, dimensions, and value roles at normal allocation sites with
 the per-layout, backend, capture, and control qualifications below still apply.
 Exposing the producer entry does not expand these qualifications.
 
+Dense group membership is indexed from immutable component declarations. A
+Kernel capture or Graph completion check reuses each group's native layout
+projection within that operation; repeated dispatches validate each distinct
+code definition once at Graph completion. Publication still rechecks complete
+groups, physical roots, member paths and extents to reject resource replacement
+during compilation. These temporary snapshots never cross Host recording
+callbacks, owners or execution calls, and do not change code identity, ABI or
+artifacts.
+
 ```python
 component = ti.aot.Component.from_owner(owner)
 root = component.compile_graph(owner.record_step, initializer=owner.record_initialize)

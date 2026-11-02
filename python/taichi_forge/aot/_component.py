@@ -561,9 +561,7 @@ def _dense_group(component, owner, group):
     root = None
     axes = {}
     dimensions = {}
-    for name, declaration in component.declarations.items():
-        if not isinstance(declaration, DenseField) or declaration.group != group:
-            continue
+    for name, declaration in component._dense_members.get(group, ()):
         field = component.read(owner, name)
         if not isinstance(field, Field):
             raise TaichiCompilationError(f"Dense resource {name!r} must be a Field")
@@ -641,6 +639,34 @@ def _dense_group(component, owner, group):
     )
 
 
+class _DenseLayoutValidation:
+    """Reuse native projections within one synchronous validation operation.
+
+    Never retained by reusable code or shared across Graph recording callbacks.
+    A lowering transaction uses a fresh validation at finish, including its
+    physical root/member/extent snapshot, before publishing any definition.
+    """
+
+    def __init__(self, component, owner):
+        self.component, self.owner = component, owner
+        self.groups = {}
+        self.extents = {}
+
+    def dense(self, group):
+        if group not in self.groups:
+            projection = _dense_group(self.component, self.owner, group)
+            self.extents[group] = {
+                name: _dimension_value(self.component, self.owner, name) for name in projection[2]
+            }
+            self.groups[group] = projection
+        return self.groups[group]
+
+    def validate_unchanged(self, current):
+        for group, previous in self.groups.items():
+            if current.dense(group) != previous or current.extents[group] != self.extents[group]:
+                raise TaichiCompilationError("Resource group changed during compilation; retry")
+
+
 def _fixed_snode_group(component, owner, group):
     """Query native construction/layout facts; never calculate sparse storage."""
     from taichi_forge._lib import core
@@ -687,7 +713,7 @@ class Component:
     is supplied by the application. Graph export follows separately.
     """
 
-    __slots__ = ("_declarations", "_sources", "_paths", "_borrowed_reads", "_source_scope_paths",
+    __slots__ = ("_declarations", "_dense_members", "_sources", "_paths", "_borrowed_reads", "_source_scope_paths",
                  "_derived_attributes", "_constraints")
 
     def __init__(self, **declarations):
@@ -742,13 +768,23 @@ class Component:
                     add(declaration.members, path)
 
         add(declarations)
-        self._declarations = MappingProxyType(flattened)
+        self._set_declarations(flattened)
         self._paths = MappingProxyType(paths)
         self._sources = MappingProxyType({})
         self._borrowed_reads = MappingProxyType({})
         self._source_scope_paths = MappingProxyType({})
         self._derived_attributes = frozenset()
         self._constraints = MappingProxyType({})
+
+    def _set_declarations(self, declarations):
+        # Construction/borrow projection can extend the immutable environment.
+        # Index only declaration facts, never owner Fields or concrete layouts.
+        self._declarations = MappingProxyType(dict(declarations))
+        groups = {}
+        for name, declaration in self._declarations.items():
+            if isinstance(declaration, DenseField):
+                groups.setdefault(declaration.group, []).append((name, declaration))
+        self._dense_members = MappingProxyType({group: tuple(members) for group, members in groups.items()})
 
     def read(self, owner, name):
         borrowed = self._borrowed_reads.get(name)
@@ -1058,7 +1094,7 @@ class Component:
             flattened[name] = type(field)(field.dtype, shape, field.group)
         for name, expression in inherited_dimensions.items():
             flattened[name] = Dimension("active", expression=expression)
-        result._declarations = MappingProxyType(flattened)
+        result._set_declarations(flattened)
         visible_fields = [(field, _capture_id((*prefix, name))) for _, prefix, name, field, _, _ in fields]
         result._project_borrowed(borrowed, roots, sources, visible_dimensions, constraints, visible_fields, namespaces)
         result._sources = MappingProxyType(sources)
@@ -1230,7 +1266,7 @@ class Component:
                         raise ValueError(f"Duplicate borrowed component declaration {'.'.join(path)!r}")
                     declarations[name], paths[name], reads[name] = declaration, path, accessor
                     sources[name] = binding["source"]
-        self._declarations = MappingProxyType(declarations)
+        self._set_declarations(declarations)
         self._paths = MappingProxyType(paths)
         self._borrowed_reads = MappingProxyType(reads)
         self._source_scope_paths = MappingProxyType(source_scope_paths)
@@ -1302,11 +1338,12 @@ class Component:
         runtime = impl.get_runtime()
         runtime.materialize(for_aot=True)
         with runtime._kernel_compilation_lock:
+            layouts = _DenseLayoutValidation(self, owner)
             for code in kernel._component_candidates:
                 if (
                     code.call_signature == signature
                     and all(resource_templates.get(slot) == name for slot, name in code.resource_templates.items())
-                    and code.matches(self, owner)
+                    and code.matches(self, owner, layouts=layouts)
                 ):
                     code.validate_bindings(self, owner)
                     return code
@@ -1447,6 +1484,7 @@ class _Capture:
         self.fixed_members = {}
         self.fixed_dependencies = {}
         self.resource_templates = {}
+        self._layouts = _DenseLayoutValidation(component, owner)
 
     def resolve_template(self, ctx, value):
         for child, path in self._method_owners:
@@ -1564,7 +1602,7 @@ class _Capture:
             elif isinstance(declaration, DenseField):
                 dense_description = declaration.validate(value)
             if isinstance(declaration, DenseField):
-                schema, members, dimensions, root_id = _dense_group(self.component, self.owner, declaration.group)
+                schema, members, dimensions, root_id = self._layouts.dense(declaration.group)
                 other_group = self.bound_group_roots.setdefault(root_id, declaration.group)
                 if other_group != declaration.group:
                     raise TaichiCompilationError("Distinct component groups cannot split the same SNode root")
@@ -1714,7 +1752,9 @@ class _Capture:
 
     def finish(self):
         self.component.constraint_facts(self.owner, self.used, entry=self.entry_definition[1])
-        mismatch = self.dependency_mismatch(self.component, self.owner)
+        layouts = _DenseLayoutValidation(self.component, self.owner)
+        self._layouts.validate_unchanged(layouts)
+        mismatch = self.dependency_mismatch(self.component, self.owner, layouts=layouts)
         if mismatch:
             raise TaichiCompilationError(f"Component dependency changed during compilation: {mismatch}; retry")
         self.contract = {
@@ -1758,10 +1798,12 @@ class _Capture:
             self.contract.update(fixed_groups=self.fixed_groups, fixed_members=self.fixed_members,
                                  fixed_captures=[(name, self.used[name]) for name in self.fixed_members])
 
-    def matches(self, component, owner):
-        return self.dependency_mismatch(component, owner) is None
+    def matches(self, component, owner, *, layouts=None):
+        return self.dependency_mismatch(component, owner, layouts=layouts) is None
 
-    def dependency_mismatch(self, component, owner):
+    def dependency_mismatch(self, component, owner, *, layouts=None):
+        if layouts is None:
+            layouts = _DenseLayoutValidation(component, owner)
         if _definition(self.kernel.func) != self.entry_definition:
             return "entry definition"
         for name, present in self.objects.items():
@@ -1800,7 +1842,7 @@ class _Capture:
                 if member_group == group and members.get(name) != paths:
                     return f"fixed member {name!r} in group {group!r}"
         for group, schema in self.groups.items():
-            actual, members, _, root_id = _dense_group(component, owner, group)
+            actual, members, _, root_id = layouts.dense(group)
             if root_id in roots:
                 raise TaichiCompilationError("Distinct component groups cannot split the same SNode root")
             roots.add(root_id)
