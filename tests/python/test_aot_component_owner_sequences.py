@@ -59,9 +59,117 @@ class _World:
     def record_static(self, builder):
         builder.dispatch(self.static_tick)
 
+    def record_stage(self, builder):
+        self.stage.record(builder)
+
     @ti.kernel
     def device_index(self):
-        self.solvers[0].state[0] += 1
+        index = 0
+        self.solvers[index].state[0] += 1
+
+
+@ti.data_oriented
+class _BorrowedStage:
+    def __init__(self, solvers):
+        self.solvers = list(reversed(solvers))
+        self.count = len(self.solvers)
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_sequence_reference("solvers", self.solvers)
+        scope.constant("count")
+
+    @ti.kernel
+    def tick(self):
+        for index in ti.static(range(self.count)):
+            solver = self.solvers[index]
+            for i in range(solver.n):
+                solver.state[i] += solver.increment()
+
+    @ti.kernel
+    def last(self):
+        solver = self.solvers[-1]
+        for i in range(solver.n):
+            solver.state[i] += solver.increment()
+
+    @ti.kernel
+    def invalid_index(self):
+        self.solvers[2].state[0] += 1
+
+    def record(self, builder):
+        builder.dispatch(self.tick)
+
+
+def _borrowed_world(n):
+    world = _World(n)
+    ti.experimental.ResourceScope(world).stage = _BorrowedStage(world.solvers)
+    return world
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_borrowed_owner_sequence_keeps_canonical_state_and_guards_members(tmp_path):
+    first, other = _borrowed_world(3), _borrowed_world(19)
+    first.stage.tick()
+    for solver in first.solvers:
+        np.testing.assert_array_equal(solver.state.to_numpy(), 2.)
+    env, other_env = ti.aot.Component.from_owner(first), ti.aot.Component.from_owner(other)
+    code = env.compile(first.stage.tick, owner=first)
+    assert other_env.compile(other.stage.tick, owner=other) is code
+    selected = env.compile(first.stage.last, owner=first)
+    other.solvers[1].mode = 2
+    assert other_env.compile(other.stage.last, owner=other) is selected
+    other.solvers[1].mode = 1
+    assert len(selected.contract["members"]) == len(selected.contract["groups"]) == 1
+    with pytest.raises(ti.TaichiCompilationError, match="index is out of range"):
+        env.compile(first.stage.invalid_index, owner=first)
+    code.run(other_env, other)
+    for solver in other.solvers:
+        np.testing.assert_array_equal(solver.state.to_numpy(), 2.)
+    # Changing the order without rebuilding declarations cannot reuse the
+    # captured reference-to-owner mapping even though length and types match.
+    first.stage.solvers.reverse()
+    with pytest.raises(ti.TaichiCompilationError, match="owner reference.*changed"):
+        env.compile(first.stage.tick, owner=first)
+    first.stage.solvers.reverse()
+    root = env.compile_graph(first.record_stage)
+    assert len(root.contract["groups"]) == len(root.contract["resources"]) == 2
+    module = ti.aot.Module()
+    root.export(module, "borrowed")
+    artifact = tmp_path / "borrowed.tcm"
+    module.archive(str(artifact))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime, runtime.load_module(artifact) as loaded:
+        component = loaded.component("borrowed")
+        sources = component.input_sources()
+        assert {tuple(s["path"]) for s in sources["dimensions"].values()} == {
+            ("solvers", 0, "n"), ("solvers", 1, "n")}
+        dims = {name: 37 + source["path"][1] for name, source in sources["dimensions"].items()}
+        values = {name: 3. + source["path"][1] for name, source in sources["values"].items()}
+        config = {name: 2 if source["kind"] == "sequence_length" else 1
+                  for name, source in component.configuration_sources().items()}
+        with component.instantiate(dims, configuration=config) as instance:
+            instance.initialize(zero=component.contract["resources"])
+            with instance.prepare(values=values) as call:
+                call.run()
+            for i in range(2):
+                field = instance.resource_from_source(("solvers", i, "state"))
+                np.testing.assert_array_equal(np.frombuffer(field.read(), np.float32), i + 3.)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_borrowed_owner_sequence_rejects_unowned_and_ambiguous_members():
+    first, second = _borrowed_world(3), _borrowed_world(19)
+    env, other = ti.aot.Component.from_owner(first), ti.aot.Component.from_owner(second)
+    code = env.compile(first.solvers[0].tick, owner=first)
+    second.stage.solvers.reverse()
+    ti.experimental.ResourceScope(second.stage).owner_sequence_reference("solvers", second.stage.solvers)
+    assert ti.aot.Component.from_owner(second).compile(second.solvers[0].tick, owner=second) is code
+    first.stage.solvers[0] = second.solvers[0]
+    with pytest.raises(ti.TaichiCompilationError, match="ownership path.*found 0"):
+        ti.aot.Component.from_owner(first)
+    first.stage.solvers[0] = first.solvers[1]
+    ti.experimental.ResourceScope(first).duplicate = first.solvers[0]
+    with pytest.raises(ti.TaichiCompilationError, match="ownership path.*found 2"):
+        ti.aot.Component.from_owner(first)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)

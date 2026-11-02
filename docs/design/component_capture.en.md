@@ -1123,6 +1123,17 @@ application dispatch table. Declare the collection again after changing its
 composition, and finish ordinary lazy resource preparation before capture.
 Changing membership while recording is rejected, including same-length reorder.
 
+An aggregate that borrows the same owners uses
+`scope.owner_sequence_reference("solvers", self.solvers)`. Each member must have
+exactly one owning path elsewhere in the component root. The compiler resolves
+the sequence members through the existing owner-reference contract, retaining
+canonical resource and dimension sources. It does not duplicate state or SNode
+groups. Static iteration and compile-time integer selection remain supported;
+changing referenced members requires
+rebuilding declarations. Missing or ambiguous ownership rejects before export.
+CPU/CUDA gates cover new dimensions, same-length reordering, unchanged code for
+unrelated borrowed views, and source-free execution of the canonical resources.
+
 This is a Host composition namespace, not a device-indexable container. Each
 Kernel retains only its actual dependencies; adding an unrelated owner or changing
 another owner's configuration does not widen that Kernel's ABI or code identity.
@@ -1138,7 +1149,9 @@ checks it before cached member dependencies, including for an empty sequence.
 Adding or removing members recompiles that iterating Kernel; a Kernel called on
 one independent member keeps its existing reuse boundary. Device indexing still
 rejects. CPU/CUDA tests cover new-size reuse, changed/empty compositions and frozen
-artifact consumption at new dimensions.
+artifact consumption at new dimensions. A compile-time integer subscript selects
+only that member, including Python negative indices; bounds are checked during
+compilation. Device-expression indices and slices reject.
 
 Source paths contain attribute-name strings and explicit nonnegative integer
 positions, for example `["simulator", "solvers", 0, "n_bodies"]`. These queries

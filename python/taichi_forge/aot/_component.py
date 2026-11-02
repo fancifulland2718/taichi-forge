@@ -947,10 +947,17 @@ class Component:
                 path = (*prefix, name)
                 owner_sequences[_capture_id(path)] = declaration["length"]
                 sources[_capture_id(path)] = declaration["source"]
-                members[name] = {
-                    f"item_{index}": collect(value, (*path, f"item_{index}"), (*ancestors, current))
-                    for index, value in enumerate(values)
-                }
+                if declaration.get("owning", True):
+                    members[name] = {
+                        f"item_{index}": collect(value, (*path, f"item_{index}"), (*ancestors, current))
+                        for index, value in enumerate(values)
+                    }
+                else:
+                    members[name] = {}
+                    for index, value in enumerate(values):
+                        item = f"item_{index}"
+                        sources[_capture_id((*path, item))] = declaration["source"]
+                        owner_references.append((members[name], path, item, value))
             for name, source in registry.get("owner_references", {}).items():
                 target = _member(current, name)
                 if target is None and registry.get("owner_reference_options", {}).get(name, False):
@@ -1649,15 +1656,34 @@ class _Capture:
         declaration = self.declarations.get(name)
         if not isinstance(declaration, _OwnerSequence):
             return value
-        owners = self.component.read(self.owner, name)
-        declaration.validate(owners)
+        self._record_owner_sequence_length(name, declaration)
+        # Keep lexical paths and normal member lowering. Resources and scalar
+        # values remain dynamic; only this explicitly iterated composition is static.
+        return tuple(self.attribute(ctx, member, prefix=value.path) for member in declaration.members)
+
+    def _record_owner_sequence_length(self, name, declaration):
+        declaration.validate(self.component.read(self.owner, name))
         length = len(declaration.members)
         previous = self.owner_sequence_lengths.setdefault(name, length)
         if previous != length:
             raise TaichiCompilationError("Owner sequence length changed during compilation; retry")
-        # Keep lexical paths and normal member lowering. Resources and scalar
-        # values remain dynamic; only this explicitly iterated composition is static.
-        return tuple(self.attribute(ctx, member, prefix=value.path) for member in declaration.members)
+        return length
+
+    def owner_sequence_subscript(self, ctx, value, indices):
+        """Resolve one compile-time member without capturing unused owners."""
+        if not isinstance(value, _RecordReference):
+            return False, None
+        name = _capture_id(value.path)
+        declaration = self.declarations.get(name)
+        if not isinstance(declaration, _OwnerSequence):
+            return False, None
+        if len(indices) != 1 or type(indices[0]) is not int:
+            raise TaichiCompilationError("A declared owner sequence is not an indexable device Field; use a compile-time integer")
+        length = self._record_owner_sequence_length(name, declaration)
+        index = indices[0]
+        if not -length <= index < length:
+            raise TaichiCompilationError("Declared owner sequence index is out of range")
+        return True, self.attribute(ctx, f"item_{index % length}", prefix=value.path)
 
     def field_operand(self, ctx, value, *, for_loop=False):
         """Resolve a declared StructField into the ordinary member lowering.

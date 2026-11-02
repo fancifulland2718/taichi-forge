@@ -398,6 +398,18 @@ class ResourceScope:
         new storage owner. Re-declare after changing its composition. Entries
         keep their own declarations and ordinary resource lifetimes.
         """
+        self._declare_owner_sequence(name, values, owning=True)
+
+    def owner_sequence_reference(self, name, values):
+        """Declare a fixed sequence borrowing owners declared elsewhere.
+
+        Every member must have exactly one owning path in the component root.
+        Order, length and member identity are guarded like ordinary owner links;
+        no state or allocation declaration is copied into this namespace.
+        """
+        self._declare_owner_sequence(name, values, owning=False)
+
+    def _declare_owner_sequence(self, name, values, *, owning):
         if not isinstance(name, str) or not name.isidentifier() or type(values) not in (list, tuple):
             raise TypeError("Owner sequences require an attribute name and a plain list/tuple")
         for value in values:
@@ -413,7 +425,8 @@ class ResourceScope:
             setattr(self._owner, name, values)
         caller = inspect.currentframe().f_back
         self._registry.setdefault("owner_sequences", {})[name] = dict(
-            length=len(values), source=(caller.f_code.co_filename, caller.f_lineno)
+            length=len(values), owning=owning,
+            source=(caller.f_back.f_code.co_filename, caller.f_back.f_lineno)
         )
         del caller
 

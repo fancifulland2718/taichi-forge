@@ -242,6 +242,10 @@ class ASTTransformer(Builder):
             node.slice.ptr = [node.slice.ptr]
         value = node.value.ptr
         if ctx.deployment is not None:
+            selected, member = ctx.deployment.owner_sequence_subscript(ctx, value, node.slice.ptr)
+            if selected:
+                node.ptr = member
+                return node.ptr
             value = ctx.deployment.field_operand(ctx, value)
         node.ptr = impl.subscript(ctx.ast_builder, value, *node.slice.ptr)
         if ctx.deployment is not None:
