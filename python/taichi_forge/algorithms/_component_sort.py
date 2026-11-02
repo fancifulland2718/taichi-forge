@@ -21,10 +21,22 @@ def capture_sequence(sequence, capture):
             "Component native capture requires an unfused qualified primitive sequence"
         )
     calls = tuple(sequence._calls)
-    if not calls or any(call.kind != "sort" for call in calls):
+    if not calls or any(call.kind not in ("sort", "sort_by_key") for call in calls):
         raise TaichiCompilationError(
             "Component native capture currently qualifies single-key native sort only"
         )
+    for call in calls:
+        if (
+            call.kind == "sort_by_key"
+            and isinstance(call.args[0], (list, tuple))
+            and len(call.args[0]) != 1
+        ):
+            # The ordinary exporter also supports multi-key recipes. Those
+            # need their own component resource/operation qualification; only
+            # the public single-key spelling shares the existing sort ABI.
+            raise TaichiCompilationError(
+                "Component native capture requires exactly one sort_by_key key part"
+            )
     operations = []
     context = SimpleNamespace(
         retained_arrays=SimpleNamespace(require=capture.native_array), operations=operations

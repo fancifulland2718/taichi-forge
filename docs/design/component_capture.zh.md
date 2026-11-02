@@ -767,11 +767,15 @@ Host 发布闭包。集合允许重叠和为空，其并集加入 `host_resource
 
 ### 组件中的原生排序
 
-正常 `primitive_sequence().sort(...)` 经 `append_native()` 进入组件时，
+正常 `primitive_sequence().sort(...)` 或单键 `sort_by_key(...)` 经 `append_native()` 进入组件时，
 编译器复用既有排序导出校验，将已声明的独立 Ndarray 或合格的 Dense Field 解析为实例资源。
 支持单键、稳定升序、精确精度及 NaN-last 的原生路径；键/值的类型、布局、
 排序策略和工作区仍按原算法校验。其他 native 操作、未声明数组及未取得资格
 的视图明确拒绝。组件录制不执行 `prewarm=True` 请求中的数值操作。
+
+`sort_by_key` 接受直接键或单元素 list/tuple，继续复用普通 exporter 的同一校验及
+ExecutionPlan sort 操作；空键和多键不会因普通 AOT exporter 支持更多配方而被静默
+授予组件资格。CPU/CUDA 已验证三种写法的稳定排序、新尺寸、同根 Dense 与实例隔离。
 
 控制合同携带排序及读写依赖，要求 `component_native_sort_v1`。
 原 ExecutionPlan `sort` 在 prepare 时按实例数组的实际长度建立排序调用和

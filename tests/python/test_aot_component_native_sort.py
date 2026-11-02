@@ -50,8 +50,9 @@ class SortModel:
 
 @ti.data_oriented
 class FieldSortModel:
-    def __init__(self, n):
+    def __init__(self, n, key_form="sort"):
         self.n = n
+        self.key_form = key_form
         builder = ti.FieldsBuilder()
         scope = ti.experimental.ResourceScope(self, builder=builder)
         extent = scope.dim("n")
@@ -69,15 +70,21 @@ class FieldSortModel:
         builder.dispatch(self.tick)
         # Neither array occurs in a captured kernel. Native effects must bring
         # its entire SNode layout group into the same resource closure.
-        builder.append_native(ti.algorithms.primitive_sequence().sort(
-            self.keys, self.values, stable=True, workspace=self.workspace), prewarm=True)
+        sequence = ti.algorithms.primitive_sequence()
+        if self.key_form == "sort":
+            sequence.sort(self.keys, self.values, stable=True, workspace=self.workspace)
+        else:
+            keys = {"direct": self.keys, "list": [self.keys], "tuple": (self.keys,)}[self.key_form]
+            sequence.sort_by_key(keys, self.values, stable=True, workspace=self.workspace)
+        builder.append_native(sequence, prewarm=True)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_native_sort_dense_fields_keep_group_and_instance_binding(tmp_path):
-    source = FieldSortModel(7)
+@pytest.mark.parametrize("key_form", ("sort", "direct", "list", "tuple"))
+def test_native_sort_dense_fields_keep_group_and_instance_binding(tmp_path, key_form):
+    source = FieldSortModel(7, key_form)
     root = Component.from_owner(source).compile_graph(source.record)
-    other = FieldSortModel(19)
+    other = FieldSortModel(19, key_form)
     assert root.contract["semantic_key"] == Component.from_owner(other).compile_graph(other.record).contract["semantic_key"]
     assert "component_native_dense_sort_v1" in root.contract["required_capabilities"]
     resources = root.contract["resources"]
@@ -191,3 +198,16 @@ def test_native_sort_rejects_undeclared_storage():
     source.keys = ti.ndarray(ti.f32, 7)
     with pytest.raises(ti.TaichiCompilationError):
         Component.from_owner(source).compile_graph(source.record)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize("parts", (0, 2))
+def test_component_sort_by_key_rejects_unqualified_key_parts(parts):
+    source = FieldSortModel(7)
+
+    def record(builder):
+        builder.append_native(ti.algorithms.primitive_sequence().sort_by_key(
+            [source.keys] * parts, source.values, workspace=source.workspace))
+
+    with pytest.raises(ti.TaichiCompilationError, match="exactly one sort_by_key"):
+        Component.from_owner(source).compile_graph(record)
