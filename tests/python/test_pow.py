@@ -5,6 +5,24 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], advanced_optimization=False)
+def test_chained_integer_power_lowering():
+    @ti.kernel
+    def chained(x: ti.f32, first: ti.i32, second: ti.i32) -> ti.f32:
+        power = x**first
+        return power**second
+
+    @ti.kernel
+    def floor_then_power(x: ti.i32, divisor: ti.i32) -> ti.i32:
+        quotient = x // divisor
+        return quotient**3
+
+    for x, first, second in [(3.0, 2, 2), (-2.0, 3, 2), (2.0, -2, 2)]:
+        assert chained(x, first, second) == pytest.approx((x**first) ** second)
+    for x, divisor in [(-7, 3), (7, -3), (8, 3)]:
+        assert floor_then_power(x, divisor) == (x // divisor) ** 3
+
+
 def _test_pow_f(dt):
     z = ti.field(dt, shape=())
 

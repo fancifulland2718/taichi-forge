@@ -19,6 +19,10 @@ class DemoteOperations : public BasicStmtVisitor {
   }
 
   void replace_usages(Stmt *stmt, Stmt *replacement) {
+    // Later original statements see this replacement before the next type
+    // check. Preserve the already checked result type so chained operations
+    // (for example (x ** 2) ** 2) do not consume an untyped local load.
+    replacement->ret_type = stmt->ret_type;
     // Replacements are fresh definitions emitted in SSA traversal order. No
     // inserted statement is visited until the next fixed-point iteration.
     // Build once on the first actual rewrite, and rebuild after delayed edits.
