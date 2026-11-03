@@ -73,6 +73,31 @@ class _TemplateParent(_Parent):
         builder.append(sequence)
 
 
+@ti.data_oriented
+class _RootTemplateWorker(_Worker):
+    @ti.func
+    def add_to_root(self, root):
+        for i in range(root.n):
+            root.shared[i] += self.increment()
+
+    @ti.kernel
+    def step_with_root(self, root: ti.template()):
+        self.add_to_root(root)
+        self.local[None] += self.gain
+
+
+class _RootTemplateParent(_Parent):
+    def __init__(self, n, left=2., right=3.):
+        super().__init__(n, left, right, worker_type=_RootTemplateWorker)
+
+    def record(self, builder):
+        builder.dispatch(self.tick)
+        sequence = builder.create_sequential()
+        for worker in (self.left, self.right):
+            sequence.dispatch(worker.step_with_root, template_args={"root": self})
+        builder.append(sequence)
+
+
 @ti.kernel
 def _ignore_worker(worker: ti.template()) -> ti.i32:
     return 7
@@ -96,13 +121,18 @@ def test_nested_template_record_keeps_path_and_only_actual_dependencies():
     assert not unused.contract["groups"]
 
 
-@pytest.mark.parametrize("parent_type", (_Parent, _TemplateParent))
+@pytest.mark.parametrize("parent_type", (_Parent, _TemplateParent, _RootTemplateParent))
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_child_graph_preserves_shared_roots_and_independent_instances(tmp_path, parent_type):
     first, second = parent_type(3), parent_type(19, 5., 7.)
     env, other = ti.aot.Component.from_owner(first), ti.aot.Component.from_owner(second)
     child_code = env.compile(first.left.step, owner=first)
     assert other.compile(second.left.step, owner=second) is child_code
+    if parent_type is _RootTemplateParent:
+        explicit_root = env.compile(first.left.step_with_root, owner=first, template_args={"root": first})
+        assert other.compile(second.left.step_with_root, owner=second, template_args={"root": second}) is explicit_root
+        with pytest.raises(ti.TaichiCompilationError, match="static captures"):
+            env.compile(first.left.step_with_root, owner=first, template_args={"root": second})
     template_code = env.compile(_step_worker, owner=first, template_args={"worker": first.left})
     assert other.compile(_step_worker, owner=second, template_args={"worker": second.left}) is template_code
     child_code.run(other, second)
@@ -114,9 +144,11 @@ def test_child_graph_preserves_shared_roots_and_independent_instances(tmp_path, 
     contract = root.contract
     assert len(contract["groups"]) == 3
     assert len(contract["resources"]) == 3
-    assert {"shared", _capture_id(("left", "shared")), _capture_id(("right", "shared"))} <= set(
-        contract["resources"]["shared"]["aliases"]
-    )
+    aliases = set(contract["resources"]["shared"]["aliases"])
+    if parent_type is _RootTemplateParent:
+        assert aliases == {"shared"}  # Unused child aliases do not enter the ABI.
+    else:
+        assert {"shared", _capture_id(("left", "shared")), _capture_id(("right", "shared"))} <= aliases
     local_names = {side: next(name for name, spec in contract["resources"].items()
                              if _capture_id((side, "local")) in spec["aliases"])
                    for side in ("left", "right")}

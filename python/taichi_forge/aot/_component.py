@@ -1383,6 +1383,11 @@ class Component:
 
         if value is entry_owner:
             return value, ("owner", entry_path or None)
+        if value is owner:
+            # A child entry can receive the component root as an ordinary
+            # template argument. Keep only its declaration path; the same
+            # attribute lowering collects actual resource/static dependencies.
+            return _RecordReference(()), ("root_owner", None)
         record = self._template_record(owner, value)
         if isinstance(value, (Field, SNode)):
             if isinstance(value, SNode):
