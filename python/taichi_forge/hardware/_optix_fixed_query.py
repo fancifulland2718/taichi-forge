@@ -201,9 +201,7 @@ class _PreparedQuery:
 
 def prepare_fixed_query(recording, bindings, descriptions):
     from ._optix import (
-        OptixFaceRuleTable,
         OptixInstanceScene,
-        _FaceRule,
         _prepare_storage,
     )
     from taichi_forge.lang._storage_view import describe_storage
@@ -238,14 +236,8 @@ def prepare_fixed_query(recording, bindings, descriptions):
         writable.append(False)
     storage, owners = _prepare_storage(recording.scene, values, descriptions, writable)
     if specs:
-        records = (_FaceRule * len(specs))()
-        offset, active = 2 if recording._occlusion else 3, 0
-        for i, rule in enumerate(specs):
-            if isinstance(rule, OptixFaceRuleTable):
-                records[i] = _FaceRule(storage.pointers[offset + active], 2, 0)
-                active += 1
-            else:
-                records[i] = _FaceRule(0, int(rule == "front_only"), 0)
+        offset = 2 if recording._occlusion else 3
+        records = recording._face_records(storage.pointers[offset:])
         workspace.from_numpy(np.frombuffer(bytes(records), dtype=np.uint64).copy())
     description = _Description(
         c.sizeof(_Description),

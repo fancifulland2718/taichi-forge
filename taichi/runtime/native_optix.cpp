@@ -150,6 +150,7 @@ struct OptixQueryOperation {
   uint32_t ray_count{0};
   bool occlusion{false}, any_hit{false}, front_only{false};
   bool graph_fixed_query{true};
+  bool live_faces{false};
   std::vector<OptixBoundFaceRule> face_rules;
   std::vector<std::optional<OptixBoundAlphaMask>> alpha_masks;
 };
@@ -169,6 +170,12 @@ struct OptixAlphaQueryOperation : OptixQueryOperation {
 // the producer's resolution. Uniform face policy is independent of IAS size.
 struct OptixArrayQueryOperation : OptixQueryOperation {
   static constexpr uint32_t version = 4;
+};
+
+// A single borrowed table in instance ordinal / GAS primitive order. Its
+// partition comes from the bound scene, never from producer instance metadata.
+struct OptixArrayFaceQueryOperation : OptixQueryOperation {
+  static constexpr uint32_t version = 5;
 };
 
 struct OptixRefitOperation {
@@ -762,7 +769,7 @@ class CudaOptixQuery final : public NativeOperation {
       const size_t table_offset = face_records_offset_ +
           size_t(scene_->instance_count()) * sizeof(TiForgeOptixFaceRule);
       bytes_ = faces_ ? table_offset : 48;
-      if (op_.faces) {
+      if (op_.faces && !op_.live_faces) {
         if (op_.faces->bytes > std::numeric_limits<size_t>::max() - bytes_)
           throw std::overflow_error("OptiX face workspace size overflows");
         bytes_ += op_.faces->bytes;
@@ -808,6 +815,13 @@ class CudaOptixQuery final : public NativeOperation {
             const auto &rule = op_.face_rules[i];
             records[i] = {rule.primitives ? address(*rule.primitives) : 0,
                           rule.mode, 0};
+          }
+        } else if (op_.faces && op_.live_faces) {
+          uint64_t pointer = address(*op_.faces);
+          const auto counts = scene_->primitive_counts();
+          for (size_t i = 0; i < records.size(); ++i) {
+            records[i] = {pointer, 2, 0};
+            pointer += uint64_t(counts[i]) * 4;
           }
         } else if (op_.faces) {
           std::vector<uint32_t> rules(size_t(scene_->face_table_size()));
@@ -1006,6 +1020,10 @@ template <typename Description>
 void register_query(NativeOperationRegistry &registry) {
   constexpr bool per_instance = Description::version == 2 || Description::version == 3;
   registry.define<Description>([](Device &device, const Description &op) {
+    if constexpr (Description::version == 5) {
+      if (!op.faces || !op.live_faces || op.front_only || !op.face_rules.empty())
+        throw std::invalid_argument("OptiX whole-array face query requires one borrowed table");
+    }
     if constexpr (Description::version == 2 || Description::version == 3) {
       if (op.face_rules.empty())
         throw std::invalid_argument("OptiX query requires per-instance face rules");
@@ -1016,16 +1034,20 @@ void register_query(NativeOperationRegistry &registry) {
   std::vector<NativeOperationRegistry::BindingGroup> groups;
   if constexpr (per_instance)
     groups.push_back({"face_table_count", {"faces"}});
-  else
+  else if constexpr (Description::version != 5)
     optional_ports.push_back("faces");
   if constexpr (Description::version == 3)
     groups.push_back({"mask_count", {"uvs", "image"}});
+  std::vector<std::string> required_ports{"scene", "rays", "hits"};
+  if constexpr (Description::version == 5) required_ports.push_back("faces");
   registry.register_schema<Description>(
-      "optix", "query", {"scene", "rays", "hits"},
+      "optix", "query", required_ports,
       [](const liong::json::JsonValue &p)
           -> NativeOperationRegistry::Binder<Description> {
         using namespace operation_json;
-        if constexpr (Description::version == 4)
+        if constexpr (Description::version == 5)
+          fields(p, {"occlusion", "any_hit", "graph_fixed_query"});
+        else if constexpr (Description::version == 4)
           fields(p, {"occlusion", "any_hit", "front_only", "graph_fixed_query"});
         else if constexpr (Description::version == 3)
           fields(p, {"ray_count", "occlusion", "any_hit", "face_rules",
@@ -1035,7 +1057,7 @@ void register_query(NativeOperationRegistry &registry) {
         else
           fields(p, {"ray_count", "occlusion", "any_hit", "front_only"});
         const auto rays = [&]() -> uint32_t {
-          if constexpr (Description::version == 4)
+          if constexpr (Description::version >= 4)
             return 0;  // Resolved and validated by the cold binder below.
           else
             return count(p, "ray_count");
@@ -1097,13 +1119,14 @@ void register_query(NativeOperationRegistry &registry) {
           op.rays = b.at("rays").array();
           op.hits = b.at("hits").array();
           op.ray_count = rays;
-          if constexpr (Description::version == 4) {
+          if constexpr (Description::version >= 4) {
             if (op.rays.shape.empty() || !op.rays.shape[0] ||
                 op.rays.shape[0] > std::numeric_limits<uint32_t>::max())
               throw std::invalid_argument("OptiX whole-array query requires a positive uint32 ray extent");
             op.ray_count = static_cast<uint32_t>(op.rays.shape[0]);
             op.graph_fixed_query = optional_bool(p, "graph_fixed_query", true);
           }
+          op.live_faces = Description::version == 5;
           op.occlusion = occlusion;
           op.any_hit = any_hit;
           op.front_only = front_only;
@@ -1273,6 +1296,7 @@ void register_optix_operations(NativeOperationRegistry &registry) {
   register_query<OptixBoundFaceQueryOperation>(registry);
   register_query<OptixAlphaQueryOperation>(registry);
   register_query<OptixArrayQueryOperation>(registry);
+  register_query<OptixArrayFaceQueryOperation>(registry);
   registry.define<OptixRefitOperation>(validate_refit);
   registry.register_schema<OptixRefitOperation>(
       "optix", "refit", {"scene", "vertices"},

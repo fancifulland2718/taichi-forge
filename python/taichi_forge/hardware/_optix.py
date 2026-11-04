@@ -1087,6 +1087,9 @@ class OptixFaceRuleTable:
     """Read-only i32/u32 binding in GAS primitive order: 0 two-sided, 1 front-only.
 
     Instances may bind different tables even when sharing the same GAS.
+    Passing one table directly as face_rules (rather than inside a tuple)
+    concatenates every instance's primitives in instance ordinal order. The
+    scene determines the partitions; repeated GAS instances each have a slice.
     Contents must remain fixed while a prepared query/Graph binding is in use.
     Rebind new storage at a cold boundary to change rules. There is no device
     readback or per-launch content validation.
@@ -1203,6 +1206,10 @@ class OptixRayQueryRecording(BackendCommandRecording):
             count = scene.instance_count if isinstance(scene, OptixInstanceScene) else 1
             alpha_masks = (None,) * count
         face_names = []
+        flat_face_table = face_rules if isinstance(face_rules, OptixFaceRuleTable) else None
+        if flat_face_table is not None:
+            count = scene.instance_count if isinstance(scene, OptixInstanceScene) else 1
+            face_rules = (flat_face_table,) * count
         if face_rules is not None:
             if isinstance(face_rules, str):
                 raise TypeError("OptiX face_rules must be a sequence in instance order")
@@ -1267,6 +1274,8 @@ class OptixRayQueryRecording(BackendCommandRecording):
                 # no mask pipeline/table/workspace is needed for this request.
                 alpha_masks = None
         if face_rules is not None and alpha_masks is not None and any(mask is not None for mask in alpha_masks):
+            if flat_face_table is not None:
+                raise ValueError("OptiX concatenated face tables do not yet support alpha masks")
             if not int(scene.provider._loaded.api.info.features) & _FACE_FILTER_ALPHA:
                 raise TaichiRuntimeError("OptiX adapter does not support face filtering combined with alpha masks")
         if set(names).intersection(face_names):
@@ -1298,6 +1307,8 @@ class OptixRayQueryRecording(BackendCommandRecording):
                 scene.instance_count if isinstance(scene, OptixInstanceScene) else 1,
                 face_rules,
                 alpha_masks,
+                flat_face_table=flat_face_table,
+                graph_fixed_query=graph_fixed_query,
             ),
         )
         object.__setattr__(self, "scene", scene)
@@ -1308,7 +1319,9 @@ class OptixRayQueryRecording(BackendCommandRecording):
             self,
             "_face_identity",
             (
-                None
+                ("instance_primitive_table", flat_face_table.binding)
+                if flat_face_table is not None
+                else None
                 if face_rules is None
                 else tuple(
                     ("primitive_table", rule.binding) if isinstance(rule, OptixFaceRuleTable) else rule
@@ -1366,6 +1379,10 @@ class OptixRayQueryRecording(BackendCommandRecording):
     @property
     def face_rules(self):
         return self._query_definition.face_rules
+
+    @property
+    def flat_face_table(self):
+        return self._query_definition.flat_face_table
 
     @property
     def any_hit(self):
@@ -1434,6 +1451,13 @@ class OptixRayQueryRecording(BackendCommandRecording):
 
     def _face_bindings(self, bindings):
         values, descriptions = [], []
+        if self.flat_face_table is not None:
+            key = self.flat_face_table.binding
+            value = bindings[key]
+            description, count = _ray_storage(value, 1, (i32, u32), key, access="read")
+            if count != sum(self._face_primitive_counts()):
+                raise TaichiRuntimeError("OptiX face table count must match all instance primitives")
+            return [value], [description]
         for index, rule in enumerate(self.face_rules or ()):
             if not isinstance(rule, OptixFaceRuleTable):
                 continue
@@ -1445,6 +1469,31 @@ class OptixRayQueryRecording(BackendCommandRecording):
             values.append(value)
             descriptions.append(description)
         return values, descriptions
+
+    def _face_primitive_counts(self):
+        return (
+            tuple(instance.gas.triangle_count for instance in self.scene._instances)
+            if isinstance(self.scene, OptixInstanceScene)
+            else (self.scene.triangle_count,)
+        )
+
+    def _face_records(self, pointers):
+        specs = self.face_rules or ()
+        records = (_FaceRule * len(specs))()
+        if self.flat_face_table is not None:
+            pointer = pointers[0]
+            for i, count in enumerate(self._face_primitive_counts()):
+                records[i] = _FaceRule(pointer, 2, 0)
+                pointer += count * 4
+        else:
+            active = 0
+            for i, rule in enumerate(specs):
+                if isinstance(rule, OptixFaceRuleTable):
+                    records[i] = _FaceRule(pointers[active], 2, 0)
+                    active += 1
+                else:
+                    records[i] = _FaceRule(0, int(rule == "front_only"), 0)
+        return records
 
     def _mask_bindings(self, bindings):
         from taichi_forge._lib import core
@@ -1578,14 +1627,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
         host = np.zeros(workspace_words, dtype=np.uint64)
         masks_end = launch_words + 4 * len(masks_spec)
         host[launch_words:masks_end] = np.frombuffer(bytes(masks), dtype=np.uint64)
-        faces = (_FaceRule * len(faces_spec))()
-        active = 0
-        for index, rule in enumerate(faces_spec):
-            if isinstance(rule, OptixFaceRuleTable):
-                faces[index] = _FaceRule(storage.pointers[query_pointer_count + len(mask_values) + active], 2, 0)
-                active += 1
-            else:
-                faces[index] = _FaceRule(0, int(rule == "front_only"), 0)
+        faces = self._face_records(storage.pointers[query_pointer_count + len(mask_values):])
         host[masks_end:] = np.frombuffer(bytes(faces), dtype=np.uint64)
         workspace.from_numpy(host)
         api = self.scene.provider._loaded.api
@@ -2527,6 +2569,8 @@ class OptixInstanceScene:
         alpha_masks is a fixed tuple of OptixAlphaMask or None per instance.
         face_rules is a tuple of two_sided/front_only or OptixFaceRuleTable,
         in instance ordinal order. Candidates must pass both face and alpha rules.
+        A single OptixFaceRuleTable instead concatenates instance primitive
+        slices in one binding; this form currently excludes alpha masks.
         any_hit returns the first accepted intersection, not necessarily nearest.
         scene optionally names a Graph port that must bind this same owner;
         a component consumer binds its own qualified scene at that port.

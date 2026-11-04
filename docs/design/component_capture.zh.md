@@ -1113,7 +1113,7 @@ OptiX scene 只进入 Graph 原生操作，不作为 CUDA Kernel 的 AS 参数�
 组件使用 `optix.query` version 4，在 prepare 时从射线数组首维获得正 uint32 数量，
 由原 compact 布局检查共同验证射线、命中和索引。新分辨率重新冷绑定/prepare，重放
 不改写描述符或回读 Host 场景。统一 two-sided/front-only 规则不依赖 producer 实例数；
-混合面表、alpha mask 和 micromap 在当前组件捕获中明确拒绝。保留原
+逐实例 tuple 的混合规则、alpha mask 和 micromap 在当前组件捕获中明确拒绝。保留原
 `graph_fixed_query` 策略，False 时仍走原查询路径；版本 1–3 保留固定数量语义。
 
 合同要求 `component_native_optix_v1`。消费者通过 `Runtime.configure_provider()`
@@ -1122,3 +1122,17 @@ adapter 或驱动路径写入 TCM。冻结单实例/两条射线后，新 3/7 �
 射线通过交错 refit/query/occlusion、普通/CUDA 执行域、错误输出数量/资源种类拒绝，
 以及在途关闭检查，全程不依赖数值前端。这是编译器/Runtime 资格，尚不等于 GeoPhys
 完整 OptiX 帧或渲染吞吐资格。
+
+`face_rules=OptixFaceRuleTable("faces")` 可直接传入一个表，按实例 ordinal 拼接
+各 GAS 的 primitive 规则；同一 GAS 被多个实例引用时，每个实例仍有独立切片。
+普通 JIT 和组件使用同一查询声明。组件导出 `optix.query` version 5，只保留
+一个数组端口；消费端 prepare 从实际 scene 的 GAS 数量划分切片并检查总长度、
+整数类型、紧凑布局、别名和所有者。不会冻结 producer 的实例数量或表内容。
+它借用表存储，不执行表内容 Host 回读或复制；表值须为 0/1，绑定在途时不能修改。
+替换表须在冷边界重新 prepare，旧调用保留原表与 scene 租约。
+
+仅被原生节点使用的数组也进入组件契约；已有 Kernel 使用的数组继续保留完整元素
+ABI，原生节点自己的布局检查仍由 provider 执行。冻结 2 实例后，新 3/7 实例、
+不同 GAS primitive 数、共享 GAS 和不同面规则通过独立解析射线参考、typed hit/
+遮挡、两种 `graph_fixed_query` 策略、普通/执行域和在途表关闭检查。此处没有新增
+alpha/micromap 资格，也不以完整帧测试推断渲染吞吐。

@@ -1399,7 +1399,7 @@ prepared ray array's first extent. The existing compact layout check verifies
 rays, hits and IDs together. New resolution requires cold array binding/prepare;
 replay does not mutate descriptors or reread Host scene state. Uniform two-sided
 or front-only policy is independent of producer instance count. Heterogeneous
-face tables, alpha masks and micromaps are rejected by this component capture.
+per-instance tuples, alpha masks and micromaps are rejected by this component capture.
 The original `graph_fixed_query` selection is retained, including the legacy
 query path when false. Versions 1–3 keep their fixed-count semantics.
 
@@ -1410,5 +1410,24 @@ or vendor-library path is baked into the TCM. Tests freeze a one-instance,
 two-ray producer then consume 3/7-instance scenes with 5/11 rays, interleaved
 refit/query/occlusion, ordinary and CUDA-domain submission, invalid output counts
 and scene kinds, and in-flight retirement without the numerical frontend.
-This is a compiler/Runtime qualification, not yet a full GeoPhys OptiX frame or
+This is a compiler/Runtime qualification, not by itself a full GeoPhys OptiX frame or
 a renderer throughput claim.
+
+Passing `face_rules=OptixFaceRuleTable("faces")` directly supplies one table in
+instance ordinal / GAS primitive order. Repeated instances of a shared GAS each
+have their own slice. Ordinary JIT and components use the same query declaration;
+component `optix.query` version 5 retains one array port. Consumer preparation
+partitions it using the actual scene's GAS counts and checks total extent,
+integer type, compact layout, aliases and ownership. Neither producer instance
+count nor table contents become artifact constants. The table is borrowed
+without a Host readback or copy. Values must be 0/1 and remain unchanged while
+bindings are in use; replace storage and prepare at a cold boundary. Accepted
+work retains the old table and scene leases until retirement.
+
+Native-only arrays also enter the component contract. Arrays used by Kernels
+retain their full element ABI; native dtype/layout alternatives remain checked
+by provider preparation. Tests freeze two instances, then consume 3/7 instances
+with different GAS primitive counts, shared GAS and different face policies.
+Analytic ray results, typed/occlusion queries, both `graph_fixed_query` choices,
+ordinary/domain submission and in-flight table closure are checked. Alpha and
+micromap qualification is unchanged; this is not a throughput claim.

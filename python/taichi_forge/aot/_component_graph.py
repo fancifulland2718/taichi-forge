@@ -50,6 +50,7 @@ class _GraphCapture:
         self.bindings = {}
         self.values = {}
         self.explicit = {}
+        self._native_array_arguments = set()
         self.entries = []
         self.symbols = {}
         self.array_types = {}
@@ -361,6 +362,15 @@ class _GraphCapture:
             raise TaichiCompilationError(f"Component Graph argument {arg.name!r} has incompatible uses")
         self.explicit[arg.name] = descriptor
 
+    def native_array_argument(self, name):
+        """Retain an array used only by native operations, without inventing a
+        Kernel element ABI. Concrete Kernel uses still supply their full type;
+        native preparation validates the provider's dtype/layout alternatives.
+        """
+        if not isinstance(name, str) or not name or name.startswith("__component_"):
+            raise TaichiCompilationError("Native array ports require explicit Graph resource names")
+        self._native_array_arguments.add(name)
+
     def native(self, executable):
         # Concrete providers opt in; inherited hooks cannot hide extra behavior.
         convert = type(executable).__dict__.get("_capture_component")
@@ -547,6 +557,12 @@ class _GraphCapture:
                 if self.component.read(self.owner, alias) is not value:
                     raise TaichiCompilationError("Component array binding changed while recording its Graph")
                 self.component.declarations[alias].validate(value, self.component, self.owner)
+        for name in self._native_array_arguments:
+            if name in self.bindings or name in self.explicit and self.explicit[name][0] != "ndarray":
+                raise TaichiCompilationError("Component native array port has an incompatible declared use")
+            # This is the existing generic Ndarray structural descriptor. The
+            # native operation remains the authority for its actual layout.
+            self.explicit.setdefault(name, ("ndarray", ("any", None, None, None), None, None, None, None))
         facts = dict(
             version=1,
             groups=self.groups,

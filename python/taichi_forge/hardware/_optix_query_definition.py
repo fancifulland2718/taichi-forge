@@ -14,9 +14,17 @@ class OptixQueryDefinition:
     instance_count: int
     face_rules: tuple | None
     alpha_masks: tuple | None
+    flat_face_table: object = None
+    graph_fixed_query: bool = True
     native: NativeDefinition = field(init=False)
 
     def __post_init__(self):
+        if self.flat_face_table is not None:
+            object.__setattr__(self, "native", NativeDefinition("optix", "query", dict(
+                occlusion=self.occlusion, any_hit=self.any_hit,
+                graph_fixed_query=self.graph_fixed_query,
+            ), version=5))
+            return
         # Inputs have passed the public recording's type/feature qualification.
         # Keep None distinct from an all-empty mask tuple: legacy direct adapters
         # use the latter to select first-accepted/OMM traversal.
@@ -40,6 +48,8 @@ class OptixQueryDefinition:
 
     @property
     def face_tables(self):
+        if self.flat_face_table is not None:
+            return (self.flat_face_table,)
         return tuple(v for v in self.face_rules or () if not isinstance(v, str))
 
     @property
@@ -54,7 +64,8 @@ class OptixQueryDefinition:
         if hit_indices is not None:
             arrays.append(NativeArrayBinding("hit_indices", hit_indices, GraphAccess.WRITE))
         arrays.extend(
-            NativeArrayBinding(f"faces_{i}", rule.binding, GraphAccess.READ) for i, rule in enumerate(self.face_tables)
+            NativeArrayBinding("faces" if self.flat_face_table is not None else f"faces_{i}", rule.binding, GraphAccess.READ)
+            for i, rule in enumerate(self.face_tables)
         )
         arrays.extend(NativeArrayBinding(f"uvs_{i}", mask.uvs, GraphAccess.READ) for i, mask in enumerate(self.masks))
         return tuple(arrays)

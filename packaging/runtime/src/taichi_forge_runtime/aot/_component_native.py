@@ -24,14 +24,14 @@ def operation_bindings(operation):
             raise ValueError("Invalid component native definition")
         parameters, bindings = operation["parameters"], operation["bindings"]
         version = operation["version"]
-        if version != 1 and not (operation["provider"] == "optix" and operation["operation"] == "query" and version == 4):
+        if version != 1 and not (operation["provider"] == "optix" and operation["operation"] == "query" and version in (4, 5)):
             raise ValueError("Unqualified component native operation version")
         if operation["provider"] == "optix" and operation["operation"] == "query":
-            if (version != 4 or not isinstance(parameters, dict)
-                    or set(parameters) != {"occlusion", "any_hit", "front_only", "graph_fixed_query"}
+            if (version not in (4, 5) or not isinstance(parameters, dict)
+                    or set(parameters) != {"occlusion", "any_hit", "graph_fixed_query"} | ({"front_only"} if version == 4 else set())
                     or any(type(value) is not bool for value in parameters.values())
                     or parameters["occlusion"] and not parameters["any_hit"]
-                    or set(bindings) != {"scene", "rays", "hits"} | (set() if parameters["occlusion"] else {"hit_indices"})):
+                    or set(bindings) != {"scene", "rays", "hits"} | (set() if parameters["occlusion"] else {"hit_indices"}) | ({"faces"} if version == 5 else set())):
                 raise ValueError("Invalid component OptiX query definition")
             if len(set(bindings.values())) != len(bindings):
                 raise ValueError("Component OptiX ports require distinct resources")

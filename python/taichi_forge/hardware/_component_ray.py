@@ -54,6 +54,7 @@ def capture_optix_refit(recording, capture):
     _optix_scene(recording, capture)
     if recording.transforms is None:
         raise TaichiCompilationError("Component OptiX refit requires device transforms")
+    capture.native_array_argument(recording.transforms)
     return _ComponentRayDefinition(
         dict(
             kind="native",
@@ -81,7 +82,8 @@ def capture_optix_query(recording, capture):
             "Component OptiX masks and micromaps need a qualified resource contract"
         )
     rules = recording.face_rules or ("two_sided",)
-    if any(not isinstance(rule, str) or rule != rules[0] for rule in rules):
+    flat = recording.flat_face_table
+    if flat is None and any(not isinstance(rule, str) or rule != rules[0] for rule in rules):
         raise TaichiCompilationError(
             "Component OptiX queries currently require uniform face rules"
         )
@@ -90,6 +92,15 @@ def capture_optix_query(recording, capture):
     )
     if recording.hit_indices is not None:
         bindings["hit_indices"] = recording.hit_indices
+    if flat is not None:
+        bindings["faces"] = flat.binding
+    for port, name in bindings.items():
+        if port != "scene":
+            capture.native_array_argument(name)
+    parameters = dict(occlusion=recording._occlusion, any_hit=recording.any_hit,
+                      graph_fixed_query=recording.graph_fixed_query)
+    if flat is None:
+        parameters["front_only"] = rules[0] == "front_only"
     # The ordinary recording validates exact whole-array ray counts. This
     # version resolves that same count from each consumer's prepared binding.
     return _ComponentRayDefinition(
@@ -97,13 +108,8 @@ def capture_optix_query(recording, capture):
             kind="native",
             provider="optix",
             operation="query",
-            version=4,
-            parameters=dict(
-                occlusion=recording._occlusion,
-                any_hit=recording.any_hit,
-                front_only=rules[0] == "front_only",
-                graph_fixed_query=recording.graph_fixed_query,
-            ),
+            version=5 if flat is not None else 4,
+            parameters=parameters,
             bindings=bindings,
         )
     )
