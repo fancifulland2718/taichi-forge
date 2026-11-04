@@ -57,6 +57,14 @@ class _Ordered:
     def record_opaque(self, builder):
         builder.dispatch(self.opaque)
 
+    @ti.kernel
+    def shape_only(self):
+        for j, k in ti.ndrange(self.a.shape[1], self.a.shape[2]):
+            self.v[j, k] = ti.Vector([10 * j + k, k + 1])
+
+    def record_shape_only(self, builder):
+        builder.dispatch(self.shape_only)
+
 
 def _expected(count):
     i, j, k = np.indices((3, 2, count))
@@ -161,3 +169,22 @@ def test_ordered_dense_internal_call_layout_proof(tmp_path, opaque):
                 expected = np.zeros_like(actual)
                 expected[0, 1] = np.arange(37) * 32 + 1
                 np.testing.assert_array_equal(actual, expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_shape_only_strided_argument_keeps_layout_proof(tmp_path):
+    model = _Ordered(3)
+    root = Component.from_owner(model).compile_graph(model.record_shape_only)
+    module = ti.aot.Module()
+    root.export(module, "step")
+    artifact = tmp_path / "shape_only.tcm"
+    module.archive(str(artifact))
+    with Runtime(ti.cfg.arch.name) as runtime, runtime.load_module(artifact) as loaded:
+        with loaded.component("step").instantiate(dict(count=37)) as instance:
+            with instance.prepare() as call:
+                call.run()
+            actual = np.frombuffer(instance.resource("v").read(), np.int32).reshape(2, 37, 2)
+            j, k = np.indices((2, 37))
+            np.testing.assert_array_equal(actual, np.stack((10 * j + k, k + 1), axis=-1))
+            np.testing.assert_array_equal(
+                np.frombuffer(instance.resource("a").read(), np.int32), np.zeros(3 * 2 * 37, np.int32))

@@ -135,6 +135,18 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
     runtime_state_ |= runtime_state_external;
     array_layouts_known_ = false;
   }
+  void visit(ExternalTensorShapeAlongAxisStmt *stmt) override {
+    // A descriptor shape query is independent of storage strides. Keep its
+    // argument eligible when there is no data access; an actual compact/raw
+    // access to the same argument still vetoes the proof in either order.
+    if (collect_array_layouts_)
+      array_layouts_.try_emplace(stmt->arg_id, true);
+  }
+  void visit(ExternalTensorBasePtrStmt *stmt) override {
+    // An escaped raw address has no affine indexing proof.
+    if (collect_array_layouts_)
+      array_layouts_[stmt->arg_id] = false;
+  }
   void visit(ExternalPtrStmt *stmt) override {
     if (!collect_array_layouts_) return;
     const auto *argument = stmt->base_ptr->cast<ArgLoadStmt>();
