@@ -564,6 +564,8 @@ class _GraphCapture:
             facts["internal_arguments"] = internal
         if any(descriptor[0] == "ndarray" for descriptor in facts["explicit"].values()):
             facts["required_capabilities"].append("component_explicit_ndarray_v1")
+        if any(descriptor[0] == "acceleration_structure" for descriptor in facts["explicit"].values()):
+            facts["required_capabilities"].append("component_explicit_acceleration_structure_v1")
         if self.array_types or any(value.get("kind") == "ndarray" for value in self.resources.values()):
             facts["required_capabilities"].append("component_array_storage_v1")
         if self.fixed_groups:
@@ -855,10 +857,11 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     contract["dimensions"].update(constraint_dimensions)
     constraints.update(capture.native_constraints)
     constraint_sources.update(capture.native_constraint_sources)
-    if not any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
-        contract["required_capabilities"] = [
-            name for name in contract["required_capabilities"] if name != "component_explicit_ndarray_v1"
-        ]
+    for kind in ("ndarray", "acceleration_structure"):
+        if not any(descriptor[0] == kind for descriptor in contract["explicit"].values()):
+            contract["required_capabilities"] = [
+                name for name in contract["required_capabilities"] if name != f"component_explicit_{kind}_v1"
+            ]
     if not any(value.get("kind") == "ndarray" for value in contract["resources"].values()):
         contract["required_capabilities"] = [name for name in contract["required_capabilities"]
                                              if name != "component_array_storage_v1"]
@@ -887,7 +890,7 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
                 effect.resource
             )
             if explicit is not None and effect.runtime_bound:
-                if explicit[0] == "ndarray":
+                if explicit[0] in ("ndarray", "acceleration_structure"):
                     effects.append(dict(argument=effect.resource, access=effect.access.value))
                 continue
             # The opaque Graph fallback includes scalar/aggregate bindings too.

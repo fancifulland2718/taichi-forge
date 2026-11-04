@@ -45,6 +45,11 @@ class SourceAccelerationStructures:
         return _scene(context, owner)
 
     def kernel_resource(self, context, arg):
+        if arg.name not in self.owners and context.arch == core.Arch.vulkan:
+            # A symbolic typed AS is supplied by the consumer. The compiled
+            # kernel ABI and native preparation validate its kind, Runtime and
+            # lifetime; no producer geometry or reconstruction is implied.
+            return context.binding(arg.name, resource=True)
         return self.resource(context, arg.name)
 
     def validate_used(self):

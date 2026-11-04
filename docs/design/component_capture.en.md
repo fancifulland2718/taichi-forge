@@ -1346,3 +1346,21 @@ changed shapes and scalar values, interleaved Dense layouts, multiple instances,
 ArgPack, and nested real functions. The Runtime ABI and default JIT optimization
 tier are unchanged. Existing TCM files remain valid; re-export affected code to
 obtain this optimization.
+### Explicit Vulkan acceleration structure arguments
+
+A normal component Graph can use `ArgKind.ACCELERATION_STRUCTURE` for an
+original Kernel's `ti.types.acceleration_structure()` parameter. Export requires
+`caps=["spirv_has_ray_query"]`; the consumer binds an `instance_tlas` native
+resource created by the same Runtime. Geometry, dimensions and AS addresses do
+not specialize the Kernel or capture producer scene data. Ordinary Graph
+ExecutionPlan export also preserves this explicit binding without a producer
+source owner.
+
+The component contract retains AS read effects and requires
+`component_explicit_acceleration_structure_v1`. The existing Kernel ABI, native
+resource and execution domain validate types, Runtime ownership, generations
+and in-flight leases. An Ndarray or BLAS cannot substitute for the TLAS.
+Qualification covers two new geometries and output sizes sharing loaded code,
+ordinary and Vulkan-domain submission, independent AS retirement, and consumption
+without the frontend. It does not qualify implicit AS captures, native refit
+recordings or OptiX components.

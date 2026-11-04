@@ -250,6 +250,11 @@ class Component:
                 capabilities.add("component_zero_initial_state_v1")
             if any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
                 capabilities.add("component_explicit_ndarray_v1")
+            for descriptor in contract["explicit"].values():
+                if descriptor[0] == "acceleration_structure":
+                    if descriptor != ["acceleration_structure", None, None, None, None, None] or module._runtime.arch != "vulkan":
+                        raise ValueError("Component acceleration structures require a typed Vulkan binding")
+                    capabilities.add("component_explicit_acceleration_structure_v1")
             if contract["version"] >= 2:
                 capabilities.add("component_compiler_facts_v1")
                 compilation = contract["compilation"]
@@ -851,7 +856,7 @@ class ComponentInstance:
             raise ValueError("Component value/explicit argument inputs differ from its contract")
         for symbol, value in tuple(bindings.items()):
             descriptor = contract["explicit"][symbol]
-            if descriptor[0] == "ndarray":
+            if descriptor[0] in ("ndarray", "acceleration_structure"):
                 # Resource type, runtime, dimensions and lifetime remain
                 # the existing native preparation contract's authority.
                 continue

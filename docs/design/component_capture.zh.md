@@ -1072,3 +1072,17 @@ LLVM 后端在生成函数的入口读取本次 Kernel 使用的顶层 ABI 值�
 `noalias`。CPU/CUDA 定向验证包括相同数组作为两个参数、变化的维度和标量、
 交错 Dense 布局、多实例、ArgPack 及嵌套 real_func。Runtime ABI 和普通 JIT
 默认优化档位保持不变；已有 TCM 仍有效，要获得此优化需重新导出相关代码。
+
+### Vulkan 显式加速结构参数
+
+正常组件 Graph 可直接使用 `ArgKind.ACCELERATION_STRUCTURE`，对应原 Kernel 的
+`ti.types.acceleration_structure()` 参数。导出必须声明
+`caps=["spirv_has_ray_query"]`；消费者通过同一 Runtime 创建的 `instance_tlas`
+原生资源绑定该参数。尺寸、几何及 AS 地址不参与 Kernel 特化，也不会因此采集
+producer 场景。无 producer source 的普通 Graph ExecutionPlan 同样保留此显式绑定。
+
+组件合同保留 AS 的读 effects，并要求 `component_explicit_acceleration_structure_v1`。
+实际类型、Runtime、代际和在途租约继续由原 Kernel ABI、原生资源及执行域验证；
+不能用 Ndarray 或 BLAS 冒充 TLAS。已验证一份代码绑定两组新几何和不同输出尺寸、
+普通提交及 Vulkan 执行域、单实例 AS 关闭与另一实例隔离、无前端源码消费。
+这不自动取得隐式 AS 捕获、原生 refit recording 或 OptiX 组件资格。

@@ -31,6 +31,7 @@ from taichi_forge.lang.matrix import Matrix, MatrixType, Vector
 from taichi_forge.lang.util import cook_dtype
 from taichi_forge.types import primitive_types
 from taichi_forge.types.ndarray_type import NdarrayType
+from taichi_forge.types.ray_type import AccelerationStructureType
 from taichi_forge.types._argument_descriptor import describe_element_type
 from taichi_forge_runtime._static_values import StaticDType, static_key
 
@@ -1352,9 +1353,16 @@ class Component:
             elif id(argument.annotation) in primitive_types.type_ids or isinstance(argument.annotation, MatrixType):
                 features.append(None)
                 abi.append(("value", str(argument.annotation)))
+            elif isinstance(argument.annotation, AccelerationStructureType):
+                if impl.current_cfg().arch.name != "vulkan":
+                    raise TaichiCompilationError("Component acceleration structures require Vulkan")
+                # The typed parameter has no geometry-dependent specialization.
+                # Graph injection supplies None without allocating a dummy AS.
+                features.append(None)
+                abi.append(("acceleration_structure",))
             else:
                 raise TaichiCompilationError(
-                    "Component explicit arguments require scalar/vector/matrix values or ndarrays"
+                    "Component explicit arguments require scalar/vector/matrix values, ndarrays, or Vulkan acceleration structures"
                 )
         signature = (tuple(template_facts), tuple(abi))
         runtime = impl.get_runtime()
