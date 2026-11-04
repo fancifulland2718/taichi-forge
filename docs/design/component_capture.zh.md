@@ -1073,6 +1073,13 @@ LLVM 后端在生成函数的入口读取本次 Kernel 使用的顶层 ABI 值�
 交错 Dense 布局、多实例、ArgPack 及嵌套 real_func。Runtime ABI 和普通 JIT
 默认优化档位保持不变；已有 TCM 仍有效，要获得此优化需重新导出相关代码。
 
+支持 affine 的 LLVM 入口还会按本次描述符选择有效的各轴 byte stride，再将索引
+代入地址计算；不再为每次访问分别计算紧凑与 strided 两个地址。顶层参数的选择在
+函数入口复用，紧凑模式仍从 shape/元素类型推导，不要求旧调用方填写额外 stride。
+矩阵/向量的元素内偏移独立处理。CPU/CUDA 同一 Graph 在紧凑数组、切片视图与新尺寸
+之间切换的检查覆盖零维及矩阵元素、相同存储作为两个可写参数；没有新增只读或
+不相交假设，也不改变布局规则、Runtime ABI 或默认编译档位。
+
 ### Vulkan 显式加速结构参数
 
 正常组件 Graph 可直接使用 `ArgKind.ACCELERATION_STRUCTURE`，对应原 Kernel 的

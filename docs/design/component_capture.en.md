@@ -1346,6 +1346,17 @@ changed shapes and scalar values, interleaved Dense layouts, multiple instances,
 ArgPack, and nested real functions. The Runtime ABI and default JIT optimization
 tier are unchanged. Existing TCM files remain valid; re-export affected code to
 obtain this optimization.
+
+Affine-capable LLVM entries also select effective byte strides from the current
+descriptor before applying indices, instead of computing both packed and strided
+addresses at every access. Top-level arguments reuse that selection at function
+entry. Packed mode still derives strides from shape and element type, so existing
+callers need not populate extra stride values. Vector/matrix lane offsets remain
+separate. CPU/CUDA checks switch one Graph between packed arrays, strided views,
+and new shapes, including rank-zero arrays, matrix elements, and two writable
+arguments sharing storage. This adds no read-only or disjointness assumptions and
+does not change layout rules, the Runtime ABI, or the default compilation tier.
+
 ### Explicit Vulkan acceleration structure arguments
 
 A normal component Graph can use `ArgKind.ACCELERATION_STRUCTURE` for an
