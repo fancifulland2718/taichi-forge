@@ -167,9 +167,11 @@ def export_instance_update(recording, context):
 
 def export_instance_transforms(recording, context):
     recording.validate_graph_lifetime()
+    scene = (_scene(context, recording.tlas) if recording.scene_binding is None
+             else context.binding(recording.scene_binding, resource=True))
     context.native(
         "vulkan_ray",
         "instance_refit",
-        bindings=dict(scene=_scene(context, recording.tlas), transforms=recording.transforms),
+        bindings=dict(scene=scene, transforms=recording.transforms),
     )
     return ()

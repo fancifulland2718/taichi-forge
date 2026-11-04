@@ -172,12 +172,7 @@ class _GraphCapture:
         for arg in flatten_args(args):
             if arg.name in managed_symbols:
                 continue
-            if arg.name.startswith("__component_"):
-                raise TaichiCompilationError("Explicit Graph arguments cannot use the reserved __component_ prefix")
-            descriptor = describe_symbolic_arg(arg).structural_key()
-            if arg.name in self.explicit and self.explicit[arg.name] != descriptor:
-                raise TaichiCompilationError(f"Component Graph argument {arg.name!r} has incompatible uses")
-            self.explicit[arg.name] = descriptor
+            self.explicit_argument(arg)
         contract = code.contract
         for group, schema in code.fixed_groups.items():
             if self.fixed_groups.setdefault(group, schema) != schema or (
@@ -357,6 +352,14 @@ class _GraphCapture:
         if isinstance(value, Ndarray):
             return self.native_array(value)
         return self._retain_dense_resources((value,), host_visible=False)[0]
+
+    def explicit_argument(self, arg):
+        if arg.name.startswith("__component_"):
+            raise TaichiCompilationError("Explicit Graph arguments cannot use the reserved __component_ prefix")
+        descriptor = describe_symbolic_arg(arg).structural_key()
+        if arg.name in self.explicit and self.explicit[arg.name] != descriptor:
+            raise TaichiCompilationError(f"Component Graph argument {arg.name!r} has incompatible uses")
+        self.explicit[arg.name] = descriptor
 
     def native(self, executable):
         # Concrete providers opt in; inherited hooks cannot hide extra behavior.
@@ -942,6 +945,15 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     for node in native_nodes:
         for effect in node.effects:
             binding = contract["bindings"].get(effect.resource)
+            explicit = contract["explicit"].get(effect.resource)
+            if binding is not None and capture.natives[node.name].control_kind == "native_ray":
+                raise TaichiCompilationError(
+                    "Component native ray ports require explicit Graph resources or private Graph arrays"
+                )
+            if binding is None and explicit and capture.natives[node.name].control_kind == "native_ray":
+                if not effect.runtime_bound or explicit[0] not in ("ndarray", "acceleration_structure"):
+                    raise TaichiCompilationError("Component native ray effects require typed runtime resources")
+                continue
             private = contract.get("internal_arguments", {}).get(effect.resource)
             if binding is None and private and private[0] == "ndarray":
                 # The original Graph owns this scratch and its shape recipe;
@@ -970,6 +982,8 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
         contract["required_capabilities"].append("component_native_dense_sort_v1")
     if native_primitives:
         contract["required_capabilities"].append("component_native_primitives_v1")
+    if any(capture.natives[node.name].control_kind == "native_ray" for node in native_nodes):
+        contract["required_capabilities"].append("component_native_ray_v1")
     if native_private:
         contract["required_capabilities"].append("component_native_private_arrays_v1")
     if has_control or "internal_arguments" in contract or constraints or fixed_groups or lifecycle:

@@ -1362,5 +1362,25 @@ resource and execution domain validate types, Runtime ownership, generations
 and in-flight leases. An Ndarray or BLAS cannot substitute for the TLAS.
 Qualification covers two new geometries and output sizes sharing loaded code,
 ordinary and Vulkan-domain submission, independent AS retirement, and consumption
-without the frontend. It does not qualify implicit AS captures, native refit
-recordings or OptiX components.
+without the frontend. Implicit AS captures and OptiX components remain outside this qualification.
+
+
+### Component device-transform refits
+
+`scene.record_refit_transforms(transforms="poses", scene="scene")` explicitly
+associates the original recording owner with a typed Graph AS port. Normal JIT
+bindings must reference that same owner. Component conversion preserves the
+`vulkan_ray.instance_refit` operation and its read/write effects; it captures no
+producer geometry, instance count or handle. The consumer supplies its own TLAS
+and f32 transforms, validated by the existing native provider. Without an
+explicit scene port, component capture rejects the recording; ordinary JIT and
+fixed-state AOT retain their existing behavior.
+
+The transform port is an explicit Graph array or declared private Graph array.
+The component requires `component_native_ray_v1`. Kernel transform writes,
+refit and ray queries retain their original ordered Plan execution; no new Host
+frame interpreter is involved. Tests use new 3/7-instance topologies, repeated
+transform updates, interleaved independent instances, ordinary and Vulkan-domain
+submission, wrong-count rejection and AS retirement during accepted work, in a
+consumer without the numerical frontend. This qualifies transform refit with
+fixed per-instance topology, not topology mutation or OptiX.

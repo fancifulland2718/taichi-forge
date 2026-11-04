@@ -1085,4 +1085,19 @@ producer 场景。无 producer source 的普通 Graph ExecutionPlan 同样保留
 实际类型、Runtime、代际和在途租约继续由原 Kernel ABI、原生资源及执行域验证；
 不能用 Ndarray 或 BLAS 冒充 TLAS。已验证一份代码绑定两组新几何和不同输出尺寸、
 普通提交及 Vulkan 执行域、单实例 AS 关闭与另一实例隔离、无前端源码消费。
-这不自动取得隐式 AS 捕获、原生 refit recording 或 OptiX 组件资格。
+隐式 AS 捕获和 OptiX 组件仍不在此资格范围内。
+
+
+### 组件内的设备变换 refit
+
+`scene.record_refit_transforms(transforms="poses", scene="scene")` 将原 recording
+owner 显式关联到 Graph 的 AS 参数。普通 JIT 绑定必须指向同一 owner；组件转换保留
+`vulkan_ray.instance_refit` 操作和读写 effects，不捕获 producer 几何、实例数或句柄。
+消费者提供自己的 TLAS 和 f32 变换，具体布局与数量仍由既有原生 provider 验证。
+未声明 scene 参数时，组件捕获明确拒绝；普通 JIT 和固定状态 AOT 保留原行为。
+
+变换端口使用显式 Graph 数组或声明的私有 Graph 数组，组件要求
+`component_native_ray_v1`。Kernel 写变换、refit、射线查询沿原 Plan 顺序执行，
+不增加 Host 逐帧解释层。已验证新 3/7 实例拓扑、连续变换更新、双实例交错、普通与
+Vulkan 执行域、错误数量拒绝、在途 AS 退休，以及无数值前端的消费者执行。
+此资格覆盖每个实例固定拓扑下的变换更新，不代表拓扑热修改或 OptiX 已接通。

@@ -1045,14 +1045,21 @@ class VulkanTLASTransformRecording(BackendCommandRecording):
 
         return export_instance_transforms(self, context)
 
-    def __init__(self, tlas, *, transforms="transforms"):
+    def _capture_component(self, capture):
+        from ._component_ray import capture_instance_transforms
+
+        return capture_instance_transforms(self, capture)
+
+    def __init__(self, tlas, *, transforms="transforms", scene=None):
         if not isinstance(tlas, InstanceTLAS):
             raise TypeError("Vulkan TLAS transform recording requires an InstanceTLAS")
         if not isinstance(transforms, str) or not transforms:
             raise ValueError("Vulkan TLAS transform binding must be a nonempty string")
+        if scene is not None and (not isinstance(scene, str) or not scene or "\0" in scene or scene == transforms):
+            raise ValueError("Vulkan TLAS scene binding must be a distinct nonempty name")
         super().__init__(
             backend="vulkan",
-            binding_names=(transforms,),
+            binding_names=(transforms,) if scene is None else (transforms, scene),
             command_count=2,
             queue="compute",
             stream_binding="runtime_ordered",
@@ -1063,6 +1070,7 @@ class VulkanTLASTransformRecording(BackendCommandRecording):
         )
         object.__setattr__(self, "tlas", tlas)
         object.__setattr__(self, "transforms", transforms)
+        object.__setattr__(self, "scene_binding", scene)
         identify_ray_recording(self, "tlas_device_refit", tlas._effect_name)
         object.__setattr__(
             self,
@@ -1073,7 +1081,8 @@ class VulkanTLASTransformRecording(BackendCommandRecording):
                     static_resource_effect(blas._effect_name, GraphAccess.READ)
                     for blas in dict.fromkeys(tlas._topology)
                 ),
-                static_resource_effect(tlas._effect_name, GraphAccess.WRITE),
+                (static_resource_effect(tlas._effect_name, GraphAccess.WRITE) if scene is None
+                 else ResourceEffect(scene, GraphAccess.WRITE)),
             ),
         )
 
@@ -1082,6 +1091,8 @@ class VulkanTLASTransformRecording(BackendCommandRecording):
         return self._effects
 
     def _binding_description(self, bindings):
+        if self.scene_binding is not None and bindings.get(self.scene_binding) is not self.tlas:
+            raise TaichiRuntimeError("Vulkan refit scene binding must reference this recording's TLAS owner")
         description = describe_storage(bindings[self.transforms])
         if not description.supported:
             raise TaichiRuntimeError(
@@ -1144,6 +1155,8 @@ class VulkanTLASTransformRecording(BackendCommandRecording):
     def _as_graph_native_node(self):
         return native_recording_node(
             self,
+            runtime_bindings=lambda item: ((item.transforms, "ndarray"),) + (
+                ((item.scene_binding, "acceleration_structure"),) if item.scene_binding is not None else ()),
             lifetime_leases=lambda item: (item.tlas,),
             debug_info=lambda item: {
                 "kind": "vulkan_instance_tlas_device_transforms",
@@ -1295,7 +1308,7 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
         self._instances = recording.instances
         return self
 
-    def record_refit_transforms(self, *, transforms="transforms"):
+    def record_refit_transforms(self, *, transforms="transforms", scene=None):
         """Record device transform packing followed by a fixed-topology refit.
 
         The binding accepts compact f32 scalar ``(N, 3, 4)`` / ``(N, 12)``
@@ -1310,9 +1323,14 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
         the existing TLAS; transform storage remains caller-owned. Host
         :meth:`build` and :meth:`refit` still use captured RayInstance values;
         they do not retrieve these device transforms.
+
+        Optional ``scene`` names the same TLAS as an explicit Graph parameter.
+        Normal execution validates that alias. Component export can then retain
+        this resource port without capturing geometry or the producer owner;
+        consumer preparation validates its own TLAS and transform extent.
         """
         self._validate_lifetime()
-        return VulkanTLASTransformRecording(self, transforms=transforms)
+        return VulkanTLASTransformRecording(self, transforms=transforms, scene=scene)
 
     def refit_transforms(self, transforms):
         """Update transforms from managed device storage without host readback."""

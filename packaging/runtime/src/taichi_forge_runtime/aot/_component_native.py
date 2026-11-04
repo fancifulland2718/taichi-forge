@@ -19,11 +19,16 @@ def operation_bindings(operation):
         ports = [(key, value) for key, value in operation.items() if key != "kind"]
     elif kind == "native":
         if (set(operation) != {"kind", "provider", "operation", "version", "parameters", "bindings"}
-                or operation["provider"] != "builtin" or type(operation["version"]) is not int
+                or operation["provider"] not in ("builtin", "vulkan_ray") or type(operation["version"]) is not int
                 or operation["version"] != 1 or not isinstance(operation["bindings"], dict)):
             raise ValueError("Invalid component builtin native definition")
         parameters, bindings = operation["parameters"], operation["bindings"]
-        if operation["operation"] == "sort":
+        if operation["provider"] == "vulkan_ray":
+            if (operation["operation"] != "instance_refit" or parameters != {}
+                    or set(bindings) != {"scene", "transforms"} or bindings["scene"] == bindings["transforms"]):
+                raise ValueError("Invalid component Vulkan instance refit definition")
+            ports = list(bindings.items())
+        elif operation["operation"] == "sort":
             if (parameters != {"nan_policy": "last"} or not {"keys"} <= set(bindings)
                     or set(bindings) - {"keys", "values"}):
                 raise ValueError("Invalid component prepared sort definition")

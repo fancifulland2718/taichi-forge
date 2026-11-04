@@ -131,14 +131,30 @@ class Component:
                 region = pending.pop()
                 pending.extend(region.get("children", ()))
                 region_kind = region.get("kind")
-                if region_kind not in ("native_sort", "native_primitives"):
+                if region_kind not in ("native_sort", "native_primitives", "native_ray"):
                     continue
                 operations = region.get("operations")
                 if set(region) != {"kind", "operations"} or not isinstance(operations, list) or not operations:
                     raise ValueError("Invalid component native definition")
+                if region_kind == "native_ray":
+                    if module._runtime.arch != "vulkan":
+                        raise ValueError("Component native ray operations require Vulkan")
+                    capabilities.add("component_native_ray_v1")
+                    for operation in operations:
+                        ports = dict(operation_bindings(operation))
+                        if operation.get("provider") != "vulkan_ray":
+                            raise ValueError("Component native ray requires qualified Vulkan operations")
+                        if contract["explicit"].get(ports["scene"]) != ["acceleration_structure", None, None, None, None, None]:
+                            raise ValueError("Component refit requires an explicit typed scene")
+                        descriptor = contract["explicit"].get(ports["transforms"]) or contract.get("internal_arguments", {}).get(ports["transforms"])
+                        if not descriptor or descriptor[0] != "ndarray":
+                            raise ValueError("Component refit requires a typed transform array")
+                    continue
                 capabilities.add("component_native_sort_v1" if region_kind == "native_sort"
                                  else "component_native_primitives_v1")
                 for operation in operations:
+                    if isinstance(operation, dict) and operation.get("provider") == "vulkan_ray":
+                        raise ValueError("Vulkan ray operation requires its native ray component contract")
                     if region_kind == "native_sort" and (not isinstance(operation, dict) or operation.get("kind") != "sort"):
                         raise ValueError("Invalid component native sort operation")
                     for port, symbol in operation_bindings(operation):
