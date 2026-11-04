@@ -1328,3 +1328,21 @@ uses default object equality. The existing presence/reference guards remain
 active. Custom `__eq__` or `__ne__` is rejected with an `is not None` diagnostic,
 including after a cache hit or a binding change; proxy comparison never runs
 user equality code.
+
+
+### LLVM argument snapshots within a call
+
+The LLVM backend loads the used top-level Kernel ABI values and Ndarray descriptor
+members at each generated function entry and reuses their SSA values within that
+function. The current binding still supplies the dynamic base, shape, affine mode,
+and strides. A later invocation reads its own values; no metadata is cached across
+instances or prepared generations. Real functions retain their separate argument
+context, and ArgPack content access keeps its existing semantics.
+
+Only argument metadata is immutable within the call. Array payloads remain mutable
+and may legally alias. This does not apply lifetime-wide `invariant.load` metadata
+or unproven `noalias` assertions to arrays. CPU/CUDA checks cover aliased arguments,
+changed shapes and scalar values, interleaved Dense layouts, multiple instances,
+ArgPack, and nested real functions. The Runtime ABI and default JIT optimization
+tier are unchanged. Existing TCM files remain valid; re-export affected code to
+obtain this optimization.

@@ -1058,3 +1058,17 @@ replay 未访问的哨兵、别名及稳定语义身份。
 消费者仍按实际实例资源准备 native operation，并由 execution domain 决定设备 capture
 资格。opaque provider 和错误后端在符号转换前拒绝；源码端通过 auto 不等于任意消费端
 执行域都已取得 capture 或性能资格。
+
+
+### LLVM 调用内参数快照
+
+LLVM 后端在生成函数的入口读取本次 Kernel 使用的顶层 ABI 值和 Ndarray 描述符
+成员，函数内重复访问复用这些 SSA 值。动态基址、shape、affine mode 和 stride
+仍由当前调用绑定提供；下一次调用重新读取，不跨实例或 prepared 代际缓存。
+真实函数的独立参数上下文保留原路径，ArgPack 内容访问不因此改变。
+
+这只优化调用内不变的参数元数据，数组载荷仍可读写并允许合法别名。没有把内存
+标为整个分配生命周期的 `invariant.load`，也没有给不同数组添加未经证明的
+`noalias`。CPU/CUDA 定向验证包括相同数组作为两个参数、变化的维度和标量、
+交错 Dense 布局、多实例、ArgPack 及嵌套 real_func。Runtime ABI 和普通 JIT
+默认优化档位保持不变；已有 TCM 仍有效，要获得此优化需重新导出相关代码。

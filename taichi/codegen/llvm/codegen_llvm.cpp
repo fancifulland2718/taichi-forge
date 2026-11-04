@@ -5,6 +5,7 @@
 #ifdef TI_WITH_LLVM
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ValueSymbolTable.h"
 #include "llvm/Linker/Linker.h"
 #include "taichi/analysis/offline_cache_util.h"
 #include "taichi/analysis/dense_struct_for.h"
@@ -2227,10 +2228,24 @@ void TaskCodeGenLLVM::visit(ExternalPtrStmt *stmt) {
   auto struct_type =
       tlctx->get_data_type(TypeFactory::get_instance().get_ndarray_struct_type(
           arg_type, stmt->ndim, needs_grad));
-  auto *gep = builder->CreateGEP(
-      struct_type, llvm_val.at(stmt->base_ptr),
-      {tlctx->get_constant(0), tlctx->get_constant(int(stmt->is_grad) + 1)});
-  auto *ptr_val = builder->CreateLoad(tlctx->get_data_type(ptr_type), gep);
+  const auto load_descriptor = [&](const std::vector<int> &path,
+                                   llvm::Type *type) -> llvm::Value * {
+    if (const auto *argument = stmt->base_ptr->cast<ArgLoadStmt>();
+        argument && argument->arg_depth == 0 && current_callable == kernel) {
+      auto index = argument->arg_id;
+      index.insert(index.end(), path.begin(), path.end());
+      return get_struct_arg(index, /*create_load=*/true);
+    }
+    std::vector<llvm::Value *> indices{tlctx->get_constant(0)};
+    for (const auto index : path) {
+      indices.push_back(tlctx->get_constant(index));
+    }
+    auto *address = builder->CreateGEP(
+        struct_type, llvm_val.at(stmt->base_ptr), indices);
+    return builder->CreateLoad(type, address);
+  };
+  auto *ptr_val = load_descriptor({int(stmt->is_grad) + 1},
+                                  tlctx->get_data_type(ptr_type));
 
   int num_indices = stmt->indices.size();
   std::vector<llvm::Value *> sizes(num_indices);
@@ -2255,14 +2270,8 @@ void TaskCodeGenLLVM::visit(ExternalPtrStmt *stmt) {
   const size_t element_shape_index_offset = num_array_args;
 
   for (int i = 0; i < num_array_args; i++) {
-    auto raw_arg = builder->CreateGEP(
-        struct_type, llvm_val[stmt->base_ptr],
-        {tlctx->get_constant(0),
-         tlctx->get_constant(TypeFactory::SHAPE_POS_IN_NDARRAY),
-         tlctx->get_constant(i)});
-    raw_arg =
-        builder->CreateLoad(tlctx->get_data_type(PrimitiveType::i32), raw_arg);
-    sizes[i] = raw_arg;
+    sizes[i] = load_descriptor({TypeFactory::SHAPE_POS_IN_NDARRAY, i},
+                               tlctx->get_data_type(PrimitiveType::i32));
   }
 
   auto linear_index = tlctx->get_constant(0);
@@ -2285,26 +2294,18 @@ void TaskCodeGenLLVM::visit(ExternalPtrStmt *stmt) {
   llvm::Value *affine_condition = nullptr;
   llvm::Value *affine_address_offset = nullptr;
   if (stmt->byte_stride == 0 && stmt->runtime_affine) {
-    auto mode_arg = builder->CreateGEP(
-        struct_type, llvm_val[stmt->base_ptr],
-        {tlctx->get_constant(0),
-         tlctx->get_constant(TypeFactory::SHAPE_POS_IN_NDARRAY),
-         tlctx->get_constant(
-             TypeFactory::affine_mode_pos_in_ndarray(stmt->ndim))});
-    mode_arg = builder->CreateLoad(
-        tlctx->get_data_type(PrimitiveType::i32), mode_arg);
+    auto *mode_arg = load_descriptor(
+        {TypeFactory::SHAPE_POS_IN_NDARRAY,
+         TypeFactory::affine_mode_pos_in_ndarray(stmt->ndim)},
+        tlctx->get_data_type(PrimitiveType::i32));
     affine_condition = builder->CreateICmpNE(mode_arg, tlctx->get_constant(0));
     affine_address_offset =
         tlctx->get_constant(get_data_type<int64>(), 0);
     for (int i = 0; i < num_array_args; ++i) {
-      auto stride_arg = builder->CreateGEP(
-          struct_type, llvm_val[stmt->base_ptr],
-          {tlctx->get_constant(0),
-           tlctx->get_constant(TypeFactory::SHAPE_POS_IN_NDARRAY),
-           tlctx->get_constant(
-               TypeFactory::stride_pos_in_ndarray(stmt->ndim, i))});
-      stride_arg = builder->CreateLoad(
-          tlctx->get_data_type(PrimitiveType::i32), stride_arg);
+      auto *stride_arg = load_descriptor(
+          {TypeFactory::SHAPE_POS_IN_NDARRAY,
+           TypeFactory::stride_pos_in_ndarray(stmt->ndim, i)},
+          tlctx->get_data_type(PrimitiveType::i32));
       auto stride = builder->CreateSExt(
           stride_arg, llvm::Type::getInt64Ty(*llvm_context));
       auto index = builder->CreateSExt(
@@ -3742,6 +3743,25 @@ llvm::Value *TaskCodeGenLLVM::get_argpack_arg(const std::vector<int> &arg_id,
 
 llvm::Value *TaskCodeGenLLVM::get_struct_arg(const std::vector<int> &index,
                                              bool create_load) {
+  // Kernel ABI values and ndarray descriptors are immutable during one call.
+  // Snapshot each used member in this function's entry, before payload stores
+  // can obscure that fact to LLVM alias analysis. Never label the allocation
+  // invariant for its entire lifetime: prepared calls can reuse it with new
+  // values on later invocations. Real-function contexts retain their own path.
+  llvm::IRBuilderBase::InsertPointGuard guard(*builder);
+  std::string snapshot_name;
+  if (create_load && current_callable == kernel) {
+    snapshot_name = "taichi_abi_snapshot";
+    for (const auto field : index) {
+      snapshot_name += "_" + std::to_string(field);
+    }
+    if (auto *symbols = func->getValueSymbolTable()) {
+      if (auto *snapshot = symbols->lookup(snapshot_name)) {
+        return snapshot;
+      }
+    }
+    builder->SetInsertPoint(entry_block);
+  }
   auto *args_ptr = get_args_ptr(current_callable, get_context());
   auto *args_type = current_callable->args_type;
   auto *arg_type = args_type->get_element_type(index);
@@ -3756,7 +3776,7 @@ llvm::Value *TaskCodeGenLLVM::get_struct_arg(const std::vector<int> &index,
   if (!create_load) {
     return gep;
   }
-  return builder->CreateLoad(tlctx->get_data_type(arg_type), gep);
+  return builder->CreateLoad(tlctx->get_data_type(arg_type), gep, snapshot_name);
 }
 
 llvm::Value *TaskCodeGenLLVM::get_args_ptr(const Callable *callable,
