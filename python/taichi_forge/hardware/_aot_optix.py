@@ -133,7 +133,8 @@ def export_query(recording, context):
     if recording.hit_indices is None and not recording._occlusion:
         raise TaichiRuntimeError("AOT OptiX recording export requires typed or compact occlusion queries")
     definition = recording._query_definition
-    resources = [("scene", NativeResourceReference(_scene(context, recording.scene)))]
+    resources = [("scene", NativeResourceReference(_scene(context, recording.scene) if recording.scene_binding is None
+        else context.binding(recording.scene_binding, resource=True)))]
     for i, mask in enumerate(definition.masks):
         texture = context.source_images.require(mask.texture)
         fmt, shape, mip_levels, _ = texture._creation_metadata
@@ -164,7 +165,8 @@ def export_gas_refit(recording, context):
 
 def export_instance_refit(recording, context):
     recording.validate_graph_lifetime()
-    bindings = dict(scene=_scene(context, recording.scene))
+    bindings = dict(scene=_scene(context, recording.scene) if recording.scene_binding is None
+        else context.binding(recording.scene_binding, resource=True))
     if recording.transforms is not None:
         bindings["transforms"] = recording.transforms
     context.native("optix", "instance_refit", bindings=bindings)

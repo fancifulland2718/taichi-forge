@@ -1085,7 +1085,7 @@ producer 场景。无 producer source 的普通 Graph ExecutionPlan 同样保留
 实际类型、Runtime、代际和在途租约继续由原 Kernel ABI、原生资源及执行域验证；
 不能用 Ndarray 或 BLAS 冒充 TLAS。已验证一份代码绑定两组新几何和不同输出尺寸、
 普通提交及 Vulkan 执行域、单实例 AS 关闭与另一实例隔离、无前端源码消费。
-隐式 AS 捕获和 OptiX 组件仍不在此资格范围内。
+隐式 AS 捕获不在此资格范围内；OptiX 使用下文的独立合同。
 
 
 ### 组件内的设备变换 refit
@@ -1101,3 +1101,24 @@ owner 显式关联到 Graph 的 AS 参数。普通 JIT 绑定必须指向同一 
 不增加 Host 逐帧解释层。已验证新 3/7 实例拓扑、连续变换更新、双实例交错、普通与
 Vulkan 执行域、错误数量拒绝、在途 AS 退休，以及无数值前端的消费者执行。
 此资格覆盖每个实例固定拓扑下的变换更新，不代表拓扑热修改或 OptiX 已接通。
+
+
+### OptiX 场景端口与 whole-array 查询
+
+`record_typed()`、`record_occlusion()` 和 `record_refit_transforms()` 增加可选
+`scene="name"` 端口。普通 Graph 绑定仍须指向 recording 原 scene owner；组件保留
+类型化端口、原生操作语义和 effects，由消费者绑定同一 Runtime 的独立场景。
+OptiX scene 只进入 Graph 原生操作，不作为 CUDA Kernel 的 AS 参数。
+
+组件使用 `optix.query` version 4，在 prepare 时从射线数组首维获得正 uint32 数量，
+由原 compact 布局检查共同验证射线、命中和索引。新分辨率重新冷绑定/prepare，重放
+不改写描述符或回读 Host 场景。统一 two-sided/front-only 规则不依赖 producer 实例数；
+混合面表、alpha mask 和 micromap 在当前组件捕获中明确拒绝。保留原
+`graph_fixed_query` 策略，False 时仍走原查询路径；版本 1–3 保留固定数量语义。
+
+合同要求 `component_native_optix_v1`。消费者通过 `Runtime.configure_provider()`
+配置本机 adapter，再由原生资源工厂创建 context、GAS 和 instance scene；不把
+adapter 或驱动路径写入 TCM。冻结单实例/两条射线后，新 3/7 实例场景和 5/11 条
+射线通过交错 refit/query/occlusion、普通/CUDA 执行域、错误输出数量/资源种类拒绝，
+以及在途关闭检查，全程不依赖数值前端。这是编译器/Runtime 资格，尚不等于 GeoPhys
+完整 OptiX 帧或渲染吞吐资格。

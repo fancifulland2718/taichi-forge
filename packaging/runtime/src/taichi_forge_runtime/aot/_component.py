@@ -125,6 +125,7 @@ class Component:
             private_scalar_capability = "component_private_scalar_values_v1" in contract["required_capabilities"]
             if private_scalar_capability:
                 capabilities.add("component_private_scalar_values_v1")
+            optix_scenes = set()
             pending = [contract.get("control", {})]
             from ._component_native import operation_bindings
             while pending:
@@ -137,24 +138,30 @@ class Component:
                 if set(region) != {"kind", "operations"} or not isinstance(operations, list) or not operations:
                     raise ValueError("Invalid component native definition")
                 if region_kind == "native_ray":
-                    if module._runtime.arch != "vulkan":
-                        raise ValueError("Component native ray operations require Vulkan")
-                    capabilities.add("component_native_ray_v1")
                     for operation in operations:
                         ports = dict(operation_bindings(operation))
-                        if operation.get("provider") != "vulkan_ray":
-                            raise ValueError("Component native ray requires qualified Vulkan operations")
+                        provider = operation.get("provider")
+                        if provider not in ("vulkan_ray", "optix"):
+                            raise ValueError("Component native ray requires qualified ray operations")
+                        if module._runtime.arch != ("vulkan" if provider == "vulkan_ray" else "cuda"):
+                            raise ValueError("Component native ray provider and backend differ")
+                        capabilities.add("component_native_ray_v1" if provider == "vulkan_ray" else "component_native_optix_v1")
                         if contract["explicit"].get(ports["scene"]) != ["acceleration_structure", None, None, None, None, None]:
-                            raise ValueError("Component refit requires an explicit typed scene")
-                        descriptor = contract["explicit"].get(ports["transforms"]) or contract.get("internal_arguments", {}).get(ports["transforms"])
-                        if not descriptor or descriptor[0] != "ndarray":
-                            raise ValueError("Component refit requires a typed transform array")
+                            raise ValueError("Component ray operation requires an explicit typed scene")
+                        if provider == "optix":
+                            optix_scenes.add(ports["scene"])
+                        for port, name in ports.items():
+                            if port == "scene":
+                                continue
+                            descriptor = contract["explicit"].get(name) or contract.get("internal_arguments", {}).get(name)
+                            if not descriptor or descriptor[0] != "ndarray":
+                                raise ValueError("Component ray operation requires typed arrays")
                     continue
                 capabilities.add("component_native_sort_v1" if region_kind == "native_sort"
                                  else "component_native_primitives_v1")
                 for operation in operations:
-                    if isinstance(operation, dict) and operation.get("provider") == "vulkan_ray":
-                        raise ValueError("Vulkan ray operation requires its native ray component contract")
+                    if isinstance(operation, dict) and operation.get("provider") in ("vulkan_ray", "optix"):
+                        raise ValueError("Ray operation requires its native ray component contract")
                     if region_kind == "native_sort" and (not isinstance(operation, dict) or operation.get("kind") != "sort"):
                         raise ValueError("Invalid component native sort operation")
                     for port, symbol in operation_bindings(operation):
@@ -266,10 +273,10 @@ class Component:
                 capabilities.add("component_zero_initial_state_v1")
             if any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
                 capabilities.add("component_explicit_ndarray_v1")
-            for descriptor in contract["explicit"].values():
+            for symbol, descriptor in contract["explicit"].items():
                 if descriptor[0] == "acceleration_structure":
-                    if descriptor != ["acceleration_structure", None, None, None, None, None] or module._runtime.arch != "vulkan":
-                        raise ValueError("Component acceleration structures require a typed Vulkan binding")
+                    if descriptor != ["acceleration_structure", None, None, None, None, None] or not (module._runtime.arch == "vulkan" or module._runtime.arch == "cuda" and symbol in optix_scenes):
+                        raise ValueError("Component acceleration structure has no qualified backend binding")
                     capabilities.add("component_explicit_acceleration_structure_v1")
             if contract["version"] >= 2:
                 capabilities.add("component_compiler_facts_v1")

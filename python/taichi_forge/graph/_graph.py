@@ -4992,6 +4992,21 @@ def _execution_report(
     )
 
 
+def _optix_scene_signature(value):
+    # Native-only scene ports never become Kernel IValues. Keep optional OptiX
+    # imports off ordinary scalar/array Graph calls, and admit concrete owners.
+    if type(value).__module__ != "taichi_forge.hardware._optix":
+        return None
+    from taichi_forge.hardware._optix import OptixInstanceScene, OptixTriangleScene
+
+    if type(value) not in (OptixInstanceScene, OptixTriangleScene):
+        return None
+    value._validate_lifetime()
+    if value._runtime_prog is not impl.get_runtime().prog:
+        raise TaichiRuntimeError("Graph OptiX scene belongs to another runtime")
+    return ("optix_scene", id(value), value._runtime_generation, value._scene.value)
+
+
 class _NativeReplayExecutable:
     def __init__(self, nodes):
         self._nodes = tuple(nodes)
@@ -5204,6 +5219,8 @@ class _GraphRunContext:
             elif isinstance(v, (int, float)):
                 signature.append((k, "scalar", type(v)))
                 dynamic_items.append((k, v))
+            elif (native_scene := _optix_scene_signature(v)) is not None:
+                signature.append((k, *native_scene))
             else:
                 raise TaichiRuntimeError(
                     "Only Python scalars, ti.Matrix, ti.Ndarray, ArgPack, DeviceExtent, "
@@ -12234,6 +12251,8 @@ class _GraphSpec:
                 _AccelerationStructureResource,
             ),
         ):
+            return None
+        if _optix_scene_signature(value) is not None:
             return None
         raise TaichiRuntimeError(
             "Only Python scalars, ti.Matrix, ti.Ndarray, DeviceExtent, "

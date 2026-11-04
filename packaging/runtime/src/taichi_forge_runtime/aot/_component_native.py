@@ -19,14 +19,27 @@ def operation_bindings(operation):
         ports = [(key, value) for key, value in operation.items() if key != "kind"]
     elif kind == "native":
         if (set(operation) != {"kind", "provider", "operation", "version", "parameters", "bindings"}
-                or operation["provider"] not in ("builtin", "vulkan_ray") or type(operation["version"]) is not int
-                or operation["version"] != 1 or not isinstance(operation["bindings"], dict)):
-            raise ValueError("Invalid component builtin native definition")
+                or operation["provider"] not in ("builtin", "vulkan_ray", "optix") or type(operation["version"]) is not int
+                or not isinstance(operation["bindings"], dict)):
+            raise ValueError("Invalid component native definition")
         parameters, bindings = operation["parameters"], operation["bindings"]
-        if operation["provider"] == "vulkan_ray":
+        version = operation["version"]
+        if version != 1 and not (operation["provider"] == "optix" and operation["operation"] == "query" and version == 4):
+            raise ValueError("Unqualified component native operation version")
+        if operation["provider"] == "optix" and operation["operation"] == "query":
+            if (version != 4 or not isinstance(parameters, dict)
+                    or set(parameters) != {"occlusion", "any_hit", "front_only", "graph_fixed_query"}
+                    or any(type(value) is not bool for value in parameters.values())
+                    or parameters["occlusion"] and not parameters["any_hit"]
+                    or set(bindings) != {"scene", "rays", "hits"} | (set() if parameters["occlusion"] else {"hit_indices"})):
+                raise ValueError("Invalid component OptiX query definition")
+            if len(set(bindings.values())) != len(bindings):
+                raise ValueError("Component OptiX ports require distinct resources")
+            ports = list(bindings.items())
+        elif operation["provider"] in ("vulkan_ray", "optix"):
             if (operation["operation"] != "instance_refit" or parameters != {}
                     or set(bindings) != {"scene", "transforms"} or bindings["scene"] == bindings["transforms"]):
-                raise ValueError("Invalid component Vulkan instance refit definition")
+                raise ValueError("Invalid component native ray instance refit definition")
             ports = list(bindings.items())
         elif operation["operation"] == "sort":
             if (parameters != {"nan_policy": "last"} or not {"keys"} <= set(bindings)

@@ -1362,7 +1362,7 @@ resource and execution domain validate types, Runtime ownership, generations
 and in-flight leases. An Ndarray or BLAS cannot substitute for the TLAS.
 Qualification covers two new geometries and output sizes sharing loaded code,
 ordinary and Vulkan-domain submission, independent AS retirement, and consumption
-without the frontend. Implicit AS captures and OptiX components remain outside this qualification.
+without the frontend. Implicit AS captures remain outside this qualification; OptiX has the separate contract below.
 
 
 ### Component device-transform refits
@@ -1384,3 +1384,31 @@ transform updates, interleaved independent instances, ordinary and Vulkan-domain
 submission, wrong-count rejection and AS retirement during accepted work, in a
 consumer without the numerical frontend. This qualifies transform refit with
 fixed per-instance topology, not topology mutation or OptiX.
+
+
+### OptiX scene ports and whole-array queries
+
+`record_typed()`, `record_occlusion()` and `record_refit_transforms()` accept an
+optional `scene="name"` port. Ordinary Graph bindings must reference the recording's
+original scene owner. A component instead retains typed ports, native operation
+semantics and effects; its consumer provides a same-Runtime scene. OptiX scenes
+are native-only Graph arguments and do not become CUDA Kernel AS parameters.
+
+Component `optix.query` version 4 derives its positive uint32 ray count from the
+prepared ray array's first extent. The existing compact layout check verifies
+rays, hits and IDs together. New resolution requires cold array binding/prepare;
+replay does not mutate descriptors or reread Host scene state. Uniform two-sided
+or front-only policy is independent of producer instance count. Heterogeneous
+face tables, alpha masks and micromaps are rejected by this component capture.
+The original `graph_fixed_query` selection is retained, including the legacy
+query path when false. Versions 1–3 keep their fixed-count semantics.
+
+The component requires `component_native_optix_v1`. Configure the installed
+OptiX adapter through `Runtime.configure_provider()` before creating its context,
+GAS and instance scene with the existing native resource factories. No adapter
+or vendor-library path is baked into the TCM. Tests freeze a one-instance,
+two-ray producer then consume 3/7-instance scenes with 5/11 rays, interleaved
+refit/query/occlusion, ordinary and CUDA-domain submission, invalid output counts
+and scene kinds, and in-flight retirement without the numerical frontend.
+This is a compiler/Runtime qualification, not yet a full GeoPhys OptiX frame or
+a renderer throughput claim.

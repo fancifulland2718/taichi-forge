@@ -37,6 +37,78 @@ def capture_instance_transforms(recording, capture):
     )
 
 
+def _optix_scene(recording, capture):
+    from taichi_forge.graph import Arg, ArgKind
+
+    if recording.scene_binding is None:
+        raise TaichiCompilationError(
+            "Component OptiX recording requires an explicit scene binding"
+        )
+    recording.validate_graph_lifetime()
+    capture.explicit_argument(
+        Arg(ArgKind.ACCELERATION_STRUCTURE, recording.scene_binding)
+    )
+
+
+def capture_optix_refit(recording, capture):
+    _optix_scene(recording, capture)
+    if recording.transforms is None:
+        raise TaichiCompilationError("Component OptiX refit requires device transforms")
+    return _ComponentRayDefinition(
+        dict(
+            kind="native",
+            provider="optix",
+            operation="instance_refit",
+            version=1,
+            parameters={},
+            bindings=dict(
+                scene=recording.scene_binding, transforms=recording.transforms
+            ),
+        )
+    )
+
+
+def capture_optix_query(recording, capture):
+    _optix_scene(recording, capture)
+    if recording.hit_indices is None and not recording._occlusion:
+        raise TaichiCompilationError(
+            "Component OptiX queries require typed hits or compact occlusion"
+        )
+    if any(mask is not None for mask in recording.alpha_masks or ()) or getattr(
+        recording.scene, "_has_micromaps", False
+    ):
+        raise TaichiCompilationError(
+            "Component OptiX masks and micromaps need a qualified resource contract"
+        )
+    rules = recording.face_rules or ("two_sided",)
+    if any(not isinstance(rule, str) or rule != rules[0] for rule in rules):
+        raise TaichiCompilationError(
+            "Component OptiX queries currently require uniform face rules"
+        )
+    bindings = dict(
+        scene=recording.scene_binding, rays=recording.rays, hits=recording.hits
+    )
+    if recording.hit_indices is not None:
+        bindings["hit_indices"] = recording.hit_indices
+    # The ordinary recording validates exact whole-array ray counts. This
+    # version resolves that same count from each consumer's prepared binding.
+    return _ComponentRayDefinition(
+        dict(
+            kind="native",
+            provider="optix",
+            operation="query",
+            version=4,
+            parameters=dict(
+                occlusion=recording._occlusion,
+                any_hit=recording.any_hit,
+                front_only=rules[0] == "front_only",
+                graph_fixed_query=recording.graph_fixed_query,
+            ),
+            bindings=bindings,
+        )
+    )
+
+
 class _ComponentRayDefinition(NativeGraphExecutable):
     """No producer handles, topology, arrays or device command survive capture."""
 
@@ -49,10 +121,8 @@ class _ComponentRayDefinition(NativeGraphExecutable):
         operation_bindings(operation)
         self._operation = json.dumps(operation, sort_keys=True)
         self.semantic_key = _digest(operation)
-        self.scene, self.transforms = (
-            operation["bindings"]["scene"],
-            operation["bindings"]["transforms"],
-        )
+        self._ports = tuple(operation["bindings"].items())
+        self._refit = operation["operation"] == "instance_refit"
 
     @property
     def operations(self):
@@ -60,16 +130,27 @@ class _ComponentRayDefinition(NativeGraphExecutable):
 
     @property
     def runtime_arg_schema(self):
-        return (
-            RuntimeBinding(self.scene, "acceleration_structure"),
-            RuntimeBinding(self.transforms, "ndarray"),
+        return tuple(
+            RuntimeBinding(
+                name, "acceleration_structure" if port == "scene" else "ndarray"
+            )
+            for port, name in self._ports
         )
 
     @property
     def resource_effects(self):
-        return (
-            ResourceEffect(self.scene, GraphAccess.WRITE),
-            ResourceEffect(self.transforms, GraphAccess.READ),
+        return tuple(
+            ResourceEffect(
+                name,
+                (
+                    GraphAccess.WRITE
+                    if port in ("hits", "hit_indices")
+                    or port == "scene"
+                    and self._refit
+                    else GraphAccess.READ
+                ),
+            )
+            for port, name in self._ports
         )
 
     @property

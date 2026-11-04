@@ -149,6 +149,7 @@ struct OptixQueryOperation {
   std::optional<NativeArrayBinding> hit_indices, faces;
   uint32_t ray_count{0};
   bool occlusion{false}, any_hit{false}, front_only{false};
+  bool graph_fixed_query{true};
   std::vector<OptixBoundFaceRule> face_rules;
   std::vector<std::optional<OptixBoundAlphaMask>> alpha_masks;
 };
@@ -162,6 +163,12 @@ struct OptixBoundFaceQueryOperation : OptixQueryOperation {
 
 struct OptixAlphaQueryOperation : OptixQueryOperation {
   static constexpr uint32_t version = 3;
+};
+
+// Whole-array queries obtain their work extent from the current binding, not
+// the producer's resolution. Uniform face policy is independent of IAS size.
+struct OptixArrayQueryOperation : OptixQueryOperation {
+  static constexpr uint32_t version = 4;
 };
 
 struct OptixRefitOperation {
@@ -710,7 +717,7 @@ class CudaOptixQuery final : public NativeOperation {
     const auto &queries = context.lease->queries;
     const bool alpha = !lease_->images.empty();
     const bool micromap = scene_->has_micromaps();
-    const bool use_prepared = queries.prepare && !alpha && !micromap;
+    const bool use_prepared = op_.graph_fixed_query && queries.prepare && !alpha && !micromap;
     faces_ = op_.front_only || bool(op_.faces) ||
              std::any_of(op_.face_rules.begin(), op_.face_rules.end(),
                          [](const auto &rule) { return rule.mode != 0; });
@@ -997,8 +1004,9 @@ std::shared_ptr<Owner> prepare(NativePreparationContext &context,
 
 template <typename Description>
 void register_query(NativeOperationRegistry &registry) {
+  constexpr bool per_instance = Description::version == 2 || Description::version == 3;
   registry.define<Description>([](Device &device, const Description &op) {
-    if constexpr (Description::version >= 2) {
+    if constexpr (Description::version == 2 || Description::version == 3) {
       if (op.face_rules.empty())
         throw std::invalid_argument("OptiX query requires per-instance face rules");
     }
@@ -1006,7 +1014,7 @@ void register_query(NativeOperationRegistry &registry) {
   });
   std::vector<std::string> optional_ports{"hit_indices"};
   std::vector<NativeOperationRegistry::BindingGroup> groups;
-  if constexpr (Description::version >= 2)
+  if constexpr (per_instance)
     groups.push_back({"face_table_count", {"faces"}});
   else
     optional_ports.push_back("faces");
@@ -1017,21 +1025,28 @@ void register_query(NativeOperationRegistry &registry) {
       [](const liong::json::JsonValue &p)
           -> NativeOperationRegistry::Binder<Description> {
         using namespace operation_json;
-        if constexpr (Description::version == 3)
+        if constexpr (Description::version == 4)
+          fields(p, {"occlusion", "any_hit", "front_only", "graph_fixed_query"});
+        else if constexpr (Description::version == 3)
           fields(p, {"ray_count", "occlusion", "any_hit", "face_rules",
                      "face_table_count", "alpha_masks", "mask_count"});
         else if constexpr (Description::version == 2)
           fields(p, {"ray_count", "occlusion", "any_hit", "face_rules", "face_table_count"});
         else
           fields(p, {"ray_count", "occlusion", "any_hit", "front_only"});
-        const auto rays = count(p, "ray_count");
+        const auto rays = [&]() -> uint32_t {
+          if constexpr (Description::version == 4)
+            return 0;  // Resolved and validated by the cold binder below.
+          else
+            return count(p, "ray_count");
+        }();
         const bool occlusion = optional_bool(p, "occlusion"),
                    any_hit = optional_bool(p, "any_hit", occlusion),
                    front_only = optional_bool(p, "front_only");
         if (occlusion && !any_hit)
           throw std::invalid_argument("OptiX occlusion requires any-hit acceptance");
         std::vector<uint32_t> modes;
-        if constexpr (Description::version >= 2) {
+        if constexpr (Description::version == 2 || Description::version == 3) {
           const auto &rules = p["face_rules"];
           if (!rules.is_arr() || rules.arr.inner.empty() ||
               rules.arr.inner.size() > std::numeric_limits<uint32_t>::max())
@@ -1082,11 +1097,18 @@ void register_query(NativeOperationRegistry &registry) {
           op.rays = b.at("rays").array();
           op.hits = b.at("hits").array();
           op.ray_count = rays;
+          if constexpr (Description::version == 4) {
+            if (op.rays.shape.empty() || !op.rays.shape[0] ||
+                op.rays.shape[0] > std::numeric_limits<uint32_t>::max())
+              throw std::invalid_argument("OptiX whole-array query requires a positive uint32 ray extent");
+            op.ray_count = static_cast<uint32_t>(op.rays.shape[0]);
+            op.graph_fixed_query = optional_bool(p, "graph_fixed_query", true);
+          }
           op.occlusion = occlusion;
           op.any_hit = any_hit;
           op.front_only = front_only;
           if (b.count("hit_indices")) op.hit_indices = b.at("hit_indices").array();
-          if constexpr (Description::version >= 2) {
+          if constexpr (Description::version == 2 || Description::version == 3) {
             size_t table = 0;
             op.face_rules.reserve(modes.size());
             for (auto mode : modes) {
@@ -1250,6 +1272,7 @@ void register_optix_operations(NativeOperationRegistry &registry) {
   register_query<OptixQueryOperation>(registry);
   register_query<OptixBoundFaceQueryOperation>(registry);
   register_query<OptixAlphaQueryOperation>(registry);
+  register_query<OptixArrayQueryOperation>(registry);
   registry.define<OptixRefitOperation>(validate_refit);
   registry.register_schema<OptixRefitOperation>(
       "optix", "refit", {"scene", "vertices"},

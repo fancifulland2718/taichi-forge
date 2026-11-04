@@ -1139,12 +1139,20 @@ class OptixAlphaMask:
 
 @instrument_hardware_recording("ray.query.batch.optix")
 class OptixRayQueryRecording(BackendCommandRecording):
-    """One runtime-ordered OptiX launch against a fixed scene generation."""
+    """One runtime-ordered OptiX launch against a fixed scene generation.
+
+    An optional scene_binding exposes that owner as a normal Graph resource
+    port. Component capture can bind a consumer scene through the same port.
+    """
 
     def _export_aot(self, context):
         from ._aot_optix import export_query
 
         return export_query(self, context)
+
+    def _capture_component(self, capture):
+        from ._component_ray import capture_optix_query
+        return capture_optix_query(self, capture)
 
     def __init__(
         self,
@@ -1158,6 +1166,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
         face_rules=None,
         any_hit=False,
         graph_fixed_query=True,
+        scene_binding=None,
         _occlusion=False,
     ):
         if not isinstance(graph_fixed_query, bool):
@@ -1263,6 +1272,11 @@ class OptixRayQueryRecording(BackendCommandRecording):
         if set(names).intersection(face_names):
             raise ValueError("OptiX face table bindings must not reuse ray, hit or alpha names")
         names += tuple(dict.fromkeys(face_names))
+        if scene_binding is not None:
+            if not isinstance(scene_binding, str) or not scene_binding or "\0" in scene_binding or scene_binding in names:
+                raise ValueError("OptiX scene binding must be a distinct nonempty name")
+            names += (scene_binding,)
+        object.__setattr__(self, "scene_binding", scene_binding)
         super().__init__(
             backend="cuda",
             binding_names=names,
@@ -1366,7 +1380,8 @@ class OptixRayQueryRecording(BackendCommandRecording):
         effects = (
             ResourceEffect(self.rays, GraphAccess.READ),
             ResourceEffect(self.hits, GraphAccess.WRITE),
-            static_resource_effect(self.scene._effect_name, GraphAccess.READ),
+            (static_resource_effect(self.scene._effect_name, GraphAccess.READ) if self.scene_binding is None
+             else ResourceEffect(self.scene_binding, GraphAccess.READ)),
         )
         if self.hit_indices is not None:
             effects += (ResourceEffect(self.hit_indices, GraphAccess.WRITE),)
@@ -1392,6 +1407,8 @@ class OptixRayQueryRecording(BackendCommandRecording):
         return self.prepare_graph_execute(bindings, _fixed_query=False)()
 
     def _binding_descriptions(self, bindings):
+        if self.scene_binding is not None and bindings.get(self.scene_binding) is not self.scene:
+            raise TaichiRuntimeError("OptiX scene binding must reference this recording owner")
         specs = [
             (self.rays, (f32,), 8),
             (self.hits, (i32, u32) if self._occlusion else (f32,), 1 if self._occlusion else 4),
@@ -1480,7 +1497,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
             return fixed
         if self.alpha_masks is not None or self._occlusion or self.face_rules is not None:
             return self._prepare_alpha_execute(bindings, descriptions)
-        values = tuple(bindings[name] for name in self.binding_names)
+        values = tuple(bindings[name] for name in self.binding_names if name != self.scene_binding)
         storage, owners = _prepare_storage(
             self.scene, values, descriptions, (False, *([True] * (len(values) - 1)))
         )
@@ -1651,7 +1668,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
                 (
                     name,
                     (
-                        "texture"
+                        "acceleration_structure" if name == item.scene_binding else "texture"
                         if item.alpha_masks is not None
                         and any(mask is not None and mask.texture == name for mask in item.alpha_masks)
                         else "ndarray"
@@ -1920,7 +1937,11 @@ class OptixInstanceRefitRecording(BackendCommandRecording):
 
         return export_instance_refit(self, context)
 
-    def __init__(self, scene, *, transforms=None):
+    def _capture_component(self, capture):
+        from ._component_ray import capture_optix_refit
+        return capture_optix_refit(self, capture)
+
+    def __init__(self, scene, *, transforms=None, scene_binding=None):
         if not isinstance(scene, OptixInstanceScene):
             raise TypeError(
                 "OptiX instance refit recording requires an OptixInstanceScene"
@@ -1931,9 +1952,15 @@ class OptixInstanceRefitRecording(BackendCommandRecording):
             raise ValueError(
                 "OptiX instance transform binding must be a nonempty string"
             )
+        names = () if transforms is None else (transforms,)
+        if scene_binding is not None:
+            if not isinstance(scene_binding, str) or not scene_binding or "\0" in scene_binding or scene_binding in names:
+                raise ValueError("OptiX scene binding must be a distinct nonempty name")
+            names += (scene_binding,)
+        object.__setattr__(self, "scene_binding", scene_binding)
         super().__init__(
             backend="cuda",
-            binding_names=() if transforms is None else (transforms,),
+            binding_names=names,
             command_count=1 if transforms is None else 2,
             queue="compute",
             stream_binding="runtime_ordered",
@@ -1952,7 +1979,8 @@ class OptixInstanceRefitRecording(BackendCommandRecording):
             for gas in dict.fromkeys(scene._topology)
         )
         effects = gas_effects + (
-            static_resource_effect(scene._effect_name, GraphAccess.WRITE),
+            (static_resource_effect(scene._effect_name, GraphAccess.WRITE) if scene_binding is None
+             else ResourceEffect(scene_binding, GraphAccess.WRITE)),
         )
         if transforms is not None:
             effects = (ResourceEffect(transforms, GraphAccess.READ),) + effects
@@ -1963,6 +1991,8 @@ class OptixInstanceRefitRecording(BackendCommandRecording):
         return self._effects
 
     def _binding_description(self, bindings):
+        if self.scene_binding is not None and bindings.get(self.scene_binding) is not self.scene:
+            raise TaichiRuntimeError("OptiX scene binding must reference this recording owner")
         if self.transforms is None:
             return None
         return _instance_transform_storage(
@@ -2018,6 +2048,7 @@ class OptixInstanceRefitRecording(BackendCommandRecording):
     def _as_graph_native_node(self):
         return native_recording_node(
             self,
+            runtime_bindings=lambda item: tuple((name, "acceleration_structure" if name == item.scene_binding else "ndarray") for name in item.binding_names),
             lifetime_leases=lambda item: (item.scene, item.scene.provider),
             debug_info=lambda item: {
                 "kind": (
@@ -2489,6 +2520,7 @@ class OptixInstanceScene:
         face_rules=None,
         any_hit=False,
         graph_fixed_query=True,
+        scene=None,
     ):
         """Record typed hits, optionally filtering each instance's alpha mask.
 
@@ -2496,6 +2528,8 @@ class OptixInstanceScene:
         face_rules is a tuple of two_sided/front_only or OptixFaceRuleTable,
         in instance ordinal order. Candidates must pass both face and alpha rules.
         any_hit returns the first accepted intersection, not necessarily nearest.
+        scene optionally names a Graph port that must bind this same owner;
+        a component consumer binds its own qualified scene at that port.
         """
 
         self._validate_lifetime()
@@ -2509,10 +2543,11 @@ class OptixInstanceScene:
             face_rules=face_rules,
             any_hit=any_hit,
             graph_fixed_query=graph_fixed_query,
+            scene_binding=scene,
         )
 
     def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None, face_rules=None,
-                         graph_fixed_query=True):
+                         graph_fixed_query=True, scene=None):
         """Write one i32/u32 flag per ray: 1 for an accepted hit, 0 for a miss.
 
         Fixed bindings accept contiguous scalar (N,) or (N,1) storage. Optional
@@ -2532,6 +2567,7 @@ class OptixInstanceScene:
             any_hit=True,
             _occlusion=True,
             graph_fixed_query=graph_fixed_query,
+            scene_binding=scene,
         )
 
     def trace_typed(self, rays, hits, hit_indices):
@@ -2553,7 +2589,7 @@ class OptixInstanceScene:
         self.record_refit().execute({})
         return self
 
-    def record_refit_transforms(self, *, transforms="transforms"):
+    def record_refit_transforms(self, *, transforms="transforms", scene=None):
         """Record device packing followed by a fixed-topology IAS update.
 
         The binding accepts compact f32 scalar ``(N, 3, 4)`` / ``(N, 12)``
@@ -2561,12 +2597,13 @@ class OptixInstanceScene:
         finite matrices with an invertible upper 3x3; Forge does not read back
         or scan per-frame values. GAS references, instance order, visibility
         masks and custom indices remain fixed in retained native descriptors.
+        scene optionally names this owner's explicit Graph resource port.
         """
 
         self._validate_lifetime()
         if not self.allow_update:
             raise TaichiRuntimeError("OptiX instance scene was not created for updates")
-        return OptixInstanceRefitRecording(self, transforms=transforms)
+        return OptixInstanceRefitRecording(self, transforms=transforms, scene_binding=scene)
 
     def refit_transforms(self, transforms):
         self.record_refit_transforms().execute({"transforms": transforms})
@@ -2772,6 +2809,7 @@ class OptixTriangleScene:
         face_rules=None,
         any_hit=False,
         graph_fixed_query=True,
+        scene=None,
     ):
         """Record f32 (t,u,v,0) and i32/u32 (primitive,instance,custom,hit).
 
@@ -2793,10 +2831,11 @@ class OptixTriangleScene:
             face_rules=face_rules,
             any_hit=any_hit,
             graph_fixed_query=graph_fixed_query,
+            scene_binding=scene,
         )
 
     def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None, face_rules=None,
-                         graph_fixed_query=True):
+                         graph_fixed_query=True, scene=None):
         """Write one i32/u32 flag per ray without producing full hit records.
 
         Output is contiguous scalar (N,) or (N,1) storage: 1 for the first
@@ -2815,6 +2854,7 @@ class OptixTriangleScene:
             any_hit=True,
             _occlusion=True,
             graph_fixed_query=graph_fixed_query,
+            scene_binding=scene,
         )
 
     def trace_typed(self, rays, hits, hit_indices):

@@ -982,8 +982,12 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
         contract["required_capabilities"].append("component_native_dense_sort_v1")
     if native_primitives:
         contract["required_capabilities"].append("component_native_primitives_v1")
-    if any(capture.natives[node.name].control_kind == "native_ray" for node in native_nodes):
-        contract["required_capabilities"].append("component_native_ray_v1")
+    ray_providers = {operation["provider"] for node in native_nodes
+                     if capture.natives[node.name].control_kind == "native_ray"
+                     for operation in capture.natives[node.name].operations}
+    for provider in sorted(ray_providers):
+        contract["required_capabilities"].append("component_native_ray_v1" if provider == "vulkan_ray"
+                                                 else "component_native_optix_v1")
     if native_private:
         contract["required_capabilities"].append("component_native_private_arrays_v1")
     if has_control or "internal_arguments" in contract or constraints or fixed_groups or lifecycle:
