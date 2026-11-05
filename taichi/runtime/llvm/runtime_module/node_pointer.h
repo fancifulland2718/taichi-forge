@@ -9,6 +9,21 @@ STRUCT_FIELD(PointerMeta, deterministic_slot);
 
 constexpr u64 pointer_slot_busy = ~0ULL;
 
+inline Ptr Pointer_load_published(Ptr slot) {
+#if defined(ARCH_cuda)
+  // Activation publishes through atomics. A normal load here can still read
+  // a stale busy sentinel from a non-coherent L1 line after activation's
+  // volatile polling has observed the published pointer.
+  auto value = *(volatile u64 *)slot;
+  while (value == pointer_slot_busy) {
+    value = *(volatile u64 *)slot;
+  }
+  return (Ptr)value;
+#else
+  return *(Ptr *)slot;
+#endif
+}
+
 inline bool Pointer_compare_exchange_u64(volatile u64 *dest,
                                          u64 expected,
                                          u64 desired) {
@@ -183,13 +198,13 @@ void Pointer_reset_all(Ptr meta, Ptr node) {
 
 u1 Pointer_is_active(Ptr meta, Ptr node, int i) {
   auto num_elements = Pointer_get_num_elements(meta, node);
-  auto data_ptr = *(Ptr *)(node + 8 * (num_elements + i));
+  auto data_ptr = Pointer_load_published(node + 8 * (num_elements + i));
   return data_ptr != nullptr;
 }
 
 Ptr Pointer_lookup_element(Ptr meta, Ptr node, int i) {
   auto num_elements = Pointer_get_num_elements(meta, node);
-  auto data_ptr = *(Ptr *)(node + 8 * (num_elements + i));
+  auto data_ptr = Pointer_load_published(node + 8 * (num_elements + i));
   if (data_ptr == nullptr) {
     auto smeta = (StructMeta *)meta;
     auto context = smeta->context;
