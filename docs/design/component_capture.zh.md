@@ -1168,3 +1168,10 @@ JSON 记录，不裁剪字段、归一化路径或推断代码等价，也不改
 应用同一存储转换；必须写入新路径，原归档保留。工具验证完整合同往返一致，保留数值
 代码、执行计划和其他载荷，并记录前后摘要、字节数及非合同条目的压缩变化。它不会
 合并模块或推断代码等价；此路径仅复用合格编译输入，不能替代正常生产库迁移。
+
+`shared_execution_plans=True` 单独启用 `execution_plan_records_v1` 存储，将完全相同的
+Kernel 调用叶记录放入 `execution_records/`。只共享 operations 和 initialization 中的叶；
+控制顺序、label、参数、资源、执行域配方及校验事实全部保留。`Module.execution_plan()`
+先恢复原文档，再交原有 ExecutionPlan 解析和原生准备，不增加逐步解释器或模块可变绑定。
+旧 reader 拒绝该存储封装。冻结归档工具接受 `--shared-execution-plans`；此时不变载荷的
+摘要清单同时排除 Plan 和合同存储，分别核验两种原文档完整恢复，数值代码保持不变。

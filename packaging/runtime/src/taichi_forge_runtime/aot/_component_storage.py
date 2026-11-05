@@ -1,6 +1,6 @@
-"""Lossless storage of repeated compiler records in component contracts.
+"""Lossless storage of repeated compiler and execution call records.
 
-This is a serialization layer, not a code identity or execution-plan format.
+This is a serialization layer, not a code identity or execution mechanism.
 Records retain every field. Readers restore the original contract before any
 existing semantic, resource, or device admission checks run.
 """
@@ -20,8 +20,8 @@ def _json_bytes(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf8")
 
 
-def _record_file(digest):
-    return "component_contracts/" + digest + ".json"
+def _record_file(digest, directory="component_contracts"):
+    return directory + "/" + digest + ".json"
 
 
 def _records(contract):
@@ -51,6 +51,15 @@ def _zip_cost(name, payload):
     return compressed + 76 + 2 * len(name.encode("utf8"))
 
 
+def _unique_record_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate stored record field")
+        result[key] = value
+    return result
+
+
 def encode_contract_documents(contracts):
     """Return filename -> bytes, using shared records only if the ZIP shrinks.
 
@@ -59,10 +68,14 @@ def encode_contract_documents(contracts):
     The comparison uses Module.archive's deflate level and includes extra file
     headers. Small contracts may intentionally retain the original representation.
     """
+    return _encode_documents(contracts, _records, _FORMAT, "contract", "component_contracts")
+
+
+def _encode_documents(contracts, records, storage_format, content_key, directory):
     original = {name: _json_bytes(contract) for name, contract in contracts.items()}
     counts, payloads, locations = Counter(), {}, {}
     for name, contract in contracts.items():
-        for path, record in _records(contract):
+        for path, record in records(contract):
             if not isinstance(record, dict):
                 continue
             payload = _json_bytes(record)
@@ -94,12 +107,12 @@ def encode_contract_documents(contracts):
 
         remainder = replace(contract)
         documents[name] = _json_bytes({
-            "storage_format": _FORMAT,
+            "storage_format": storage_format,
             "sha256": sha256(original[name]).hexdigest(),
-            "contract": remainder,
+            content_key: remainder,
             "references": references,
         }) if references else original[name]
-    documents.update((_record_file(digest), payloads[digest]) for digest in sorted(used))
+    documents.update((_record_file(digest, directory), payloads[digest]) for digest in sorted(used))
     if sum(_zip_cost(name, payload) for name, payload in documents.items()) >= sum(
         _zip_cost(name, payload) for name, payload in original.items()
     ):
@@ -109,18 +122,28 @@ def encode_contract_documents(contracts):
 
 def decode_contract_document(document, read_bytes):
     """Expand one component; referenced records are direct JSON, never programs."""
+    return _decode_document(document, read_bytes, _FORMAT, "contract", "component_contracts", _contract_path)
+
+
+def _contract_path(path):
+    return (len(path) == 2 and path[0] == "entries" and type(path[1]) is int
+            or len(path) == 3 and path[:2] == ["compilation", "entries"] and type(path[2]) is int
+            or len(path) > 1 and path[0] == "control")
+
+
+def _decode_document(document, read_bytes, storage_format, content_key, directory, allowed_path):
     if not isinstance(document, dict):
         raise ValueError("Unsupported component contract")
     if "storage_format" not in document:
         return document
-    if (set(document) != {"storage_format", "sha256", "contract", "references"}
-            or document["storage_format"] != _FORMAT
+    if (set(document) != {"storage_format", "sha256", content_key, "references"}
+            or document["storage_format"] != storage_format
             or not isinstance(document["sha256"], str)
             or not _DIGEST.fullmatch(document["sha256"])
-            or not isinstance(document["contract"], dict)
+            or not isinstance(document[content_key], dict)
             or not isinstance(document["references"], list)):
         raise ValueError("Unsupported component contract storage")
-    contract, records = deepcopy(document["contract"]), {}
+    contract, records = deepcopy(document[content_key]), {}
     for reference in document["references"]:
         if (not isinstance(reference, list) or len(reference) != 2
                 or not isinstance(reference[0], list) or not reference[0]
@@ -130,9 +153,7 @@ def decode_contract_document(document, read_bytes):
         path, digest = reference
         # Only compiler record positions may be shared; identity/header fields
         # remain in the component document and are validated after expansion.
-        if not (len(path) == 2 and path[0] == "entries" and type(path[1]) is int
-                or len(path) == 3 and path[:2] == ["compilation", "entries"] and type(path[2]) is int
-                or len(path) > 1 and path[0] == "control"):
+        if not allowed_path(path):
             raise ValueError("Invalid component record path")
         parent = contract
         try:
@@ -150,10 +171,10 @@ def decode_contract_document(document, read_bytes):
         except (KeyError, IndexError, TypeError) as exc:
             raise ValueError("Invalid component record path") from exc
         if digest not in records:
-            payload = read_bytes(_record_file(digest))
+            payload = read_bytes(_record_file(digest, directory))
             if sha256(payload).hexdigest() != digest:
                 raise ValueError("Component record digest mismatch")
-            record = json.loads(payload)
+            record = json.loads(payload, object_pairs_hook=_unique_record_fields)
             if not isinstance(record, dict):
                 raise ValueError("Invalid component compiler record")
             records[digest] = record
@@ -161,5 +182,36 @@ def decode_contract_document(document, read_bytes):
         # Python contract dictionaries as a consequence of disk interning.
         parent[part] = deepcopy(records[digest])
     if sha256(_json_bytes(contract)).hexdigest() != document["sha256"]:
-        raise ValueError("Expanded component contract digest mismatch")
+        raise ValueError(f"Expanded {content_key} digest mismatch")
     return contract
+
+
+def _plan_records(plan):
+    def visit(value, path):
+        if isinstance(value, dict):
+            if value.get("kind") == "kernel":
+                yield path, value
+            else:
+                for key, child in value.items():
+                    yield from visit(child, path + (key,))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                yield from visit(child, path + (index,))
+
+    for key in ("operations", "initialization"):
+        yield from visit(plan.get(key), (key,))
+
+
+def encode_plan_documents(plans):
+    """Share exact kernel call records; keep control, resources and order intact.
+
+    This is an on-disk representation only. Runtime expands the document before
+    the ordinary ExecutionPlan parser and native preparation see it.
+    """
+    return _encode_documents(plans, _plan_records, "execution_plan_records_v1", "plan", "execution_records")
+
+
+def decode_plan_document(document, read_bytes):
+    """Restore a plan before its existing schema and execution-domain checks."""
+    return _decode_document(document, read_bytes, "execution_plan_records_v1", "plan", "execution_records",
+                            lambda path: len(path) > 1 and path[0] in ("operations", "initialization"))

@@ -970,18 +970,20 @@ class Module(_Resource):
     def execution_plan(self, name):
         """Read a named persistent plan from a directory or .tcm module."""
         from urllib.parse import quote
-        from ._plan import ExecutionPlan
+        from ._plan import ExecutionPlan, _unique_fields
+        from ._component_info import _document_reader
+        from ._component_storage import decode_plan_document, _json_bytes
 
         with self._runtime._lock:
             self._check()
             _name(name)
             relative = "executions/" + quote(name, safe="-_.") + ".json"
-            if self._source_path.is_dir():
-                return ExecutionPlan.load(self._source_path / relative)
-            from zipfile import ZipFile
-
-            with ZipFile(self._source_path) as archive:
-                return ExecutionPlan.from_json(archive.read(relative))
+            with _document_reader(self._source_path) as read:
+                payload = read(relative)
+                document = json.loads(payload, object_pairs_hook=_unique_fields)
+                if isinstance(document, dict) and "storage_format" in document:
+                    payload = _json_bytes(decode_plan_document(document, read))
+                return ExecutionPlan.from_json(payload)
 
     def prepare_execution(self, plan, arguments, *, gradients=None, execution_domain=None, mutable_parameters=(),
                           snode_instance=None):

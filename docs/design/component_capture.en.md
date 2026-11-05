@@ -1478,3 +1478,14 @@ destination, verifies exact contract roundtrips, retains numerical code, plans a
 other payloads, and reports hashes, byte totals and non-contract compression changes.
 It does not combine modules or infer code equivalence. This reuse of qualified
 compilations does not replace migration to normal production libraries.
+
+`shared_execution_plans=True` separately enables `execution_plan_records_v1`
+storage for exact repeated Kernel call records under `execution_records/`.
+Only operation and initialization leaves are shared; control ordering, labels,
+arguments, resources, domain recipes and all validation facts remain intact.
+`Module.execution_plan()` restores the original document before the ordinary
+ExecutionPlan parser and native preparation. No extra per-step interpreter or
+mutable module binding is introduced. Old readers reject this storage envelope.
+The frozen-archive tool accepts `--shared-execution-plans`; its unchanged-payload
+hash list then excludes plan storage as well as contract storage. Both original
+documents are checked for exact restoration, while numerical code stays unchanged.

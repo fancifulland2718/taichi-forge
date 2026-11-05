@@ -13,9 +13,11 @@ import taichi_forge as ti
 import taichi_forge_runtime
 from taichi_forge.aot import Component, RootOption, StaticValue
 from taichi_forge.aot._component import Record
-from taichi_forge_runtime.aot import Runtime, inspect_component
+from taichi_forge_runtime.aot import Runtime, inspect_component, ExecutionPlan
 from taichi_forge_runtime.aot._component_info import _document_reader
-from taichi_forge_runtime.aot._component_storage import decode_contract_document, encode_contract_documents
+from taichi_forge_runtime.aot._component_storage import (
+    decode_contract_document, encode_contract_documents, decode_plan_document, encode_plan_documents,
+)
 from tests import test_utils
 from tests.python.test_aot_component_configuration import _NestedConfiguration
 from tests.python.test_aot_component_dense import _environment
@@ -83,6 +85,40 @@ def test_record_integrity_and_archive_membership(tmp_path):
             decode_contract_document(doc, read)
 
 
+def test_shared_plan_calls_preserve_order_initialization_and_validation():
+    rng = random.Random(23)
+    # Long legal binding names represent wide captured ABIs whose call records
+    # repeat across roots and beyond deflate's dictionary window.
+    call = dict(kind="kernel", entry="compute", arguments=[rng.randbytes(256).hex() for _ in range(100)])
+    plan = dict(version=2, operations=[deepcopy(call)] * 3, initialization=[deepcopy(call)])
+    plans = {"executions/first.json": plan, "executions/second.json": deepcopy(plan)}
+    encoded = encode_plan_documents(plans)
+    assert len([n for n in encoded if n.startswith("execution_records/")]) == 1
+    for name, expected in plans.items():
+        document = json.loads(encoded[name])
+        restored = decode_plan_document(document, encoded.__getitem__)
+        assert restored == expected
+        assert json.loads(ExecutionPlan.from_json(json.dumps(restored)).to_json()) == json.loads(
+            ExecutionPlan.from_json(json.dumps(expected)).to_json())
+        restored["operations"][0]["arguments"].append("changed")
+        assert restored["initialization"][0] == call
+        assert restored["operations"][1] == call
+        for bad_path in (["version"], ["operations", -1], ["operations", True]):
+            bad = deepcopy(document)
+            bad["references"][0][0] = bad_path
+            with pytest.raises(ValueError, match="record (path|reference)"):
+                decode_plan_document(bad, encoded.__getitem__)
+        bad = deepcopy(document)
+        bad["plan"]["version"] = 1000
+        with pytest.raises(ValueError, match="plan digest"):
+            decode_plan_document(bad, encoded.__getitem__)
+    invalid = {"executions/invalid.json": {**deepcopy(plan), "version": 1000}}
+    stored = encode_plan_documents(invalid)
+    restored = decode_plan_document(json.loads(stored["executions/invalid.json"]), stored.__getitem__)
+    with pytest.raises(ValueError, match="Unsupported execution plan version"):
+        ExecutionPlan.from_json(json.dumps(restored))
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_shared_contract_export_and_loaded_instances(tmp_path):
     env = Component(**_environment().declarations,
@@ -98,11 +134,11 @@ def test_shared_contract_export_and_loaded_instances(tmp_path):
         root.export(module, "step" + str(index))
     legacy, shared = tmp_path / "legacy.tcm", tmp_path / "shared.tcm"
     module.archive(str(legacy))
-    module.archive(str(shared), shared_component_contracts=True)
+    module.archive(str(shared), shared_component_contracts=True, shared_execution_plans=True)
     from taichi_forge.tools._component_archive import share_component_contracts
 
     rewritten = tmp_path / "rewritten.tcm"
-    report = share_component_contracts(legacy, rewritten)
+    report = share_component_contracts(legacy, rewritten, shared_execution_plans=True)
     assert report["changed"] and report["after_bytes"] < report["before_bytes"]
     assert report["noncontract_compressed_byte_delta"] == 0
     with pytest.raises(ValueError, match="new destination"):
@@ -113,8 +149,10 @@ def test_shared_contract_export_and_loaded_instances(tmp_path):
         assert any(name.startswith("component_contracts/") for name in new.namelist())
         assert shared.stat().st_size < legacy.stat().st_size
         for name in old.namelist():
-            if not name.startswith("components/"):
+            if not name.startswith(("components/", "executions/")):
                 assert new.read(name) == old.read(name)
+            elif name.startswith("executions/"):
+                assert decode_plan_document(json.loads(new.read(name)), new.read) == json.loads(old.read(name))
         directory = tmp_path / "directory"
         new.extractall(directory)
     for index in range(4):
@@ -162,3 +200,58 @@ with Runtime('cpu') as runtime, runtime.load_module(sys.argv[2]) as module:
 '''
     subprocess.run([sys.executable, "-c", probe, str(Path(taichi_forge_runtime.__file__).parent.parent),
                     str(rewritten), json.dumps(configuration)], check=True, capture_output=True, text=True)
+
+
+@ti.kernel
+def _stored_plan_increment(value: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    for i in range(value.shape[0]):
+        value[i] += 1
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_shared_execution_records_load_directory_archive_and_frozen_rewrite(tmp_path):
+    # A long diagnostic label is legal and deliberately exercises storage beyond
+    # deflate's window without increasing kernel ABI or executing more kernels.
+    label = random.Random(17).randbytes(20000).hex()
+    call = dict(kind="kernel", entry="increment", arguments=["value"], label=label)
+    plan = ExecutionPlan([call, deepcopy(call)])
+    module = ti.aot.Module()
+    module.add_kernel(_stored_plan_increment, template_args={"value": ti.ndarray(ti.i32, shape=(3,))}, name="increment")
+    module.add_execution_plan("increment", plan)
+    legacy, shared, rewritten = (tmp_path / name for name in ("legacy.tcm", "shared.tcm", "rewritten.tcm"))
+    module.archive(str(legacy))
+    module.archive(str(shared), shared_execution_plans=True)
+    module.save(tmp_path / "directory", shared_execution_plans=True)
+    from taichi_forge.tools._component_archive import share_component_contracts
+
+    report = share_component_contracts(legacy, rewritten, shared_execution_plans=True)
+    assert report["changed"] and report["execution_plan_count"] == 1
+    assert report["noncontract_compressed_byte_delta"] == 0
+    with ZipFile(shared) as archive:
+        assert any(name.startswith("execution_records/") for name in archive.namelist())
+    probe = r'''
+import importlib.abc, json, struct, sys
+from contextlib import closing
+sys.path.insert(0, sys.argv[1])
+class NoFrontend(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, *args):
+        if fullname.split('.')[0] in ('taichi_forge', 'tests'):
+            raise AssertionError('producer source imported')
+sys.meta_path.insert(0, NoFrontend())
+from taichi_forge_runtime.aot import Runtime
+for path in sys.argv[2:]:
+    with Runtime('cpu') as runtime, runtime.load_module(path) as module:
+        document = json.loads(module.execution_plan('increment').to_json())
+        assert len(document['operations']) == 2
+        with closing(runtime.ndarray('i32', (3,))) as first, closing(runtime.ndarray('i32', (5,))) as second:
+            first.write(struct.pack('3i', 1, 2, 3))
+            second.write(struct.pack('5i', 5, 6, 7, 8, 9))
+            with module.prepare_execution('increment', {'value': first}) as a, module.prepare_execution('increment', {'value': second}) as b:
+                a.run()
+                b.run()
+            assert struct.unpack('3i', first.read()) == (3, 4, 5)
+            assert struct.unpack('5i', second.read()) == (7, 8, 9, 10, 11)
+'''
+    subprocess.run([sys.executable, "-c", probe, str(Path(taichi_forge_runtime.__file__).parent.parent),
+                    str(shared), str(tmp_path / "directory"), str(rewritten)],
+                   check=True, capture_output=True, text=True)

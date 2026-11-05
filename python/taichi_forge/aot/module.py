@@ -785,12 +785,14 @@ class Module:
         kt = KernelTemplate(kernel_fn, self)
         yield kt
 
-    def save(self, filepath, *, shared_component_contracts=False):
+    def save(self, filepath, *, shared_component_contracts=False, shared_execution_plans=False):
         """
         Args:
           filepath (str): path to a folder to store aot files.
           shared_component_contracts (bool): store repeated compiler records
             once, requiring a Runtime with component contract storage v1.
+          shared_execution_plans (bool): share exact kernel call records in
+            plans, requiring a Runtime with execution plan storage v1.
         """
         if self._graph_export_failed:
             raise TaichiRuntimeError("A Graph kernel export failed; create a new AOT module")
@@ -808,8 +810,20 @@ class Module:
         if self._execution_plans:
             directory = output_dir / "executions"
             directory.mkdir(exist_ok=True)
-            for name, plan in self._execution_plans.items():
-                plan.save(directory / (quote(name, safe="-_.") + ".json"))
+            if shared_execution_plans:
+                from taichi_forge_runtime.aot._component_storage import encode_plan_documents
+
+                documents = encode_plan_documents({
+                    "executions/" + quote(name, safe="-_.") + ".json": json.loads(plan.to_json())
+                    for name, plan in self._execution_plans.items()
+                })
+                for relative, payload in documents.items():
+                    target = output_dir / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(payload)
+            else:
+                for name, plan in self._execution_plans.items():
+                    plan.save(directory / (quote(name, safe="-_.") + ".json"))
         if self._component_entries:
             directory = output_dir / "component_entries"
             directory.mkdir(exist_ok=True)
@@ -853,7 +867,8 @@ class Module:
         with open(f"{filepath}/__version__", "w") as f:
             f.write(".".join(str(x) for x in taichi_forge.__version__))
 
-    def archive(self, filepath: str, *, include_debug_metadata: bool = False, shared_component_contracts=False):
+    def archive(self, filepath: str, *, include_debug_metadata: bool = False, shared_component_contracts=False,
+                shared_execution_plans=False):
         """
         Args:
           filepath (str): path to the stored archive of aot artifacts, MUST
@@ -865,6 +880,8 @@ class Module:
           shared_component_contracts (bool): losslessly share repeated compiler
             records when this reduces the archive. Requires a Runtime reader
             supporting component contract storage v1; older readers reject it.
+          shared_execution_plans (bool): share exact plan kernel call records
+            before ordinary Runtime plan decoding; requires plan storage v1.
 
         Entries use fast deflate compression. Native readers decompress on
         demand; this does not change execution data or device storage sizes.
@@ -877,7 +894,8 @@ class Module:
 
         temp_dir = mkdtemp(prefix="tcm_")
         # Save first as usual.
-        self.save(temp_dir, shared_component_contracts=shared_component_contracts)
+        self.save(temp_dir, shared_component_contracts=shared_component_contracts,
+                  shared_execution_plans=shared_execution_plans)
 
         fixed_time = datetime.datetime(2000, 12, 1).timestamp()
         omitted = set()
