@@ -1471,3 +1471,10 @@ packages must ship with a compatible reader. Build and inspection tools should u
 `inspect_component()` instead of treating `components/*.json` as an unwrapped public
 contract API. Contract storage savings, numerical code sharing and final wheel size
 remain separate acceptance results.
+
+The producer tool `_component_archive.py SOURCE DESTINATION --report FILE` applies
+the same storage conversion to an existing frozen compilation. It requires a new
+destination, verifies exact contract roundtrips, retains numerical code, plans and
+other payloads, and reports hashes, byte totals and non-contract compression changes.
+It does not combine modules or infer code equivalence. This reuse of qualified
+compilations does not replace migration to normal production libraries.

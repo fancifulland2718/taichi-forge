@@ -99,6 +99,16 @@ def test_shared_contract_export_and_loaded_instances(tmp_path):
     legacy, shared = tmp_path / "legacy.tcm", tmp_path / "shared.tcm"
     module.archive(str(legacy))
     module.archive(str(shared), shared_component_contracts=True)
+    from taichi_forge.tools._component_archive import share_component_contracts
+
+    rewritten = tmp_path / "rewritten.tcm"
+    report = share_component_contracts(legacy, rewritten)
+    assert report["changed"] and report["after_bytes"] < report["before_bytes"]
+    assert report["noncontract_compressed_byte_delta"] == 0
+    with pytest.raises(ValueError, match="new destination"):
+        share_component_contracts(legacy, legacy)
+    with pytest.raises(ValueError, match="new destination"):
+        share_component_contracts(legacy, rewritten)
     with ZipFile(legacy) as old, ZipFile(shared) as new:
         assert any(name.startswith("component_contracts/") for name in new.namelist())
         assert shared.stat().st_size < legacy.stat().st_size
@@ -111,6 +121,7 @@ def test_shared_contract_export_and_loaded_instances(tmp_path):
         name = "step" + str(index)
         assert inspect_component(shared, name).contract == inspect_component(legacy, name).contract
         assert inspect_component(directory, name).contract == inspect_component(legacy, name).contract
+        assert inspect_component(rewritten, name).contract == inspect_component(legacy, name).contract
     with Runtime("cpu") as runtime, runtime.load_module(shared) as loaded:
         component = loaded.component("step0")
         configuration = {name: (128 if source["path"] == ["repeat"] else
@@ -150,4 +161,4 @@ with Runtime('cpu') as runtime, runtime.load_module(sys.argv[2]) as module:
         np.testing.assert_array_equal(np.frombuffer(instance.resource('x').read(), np.float32), [14]*11+[0]*2)
 '''
     subprocess.run([sys.executable, "-c", probe, str(Path(taichi_forge_runtime.__file__).parent.parent),
-                    str(shared), json.dumps(configuration)], check=True, capture_output=True, text=True)
+                    str(rewritten), json.dumps(configuration)], check=True, capture_output=True, text=True)
