@@ -3,12 +3,15 @@
 Inspection shares header/static validation with Component. It does not admit
 device execution, allocate resources, or interpret layouts or execution plans.
 """
+from collections import Counter
+from contextlib import contextmanager
 import json
 from pathlib import Path
 from urllib.parse import quote
 from zipfile import ZipFile
 
 from .._static_values import read_static_key, static_key
+from ._component_storage import decode_contract_document
 
 
 def _valid_source_path(path, *, indexed=False):
@@ -20,23 +23,35 @@ def _valid_source_path(path, *, indexed=False):
                     or indexed and type(part) is int and part >= 0 for part in path))
 
 
-def _read_document(path, relative):
+@contextmanager
+def _document_reader(path):
     path = Path(path).resolve(strict=True)
     if path.is_dir():
-        payload = (path / relative).read_bytes()
+        yield lambda relative: (path / relative).read_bytes()
     else:
         with ZipFile(path) as archive:
-            if archive.namelist().count(relative) != 1:
-                raise ValueError(f"Artifact document must occur exactly once: {relative!r}")
-            payload = archive.read(relative)
-    return json.loads(payload)
+            counts = Counter(archive.namelist())
+
+            def read(relative):
+                if counts[relative] != 1:
+                    raise ValueError(f"Artifact document must occur exactly once: {relative!r}")
+                return archive.read(relative)
+
+            yield read
+
+
+def _read_document(path, relative):
+    with _document_reader(path) as read:
+        return json.loads(read(relative))
 
 
 def _read_contract(path, name):
     from ._runtime import _name
 
     _name(name)
-    contract = _read_document(path, "components/" + quote(name, safe="-_.") + ".json")
+    with _document_reader(path) as read:
+        document = json.loads(read("components/" + quote(name, safe="-_.") + ".json"))
+        contract = decode_contract_document(document, read)
     _validate_header(contract, name)
     return contract
 

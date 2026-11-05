@@ -1449,3 +1449,25 @@ with different GAS primitive counts, shared GAS and different face policies.
 Analytic ray results, typed/occlusion queries, both `graph_fixed_query` choices,
 ordinary/domain submission and in-flight table closure are checked. Alpha and
 micromap qualification is unchanged; this is not a throughput claim.
+
+### Shared compiler records in release contracts
+
+`Module.archive(path, shared_component_contracts=True)` can store repeated complete
+call facts, compiler facts and control Kernel leaves in `component_contracts/<sha256>.json`.
+Each component retains its own document in a versioned storage envelope. Sharing is
+selected only when it reduces bytes at the archive's deflate settings, including new
+file headers. Small contracts may keep their original representation. `save()` accepts
+the same option; it defaults to false for compatibility with existing consumers.
+
+Runtime inspection and loaded components share one reader. It verifies record digests,
+reference positions and the expanded contract digest, then runs the existing configuration,
+ABI, resource, effects and plan checks. Logical calls receive independent mutable
+dictionaries; disk sharing does not share instance state. This storage layer compares
+complete JSON records without dropping fields, normalizing paths or inferring code
+equivalence. Numerical code and native plans are unchanged.
+
+New readers accept old contracts. Old Runtime readers reject the new envelope, so release
+packages must ship with a compatible reader. Build and inspection tools should use
+`inspect_component()` instead of treating `components/*.json` as an unwrapped public
+contract API. Contract storage savings, numerical code sharing and final wheel size
+remain separate acceptance results.

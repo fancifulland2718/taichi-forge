@@ -785,10 +785,12 @@ class Module:
         kt = KernelTemplate(kernel_fn, self)
         yield kt
 
-    def save(self, filepath):
+    def save(self, filepath, *, shared_component_contracts=False):
         """
         Args:
           filepath (str): path to a folder to store aot files.
+          shared_component_contracts (bool): store repeated compiler records
+            once, requiring a Runtime with component contract storage v1.
         """
         if self._graph_export_failed:
             raise TaichiRuntimeError("A Graph kernel export failed; create a new AOT module")
@@ -818,6 +820,7 @@ class Module:
         if self._component_roots:
             directory = output_dir / "components"
             directory.mkdir(exist_ok=True)
+            contracts = {}
             for name, contract in self._component_roots.items():
                 contract = dict(contract)
                 if name in self._component_fixed_sources:
@@ -826,9 +829,18 @@ class Module:
                         group: tree_bindings[dependency[0]]
                         for group, dependency in self._component_fixed_sources[name].items()
                     }
-                (directory / (quote(name, safe="-_.") + ".json")).write_text(
-                    json.dumps(contract, sort_keys=True, separators=(",", ":")), encoding="utf8"
-                )
+                contracts["components/" + quote(name, safe="-_.") + ".json"] = contract
+            if shared_component_contracts:
+                from taichi_forge_runtime.aot._component_storage import encode_contract_documents
+
+                documents = encode_contract_documents(contracts)
+            else:
+                documents = {name: json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf8")
+                             for name, contract in contracts.items()}
+            for relative, payload in documents.items():
+                target = output_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
         if self._component_families:
             directory = output_dir / "component_families"
             directory.mkdir(exist_ok=True)
@@ -841,7 +853,7 @@ class Module:
         with open(f"{filepath}/__version__", "w") as f:
             f.write(".".join(str(x) for x in taichi_forge.__version__))
 
-    def archive(self, filepath: str, *, include_debug_metadata: bool = False):
+    def archive(self, filepath: str, *, include_debug_metadata: bool = False, shared_component_contracts=False):
         """
         Args:
           filepath (str): path to the stored archive of aot artifacts, MUST
@@ -850,6 +862,9 @@ class Module:
             cache lock file. By default these are omitted from deployment
             archives; runtime metadata and the output of ``save()`` are
             unchanged. GFX JSON metadata is always retained.
+          shared_component_contracts (bool): losslessly share repeated compiler
+            records when this reduces the archive. Requires a Runtime reader
+            supporting component contract storage v1; older readers reject it.
 
         Entries use fast deflate compression. Native readers decompress on
         demand; this does not change execution data or device storage sizes.
@@ -862,7 +877,7 @@ class Module:
 
         temp_dir = mkdtemp(prefix="tcm_")
         # Save first as usual.
-        self.save(temp_dir)
+        self.save(temp_dir, shared_component_contracts=shared_component_contracts)
 
         fixed_time = datetime.datetime(2000, 12, 1).timestamp()
         omitted = set()

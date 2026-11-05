@@ -1147,3 +1147,19 @@ ABI，原生节点自己的布局检查仍由 provider 执行。冻结 2 实例�
 不同 GAS primitive 数、共享 GAS 和不同面规则通过独立解析射线参考、typed hit/
 遮挡、两种 `graph_fixed_query` 策略、普通/执行域和在途表关闭检查。此处没有新增
 alpha/micromap 资格，也不以完整帧测试推断渲染吞吐。
+
+### 发行合同的共享记录存储
+
+`Module.archive(path, shared_component_contracts=True)` 可将重复的完整调用、编译事实
+和 control Kernel 叶记录保存到 `component_contracts/<sha256>.json`。各组件保留自己的
+合同文档，通过版本化的存储封装引用这些记录。只有按归档的 deflate 设置计入新增
+文件头后确实减少字节才启用；小合同可以继续使用原表示。`save()` 提供同名选项，
+默认关闭，以保持既有消费者兼容。
+
+Runtime 的 `inspect_component()` 和加载组件共用读取路径：检查片段摘要、引用位置
+和完整合同摘要，恢复原合同后继续执行已有配置、ABI、资源、effects 和执行计划校验。
+每个逻辑调用获得独立的可变字典；磁盘共享不引入实例状态共享。该存储格式只比较完整
+JSON 记录，不裁剪字段、归一化路径或推断代码等价，也不改变数值代码和原生执行计划。
+旧格式仍可读取；不支持此存储格式的旧 Runtime 明确拒绝新合同，发行包须配套新 reader。
+构建和检查工具应调用 `inspect_component()`，不要将 `components/*.json` 视为未封装的
+公共合同 API。该改动减少合同副本；数值代码共享和整个 wheel 的体积仍需分别验收。
