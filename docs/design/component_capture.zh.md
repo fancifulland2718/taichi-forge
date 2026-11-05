@@ -6,6 +6,10 @@ CPU/CUDA 定向门槛覆盖冻结后动态换分支、不同尺寸的独立实�
 Plan 分支篡改拒绝；沿用既有 Graph lowering，不扩大嵌套 native 控制的资格。
 
 producer 使用公开的 `ti.aot.Component`；`_component` 保留为实现模块。
+没有资源声明、仅使用显式参数的普通 Kernel，也可用 `ti.aot.Component()` 编译，
+并由普通 Graph 记录组成组件根；不需要虚构应用 owner 或数值包装方法。
+这条无状态路径仍检查全局/闭包捕获及静态来源；一旦环境包含资源声明，
+就必须提供实际 owner。无状态代码沿同一组件查询、实例化和执行合同导出。
 它沿正常 AST transformer 编译原有装饰方法，不重跑前端发现捕获，也不生成数值包装函数。
 在正常分配处用 `ti.experimental.ResourceScope` 声明资源/维度/值角色，再使用
 `ti.aot.Component.from_owner(owner)` 收集声明。该实验性声明协议和本文逐项资格边界

@@ -4,6 +4,13 @@ Producers use the public `ti.aot.Component` entry; `_component` remains its
 implementation module. It compiles the original decorated method through the normal AST transformer; it does not parse
 the application a second time or create a numerical wrapper.
 
+Ordinary kernels that use only explicit arguments can also use an empty
+`ti.aot.Component()` environment and compose through a normal Graph recording.
+They need no artificial application owner or numerical wrapper. Global/closure
+classification and static guards still apply; an environment with resource
+declarations requires its actual owner. Stateless roots use the same exported
+component query, instantiation, and execution contracts.
+
 `Component` declarations describe the owner's attributes. `RuntimeValue` supports
 scalar and fixed vector/matrix values, `Array` supports whole managed Ndarrays,
 and `StaticValue` accepts immutable scalar/tuple configuration. Entry arguments

@@ -20,6 +20,7 @@ from taichi_forge.aot._component import (
     _capture_id,
     _dense_group,
     _DenseLayoutValidation,
+    _STATELESS_OWNER,
 )
 from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang.exception import TaichiCompilationError
@@ -128,6 +129,8 @@ class _GraphCapture:
             expected_templates[name] = owner
         if self.owner is None:
             self.owner = owner
+        if self.owner is None and not self.component.declarations:
+            self.owner = _STATELESS_OWNER
         if self.owner is None:
             raise TaichiCompilationError("A component Graph root requires a declared resource owner")
         if self._owner_sequences is None:

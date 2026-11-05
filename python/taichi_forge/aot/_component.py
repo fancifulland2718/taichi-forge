@@ -36,6 +36,11 @@ from taichi_forge.types._argument_descriptor import describe_element_type
 from taichi_forge_runtime._static_values import StaticDType, static_key
 
 
+# Unbound, explicit-argument-only definitions do not have an application owner.
+# This identity has no declarations or values and never enters the semantic key.
+_STATELESS_OWNER = object()
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -1314,6 +1319,8 @@ class Component:
         kernel = getattr(entry, "_primal", None)
         bound_owner = getattr(entry, "_kernel_owner", None)
         owner = bound_owner if owner is None else owner
+        if owner is None and not self.declarations:
+            owner = _STATELESS_OWNER
         if kernel is None or owner is None:
             raise TypeError("Component.compile requires a decorated kernel and its declared owner")
         entry_owner = owner if bound_owner is None else bound_owner
