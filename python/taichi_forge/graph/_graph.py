@@ -5179,15 +5179,29 @@ class _GraphRunContext:
                 dynamic_items.append((k, runtime_pack(v, arch)))
             elif isinstance(v, DeviceExtent):
                 v._validate_current()
-                signature.append((k, "device_extent", v.binding.allocation_identity))
+                signature.append(
+                    (
+                        k, "device_extent", v.binding.allocation_identity,
+                        v.state._runtime_binding_token,
+                    )
+                )
             elif isinstance(v, (Ndarray, ProviderOwnedNdarrayBinding)):
                 if v.arr is None:
                     raise TaichiRuntimeError(
                         "Cannot submit an Ndarray to Graph.run() after its Taichi runtime has been reset"
                     )
-                entry = (k, "ndarray", v._runtime_allocation_identity)
+                # Backend allocation IDs and pybind native wrappers may both
+                # be reused after retirement. Retain a logical lifetime token,
+                # without keeping the high-level array or its buffer alive.
+                entry = (
+                    k, "ndarray", v._runtime_allocation_identity,
+                    v._runtime_binding_token,
+                )
                 if isinstance(v, Ndarray) and v.grad is not None:
-                    entry += ("gradient", v.grad._runtime_allocation_identity)
+                    entry += (
+                        "gradient", v.grad._runtime_allocation_identity,
+                        v.grad._runtime_binding_token,
+                    )
                 signature.append(entry)
             elif isinstance(v, (DenseNdarrayView, ScalarField, MatrixField)):
                 signature.append((k, "dense_storage", id(v)))

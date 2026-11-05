@@ -42,6 +42,7 @@ class ProviderOwnedNdarrayBinding:
         "_owner",
         "_runtime_prog",
         "_runtime_allocation_identity",
+        "_runtime_binding_token",
         "_runtime_storage_arguments",
     )
 
@@ -54,6 +55,7 @@ class ProviderOwnedNdarrayBinding:
         self._owner = owner
         self._runtime_prog = impl.get_runtime().prog
         self._runtime_allocation_identity = native_array.device_allocation().alloc_id
+        self._runtime_binding_token = object()
         self._runtime_storage_arguments = {}
 
     @property

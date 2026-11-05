@@ -695,6 +695,39 @@ def test_graph_ndarray_registry_lifetime_after_runtime_arg_gc():
     assert sink[None] == 11
 
 
+@pytest.mark.parametrize("reorder_arguments", [False, True])
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_cgraph_rebind_after_ndarray_retirement(reorder_arguments):
+    @ti.kernel
+    def fill(output: ti.types.ndarray(dtype=ti.i32, ndim=1), value: ti.i32):
+        for i in output:
+            output[i] = value + i
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        fill,
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1),
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32),
+    )
+    graph = builder.compile()
+    for iteration in range(32):
+        size = (210, 336)[iteration % 2]
+        output = ti.ndarray(ti.i32, shape=size)
+        arguments = dict(output=output, value=iteration)
+        if reorder_arguments and iteration % 2:
+            # Reordering takes the per-argument reuse path instead of the
+            # whole-frame fast path; both must reject a recycled identity.
+            arguments = dict(reversed(arguments.items()))
+        graph.run(arguments)
+        np.testing.assert_array_equal(
+            output.to_numpy(), np.arange(size, dtype=np.int32) + iteration
+        )
+        # Vulkan allocation IDs can be reused after retirement even while the
+        # Graph's flattened frame still holds the old native wrapper.
+        del arguments, output
+        gc.collect()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_graph_submit_returns_one_public_completion_ticket():
     result = ti.ndarray(ti.i32, shape=1)

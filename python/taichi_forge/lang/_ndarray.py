@@ -244,6 +244,7 @@ class Ndarray:
         self.grad = None
         self._runtime_prog = None
         self._runtime_allocation_identity = None
+        self._runtime_binding_token = None
         self._runtime_storage_arguments = {}
         self._runtime_affine_exemplar_value = False
         self._graph_runtime_affine_exemplar_value = False
@@ -277,6 +278,9 @@ class Ndarray:
         runtime = impl.get_runtime()
         self._runtime_prog = runtime.prog
         self._runtime_allocation_identity = self.arr.device_allocation().alloc_id
+        # Keep logical binding lifetime separate from recyclable backend IDs
+        # and pybind wrappers. A cached token never pins the array or buffer.
+        self._runtime_binding_token = object()
         runtime.register_runtime_object(self)
 
     def _invalidate_runtime(self):
@@ -284,6 +288,7 @@ class Ndarray:
         self.arr = None
         self._runtime_prog = None
         self._runtime_allocation_identity = None
+        self._runtime_binding_token = None
         self.grad = None
         self._runtime_storage_arguments.clear()
 
