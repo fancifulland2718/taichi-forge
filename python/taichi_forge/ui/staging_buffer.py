@@ -281,10 +281,13 @@ def copy_image_f32_to_rgba8_ti_ndarray(
     gray_scale: ti.template(),
     image_shape: ti.template(),
 ):
-    # Image extents are fixed during preparation. Specializing this range
-    # avoids a serial extent task and dynamic pixel-index division, while
-    # the buffers remain ordinary ndarray arguments (including shared views).
-    for i, j in ti.ndrange(image_shape[0], image_shape[1]):
+    # Ordinary display preparation specializes the image range. AOT consumers
+    # can explicitly select None to use the ndarray's runtime extents while
+    # retaining the same conversion and channel specialization.
+    for i, j in ti.ndrange(
+        src.shape[0] if ti.static(image_shape is None) else image_shape[0],
+        src.shape[1] if ti.static(image_shape is None) else image_shape[1],
+    ):
         px = ti.Vector([0, 0, 0, 0xFF], dt=u32)
         if ti.static(gray_scale):
             c = 0.0
