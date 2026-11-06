@@ -492,7 +492,7 @@ class ResourceScope:
         del caller
         return Extent(("dim", alias))
 
-    def borrow(self, name, field, *, dimensions=None, source_scope=False):
+    def borrow(self, name, field, *, dimensions=None, source_scope=False, external=False):
         """Bind an existing Field and explicitly relate its whole source group.
 
         The target retains the original Field and storage ownership. This is a
@@ -501,14 +501,19 @@ class ResourceScope:
         source_scope=True instead requires the original allocation scope in
         the component root. Its layout remains authoritative; dimensions then
         supplies only the explicit target relations that need checking.
+        external=True instead declares a read-only component input. Only this
+        member's dimensions are mapped; its original group stays owned by the
+        supplying component. The native member-view ABI still qualifies access.
         """
         from taichi_forge.lang.field import Field
 
         if not isinstance(name, str) or not name.isidentifier() or not isinstance(field, Field):
             raise TypeError("Resource borrow requires an attribute name and a Field")
+        if type(external) is not bool or external and source_scope:
+            raise TypeError("External Field inputs cannot also require a source scope")
         if type(source_scope) is not bool or (dimensions is None and not source_scope):
             raise TypeError("Resource borrow requires explicit dimensions or source_scope=True")
-        if source_scope:
+        if source_scope or external:
             declaration = getattr(field, "_logical_resource_declaration", None)
             if declaration is None or declaration["identity"] is None:
                 raise ValueError("Source-scope borrows require an existing normal Field declaration")
@@ -533,7 +538,9 @@ class ResourceScope:
             if isinstance(candidate, MemberDescriptorType):
                 candidate = candidate.__get__(self._owner, type(self._owner))
             source_group = getattr(field, "_logical_resource_group", None)
-            if source_group is not None and getattr(candidate, "_logical_resource_group", None) is source_group:
+            same_source = (candidate is field if external else
+                           source_group is not None and getattr(candidate, "_logical_resource_group", None) is source_group)
+            if previous.get("external", False) == external and same_source:
                 group = previous["group"]
                 break
         caller = inspect.currentframe().f_back
@@ -545,6 +552,8 @@ class ResourceScope:
         )
         if source_scope:
             declaration["source_scope"] = True
+        if external:
+            declaration["external"] = True
         del caller
         if self._read_only:
             if getattr(self._owner, name) is not field:

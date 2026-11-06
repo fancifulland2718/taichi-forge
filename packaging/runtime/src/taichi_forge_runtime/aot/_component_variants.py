@@ -121,5 +121,5 @@ class ComponentVariants:
             )
         return self._components[key]
 
-    def instantiate(self, dimensions, *, configuration):
-        return self.select(configuration).instantiate(dimensions, configuration=configuration)
+    def instantiate(self, dimensions, *, configuration, inputs=None):
+        return self.select(configuration).instantiate(dimensions, configuration=configuration, inputs=inputs)

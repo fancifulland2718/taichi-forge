@@ -1148,6 +1148,44 @@ ABI，原生节点自己的布局检查仍由 provider 执行。冻结 2 实例�
 遮挡、两种 `graph_fixed_query` 策略、普通/执行域和在途表关闭检查。此处没有新增
 alpha/micromap 资格，也不以完整帧测试推断渲染吞吐。
 
+### 独立组件之间的只读 Field 输入
+
+正常所有者可用 `scope.borrow("positions", field, dimensions={"source_count":
+scope.dim("count")}, external=True)` 声明外部输入。`dimensions` 只映射该成员实际
+形状的声明依赖；`external=True` 与 `source_scope=True` 互斥，源分配所有者不在
+接收组件的根内。普通 JIT 仍读取原 Field，AOT 捕获沿现有 affine ndarray ABI
+传入成员视图，保留 Field 元素类型和动态范围。接收组件不携带源组的布局配方、
+兄弟资源、初始化或求解操作，也不因源组有不同兄弟字段而生成不同代码。
+
+消费端先初始化源实例，再连接两个独立组件：
+
+```python
+positions = solver.borrow(solver_component.resource_name(["x"]))
+renderer = render_component.instantiate(render_dimensions, inputs={"positions": positions})
+frame = renderer.prepare(arguments=render_arguments)
+```
+
+输入名称为接收组件的资源名或声明别名，必须完整且不重复。第一版仅接受另一个
+Component 实例拥有的合格 Dense 成员：类型、元素形状、逻辑尺寸和 Runtime 必须
+一致；布局仍由 native SNode member/view 校验，不能用相同 shape 放行任意 stride、
+Sparse 或固定树。编译器必须证明所有别名使用均只读，写入、原子和不透明 effects
+拒绝导出。新合同要求 `component_external_field_inputs_v1`，旧 reader 明确拒绝。
+
+源实例继续拥有整组存储；接收实例仅拥有自己的输出、history 和 scratch，不能
+通过 `initialize()` 清零外部输入，关闭接收实例不会关闭源视图。准备的调用同时
+登记到两方的现有租约和执行域门禁；源关闭撤销新提交并退休已接受工作，源冷重置
+要求借用调用先退休。源重新初始化后旧借用 token 失效，需要重新接线。冷初始化
+读取外部输入时沿用源已绑定的有序执行域，不在另一个流悄悄读取同一状态。
+
+Host 冷重置可先调用 `source.retire_bindings()`，同时退休该源的计算调用与其他
+组件借用它的调用；此方法保留资源。已 release 到执行域的实例仍由域持有并阻止
+提前重置，不会自动关闭调用者的执行域。退休期间拒绝新提交，等待时释放 Runtime
+提交锁；退休失败仍受原 live-binding 门禁约束。
+
+这条输入接线支持独立求解与渲染节奏，不生成“求解器 × 渲染器”组合组件，也不
+新增逐 Kernel Host 执行器或通用 Runtime Linker。多个基本组件的原生组合提交仍
+须按已有执行域的实际需求单独资格；有只读端口不代表任意组合已通过。
+
 ### 发行合同的共享记录存储
 
 `Module.archive(path, shared_component_contracts=True)` 可将重复的完整调用、编译事实

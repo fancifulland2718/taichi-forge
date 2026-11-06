@@ -400,6 +400,36 @@ class DenseField:
         return description
 
 
+@dataclass(frozen=True)
+class _ExternalField(Array):
+    """Typed read-only input; storage remains in its supplying SNode group."""
+
+    @property
+    def schema(self):
+        return ("external_field", *super().schema[1:])
+
+    def declare(self, name):
+        # A producer's compact member does not constrain the consumer's group.
+        return DenseField(self.dtype, self.shape, "external").declare(name, runtime_affine=True)
+
+    def validate(self, value, component=None, owner=None):
+        from taichi_forge.lang.field import Field
+
+        if not isinstance(value, Field):
+            raise TaichiCompilationError("External Field input requires its original declared Field")
+        scalar = self.dtype.dtype if isinstance(self.dtype, MatrixType) else self.dtype
+        element_shape = tuple(self.dtype.get_shape()) if isinstance(self.dtype, MatrixType) else ()
+        actual_element = ((value.n,) if value.ndim == 1 else (value.n, value.m)) if hasattr(value, "n") else ()
+        if value.dtype != cook_dtype(scalar) or actual_element != element_shape or len(value.shape) != self.ndim:
+            raise TaichiCompilationError("External Field input dtype/rank differs from its declaration")
+        DenseField(self.dtype, self.shape, "external").validate(value)
+        if component is not None:
+            expected = tuple(_dimension_value(component, owner, dim) if isinstance(dim, str) else dim
+                             for dim in self.shape)
+            if tuple(value.shape) != expected:
+                raise TaichiCompilationError("External Field input shape differs from its declared extent relation")
+
+
 def _extent_invariant_compact_member(field, description):
     """Prove a narrow compact access family using native layout facts.
 
@@ -1180,6 +1210,38 @@ class Component:
                 identity = anchor._logical_resource_declaration["identity"]
                 if identity != binding["identity"]:
                     raise ValueError("source Field was replaced without redeclaration")
+                if binding.get("external", False):
+                    if root_id in visible_dimensions:
+                        raise ValueError("External Field inputs cannot also own their source group")
+                    source = anchor._logical_resource_declaration
+                    dependencies = {dim for extent in source["shape"] if isinstance(extent, Extent)
+                                    for dim in extent_dependencies(extent.expression)}
+                    if dependencies != binding["dimensions"].keys():
+                        raise ValueError(f"External member dimensions require {sorted(dependencies)!r}")
+                    mapping = {key: rewrite(expression, {
+                        dim: ("dim", _capture_id((*path[:-1], dim)))
+                        for dim in extent_dependencies(expression)
+                    }) for key, expression in binding["dimensions"].items()}
+                    shape = []
+                    for extent in source["shape"]:
+                        if isinstance(extent, Extent):
+                            expression = rewrite(extent.expression, mapping)
+                            dimension = "__extent_" + _digest(expression)
+                            declarations[dimension] = Dimension(expression=expression)
+                            paths[dimension], sources[dimension] = (dimension,), binding["source"]
+                            shape.append(dimension)
+                        else:
+                            shape.append(extent)
+                    dtype = anchor.dtype
+                    if hasattr(anchor, "n"):
+                        dtype = VectorType(anchor.n, dtype) if anchor.ndim == 1 else MatrixType(anchor.n, anchor.m, 2, dtype)
+                    name = _capture_id(path)
+                    # The normal declaration names the port. Adding an unused
+                    # alias later does not rename an already captured input.
+                    resource_id = _capture_id((*path[:-1], binding["group"]))
+                    declarations[name] = _ExternalField(dtype, len(shape), tuple(shape), resource_id)
+                    paths[name], sources[name] = path, binding["source"]
+                    continue
                 source_scope = binding.get("source_scope", False)
                 if source_scope and root_id not in visible_dimensions:
                     # This is an explicitly linked external resource, not an
@@ -2089,7 +2151,7 @@ class _ComponentCode:
         values = tuple(
             (
                 ndarray_view(component.read(owner, name))
-                if isinstance(component.declarations[name], DenseField)
+                if isinstance(component.declarations[name], (DenseField, _ExternalField))
                 else component.read(owner, name)
             )
             for name in self.dynamic

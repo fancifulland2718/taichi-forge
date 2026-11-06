@@ -269,6 +269,8 @@ class Component:
                                  else "component_instance_initializer_v1")
             if any(resource.get("kind") == "ndarray" for resource in contract["resources"].values()):
                 capabilities.add("component_array_storage_v1")
+            if any(resource.get("ownership") == "external" for resource in contract["resources"].values()):
+                capabilities.add("component_external_field_inputs_v1")
             if any(resource.get("initialization") == "zero" for resource in contract["resources"].values()):
                 capabilities.add("component_zero_initial_state_v1")
             if any(descriptor[0] == "ndarray" for descriptor in contract["explicit"].values()):
@@ -355,6 +357,7 @@ class Component:
             self._array_layouts = {}
             for key, resource in contract["resources"].items():
                 array = resource.get("kind") == "ndarray"
+                external = resource.get("ownership") == "external"
                 fixed = resource.get("kind") == "fixed_snode"
                 if fixed:
                     if (set(resource) != {"kind", "group", "paths", "dtype", "element_shape", "shape", "aliases",
@@ -363,9 +366,15 @@ class Component:
                             or any(type(extent) is not int or extent <= 0 for extent in resource["shape"])):
                         raise ValueError("Invalid fixed SNode component resource")
                 if array:
-                    if set(resource) != {"kind", "shape", "dtype", "element_shape", "layout", "aliases",
-                                         "access", "effects_precision", "initialization"}:
+                    keys = {"kind", "shape", "dtype", "element_shape", "layout", "aliases",
+                            "access", "effects_precision", "initialization"}
+                    if external:
+                        keys.add("ownership")
+                    if set(resource) != keys:
                         raise ValueError("Invalid component array contract")
+                    if external and (resource["layout"] or resource["effects_precision"] != "compiler_proven"
+                                     or resource["access"] not in ("none", "read")):
+                        raise ValueError("External Field inputs require compiler-proven read-only effects")
                     for extent in resource["shape"]:
                         if isinstance(extent, str):
                             depend(extent)
@@ -389,7 +398,8 @@ class Component:
                         and resource.get("access") in ("none", "read", "write", "read_write", "atomic")
                     )
                     or resource.get("initialization") not in (
-                        ("empty_activation_and_zero_values",) if fixed else ("consumer_explicit", "zero"))
+                        ("empty_activation_and_zero_values",) if fixed else
+                        ("external",) if external else ("consumer_explicit", "zero"))
                 ):
                     raise ValueError("Invalid component resource contract")
                 for alias in (key, *resource["aliases"]):
@@ -574,7 +584,7 @@ class Component:
             # all execution entries and layout schemas) once per supplied Field.
             self._dense_upload_resources = frozenset(
                 name for name, resource in contract["resources"].items()
-                if resource.get("kind") != "fixed_snode"
+                if resource.get("kind") != "fixed_snode" and resource.get("ownership") != "external"
             )
 
     @property
@@ -682,9 +692,30 @@ class Component:
         except KeyError:
             raise KeyError(f"Unknown component resource source {path!r}, member={member!r}") from None
 
-    def instantiate(self, dimensions, *, configuration=None):
+    def instantiate(self, dimensions, *, configuration=None, inputs=None):
         _check_configuration(self._configuration, configuration)
-        return ComponentInstance(self, dimensions)
+        return ComponentInstance(self, dimensions, inputs=inputs)
+
+
+class _FieldInputBinding:
+    """Read-only member binding retaining the original component and generation."""
+
+    def __init__(self, owner, name):
+        self.owner, self.name = owner, name
+        self.generation = owner._state_generation
+        self._check()
+
+    def _check(self):
+        self.owner._check()
+        if self.generation != self.owner._state_generation:
+            raise RuntimeError("External Field input belongs to a stale component generation")
+        if self.owner._transfer_active or not self.owner._model_initialized or self.name not in self.owner._initialized:
+            raise ValueError("External Field input requires initialized source state")
+
+    @property
+    def resource(self):
+        self._check()
+        return self.owner._resources[self.name]
 
 
 class ComponentInstance:
@@ -695,7 +726,7 @@ class ComponentInstance:
     it is a blocking cold operation, never a module root-pointer swap.
     """
 
-    def __init__(self, component, dimensions):
+    def __init__(self, component, dimensions, *, inputs=None):
         self._component = component
         self._groups, self._resources = {}, {}
         self._fixed_state = None
@@ -704,7 +735,10 @@ class ComponentInstance:
         self._transfer_active = False
         self._close_lock = threading.RLock()
         self._closed = self._retired = False
+        self._retiring_bindings = False
         self._initialized = set()
+        self._borrowed = {}
+        self._state_generation = 0
         self._model_initialized = component._initializer_plan is None
         contract = component.contract
         self._inputs = dict(dimensions)
@@ -718,6 +752,21 @@ class ComponentInstance:
         try:
             with runtime._lock:
                 component._module._check()
+                expected = {name for name, resource in contract["resources"].items()
+                            if resource.get("ownership") == "external"}
+                for name, binding in dict(inputs or {}).items():
+                    key = component._aliases.get(name)
+                    if key not in expected or key in self._borrowed or not isinstance(binding, _FieldInputBinding):
+                        raise ValueError("Component inputs require distinct declared external Field bindings")
+                    resource = contract["resources"][key]
+                    view = binding.resource
+                    shape = tuple(self._dimensions[dim] if isinstance(dim, str) else dim for dim in resource["shape"])
+                    view._descriptor(runtime)
+                    if view.dtype != resource["dtype"] or view.shape != shape or view.element_shape != tuple(resource["element_shape"]):
+                        raise ValueError("External Field input dtype/shape differs from its contract")
+                    self._borrowed[key] = binding
+                if set(self._borrowed) != expected:
+                    raise ValueError("Component inputs must cover its external Field ports exactly")
                 if contract.get("fixed_groups"):
                     self._fixed_state = component._module.snode_instance(plan=component._instance_plan)
                 for name, schema in contract["groups"].items():
@@ -731,6 +780,10 @@ class ComponentInstance:
                         schema, {key: self._dimensions[key] for key in required}
                     )
                 for name, resource in contract["resources"].items():
+                    if name in self._borrowed:
+                        self._resources[name] = self._borrowed[name].resource
+                        self._initialized.add(name)
+                        continue
                     if resource.get("kind") == "fixed_snode":
                         if name in component._field_io:
                             from ._field_coordinates import FieldCoordinates
@@ -764,6 +817,10 @@ class ComponentInstance:
         self._component._module._check()
         if self._closed:
             raise RuntimeError("Component instance is closed")
+        if self._retiring_bindings:
+            raise RuntimeError("Component instance bindings are retiring")
+        for binding in self._borrowed.values():
+            binding._check()
 
     @property
     def dimensions(self):
@@ -785,7 +842,7 @@ class ComponentInstance:
         contract = self._component.contract
         return sum(group.nbytes for group in self._groups.values()) + sum(
             self._resources[name].nbytes for name, resource in contract["resources"].items()
-            if resource.get("kind") == "ndarray")
+            if resource.get("kind") == "ndarray" and name not in self._borrowed)
 
     def resource(self, name):
         self._check()
@@ -799,6 +856,19 @@ class ComponentInstance:
         self._check()
         return self.resource(self._component.resource_name(path, member=member))
 
+    def borrow(self, name):
+        """Expose a qualified Dense member without transferring group ownership.
+
+        The source remains responsible for initialization, reset and close.
+        Borrowing does not copy state or create a second group layout recipe.
+        """
+        with self._component._module._runtime._lock:
+            self._check()
+            key = self._component._aliases[name]
+            if self._component.contract["resources"][key].get("kind") is not None:
+                raise ValueError("External Field inputs require an owned Dense SNode member")
+            return _FieldInputBinding(self, key)
+
     def initialize(self, data=None, *, zero=()):
         with self._component._module._runtime._lock:
             self._initialize(data, zero=zero)
@@ -810,6 +880,8 @@ class ComponentInstance:
         selected = {}
         for name, value in dict(data or {}).items():
             key = self._component._aliases[name]
+            if key in self._borrowed:
+                raise ValueError("External Field inputs must be initialized by their source owner")
             if key not in self._resources or key not in self._component._dense_upload_resources:
                 raise ValueError("Sparse model data must use a declared numerical initializer, not a dense byte upload")
             if key in selected:
@@ -817,14 +889,35 @@ class ComponentInstance:
             selected[key] = value
         for name in zero:
             key = self._component._aliases[name]
+            if key in self._borrowed:
+                raise ValueError("External Field inputs must be reset by their source owner")
             if key not in self._resources or key not in self._component._dense_upload_resources:
                 raise ValueError("Sparse reset requires the original component reset entry or a new empty instance")
             if key in selected:
                 raise ValueError("Initialization repeats an aliased component resource")
             selected[key] = bytes(self._resources[key].nbytes)
+        if selected:
+            self._state_generation += 1
         for name, value in selected.items():
             self._resources[name].write(value)
             self._initialized.add(name)
+
+    def _input_owners(self, execution_domain):
+        for binding in self._borrowed.values():
+            binding._check()
+        owners = tuple(dict.fromkeys(binding.owner for binding in self._borrowed.values()))
+        for owner in owners:
+            owner._check()
+            if owner._has_live_bindings() and execution_domain is not owner._binding_domain:
+                raise ValueError("External Field input state requires the same ordered execution domain")
+        return owners
+
+    @staticmethod
+    def _retain_owners(call, owners, execution_domain):
+        for owner in owners:
+            call._retain_binding_owner(owner)
+            owner._prepared.add(call)
+            owner._binding_domain = execution_domain
 
     def _has_live_bindings(self):
         runtime = self._component._module._runtime
@@ -845,12 +938,13 @@ class ComponentInstance:
             if self._initialized != set(self._resources):
                 raise ValueError("Component resources require explicit consumer initialization before preparation")
             plan = self._component._operation_plan(operation)
+            input_owners = self._input_owners(execution_domain)
             bindings = self._bindings(plan, values, dimensions, arguments)
             call = self._component._module.prepare_execution(
                 plan, bindings, execution_domain=execution_domain, snode_instance=self._fixed_state
             )
             try:
-                call._retain_binding_owner(self)
+                self._retain_owners(call, (self, *input_owners), execution_domain)
             except BaseException:
                 call.close()
                 raise
@@ -950,17 +1044,32 @@ class ComponentInstance:
                 self._transfer_active = True
             try:
                 with ExitStack() as owners:
-                    domain = (owners.enter_context(runtime.execution_domain(capacity=1, instance_capacity=1))
-                              if runtime.arch == "cuda" else None)
+                    with runtime._lock:
+                        domains = {binding.owner._binding_domain for binding in self._borrowed.values()
+                                   if binding.owner._has_live_bindings()}
+                        if len(domains) > 1:
+                            raise ValueError("External Field inputs require one ordered execution domain")
+                        # Preserve the source's established ordering. A cold
+                        # reader must not create a competing CUDA stream.
+                        domain = (next(iter(domains)) if domains else
+                                  owners.enter_context(runtime.execution_domain(capacity=1, instance_capacity=1))
+                                  if runtime.arch == "cuda" else None)
                     call = owners.enter_context(component._module.prepare_execution(
                         plan, bindings, execution_domain=domain, snode_instance=self._fixed_state))
                     with runtime._lock:
+                        self._retain_owners(call, self._input_owners(domain), domain)
                         self._model_initialized = False
+                        self._state_generation += 1
                     call.initialize()
                     if domain is None:
                         call.run()
+                        if self._borrowed and runtime.arch == "cuda":
+                            runtime.wait()
                     else:
-                        with closing(call.submit()) as ticket:
+                        ticket = call.submit()
+                        if ticket is None:
+                            raise RuntimeError("Execution domain is full during component initialization")
+                        with closing(ticket):
                             ticket.wait()
                 with runtime._lock:
                     self._model_initialized = finish
@@ -971,6 +1080,28 @@ class ComponentInstance:
     def close(self):
         with self._close_lock:
             self._close()
+
+    def retire_bindings(self):
+        """Revoke and close this instance's prepared readers/writers, keeping state.
+
+        Cold model reset can use this before initialization. Released domain
+        instances remain owned by their domain and still block reset until
+        retired there; this method never closes a caller-owned execution domain.
+        """
+        runtime = self._component._module._runtime
+        with self._close_lock:
+            with runtime._lock:
+                self._check()
+                if self._transfer_active:
+                    raise RuntimeError("Component Field transfer is in progress")
+                self._retiring_bindings = True
+                calls = tuple(self._prepared)
+            try:
+                for call in calls:
+                    call.close()
+            finally:
+                with runtime._lock:
+                    self._retiring_bindings = False
 
     def _close(self):
         runtime = self._component._module._runtime
@@ -983,8 +1114,9 @@ class ComponentInstance:
         # retiring its accepted domain work. Do not enclose it in that lock.
         for call in calls:
             call.close()
-        for resource in self._resources.values():
-            resource.close()
+        for name, resource in self._resources.items():
+            if name not in self._borrowed:
+                resource.close()
         for group in self._groups.values():
             group.close()
         if self._fixed_state is not None:

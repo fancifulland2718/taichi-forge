@@ -9,6 +9,7 @@ import json
 
 from taichi_forge.aot._component import (
     Array,
+    _ExternalField,
     DenseField,
     Dimension,
     RuntimeValue,
@@ -313,6 +314,8 @@ class _GraphCapture:
             dtype=str(element.scalar_type) if not layout else "struct", element_shape=element.shape, layout=layout,
             aliases=sorted(aliases), access="read_write", effects_precision="conservative",
             initialization=getattr(value, "_logical_resource_declaration", {}).get("initialization", "consumer_explicit"))
+        if isinstance(declaration, _ExternalField):
+            resource.update(ownership="external", initialization="external")
         previous = self.resources.get(identity)
         if previous is not None:
             if {k: v for k, v in previous.items() if k != "aliases"} != {k: v for k, v in resource.items() if k != "aliases"}:
@@ -991,6 +994,12 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
             access = accesses.get(name)
             resource["access"] = access.value if access is not None else "none"
             resource["effects_precision"] = "compiler_proven"
+        if resource.get("ownership") == "external" and (
+            resource["effects_precision"] != "compiler_proven" or resource["access"] not in ("none", "read")
+        ):
+            raise TaichiCompilationError("External Field inputs require compiler-proven read-only effects")
+    if any(resource.get("ownership") == "external" for resource in contract["resources"].values()):
+        contract["required_capabilities"].append("component_external_field_inputs_v1")
     contract["version"] = 2
     contract["required_capabilities"].append("component_compiler_facts_v1")
     legacy_sort = any(capture.natives[node.name].control_kind == "native_sort" for node in native_nodes)

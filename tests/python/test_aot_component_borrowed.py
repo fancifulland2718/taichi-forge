@@ -13,6 +13,138 @@ from taichi_forge_runtime.aot import Runtime
 from tests import test_utils
 
 
+@ti.data_oriented
+class _InputSource:
+    def __init__(self, n, padding):
+        self.n, self.padding = n, padding
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        node = scope.dense(ti.i, scope.dim("n"))
+        scope.payload = scope.field(ti.f32, shape=scope.dim("n"), placement=node)
+        scope.neighbor = scope.field(ti.f32, shape=scope.dim("n"), placement=node)
+        scope.padding_state = scope.field(ti.i32, shape=scope.dim("padding"))
+        self.tree = builder.finalize()
+
+    @ti.kernel
+    def advance(self):
+        for i in self.payload:
+            self.payload[i] += 1
+
+    def record(self, builder):
+        builder.dispatch(self.advance)
+
+
+@ti.data_oriented
+class _InputReader:
+    def __init__(self, source):
+        self.count = source.n
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow("state", source.payload, dimensions={"n": scope.dim("count")}, external=True)
+        scope.borrow("alias", source.payload, dimensions={"n": scope.dim("count")}, external=True)
+        scope.output = scope.ndarray(ti.f32, shape=scope.dim("count"), initialization="zero")
+
+    @ti.kernel
+    def render(self):
+        for i in self.state:
+            self.output[i] = self.state[i] + self.alias[i]
+
+    @ti.kernel
+    def bad_write(self):
+        self.alias[0] = 3
+
+    def record(self, builder):
+        builder.dispatch(self.render)
+
+    def bad_record(self, builder):
+        builder.dispatch(self.bad_write)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_external_field_input_keeps_independent_roots_and_source_lifetime(tmp_path):
+    source = _InputSource(1, 2)
+    reader = _InputReader(source)
+    environment = Component.from_owner(reader)
+    code = environment.compile(reader.render)
+    other = _InputReader(_InputSource(13, 29))
+    assert Component.from_owner(other).compile(other.render) is code
+    scope = ti.experimental.ResourceScope(other)
+    scope.borrow("aaa_unused", other.state, dimensions={"n": scope.dim("count")}, external=True)
+    assert Component.from_owner(other).compile(other.render) is code
+    assert not code.contract["groups"]
+    assert "padding" not in code.contract["dimensions"]
+    module = ti.aot.Module()
+    Component.from_owner(source).compile_graph(source.record, host_resources=(source.neighbor, source.padding_state)).export(module, "solver")
+    root = environment.compile_graph(reader.record)
+    assert not root.contract["groups"]
+    assert len(root.contract["resources"]) == 2  # input alias + own output
+    root.export(module, "renderer")
+    path = tmp_path / "independent.tcm"
+    module.archive(str(path))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime, runtime.load_module(path) as loaded:
+        solver = loaded.component("solver")
+        renderer = loaded.component("renderer")
+        with solver.instantiate(dict(n=13, padding=29)) as state:
+            state.initialize(dict(payload=np.arange(13, dtype=np.float32),
+                                  neighbor=np.full(13, -7, np.float32), padding_state=np.full(29, 17, np.int32)))
+            binding = state.borrow("payload")
+            with pytest.raises(ValueError, match="cover"):
+                renderer.instantiate(dict(count=13))
+            with pytest.raises(ValueError, match="dtype/shape"):
+                renderer.instantiate(dict(count=7), inputs={"state": binding})
+            with pytest.raises(ValueError, match="distinct"):
+                renderer.instantiate(dict(count=13), inputs={"state": binding, "alias": binding})
+            with pytest.raises(ValueError, match="dtype/shape"):
+                renderer.instantiate(dict(count=13), inputs={"state": state.borrow("padding_state")})
+            with Runtime(backend) as foreign, foreign.load_module(path) as foreign_module:
+                with pytest.raises(ValueError, match="different AOT runtime"):
+                    foreign_module.component("renderer").instantiate(dict(count=13), inputs={"state": binding})
+            frame = renderer.instantiate(dict(count=13), inputs={"state": binding})
+            assert frame.layout == {}
+            assert frame.nbytes == 13 * 4
+            with pytest.raises(ValueError, match="source owner"):
+                frame.initialize(zero=["state"])
+            with frame.prepare() as draw:
+                draw.run()
+                np.testing.assert_array_equal(np.frombuffer(frame.resource("output").read(), np.float32), np.arange(13) * 2)
+                with pytest.raises(RuntimeError, match="cold boundary"):
+                    state.initialize(zero=["payload"])
+                with state.prepare() as step:
+                    step.run()
+                draw.run()
+                np.testing.assert_array_equal(np.frombuffer(frame.resource("output").read(), np.float32), (np.arange(13) + 1) * 2)
+                with solver.instantiate(dict(n=13, padding=29)) as peer:
+                    peer.initialize(zero=solver.contract["resources"])
+                    with renderer.instantiate(dict(count=13), inputs={"state": peer.borrow("payload")}) as peer_frame:
+                        with peer_frame.prepare() as peer_draw:
+                            peer_draw.run()
+                            draw.run()
+                        np.testing.assert_array_equal(np.frombuffer(peer_frame.resource("output").read(), np.float32), [0] * 13)
+                        np.testing.assert_array_equal(np.frombuffer(frame.resource("output").read(), np.float32), (np.arange(13) + 1) * 2)
+            frame.close()
+            np.testing.assert_array_equal(np.frombuffer(state.resource("neighbor").read(), np.float32), [-7] * 13)
+            np.testing.assert_array_equal(np.frombuffer(state.resource("padding_state").read(), np.int32), [17] * 29)
+            with state.prepare() as step:
+                step.run()
+            state.initialize(zero=["payload"])
+            with pytest.raises(RuntimeError, match="stale"):
+                renderer.instantiate(dict(count=13), inputs={"state": binding})
+            with renderer.instantiate(dict(count=13), inputs={"state": state.borrow("payload")}) as frame:
+                draw = frame.prepare()
+                state.close()
+                with pytest.raises(RuntimeError):
+                    draw.run()
+                draw.close()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_external_field_input_rejects_writes():
+    reader = _InputReader(_InputSource(7, 3))
+    with pytest.raises(ti.TaichiCompilationError, match="read-only"):
+        Component.from_owner(reader).compile_graph(reader.bad_record)
+
+
 class _Source:
     def __init__(self, n, m):
         self.n, self.m = n, m
