@@ -2,6 +2,10 @@
 
 [中文](aot_sdk.zh.md)
 
+For the new experiment using existing decorators to separate numerical methods
+from Host `.py`, see [definition-driven package export](package_aot.en.md).
+It currently covers a scalar/Ndarray prototype, not full engine support.
+
 For application artifact selection, producer/consumer cost and package ownership,
 see [AOT deployment profiles](aot_deployment_profiles.en.md).
 

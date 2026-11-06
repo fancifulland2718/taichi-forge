@@ -21,6 +21,8 @@ _component_exports = {
     "ComponentBuildError": "._component_variants",
     "Variant": "._component_variants",
     "build_variants": "._component_variants",
+    "export_package": "._package",
+    "PackageExportError": "._package",
 }
 
 

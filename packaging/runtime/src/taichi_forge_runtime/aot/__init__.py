@@ -32,3 +32,13 @@ __all__ += ["ComponentInfo", "inspect_component"]
 from ._component_variants import ComponentVariantsInfo, inspect_component_variants
 
 __all__ += ["ComponentVariantsInfo", "inspect_component_variants"]
+
+
+def load_package(runtime, directory):
+    """Load an experimental definition package without the numerical frontend."""
+    from ._package import load_package as load
+
+    return load(runtime, directory)
+
+
+__all__ += ["load_package"]

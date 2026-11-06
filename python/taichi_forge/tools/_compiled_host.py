@@ -10,6 +10,26 @@ import copy
 import symtable
 
 
+def decorator_resolver(tree):
+    """Recognize existing DSL decorators, including ordinary import aliases."""
+    aliases, direct = set(), {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            aliases.update(n.asname or n.name for n in node.names if n.name in ("taichi", "taichi_forge"))
+        elif isinstance(node, ast.ImportFrom) and node.module in ("taichi", "taichi_forge"):
+            direct.update((n.asname or n.name, n.name) for n in node.names)
+
+    def kind(decorator):
+        expr = decorator.func if isinstance(decorator, ast.Call) else decorator
+        if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name) and expr.value.id in aliases:
+            return expr.attr
+        if isinstance(expr, ast.Name):
+            return direct.get(expr.id)
+        return None
+
+    return kind
+
+
 def lower_module(source, module_name, *, _constructor=None):
     tree = ast.parse(source)
     symbols = symtable.symtable(source, module_name, "exec")
@@ -21,22 +41,9 @@ def lower_module(source, module_name, *, _constructor=None):
             collect(child)
 
     collect(symbols)
-    aliases, direct = set(), {}
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            aliases.update(n.asname or n.name for n in node.names if n.name in ("taichi", "taichi_forge"))
-        elif isinstance(node, ast.ImportFrom) and node.module in ("taichi", "taichi_forge"):
-            direct.update((n.asname or n.name, n.name) for n in node.names)
+    kind = decorator_resolver(tree)
     if any(isinstance(n, ast.Name) and n.id.startswith("_forge_host_") for n in ast.walk(tree)):
         raise ValueError("The compiled-host producer prefix is already used by this module")
-
-    def kind(decorator):
-        expr = decorator.func if isinstance(decorator, ast.Call) else decorator
-        if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name) and expr.value.id in aliases:
-            return expr.attr
-        if isinstance(expr, ast.Name):
-            return direct.get(expr.id)
-        return None
 
     factories, entries = [], []
 

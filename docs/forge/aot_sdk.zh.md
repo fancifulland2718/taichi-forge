@@ -2,6 +2,9 @@
 
 [English](aot_sdk.en.md)
 
+使用已有装饰器、按方法分离数值代码和 Host `.py` 的新试验见
+[按包定义导出 AOT](package_aot.zh.md)。目前仅覆盖标量/Ndarray 原型，不代表完整引擎支持。
+
 应用产物选择、生产/消费成本和包归属见 [AOT 部署配置](aot_deployment_profiles.zh.md)。
 有界独立 CUDA 队列、精确设备依赖和显式初始化见
 [CUDA 执行域](cuda_execution_domains.zh.md)。开发接口在运行时绑定已保存计划，
