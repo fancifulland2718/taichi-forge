@@ -64,6 +64,12 @@ def test_variant_coverage_uses_existing_code_and_execution_plans(tmp_path):
     assert len(manifest["cases"]) == 3 and len(manifest["exported_kernel_entries"]) == 2
     artifact = tmp_path / "variants.tcm"
     module.archive(str(artifact))
+    built.close()
+    built.close()
+    with pytest.raises(RuntimeError, match="family is closed"):
+        built.select({})
+    with pytest.raises(RuntimeError, match="family is closed"):
+        built.export(module, "closed_family")
     info = inspect_component_variants(artifact, "configured")
     assert info.target == "x64"
     assert info.contract == manifest

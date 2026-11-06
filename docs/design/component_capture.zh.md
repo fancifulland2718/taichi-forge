@@ -51,6 +51,8 @@ Vulkan 产物还提供 `required_device_capabilities()`，直接查询 native GF
 `ti.aot.StaticValue` 可收窄正常声明的合法静态域，`ti.aot.RootOption` 声明 Host 构图选项。
 消费端继续通过独立 `taichi_forge_runtime.aot.Runtime` 的 `module.component(name)` 或
 `module.component_variants(name)` 查询及实例化，不导入这些 producer 类型。
+导出后调用 `built.close()` 释放 Producer 族保留的 Graph 句柄；不必反向解码类型化
+构建报告，也不清空共享编译缓存。
 
 加载前可用 `inspect_component_variants(path, name)` 核对族的案例引用、覆盖报告和实际
 组件合同。`configuration_sources()` 要求全部案例的来源路径一致；`select(configuration)`

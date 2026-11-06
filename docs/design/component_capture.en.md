@@ -76,6 +76,8 @@ catch `ti.aot.ComponentBuildError` to inspect an incomplete build report.
 declares Host recording options. Standalone consumers use
 `taichi_forge_runtime.aot.Runtime` with `module.component(name)` or
 `module.component_variants(name)`; they do not import these producer types.
+After exporting, `built.close()` releases the Producer family's retained Graph
+handles without decoding its typed build report or evicting shared code caches.
 
 Before loading, `inspect_component_variants(path, name)` validates the family's
 case references and coverage against its actual component contracts. Its

@@ -106,6 +106,22 @@ class ComponentVariants:
             configuration for configuration, _ in roots
         ]
         self._report = json.dumps(report, sort_keys=True)
+        self._closed = False
+
+    def close(self):
+        """Release this build's Graph handles after export, retaining code caches.
+
+        Cleanup does not require decoding the configuration report back into
+        producer values. Exported modules keep their own definitions.
+        """
+        if not self._closed:
+            self._closed = True
+            for _, root in self._roots:
+                root._graph.close()
+
+    def _check_open(self):
+        if self._closed:
+            raise RuntimeError("Compiled component family is closed")
 
     @property
     def report(self):
@@ -113,6 +129,7 @@ class ComponentVariants:
 
     def select(self, configuration):
         """Query the compiler-produced root for an already built selection."""
+        self._check_open()
         key = _digest({name: _static_value(value) for name, value in configuration.items()})
         for selection, root in self._roots:
             if _digest(selection) == key:
@@ -120,6 +137,7 @@ class ComponentVariants:
         raise ValueError("No built component variant for this configuration")
 
     def export(self, module, name):
+        self._check_open()
         if not isinstance(name, str) or not name or "\0" in name or name in module._component_families:
             raise ValueError("Component family requires an unused nonempty name")
         if module._runtime is not self._runtime or module._arch.name != self._target:
