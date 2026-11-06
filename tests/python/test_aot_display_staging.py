@@ -38,10 +38,10 @@ def test_float_image_dynamic_aot_and_fixed_jit(tmp_path, monkeypatch, channels, 
                               ti.f32 if channels == 1 else ti.types.vector(channels, ti.f32), ndim=2)
         dst_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.u32, ndim=2)
 
-        def record(builder):
-            record_rgba8_packed_ndarray(builder, src_arg, dst_arg, channels=channels, grayscale=channels == 1)
-
-        code = ti.aot.Component().compile_graph(record)
+        code = ti.aot.Component().compile_graph(
+            record_rgba8_packed_ndarray, image=src_arg, destination=dst_arg,
+            channels=channels, grayscale=channels == 1,
+        )
         code.export(exported, "pack")
     else:
         exported.add_kernel(
