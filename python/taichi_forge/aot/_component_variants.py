@@ -166,8 +166,16 @@ class ComponentVariants:
             # family or an apparently complete module after a failed export.
             module._graph_export_failed = True
             raise
+        # A family can collect explicitly authored roots with different finite
+        # value sets. The union is an admission envelope, never Cartesian
+        # coverage. Keep the original format for equal declaration domains.
+        version = 1 if all(
+            {key: sorted(spec["choices"], key=lambda value: json.dumps(value))
+             for key, spec in root.contract["configuration"].items()} == self._domain
+            for _, root in self._roots
+        ) else 2
         manifest = dict(
-            version=1,
+            version=version,
             name=name,
             target=self._target,
             domain=self._domain,
@@ -175,7 +183,7 @@ class ComponentVariants:
             build_report=self.report,
             exported_kernel_entries=sorted(kernels),
             coverage="exact_requested_configurations",
-            required_capabilities=["component_variant_selection_v1"],
+            required_capabilities=[f"component_variant_selection_v{version}"],
         )
         module._component_families[name] = manifest
         module._content.append("component_family:" + name)
@@ -235,8 +243,12 @@ def build_variants(variants, *, budget=None):
             }
             if domain is None:
                 domain = current_domain
-            elif domain != current_domain:
-                raise ValueError("Component variants declare different finite domains")
+            elif set(domain) != set(current_domain):
+                raise ValueError("Component variants declare different configuration inputs")
+            else:
+                for key, choices in current_domain.items():
+                    distinct = {json.dumps(value): value for value in domain[key] + choices}
+                    domain[key] = [distinct[value] for value in sorted(distinct)]
             identity = _digest(actual)
             if identity in selected:
                 raise ValueError("Component configuration has duplicate or ambiguous recorded roots")

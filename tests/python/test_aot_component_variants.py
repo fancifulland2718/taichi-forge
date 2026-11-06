@@ -38,6 +38,58 @@ def _requests():
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_variant_family_collects_distinct_declared_domains_without_cartesian_coverage(tmp_path):
+    models = [_VariantModel(7, unused_mode=mode) for mode in ("a", "b")]
+    built = build_variants([
+        Variant(_configured(scale=(True,), unused=(model.unused_mode,)), model.record)
+        for model in models
+    ])
+    assert len(built.report["kernel_variants"]) == 1
+    module = ti.aot.Module()
+    manifest = built.export(module, "collected")
+    assert manifest["version"] == 2
+    assert manifest["required_capabilities"] == ["component_variant_selection_v2"]
+    assert len(manifest["cases"]) == 2
+    assert len(manifest["exported_kernel_entries"]) == 1
+    artifact = tmp_path / "collected.tcm"
+    module.archive(str(artifact))
+    built.close()
+    info = inspect_component_variants(artifact, "collected")
+    with Runtime("cpu") as runtime, runtime.load_module(artifact) as loaded:
+        family = loaded.component_variants("collected")
+        for mode in ("a", "b"):
+            configuration = dict(scale=True, extra_stage=False, unused_mode=mode)
+            code = family.select(configuration)
+            assert code.contract == info.select(configuration).contract
+            assert code.contract["configuration"]["unused_mode"]["choices"] == [["str", mode]]
+            with code.instantiate(dict(capacity=11, active=9), configuration=configuration) as instance:
+                instance.initialize(zero=code.contract["resources"])
+                with instance.prepare(values=dict(gravity=[3, 0, 0])) as call:
+                    call.run()
+                assert struct.unpack("<11f", instance.resource("x").read()) == (6,) * 9 + (0,) * 2
+        for selector in (info, family):
+            with pytest.raises(ValueError, match="No exported component variant"):
+                selector.select(dict(scale=True, extra_stage=True, unused_mode="a"))
+            with pytest.raises(ValueError, match="outside its declared domain"):
+                selector.select(dict(scale=1, extra_stage=False, unused_mode="a"))
+    # A family cannot broaden its domain independently of its compiled roots.
+    invalid = tmp_path / "invented_domain.tcm"
+    with ZipFile(artifact) as source, ZipFile(invalid, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            if name == "component_families/collected.json":
+                facts = json.loads(data)
+                facts["domain"]["unused_mode"].append(["str", "invented"])
+                data = json.dumps(facts)
+            target.writestr(name, data)
+    with pytest.raises(ValueError, match="domain differs from its actual compiled roots"):
+        inspect_component_variants(invalid, "collected")
+    with Runtime("cpu") as runtime, runtime.load_module(invalid) as loaded:
+        with pytest.raises(ValueError, match="domain differs from its actual compiled roots"):
+            loaded.component_variants("collected")
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_build_has_no_implicit_configuration_or_kernel_limit():
     # Cross the former default configuration ceiling while compiling just one
     # numerical entry. Host choices still have an explicit finite legal domain.

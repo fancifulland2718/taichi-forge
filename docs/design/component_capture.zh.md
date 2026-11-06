@@ -119,7 +119,10 @@ identity 比较明确拒绝。未使用成员不进入数值代码身份。局�
 Host 构图选择，即使没有 Kernel 读取它。Host 分支、模板调度次数及独立布局假设不能
 标成 kernel-only；收窄域时不得更改该策略。成功的 family 报告在
 `declaration_configurations` 保留完整声明快照，requested/completed 覆盖及选择使用
-实际准入配置；同一 family 仍要求共同准入域，重复选择明确拒绝。这不自动追踪
+实际准入配置。同一 family 要求相同准入输入名；各根可以声明不同的有限 choices，
+由 family v2 记录其并集，但只允许显式构建的完整配置，不能据此推导笛卡尔积覆盖。
+消费端核对并集与实际根一致，保留每根原有 guard，拒绝额外选择及重复配置；相同域
+仍导出 v1。代码共享继续取决于实际数值依赖与 ABI，不由这个并集决定。这不自动追踪
 Python Host 读取，也不推导容量约束。
 
 正常构造时可用 `scope.value("gravity", ti.types.vector(3, ti.f32))` 声明动态值，

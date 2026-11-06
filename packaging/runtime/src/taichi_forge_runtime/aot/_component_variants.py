@@ -39,11 +39,11 @@ class _FamilySelection:
                 "coverage",
                 "required_capabilities",
             }
-            or contract["version"] != 1
+            or contract["version"] not in (1, 2)
             or contract["name"] != name
             or contract["target"] != target
             or contract["coverage"] != "exact_requested_configurations"
-            or contract["required_capabilities"] != ["component_variant_selection_v1"]
+            or contract["required_capabilities"] != [f"component_variant_selection_v{contract['version']}"]
         ):
             raise ValueError("Unsupported component family contract")
         self._choices, self._components = {}, {}
@@ -56,6 +56,7 @@ class _FamilySelection:
             self._choices[key] = set(normalized)
         if not self._choices or not contract["cases"]:
             raise ValueError("Component family has no declared configurations")
+        actual_domain = {name: set() for name in self._choices}
         for case in contract["cases"]:
             if set(case) != {"configuration", "root", "semantic_key"}:
                 raise ValueError("Invalid component family case")
@@ -66,18 +67,27 @@ class _FamilySelection:
             component = get_component(case["root"])
             facts = component.contract
             actual = facts.get("configuration", {})
+            choices = {
+                name: {static_key(read_static_key(item)) for item in spec["choices"]}
+                for name, spec in actual.items()
+            }
             if (
                 facts["semantic_key"] != case["semantic_key"]
                 or facts["target"] != target
                 or set(actual) != set(self._choices)
                 or any(
                     static_key(read_static_key(spec["selected"])) != static_key(values[name])
-                    or {static_key(read_static_key(item)) for item in spec["choices"]} != self._choices[name]
+                    or not choices[name].issubset(self._choices[name])
+                    or (contract["version"] == 1 and choices[name] != self._choices[name])
                     for name, spec in actual.items()
                 )
             ):
                 raise ValueError("Component family differs from its actual compiled root")
+            for name, values in choices.items():
+                actual_domain[name].update(values)
             self._components[key] = component
+        if actual_domain != self._choices:
+            raise ValueError("Component family domain differs from its actual compiled roots")
         report = contract["build_report"]
         if (
             report.get("version") != 1

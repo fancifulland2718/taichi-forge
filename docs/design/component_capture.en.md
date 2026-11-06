@@ -158,9 +158,14 @@ even when no Kernel reads them. Do not mark Host branches, template-dispatch
 counts or independent layout assumptions as kernel-only. Domain overlays must
 preserve this policy. Family build reports retain full declaration snapshots in
 `declaration_configurations`, while requested/completed coverage and selection
-use the admitted root configurations. Families still require a common admitted
-domain and reject ambiguous duplicate selections. This is dependency projection,
-not automatic tracing of Python Host reads or inference of capacity constraints.
+use the admitted root configurations. Families require the same admission input
+names, but individual roots may declare different finite choices. Family v2 records
+their union and selects only explicitly built complete configurations, never a
+Cartesian product. Consumers verify the union against the actual roots and retain
+each root's guards; additional choices and ambiguous duplicates are rejected.
+Equal domains still export v1. Numerical dependencies and ABI, rather than this
+union, determine code sharing. This does not trace Python Host reads or infer
+capacity constraints.
 
 Normal constructors can declare dynamic values with
 `scope.value("gravity", ti.types.vector(3, ti.f32))` and finite static domains with
