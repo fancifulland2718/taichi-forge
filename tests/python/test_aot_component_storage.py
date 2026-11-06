@@ -49,6 +49,55 @@ def test_shared_records_are_exact_and_do_not_alias():
     assert json.loads(encode_contract_documents(tiny)["components/a.json"]) == tiny["components/a.json"]
 
 
+def test_local_specializations_share_layout_contracts_without_sharing_state():
+    rng = random.Random(71)
+    # Two local algorithm choices keep distinct code/guards but exactly the
+    # same large resource layout, as normal temporal-filter variants do.
+    resources = {f"r{index}": dict(dtype="f32", shape=["n"],
+                                  provenance=rng.randbytes(400).hex()) for index in range(100)}
+    first = dict(name="linear", target="cpu", semantic_key="first",
+                 configuration={"filter": "linear"}, resources=resources,
+                 groups={"state": dict(members=list(resources))},
+                 compilation={"input_sources": {"resources": {
+                     name: {"member": {"kind": "attribute", "path": [value["provenance"]]}}
+                     for name, value in resources.items()}}},
+                 entries=[{"code": "resolve_linear"}])
+    second = deepcopy(first)
+    second.update(name="cubic", semantic_key="second", configuration={"filter": "cubic"},
+                  entries=[{"code": "resolve_cubic"}])
+    originals = {"components/linear.json": first, "components/cubic.json": second}
+    encoded = encode_contract_documents(originals)
+    document = json.loads(encoded["components/linear.json"])
+    assert document["storage_format"] == "component_contract_records_v2"
+    assert ["resources"] in [path for path, _ in document["references"]]
+    assert ["compilation", "input_sources"] in [path for path, _ in document["references"]]
+    assert document["contract"]["configuration"] == {"filter": "linear"}
+    restored = {name: decode_contract_document(json.loads(encoded[name]), encoded.__getitem__)
+                for name in originals}
+    assert restored == originals
+    restored["components/linear.json"]["resources"]["r0"]["shape"][0] = "mutated"
+    assert restored["components/cubic.json"] == second
+    assert decode_contract_document(document, encoded.__getitem__) == first
+    for path in (["target"], ["semantic_key"], ["configuration"], ["resources", "r0"]):
+        bad = deepcopy(document)
+        bad["references"][0][0] = path
+        with pytest.raises(ValueError, match="record path"):
+            decode_contract_document(bad, encoded.__getitem__)
+    # An old-format reader must not silently interpret new layout references.
+    bad = deepcopy(document)
+    bad["storage_format"] = "component_contract_records_v1"
+    with pytest.raises(ValueError, match="record path"):
+        decode_contract_document(bad, encoded.__getitem__)
+    bad = deepcopy(document)
+    bad["contract"]["configuration"]["filter"] = "cubic"
+    with pytest.raises(ValueError, match="contract digest"):
+        decode_contract_document(bad, encoded.__getitem__)
+    # Existing v1 records remain supported without upgrading unrelated output.
+    legacy_originals, legacy = _documents()
+    assert json.loads(legacy["components/first.json"])["storage_format"] == "component_contract_records_v1"
+    assert decode_contract_document(json.loads(legacy["components/first.json"]), legacy.__getitem__) == legacy_originals["components/first.json"]
+
+
 @pytest.mark.parametrize("mutation, message", [
     (lambda doc: doc.update(storage_format="future"), "Unsupported.*storage"),
     (lambda doc: doc["references"][0].__setitem__(1, "../../outside"), "record reference"),

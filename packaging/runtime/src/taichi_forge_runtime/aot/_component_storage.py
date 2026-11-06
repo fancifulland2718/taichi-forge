@@ -13,6 +13,8 @@ import zlib
 
 
 _FORMAT = "component_contract_records_v1"
+_LAYOUT_FORMAT = "component_contract_records_v2"
+_LAYOUT_SECTIONS = frozenset(("resources", "groups", "dimensions", "values"))
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -44,6 +46,23 @@ def _records(contract):
     yield from control(contract.get("control"), ("control",))
 
 
+def _layout_records(contract):
+    # A local code specialization need not repeat the common resource/ABI
+    # contract. Store entire exact sections, without canonicalizing names,
+    # dropping guards, or changing the component's semantic identity.
+    for key in sorted(_LAYOUT_SECTIONS):
+        if contract.get(key):
+            yield (key,), contract[key]
+    sources = contract.get("compilation", {}).get("input_sources")
+    if sources:
+        yield ("compilation", "input_sources"), sources
+
+
+def _all_records(contract):
+    yield from _layout_records(contract)
+    yield from _records(contract)
+
+
 def _zip_cost(name, payload):
     compressor = zlib.compressobj(1, zlib.DEFLATED, -15)
     compressed = len(compressor.compress(payload) + compressor.flush())
@@ -68,7 +87,14 @@ def encode_contract_documents(contracts):
     The comparison uses Module.archive's deflate level and includes extra file
     headers. Small contracts may intentionally retain the original representation.
     """
-    return _encode_documents(contracts, _records, _FORMAT, "contract", "component_contracts")
+    legacy = _encode_documents(contracts, _records, _FORMAT, "contract", "component_contracts")
+    layouts = _encode_documents(contracts, _layout_records, _LAYOUT_FORMAT, "contract", "component_contracts")
+    combined = _encode_documents(contracts, _all_records, _LAYOUT_FORMAT, "contract", "component_contracts")
+    # Sharing small sections can lose more ZIP locality/headers than it saves.
+    # Retain v1 (or ordinary documents) unless the complete v2 output is smaller.
+    # Small call-record fragments must not hide gains from the large sections.
+    return min((legacy, layouts, combined), key=lambda documents: sum(
+        _zip_cost(name, value) for name, value in documents.items()))
 
 
 def _encode_documents(contracts, records, storage_format, content_key, directory):
@@ -122,6 +148,8 @@ def _encode_documents(contracts, records, storage_format, content_key, directory
 
 def decode_contract_document(document, read_bytes):
     """Expand one component; referenced records are direct JSON, never programs."""
+    if isinstance(document, dict) and document.get("storage_format") == _LAYOUT_FORMAT:
+        return _decode_document(document, read_bytes, _LAYOUT_FORMAT, "contract", "component_contracts", _layout_path)
     return _decode_document(document, read_bytes, _FORMAT, "contract", "component_contracts", _contract_path)
 
 
@@ -129,6 +157,12 @@ def _contract_path(path):
     return (len(path) == 2 and path[0] == "entries" and type(path[1]) is int
             or len(path) == 3 and path[:2] == ["compilation", "entries"] and type(path[2]) is int
             or len(path) > 1 and path[0] == "control")
+
+
+def _layout_path(path):
+    return (_contract_path(path)
+            or len(path) == 1 and path[0] in _LAYOUT_SECTIONS
+            or path == ["compilation", "input_sources"])
 
 
 def _decode_document(document, read_bytes, storage_format, content_key, directory, allowed_path):
@@ -151,7 +185,7 @@ def _decode_document(document, read_bytes, storage_format, content_key, director
                 or not isinstance(reference[1], str) or not _DIGEST.fullmatch(reference[1])):
             raise ValueError("Invalid component record reference")
         path, digest = reference
-        # Only compiler record positions may be shared; identity/header fields
+        # Only declared record positions may be shared; identity/header fields
         # remain in the component document and are validated after expansion.
         if not allowed_path(path):
             raise ValueError("Invalid component record path")

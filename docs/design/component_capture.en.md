@@ -1459,6 +1459,17 @@ selected only when it reduces bytes at the archive's deflate settings, including
 file headers. Small contracts may keep their original representation. `save()` accepts
 the same option; it defaults to false for compatibility with existing consumers.
 
+`component_contract_records_v2` also shares exact complete resources, groups,
+dimensions, values and compilation.input_sources sections. For example, a local
+TAA resolve-filter specialization need not duplicate its common resource/layout
+contract. The builder compares v1, section-only sharing and sections plus call
+records, choosing the smallest compressed representation including file headers.
+Small record overhead cannot hide section-sharing gains. Component names,
+semantic identities and configuration guards remain separate; expanded contracts
+are unchanged and have independent mutable dictionaries. v2 requires its matching
+reader, which also accepts v1. It neither merges instances nor removes necessary
+static algorithm differences.
+
 Runtime inspection and loaded components share one reader. It verifies record digests,
 reference positions and the expanded contract digest, then runs the existing configuration,
 ABI, resource, effects and plan checks. Logical calls receive independent mutable
