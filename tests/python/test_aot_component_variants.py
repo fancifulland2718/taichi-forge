@@ -68,7 +68,7 @@ def test_variant_family_collects_distinct_declared_domains_without_cartesian_cov
                     call.run()
                 assert struct.unpack("<11f", instance.resource("x").read()) == (6,) * 9 + (0,) * 2
         for selector in (info, family):
-            with pytest.raises(ValueError, match="No exported component variant"):
+            with pytest.raises(ValueError, match="No exported component variant.*extra_stage"):
                 selector.select(dict(scale=True, extra_stage=True, unused_mode="a"))
             with pytest.raises(ValueError, match="outside its declared domain"):
                 selector.select(dict(scale=1, extra_stage=False, unused_mode="a"))

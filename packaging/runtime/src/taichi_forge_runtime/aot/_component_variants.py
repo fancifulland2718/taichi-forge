@@ -121,8 +121,16 @@ class _FamilySelection:
         self._check()
         key = self._admit(dict(configuration))
         if key not in self._components:
+            selected = dict(key)
+            differences = [
+                {name for name, value in candidate if selected[name] != value}
+                for candidate in self._components
+            ]
+            distance = min(map(len, differences))
+            closest = sorted(set().union(*(names for names in differences if len(names) == distance)))
             raise ValueError(
-                "No exported component variant for this legal configuration; rebuild its declared coverage"
+                "No exported component variant for this legal configuration; rebuild its declared coverage. "
+                "Closest exported selections differ at: " + ", ".join(closest)
             )
         return self._components[key]
 
