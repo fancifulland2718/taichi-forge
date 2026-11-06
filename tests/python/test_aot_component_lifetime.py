@@ -152,8 +152,9 @@ def test_external_field_initializer_preserves_source_ordering(tmp_path, independ
         assert struct.unpack("<7f", sources[0].resource("neighbor").read()) == (-7,) * 7
 
 
+@pytest.mark.parametrize("cold_mutation", [False, True], ids=["close", "cold-mutation"])
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_external_field_source_retirement_and_released_call_owners(tmp_path):
+def test_external_field_source_retirement_and_released_call_owners(tmp_path, cold_mutation):
     path = _export_external_inputs(tmp_path)
     with Runtime("cuda") as runtime, runtime.load_module(path) as loaded:
         with runtime.execution_domain(capacity=8, instance_capacity=4) as domain:
@@ -179,7 +180,10 @@ def test_external_field_source_retirement_and_released_call_owners(tmp_path):
 
             def close_source():
                 try:
-                    source.close()
+                    if cold_mutation:
+                        source.retire_bindings(invalidate_borrows=True)
+                    else:
+                        source.close()
                 except BaseException as error:
                     errors.append(error)
 
@@ -191,7 +195,7 @@ def test_external_field_source_retirement_and_released_call_owners(tmp_path):
                 acquired = runtime._lock.acquire(timeout=2)
                 assert acquired, "Source retirement held the Runtime submission lock"
                 runtime._lock.release()
-                with pytest.raises(RuntimeError, match="closed|retiring"):
+                with pytest.raises(RuntimeError, match="closed|retiring|stale"):
                     draw.submit()
                 tickets.append(peer_call.submit())
                 assert tickets[-1] is not None
@@ -201,9 +205,14 @@ def test_external_field_source_retirement_and_released_call_owners(tmp_path):
                 runtime._api.call = original
             assert not worker.is_alive() and not errors
             assert tickets[0].done()
+            if cold_mutation:
+                assert struct.unpack("<7f", source.resource("payload").read()) == tuple(range(7))
+                with pytest.raises(RuntimeError, match="stale"):
+                    reader.prepare(execution_domain=domain)
             tickets[-1].wait()
             assert struct.unpack("<13f", peer.resource("payload").read()) == tuple(i + 1 for i in range(13))
             reader.close()
+            source.close()
             draw.close()
             peer_call.close()
             peer.close()

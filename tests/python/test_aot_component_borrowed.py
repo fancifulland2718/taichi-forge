@@ -123,6 +123,40 @@ def test_external_field_input_keeps_independent_roots_and_source_lifetime(tmp_pa
                         np.testing.assert_array_equal(np.frombuffer(peer_frame.resource("output").read(), np.float32), [0] * 13)
                         np.testing.assert_array_equal(np.frombuffer(frame.resource("output").read(), np.float32), (np.arange(13) + 1) * 2)
             frame.close()
+            # Retiring calls alone preserves the port; a cold numerical write
+            # boundary must also revoke old tokens and unprepared consumers.
+            with renderer.instantiate(dict(count=13), inputs={"state": binding}) as frame:
+                draw = frame.prepare()
+                draw.run()
+                with pytest.raises(TypeError, match="bool"):
+                    state.retire_bindings(invalidate_borrows=1)
+                draw.run()  # rejected retirement does not disturb live calls
+                state.retire_bindings()
+                with pytest.raises(RuntimeError):
+                    draw.run()
+                draw = frame.prepare()
+                step = state.prepare()
+                step.run()
+                draw.run()
+                state.retire_bindings(invalidate_borrows=True)
+                with pytest.raises(RuntimeError):
+                    step.run()
+                with pytest.raises(RuntimeError):
+                    draw.run()
+                with pytest.raises(RuntimeError, match="stale"):
+                    frame.prepare()
+                with pytest.raises(RuntimeError, match="stale"):
+                    renderer.instantiate(dict(count=13), inputs={"state": binding})
+            # Retirement drains accepted work and retains source storage. New
+            # calls and new ports can use the same instance without a reload.
+            np.testing.assert_array_equal(np.frombuffer(state.resource("payload").read(), np.float32),
+                                          np.arange(13) + 2)
+            with renderer.instantiate(dict(count=13), inputs={"state": state.borrow("payload")}) as frame:
+                with state.prepare() as step, frame.prepare() as draw:
+                    step.run()
+                    draw.run()
+                np.testing.assert_array_equal(np.frombuffer(frame.resource("output").read(), np.float32),
+                                              (np.arange(13) + 3) * 2)
             np.testing.assert_array_equal(np.frombuffer(state.resource("neighbor").read(), np.float32), [-7] * 13)
             np.testing.assert_array_equal(np.frombuffer(state.resource("padding_state").read(), np.int32), [17] * 29)
             with state.prepare() as step:

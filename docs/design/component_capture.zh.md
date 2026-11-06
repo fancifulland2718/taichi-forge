@@ -1182,6 +1182,12 @@ Host 冷重置可先调用 `source.retire_bindings()`，同时退休该源的计
 提前重置，不会自动关闭调用者的执行域。退休期间拒绝新提交，等待时释放 Runtime
 提交锁；退休失败仍受原 live-binding 门禁约束。
 
+若冷写入通过普通 operation 完成（例如批量选定 world 的状态写入），使用
+`source.retire_bindings(invalidate_borrows=True)` 同时撤销已有输入 token，使旧接收
+实例无法再次 prepare。冷写入后重新借用端口并准备调用，包括源的 step 调用。
+默认参数保留 token，正常 step 不推进代际。此操作本身不修改数值状态，也不允许
+冷写入和新 prepare 并发。
+
 这条输入接线支持独立求解与渲染节奏，不生成“求解器 × 渲染器”组合组件，也不
 新增逐 Kernel Host 执行器或通用 Runtime Linker。多个基本组件的原生组合提交仍
 须按已有执行域的实际需求单独资格；有只读端口不代表任意组合已通过。

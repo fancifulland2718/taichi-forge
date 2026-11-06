@@ -1450,6 +1450,24 @@ Analytic ray results, typed/occlusion queries, both `graph_fixed_query` choices,
 ordinary/domain submission and in-flight table closure are checked. Alpha and
 micromap qualification is unchanged; this is not a throughput claim.
 
+### Independent Field inputs and cold state changes
+
+Read-only external Field ports bind an independent consumer to qualified Dense
+members owned by a source component instance. `source.borrow(name)` returns a
+generation-bound input for `consumer.instantiate(dimensions, inputs={...})`.
+Type, shape, native layout and Runtime ownership remain checked. Source storage
+stays with the source; consumer output, history and scratch stay independent.
+
+`source.retire_bindings()` closes its prepared writers and external readers while
+keeping storage and existing input tokens. Cold mutations implemented by ordinary
+operations, such as a selected-world state write, can instead call
+`source.retire_bindings(invalidate_borrows=True)`. This also revokes existing input
+tokens and prevents old consumers from preparing again. Obtain fresh inputs after
+the cold mutation and prepare new calls, including the source step. Normal steps
+do not invalidate inputs. Accepted work retires without holding the Runtime
+submission lock; caller-owned execution domains remain open. This operation does
+not mutate state or authorize concurrent cold mutation and new preparation.
+
 ### Shared compiler records in release contracts
 
 `Module.archive(path, shared_component_contracts=True)` can store repeated complete

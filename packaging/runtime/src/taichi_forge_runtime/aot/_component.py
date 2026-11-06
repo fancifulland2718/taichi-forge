@@ -1081,13 +1081,20 @@ class ComponentInstance:
         with self._close_lock:
             self._close()
 
-    def retire_bindings(self):
+    def retire_bindings(self, *, invalidate_borrows=False):
         """Revoke and close this instance's prepared readers/writers, keeping state.
 
         Cold model reset can use this before initialization. Released domain
         instances remain owned by their domain and still block reset until
         retired there; this method never closes a caller-owned execution domain.
+
+        A cold state mutation implemented by an ordinary operation can request
+        invalidate_borrows=True to revoke existing Field inputs as well. The
+        source state remains intact; consumers must obtain fresh inputs before
+        preparing again. Normal step submission does not use this boundary.
         """
+        if type(invalidate_borrows) is not bool:
+            raise TypeError("invalidate_borrows must be a bool")
         runtime = self._component._module._runtime
         with self._close_lock:
             with runtime._lock:
@@ -1095,6 +1102,8 @@ class ComponentInstance:
                 if self._transfer_active:
                     raise RuntimeError("Component Field transfer is in progress")
                 self._retiring_bindings = True
+                if invalidate_borrows:
+                    self._state_generation += 1
                 calls = tuple(self._prepared)
             try:
                 for call in calls:
