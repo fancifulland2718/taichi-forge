@@ -1888,6 +1888,13 @@ class _Capture:
             layouts = _DenseLayoutValidation(component, owner)
         if _definition(self.kernel.func) != self.entry_definition:
             return "entry definition"
+        # A candidate can come from a different legal component configuration.
+        # Check its captured declarations before reading paths that only exist
+        # in that configuration (including optional record presence guards).
+        for name, schema in self.used.items():
+            declaration = component.declarations.get(name)
+            if declaration is None or declaration.schema != schema:
+                return f"declaration {name!r}"
         for name, length in self.owner_sequence_lengths.items():
             declaration = component.declarations.get(name)
             if not isinstance(declaration, _OwnerSequence) or len(declaration.members) != length:
@@ -1902,10 +1909,8 @@ class _Capture:
                    for method in ("__eq__", "__ne__")):
                 return f"record equality {path!r}"
         arrays = {}
-        for name, schema in self.used.items():
-            declaration = component.declarations.get(name)
-            if declaration is None or declaration.schema != schema:
-                return f"declaration {name!r}"
+        for name in self.used:
+            declaration = component.declarations[name]
             if isinstance(declaration, _OwnerReference) and not declaration.matches(component, owner, name):
                 return f"owner reference {name!r}"
             if isinstance(declaration, Dimension):

@@ -79,6 +79,54 @@ def _environment(*, extra=False):
     )
 
 
+@ti.data_oriented
+class _ConditionalRecord:
+    def __init__(self, enabled):
+        from types import SimpleNamespace
+
+        self.enabled = enabled
+        self.count = 3
+        scope = ti.experimental.ResourceScope(self)
+        scope.static("enabled", choices=(False, True))
+        scope.output = scope.field(ti.i32, shape=scope.dim("count"), initialization="zero")
+        if enabled:
+            child = scope.child("data", SimpleNamespace(value=17))
+            child.static("value", choices=(17,))
+
+    @ti.kernel
+    def step(self):
+        if ti.static(self.enabled):
+            if ti.static(self.data is not None):
+                for i in range(self.count):
+                    self.output[i] = self.data.value + i
+        else:
+            for i in range(self.count):
+                self.output[i] = -i
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_candidate_record_dependencies_may_be_absent_in_another_configuration():
+    first = _ConditionalRecord(True)
+    active = Component.from_owner(first)
+    first_code = active.compile(first.step)
+    second = _ConditionalRecord(False)
+    inactive = Component.from_owner(second)
+    second_code = inactive.compile(second.step)
+    assert second_code.semantic_key != first_code.semantic_key
+    second_code.run(inactive, second)
+    np.testing.assert_array_equal(second.output.to_numpy(), [0, -1, -2])
+    assert inactive.compile(second.step) is second_code
+    assert active.compile(first.step) is first_code
+    first_code.run(active, first)
+    np.testing.assert_array_equal(first.output.to_numpy(), [17, 18, 19])
+    with pytest.raises(ValueError, match="dependencies"):
+        first_code.run(inactive, second)
+    # A missing declaration is still an error if the numerical branch needs it.
+    second.enabled = True
+    with pytest.raises(ti.TaichiCompilationError, match="undeclared capture.*data"):
+        inactive.compile(second.step)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_record_capture_preserves_dynamic_leaves_and_optional_variant(tmp_path):
     first, second = _Model(7, 5), _Model(19, 17, gain=3)
