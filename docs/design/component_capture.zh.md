@@ -52,6 +52,11 @@ Vulkan 产物还提供 `required_device_capabilities()`，直接查询 native GF
 消费端继续通过独立 `taichi_forge_runtime.aot.Runtime` 的 `module.component(name)` 或
 `module.component_variants(name)` 查询及实例化，不导入这些 producer 类型。
 
+加载前可用 `inspect_component_variants(path, name)` 核对族的案例引用、覆盖报告和实际
+组件合同。`configuration_sources()` 要求全部案例的来源路径一致；`select(configuration)`
+接收完整的类型化配置并返回普通 `ComponentInfo`。冷查询与加载后的族共用精确选择规则，
+但不替代原生加载、Plan/Kernel 闭包及资源准入；查询不加载原生库、设备状态或数值前端。
+
 模块常量可通过 `typing.Final` 注解显式声明静态角色，例如
 `MATERIAL_ID: Final[int] = 3`，值限于不可变标量和元组。普通 JIT 数值表达式保持原样；
 入口及嵌套 helper 的实际读取才将带类型的值纳入代码身份和可查询的 `constants`。

@@ -1,14 +1,17 @@
 """Variant coverage, actual code reuse, bounded builds and cold selection."""
 
 import json
+import os
 import struct
+import subprocess
+import sys
 from zipfile import ZipFile
 
 import pytest
 import taichi_forge as ti
 from taichi_forge.aot import BuildBudget, Component, ComponentBuildError, RootOption, Variant, build_variants
 from taichi_forge.lang import kernel_impl
-from taichi_forge_runtime.aot import Runtime
+from taichi_forge_runtime.aot import Runtime, inspect_component_variants
 from tests import test_utils
 from tests.python.test_aot_component_configuration import _ConfiguredModel, _configured
 
@@ -61,9 +64,13 @@ def test_variant_coverage_uses_existing_code_and_execution_plans(tmp_path):
     assert len(manifest["cases"]) == 3 and len(manifest["exported_kernel_entries"]) == 2
     artifact = tmp_path / "variants.tcm"
     module.archive(str(artifact))
+    info = inspect_component_variants(artifact, "configured")
+    assert info.target == "x64"
+    assert info.contract == manifest
     with Runtime("cpu") as runtime:
         loaded = runtime.load_module(artifact)
         variants = loaded.component_variants("configured")
+        assert variants.configuration_sources() == info.configuration_sources()
         base = dict(scale=True, extra_stage=False, unused_mode="a", include_capacity=False)
         with pytest.raises(ValueError, match="No exported component variant"):
             variants.select({**base, "unused_mode": "b"})
@@ -72,6 +79,7 @@ def test_variant_coverage_uses_existing_code_and_execution_plans(tmp_path):
         for mode, capacity in (("a", False), ("b", True)):
             configuration = {**base, "unused_mode": mode, "include_capacity": capacity}
             selected = variants.select(configuration)
+            assert info.select(configuration).contract == selected.contract
             with variants.instantiate(dict(capacity=41, active=37), configuration=configuration) as instance:
                 instance.initialize(zero=selected.contract["resources"])
                 with instance.prepare(values=dict(gravity=[5, 7, 9])) as call:
@@ -106,6 +114,86 @@ def test_variant_coverage_uses_existing_code_and_execution_plans(tmp_path):
     with Runtime("cpu") as runtime:
         with pytest.raises(ValueError, match="actual compiled root"):
             runtime.load_module(bad).component_variants("configured")
+    with pytest.raises(ValueError, match="actual compiled root"):
+        inspect_component_variants(bad, "configured")
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_family_inspection_preserves_cold_selection_and_source_provenance(tmp_path):
+    built = build_variants(_requests())
+    module = ti.aot.Module()
+    manifest = built.export(module, "configured")
+    artifact = tmp_path / "variants.tcm"
+    module.archive(str(artifact), shared_component_contracts=True, shared_execution_plans=True)
+    info = inspect_component_variants(artifact, "configured")
+    base = dict(scale=True, extra_stage=False, unused_mode="a", include_capacity=False)
+    with pytest.raises(ValueError, match="configuration inputs differ"):
+        info.select({"scale": True})
+    with pytest.raises(ValueError, match="outside its declared domain"):
+        info.select({**base, "scale": 1})
+    with pytest.raises(ValueError, match="No exported component variant"):
+        info.select({**base, "unused_mode": "b"})
+    sources = info.configuration_sources()
+    sources["scale"]["path"].append("changed")
+    assert info.configuration_sources()["scale"]["path"] == ["scale"]
+    info.contract["cases"].clear()
+    assert len(info.contract["cases"]) == 3
+    with ZipFile(artifact) as archive:
+        directory = tmp_path / "directory"
+        archive.extractall(directory)
+    assert inspect_component_variants(directory, "configured").select(base).contract == info.select(base).contract
+    # A fresh consumer cannot import the numerical frontend or load native code.
+    probe = r'''
+import ctypes, importlib.abc, sys
+class NoFrontend(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, *args):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge'):
+            raise AssertionError('numerical frontend imported')
+sys.meta_path.insert(0, NoFrontend())
+def no_native(*args, **kwargs):
+    raise AssertionError('native library loaded')
+ctypes.CDLL = no_native
+if hasattr(ctypes, 'WinDLL'):
+    ctypes.WinDLL = no_native
+from taichi_forge_runtime.aot import inspect_component_variants
+family = inspect_component_variants(sys.argv[1], 'configured')
+configuration = dict(scale=True, extra_stage=False, unused_mode='a', include_capacity=False)
+assert family.configuration_sources()['scale']['path'] == ['scale']
+family.select(configuration).check_configuration(configuration)
+'''
+    import taichi_forge_runtime
+    from pathlib import Path
+    env = dict(os.environ, PYTHONPATH=str(Path(taichi_forge_runtime.__file__).resolve().parent.parent))
+    subprocess.run([sys.executable, "-B", "-c", probe, str(artifact)], env=env,
+                   check=True, capture_output=True, text=True)
+
+    family_path = directory / "component_families/configured.json"
+    changed = json.loads(json.dumps(manifest))
+    changed["build_report"]["completed_configurations"].pop()
+    family_path.write_text(json.dumps(changed), encoding="utf8")
+    with pytest.raises(ValueError, match="coverage"):
+        inspect_component_variants(directory, "configured")
+    family_path.write_text(json.dumps(manifest), encoding="utf8")
+    # Use ordinary decoded documents to isolate provenance from storage checks.
+    from taichi_forge_runtime._static_values import read_static_key
+    for case in manifest["cases"]:
+        values = {name: read_static_key(value) for name, value in case["configuration"].items()}
+        facts = info.select(values).contract
+        if case is manifest["cases"][0]:
+            facts["compilation"]["configuration_sources"]["scale"]["path"] = ["other_scale"]
+        (directory / "components" / (case["root"] + ".json")).write_text(json.dumps(facts), encoding="utf8")
+    changed_info = inspect_component_variants(directory, "configured")
+    changed_info.select(base).check_configuration(base)
+    with pytest.raises(ValueError, match="different configuration source paths"):
+        changed_info.configuration_sources()
+    # Do not weaken loaded Plan/kernel validation to match the cold query scope.
+    changed = json.loads(json.dumps(manifest))
+    changed["exported_kernel_entries"] = []
+    family_path.write_text(json.dumps(changed), encoding="utf8")
+    inspect_component_variants(directory, "configured").select(base)
+    with Runtime("cpu") as runtime, runtime.load_module(directory) as loaded:
+        with pytest.raises(ValueError, match="coverage"):
+            loaded.component_variants("configured")
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

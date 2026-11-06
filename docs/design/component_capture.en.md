@@ -77,6 +77,14 @@ declares Host recording options. Standalone consumers use
 `taichi_forge_runtime.aot.Runtime` with `module.component(name)` or
 `module.component_variants(name)`; they do not import these producer types.
 
+Before loading, `inspect_component_variants(path, name)` validates the family's
+case references and coverage against its actual component contracts. Its
+`configuration_sources()` query requires identical source paths in every case;
+`select(configuration)` accepts the complete typed configuration and returns an
+ordinary `ComponentInfo`. This shares the loaded family's exact selection rule,
+but does not replace native load, Plan/kernel closure or resource admission.
+No native library, device state or numerical frontend is needed for inspection.
+
 Module constants can opt into static capture with a `typing.Final`
 annotation, for example `MATERIAL_ID: Final[int] = 3`. Only immutable scalars
 and tuples are accepted. Original JIT expressions remain unchanged; actual

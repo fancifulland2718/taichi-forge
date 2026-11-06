@@ -28,3 +28,7 @@ __all__ += ["StaticDType"]
 from ._component_info import ComponentInfo, inspect_component
 
 __all__ += ["ComponentInfo", "inspect_component"]
+
+from ._component_variants import ComponentVariantsInfo, inspect_component_variants
+
+__all__ += ["ComponentVariantsInfo", "inspect_component_variants"]
