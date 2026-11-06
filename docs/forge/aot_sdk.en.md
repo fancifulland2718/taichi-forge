@@ -5644,7 +5644,45 @@ standalone and borrowed runtimes, independent bindings, failure status, and
 exported kernel gradients with explicit symmetric adjoint solves. Provider
 autodiff and the separate cuSOLVERSp sparse route are not included.
 
-### Compiled application hosts (experimental)
+### Python application hosts and AOT delivery
+
+Ordinary Host code that prepares and submits AOT calls can ship as `.py`, without
+Cython or application extension modules. TCM carries kernels and compiled execution
+plans; existing native plan loops and conditions do not move into Python. Examples
+also remain `.py`. Forge Runtime and external providers use their existing loading
+and linking contracts. TCM records references and reconstruction contracts rather
+than copying external shared libraries.
+
+The existing `_host_wheel.py` accepts an explicit Python Host release specification:
+
+```json
+{
+  "version": 2,
+  "host_sources": "host.json",
+  "platform": "win-amd64",
+  "project": "public/pyproject.toml",
+  "files": {"simulation/aot/cuda/application.tcm": "artifacts/application.tcm"},
+  "examples": {"simulation/sdk/examples/scene.py": "public/scene.py"}
+}
+```
+
+`host.json` reuses the existing `source_root`, explicit `modules`, and `aliases`
+closure, including package initializer and alias provenance checks. A legacy
+`toolchain` field does not trigger compilation or version locking on this path.
+The producer rejects recognized numerical DSL definitions, copies original source
+bytes, and records hashes. It does not import the application, rewrite its source,
+or discover extra modules by scanning the source tree. Static checks do not replace
+installed-consumer checks for private numerical sources and frontend dependencies.
+
+Target assets remain platform-specific, so this mode emits `py3-none-<platform>`
+wheels; this does not qualify new platforms or Python versions. `forge-host.json`
+records `forge_python_host` separately from the legacy `forge_compiled_host` format.
+The ordinary `files` channel still rejects undeclared source and native libraries.
+Focused checks cover original bytes and encoding, initializers and aliases, isolated
+consumption, DSL rejection, and the external-library boundary; they do not qualify
+every branch of a complete engine with Python Host sources.
+
+### Compiled application hosts (experimental, optional)
 
 The private producer helper `taichi_forge.tools._compiled_host.lower_module`
 can replace DSL definitions with compiled template constructors while retaining

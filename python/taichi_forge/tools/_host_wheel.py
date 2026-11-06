@@ -1,4 +1,4 @@
-"""Package sealed host extensions with standard Python metadata, without a DSL.
+"""Package explicit Python hosts or sealed extensions without a DSL runtime.
 
 The producer uses PyPA build and setuptools. It never compiles host modules,
 resolves runtime dependencies, imports application code, or bundles Forge.
@@ -21,6 +21,7 @@ import sys
 import sysconfig
 import tempfile
 import time
+import tokenize
 from zipfile import ZipFile
 
 
@@ -101,7 +102,10 @@ def host_payload(layout):
         raise ValueError("A host wheel requires compiled modules")
     for alias, contract in manifest.get("aliases", {}).items():
         _name(alias)
-        if os.path.normcase(alias) in names or set(contract) != {"target", "registered_by"}:
+        if os.path.normcase(alias) in names or set(contract) != {
+            "target",
+            "registered_by",
+        }:
             raise ValueError(f"Invalid host alias contract: {alias}")
         names.add(os.path.normcase(alias))
         canonical = {item["name"] for item in manifest["modules"]}
@@ -119,17 +123,76 @@ def host_payload(layout):
     return manifest, modules, payload
 
 
+def source_payload(filename, *, platform=None):
+    """Read the existing host closure without compiling or importing its modules.
+
+    This is an explicit public-source channel. Numerical definitions must stay
+    in AOT artifacts; ordinary resource files cannot bypass this declaration.
+    """
+    # Reuse the producer's initializer/alias/path checks and DSL recognition.
+    # The SDK also loads this tool by filename rather than as a Python package.
+    if __package__:
+        from ._host_build import read_spec
+        from ._compiled_host import lower_module
+    else:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        try:
+            from _host_build import read_spec
+            from _compiled_host import lower_module
+        finally:
+            sys.path.pop(0)
+    platform = sysconfig.get_platform() if platform is None else platform
+    if platform != sysconfig.get_platform():
+        raise ValueError("Source host payload requires its matching target platform")
+    root, sources, aliases, _ = read_spec(filename)
+    records, payload = [], {}
+    for name, item in sorted(sources.items()):
+        source = _inside(root, item["relative"])
+        raw = source.read_bytes()
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(raw).readline)
+        _, entries = lower_module(raw.decode(encoding), name)
+        if entries:
+            raise ValueError(f"Public Host source must not contain numerical DSL templates: {name}")
+        relative = name.replace(".", "/") + ("/__init__.py" if item["package"] else ".py")
+        digest = _hash(raw)
+        payload[os.path.normcase(relative)] = dict(file=relative, source=source, sha256=digest)
+        records.append(
+            dict(
+                name=name,
+                file=relative,
+                bytes=len(raw),
+                sha256=digest,
+                source_sha256=digest,
+                dsl_entries=[],
+            )
+        )
+    manifest = dict(
+        version=1,
+        kind="forge_python_host",
+        platform=platform,
+        modules=records,
+        aliases=aliases,
+    )
+    return root, manifest, [], payload
+
+
 def release_inputs(filename):
     filename = Path(filename).resolve()
     spec = _load(filename)
-    required = {"version", "host_layout", "project", "files"}
-    if not required <= set(spec) or set(spec) - required - {"examples"} or spec["version"] != 1:
+    source_host = spec.get("version") == 2
+    required = {"version", "project", "files"} | ({"host_sources", "platform"} if source_host else {"host_layout"})
+    if not required <= set(spec) or set(spec) - required - {"examples"} or spec["version"] not in (1, 2):
         raise ValueError("Unsupported host wheel specification")
     root = filename.parent
-    layout = (root / _relative(spec["host_layout"])).resolve()
-    if not layout.is_relative_to(root):
-        raise ValueError("Host layout is outside the release inputs")
-    manifest, modules, payload = host_payload(layout)
+    if source_host:
+        layout, manifest, modules, payload = source_payload(
+            _inside(root, spec["host_sources"]), platform=spec["platform"]
+        )
+    else:
+        layout = (root / _relative(spec["host_layout"])).resolve()
+        if not layout.is_relative_to(root):
+            raise ValueError("Host layout is outside the release inputs")
+        manifest, modules, payload = host_payload(layout)
     roots = {item["name"].split(".")[0] for item in manifest["modules"]}
     forbidden = {
         ".py",
@@ -155,7 +218,7 @@ def release_inputs(filename):
         _relative(target)
         path = PurePosixPath(target)
         if path.parts[0] not in roots or len(path.parts) < 2:
-            raise ValueError(f"Public files must belong to a compiled host namespace: {target}")
+            raise ValueError(f"Public files must belong to a declared host namespace: {target}")
         if (
             path.suffix.lower() in forbidden
             or re.search(r"\.so(?:\.[0-9]+)*$", target.lower())
@@ -224,14 +287,21 @@ def release_inputs(filename):
         for path in matches:
             name = path.relative_to(project.parent).as_posix()
             attachments[name] = _inside(project.parent, name)
-    reserved = {"setup.py", "pyproject.toml", "host-input.json", "payload", "build", "dist"}
+    reserved = {
+        "setup.py",
+        "pyproject.toml",
+        "host-input.json",
+        "payload",
+        "build",
+        "dist",
+    }
     for name in attachments:
         if PurePosixPath(name).parts[0] in reserved or PurePosixPath(name).suffix.lower() in forbidden:
             raise ValueError(f"Metadata file conflicts with the closed build inputs: {name}")
     return layout, manifest, modules, payload, project, attachments
 
 
-# This build adapter copies already verified extension files. Setuptools owns
+# This build adapter copies already verified host files. Setuptools owns
 # wheel tags, metadata, RECORD and entry points; no application module is loaded.
 _SETUP = """from pathlib import Path
 import json
@@ -239,12 +309,24 @@ from setuptools import Distribution, Extension, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 from setuptools.command.egg_info import egg_info
+from setuptools.command.bdist_wheel import bdist_wheel
 
 inputs = json.loads(Path("host-input.json").read_text(encoding="utf-8"))
 
 class HostDistribution(Distribution):
     def has_pure_modules(self):
         return bool(inputs["public_files"])
+    def has_ext_modules(self):
+        return bool(inputs["extensions"] or inputs["source_platform"])
+
+class HostWheel(bdist_wheel):
+    def get_tag(self):
+        if inputs["source_platform"]:
+            # AOT target assets are platform-specific, but Python Host source
+            # does not bind the application to a particular CPython ABI.
+            platform = inputs["source_platform"].replace("-", "_").replace(".", "_")
+            return "py3", "none", platform
+        return super().get_tag()
 
 class HostExtensions(build_ext):
     def run(self):
@@ -270,16 +352,24 @@ class HostMetadata(egg_info):
 
 setup(distclass=HostDistribution, packages=[], py_modules=[],
       ext_modules=[Extension(item["name"], sources=[]) for item in inputs["extensions"]],
-      cmdclass={"build_ext": HostExtensions, "build_py": HostPublicFiles, "egg_info": HostMetadata})
+      cmdclass={"build_ext": HostExtensions, "build_py": HostPublicFiles,
+                "egg_info": HostMetadata, "bdist_wheel": HostWheel})
 """
 
 
-def verify_wheel(path, payload):
+def verify_wheel(path, payload, *, source_host=False):
     from packaging.tags import sys_tags
     from packaging.utils import parse_wheel_filename
 
     tags = parse_wheel_filename(path.name)[3]
-    if not tags or not tags <= set(sys_tags()) or any(tag.abi == "none" for tag in tags):
+    if source_host:
+        expected_platform = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+        valid_abi = all(
+            tag.interpreter == "py3" and tag.abi == "none" and tag.platform == expected_platform for tag in tags
+        )
+    else:
+        valid_abi = all(tag.abi != "none" for tag in tags)
+    if not tags or not tags <= set(sys_tags()) or not valid_abi:
         raise ValueError("Host wheel has incompatible or missing native ABI tags")
     with ZipFile(path) as archive:
         names = archive.namelist()
@@ -296,7 +386,7 @@ def verify_wheel(path, payload):
         if actual != expected:
             raise ValueError(f"Wheel payload differs from its release closure: {actual ^ expected}")
         if "Root-Is-Purelib: false" not in archive.read(metadata + "/WHEEL").decode():
-            raise ValueError("Compiled host wheel was tagged as pure Python")
+            raise ValueError("Platform-specific host wheel was tagged as pure Python")
         archive.getinfo(metadata + "/forge-host.json")
         records = list(csv.reader(io.StringIO(archive.read(metadata + "/RECORD").decode())))
         if len(records) != len(names) or {row[0] for row in records} != set(names):
@@ -316,6 +406,7 @@ def verify_wheel(path, payload):
 def build(spec, output):
     start = time.perf_counter()
     layout, manifest, modules, payload, project, attachments = release_inputs(spec)
+    source_host = manifest["kind"] == "forge_python_host"
     verified = time.perf_counter()
     output = Path(output).resolve()
     if output.is_relative_to(layout) or layout.is_relative_to(output):
@@ -338,6 +429,7 @@ def build(spec, output):
             json.dumps(
                 dict(
                     extensions=modules,
+                    source_platform=manifest["platform"] if source_host else None,
                     manifest=manifest,
                     public_files=sorted(
                         item["file"] for item in payload.values() if item["file"] not in extension_files
@@ -375,7 +467,7 @@ def build(spec, output):
         if len(wheels) != 1:
             raise ValueError("Host packaging must produce exactly one wheel")
         packaged = time.perf_counter()
-        verify_wheel(wheels[0], payload)
+        verify_wheel(wheels[0], payload, source_host=source_host)
         destination = output / wheels[0].name
         if destination.exists():
             if destination.read_bytes() != wheels[0].read_bytes():
@@ -385,7 +477,7 @@ def build(spec, output):
     return dict(
         wheel=str(destination),
         bytes=destination.stat().st_size,
-        modules=len(modules),
+        modules=len(manifest["modules"]),
         payload_files=len(payload),
         input_verify_ms=(verified - start) * 1000,
         package_ms=(packaged - verified) * 1000,

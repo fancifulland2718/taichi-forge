@@ -4269,7 +4269,39 @@ owner，不在主机调用 vendor factor/solve 或重建捕获。此合同不包
 不同绑定、失败状态以及导出 kernel 梯度配合显式对称伴随求解；不包含 provider 自动
 求导或另一条 cuSOLVERSp 稀疏路线。
 
-### 编译后的应用宿主（实验性）
+### Python 应用宿主与 AOT 交付
+
+组织、准备和提交 AOT 调用的普通 Host 可以直接作为 `.py` 分发，无需 Cython 或
+应用 `.pyd`。Kernel 和已编译执行计划由 TCM 承载；现有原生计划中的循环和条件
+不因此移到 Python。示例同样保留原 `.py`。Forge Runtime 和外部 provider 库仍由
+既有加载/链接合同接入，TCM 保存所需引用与重建合同，不复制外部动态库。
+
+现有 `_host_wheel.py` 支持显式 Python Host 发行规格：
+
+```json
+{
+  "version": 2,
+  "host_sources": "host.json",
+  "platform": "win-amd64",
+  "project": "public/pyproject.toml",
+  "files": {"simulation/aot/cuda/application.tcm": "artifacts/application.tcm"},
+  "examples": {"simulation/sdk/examples/scene.py": "public/scene.py"}
+}
+```
+
+`host.json` 复用已有 `source_root`、显式 `modules` 和 `aliases` 清单，保留包
+初始化器和别名来源检查。旧清单中的 `toolchain` 在此路径不触发编译或版本锁定。
+生产器检查已识别的数值 DSL 定义并拒绝将其作为公开 Host，复制原始源码字节并
+记录 hash；不导入应用、不改写源码，也不扫描整个源码树来扩大发行范围。静态
+检查不能代替安装后对私有计算源码和数值前端依赖的检查。
+
+由于 TCM 目标仍有平台约束，此模式生成 `py3-none-<platform>` wheel，不宣称跨平台
+或新增 Python 版本资格。`forge-host.json` 使用 `forge_python_host` 记录普通源码，
+与旧 `forge_compiled_host` 明确区分。普通 `files` 通道继续拒绝未声明源码和原生库。
+局部检查覆盖原字节、编码、包初始化和别名、独立消费、DSL 拒绝及外部库边界；
+不据此宣布整引擎源码 Host 的所有分支已完成安装资格。
+
+### 编译后的应用宿主（实验性、可选）
 
 私有生产侧工具 `taichi_forge.tools._compiled_host.lower_module` 可将 DSL 定义替换
 为待编译的模板构造器，并保留普通宿主代码。输出只是构建中间文件：应随宿主编译，
