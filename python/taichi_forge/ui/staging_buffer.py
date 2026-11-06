@@ -545,6 +545,25 @@ def _cached_ndarray_matches(cached, shape):
     return cached is not None and getattr(cached, "arr", None) is not None and cached.shape == shape
 
 
+def record_rgba8_packed_ndarray(builder, image, destination, *, channels=3, grayscale=False):
+    """Record the existing float-image conversion with runtime image extents.
+
+    ``image`` is a two-dimensional f32 ndarray graph argument (scalar for
+    grayscale, otherwise a vector with ``channels`` elements); ``destination``
+    is a two-dimensional u32 ndarray argument with the same runtime shape.
+    This records device work only and does not create a window or allocate
+    image storage. It can be used by normal Graph and AOT component producers.
+    """
+    if type(channels) is not int or not 1 <= channels <= 4:
+        raise ValueError("RGBA8 graph staging requires one to four channels")
+    if type(grayscale) is not bool or (grayscale and channels != 1):
+        raise ValueError("Grayscale graph staging requires exactly one channel")
+    builder.dispatch(
+        copy_image_f32_to_rgba8_ti_ndarray, image, destination,
+        template_args=dict(num_components=channels, gray_scale=grayscale, image_shape=None),
+    )
+
+
 def to_rgba8_packed_ndarray(image, destination=None):
     """Pack a Taichi image into a device-side u32 RGBA8 ndarray.
 

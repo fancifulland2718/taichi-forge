@@ -6299,3 +6299,16 @@ staged Forge and installed compiled host. This is an external dependency profile
 not qualification of complete Forge/SDK wheel installation, every optional extra
 or arbitrary solver/material input. Build tools remain producer-only; external
 libraries remain shared dependencies rather than copies inside the host wheel.
+
+### Recording float-image display conversion
+
+`taichi_forge.ui.staging_buffer.record_rgba8_packed_ndarray(builder, src, dst,
+channels=3, grayscale=False)` records the normal f32-to-RGBA8 conversion for a
+Graph or component producer. `src` is a rank-two f32 vector ndarray graph
+argument with one to four channels, or scalar f32 with `channels=1,
+grayscale=True`; `dst` is rank-two u32. Supply matching runtime extents for both
+arrays. The existing conversion kernel clamps to [0, 1] and packs RGBA8 using
+runtime extents, so exporting the conversion does not require a sample image or a
+window instance. Normal `to_rgba8_packed_ndarray` immediate staging retains its
+fixed-range specialization. Allocation, completion and display handoff remain
+the caller's responsibility.

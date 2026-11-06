@@ -6,13 +6,25 @@ import numpy as np
 import pytest
 import taichi_forge as ti
 from taichi_forge.lang.kernel_impl import Kernel
-from taichi_forge.ui.staging_buffer import copy_image_f32_to_rgba8_ti_ndarray
+from taichi_forge.ui.staging_buffer import copy_image_f32_to_rgba8_ti_ndarray, record_rgba8_packed_ndarray
 from tests import test_utils
 
 
+@pytest.mark.parametrize("options", [dict(channels=True), dict(channels=0), dict(channels=5),
+                                     dict(grayscale=1), dict(channels=3, grayscale=True)])
+def test_graph_image_staging_rejects_invalid_channel_layout(options):
+    class NoDispatch:
+        def dispatch(self, *args, **kwargs):
+            raise AssertionError("Invalid staging layout must fail before graph recording")
+
+    with pytest.raises(ValueError, match="channels|channel"):
+        record_rgba8_packed_ndarray(NoDispatch(), None, None, **options)
+
+
 @pytest.mark.parametrize("channels", [1, 3, 4])
+@pytest.mark.parametrize("component", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_float_image_dynamic_aot_and_fixed_jit(tmp_path, monkeypatch, channels):
+def test_float_image_dynamic_aot_and_fixed_jit(tmp_path, monkeypatch, channels, component):
     def image(shape):
         if channels == 1:
             return ti.ndarray(ti.f32, shape)
@@ -21,12 +33,23 @@ def test_float_image_dynamic_aot_and_fixed_jit(tmp_path, monkeypatch, channels):
     source = image((2, 3))
     destination = ti.ndarray(ti.u32, (2, 3))
     exported = ti.aot.Module()
-    exported.add_kernel(
-        copy_image_f32_to_rgba8_ti_ndarray,
-        template_args=dict(src=source, dst=destination, num_components=channels,
-                           gray_scale=channels == 1, image_shape=None),
-        name="pack",
-    )
+    if component:
+        src_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src",
+                              ti.f32 if channels == 1 else ti.types.vector(channels, ti.f32), ndim=2)
+        dst_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.u32, ndim=2)
+
+        def record(builder):
+            record_rgba8_packed_ndarray(builder, src_arg, dst_arg, channels=channels, grayscale=channels == 1)
+
+        code = ti.aot.Component().compile_graph(record)
+        code.export(exported, "pack")
+    else:
+        exported.add_kernel(
+            copy_image_f32_to_rgba8_ti_ndarray,
+            template_args=dict(src=source, dst=destination, num_components=channels,
+                               gray_scale=channels == 1, image_shape=None),
+            name="pack",
+        )
     artifact = tmp_path / "display.tcm"
     exported.archive(str(artifact))
 
@@ -60,7 +83,12 @@ def test_float_image_dynamic_aot_and_fixed_jit(tmp_path, monkeypatch, channels):
                 with closing(runtime.ndarray("f32", shape, element_shape=() if channels == 1 else (channels,))) as src:
                     with closing(runtime.ndarray("u32", shape)) as dst:
                         src.write(values.tobytes())
-                        loaded.kernel("pack")(src, dst)
+                        if component:
+                            with loaded.component("pack").instantiate({}) as state:
+                                with state.prepare(arguments=dict(src=src, dst=dst)) as call:
+                                    call.run()
+                        else:
+                            loaded.kernel("pack")(src, dst)
                         runtime.wait()
                         actual = np.frombuffer(dst.read(), dtype=np.uint32).reshape(shape)
                         np.testing.assert_array_equal(actual, expected)

@@ -4726,3 +4726,13 @@ Windows CPython3.10已将SDK/Forge声明的外部依赖解析为44个wheel（166
 运行两个公开小场景。这是外部依赖配置的资格，不代表完整Forge/SDK wheel安装、全部
 extra或任意solver/材质输入均已覆盖。生产工具不进入消费依赖，外部库由环境共用，
 不复制到宿主wheel内部。
+
+### 录制浮点图像显示转换
+
+`taichi_forge.ui.staging_buffer.record_rgba8_packed_ndarray(builder, src, dst,
+channels=3, grayscale=False)` 为正常 Graph 或组件 Producer 录制已有 f32 到 RGBA8
+转换。`src` 是二维 f32 向量 Ndarray 图参数，通道数为 1–4；标量灰度使用
+`channels=1, grayscale=True`；`dst` 为二维 u32。调用方须提供相同的运行时宽高。
+它复用原转换核的 [0, 1] 钳制与像素打包，范围来自运行时尺寸，导出不需要样本图像或
+窗口实例。正常 `to_rgba8_packed_ndarray` 即时调用保留固定范围特化。分配、完成边界
+和显示交接仍由调用方负责。
