@@ -6258,6 +6258,25 @@ def test_package_resource_scope_rejects_unproven_roles(tmp_path, monkeypatch, re
     assert not (tmp_path / "sdk").exists()
 
 
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "scope = ti.experimental.ResourceScope(self) if gain else None",
+        "scope: object = ti.experimental.ResourceScope(self)",
+        "scope = (ti.experimental.ResourceScope(self),)[0]",
+        "scope = identity(ti.experimental.ResourceScope(self))",
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unprojected_scope_construction(tmp_path, monkeypatch, binding):
+    source = SCOPE_VALUES_SOURCE.replace("scope = ti.experimental.ResourceScope(self)", binding)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="ResourceScope construction requires"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 SCOPE_FIELDS_SOURCE = """
 import taichi_forge as ti
 constructors = 0

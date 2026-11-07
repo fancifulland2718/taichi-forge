@@ -305,6 +305,14 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
             fail(module, statement, "Package ResourceScope aliases must not be reassigned")
         scopes[scope] = statement
         scope_groups[scope] = "builder_" + builder.id if builder is not None else "fields"
+    recognized_calls = {id(statement.value) for statement in scopes.values()}
+    for node in ast.walk(constructor):
+        if (
+            isinstance(node, ast.Call)
+            and qualified_kind(node, kind) == "experimental.ResourceScope"
+            and id(node) not in recognized_calls
+        ):
+            fail(module, node, "ResourceScope construction requires one unconditional local assignment")
     if not scopes:
         return {}
     from ._component import _capture_id
