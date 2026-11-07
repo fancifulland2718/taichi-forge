@@ -118,7 +118,8 @@ class OwnerGraph:
 
 def _compose(environment, schema, children):
     """Qualify existing Component declarations; native layouts remain authoritative."""
-    from ._component import Array, DenseField, Dimension, Record, _ConditionalDenseField, _ModelTensorField, _capture_id
+    from dataclasses import replace
+    from ._component import Array, DenseField, Dimension, Record, _ModelTensorField, _capture_id
 
     declarations, paths = dict(environment.declarations), dict(environment._paths)
     constraints, source_paths = dict(environment._constraints), dict(environment._source_scope_paths)
@@ -144,22 +145,12 @@ def _compose(environment, schema, children):
             elif isinstance(value, DenseField):
                 shape = tuple(names[n] if isinstance(n, str) else n for n in value.shape)
                 group = attribute + "." + value.group
-                value = (
-                    _ModelTensorField(
-                        value.dtype,
-                        shape,
-                        group,
-                        tuple(names[n] if isinstance(n, str) else n for n in value.element_shape),
-                    )
-                    if isinstance(value, _ModelTensorField)
-                    else (
-                        _ConditionalDenseField(
-                            value.dtype, shape, group, tuple((names[n], expected) for n, expected in value.conditions)
-                        )
-                        if isinstance(value, _ConditionalDenseField)
-                        else DenseField(value.dtype, shape, group)
-                    )
-                )
+                changes = dict(shape=shape, group=group)
+                if isinstance(value, _ModelTensorField):
+                    changes["element_shape"] = tuple(names[n] if isinstance(n, str) else n for n in value.element_shape)
+                if getattr(value, "conditions", ()):
+                    changes["conditions"] = tuple((names[n], expected) for n, expected in value.conditions)
+                value = replace(value, **changes)
             elif isinstance(value, Array):
                 value = Array(
                     value.dtype,

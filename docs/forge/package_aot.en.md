@@ -707,6 +707,12 @@ check both the package/type and identity with that source path; replacing only
 the alias rejects. CPU/CUDA local source-free checks retain independent state
 and prepared snapshots. This does not admit arbitrary reflected object graphs.
 
+Fields within optional children can be borrowed under the same presence guards,
+retaining their source path, dimension relations and native allocation group.
+Guarded model-length vectors keep dynamic element axes rather than a fixed
+vector ABI. Local CPU/CUDA source-free tests cover new widths, independent state
+and prepared snapshots; missing or opposite source guards reject at export.
+
 The consumer borrows the existing instance without allocating another state.
 Compilation retains the source allocation's fields, dimensions and static facts,
 without recursively constructing its owned solver/workspace children. This also

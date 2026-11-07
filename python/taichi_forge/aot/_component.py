@@ -459,6 +459,13 @@ class _ConditionalDenseField(DenseField):
 
 
 @dataclass(frozen=True)
+class _ConditionalModelTensorField(_ModelTensorField):
+    """A guarded view retains the original dynamic model element axes."""
+
+    conditions: tuple
+
+
+@dataclass(frozen=True)
 class _ExternalField(Array):
     """Typed read-only input; storage remains in its supplying SNode group."""
 
@@ -1911,7 +1918,7 @@ class _Capture:
                 "declare it as a runtime value, resource or static configuration"
             )
         self.used[name] = declaration.schema
-        if isinstance(declaration, _ConditionalDenseField):
+        if isinstance(declaration, (_ConditionalDenseField, _ConditionalModelTensorField)):
             self.resource_conditions[name] = declaration.conditions
             present = True
             for condition, expected in declaration.conditions:

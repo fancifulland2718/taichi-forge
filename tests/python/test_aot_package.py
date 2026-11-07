@@ -1012,7 +1012,7 @@ class Model:
 
 
 @pytest.mark.parametrize("absence", ["initial", "record"])
-@pytest.mark.parametrize("reference", [False, True])
+@pytest.mark.parametrize("reference", [False, True, "field", "model_field"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_conditional_children_keep_local_state_and_code_domains(tmp_path, monkeypatch, absence, reference):
     source = CONDITIONAL_CHILD_SOURCE
@@ -1022,21 +1022,40 @@ def test_package_conditional_children_keep_local_state_and_code_domains(tmp_path
             "            scope.child = Group(n, n + 1, first, False)\n"
             "        else:\n            scope.record('child', None, optional=True)",
         )
-    if reference:
-        source = source.replace("self.child.left.values[i] + gain * self.child.left.bias()",
-                                "self.selected.values[i] + gain * self.selected.bias()")
+    if reference is True:
+        source = source.replace(
+            "self.child.left.values[i] + gain * self.child.left.bias()",
+            "self.selected.values[i] + gain * self.selected.bias()",
+        )
         source = source.replace(
             "            scope.child = Group(n, n + 1, first, False)",
             "            scope.child = Group(n, n + 1, first, False)\n"
             "            scope.owner_reference('selected', self.child.left)",
         )
+    elif reference in ("field", "model_field"):
+        source = source.replace("self.child.left.values[i] + gain", "self.alias[i] + gain")
+        source = source.replace(
+            "            scope.child = Group(n, n + 1, first, False)",
+            "            scope.child = Group(n, n + 1, first, False)\n"
+            "            scope.borrow('alias', self.child.left.values, source_scope=True, dimensions={'n': scope.dim('n')})",
+        )
+        if reference == "model_field":
+            source = source.replace(
+                "scope.values = scope.field(ti.f32, shape=rows)",
+                "scope.values = scope.vector_field(self.n, ti.f32, shape=rows)",
+            )
+            source = source.replace(
+                "for i in self.values:\n            self.values[i] = gain * i",
+                "for i, j in ti.ndrange(self.n, self.n):\n            self.values[i][j] = gain * i + j",
+            )
+            source = source.replace("self.alias[i] + gain", "self.alias[i][0] + gain")
     package = _source_package(tmp_path, monkeypatch, source)
     original = package.Model(7, True, True)
     original.child.fill(3.0)
     original.step(2.0)
     expected = original.values.to_numpy()
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == (38 if reference else 37)
+    assert manifest["version"] == (38 if reference is True else 37)
     assert sys.modules["definition_fixture.model"].constructors == 2
     assert len(manifest["entries"]) == 6  # Three step paths, fill, common, unimported entry.
     (family,) = manifest["entry_families"].values()
@@ -1054,12 +1073,18 @@ def test_package_conditional_children_keep_local_state_and_code_domains(tmp_path
         np.testing.assert_array_equal(b.values.to_numpy(), -2 * np.arange(19) + 8)
         np.testing.assert_array_equal(c.values.to_numpy(), -2 * np.arange(5))
         assert a.child.left.values._group_owner is not b.child.left.values._group_owner
-        if reference:
+        if reference is True:
             saved_reference = a.selected
             a.selected = b.selected
             with pytest.raises(ValueError, match="Owner reference"):
                 a.step(2.0)
             a.selected = saved_reference
+        elif reference in ("field", "model_field"):
+            saved_alias = a.alias
+            a.alias = b.alias
+            with pytest.raises(ValueError, match="Borrowed Field"):
+                a.step(2.0)
+            a.alias = saved_alias
         prepared = a.graph().bind(dict(gain=2.0))
         saved = a.child
         a.child, a.enabled = None, False
@@ -1143,6 +1168,21 @@ def test_package_owner_alias_rejects_unproven_sources(tmp_path, monkeypatch, ref
     )
     package = _source_package(tmp_path, monkeypatch, source)
     with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
+@pytest.mark.parametrize("branch", ["outside", "opposite"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_optional_owner_borrow_requires_source_presence(tmp_path, monkeypatch, branch):
+    call = "scope.borrow('alias', self.child.left.values, source_scope=True)"
+    suffix = f"\n        {call}" if branch == "outside" else f"\n        else:\n            {call}"
+    source = CONDITIONAL_CHILD_SOURCE.replace(
+        "            scope.child = Group(n, n + 1, first, False)",
+        "            scope.child = Group(n, n + 1, first, False)" + suffix,
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match="original allocation presence guards"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
 

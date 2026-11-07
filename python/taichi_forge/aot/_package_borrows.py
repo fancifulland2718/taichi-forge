@@ -83,7 +83,14 @@ def declaration(call, scope_path, schema, dimension, fail):
 
 def project(owner, environment, schema):
     """Use the same source declaration and Component alias paths, without allocation."""
-    from ._component import Dimension, _ConditionalDenseField, _capture_id, _source_scope_alias
+    from ._component import (
+        Dimension,
+        _ConditionalDenseField,
+        _ConditionalModelTensorField,
+        _ModelTensorField,
+        _capture_id,
+        _source_scope_alias,
+    )
     from ._package_records import write_member
     from taichi_forge_runtime._dimensions import extent_dependencies
 
@@ -110,8 +117,13 @@ def project(owner, environment, schema):
             ),
             None,
         )
-        if source is None or source.get("conditions"):
-            raise ValueError("Borrowed Field requires an unconditional original allocation")
+        if source is None:
+            raise ValueError("Borrowed Field requires a declared original allocation")
+        if any(
+            item.get("conditions", {}).get(key) is not expected
+            for key, expected in source.get("conditions", {}).items()
+        ):
+            raise ValueError("Borrowed Field requires its original allocation presence guards")
         namespace = path[:-2] if source.get("struct_field") else path[:-1]
         checks = {}
         for dimension, expression in item["dimensions"].items():
@@ -137,8 +149,13 @@ def project(owner, environment, schema):
         _source_scope_alias(declarations, paths, source_paths, name, tuple(item.get("path", (name,))), source_name)
         if item.get("conditions"):
             original = declarations[name]
-            declarations[name] = _ConditionalDenseField(
-                original.dtype, original.shape, original.group, tuple(sorted(item["conditions"].items()))
+            conditions = tuple(sorted(item["conditions"].items()))
+            declarations[name] = (
+                _ConditionalModelTensorField(
+                    original.dtype, original.shape, original.group, original.element_shape, conditions
+                )
+                if isinstance(original, _ModelTensorField)
+                else _ConditionalDenseField(original.dtype, original.shape, original.group, conditions)
             )
         value = owner
         for part in path:

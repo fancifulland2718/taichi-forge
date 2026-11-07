@@ -1067,7 +1067,9 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
             if parameter is not None and getattr(call, "_package_field_obligation", False):
                 spec["field_obligation"] = True
             if conditions:
-                if not (
+                if parameter is None:
+                    spec["conditions"] = dict(conditions)
+                elif not (
                     parameter is not None
                     and len(conditions) == 1
                     and all(
@@ -1078,7 +1080,8 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                     )
                 ):
                     fail(module, call, "Conditional borrow requires that input's proven non-None branch")
-                spec.update(conditions=dict(conditions), optional_input=True)
+                else:
+                    spec.update(conditions=dict(conditions), optional_input=True)
             prior_input_binding = (
                 parameter is not None
                 and member_stores.get(name, 0) == 1
