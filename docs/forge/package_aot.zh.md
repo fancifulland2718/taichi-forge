@@ -4,7 +4,7 @@
 
 `ti.aot.export_package(module, directory, arch="cuda")` 尝试从普通 Python 包的计算定义生成
 数值 TCM、可读 Host Python 和入口清单。应用继续使用已有的 `@ti.kernel`、
-`@ti.func`、`@ti.real_func`、`@ti.dataclass` 和 `@ti.data_oriented`，无需增加导出装饰器、逐 Kernel 注册或组件根。
+`@ti.func`、`@ti.real_func`、`@ti.pyfunc`、`@ti.dataclass` 和 `@ti.data_oriented`，无需增加导出装饰器、逐 Kernel 注册或组件根。
 这个接口目前是小范围原型，不是完整引擎的一键发行接口，格式和支持范围尚未稳定。
 
 ## 生产与消费
@@ -60,6 +60,15 @@ with Runtime("cuda") as runtime:
 - 构造函数中直接分配的带类型 Ndarray，以及由标量常量或带 `int/float/bool`、Forge 标量类型注解的构造参数赋值的 `self` 属性。
 - `types.vector/matrix/struct`、math 向量/矩阵别名及 `dataclass` 保留原逻辑类型。结构体存储复用 `Module.add_ndarray_layout` 和消费者原生布局查询，不建立另一套 packing 规则。Host 类型投影目前提供参数构造，不等于完整 Python Matrix/Struct 操作接口。
 - LLVM 的 `real_func` 保留真实函数调用边界。嵌套函数通过类型化隐藏参数接收标量和数组捕获；显式参数的浅层递归已检查，递归函数带隐式捕获时明确拒绝。Vulkan 尚不支持 real function，在发布产物前拒绝。
+- 带类型的数值 `pyfunc` 作为 AOT 入口供 Host 调用，在 Kernel 内继续使用正常函数 lowering；数值 Python 源码移除。未注解的公开参数拒绝，不根据先前调用推导发行签名。这只覆盖已声明数值域，不支持任意 Python 对象、副作用或按调用作用域改变的实现；显式作用域查询会拒绝。原 JIT/Python 装饰器行为不变。
+- 单模块导出按原模块命名空间解析相对设备 helper 导入，编译依赖后从 Host 导入中移除这些 helper；此类导入不要求消费者保留私有父包。
+
+同包无状态入口的 Host recorder 可使用 `ti.graph.Arg`、`ArgKind`、
+`GraphBuilder.dispatch`、顺序节点和 `append`。`compile()` 生成引用已导出符号的
+既有 `ExecutionPlan`，不生成组合 TCM。`graph.bind(arguments)` 返回原生 prepared
+call，可反复 `run()`；`graph.run(arguments)` 是每次重新 prepare 的单次便利调用，
+不推荐作为稳态路径。这层初始构图接口尚未接入 owner 隐式捕获、原生 provider 节点和
+Graph 控制流节点。
 - 数组尺寸、普通标量属性按运行时数据传递。内部复用 Component lowering 的类型合同，不要求用户注册 Component；extent 为 1 的临时数组只提供类型/维数见证，不选择模型或静态分支。
 - 正常 JIT 装饰器与调用路径不变；包扫描和 Host 投影仅在显式导出时执行。
 
@@ -73,8 +82,8 @@ CUDA 深度为 18 的递归探针曾发生非法地址，原因尚未确认，�
 
 ## 仍需补齐的共同机制
 
-复杂 SNode/Field 布局、继承、模板/静态合法域、`pyfunc`、梯度、任意 Python
-资源工厂、完整 Host 数组访问接口、Graph/ExecutionPlan 和 provider 引用还没有接入。
+复杂 SNode/Field 布局、继承、模板/静态合法域、无类型或 Python 专用 `pyfunc`、梯度、任意 Python
+资源工厂、完整 Host 数组访问接口、完整 Graph/ExecutionPlan 和 provider 引用还没有接入。
 当前识别到不支持的声明或 Host 前端操作会拒绝导出，不借助样本运行或私有 JIT 回退。
 这不等于已完成对任意 Python Host 代码的语义验证。
 

@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 from taichi_forge.tools._compiled_host import decorator_resolver
 from ._package_types import qualified_kind, resolve_type, type_expression, type_spec
@@ -110,10 +110,24 @@ def _analyze(module, source):
             dsl = next((d for d in decorators if d in _DECORATORS), None)
             if dsl is None:
                 continue
-            if owner is not None and owner not in owners and dsl == "kernel":
-                _fail(module, entry, "dataclass device methods must be functions, not kernels")
-            if dsl not in ("kernel", "func", "real_func") or decorators != [dsl]:
+            if owner is not None and owner not in owners and dsl in ("kernel", "pyfunc"):
+                _fail(
+                    module, entry, "dataclass Host entries are not yet supported; device methods must be func/real_func"
+                )
+            if dsl not in ("kernel", "func", "real_func", "pyfunc") or decorators != [dsl]:
                 _fail(module, entry, "unsupported numerical decorator combination")
+            if dsl == "pyfunc":
+                # Its Python body is numerical too: exporting it requires a
+                # declared value domain, never a signature learned from calls.
+                arguments = entry.args.args[1:] if owner is not None else entry.args.args
+                if any(a.annotation is None for a in arguments):
+                    _fail(module, entry, "pyfunc export requires explicit parameter types")
+                if any(
+                    qualified_kind(n, kind)
+                    in ("lang.impl.inside_kernel", "lang.impl.inside_kernel_scope", "lang.impl.inside_python")
+                    for n in ast.walk(entry)
+                ):
+                    _fail(module, entry, "scope-dependent pyfunc requires separate Host and numerical definitions")
             supported.add(id(entry))
             definitions.append(
                 dict(owner=owner, node=entry, kind=dsl, name=".".join(p for p in (owner, entry.name) if p))
@@ -138,6 +152,12 @@ def _host_projection(
     }
     imported_helpers = set()
 
+    def device_import(alias, origin):
+        value = namespace.get(alias.asname or alias.name)
+        return f"{origin}.{alias.name}" in device_functions or (
+            getattr(value, "_is_taichi_function", False) and not value.func.pyfunc
+        )
+
     def import_origin(node):
         if node.level:
             parent = module if is_package else module.rpartition(".")[0]
@@ -147,7 +167,7 @@ def _host_projection(
     for node in tree.body:
         if isinstance(node, ast.ImportFrom):
             origin = import_origin(node)
-            imported_helpers.update(a.asname or a.name for a in node.names if f"{origin}.{a.name}" in device_functions)
+            imported_helpers.update(a.asname or a.name for a in node.names if device_import(a, origin))
 
     class Project(ast.NodeTransformer):
         owner = None
@@ -172,7 +192,7 @@ def _host_projection(
 
         def visit_ImportFrom(self, node):
             origin = import_origin(node)
-            node.names = [a for a in node.names if f"{origin}.{a.name}" not in device_functions]
+            node.names = [a for a in node.names if not device_import(a, origin)]
             if not node.names:
                 return None
             if not node.level and node.module in ("taichi", "taichi_forge"):
@@ -255,7 +275,7 @@ def _host_projection(
                 "math.uvec4",
             ):
                 return ast.copy_location(type_expression(type_spec(resolve_type(node, namespace), builder)), node)
-            if role is not None and role not in _DTYPES | {"ndarray"}:
+            if role is not None and role not in _DTYPES | {"ndarray", "graph"}:
                 _fail(module, node, f"Host frontend operation {role!r} needs a Runtime projection")
             return self.generic_visit(node)
 
@@ -382,11 +402,19 @@ def export_package(package, output, *, arch=None):
             manifest["owners"][name + "." + class_name] = schema
         entries = {}
         for definition in definitions:
-            if definition["kind"] != "kernel":
+            if definition["kind"] not in ("kernel", "pyfunc"):
                 continue
             owner_name, node = definition["owner"], definition["node"]
             owner = owners.get(owner_name)
             entry = getattr(owner if owner is not None else imported, node.name)
+            if definition["kind"] == "pyfunc":
+                from taichi_forge.lang.kernel_impl import Kernel, AutodiffMode
+
+                # Compile the original function definition with its declared
+                # entry signature. In-kernel calls still use the normal Func;
+                # no application decorator or alternate numerical body exists.
+                kernel = Kernel(entry.func.func, AutodiffMode.NONE, _classkernel=owner is not None)
+                entry = SimpleNamespace(_primal=kernel, _kernel_owner=owner)
             kernel = getattr(entry, "_primal", None)
             if kernel is None:
                 _fail(name, node, "decorated definition did not resolve to a Forge kernel")
@@ -455,7 +483,7 @@ def export_package(package, output, *, arch=None):
             entries,
             package.__name__,
             device_functions,
-            relative.name == "__init__.py",
+            hasattr(imported, "__path__"),
             vars(imported),
             module,
         ).encode("utf8")

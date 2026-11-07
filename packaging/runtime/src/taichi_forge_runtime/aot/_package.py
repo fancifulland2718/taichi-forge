@@ -51,8 +51,14 @@ class _ElementType:
 
 class _ModuleBinding:
     def __init__(self, package):
+        from ._package_graph import Arg, ArgKind, GraphBuilder
+
         self.package = package
-        self.host = SimpleNamespace(ndarray=self.ndarray, **{dtype: dtype for dtype in _DTYPES})
+        self.host = SimpleNamespace(
+            ndarray=self.ndarray,
+            graph=SimpleNamespace(Arg=Arg, ArgKind=ArgKind, GraphBuilder=lambda: GraphBuilder(package)),
+            **{dtype: dtype for dtype in _DTYPES},
+        )
 
     def ndarray(self, dtype, shape):
         self.package._check()

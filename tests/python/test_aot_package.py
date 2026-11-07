@@ -101,7 +101,7 @@ def _source_package(tmp_path, monkeypatch, source=SOURCE):
     return importlib.import_module("definition_fixture")
 
 
-@pytest.mark.parametrize("helper_kind", ["func", "real_func"])
+@pytest.mark.parametrize("helper_kind", ["func", "real_func", "pyfunc"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_compiles_definitions_without_constructor_or_test_trace(tmp_path, monkeypatch, helper_kind):
     source = SOURCE.replace(
@@ -112,13 +112,16 @@ def test_package_compiles_definitions_without_constructor_or_test_trace(tmp_path
     model_module = sys.modules["definition_fixture.model"]
     result = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
     assert model_module.constructors == 0
-    assert {item["definition"].rsplit(".", 1)[-1] for item in result["entries"].values()} == {
+    expected_entries = {
         "initialize",
         "add",
         "subtract",
         "unused_public_function",
         "available_without_a_test",
     }
+    if helper_kind == "pyfunc":
+        expected_entries.add("affine")
+    assert {item["definition"].rsplit(".", 1)[-1] for item in result["entries"].values()} == expected_entries
     host = (tmp_path / "sdk/host/model.py").read_text(encoding="utf8")
     assert "scale" not in host
     assert "return x * gain" not in (tmp_path / "sdk/host/device_helpers.py").read_text(encoding="utf8")
@@ -159,6 +162,8 @@ def test_package_compiles_definitions_without_constructor_or_test_trace(tmp_path
                 np.testing.assert_array_equal(read(a), np.arange(7, dtype=np.float32) * 2 - .75)
                 np.testing.assert_array_equal(read(b), np.arange(19, dtype=np.float32) * -3 + 4.5)
                 assert a.description() == 'Model with 7 values'
+                if sys.argv[3] == 'pyfunc':
+                    assert a.affine(3.0) == 6.0 and b.affine(3.0) == -9.0
                 module = importlib.import_module(code.host.__name__ + '.model')
                 assert module.unused_public_function(5) == 22
                 with load_package(runtime, sys.argv[1]) as other:
@@ -191,7 +196,7 @@ def test_package_compiles_definitions_without_constructor_or_test_trace(tmp_path
         PYTHONDONTWRITEBYTECODE="1",
     )
     result = subprocess.run(
-        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), result["target"]],
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), result["target"], helper_kind],
         env=env,
         cwd=tmp_path,
         capture_output=True,
@@ -393,3 +398,98 @@ def test_package_diagnoses_real_function_backend_before_publication(tmp_path, mo
     with pytest.raises(ti.aot.PackageExportError, match="real_func AOT requires an LLVM backend"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert not (tmp_path / "sdk").exists()
+
+
+PYFUNC_SOURCE = """
+import taichi_forge as ti
+
+@ti.pyfunc
+def twice(x: ti.i32) -> ti.i32:
+    return x * 2
+
+@ti.data_oriented
+class Model:
+    def __init__(self, bias: int):
+        self.bias = bias
+
+    @ti.pyfunc
+    def adjust(self, x: ti.i32) -> ti.i32:
+        return twice(x) + self.bias
+
+    @ti.kernel
+    def run(self, x: ti.i32) -> ti.i32:
+        return self.adjust(x)
+
+    def host(self, x):
+        return self.adjust(x) + twice(x + 1)
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_typed_pyfunc_is_available_from_host_and_device(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, PYFUNC_SOURCE)
+    original = package.Model(3)
+    expected = original.host(5)
+    assert original.run(5) == 13
+    result = ti.aot.export_package(package, tmp_path / "sdk")
+    projected = (tmp_path / "sdk/host/model.py").read_text(encoding="utf8")
+    assert "return x * 2" not in projected and "return twice(x) + self.bias" not in projected
+    with Runtime(result["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        a, b = library.host.Model(3), library.host.Model(-7)
+        assert a.host(5) == expected and a.run(5) == 13
+        assert b.host(5) == expected - 10 and b.run(5) == 3
+        a.bias = 9
+        assert a.host(5) == expected + 6
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_pyfunc_without_declared_domain_does_not_sample_calls(tmp_path, monkeypatch):
+    source = PYFUNC_SOURCE.replace("def twice(x: ti.i32)", "def twice(x)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    # Calling it before export does not establish a production signature.
+    assert package.Model(3).host(5) == 25
+    with pytest.raises(ti.aot.PackageExportError, match="pyfunc export requires explicit parameter types"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_scope_dependent_pyfunc(tmp_path, monkeypatch):
+    source = PYFUNC_SOURCE.replace("return x * 2", "return x * 2 if ti.lang.impl.inside_kernel() else x * 3")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="scope-dependent pyfunc"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_submodule_device_imports_and_host_graph_share_code(tmp_path, monkeypatch):
+    package = _source_package(
+        tmp_path,
+        monkeypatch,
+        SOURCE + """
+
+def record(builder):
+    builder.dispatch(unused_public_function, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'x', ti.i32))
+""",
+    )
+    module = sys.modules["definition_fixture.model"]
+    # Select one source module, not the parent package: its relative helper is
+    # compiler-only and must not leak a dependency on the private parent.
+    result = ti.aot.export_package(module, tmp_path / "sdk")
+    assert len(result["entries"]) == 4
+    assert ".device_helpers" not in (tmp_path / "sdk/host/__init__.py").read_text(encoding="utf8")
+    with Runtime(result["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        builder = library.host.ti.graph.GraphBuilder()
+        library.host.record(builder)
+        graph = builder.compile()
+        with graph.bind(dict(x=4)) as binding:
+            binding.run()
+        with pytest.raises(ValueError, match="differs from the entry's type"):
+            builder.dispatch(
+                library.host.unused_public_function,
+                library.host.ti.graph.Arg(library.host.ti.graph.ArgKind.SCALAR, "wrong", "f32"),
+            )
+        # Host recording references the same compiled definition; it never
+        # creates another artifact for this sequence or argument value.
+        assert len(library.manifest["entries"]) == 4
