@@ -90,7 +90,12 @@ call，可反复 `run()`；`graph.run(arguments)` 是每次重新 prepare 的单
 不推荐作为稳态路径。绑定方法保留 owner 捕获；prepare 对每个实例的标量/张量值及原生
 资源绑定取快照，后续 Host 修改不改变旧调用。`template_args={'self': owner}` 必须与
 绑定接收者一致。`private_scalar` 复用已有 Plan 的不可变标量资源，支持顺序节点的独立
-名称作用域。原生 provider 和 Graph 控制流节点仍未接入。
+名称作用域。`private_ndarray` 描述每次原生准备独立拥有的标量元素存储。CPU/CUDA 的
+平坦 `while_loop` 区域复用现有精确原生 Plan 执行器，支持提前退出和零次上限；CUDA
+准备检查实际 conditional graph 能力，不静默加入 masked 或 Host 控制回退。控制参数
+和区域须来自同一录制。局部 CPU/CUDA 无源码检查覆盖私有数组隔离及 prepared 快照
+交错执行。嵌套/Vulkan 控制配方和原生 provider 节点尚未接入此接口。循环上限目前在
+录图时确定；改变上限须重新运行 Host 构图。
 - 数组尺寸、普通标量属性按运行时数据传递。内部复用 Component lowering 的类型合同，不要求用户注册 Component；extent 为 1 的临时数组只提供类型/维数见证，不选择模型或静态分支。
 - 正常 JIT 装饰器与调用路径不变；包扫描和 Host 投影仅在显式导出时执行。
 

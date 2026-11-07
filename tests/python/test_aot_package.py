@@ -2902,6 +2902,143 @@ class Model:
 """
 
 
+PACKAGE_WHILE_SOURCE = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, limit: int, gain: int):
+        self.n, self.limit, self.gain = n, limit, gain
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.i32, shape=scope.dim('n'))
+        scope.value('limit', ti.i32)
+        scope.value('gain', ti.i32)
+    @ti.kernel
+    def reset(self, counter: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        counter[0] = 0
+        for i in range(self.n):
+            self.values[i] = 0
+    @ti.kernel
+    def condition(self, predicate: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                  counter: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        predicate[0] = counter[0] < self.limit
+    @ti.kernel
+    def advance(self, counter: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(self.n):
+            self.values[i] += self.gain * (i + 1)
+        counter[0] += 1
+    def record(self, builder, maximum):
+        predicate = builder.private_ndarray('predicate', ti.i32, (1,))
+        counter = builder.private_ndarray('counter', ti.i32, (1,))
+        builder.dispatch(self.reset, counter)
+        condition, body = builder.create_sequential(), builder.create_sequential()
+        condition.dispatch(self.condition, predicate, counter)
+        body.dispatch(self.advance, counter)
+        builder.while_loop(condition, body, predicate=predicate, counter=counter,
+                           max_iterations=maximum, masked_execution=True, lowering_mode='native_required')
+    def graph(self, maximum):
+        builder = ti.graph.GraphBuilder()
+        self.record(builder, maximum)
+        return builder.compile()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, PACKAGE_WHILE_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert len(manifest["entries"]) == 4 and not manifest["entry_families"]  # three kernels plus fixture entry
+    reference = package.Model(3, 5, 2)
+    counter = ti.ndarray(ti.i32, shape=1)
+    reference.reset(counter)
+    for _ in range(5):
+        reference.advance(counter)
+    np.testing.assert_array_equal(reference.values.to_numpy(), np.arange(1, 4) * 10)
+    probe = tmp_path / "consume_package_while.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import json
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3, 5, 2), code.host.Model(17, 2, -3)
+            ga, gb = a.graph(5), b.graph(9)
+            document = json.loads(ga.plan.to_json())
+            assert len(document['operations']) == 2
+            assert document['operations'][1]['kind'] == 'while'
+            assert 'lowering' not in document['operations'][1]  # exact native route
+            assert len(document['resources']) == 2
+            assert not ga.arguments and not gb.arguments
+            pa, pb = ga.bind({}), gb.bind({})
+            a.limit, a.gain = 1, 7
+            with ga.bind({}) as fresh:
+                fresh.run()
+                np.testing.assert_array_equal(a.values.to_numpy(), np.arange(1, 4) * 7)
+                pb.run()
+                pa.run()
+                np.testing.assert_array_equal(a.values.to_numpy(), np.arange(1, 4) * 10)
+                np.testing.assert_array_equal(b.values.to_numpy(), np.arange(1, 18) * -6)
+            pa.run()
+            pb.run()
+            pa.close()
+            pb.close()
+            with a.graph(0).bind({}) as zero:
+                zero.run()
+                np.testing.assert_array_equal(a.values.to_numpy(), 0)
+            # Reject unrelated recording scopes before adding a partial loop.
+            root = code.graph_builder()
+            other = code.graph_builder()
+            pred = root.private_ndarray('predicate', 'i32', (1,))
+            cnt = root.private_ndarray('counter', 'i32', (1,))
+            condition, body = root.create_sequential(), root.create_sequential()
+            condition.dispatch(a.condition, pred, cnt)
+            body.dispatch(a.advance, cnt)
+            invalid = [dict(condition=other, body=body, predicate=pred, max_iterations=1),
+                       dict(condition=condition, body=body, predicate=pred, max_iterations=-1),
+                       dict(condition=condition, body=body, predicate=cnt, counter=cnt, max_iterations=1)]
+            for kwargs in invalid:
+                try:
+                    root.while_loop(**kwargs)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError('invalid loop accepted')
+                assert not root.operations
+            try:
+                body.private_ndarray('counter', 'i32', (1,))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('private scope collision accepted')
+        print('PACKAGE_WHILE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PACKAGE_WHILE_OK" in result.stdout
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_graph_captures_are_instance_snapshots_without_new_code(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, OWNER_GRAPH_SOURCE)

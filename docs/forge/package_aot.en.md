@@ -128,8 +128,15 @@ Bound methods retain owner captures. Preparation snapshots scalar/tensor values
 and native resource bindings for each instance; later Host changes do not mutate
 an earlier prepared call. `template_args={'self': owner}` must match the bound
 receiver. `private_scalar` uses existing immutable scalar Plan resources, including
-sequential private scopes. Native provider and control-flow Graph nodes remain
-outside this recording facade.
+sequential private scopes. `private_ndarray` describes scalar-element storage owned
+by each native preparation. Flat CPU/CUDA `while_loop` regions reuse the existing
+exact native Plan executor, including early termination and a zero iteration cap.
+CUDA preparation checks the actual conditional-graph capability; this facade does
+not silently insert a masked or Host-controlled fallback. Controls and regions must
+belong to the same recording. Focused source-free CPU/CUDA checks cover independent
+private arrays and interleaved prepared snapshots. Nested/Vulkan control recipes and
+native-provider Graph nodes remain outside this facade. Loop bounds are currently
+recording-time values; changing a bound requires rerecording the Host plan.
 - Array extents and ordinary scalar attributes remain runtime data. Existing Component lowering supplies the internal type contract without user Component registration. Extent-one temporary arrays provide type/rank witnesses, not sample models or static-branch choices.
 - Normal JIT decorators and invocation remain unchanged. Scanning and Host projection run only on explicit export.
 

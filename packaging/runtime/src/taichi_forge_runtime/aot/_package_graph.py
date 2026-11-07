@@ -6,6 +6,7 @@ definition, creates another code module, or executes a Python kernel loop.
 
 from dataclasses import dataclass
 from enum import Enum
+import copy
 import itertools
 
 from ._plan import ExecutionPlan
@@ -165,6 +166,25 @@ class GraphBuilder:
         self._bindings.constants[symbol] = resource
         return _PrivateArg(ArgKind.SCALAR, symbol, dtype, scope=self._bindings)
 
+    def private_ndarray(self, name, dtype, shape, *, exclusive_submission=True):
+        """Describe prepare-owned storage; allocation follows native Plan leases."""
+        from ._runtime import _shape
+
+        self.package._check()
+        if not isinstance(name, str) or not name or name in self._private_names:
+            raise ValueError("Graph private array name must be nonempty and unique in its scope")
+        if exclusive_submission is not True:
+            raise ValueError("Package private arrays require exclusive prepared submission")
+        shape = _shape(shape)
+        argument = _PrivateArg(ArgKind.NDARRAY, self._bindings.name(), dtype, len(shape), scope=self._bindings)
+        element = argument.schema()["element"]
+        if element["kind"] != "scalar":
+            raise ValueError("Package private arrays currently require scalar elements")
+        resource = dict(kind="ndarray", name=argument.name, dtype=element["dtype"], shape=list(shape))
+        self._private_names.add(name)
+        self._bindings.constants[argument.name] = resource
+        return argument
+
     def create_sequential(self, *, private_scope=False):
         return GraphBuilder(
             self.package,
@@ -187,6 +207,66 @@ class GraphBuilder:
         self._admissions.extend(sequence._admissions)
         self._range_checks.extend(sequence._range_checks)
         return self
+
+    def while_loop(
+        self,
+        condition,
+        body,
+        *,
+        predicate,
+        max_iterations,
+        counter=None,
+        masked_execution=False,
+        lowering_mode="auto",
+        name="while",
+    ):
+        """Record an exact CPU/CUDA loop using the existing native Plan executor."""
+        self.package._check()
+        if self.package.runtime.arch not in ("x64", "arm64", "cuda"):
+            raise ValueError("Package while requires a qualified CPU/CUDA control route")
+        if lowering_mode not in ("auto", "native_required"):
+            raise ValueError("Package while currently requires native control")
+        if type(masked_execution) is not bool or not isinstance(name, str) or not name:
+            raise ValueError("Invalid package while options")
+        if type(max_iterations) is not int or not 0 <= max_iterations <= 0x7FFFFFFFFFFFFFFF:
+            raise ValueError("Graph while maximum iterations must be a nonnegative int64")
+        for region in (condition, body):
+            if not isinstance(region, GraphBuilder) or region._bindings is not self._bindings:
+                raise ValueError("Package while regions must belong to the same recording")
+            if region is self or any(op["kind"] != "kernel" for op in region.operations):
+                raise ValueError("Package while currently requires flat kernel regions")
+        if not condition.operations or not body.operations:
+            raise ValueError("Package while requires nonempty condition and body regions")
+        for role, argument in (("predicate", predicate), ("counter", counter)):
+            if argument is None and role == "counter":
+                continue
+            if not isinstance(argument, Arg) or argument.schema() != dict(
+                kind="ndarray", element=dict(kind="scalar", dtype="i32", element_shape=[]), ndim=1
+            ):
+                raise ValueError(f"Graph while {role} requires a rank-one i32 array")
+            if isinstance(argument, _PrivateArg) and argument.scope is not self._bindings:
+                raise ValueError(f"Graph while {role} belongs to another recording")
+        # Merge through the ordinary sequence checks before publishing anything.
+        merged = self.create_sequential()
+        merged.append(condition)
+        merged.append(body)
+        used = set(merged.arguments) | set(merged._constants)
+        condition_used = set(condition.arguments) | set(condition._constants)
+        if predicate.name not in condition_used or (counter is not None and counter.name not in used):
+            raise ValueError("Graph while controls must be used by the recorded regions")
+        if counter is not None and counter.name == predicate.name:
+            raise ValueError("Graph while predicate and counter must be distinct")
+        operation = dict(
+            kind="while",
+            predicate=predicate.name,
+            max_iterations=max_iterations,
+            condition=copy.deepcopy(condition.operations),
+            body=copy.deepcopy(body.operations),
+        )
+        merged.operations = [operation]
+        # Native preparation admits CUDA conditional control on the actual device;
+        # neither a masked fallback nor per-iteration Host observation is inserted.
+        return self.append(merged)
 
     def compile(self):
         self.package._check()
