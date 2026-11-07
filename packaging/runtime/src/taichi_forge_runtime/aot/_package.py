@@ -55,6 +55,7 @@ class _ModuleBinding:
         from ._package_graph import Arg, ArgKind, GraphBuilder
 
         self.package = package
+        self.importlib = _Importlib(self)
         self.host = SimpleNamespace(
             ndarray=self.ndarray,
             graph=SimpleNamespace(Arg=Arg, ArgKind=ArgKind, GraphBuilder=lambda: GraphBuilder(package)),
@@ -83,6 +84,11 @@ class _ModuleBinding:
 
     def import_module(self, name):
         self.package._check()
+        modules = self.package.manifest.get("application_modules")
+        if modules is not None:
+            if name not in modules:
+                raise ImportError("Module is outside this definition package: " + name)
+            return importlib.import_module(self.package._name + "." + name)
         root = self.package.manifest["module_root"]
         if name != root and not name.startswith(root + "."):
             raise ImportError("Module is outside this definition package: " + name)
@@ -96,6 +102,25 @@ class _ModuleBinding:
             if not hasattr(module, "__path__"):
                 raise ImportError(f"Cannot import {name} from {origin}") from None
         return self.import_module(origin + "." + name)
+
+    def dynamic_import(self, name, package=None):
+        self.package._check()
+        resolved = importlib.util.resolve_name(name, package) if name.startswith(".") else name
+        if resolved == self.package._name or resolved.startswith(self.package._name + "."):
+            return importlib.import_module(resolved)
+        modules = self.package.manifest.get("application_modules")
+        if modules is not None:
+            if resolved in modules:
+                return self.import_module(resolved)
+            if resolved.split(".")[0] in self.package.manifest["dependencies"]["local_roots"]:
+                raise ImportError("Dynamic local dependency was not exported: " + resolved)
+        else:
+            root = self.package.manifest["module_root"]
+            if resolved == root or resolved.startswith(root + "."):
+                return self.import_module(resolved)
+        if resolved.split(".")[0] in ("taichi", "taichi_forge"):
+            raise ImportError("Definition packages cannot dynamically import the numerical frontend")
+        return importlib.import_module(resolved)
 
     def field(self, owner_key, name, dimensions):
         self.package._check()
@@ -129,6 +154,16 @@ class _ModuleBinding:
 
     def managed_class(self, cls):
         return managed_class(self.package, cls)
+
+
+class _Importlib:
+    """Local importlib binding; never install a process-global import hook."""
+
+    def __init__(self, binding):
+        self.import_module = binding.dynamic_import
+
+    def __getattr__(self, name):
+        return getattr(importlib, name)
 
 
 def bind_module(name):
@@ -220,8 +255,16 @@ class LoadedPackage:
     def __init__(self, runtime, directory):
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
-        if self.manifest.get("version") != 1 or self.manifest.get("kind") != "forge_definition_package_prototype":
+        if (
+            self.manifest.get("version") not in (1, 2)
+            or self.manifest.get("kind") != "forge_definition_package_prototype"
+        ):
             raise ValueError("Unsupported definition package")
+        if (
+            self.manifest["version"] == 2
+            and not {"application_modules", "entry_module", "dependencies"} <= self.manifest.keys()
+        ):
+            raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
         files = self.manifest["files"]
@@ -259,6 +302,8 @@ class LoadedPackage:
                 self.host._forge_package_owner = self
                 sys.modules[self._name] = self.host
                 spec.loader.exec_module(self.host)
+                if self.manifest.get("entry_module"):
+                    self.host = importlib.import_module(self._name + "." + self.manifest["entry_module"])
             return self
         except BaseException:
             self.__exit__(*sys.exc_info())

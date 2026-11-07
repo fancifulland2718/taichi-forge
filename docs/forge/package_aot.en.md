@@ -34,6 +34,22 @@ discover compilation coverage. Modules still undergo normal Python imports,
 including their top-level side effects; producer inputs should be safely
 importable definition packages.
 
+For multiple top-level packages in one application source directory, pass
+`source_root="path/to/src"`. The existing static import audit collects local
+imports, literal `importlib.import_module` targets, real package initializers
+and namespace parents, while all definitions in the selected package remain
+roots. Output must be outside that source directory, and imported module origins
+must match scanned paths. Forge/Taichi compatibility shims and Runtime remain
+external rather than becoming application compilation units.
+
+This mode uses package manifest version 2. Consumers retain version 1 support;
+older consumers reject the new version. `library.host` still denotes the selected
+entry module/package. Imports resolve within each loaded package's namespace.
+Arbitrary computed dynamic targets are recorded, not treated as a proven complete
+closure: requesting an unexported local module fails instead of importing private
+source. Ordinary external Python dependencies retain normal imports. This does
+not provide general native-extension or arbitrary dynamic-loader projection.
+
 | Artifact | Contents |
 | --- | --- |
 | `code.tcm` | Original numerical definitions compiled by the existing compiler, with actual ABI contracts |
@@ -74,7 +90,7 @@ independent object retirement is not implemented.
 - LLVM `real_func` calls retain real function boundaries. Nested helpers can capture scalar values and ndarrays through typed hidden parameters. Explicit-parameter shallow recursion is checked; recursive functions with implicit captures reject with a diagnostic. Vulkan real functions remain unsupported and reject before publication.
 - Typed numerical `pyfunc` definitions become callable AOT entries for Host use and retain ordinary function lowering inside kernels. Their numerical Python source is removed. Untyped public parameters reject instead of learning a signature from prior calls. This covers the declared numerical domain, not arbitrary Python objects, side effects, or scope-dependent implementations; explicit scope queries reject. Original JIT/Python decorators remain unchanged.
 - Single-module exports resolve relative device-helper imports against the original module namespace. Such helpers compile as dependencies and are removed from Host imports; the private parent package is not required for these imports.
-- Absolute imports within the selected package, including lazy imports inside functions, resolve in that loaded package's independent namespace. Ordinary imports, aliases and named imports preserve their bindings without changing global source-package names. Unaliased absolute imports of a nested package and wildcard imports remain unsupported. Host dependencies outside the selected package must still be supplied separately.
+- Absolute imports within the selected package, including lazy imports inside functions, resolve in that loaded package's independent namespace. Ordinary imports, aliases and named imports preserve their bindings without changing global source-package names. Without `source_root`, unaliased absolute imports of a nested package remain unsupported. Wildcard imports and builtin `__import__` have explicit restrictions; external dependencies follow the source boundary above.
 - Direct constructor `field`, `Vector.field` and `Matrix.field` allocations with plain default AOS layout form one complete native SNode group per owner. Extents may be positive constants, constructor parameters or their unconditional single-assignment owner aliases. A compile-only ordinary FieldsBuilder supplies the native schema; the consumer instantiates that schema through the same native layout compiler. No application constructor runs during export and Fields are not split into separately allocated ndarrays. Conditional/ambiguous extents, offsets, custom order, gradients and explicit user-built trees require further support.
 
 For stateless entries in the same package, retained Host recorders can use
@@ -109,6 +125,13 @@ different point/triangle counts to the same compiled entry and existing native
 Plan. This qualifies that module, not whole-engine package export.
 The same winding entry also passes three-backend NumPy Host buffer consumption,
 analytic/original-JIT comparisons and temporary-resource release checks.
+
+The source-boundary mode is also exercised with the original winding module.
+The larger original sampling closure reaches resource owners such as `MeshSDF`
+and currently rejects during declaration preflight because inheritance and complex
+resources are not yet projected. No dependency was deleted to obtain a pass;
+correct rejection does not qualify sampling. Preflight aggregates declaration
+failures across modules before numerical compilation or publication.
 
 ## Remaining shared mechanisms
 

@@ -20,10 +20,12 @@ from types import ModuleType, SimpleNamespace
 from taichi_forge.tools._compiled_host import decorator_resolver
 from ._package_types import qualified_kind, resolve_type, type_expression, type_spec
 from ._package_fields import field_declarations, construct_fields, field_allocation
+from ._package_sources import collect_sources
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
 _PREFIX = "_forge_package_"
+_HOST_OPS = frozenset(("ndarray", "graph"))
 
 
 class PackageExportError(ValueError):
@@ -152,7 +154,18 @@ def _analyze(module, source):
 
 
 def _host_projection(
-    module, tree, kind, owners, definitions, entries, package_name, device_functions, is_package, namespace, builder
+    module,
+    tree,
+    kind,
+    owners,
+    definitions,
+    entries,
+    package_name,
+    device_functions,
+    is_package,
+    namespace,
+    builder,
+    application_modules=None,
 ):
     numerical = {item["name"]: item for item in definitions}
     definitions_at = {(item["node"].lineno, item["node"].col_offset): item for item in definitions}
@@ -162,6 +175,8 @@ def _host_projection(
     imported_helpers = set()
 
     def internal_import(origin):
+        if application_modules is not None:
+            return origin in application_modules
         return origin == package_name or (origin or "").startswith(package_name + ".")
 
     def module_import(origin):
@@ -221,17 +236,27 @@ def _host_projection(
                             ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "host", ast.Load()),
                         )
                     )
+                elif alias.name == "importlib" or (alias.name.startswith("importlib.") and alias.asname is None):
+                    if alias.name != "importlib":
+                        replacements.append(ast.Import([alias]))
+                    replacements.append(
+                        ast.Assign(
+                            [ast.Name(alias.asname or "importlib", ast.Store())],
+                            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "importlib", ast.Load()),
+                        )
+                    )
                 elif alias.name.startswith(("taichi.", "taichi_forge.")):
                     _fail(module, node, "frontend submodule imports require further Host projection support")
                 elif internal_import(alias.name):
                     # Keep Python's import binding rules, while resolving the
                     # code owner through this loaded package's private namespace.
-                    if alias.asname is None and "." in package_name:
+                    if alias.asname is None and "." in package_name and application_modules is None:
                         _fail(module, node, "nested package absolute imports require an explicit alias")
                     value = module_import(alias.name)
-                    if alias.asname is None and alias.name != package_name:
+                    root = alias.name.split(".")[0] if application_modules is not None else package_name
+                    if alias.asname is None and alias.name != root:
                         replacements.append(ast.Expr(value))
-                        value = module_import(package_name)
+                        value = module_import(root)
                     replacements.append(
                         ast.Assign([ast.Name(alias.asname or alias.name.split(".")[0], ast.Store())], value)
                     )
@@ -244,9 +269,21 @@ def _host_projection(
             node.names = [a for a in node.names if not device_import(a, origin)]
             if not node.names:
                 return None
+            if origin == "importlib" and not node.level:
+                if any(a.name == "*" for a in node.names):
+                    _fail(module, node, "wildcard importlib imports cannot preserve the package import boundary")
+                ordinary = [a for a in node.names if a.name != "import_module"]
+                return ([ast.ImportFrom(origin, ordinary, level=0)] if ordinary else []) + [
+                    ast.Assign(
+                        [ast.Name(a.asname or a.name, ast.Store())],
+                        ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "dynamic_import", ast.Load()),
+                    )
+                    for a in node.names
+                    if a.name == "import_module"
+                ]
             if not node.level and node.module in ("taichi", "taichi_forge"):
                 names = [a for a in node.names if a.name not in _DECORATORS]
-                if any(a.name not in _DTYPES | {"ndarray"} for a in names):
+                if any(a.name not in _DTYPES | _HOST_OPS for a in names):
                     _fail(module, node, "unsupported frontend dependency in Host code")
                 return [
                     ast.Assign(
@@ -336,7 +373,7 @@ def _host_projection(
                 "math.uvec4",
             ):
                 return ast.copy_location(type_expression(type_spec(resolve_type(node, namespace), builder)), node)
-            if role is not None and role not in _DTYPES | {"ndarray", "graph"}:
+            if role is not None and role not in _DTYPES | _HOST_OPS:
                 _fail(module, node, f"Host frontend operation {role!r} needs a Runtime projection")
             return self.generic_visit(node)
 
@@ -348,6 +385,8 @@ def _host_projection(
             return node
 
         def visit_Call(self, node):
+            if isinstance(node.func, ast.Name) and node.func.id == "__import__":
+                _fail(module, node, "builtin dynamic import requires an explicit importlib boundary")
             if qualified_kind(node, kind) in ("types.vector", "types.matrix", "types.struct"):
                 return ast.copy_location(type_expression(type_spec(resolve_type(node, namespace), builder)), node)
             if kind(node) in _DTYPES:
@@ -373,7 +412,7 @@ def _host_projection(
     return ast.unparse(projected) + "\n"
 
 
-def export_package(package, output, *, arch=None):
+def export_package(package, output, *, arch=None, source_root=None):
     """Experimentally export all decorated definitions in an imported module/package.
 
     Selects ``arch`` on a cold Runtime or validates the currently initialized
@@ -408,17 +447,21 @@ def export_package(package, output, *, arch=None):
     output = Path(output).resolve()
     if output.exists():
         raise FileExistsError(output)
-    source = Path(package.__file__).resolve()
-    paths = sorted(source.parent.rglob("*.py")) if hasattr(package, "__path__") else [source]
-    sources = []
-    for path in paths:
-        relative = path.relative_to(source.parent) if hasattr(package, "__path__") else Path("__init__.py")
-        suffix = relative.with_suffix("").parts
-        suffix = suffix[:-1] if suffix[-1] == "__init__" else suffix
-        name = ".".join((package.__name__, *suffix))
+    if source_root is not None and output.is_relative_to(Path(source_root).resolve()):
+        raise ValueError("Package output must be outside its application source root")
+    paths, namespaces, dependency_report = collect_sources(package, source_root)
+    application_modules = set(paths) | set(namespaces) if source_root is not None else None
+    sources, failures = [], []
+    for name, (path, relative) in paths.items():
         text = path.read_text(encoding="utf8")
-        tree, kind, owners, definitions = _analyze(name, text)
+        try:
+            tree, kind, owners, definitions = _analyze(name, text)
+        except PackageExportError as error:
+            failures.append(str(error))
+            continue
         sources.append((name, path, relative, text, tree, kind, owners, definitions))
+    if failures:
+        raise PackageExportError("Package declaration preflight failed:\n" + "\n".join(failures))
     module = Module()
     manifest = dict(
         version=1,
@@ -433,6 +476,16 @@ def export_package(package, output, *, arch=None):
         field_groups={},
     )
     payloads = {}
+    if source_root is not None:
+        manifest.update(
+            version=2,
+            application_modules=sorted(application_modules),
+            entry_module=package.__name__,
+            dependencies=dependency_report,
+        )
+        payloads["host/__init__.py"] = b""
+        # Namespace parents remain namespaces; no application initializer is
+        # invented or removed. Real initializers are ordinary scanned sources.
     device_functions = {
         name + "." + definition["name"]
         for name, _, _, _, _, _, _, definitions in sources
@@ -561,6 +614,7 @@ def export_package(package, output, *, arch=None):
             hasattr(imported, "__path__"),
             vars(imported),
             module,
+            application_modules,
         ).encode("utf8")
         manifest["sources"][name] = hashlib.sha256(text.encode("utf8")).hexdigest()
     if not manifest["entries"]:

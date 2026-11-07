@@ -789,3 +789,109 @@ def test_package_host_buffers_preserve_types_and_reject_unproved_aliases(tmp_pat
         with pytest.raises(ValueError, match="element shape"):
             library.host.model.transform(np.zeros((7, 2), dtype=np.float32))
         assert runtime._resources == resources
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_collects_local_dependencies_without_tracing_and_isolates_dynamic_imports(tmp_path, monkeypatch):
+    source_root = tmp_path / "src"
+    source_root.mkdir()
+    dependencies = {
+        "sibling_fixture/__init__.py": "initialized = 31\n",
+        "sibling_fixture/ops.py": """import taichi_forge as ti
+@ti.kernel
+def extra(x: ti.i32) -> ti.i32:
+    return x * 11
+@ti.kernel
+def never_called(x: ti.i32) -> ti.i32:
+    return x * 13
+""",
+        "sibling_fixture/lazy.py": """import taichi_forge as ti
+@ti.kernel
+def calc(x: ti.i32) -> ti.i32:
+    return x * 17
+""",
+        "sibling_fixture/not_selected.py": "raise AssertionError('must not import unspecified dynamic target')\n",
+        "ns_fixture/helper.py": "def label(value):\n    return 'item-' + str(value)\n",
+    }
+    for name, text in dependencies.items():
+        path = source_root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf8")
+    source = SOURCE + """
+
+def use_dependencies(x):
+    import sibling_fixture.ops
+    from ns_fixture import helper
+    return sibling_fixture.ops.extra(x), sibling_fixture.initialized, helper.label(x)
+
+from importlib import import_module as late
+import importlib as imports
+import importlib.util
+def literal_late(x):
+    return late('sibling_fixture.lazy').calc(x)
+def dynamic(name):
+    return imports.import_module(name)
+def relative_late(x):
+    return importlib.import_module('.lazy', 'sibling_fixture').calc(x)
+"""
+    package = _source_package(source_root, monkeypatch, source)
+    with pytest.raises(ValueError, match="outside its application source root"):
+        ti.aot.export_package(package, source_root / "sdk", source_root=source_root)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", source_root=source_root)
+    assert manifest["version"] == 2
+    assert "sibling_fixture.not_selected" not in manifest["application_modules"]
+    assert "ns_fixture" in manifest["application_modules"]
+    assert {"sibling_fixture.ops.never_called", "sibling_fixture.lazy.calc"} <= {
+        entry["definition"] for entry in manifest["entries"].values()
+    }
+    assert any(edge["kind"] == "literal_dynamic" for edge in manifest["dependencies"]["import_edges"])
+    assert manifest["dependencies"]["dynamic_import_sites"]
+    probe = tmp_path / "consume_dependencies.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        class NoPrivateSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'sibling_fixture', 'ns_fixture'):
+                    raise AssertionError('Private source import: ' + fullname)
+        sys.meta_path.insert(0, NoPrivateSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime('cpu') as runtime, load_package(runtime, sys.argv[1]) as a:
+            model = a.host.model
+            assert model.use_dependencies(3) == (33, 31, 'item-3')
+            assert model.literal_late(2) == 34
+            assert model.relative_late(3) == 51
+            with load_package(runtime, sys.argv[1]) as b:
+                left = model.dynamic('sibling_fixture.ops')
+                right = b.host.model.dynamic('sibling_fixture.ops')
+                assert left is not right and left.extra.package is a and right.extra.package is b
+                assert model.dynamic('math').sqrt(9) == 3
+            assert left.never_called(4) == 52
+            try:
+                model.dynamic('sibling_fixture.not_selected')
+            except ImportError as error:
+                assert 'was not exported' in str(error)
+            else:
+                raise AssertionError('Unresolved local dependency fell back to source')
+        print('LOCAL_DEPENDENCIES_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "LOCAL_DEPENDENCIES_SOURCE_FREE_OK" in result.stdout

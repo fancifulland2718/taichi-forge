@@ -18,9 +18,9 @@ else:
     from _host_build import read_spec
 
 
-def audit_imports(filename, *, source_root=None, roots=()):
-    frozen_root, selected, aliases, _ = read_spec(filename)
-    candidate_root = Path(source_root).resolve() if source_root is not None else frozen_root
+def source_inventory(source_root):
+    """Inventory canonical local modules without executing their source."""
+    candidate_root = Path(source_root).resolve()
     if not candidate_root.is_dir():
         raise ValueError(f"Missing candidate source root: {candidate_root}")
     candidates = {}
@@ -38,7 +38,18 @@ def audit_imports(filename, *, source_root=None, roots=()):
         # Exact filename spelling matters even on case-insensitive filesystems:
         # a class named Coupler does not identify a file named coupler.py.
         candidates[name] = dict(source=str(path), relative=relative.as_posix(), package=package)
-    available = dict(candidates, **selected)
+    return candidates
+
+
+def audit_imports(filename, *, source_root=None, roots=()):
+    frozen_root, selected, aliases, _ = read_spec(filename)
+    candidates = source_inventory(source_root if source_root is not None else frozen_root)
+    return audit_source_imports(dict(candidates, **selected), roots=roots, selected=selected, aliases=aliases)
+
+
+def audit_source_imports(available, *, roots=(), selected=None, aliases=None):
+    """Shared static dependency walk for audits and definition package exports."""
+    selected, aliases = selected or {}, aliases or {}
     local_roots = {name.split(".")[0] for name in available} | {name.split(".")[0] for name in aliases}
     namespace_prefixes = set()
     for name in available:
@@ -90,7 +101,18 @@ def audit_imports(filename, *, source_root=None, roots=()):
                 pending.append((parent, name, 0, "package_initializer"))
             parent = parent.rpartition(".")[0]
         package = name if item["package"] else name.rpartition(".")[0]
-        for node in ast.walk(ast.parse(data, filename=item["source"])):
+        tree = ast.parse(data, filename=item["source"])
+        dynamic_names, importlib_names = {"__import__"}, set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "importlib":
+                dynamic_names.update(a.asname or a.name for a in node.names if a.name == "import_module")
+            if isinstance(node, ast.Import):
+                importlib_names.update(
+                    a.asname or "importlib"
+                    for a in node.names
+                    if a.name == "importlib" or (a.name.startswith("importlib.") and a.asname is None)
+                )
+        for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 pending.extend((entry.name, name, node.lineno, "import") for entry in node.names)
             elif isinstance(node, ast.ImportFrom):
@@ -111,14 +133,36 @@ def audit_imports(filename, *, source_root=None, roots=()):
                             pending.append((child, name, node.lineno, "from_member"))
             elif isinstance(node, ast.Call):
                 called = node.func
-                if (isinstance(called, ast.Name) and called.id in ("__import__", "import_module")) or (
-                    isinstance(called, ast.Attribute) and called.attr == "import_module"
+                if (isinstance(called, ast.Name) and called.id in dynamic_names) or (
+                    isinstance(called, ast.Attribute)
+                    and called.attr == "import_module"
+                    and isinstance(called.value, ast.Name)
+                    and called.value.id in importlib_names
                 ):
                     dynamic.append(dict(module=name, line=node.lineno))
+                    # Literal import_module targets are still source facts;
+                    # unknown expressions remain explicitly unresolved below.
+                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                        target = node.args[0].value
+                        if target.startswith("."):
+                            anchor = (
+                                node.args[1]
+                                if len(node.args) > 1
+                                else next((k.value for k in node.keywords if k.arg == "package"), None)
+                            )
+                            if isinstance(anchor, ast.Name) and anchor.id in ("__name__", "__package__"):
+                                parent = name if anchor.id == "__name__" else package
+                                target = importlib.util.resolve_name(target, parent)
+                            elif isinstance(anchor, ast.Constant) and isinstance(anchor.value, str):
+                                target = importlib.util.resolve_name(target, anchor.value)
+                            else:
+                                continue
+                        pending.append((target, name, node.lineno, "literal_dynamic"))
     return dict(
         version=1,
         coverage="Static syntax only; optional branches may over-report and dynamic imports may be missed.",
         roots=list(roots),
+        local_roots=sorted(local_roots),
         visited=sorted(seen),
         missing_modules=dict(sorted(missing.items())),
         unresolved_local_imports=unresolved,
