@@ -28,6 +28,10 @@ def resolve_inputs(sources, imported):
         if parameter is None:
             raise ValueError("Inherited owner inputs require a resolved constructor parameter mapping: " + key[0])
         if item["kind"] != "owner_input":
+            if item.get("field_obligation") and parameter.default is None and not item.get("optional_capable"):
+                raise ValueError("Optional Field helper requires a proven absence declaration: " + key[0])
+            if item.get("optional_capable") and parameter.default is None:
+                item["optional_input"] = True
             continue
         annotation = parameter.annotation
         if isinstance(annotation, str):
@@ -58,6 +62,7 @@ def resolve_inputs(sources, imported):
                 bound = inspect.signature(owners[target][1].__init__).bind(
                     None, *call.args, **{k.arg: k.value for k in call.keywords}
                 )
+                bound.apply_defaults()
             except TypeError as error:
                 raise ValueError("Declared constructor argument mismatch: " + target) from error
             calls.setdefault(target, []).append((caller, bound.arguments))
@@ -111,14 +116,43 @@ def resolve_inputs(sources, imported):
             path = [*prefix, *path]
         return member_type(owner, path)
 
+    absent = (None, ())
+
+    def input_types(owner, expression):
+        if expression is None or isinstance(expression, ast.Constant) and expression.value is None:
+            return {absent}
+        if isinstance(expression, ast.IfExp):
+            left, right = input_types(owner, expression.body), input_types(owner, expression.orelse)
+            return None if left is None or right is None else left | right
+        value = input_type(owner, expression)
+        if value is None:
+            return None
+        optional = any(
+            item.get("optional_input")
+            and (
+                isinstance(expression, ast.Name)
+                and item.get("input_parameter") == expression.id
+                or isinstance(expression, ast.Attribute)
+                and isinstance(expression.value, ast.Name)
+                and expression.value.id == "self"
+                and key == expression.attr
+            )
+            for key, item in owners[owner][0].items()
+        )
+        return {value, absent} if optional else {value}
+
     while True:
         changed = False
         for (owner, name), item in inputs.items():
-            observed = {
+            observed_all = {
                 identity
                 for caller, args in calls.get(owner, ())
-                if (identity := input_type(caller, args.get(item["input_parameter"]))) is not None
+                for identity in (input_types(caller, args.get(item["input_parameter"])) or ())
             }
+            observed = observed_all - {absent}
+            if absent in observed_all and item.get("optional_capable") and not item.get("optional_input"):
+                item["optional_input"] = True
+                changed = True
             if len(observed) > 1:
                 raise ValueError(f"Owner input {owner}.{name} has incompatible source definitions: {sorted(observed)}")
             if (owner, name) in annotated and observed - {origin(item)}:
@@ -143,7 +177,11 @@ def resolve_inputs(sources, imported):
         if (
             not sites
             or origin(item) is None
-            or any(input_type(caller, args.get(item["input_parameter"])) != origin(item) for caller, args in sites)
+            or any(
+                (actual := input_types(caller, args.get(item["input_parameter"]))) is None
+                or not actual <= ({origin(item), absent} if item.get("optional_input") else {origin(item)})
+                for caller, args in sites
+            )
         ):
             raise ValueError(f"Owner input {owner}.{name} requires a proven source at every declared constructor call")
     for (owner, name), item in inputs.items():
@@ -153,4 +191,20 @@ def resolve_inputs(sources, imported):
         # existing Component layout/alias machinery. It creates no runtime state.
         source = "_forge_package_source_" + name
         item["source_path"] = [source, *item["source_member"]]
-        owners[owner][0][source] = dict(kind="owner_input", owner_type=item["source_type"], field_input=name)
+        if item.get("optional_input") and not item.get("conditions"):
+            presence = "_forge_package_input_present_" + item["input_parameter"]
+            owners[owner][0][presence] = dict(
+                kind="static",
+                choices=[("bool", False), ("bool", True)],
+                kernel_only=False,
+                presence_parameter=item["input_parameter"],
+                presence_owner=owner,
+                presence_nonnull=True,
+            )
+            item["conditions"] = {presence: True}
+        owners[owner][0][source] = dict(
+            kind="owner_input",
+            owner_type=item["source_type"],
+            field_input=name,
+            **({"conditions": item["conditions"]} if item.get("conditions") else {}),
+        )

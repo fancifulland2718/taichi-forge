@@ -343,6 +343,10 @@ class _ModuleBinding:
         ):
             raise ValueError("Borrowed Field requires its managed source-scope construction")
         contract = self.package.manifest["owners"][owner_key].get(name, {})
+        if contract.get("optional_input") and field is None:
+            setattr(scope._root, contract["source_path"][0], None)
+            setattr(scope._owner, name, None)
+            return None
         if "input_parameter" in contract:
             from ._package_values import check_owner_bindings
 
@@ -610,7 +614,9 @@ def managed_class(package, cls):
             bound.apply_defaults()
             for attribute, parameter in parameters.items():
                 value = bound.arguments[parameter]
-                if type(value) is not bool:
+                if package.manifest["owners"][key][attribute].get("presence_nonnull"):
+                    value = value is not None
+                elif type(value) is not bool:
                     raise ValueError(f"Optional resource parameter {parameter!r} requires a boolean")
                 setattr(self, attribute, value)
         construction = _construction.get()
@@ -634,6 +640,7 @@ def managed_class(package, cls):
                     dict(path=item.get("path", [name]), owner_type=item["owner_type"])
                     for name, item in package.manifest["owners"].get(key, {}).items()
                     if item["kind"] in ("owner", "owner_input")
+                    and all(getattr(self, flag) is expected for flag, expected in item.get("conditions", {}).items())
                 ),
             )
         except BaseException:
@@ -791,7 +798,7 @@ class LoadedPackage:
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
             self.manifest.get("version")
-            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)
+            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

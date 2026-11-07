@@ -74,7 +74,7 @@ def declaration(call, scope_path, schema, dimension, fail):
 
 def project(owner, environment, schema):
     """Use the same source declaration and Component alias paths, without allocation."""
-    from ._component import Dimension, _capture_id, _source_scope_alias
+    from ._component import Dimension, _ConditionalDenseField, _capture_id, _source_scope_alias
     from ._package_records import write_member
     from taichi_forge_runtime._dimensions import extent_dependencies
 
@@ -126,6 +126,11 @@ def project(owner, environment, schema):
             }
             constraints.update(checks)
         _source_scope_alias(declarations, paths, source_paths, name, tuple(item.get("path", (name,))), source_name)
+        if item.get("conditions"):
+            original = declarations[name]
+            declarations[name] = _ConditionalDenseField(
+                original.dtype, original.shape, original.group, tuple(sorted(item["conditions"].items()))
+            )
         value = owner
         for part in path:
             value = getattr(value, part)

@@ -116,6 +116,186 @@ def declare_source(scope, name, field, *, dimensions=None):
 """
 
 
+OPTIONAL_FIELD_INPUT_SOURCE = (
+    FIELD_INPUT_SOURCE.replace("def __init__(self, values, n):", "def __init__(self, values=None, n=0):")
+    .replace(
+        "scope.borrow('alias', values, dimensions={'n': extent}, source_scope=True)",
+        "if values is None:\n            scope.record('alias', None, optional=True)\n"
+        "        else:\n            scope.borrow('alias', values, dimensions={'n': extent}, source_scope=True)",
+    )
+    .replace("Forward(self.storage.values, n)", "Forward(self.storage.values if first else None, n)")
+    .replace(
+        "def step(self, gain: ti.f32):\n        for i in self.alias:\n            self.alias[i] = gain * i",
+        "def step(self, gain: ti.f32) -> ti.i32:\n        result = 0\n"
+        "        if ti.static(self.alias is not None):\n            for i in self.alias:\n"
+        "                self.alias[i] = gain * i\n            result = self.alias.shape[0]\n        return result",
+    )
+)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+@pytest.mark.parametrize("helper", [False, True])
+def test_package_optional_field_inputs_keep_only_used_presence_variants(tmp_path, monkeypatch, helper):
+    source = OPTIONAL_FIELD_INPUT_SOURCE
+    if helper:
+        source = (
+            source.replace(
+                "if values is None:\n            scope.record('alias', None, optional=True)\n"
+                "        else:\n            scope.borrow('alias', values, dimensions={'n': extent}, source_scope=True)",
+                "declare_source(scope, 'alias', values, dimensions={'n': extent})",
+            )
+            + FIELD_HELPER_SOURCE
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 24
+    assert len(manifest["entries"]) == 4
+    assert len(manifest["field_groups"]) == 1
+    assert len(manifest["entry_families"]) == 1
+    assert len(next(iter(manifest["entry_families"].values()))["domain"]) == 1
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, True), code.host.Model(13, False)
+        present, absent = a.reader.reader, b.reader.reader
+        assert present.step(3.0) == 7 and absent.step(3.0) == 0
+        np.testing.assert_array_equal(a.storage.values.to_numpy(), 3 * np.arange(7))
+        assert absent.alias is None and absent._forge_package_field_groups == {}
+        # Absence does not allocate or require even a live source owner.
+        b.storage.tree.destroy()
+        assert absent.step(4.0) == 0
+        assert type(absent)().step(4.0) == 0
+        prepared = absent.graph().bind(dict(gain=9.0))
+        absent.alias = a.storage.values
+        with pytest.raises(ValueError, match="presence changed"):
+            absent.step(1.0)
+        prepared.run()
+        np.testing.assert_array_equal(a.storage.values.to_numpy(), 3 * np.arange(7))
+        absent.alias = None
+        present.alias = None
+        with pytest.raises(ValueError, match="presence changed"):
+            present.step(1.0)
+        prepared.close()
+    for entry in manifest["entries"].values():
+        if any(not item["present"] for item in entry.get("admission", {}).get("input_presence", {}).values()):
+            assert not entry["captures"]
+    probe = tmp_path / "consume_optional_input.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in {'taichi', 'taichi_forge', 'definition_fixture'}:
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3, True), code.host.Model(13, False)
+            assert a.reader.reader.step(4.0) == 3
+            assert b.reader.reader.step(4.0) == 0
+            np.testing.assert_array_equal(a.storage.values.to_numpy(), 4 * np.arange(3))
+            b.storage.tree.destroy()
+            assert b.reader.reader.step(1.0) == 0
+        print('OPTIONAL_INPUT_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OPTIONAL_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_independent_optional_inputs_do_not_multiply_each_others_code(tmp_path, monkeypatch):
+    source = OPTIONAL_FIELD_INPUT_SOURCE.replace(
+        "class Reader:\n    def __init__(self, values=None, n=0):",
+        "class Reader:\n    def __init__(self, values=None, n=0, other=None):",
+    )
+    source = source.replace(
+        "scope.borrow('alias', values, dimensions={'n': extent}, source_scope=True)",
+        "scope.borrow('alias', values, dimensions={'n': extent}, source_scope=True)\n"
+        "        if other is None:\n            scope.record('other', None, optional=True)\n"
+        "        else:\n            scope.borrow('other', other, dimensions={'n': extent}, source_scope=True)",
+        1,
+    )
+    source = source.replace("Reader(self.values, n)", "Reader(self.values, n, self.values)")
+    source = source.replace("Reader(values, n)", "Reader(values, n, values)")
+    source = source.replace(
+        "    def graph(self):",
+        """    @ti.kernel
+    def second(self, value: ti.f32) -> ti.i32:
+        result = 0
+        if ti.static(self.other is not None):
+            for i in self.other:
+                self.other[i] = value
+            result = self.other.shape[0]
+        return result
+    def graph(self):""",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert len(manifest["entries"]) == 6
+    assert len(manifest["entry_families"]) == 2
+    assert all(len(item["domain"]) == 1 and len(item["variants"]) == 2 for item in manifest["entry_families"].values())
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(7, True)
+        reader = type(model.reader.reader)
+        for first in (None, model.storage.values):
+            for second in (None, model.storage.values):
+                value = reader(first, 7, second)
+                assert value.step(3.0) == (0 if first is None else 7)
+                assert value.second(9.0) == (0 if second is None else 7)
+
+
+@pytest.mark.parametrize(
+    "change, diagnostic",
+    [
+        ("wrong_guard", "non-None branch"),
+        ("mutated_parameter", "unconditional declared boolean"),
+        ("unknown_source", "proven source"),
+        ("wrong_prior_binding", "replace an existing"),
+        ("unproven_absence_helper", "proven absence declaration"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_optional_inputs_reject_unproven_presence_or_source(tmp_path, monkeypatch, change, diagnostic):
+    source = OPTIONAL_FIELD_INPUT_SOURCE
+    if change == "wrong_guard":
+        source = source.replace("if values is None:", "if values is not None:")
+    elif change == "mutated_parameter":
+        source = source.replace("        if values is None:", "        values = None\n        if values is None:")
+    elif change == "unknown_source":
+        source = source.replace("self.storage.values if first else None", "self.storage.values if first else n")
+    elif change == "wrong_prior_binding":
+        source = source.replace("        if values is None:", "        self.alias = None\n        if values is None:")
+    else:
+        source = source.replace(
+            "if values is None:\n            scope.record('alias', None, optional=True)\n"
+            "        else:\n            scope.borrow('alias', values, dimensions={'n': extent}, source_scope=True)",
+            "declare_source(scope, 'alias', values, dimensions={'n': extent})",
+        )
+        source += FIELD_HELPER_SOURCE.replace("scope.record(name, None, optional=True)", "application_side_effect()")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk/package.json").exists()
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_field_metadata_helpers_require_proven_allocation_inputs(tmp_path, monkeypatch):
     source = FIELD_INPUT_SOURCE.replace("scope.borrow('alias', values,", "declare_source(scope, 'alias', values,")

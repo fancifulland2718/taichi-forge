@@ -80,7 +80,7 @@ def _source_value(node, namespace):
     return None
 
 
-def prove_factory(function, call, scopes=frozenset(), *, allow_void=False):
+def prove_factory(function, call, scopes=frozenset(), *, allow_void=False, absent_parameter=None):
     """Prove a scope constructor or dimension-method forwarding call."""
     from taichi_forge.lang._resource_declaration import ResourceScope
 
@@ -137,6 +137,8 @@ def prove_factory(function, call, scopes=frozenset(), *, allow_void=False):
         raise _Unproven("factory forwarding cannot infer expanded keyword arguments")
     bound = signature.bind(*(input_value(n) for n in call.args), **{k.arg: input_value(k.value) for k in call.keywords})
     bound.apply_defaults()
+    if absent_parameter is not None:
+        bound.arguments[absent_parameter] = None
     for name, value in bound.arguments.items():
         if not isinstance(value, _Input) and not _literal(value):
             raise _Unproven("factory defaults require immutable literal values")
@@ -320,7 +322,7 @@ def prove_factory(function, call, scopes=frozenset(), *, allow_void=False):
             or any(value is not result.arguments[1] for value in field_obligations.values())
         ):
             raise _Unproven("Field metadata branches require the same input's proven source-scope borrow")
-    if any(
+    if absent_parameter is None and any(
         isinstance(value, _Input) and not any(item is value for item in forwarded) for value in bound.arguments.values()
     ):
         raise _Unproven("factory drops a nonliteral argument")
@@ -346,6 +348,28 @@ def prove_factory(function, call, scopes=frozenset(), *, allow_void=False):
     normalized._package_factory = dict(
         definition=function.__module__ + "." + function.__qualname__, sha256=hashlib.sha256(source.encode()).hexdigest()
     )
+    if field_obligations and allow_void and absent_parameter is None:
+        normalized._package_field_obligation = True
+        parameter = next(name for name, value in bound.arguments.items() if value is result.arguments[1])
+        try:
+            absence = prove_factory(function, call, scopes, allow_void=True, absent_parameter=parameter)
+        except (TypeError, _Unproven):
+            absence = None
+        if (
+            absence is not None
+            and isinstance(absence.func, ast.Attribute)
+            and absence.func.attr == "record"
+            and ast.dump(absence.func.value) == ast.dump(normalized.func.value)
+            and len(absence.args) == 2
+            and ast.dump(absence.args[0]) == ast.dump(normalized.args[0])
+            and isinstance(absence.args[1], ast.Constant)
+            and absence.args[1].value is None
+            and len(absence.keywords) == 1
+            and absence.keywords[0].arg == "optional"
+            and isinstance(absence.keywords[0].value, ast.Constant)
+            and absence.keywords[0].value.value is True
+        ):
+            normalized._package_optional_borrow = True
     return ast.copy_location(normalized, call)
 
 

@@ -582,6 +582,10 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 if not isinstance(node, ast.Expr) or name is None or name in records:
                     return None
                 records[name] = call
+            elif method == "borrow" and isinstance(node, ast.Expr):
+                if len(call.args) != 2 or not isinstance(call.args[0], ast.Constant):
+                    return None
+                fields.add(call.args[0].value)
         return fields, records
 
     def paired_records(statement):
@@ -593,7 +597,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             return None
         return [*absent_left.values(), *absent_right.values()]
 
-    def presence_parameter(statement, parameter):
+    def presence_parameter(statement, parameter, *, nonnull=False):
         calls = paired_records(statement)
         if calls is None:
             return None
@@ -610,6 +614,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     choices=[("bool", False), ("bool", True)],
                     kernel_only=False,
                     presence_parameter=parameter,
+                    **({"presence_nonnull": True} if nonnull else {}),
                     scope_allocation=origin(scope),
                 ),
                 statement,
@@ -677,6 +682,18 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 )
                 if isinstance(test, ast.Name) and test.id in boolean_parameters:
                     name = presence_parameter(statement, test.id)
+                elif (
+                    isinstance(test, ast.Compare)
+                    and len(test.ops) == 1
+                    and isinstance(test.ops[0], (ast.Is, ast.IsNot))
+                    and isinstance(test.left, ast.Name)
+                    and test.left.id in parameter_names
+                    and stores[test.left.id] == 1
+                    and isinstance(test.comparators[0], ast.Constant)
+                    and test.comparators[0].value is None
+                ):
+                    name = presence_parameter(statement, test.left.id, nonnull=True)
+                    expected = isinstance(test.ops[0], ast.IsNot) == expected
                 declaration = declarations.get(name, {})
                 if not (
                     declaration.get("kind") == "static"
@@ -782,15 +799,46 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         elif method == "borrow" and isinstance(statement, ast.Expr):
             from ._package_borrows import declaration
 
-            if conditions:
-                fail(module, call, "Conditional borrowed Field bindings require further package support")
             name, spec = declaration(
                 call, scope_paths[scope], declarations, dimension, lambda node, message: fail(module, node, message)
             )
             parameter = spec.get("input_parameter")
             if parameter is not None and (parameter not in parameter_names or stores[parameter] != 1):
                 fail(module, call, "Borrowed input requires an unmodified constructor parameter")
-            if member_stores.get(name, 0):
+            if parameter is not None and getattr(call, "_package_optional_borrow", False):
+                spec["optional_capable"] = True
+            if parameter is not None and getattr(call, "_package_field_obligation", False):
+                spec["field_obligation"] = True
+            if conditions:
+                if not (
+                    parameter is not None
+                    and len(conditions) == 1
+                    and all(
+                        expected is True
+                        and declarations[key].get("presence_nonnull")
+                        and declarations[key].get("presence_parameter") == parameter
+                        for key, expected in conditions.items()
+                    )
+                ):
+                    fail(module, call, "Conditional borrow requires that input's proven non-None branch")
+                spec.update(conditions=dict(conditions), optional_input=True)
+            prior_input_binding = (
+                parameter is not None
+                and member_stores.get(name, 0) == 1
+                and any(
+                    isinstance(prior, ast.Assign)
+                    and len(prior.targets) == 1
+                    and isinstance(prior.targets[0], ast.Attribute)
+                    and prior.targets[0].attr == name
+                    and isinstance(prior.targets[0].value, ast.Name)
+                    and prior.targets[0].value.id == "self"
+                    and isinstance(prior.value, ast.Name)
+                    and prior.value.id == parameter
+                    and prior.lineno < call.lineno
+                    for prior in constructor.body
+                )
+            )
+            if member_stores.get(name, 0) and not prior_input_binding:
                 fail(module, call, "Borrowed Field cannot replace an existing owner attribute")
             spec["scope_allocation"] = origin(scope)
             add(name, spec, call)

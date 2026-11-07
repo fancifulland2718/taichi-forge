@@ -24,6 +24,9 @@ def dimension_value(owner, name):
 def check_admission(owner, contract):
     admission = contract.get("admission")
     if admission:
+        for binding in admission.get("input_presence", {}).values():
+            if (path_value(owner, binding["path"]) is not None) is not binding["present"]:
+                raise ValueError("Optional Field input presence changed after construction")
         check_owner_bindings(owner, admission.get("owner_bindings", {}).values())
         for binding in admission.get("source_bindings", {}).values():
             if path_value(owner, binding["path"]) is not path_value(owner, binding["source_path"]):

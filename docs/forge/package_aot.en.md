@@ -595,9 +595,25 @@ return values or substitution with external bindings remain rejected.
 GeoPhys's original `declare_source_borrow` passes source-free consumers on all
 three backends for this mandatory numerical Field path. Original EFC declaration
 preflight passes helper forwarding but still rejects its nonliteral `dof_count`
-static type domain. Optional Fields, normalization across different compatible
+static type domain. Normalization across different compatible
 source definitions and the full EFC type domain remain work to do. This is not
 whole EFC or engine qualification.
+
+Version 24 supports Field inputs selected by existing `input is None` / `is not None`
+branches: the present branch borrows the same parameter, and the absent branch uses
+`scope.record(name, None, optional=True)`. Ordinary helpers must prove both paths;
+unknown effects in the absent path cannot be discarded. Optionality propagates through
+normal constructor definitions and still requires at least one proven non-null allocation
+source. Test execution is not used to infer types. An earlier `self.name = input`
+assignment is accepted; other attribute replacement remains rejected.
+
+Absent inputs allocate no resources and require no source instance. Only numerical
+entries that read an input receive its necessary presence variants; two independent
+inputs do not multiply each other's kernel code. Direct calls and rebinding validate
+presence and source identity, while prepared calls retain their snapshots. Focused
+CPU/CUDA/Vulkan source-free consumers and the original GeoPhys helper cover these
+paths. Optional object references and model-driven tensor element or local-vector
+lengths are not thereby supported.
 
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute

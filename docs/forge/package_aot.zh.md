@@ -400,8 +400,18 @@ Vector/MatrixField 以及 StructField 的数值成员，不将整个 StructField
 的分支都产生来源义务，只有结果确实是对同一输入的 `source_scope=True` 借用，且后续定义来源检查
 通过，才能导出；不能仅假设参数是 Field、吞掉副作用、丢弃返回值或退化为 external 绑定。
 原 GeoPhys `declare_source_borrow` 的必选数值 Field 路径已通过三后端无源码消费；原 EFC 类的声明
-预检查越过 helper 转发后，仍在 `dof_count` 的非字面量静态类型域拒绝。可选 Field、不同来源定义的
+预检查越过 helper 转发后，仍在 `dof_count` 的非字面量静态类型域拒绝。不同来源定义的
 相容性归一化及完整 EFC 类型域仍需处理，这不是完整 EFC 或整引擎资格。
+
+版本 24 接入已有 `input is None` / `is not None` 选择的 Field 输入声明：存在分支借用同一参数，
+缺席分支为 `scope.record(name, None, optional=True)`。普通 helper 必须分别证明两条路径，
+不能忽略缺席路径的未知副作用。从正常构造定义传播可选性，仍需至少一个已证明的非空原分配来源；
+没有从测试执行猜测类型。允许声明前已有的 `self.name = input`，其他属性覆盖仍拒绝。
+
+缺席输入不分配资源，也不要求存在来源实例。只有读取该输入的数值入口产生所需的存在性变体；
+两个独立输入不会让各自的 Kernel 展开成组合副本。直接调用和重新绑定检查输入存在性及原来源，
+已准备调用保留原快照。CPU/CUDA/Vulkan 局部无源码消费及原 GeoPhys helper 检查覆盖这些路径；
+可选对象引用、模型决定的张量元素/局部向量长度仍未因此获得支持。
 
 ## 仍需补齐的共同机制
 

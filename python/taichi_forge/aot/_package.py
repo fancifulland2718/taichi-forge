@@ -1031,6 +1031,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(22, manifest["version"])
             if any(item["kind"] == "borrowed_field" and "input_parameter" in item for item in schema.values()):
                 manifest["version"] = max(23, manifest["version"])
+            if any(item.get("optional_input") for item in schema.values()):
+                manifest["version"] = max(24, manifest["version"])
             if any(item["kind"] == "static" for item in schema.values()):
                 manifest["version"] = max(11, manifest["version"])
             if any("presence_parameter" in item for item in schema.values()):
@@ -1184,21 +1186,38 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         )
                 # Sharing is decided by the compiler object/key and its actual
                 # ABI/dependency guards, never by a semantic hash alone.
-                constraints, dimensions, _ = environment.constraint_facts(owner, code.used)
+                bound_used = {
+                    key: value
+                    for key, value in code.used.items()
+                    if all(
+                        code.static.get(flag) == static_key(expected)
+                        for flag, expected in compilation_schemas.get(owner_name, {})
+                        .get(key, {})
+                        .get("conditions", {})
+                        .items()
+                    )
+                }
+                constraints, dimensions, _ = environment.constraint_facts(owner, bound_used)
+                input_presence = {
+                    key: dict(path=list(environment._paths[key]), present=key in bound_used)
+                    for key, item in compilation_schemas.get(owner_name, {}).items()
+                    if key in code.used and item.get("optional_input")
+                }
                 source_bindings = {
                     key: dict(path=list(environment._paths[key]), source_path=item["source_path"])
                     for key, item in compilation_schemas.get(owner_name, {}).items()
-                    if key in code.used and item["kind"] == "borrowed_field"
+                    if key in bound_used and item["kind"] == "borrowed_field"
                 }
-                child_bindings = owner_bindings(environment, compilation_schemas.get(owner_name, {}), code.used)
+                child_bindings = owner_bindings(environment, compilation_schemas.get(owner_name, {}), bound_used)
                 admission = (
                     dict(
                         constraints=constraints,
                         dimensions=dimension_relations(environment, dimensions),
                         **({"source_bindings": source_bindings} if source_bindings else {}),
                         **({"owner_bindings": child_bindings} if child_bindings else {}),
+                        **({"input_presence": input_presence} if input_presence else {}),
                     )
-                    if constraints or source_bindings or child_bindings
+                    if constraints or source_bindings or child_bindings or input_presence
                     else None
                 )
                 identity = (code.kernel, code.key)
