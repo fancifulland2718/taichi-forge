@@ -12,11 +12,13 @@ import importlib.util
 import inspect
 import itertools
 import json
+import operator
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 
 from ._runtime import Scalar
+from .._dimensions import Extent, evaluate_extent
 
 _construction = ContextVar("forge_definition_owner", default=None)
 _ids = itertools.count()
@@ -152,6 +154,15 @@ class _ModuleBinding:
     def type(self, spec):
         return _ElementType(self.package, spec)
 
+    def extent(self, expression, owner):
+        return evaluate_extent(expression, lambda key: getattr(owner, key))
+
+    def resource_scope(self, owner):
+        self.package._check()
+        if getattr(owner, "_forge_package_owner", None) is not self.package:
+            raise ValueError("Resource scope belongs to another loaded package")
+        return _ResourceScope(owner)
+
     def declare_value(self, owner, name, spec):
         self.package._check()
         if getattr(owner, "_forge_package_owner", None) is not self.package:
@@ -167,6 +178,27 @@ class _ModuleBinding:
 
     def unbound_entry(self, definition):
         return _UnboundEntry(definition)
+
+
+class _ResourceScope:
+    """Forward original Host attributes and reuse the shared dimension algebra."""
+
+    def __init__(self, owner):
+        object.__setattr__(self, "_owner", owner)
+
+    def __getattr__(self, name):
+        return getattr(self._owner, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._owner, name, value)
+
+    def dim(self, name):
+        if not isinstance(name, str) or not name.isidentifier():
+            raise ValueError("A dimension requires an explicit owner attribute name")
+        value = operator.index(getattr(self._owner, name))
+        if not 0 <= value <= 2**31 - 1:
+            raise ValueError(f"Dimension {name!r} is outside the i32 count range")
+        return Extent(("dim", name))
 
 
 class _Importlib:
@@ -289,7 +321,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

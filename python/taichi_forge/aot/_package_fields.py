@@ -5,6 +5,29 @@ import ast
 from ._package_types import qualified_kind, resolve_type, type_spec
 
 
+def field_type_shape(call, role, module, fail):
+    names = {
+        "field": ("dtype", "shape"),
+        "Vector.field": ("n", "dtype", "shape"),
+        "Matrix.field": ("n", "m", "dtype", "shape"),
+    }[role]
+    if len(call.args) > len(names) or any(k.arg not in names for k in call.keywords):
+        fail(module, call, "Package Field declarations currently require plain default AOS layout")
+    args = dict(zip(names, call.args))
+    for keyword in call.keywords:
+        if keyword.arg in args:
+            fail(module, call, "Duplicate Field factory argument")
+        args[keyword.arg] = keyword.value
+    if not set(names) <= args.keys():
+        fail(module, call, "Field declaration requires its type dimensions, dtype and shape")
+    dtype = args["dtype"]
+    if role != "field":
+        factory = "_forge_package_vector" if role == "Vector.field" else "_forge_package_matrix"
+        dimensions = [args["n"]] + ([args["m"]] if role == "Matrix.field" else [])
+        dtype = ast.Call(ast.Name(factory, ast.Load()), [*dimensions, dtype], [])
+    return dtype, args["shape"]
+
+
 def field_declarations(module, constructor, kind, fail):
     """Read only a declarative constructor slice, without running user code."""
     if constructor is None:
@@ -76,27 +99,8 @@ def field_declarations(module, constructor, kind, fail):
             or writes[target.attr] != 1
         ):
             fail(module, node, "Field allocation requires one unconditional owner attribute")
-        names = {
-            "field": ("dtype", "shape"),
-            "Vector.field": ("n", "dtype", "shape"),
-            "Matrix.field": ("n", "m", "dtype", "shape"),
-        }[role]
-        call = node.value
-        if len(call.args) > len(names) or any(k.arg not in names for k in call.keywords):
-            fail(module, node, "Package Field declarations currently require plain default AOS layout")
-        args = dict(zip(names, call.args))
-        for keyword in call.keywords:
-            if keyword.arg in args:
-                fail(module, node, "Duplicate Field factory argument")
-            args[keyword.arg] = keyword.value
-        if not set(names) <= args.keys():
-            fail(module, node, "Field declaration requires its type dimensions, dtype and shape")
-        dtype = args["dtype"]
-        if role != "field":
-            factory = "_forge_package_vector" if role == "Vector.field" else "_forge_package_matrix"
-            dimensions = [args["n"]] + ([args["m"]] if role == "Matrix.field" else [])
-            dtype = ast.Call(ast.Name(factory, ast.Load()), [*dimensions, dtype], [])
-        shape = args["shape"].elts if isinstance(args["shape"], (ast.List, ast.Tuple)) else [args["shape"]]
+        dtype, shape = field_type_shape(node.value, role, module, fail)
+        shape = shape.elts if isinstance(shape, (ast.List, ast.Tuple)) else [shape]
         sources = {}
         fields[target.attr] = dict(
             kind="dense_field",
@@ -112,11 +116,21 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
     from ._component import DenseField, Dimension
+    from taichi_forge_runtime._dimensions import evaluate_extent
 
-    fields = {name: item for name, item in schema.items() if item["kind"] == "dense_field"}
-    if not fields:
-        return {}
+    fields = dict(
+        sorted(
+            ((name, item) for name, item in schema.items() if item["kind"] == "dense_field"),
+            key=lambda pair: pair[1]["allocation"],
+        )
+    )
     declarations = {}
+    for name, item in schema.items():
+        if item["kind"] == "dimension":
+            declarations[name] = Dimension(kind="active")
+            setattr(owner, name, 1)
+    if not fields:
+        return declarations
     typed = []
     for name, item in fields.items():
         declaration_namespace = (
@@ -138,9 +152,13 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         concrete = []
         for extent in item["shape"]:
             if isinstance(extent, str):
-                declarations[extent] = Dimension()
-                setattr(owner, extent, 1)
-                concrete.append(1)
+                expression = item.get("dimension_expressions", {}).get(extent, ())
+                declarations[extent] = Dimension(expression=expression)
+                value = evaluate_extent(expression, lambda key: getattr(owner, key)) if expression else 1
+                if not 0 < value <= 2**31 - 1:
+                    raise ValueError("Declared extent needs a legal symbolic construction witness")
+                setattr(owner, extent, value)
+                concrete.append(value)
             else:
                 if not 0 < extent <= 2**31 - 1:
                     raise ValueError("Field extents must fit the existing positive i32 dimension contract")
@@ -154,10 +172,10 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         value = ti.field(dtype)
         # This is the documented default field(shape=...) placement through the
         # ordinary builder. Native capture verifies the complete group below.
-        if concrete:
-            builder.dense(axes, tuple(concrete)).place(value)
-        else:
-            builder.place(value)
+        # Even shape=() uses the ordinary factory's empty-axis Dense node.
+        # Placing a tensor directly at root would split its lanes into separate
+        # implicit nodes, unlike Matrix.field(shape=())'s one packed element.
+        builder.dense(axes, tuple(concrete)).place(value)
         setattr(owner, name, value)
         declarations[name] = DenseField(dtype, tuple(item["shape"]), "fields")
     owner._forge_package_field_tree = builder._finalize_for_aot()

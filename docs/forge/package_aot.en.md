@@ -146,8 +146,8 @@ analytic/original-JIT comparisons and temporary-resource release checks.
 
 The source-boundary mode is also exercised with the original winding module.
 The larger original sampling closure reaches resource owners such as `MeshSDF`
-and currently rejects its target-dependent ResourceScope construction. ResourceScope
-Field/Sparse placements remain pending. No dependency was deleted
+and currently rejects its target-dependent ResourceScope construction. Its conditional
+construction and explicit Sparse placements remain pending. No dependency was deleted
 to obtain a pass; correct rejection does not qualify sampling. Declaration
 preflight aggregates syntax/schema failures across modules; compiler dependency
 failures are diagnosed when compiling the affected entry.
@@ -170,15 +170,26 @@ implementation; an error interface is not a device implementation.
 
 An unconditional local `scope = ti.experimental.ResourceScope(self)` with ordinary
 `scope.value('name', dtype)` declarations now supplies scalar/vector/matrix owner
-types without constructing a model. These packages use manifest version 4;
-consumers retain version 1–3 support. Native per-call ABI packing receives tensor
+types without constructing a model. New packages use manifest version 5;
+consumers retain version 1–4 support. Native per-call ABI packing receives tensor
 shape metadata, and only values read by a kernel enter that kernel's capture
 contract. Unused declarations do not add arguments. Original Host value assignments
 and later changes remain normal Python. Focused CPU/CUDA/Vulkan checks cover
 source-free tensor captures, two independent instances and original JIT behavior.
-This slice does not yet cover ResourceScope resource allocations, conditional or
-reassigned scopes, dynamic attribute names, scope escapes or static domains. These
-declarations reject before publishing a package.
+
+Default AOS ResourceScope `field/vector_field/matrix_field` declarations also export
+through `dim('name')`, single-assignment local aliases and the existing dimension
+algebra (add, subtract, multiply, floor-divide, minimum/maximum). Producer and consumer
+reuse the same `Extent`/evaluation implementation without running model preparation.
+Native SNode rules determine the complete group's layout and instantiate new sizes.
+Direct and scoped Fields retain their original allocation order; zero-dimensional
+tensors use the same empty-axis Dense node as ordinary JIT. CPU/CUDA/Vulkan checks
+compare every layout node with JIT, numerical outputs, new counts including 0/3/7/19,
+state isolation and source-free consumption. Counts may be zero; physical extents
+must remain legal. Expressions not satisfied by the current structural witness reject,
+rather than executing a model to obtain sample values. Explicit FieldsBuilder/Sparse
+layouts, conditional/reassigned scopes, dynamic attribute names, scope escapes and
+static domains remain unsupported and reject before publishing a package.
 
 ## Remaining shared mechanisms
 

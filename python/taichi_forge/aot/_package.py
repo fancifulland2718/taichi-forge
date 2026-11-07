@@ -23,7 +23,7 @@ from ._package_fields import field_declarations, construct_fields, field_allocat
 from ._package_sources import collect_sources
 from ._package_owners import resolve_owners
 from ._package_errors import is_error_interface, project_error_interface
-from ._package_resources import scope_values
+from ._package_resources import scope_declarations
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
@@ -89,9 +89,9 @@ def _owner_schema(module, node, kind):
             if target.attr in schema and schema[target.attr] != spec:
                 _fail(module, statement, f"attribute {target.attr!r} has conflicting types")
             schema[target.attr] = spec
-    for name, declaration in scope_values(module, constructor, kind, _fail).items():
+    for name, declaration in scope_declarations(module, constructor, kind, _fail).items():
         if name in schema and schema[name]["kind"] != "value":
-            _fail(module, constructor, f"ResourceScope value {name!r} conflicts with a resource allocation")
+            _fail(module, constructor, f"ResourceScope role {name!r} conflicts with a resource allocation")
         schema[name] = declaration
     return schema
 
@@ -251,7 +251,6 @@ def _host_projection(
             if (
                 isinstance(target, ast.Attribute)
                 and isinstance(target.value, ast.Name)
-                and target.value.id == "self"
                 and schema.get(target.attr, {}).get("kind") == "dense_field"
                 and schema[target.attr]["allocation"] == [node.lineno, node.col_offset]
             ):
@@ -468,7 +467,14 @@ def _host_projection(
                 ):
                     # The normal scope forwards attributes to this same owner;
                     # declarations are projected separately at their source sites.
-                    return ast.copy_location(ast.Name("self", ast.Load()), node)
+                    return ast.copy_location(
+                        ast.Call(
+                            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "resource_scope", ast.Load()),
+                            [ast.Name("self", ast.Load())],
+                            [],
+                        ),
+                        node,
+                    )
                 _fail(module, node, "Package ResourceScope builder/initialization requires further support")
             if (
                 isinstance(node.func, ast.Attribute)
@@ -629,7 +635,14 @@ def export_package(package, output, *, arch=None, source_root=None):
         for schema in schemas.values()
         for item in schema.values()
     ):
-        manifest["version"] = max(4, manifest["version"])
+        manifest["version"] = 5
+    if any(
+        "scope_allocation" in item and item["kind"] != "value"
+        for _, _, _, _, _, _, schemas, _ in sources
+        for schema in schemas.values()
+        for item in schema.values()
+    ):
+        manifest["version"] = 5
     if source_root is not None:
         manifest.update(
             version=max(2, manifest["version"]),
@@ -656,7 +669,7 @@ def export_package(package, output, *, arch=None, source_root=None):
             owner = object.__new__(cls)  # Deliberately never call application __init__.
             declarations = construct_fields(owner, schema, vars(imported), module, imported_modules=imported_modules)
             for attribute, item in schema.items():
-                if item["kind"] == "dense_field":
+                if item["kind"] in ("dense_field", "dimension"):
                     continue
                 elif item["kind"] == "ndarray":
                     dtype = resolve_type(

@@ -1294,7 +1294,7 @@ def test_package_resource_scope_values_preserve_compound_captures(tmp_path, monk
     package = _source_package(tmp_path, monkeypatch, SCOPE_VALUES_SOURCE)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     original = sys.modules["definition_fixture.model"]
-    assert manifest["version"] == 4 and original.constructors == 0
+    assert manifest["version"] == 5 and original.constructors == 0
     entries = {entry["definition"].rsplit(".", 1)[-1]: entry for entry in manifest["entries"].values()}
     captures = {item["name"]: item for item in entries["compute"]["captures"]}
     assert set(captures) == {"gain", "shift", "transform"}
@@ -1347,10 +1347,10 @@ def test_package_resource_scope_values_preserve_compound_captures(tmp_path, monk
 @pytest.mark.parametrize(
     "replacement,diagnostic",
     [
-        ("if gain > 0:\n            scope.value('gain', ti.f32)", "unconditional declarations"),
-        ("alias = scope\n        scope.value('gain', ti.f32)", "beyond value declarations"),
+        ("if gain > 0:\n            scope.value('gain', ti.f32)", "unconditional supported resource declaration"),
+        ("alias = scope\n        scope.value('gain', ti.f32)", "unconditional supported resource declaration"),
         ("scope = ti.experimental.ResourceScope(self)\n        scope.value('gain', ti.f32)", "must not be reassigned"),
-        ("scope.array = scope.field(ti.f32, shape=2)", "beyond value declarations"),
+        ("scope.array = scope.field(ti.f32, shape=2, placement=None)", "default AOS layout"),
     ],
 )
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -1362,3 +1362,140 @@ def test_package_resource_scope_rejects_unproven_roles(tmp_path, monkeypatch, re
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk").exists()
+
+
+SCOPE_FIELDS_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, m: int):
+        global constructors
+        constructors += 1
+        self.n, self.m = n, m
+        unrelated_host_value = 2**48
+        unrelated_host_value = 0
+        scope = ti.experimental.ResourceScope(self)
+        rows, cols = scope.dim('n'), scope.dim('m')
+        count = (rows + 1) * 2
+        scope.a = scope.field(ti.f32, shape=count, initialization='zero')
+        self.total = ti.field(ti.f32, shape=())
+        scope.v = scope.vector_field(2, ti.f32, shape=(rows.maximum(1), cols))
+        scope.mat = scope.matrix_field(2, 2, ti.f32, shape=())
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.a:
+            self.a[i] = gain * (i + self.n)
+        for i, j in self.v:
+            self.v[i, j] = ti.Vector([gain * i, gain * j])
+        self.mat[None] = ti.Matrix([[gain, 2.0], [3.0, gain + 4.0]])
+        self.total[None] = gain * (self.n + self.m)
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_scope_fields_share_dimension_and_native_layout_rules(tmp_path, monkeypatch):
+    from tests.python.test_aot_dense_snode_group import _compiled_nodes
+
+    package = _source_package(tmp_path, monkeypatch, SCOPE_FIELDS_SOURCE)
+    original = package.Model(7, 3)
+    original.step(2.0)
+    expected = {name: getattr(original, name).to_numpy() for name in ("a", "v", "mat", "total")}
+    root = ti.lang.impl.get_runtime().prog.get_snode_root(original.a.snode.ptr.get_snode_tree_id())
+    layout = _compiled_nodes(root)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 5
+    assert sys.modules["definition_fixture.model"].constructors == 1
+    assert len(manifest["field_groups"]) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        a, b = library.host.Model(7, 3), library.host.Model(0, 5)
+        assert a.a._group_owner.layout["nodes"] == layout
+        assert a.a._group_owner is a.v._group_owner is a.mat._group_owner is a.total._group_owner
+        assert a.a._group_owner is not b.a._group_owner
+        assert a.a.shape == (16,) and b.a.shape == (2,) and b.v.shape == (1, 5)
+        a.step(2.0)
+        b.step(-3.0)
+        for name, values in expected.items():
+            np.testing.assert_array_equal(
+                np.frombuffer(getattr(a, name).read(), np.float32).reshape(values.shape), values
+            )
+        np.testing.assert_array_equal(np.frombuffer(b.a.read(), np.float32), [0.0, -3.0])
+        assert np.frombuffer(b.total.read(), np.float32).item() == -15.0
+        registered = set(runtime._resources)
+        with pytest.raises((ValueError, RuntimeError)):
+            library.host.Model(-1, 2)
+        assert runtime._resources == registered
+    probe = tmp_path / "consume_scope_fields.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoPrivateSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoPrivateSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3, 2), code.host.Model(19, 1)
+            a.step(2.0)
+            b.step(-1.0)
+            np.testing.assert_array_equal(np.frombuffer(a.a.read(), np.float32), 2 * (np.arange(8) + 3))
+            np.testing.assert_array_equal(np.frombuffer(b.a.read(), np.float32), -(np.arange(40) + 19))
+            assert a.v.shape == (3, 2) and b.v.shape == (19, 1)
+            assert a.a._group_owner is not b.a._group_owner
+        print('SCOPE_FIELDS_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SCOPE_FIELDS_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "before,after,diagnostic",
+    [
+        ("count = (rows + 1) * 2", "count = n * 2", "shape requires declared dimensions"),
+        (
+            "count = (rows + 1) * 2",
+            "count = (rows + 1) * 2\n        count = rows",
+            "shape requires declared dimensions",
+        ),
+        (
+            "self.total = ti.field(ti.f32, shape=())",
+            "self.a = 7\n        self.total = ti.field(ti.f32, shape=())",
+            "one unconditional owner attribute",
+        ),
+        (
+            "rows, cols = scope.dim('n'), scope.dim('m')",
+            "if n > 0:\n            rows, cols = scope.dim('n'), scope.dim('m')",
+            "shape requires declared dimensions",
+        ),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_scope_fields_reject_unproven_dimensions_and_replacements(
+    tmp_path, monkeypatch, before, after, diagnostic
+):
+    package = _source_package(tmp_path, monkeypatch, SCOPE_FIELDS_SOURCE.replace(before, after))
+    with pytest.raises(ti.aot.PackageExportError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0

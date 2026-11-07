@@ -102,7 +102,7 @@ recorder 在消费端把两种点数/面数绑定到同一已编译入口及现�
 同一个 winding 入口也已通过三后端 NumPy Host 缓冲区消费、解析值/原 JIT 比对和临时资源释放检查。
 这只证明该真实模块，仍不是整引擎按包导出资格。
 
-包含继承数值方法的包使用清单版本 3，消费者兼容版本 1–3。按 Python MRO 解析
+包含继承数值方法的包至少使用清单版本 3，消费者兼容版本 1–5。按 Python MRO 解析
 实际方法，支持未重复装饰的普通子类及 Kernel/helper mixin；mixin 需要扫描范围内的
 具体 `data_oriented` 接收者，不要求新增装饰器。只有原编译器依赖/ABI 检查已接受的
 同一个编译结果才共享入口；覆盖实际使用的 helper 会保留不同实现。入口的 `definitions`
@@ -115,7 +115,7 @@ recorder 在消费端把两种点数/面数绑定到同一已编译入口及现�
 
 源码边界模式也已用于原 winding 模块。原采样模块的更大依赖闭包会到达
 `MeshSDF` 等资源 owner，当前第一处失败是按目标分支构造的 ResourceScope；
-ResourceScope Field/Sparse 布局仍待接入。没有删除该依赖或把“拒绝正确”算成采样支持。
+其条件构造及显式 Sparse 布局仍待接入。没有删除该依赖或把“拒绝正确”算成采样支持。
 
 只含一次字面量参数调用、且所调用的普通 Python helper 明确标注 `typing.NoReturn`/`Never`
 的报错接口，保留 Host 报错行为，不生成数值代码资产。标注别名和延迟标注只解析引用，
@@ -125,11 +125,20 @@ override 均保留。数值代码调用这些接口仍须有可编译实现，�
 
 无条件的局部 `scope = ti.experimental.ResourceScope(self)` 及已有
 `scope.value('name', dtype)` 声明可提供标量/向量/矩阵 owner 类型，无须运行模型构造。
-此类包使用清单版本 4，消费者继续兼容 1–3。向量/矩阵捕获的形状保留到原生逐次调用
+此类新包使用清单版本 5，消费者继续兼容 1–4。向量/矩阵捕获的形状保留到原生逐次调用
 ABI；只有 Kernel 实际读取的值进入其捕获合同，无关声明不增加参数。原 Host 赋值及
 后续值变化保持普通 Python 行为。CPU/CUDA/Vulkan 局部检查覆盖无源码张量捕获、
-两个独立实例及原 JIT。此切片尚不支持 ResourceScope 资源分配、条件或重绑定 scope、
-动态属性名、scope 逃逸及静态域；这些声明在发布包前明确拒绝。
+两个独立实例及原 JIT。
+
+ResourceScope 的默认 AOS `field/vector_field/matrix_field` 也可从声明导出：支持
+`dim('name')`、单赋值局部别名及已有加减乘、整除、minimum/maximum 维度代数。
+Producer 与消费者复用同一个 `Extent`/求值实现，不执行模型准备；原生 SNode 规则生成
+完整组的物理布局，消费时以新尺寸实例化。普通字段和 scope 字段按原分配顺序共组，
+零维张量保留正常 JIT 的空轴 Dense 节点。CPU/CUDA/Vulkan 对照原 JIT 的所有布局节点，
+并检查数值、0/3/7/19 等新计数、独立状态及无源码消费。声明计数可为零，Field 的实际
+extent 仍须合法；当前结构见证不能满足的表达式明确拒绝，不运行模型求样本。
+显式 FieldsBuilder/Sparse 布局、条件或重绑定 scope、动态属性名、scope 逃逸和静态域
+仍未接入；不支持的声明在发布包前明确拒绝。
 
 声明预检查汇总不同模块的语法/schema 错误；编译依赖错误在对应入口编译时诊断。
 

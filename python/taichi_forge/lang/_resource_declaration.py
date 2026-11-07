@@ -12,49 +12,7 @@ from dataclasses import dataclass
 from types import MemberDescriptorType
 
 
-from taichi_forge_runtime._dimensions import evaluate_extent, extent_dependencies, freeze_extent, validate_extent
-
-
-@dataclass(frozen=True)
-class Extent:
-    expression: tuple
-
-    def __post_init__(self):
-        object.__setattr__(self, "expression", freeze_extent(self.expression))
-
-    def _binary(self, op, other):
-        if isinstance(other, Extent):
-            expression = other.expression
-        elif type(other) is int:
-            expression = ("const", other)
-        else:
-            raise TypeError("Dimension expressions accept declared dimensions or integer constants")
-        return Extent((op, self.expression, expression))
-
-    def __add__(self, other):
-        return self._binary("add", other)
-
-    __radd__ = __add__
-
-    def __sub__(self, other):
-        return self._binary("sub", other)
-
-    def __mul__(self, other):
-        return self._binary("mul", other)
-
-    __rmul__ = __mul__
-
-    def __floordiv__(self, other):
-        return self._binary("floordiv", other)
-
-    def maximum(self, other):
-        return self._binary("max", other)
-
-    def minimum(self, other):
-        return self._binary("min", other)
-
-    def __bool__(self):
-        raise TypeError("A declared extent is not a Python condition; use the normal model value")
+from taichi_forge_runtime._dimensions import Extent, evaluate_extent, extent_dependencies, freeze_extent, validate_extent
 
 
 def _source_members(field):
