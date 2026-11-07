@@ -30,6 +30,10 @@ _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32"
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
 _PREFIX = "_forge_package_"
 _HOST_OPS = frozenset(("ndarray", "graph", "sync"))
+_HOST_RESOURCE_TYPES = frozenset(("Field", "ScalarField", "MatrixField", "StructField"))
+_PRODUCER_ALLOCATIONS = frozenset(
+    ("root", "FieldsBuilder", "field", "axes", "Vector.field", "Matrix.field", "Struct.field", "types.struct.field")
+)
 
 
 class PackageExportError(ValueError):
@@ -252,6 +256,23 @@ def _host_projection(
 
         def __init__(self):
             self.producer_only = []
+            self.host_functions = []
+
+        def producer_allocation(self, node, role):
+            if not self.host_functions:
+                _fail(module, node, f"Unprojected {role!r} allocation is eager Host code")
+            self.minimum_version = max(self.minimum_version, 18)
+            self.producer_only.append(
+                dict(module=module, operation=role, line=node.lineno, function=self.host_functions[-1])
+            )
+            return ast.copy_location(
+                ast.Call(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "producer_allocation", ast.Load()),
+                    [ast.Constant(role), ast.Constant(f"{module}:{node.lineno}")],
+                    [],
+                ),
+                node,
+            )
 
         def visit_Assign(self, node):
             return self._allocation(node)
@@ -503,7 +524,19 @@ def _host_projection(
                 local = decorator_resolver(node)
                 kind = lambda expression: local(expression) or previous(expression)
                 try:
-                    return self.generic_visit(node)
+                    # Defaults, annotations and decorators execute in the outer
+                    # scope, unlike the deferred body of ordinary Host methods.
+                    node.args = self.visit(node.args)
+                    node.decorator_list = [self.visit(d) for d in node.decorator_list]
+                    if node.returns is not None:
+                        node.returns = self.visit(node.returns)
+                    self.host_functions.append(".".join(n for n in (self.owner, node.name) if n))
+                    try:
+                        body = self.visit(ast.Module(body=node.body, type_ignores=[]))
+                        node.body = body.body
+                    finally:
+                        self.host_functions.pop()
+                    return node
                 finally:
                     kind = previous
             if definition.get("error_interface"):
@@ -526,6 +559,28 @@ def _host_projection(
 
         def visit_Attribute(self, node):
             role = qualified_kind(node, kind)
+            if isinstance(node.ctx, ast.Load) and role in _PRODUCER_ALLOCATIONS:
+                return self.producer_allocation(node, role)
+            if isinstance(node.ctx, ast.Load) and role in _HOST_RESOURCE_TYPES:
+                self.minimum_version = max(self.minimum_version, 18)
+                return ast.copy_location(
+                    ast.Call(
+                        ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "resource_type", ast.Load()),
+                        [ast.Constant(role)],
+                        [],
+                    ),
+                    node,
+                )
+            if isinstance(node.ctx, ast.Load) and role in ("Layout.AOS", "Layout.SOA"):
+                self.minimum_version = max(self.minimum_version, 18)
+                return ast.copy_location(
+                    ast.Call(
+                        ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "layout", ast.Load()),
+                        [ast.Constant(role.split(".")[-1])],
+                        [],
+                    ),
+                    node,
+                )
             if role == "lang.impl.get_runtime.prog" and isinstance(node.ctx, ast.Load):
                 if not isinstance(node.value, ast.Call) or node.value.args or node.value.keywords:
                     _fail(module, node, "Runtime identity query takes no arguments")
@@ -606,6 +661,11 @@ def _host_projection(
             ):
                 _fail(module, node, "Host references a device-only helper")
             return node
+
+        def visit_Subscript(self, node):
+            if self.host_functions and isinstance(node.slice, ast.Constant) and node.slice.value is None:
+                self.minimum_version = max(self.minimum_version, 18)
+            return self.generic_visit(node)
 
         def visit_Call(self, node):
             for item in owners.get(self.owner, {}).values():
@@ -745,7 +805,7 @@ def _host_projection(
     return ast.unparse(projected) + "\n", projector.minimum_version, projector.producer_only
 
 
-def export_package(package, output, *, arch=None, source_root=None):
+def export_package(package, output, *, arch=None, caps=None, source_root=None):
     """Experimentally export all decorated definitions in an imported module/package.
 
     Selects ``arch`` on a cold Runtime or validates the currently initialized
@@ -818,7 +878,7 @@ def export_package(package, output, *, arch=None, source_root=None):
                 function = _source_value(node.items[0].context_expr.func, vars(imported_modules[name]))
                 host_contexts.add(function, recipe)
     resolve_owners(sources, imported_modules, _owner_schema, _fail)
-    module = Module()
+    module = Module(caps=caps)
     manifest = dict(
         version=(
             3
@@ -831,6 +891,7 @@ def export_package(package, output, *, arch=None, source_root=None):
         ),
         kind="forge_definition_package_prototype",
         target=module._arch.name,
+        target_capabilities=list(caps or ()),
         module_root=package.__name__,
         discovery="all_decorated_definitions",
         entries={},

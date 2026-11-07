@@ -415,6 +415,88 @@ class Model:
     assert not (tmp_path / "sdk").exists()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_keeps_cold_producer_paths_explicit_and_scalar_field_io_native(tmp_path, monkeypatch):
+    source = STRUCT_FIELDS_SOURCE.replace("LAYOUT", "AOS") + """
+class Legacy:
+    def allocate(self):
+        return ti.field(ti.i32, shape=3)
+    def place(self):
+        return ti.root.dense(None, 3)
+    def allocate_tensor(self):
+        return ti.Vector.field(3, ti.f32, shape=3)
+    def allocate_record(self):
+        return ti.types.struct(**{'x': ti.f32}).field(shape=3)
+
+def classify(value):
+    return (isinstance(value, ti.Field), isinstance(value, ti.ScalarField),
+            isinstance(value, ti.MatrixField), isinstance(value, ti.StructField))
+
+def scalar_roundtrip(model, value):
+    model.total[None] = value
+    return model.total[None]
+
+def layout_names():
+    return ti.Layout.AOS == ti.Layout.AOS, ti.Layout.AOS != ti.Layout.SOA
+
+def legacy_capability_fallback():
+    return getattr(ti, 'experimental', None) is None
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 18
+    assert {item["operation"] for item in manifest["producer_only"]} == {
+        "field",
+        "root",
+        "Vector.field",
+        "types.struct.field",
+    }
+    original = package.Model(3)
+    original.initialize(2.0)
+    expected = original.particles.to_numpy()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        host = loaded.module("definition_fixture.model")
+        a, b = loaded.host.Model(3), loaded.host.Model(7)
+        a.initialize(2.0)
+        b.initialize(-1.0)
+        assert host.classify(a.total) == (True, True, False, False)
+        assert host.classify(a.particles) == (True, False, False, True)
+        assert host.classify(a.particles.position) == (True, False, True, False)
+        assert host.classify(runtime.ndarray("f32", (3,))) == (False, False, False, False)
+        assert host.layout_names() == (True, True)
+        with pytest.raises(RuntimeError, match="frontend capability ti.experimental"):
+            host.legacy_capability_fallback()
+        assert host.scalar_roundtrip(a, 3.5) == 3.5
+        assert b.total[None] == 0.0
+        for name, array in a.particles.to_numpy().items():
+            np.testing.assert_array_equal(array, expected[name])
+        builder = loaded.graph_builder()
+        builder.dispatch(a.step, builder.private_scalar("delta", "f32", 2.0))
+        builder.compile().run({})
+        assert a.total[None] == 4.0
+        resources = set(runtime._resources)
+        for method in ("allocate", "place", "allocate_tensor", "allocate_record"):
+            with pytest.raises(RuntimeError, match="producer resource declaration lowering"):
+                getattr(host.Legacy(), method)()
+            assert set(runtime._resources) == resources
+        with pytest.raises(TypeError, match="zero-dimensional Field"):
+            a.particles.mass[None]
+        a.total._group_owner.close()
+        with pytest.raises((ValueError, RuntimeError)):
+            host.scalar_roundtrip(a, 1.0)
+        assert host.scalar_roundtrip(b, -4.0) == -4.0
+
+
+@pytest.mark.parametrize("eager", ["value = ti.field(ti.i32, shape=3)", "def setup(value=ti.FieldsBuilder()): pass"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_does_not_defer_eager_unprojected_allocations(tmp_path, monkeypatch, eager):
+    source = "import taichi_forge as ti\nclass Model: pass\n" + eager
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="eager Host code"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize("helper_kind", ["func", "real_func", "pyfunc"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_compiles_definitions_without_constructor_or_test_trace(tmp_path, monkeypatch, helper_kind):

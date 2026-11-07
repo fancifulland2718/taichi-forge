@@ -909,6 +909,21 @@ class NdArray:
         _, format, _ = _dtype(self.dtype)
         return np.frombuffer(self.read(), dtype=np.dtype(format)).reshape(self.shape + self.element_shape).copy()
 
+    def _scalar_field_format(self, key):
+        if key is not None or self.shape or self.element_shape or not hasattr(self, "_group_owner"):
+            raise TypeError("Host indexing currently requires a scalar zero-dimensional Field and the None index")
+        return "=" + _dtype(self.dtype)[1]
+
+    def __getitem__(self, key):
+        # The native descriptor resolves the member's SNode placement. A scalar
+        # transfer is exactly one element, never a readback of the owning group.
+        format = self._scalar_field_format(key)
+        return struct.unpack(format, self.read())[0]
+
+    def __setitem__(self, key, value):
+        format = self._scalar_field_format(key)
+        self.write(struct.pack(format, value))
+
     def close(self):
         self._memory.close()
 

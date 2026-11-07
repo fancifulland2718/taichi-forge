@@ -22,6 +22,11 @@ ti.aot.export_package(my_engine, "dist/my_engine_cuda", arch="cuda")
 后端启动，禁用静默回退；已有 JIT Runtime 时必须与其后端一致，不重置活跃的 JIT。
 省略 `arch` 则使用已经选择的后端。
 
+可传入 `caps=[...]`，直接复用 `ti.aot.Module` 的部署设备能力声明和原生加载检查。
+例如需要 64 位整数的 Vulkan 包使用 `caps=["spirv_has_int64"]`。能力不会从 Producer
+的 JIT 设备自动继承；省略时仍是原 Module 的基线目标。包清单记录请求值，TCM 的
+原生目标合同保持权威，不通过更换后端或截断数据类型绕过不支持的能力。
+
 输出目录必须不存在。导出扫描选定包目录中的所有 `.py` 定义，包含没有被包入口
 导入的模块和未在测试中调用的 Kernel；也可传入单个源码模块。它不运行构造函数、
 初始化 Kernel、Host 分支或 step 来收集编译覆盖。Python 模块仍需正常导入，顶层
@@ -169,7 +174,7 @@ Host 的 `ti.Vector`/`ti.Matrix` 构造（含 import 别名）、固定张量类
 装饰器内的数值矩阵运算继续由原编译器处理。三后端局部检查覆盖捕获、复合参数、
 独立状态及无源码消费。
 
-Graph 捕获及相关 Host 支持使用清单版本 9，当前消费者读取版本 1–17。函数内前端导入、
+Graph 捕获及相关 Host 支持使用清单版本 9，当前消费者读取版本 1–18。函数内前端导入、
 `ti.sync()` 和 Runtime program 身份查询均投影到现有 Runtime，不导入编译器。
 逻辑 `types.vector/matrix` 工厂接受 Host 维度/dtype，不分配设备存储。
 `NdArray.from_numpy/to_numpy` 复用原生传输并检查形状，包括 Dense 成员视图；Struct
@@ -307,6 +312,21 @@ JIT 对照、无源码消费、新尺寸、分配前/后异常回收、正常树
 可保留为 Host 类型检查，使用版本 17。`isinstance` 接受普通标量/张量/记录 ndarray；
 Dense Field 成员即使复用 ndarray ABI 也不属于该类型，普通 Python/NumPy 对象同样不属于。
 这是类型判断和标注投影；直接构造该基类、定义子类或检查资源实现类的继承关系仍明确拒绝。
+
+版本 18 还保留 `ti.Field/ScalarField/MatrixField/StructField` 的 Host 实例判断及
+`ti.Layout.AOS/SOA` 的名称身份。零维标量 Field 的 `[None]` 读写使用已有原生成员
+传输，一次只传一个标量；这是同步的冷查询/准备操作，不按整个资源组复制。
+其他索引、切片和张量元素 Host 访问仍明确拒绝。调用方可通过
+`library.graph_builder()` 向已有 Graph 实现录制导出对象的正常 Host 方法。
+
+完整源码闭包可能带有旧 JIT 构造或 Producer 工具方法。已证明的资源声明仍正常
+转换；普通 Host 方法中未转换的 `ti.root/FieldsBuilder/field/axes` 和
+Vector/Matrix/Struct Field 工厂保留为明确的 Producer 边界，逐处记录在
+`producer_only`，调用时在该操作处分配前报错。这不会删除原方法，也不表示其旧
+JIT 分配能力已在消费者实现。模块初始化、默认参数等即时执行位置仍拒绝这种
+未转换操作。缺少 Runtime 投影的前端能力查询明确报错，不能因前端已移除而通过
+`getattr(..., None)` 静默选择旧 JIT 兼容路径；其他未知前端操作仍在导出时拒绝。
+资格检查必须覆盖实际公共运行路径，不能仅凭含 Producer 边界的包能导出就宣称完整支持。
 
 ## 仍需补齐的共同机制
 

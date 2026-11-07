@@ -26,6 +26,13 @@ It initializes a cold Runtime without backend fallback. If JIT is already
 initialized, the target must match; export never resets a live JIT Runtime.
 Omitting `arch` uses the already selected backend.
 
+Pass `caps=[...]` to reuse `ti.aot.Module` deployment capability declarations and
+native load checks. For example, Vulkan code using 64-bit integers needs
+`caps=["spirv_has_int64"]`. Capabilities are not inherited from the Producer's JIT
+device; omission keeps the existing Module baseline target. The package records
+the requested capabilities, while the native TCM target contract stays
+authoritative. Export does not switch backends or narrow types to bypass them.
+
 The output directory must not exist. Export scans all `.py` definitions under
 the selected package, including modules not imported by its initializer and
 kernels never called by a test. A single source module is also accepted.
@@ -228,7 +235,7 @@ decorated definitions continue through the original compiler. Focused three-back
 checks cover captures, typed compound arguments, state isolation and source-free use.
 
 Graph capture projection and related Host support use manifest version 9; the
-consumer reads versions 1–17. Local frontend imports, `ti.sync()` and the Runtime
+consumer reads versions 1–18. Local frontend imports, `ti.sync()` and the Runtime
 program identity query are projected without importing the compiler. Logical
 `types.vector/matrix` factories accept Host dimensions/dtypes; they do not allocate
 device storage. `NdArray.from_numpy/to_numpy` use existing native transfers with
@@ -450,7 +457,29 @@ do not match. This projects annotations and instance checks; direct base-class
 allocation, subclass definitions and resource implementation subclass inspection
 remain explicitly unsupported.
 
-Recognized unsupported declarations or Host frontend operations reject export;
+Version 18 also preserves Host instance checks for
+`ti.Field/ScalarField/MatrixField/StructField` and the named identities of
+`ti.Layout.AOS/SOA`. Zero-dimensional scalar Field `[None]` reads and writes use
+existing native member transfers: one scalar, without copying the owning group.
+These are synchronous cold queries/preparation operations. Other indexing,
+slicing and Host tensor-element access remain explicitly unsupported.
+`library.graph_builder()` exposes the existing Graph recorder for ordinary Host
+recording methods on exported objects.
+
+A full source closure can contain legacy JIT construction or Producer tools.
+Proven resource declarations still lower normally. Unprojected
+`ti.root/FieldsBuilder/field/axes` and Vector/Matrix/Struct Field factories in
+deferred ordinary Host bodies remain explicit Producer boundaries, individually
+listed in `producer_only`. Reaching one raises before that operation allocates.
+Methods are retained; their legacy JIT allocation capability is not implemented
+in the consumer. Such operations in eager module initializers or defaults still
+reject export. Unknown frontend capability queries raise rather than silently
+selecting an old JIT fallback through `getattr(..., None)` after frontend removal.
+Other unknown frontend operations still reject export. Qualification must cover
+the actual public runtime paths; exporting a package with Producer boundaries
+does not establish complete support.
+
+Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.
 

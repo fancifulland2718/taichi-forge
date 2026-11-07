@@ -46,24 +46,54 @@ class _NdarrayAnnotation:
     boundary: str
 
 
-class _NdarrayType(type):
+class _ResourceType(type):
+    def __new__(metaclass, name, bases, namespace):
+        if any(isinstance(base, _ResourceType) for base in bases):
+            raise TypeError("Host resource subclasses require further projection support")
+        return super().__new__(metaclass, name, bases, namespace)
+
     def __instancecheck__(cls, value):
         # Dense Field member views use the ndarray ABI, but remain Fields in
         # ordinary Host dispatch. ABI compatibility is not nominal subtyping.
-        return isinstance(value, NdArray) and not hasattr(value, "_group_owner")
+        array = isinstance(value, NdArray)
+        field = array and hasattr(value, "_group_owner")
+        if cls.kind == "ndarray":
+            return array and not field
+        if cls.kind == "StructField":
+            return isinstance(value, StructField)
+        if cls.kind == "Field":
+            return field or isinstance(value, StructField)
+        return field and bool(value.element_shape) == (cls.kind == "MatrixField")
 
     def __subclasscheck__(cls, value):
         if value is cls:
             return True
-        raise TypeError("Host Ndarray projection supports instance checks, not resource subclass inspection")
+        raise TypeError("Host resource projection supports instance checks, not implementation subclass inspection")
+
+    def __call__(cls, *args, **kwargs):
+        raise TypeError("Host resource type is not an allocation API; use the retained resource constructor")
 
 
-class _HostNdarray(metaclass=_NdarrayType):
-    def __new__(cls, *args, **kwargs):
-        raise TypeError("Host Ndarray type is not an allocation API; use the retained ndarray constructor")
+_RESOURCE_TYPES = {
+    name: _ResourceType(name, (), {"kind": name})
+    for name in ("ndarray", "Field", "ScalarField", "MatrixField", "StructField")
+}
 
-    def __init_subclass__(cls, **kwargs):
-        raise TypeError("Host Ndarray subclasses require further projection support")
+
+@dataclass(frozen=True)
+class _Layout:
+    name: str
+
+
+_LAYOUTS = {name: _Layout(name) for name in ("AOS", "SOA")}
+
+
+class _HostAPI(SimpleNamespace):
+    def __getattr__(self, name):
+        # An unavailable frontend capability is not proof that the producer
+        # lacked it. In particular, do not select an old JIT allocation fallback
+        # through getattr(..., None) after removing the numerical frontend.
+        raise RuntimeError(f"Host frontend capability ti.{name} has no Runtime projection")
 
 
 @dataclass(frozen=True)
@@ -108,7 +138,7 @@ class _ModuleBinding:
         self.package = package
         self.target = _BACKENDS[package.runtime.arch]
         self.importlib = _Importlib(self)
-        self.host = SimpleNamespace(
+        self.host = _HostAPI(
             ndarray=self.ndarray,
             sync=package.runtime.wait,
             graph=SimpleNamespace(Arg=Arg, ArgKind=ArgKind, GraphBuilder=lambda: GraphBuilder(package)),
@@ -144,9 +174,19 @@ class _ModuleBinding:
         return _ProducerType(name)
 
     def resource_type(self, name):
-        if name != "ndarray":
+        if name not in _RESOURCE_TYPES:
             raise ValueError(f"Unsupported Host resource type: {name}")
-        return _HostNdarray
+        return _RESOURCE_TYPES[name]
+
+    def layout(self, name):
+        return _LAYOUTS[name]
+
+    def producer_allocation(self, operation, location):
+        raise RuntimeError(
+            f"ti.{operation} at {location} requires producer resource declaration lowering; "
+            "this ordinary Host path has no exported allocation contract. "
+            "This operation did not allocate device resources; private JIT is unavailable."
+        )
 
     @property
     def program(self):
@@ -622,7 +662,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")
@@ -658,6 +698,13 @@ class LoadedPackage:
         if not self._entered:
             raise RuntimeError("Enter the package context before resolving Host modules")
         return _ModuleBinding(self).import_module(name)
+
+    def graph_builder(self):
+        """Record retained Host methods against this package's loaded entries."""
+        from ._package_graph import GraphBuilder
+
+        self._check()
+        return GraphBuilder(self)
 
     def __enter__(self):
         self._check()
