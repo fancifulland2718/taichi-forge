@@ -352,7 +352,7 @@ class Component:
 
             for schema in contract["groups"].values():
                 for node in json.loads(schema)["nodes"]:
-                    for extent in node["extents"]:
+                    for extent in node["extents"] + node.get("tensor_extents", []):
                         if extent["parameter"]:
                             depend(extent["parameter"])
             aliases = {}
@@ -368,7 +368,7 @@ class Component:
                             or len(set(nodes)) != len(nodes) or resource.get("group") not in contract["groups"]):
                         raise ValueError("Invalid component model tensor member selector")
                     schema = json.loads(contract["groups"][resource["group"]])
-                    if schema["version"] != 2:
+                    if schema["version"] not in (2, 3):
                         raise ValueError("Model tensor members require a symbolic tensor layout recipe")
                     model_shape = resource.get("model_element_shape", [])
                     if "model_element_shape" in resource and (
@@ -797,7 +797,7 @@ class ComponentInstance:
                     required = {
                         extent["parameter"]
                         for node in json.loads(schema)["nodes"]
-                        for extent in node["extents"]
+                        for extent in node["extents"] + node.get("tensor_extents", [])
                         if extent["parameter"]
                     }
                     self._groups[name] = runtime.dense_snode_group(

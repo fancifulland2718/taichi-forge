@@ -48,7 +48,8 @@ def select_layout(contract, selected):
         nodes.append({**node, "parent": new_parent})
     if not needed <= new_paths.keys():
         raise ValueError("Conditional layout references a missing native member path")
-    dimensions = sorted({extent["parameter"] for node in nodes for extent in node["extents"] if extent["parameter"]})
+    dimensions = sorted({extent["parameter"] for node in nodes
+                         for extent in node["extents"] + node.get("tensor_extents", []) if extent["parameter"]})
     return dict(
         schema=json.dumps({**source, "nodes": nodes}, separators=(",", ":")),
         members={name: [list(new_paths[tuple(path)]) for path in paths] for name, paths in active.items()},

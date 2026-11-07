@@ -421,6 +421,20 @@ class _ModelTensorField(DenseField):
 
     element_shape: tuple
 
+    def validate(self, field):
+        from taichi_forge.lang._storage_view import describe_storage
+
+        description = describe_storage(field)
+        if (
+            not description.supported
+            or description.properties["has_negative_stride"]
+            or description.properties["uniqueness"] != "kProvenUnique"
+        ):
+            raise TaichiCompilationError(
+                "Model tensor Field requires a qualified affine SNode member"
+            )
+        return description
+
     @property
     def schema(self):
         base = super().schema
@@ -663,6 +677,7 @@ def _dense_group(component, owner, group):
     axes = {}
     dimensions = {}
     tensors = {}
+    tensor_layouts = {}
     tensor_roles = {}
 
     def resolve_extent(extent):
@@ -702,6 +717,14 @@ def _dense_group(component, owner, group):
             previous = tensors.setdefault(key, tensor)
             if previous[1:] != tensor[1:]:
                 raise TaichiCompilationError(f"Conflicting tensor dimension provenance in group {group!r}")
+            separated = (
+                bool(getattr(field, "_aot_tensor_soa", False))
+                or len({node.parent.id for node in nodes}) > 1
+            )
+            if tensor_layouts.setdefault(key, separated) != separated:
+                raise TaichiCompilationError(
+                    f"Conflicting tensor layout provenance in group {group!r}"
+                )
         for node in nodes:
             current_root = impl.get_runtime().prog.get_snode_root(node.get_snode_tree_id())
             if root is None:
@@ -747,7 +770,18 @@ def _dense_group(component, owner, group):
     visit(root, ())
     parameters = [(node, axis, extent) for (_, axis), (node, extent) in axes.items() if isinstance(extent, str)]
     if tensors:
-        schema, selectors = core.DenseSNodeSchema.capture_tensor_members(root, parameters, list(tensors.values()))
+        if any(tensor_layouts.values()):
+            if not hasattr(core.DenseSNodeSchema, "capture_tensor_layout_members"):
+                raise TaichiCompilationError(
+                    "SOA model tensor Fields require the native tensor layout recipe capability"
+                )
+            schema, selectors = core.DenseSNodeSchema.capture_tensor_layout_members(
+                root, parameters, list(tensors.values()), list(tensor_layouts.values())
+            )
+        else:
+            schema, selectors = core.DenseSNodeSchema.capture_tensor_members(
+                root, parameters, list(tensors.values())
+            )
         member_paths = {
             name: ("schema_nodes", tuple(dict.fromkeys(selectors[node.id] for node in nodes)))
             for name, nodes in members.items()

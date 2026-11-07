@@ -713,8 +713,13 @@ index and model element dimensions, but owns independent native storage. Normal
 Host construction checks the source type and extents before allocation; the
 original SNode schema compiler remains authoritative. Scalar, AOS model vector/
 matrix and flat StructField copies have local CPU/CUDA checks; a new process
-also consumes model vectors without numerical sources. SOA model tensor lanes,
-conditional sources and heterogeneous checkpoint input families remain open.
+also consumes model vectors without numerical sources. With native Dense schema
+version 3, SOA model vector/matrix clones repeat the original single-leaf Dense
+branch per component. Index layout and component strides come from the same
+SNode constructors and StructCompiler as JIT; they are not calculated by Host
+Python. CPU/CUDA checks compare native layouts at new sizes and exercise copies
+and independent instances, including a source-free vector consumer. Conditional
+sources and heterogeneous checkpoint input families remain open.
 This is not qualification of an entire engine checkpoint or EFC export.
 
 Fields within optional children can be borrowed under the same presence guards,

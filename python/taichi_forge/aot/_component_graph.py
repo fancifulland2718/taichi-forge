@@ -895,7 +895,7 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
     # Layout-only siblings and Host-only groups can have independent extents.
     for schema in contract["groups"].values():
         for node in json.loads(schema)["nodes"]:
-            for extent in node["extents"]:
+            for extent in node["extents"] + node.get("tensor_extents", []):
                 if extent["parameter"]:
                     require_dimension(extent["parameter"])
     contract["dimensions"] = {

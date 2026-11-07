@@ -6,8 +6,9 @@ from taichi_forge.aot._component import Component, DenseField, Dimension, Runtim
 from tests import test_utils
 
 
+@pytest.mark.parametrize("soa", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_model_tensor_field_indices_share_code_across_element_extents(tmp_path):
+def test_model_tensor_field_indices_share_code_across_element_extents(tmp_path, soa):
     import os
     from pathlib import Path
     import subprocess
@@ -15,6 +16,9 @@ def test_model_tensor_field_indices_share_code_across_element_extents(tmp_path):
     import textwrap
     from taichi_forge.aot._component import _ModelTensorField
     from taichi_forge_runtime.aot import Runtime
+
+    if soa and ti.cfg.arch == ti.vulkan:
+        pytest.skip("SOA model tensor qualification currently covers CPU/CUDA")
 
     @ti.data_oriented
     class Model:
@@ -25,8 +29,16 @@ def test_model_tensor_field_indices_share_code_across_element_extents(tmp_path):
             self.fixed = ti.Vector.field(3, ti.f32)
             self.h = ti.Matrix.field(2, dofs, ti.f32)
             builder = ti.FieldsBuilder()
-            builder.dense(ti.i, rows).place(self.j, self.fixed)
-            builder.dense(ti.i, rows).place(self.h)
+            if soa:
+                builder.dense(ti.i, rows).place(self.fixed)
+                for field in (self.j, self.h):
+                    field._aot_tensor_soa = True
+                    for i in range(field.n):
+                        for j in range(field.m):
+                            builder.dense(ti.i, rows).place(field.get_scalar_field(i, j))
+            else:
+                builder.dense(ti.i, rows).place(self.j, self.fixed)
+                builder.dense(ti.i, rows).place(self.h)
             self.tree = builder.finalize()
 
         @ti.func
@@ -68,13 +80,14 @@ def test_model_tensor_field_indices_share_code_across_element_extents(tmp_path):
         conflict = Component(**{**env.declarations, "alias": DenseField(ti.types.vector(5, ti.f32), ("rows",), "state")})
         with pytest.raises(ti.TaichiCompilationError, match="conflicting tensor dimensions"):
             conflict.compile(first.update, 1.0)
-        with pytest.raises(ti.TaichiCompilationError, match="dynamic local workspace"):
-            env.compile(first.local_copy)
+        local_copy = env.compile(first.local_copy)
         code.run(env, second, 3.0)
         expected = 3 + np.arange(3)[:, None] * 100 + np.arange(65)
         np.testing.assert_array_equal(second.j.to_numpy(), expected)
         np.testing.assert_array_equal(second.h.to_numpy(), expected[:, None, :] + np.arange(2)[None, :, None] * 10)
         np.testing.assert_array_equal(second.fixed.to_numpy(), np.tile([1, 2, 3], (3, 1)))
+        local_copy.run(env, second)
+        np.testing.assert_array_equal(second.j.to_numpy(), expected)
         np.testing.assert_array_equal(first.j.to_numpy(), np.zeros((2, 5)))
         # Deployment lowering leaves ordinary JIT and its fixed tensor types intact.
         first.update(2.0)

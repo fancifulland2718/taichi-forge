@@ -1005,22 +1005,27 @@ class Model:
 
     @ti.kernel
     def save(self):
-        for i in range(self.storage.n):
+        for i in ti.grouped(self.storage.values):
             self.backup[i] = self.storage.values[i]
 
     @ti.kernel
     def restore(self):
-        for i in range(self.storage.n):
+        for i in ti.grouped(self.storage.values):
             self.storage.values[i] = self.backup[i]
 """
 
 
-@pytest.mark.parametrize('kind', ['scalar', 'vector', 'matrix', 'struct'])
+@pytest.mark.parametrize(
+    "kind", ["scalar", "vector", "matrix", "struct", "soa_vector", "soa_matrix"]
+)
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_field_like_keeps_dynamic_axes_and_independent_storage(
     tmp_path, monkeypatch, kind
 ):
     source = FIELD_LIKE_SOURCE
+    if kind.startswith("soa_"):
+        source = source.replace("layout=ti.Layout.AOS", "layout=ti.Layout.SOA")
+        kind = kind.removeprefix("soa_")
     if kind == "scalar":
         source = source.replace(
             "scope.vector_field(self.n, ti.f32,", "scope.field(ti.f32,"
@@ -1144,7 +1149,7 @@ def test_package_field_like_keeps_dynamic_axes_and_independent_storage(
         assert "FIELD_LIKE_SOURCE_FREE_OK" in result.stdout
 
 
-@pytest.mark.parametrize("failure", ["missing", "forward", "soa_model"])
+@pytest.mark.parametrize("failure", ["missing", "forward"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_field_like_rejects_unproved_layouts(tmp_path, monkeypatch, failure):
     source = FIELD_LIKE_SOURCE
@@ -1158,9 +1163,6 @@ def test_package_field_like_rejects_unproved_layouts(tmp_path, monkeypatch, fail
             "scope.field_like(self.storage.values", "scope.field_like(self.backup"
         )
         message = "Cyclic field_like"
-    else:
-        source = source.replace("layout=ti.Layout.AOS", "layout=ti.Layout.SOA")
-        message = "Model tensor SOA"
     package = _source_package(tmp_path, monkeypatch, source)
     with pytest.raises(ValueError, match=message):
         ti.aot.export_package(package, tmp_path / "sdk")

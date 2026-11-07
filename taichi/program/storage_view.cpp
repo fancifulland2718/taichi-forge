@@ -1241,14 +1241,17 @@ DenseStorageBuildResult describe_dense_field_storage(
     return invalid;
   }
 
-  SNode *parent = anchor->parent;
-  DenseSNodeMemberLayout member_layout;
+  DenseSNodeTensorLayout tensor_layout;
   try {
-    member_layout = dense_snode_member_layout(*anchor);
+    if (components.front() != anchor)
+      throw std::invalid_argument(
+          "Dense tensor anchor is not its first component");
+    tensor_layout = dense_snode_tensor_layout(components);
   } catch (const std::invalid_argument &) {
     invalid.reason = StorageFailureReason::kUnsupportedLayout;
     return invalid;
   }
+  const auto &member_layout = tensor_layout.member;
   if (member_layout.shape != index_shape) {
     invalid.reason = StorageFailureReason::kInvalidShape;
     return invalid;
@@ -1259,18 +1262,7 @@ DenseStorageBuildResult describe_dense_field_storage(
   for (std::size_t lane = 0; lane < components.size(); ++lane) {
     SNode *component = components[lane];
     if (component == nullptr || component->type != SNodeType::place ||
-        component->parent != parent ||
         component->get_snode_tree_id() != tree_id) {
-      invalid.reason = StorageFailureReason::kUnsupportedLayout;
-      return invalid;
-    }
-    // A packed element can be a member of a larger record. Its lanes are
-    // contiguous relative to the anchor, not necessarily to the parent cell.
-    if (component->offset_bytes_in_parent_cell <
-            anchor->offset_bytes_in_parent_cell ||
-        component->offset_bytes_in_parent_cell -
-                anchor->offset_bytes_in_parent_cell !=
-            lane * scalar_size) {
       invalid.reason = StorageFailureReason::kUnsupportedLayout;
       return invalid;
     }
@@ -1327,7 +1319,8 @@ DenseStorageBuildResult describe_dense_field_storage(
   layout.byte_offset = static_cast<std::int64_t>(field_offset);
   layout.access = access;
   layout.index_strides_bytes = member_layout.strides;
-  if (!canonical_strides(element_shape, static_cast<std::int64_t>(scalar_size),
+  if (!canonical_strides(element_shape,
+                         static_cast<std::int64_t>(tensor_layout.lane_stride),
                          &layout.element_strides_bytes)) {
     invalid.reason = StorageFailureReason::kArithmeticOverflow;
     return invalid;

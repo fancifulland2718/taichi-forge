@@ -955,6 +955,9 @@ class Matrix(TaichiOperations):
                 shape_seq = list(shape)
             same_level = order is None
             if layout == Layout.SOA:
+                # One-lane construction witnesses otherwise cannot distinguish
+                # separate component branches from packed tensor placement.
+                entries._aot_tensor_soa = True
                 for e in entries._get_field_members():
                     impl._create_snode(axis_seq, shape_seq, same_level).place(ScalarField(e), offset=offset)
                 if needs_grad:

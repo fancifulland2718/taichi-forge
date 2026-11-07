@@ -20,6 +20,13 @@ struct DenseSNodeMemberLayout {
   std::vector<std::int64_t> strides;
 };
 DenseSNodeMemberLayout dense_snode_member_layout(const SNode &leaf);
+struct DenseSNodeTensorLayout {
+  DenseSNodeMemberLayout member;
+  std::uint64_t lane_stride{0};
+};
+// Prove affine scalar-component spacing from compiled SNode byte facts.
+DenseSNodeTensorLayout dense_snode_tensor_layout(
+    const std::vector<SNode *> &leaves);
 
 // A parameterized construction recipe, NOT a second byte-layout calculator.
 // instantiate() calls the same SNode constructors as FieldsBuilder. The owner
@@ -39,7 +46,11 @@ struct DenseSNodeSchema {
     // Dense: index axes. Version 2 place: logical tensor axes, expanded as
     // adjacent scalar places by the ordinary SNode construction API.
     std::vector<Extent> extents;
-    TI_IO_DEF(parent, type, dtype, extents);
+    // Version 3: repeat a complete single-leaf Dense branch for SOA tensor
+    // lanes. Index extents remain on the original Dense nodes; no offsets or
+    // strides are synthesized by the recipe.
+    std::vector<Extent> tensor_extents;
+    TI_IO_DEF(parent, type, dtype, extents, tensor_extents);
   };
 
   int version{1};
@@ -62,6 +73,11 @@ struct DenseSNodeSchema {
       const SNode &root,
       const std::vector<Parameter> &parameters,
       const std::vector<TensorParameter> &tensors);
+  static std::pair<DenseSNodeSchema, std::map<int, int>>
+  capture_tensor_layout_members(const SNode &root,
+                                const std::vector<Parameter> &parameters,
+                                const std::vector<TensorParameter> &tensors,
+                                const std::vector<bool> &separated);
   void validate() const;
   std::unique_ptr<SNode> instantiate(
       const std::map<std::string, int> &dimensions) const;

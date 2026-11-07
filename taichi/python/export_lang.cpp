@@ -9040,19 +9040,25 @@ void export_lang(py::module &m) {
   py::class_<DenseSNodeSchema>(m, "DenseSNodeSchema")
       .def_static("capture", &DenseSNodeSchema::capture)
       .def_static("capture_tensors", &DenseSNodeSchema::capture_tensors)
-      .def_static("capture_tensor_members", &DenseSNodeSchema::capture_tensor_members)
+      .def_static("capture_tensor_members",
+                  &DenseSNodeSchema::capture_tensor_members)
+      .def_static("capture_tensor_layout_members",
+                  &DenseSNodeSchema::capture_tensor_layout_members)
       .def_static("from_json", &DenseSNodeSchema::from_json)
       .def("to_json", &DenseSNodeSchema::to_json)
-      .def("instantiate",
-           [](const DenseSNodeSchema &schema, Program &program,
-              const std::map<std::string, int> &dimensions) {
-             TI_ERROR_IF(!arch_is_cpu(program.compile_config().arch) &&
-                             program.compile_config().arch != Arch::cuda,
-                         "Dense component schemas are qualified only for CPU/CUDA");
-             return program.add_snode_tree(schema.instantiate(dimensions), false);
-           },
-           py::return_value_policy::reference,
-           py::call_guard<py::gil_scoped_release>());
+      .def(
+          "instantiate",
+          [](const DenseSNodeSchema &schema, Program &program,
+             const std::map<std::string, int> &dimensions) {
+            TI_ERROR_IF(
+                !arch_is_cpu(program.compile_config().arch) &&
+                    program.compile_config().arch != Arch::cuda,
+                "Dense component schemas are qualified only for CPU/CUDA");
+            return program.add_snode_tree(schema.instantiate(dimensions),
+                                          false);
+          },
+          py::return_value_policy::reference,
+          py::call_guard<py::gil_scoped_release>());
 
   // Sparse Matrix
   py::class_<SparseMatrixBuilder>(m, "SparseMatrixBuilder")

@@ -229,7 +229,7 @@ TiNdArray Runtime::dense_snode_group_member(TiMemory handle,
     throw MemoryBindingError(
         "Dense member element shape differs from component paths");
   const auto scalar_type = capi::ndarray_scalar_type(dtype);
-  SNode *anchor = nullptr;
+  std::vector<SNode *> leaves;
   for (std::size_t lane = 0; lane < lanes; ++lane) {
     auto *node = schema_nodes ? selected_nodes[lane] : group->root.get();
     if (!schema_nodes) {
@@ -243,18 +243,10 @@ TiNdArray Runtime::dense_snode_group_member(TiMemory handle,
     if (node->type != SNodeType::place || node->dt != scalar_type)
       throw MemoryBindingError(
           "Dense member path/type does not select a declared scalar place");
-    if (!anchor)
-      anchor = node;
-    if (node->parent != anchor->parent ||
-        node->offset_bytes_in_parent_cell <
-            anchor->offset_bytes_in_parent_cell ||
-        node->offset_bytes_in_parent_cell -
-                anchor->offset_bytes_in_parent_cell !=
-            lane * width)
-      throw MemoryBindingError(
-          "Dense member components are not contiguous in the same SNode");
+    leaves.push_back(node);
   }
-  const auto member_layout = dense_snode_member_layout(*anchor);
+  const auto tensor_layout = dense_snode_tensor_layout(leaves);
+  const auto &member_layout = tensor_layout.member;
   const uint64_t offset = member_layout.offset;
   array.shape.dim_count = member_layout.shape.size();
   if (array.shape.dim_count > 16)
@@ -283,15 +275,14 @@ TiNdArray Runtime::dense_snode_group_member(TiMemory handle,
     return result;
   };
   layout->index_strides_bytes = member_layout.strides;
-  layout->element_strides_bytes = strides(layout->element_shape, width);
+  layout->element_strides_bytes =
+      strides(layout->element_shape, tensor_layout.lane_stride);
   auto analysis = storage::analyze_dense_storage_layout(*layout);
-  if (!analysis || !analysis.properties.element_contiguous ||
-      !(analysis.properties.single_record_stride_compatible ||
-        analysis.properties.compact_contiguous) ||
-      analysis.properties.has_negative_stride ||
-      analysis.properties.uniqueness != storage::StorageMappingUniqueness::kProvenUnique ||
+  if (!analysis || analysis.properties.has_negative_stride ||
+      analysis.properties.uniqueness !=
+          storage::StorageMappingUniqueness::kProvenUnique ||
       analysis.properties.reachable_begin != 0)
-    throw MemoryBindingError("Dense member has an unqualified record mapping");
+    throw MemoryBindingError("Dense member has an unqualified affine mapping");
   if (scalar_axes) {
     *layout = storage::scalarize_dense_storage_layout(std::move(*layout));
     if (layout->index_shape.size() > 16)

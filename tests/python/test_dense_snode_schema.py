@@ -63,6 +63,99 @@ def _tensor_group(n, dofs):
     return schema, tree, builder.ptr, parameters, tensors
 
 
+def _soa_tensor_group(n, dofs):
+    builder = ti.FieldsBuilder()
+    prefix = ti.field(ti.u8)
+    builder.dense(ti.i, n).place(prefix)
+    vector = ti.Vector.field(dofs, ti.f32)
+    matrix = ti.Matrix.field(2, dofs, ti.f64)
+    parameters = [(builder.ptr.get_ch(0), 0, "N")]
+    tensors = []
+    for field, shape, names in (
+        (vector, [dofs], ["D"]),
+        (matrix, [2, dofs], ["", "D"]),
+    ):
+        for i in range(field.n):
+            for j in range(field.m):
+                outer = builder.dense(ti.j, 3)
+                inner = outer.dense(ti.i, n)
+                inner.place(field.get_scalar_field(i, j))
+                parameters.append((inner.ptr, 0, "N"))
+        tensors.append(
+            ([var.ptr.snode() for var in field._get_field_members()], shape, names)
+        )
+    schema, members = core.DenseSNodeSchema.capture_tensor_layout_members(
+        builder.ptr, parameters, tensors, [True, True]
+    )
+    tree = builder.finalize()
+    return schema, members, tree, builder.ptr, parameters, tensors
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_soa_model_tensor_recipe_reuses_native_dense_branch_layout():
+    schema, members, producer, root, parameters, tensors = _soa_tensor_group(2, 1)
+    frozen = schema.to_json()
+    assert json.loads(frozen)["version"] == 3
+    selectors = [
+        tuple(dict.fromkeys(members[node.id] for node in t[0])) for t in tensors
+    ]
+    program = ti.lang.impl.get_runtime().prog
+    for n, dofs in ((5, 7), (3, 19), (7, 1)):
+        expected, mapping, reference, reference_root, _, definitions = (
+            _soa_tensor_group(n, dofs)
+        )
+        assert expected.to_json() == frozen
+        assert [
+            tuple(dict.fromkeys(mapping[node.id] for node in t[0])) for t in definitions
+        ] == selectors
+        instance = core.DenseSNodeSchema.from_json(frozen).instantiate(
+            program, {"N": n, "D": dofs}
+        )
+        try:
+            assert _layout(instance.root()) == _layout(reference_root)
+        finally:
+            instance.destroy_snode_tree(program)
+            reference.destroy()
+    active = program.get_active_snode_tree_ids()
+    for bindings in ({"N": 2, "D": 0}, {"N": 2, "D": 2**31 - 1}):
+        with pytest.raises(ValueError):
+            schema.instantiate(program, bindings)
+        assert program.get_active_snode_tree_ids() == active
+    producer.destroy()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_soa_tensor_recipe_rejects_nonmatching_branches_and_nested_repetition():
+    schema, _, producer, root, parameters, tensors = _soa_tensor_group(2, 3)
+    leaves, shape, names = tensors[0]
+    for invalid, layouts in (
+        ([(list(reversed(leaves)), shape, names)], [True]),
+        ([tensors[0], tensors[0]], [True, True]),
+        ([tensors[0]], []),
+    ):
+        with pytest.raises(ValueError):
+            core.DenseSNodeSchema.capture_tensor_layout_members(
+                root, parameters, invalid, layouts
+            )
+    changed = list(parameters)
+    node, axis, _ = changed[2]
+    changed[2] = (node, axis, "OtherN")
+    with pytest.raises(ValueError, match="different index or scalar layouts"):
+        core.DenseSNodeSchema.capture_tensor_layout_members(
+            root, changed, [tensors[0]], [True]
+        )
+    data = json.loads(schema.to_json())
+    branch_index = next(
+        i for i, node in enumerate(data["nodes"]) if node["tensor_extents"]
+    )
+    data["nodes"][branch_index + 1]["tensor_extents"] = data["nodes"][branch_index][
+        "tensor_extents"
+    ]
+    with pytest.raises(ValueError, match="another tensor repetition"):
+        core.DenseSNodeSchema.from_json(json.dumps(data))
+    producer.destroy()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_tensor_member_dimensions_keep_one_authoritative_layout_recipe():
     schema, producer, root, parameters, tensors = _tensor_group(3, 7)

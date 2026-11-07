@@ -219,9 +219,9 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
                 item.pop("member_initialization_source"),
             )
         if model_tensors and item.get("conditions"):
-            raise ValueError("Conditional model tensor Fields require projected layout selection")
-        if model_tensors and item.get("layout") == "SOA" and not item.get("struct_field"):
-            raise ValueError("Model tensor SOA lanes require further native layout support")
+            raise ValueError(
+                "Conditional model tensor Fields require projected layout selection"
+            )
         if item.get("struct_field"):
             if (
                 item["element"]["kind"] != "struct"
@@ -275,6 +275,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             if item.get("struct_field"):
                 members = value.field_dict.values()
             elif isinstance(value, ti.MatrixField):
+                value._aot_tensor_soa = True
                 members = (value.get_scalar_field(i, j) for i in range(value.n) for j in range(value.m))
             else:
                 members = (value,)
