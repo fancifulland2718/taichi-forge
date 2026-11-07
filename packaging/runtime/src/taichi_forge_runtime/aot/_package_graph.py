@@ -11,6 +11,7 @@ import itertools
 from ._plan import ExecutionPlan
 from ._runtime import Scalar
 from ._package_values import capture_value, check_admission
+from .._dimensions import extent_dependencies, local_workspace_shape
 
 
 class ArgKind(Enum):
@@ -59,8 +60,10 @@ class _Bindings:
     def name(self):
         return self.prefix + str(next(self.ids))
 
-    def capture(self, owner, item):
-        key = (id(owner), item["name"])
+    def capture(self, owner, item, *, entry=None):
+        # Compiler-generated local names are scoped to their numerical entry.
+        # Ordinary owner fields still share one binding across all entry uses.
+        key = (id(owner), item["name"], entry)
         if key not in self.captures:
             self.captures[key] = (self.name(), owner, dict(item))
         name, previous_owner, previous = self.captures[key]
@@ -88,8 +91,6 @@ class GraphBuilder:
         if not isinstance(kernel, entry) or kernel.package is not self.package:
             raise ValueError("Package Graph dispatch requires an entry in the same loaded package")
         kernel = kernel._select(owner)
-        if any(item["kind"] == "local_tensor_workspace" for item in kernel.contract["captures"]):
-            raise ValueError("Model local tensors in Graphs require invocation workspace binding")
         check_admission(owner, kernel.contract)
         kernel._check_layout(owner)
         if template_args:
@@ -122,8 +123,18 @@ class GraphBuilder:
             arguments[arg.name] = schema
         names = [a.name for a in args]
         captures = dict(self._captures)
+        captured = {
+            item["name"]: self._bindings.capture(owner, item)
+            for item in kernel.contract["captures"]
+            if item["kind"] != "local_tensor_workspace"
+        }
         for item in kernel.contract["captures"]:
-            name, binding = self._bindings.capture(owner, item)
+            if item["kind"] == "local_tensor_workspace":
+                inputs = {dim for expression in item["shape"] for dim in extent_dependencies(expression)}
+                spec = dict(item, inputs={dim: captured[dim][0] for dim in inputs})
+                name, binding = self._bindings.capture(owner, spec, entry=kernel.symbol)
+            else:
+                name, binding = captured[item["name"]]
             names.append(name)
             captures[name] = binding
         self.operations.append(dict(kind="kernel", entry=kernel.symbol, arguments=names))
@@ -198,8 +209,18 @@ class Graph:
             elif schema["kind"] == "compound":
                 value = self.plan.value(self.package._module, name, value)
             values[name] = value
+        captured = {
+            name: capture_value(owner, schema)
+            for name, (owner, schema) in self.captures.items()
+            if schema["kind"] != "local_tensor_workspace"
+        }
+        resources = []
         for name, (owner, schema) in self.captures.items():
-            value = capture_value(owner, schema)
+            if schema["kind"] == "local_tensor_workspace":
+                shape = local_workspace_shape(schema["shape"], lambda dim: captured[schema["inputs"][dim]])
+                resources.append(dict(kind="ndarray", name=name, dtype=schema["dtype"], shape=list(shape)))
+                continue
+            value = captured[name]
             if schema["kind"] in ("value", "dimension"):
                 value = (
                     self.plan.value(self.package._module, name, value)
@@ -209,7 +230,8 @@ class Graph:
             values[name] = value
         # Native preparation owns immutable instance bindings and their leases.
         # Replaying the returned call does not interpret operations in Python.
-        return self.plan.prepare(self.package._module, values)
+        plan = self.plan.with_argument_resources(resources) if resources else self.plan
+        return plan.prepare(self.package._module, values)
 
     def run(self, arguments):
         # Convenience for one submission. Repeated replay uses bind(...).run().

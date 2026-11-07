@@ -444,12 +444,15 @@ Vector/MatrixField 以及 StructField 的数值成员，不将整个 StructField
 不切换模块共享指针，void 调用不为释放临时存储显式等待。空范围只需最小合法描述符。
 表达式和总索引须满足现有 i32 数组 ABI，未设有限模型尺寸域。目前存储随逻辑工作项数量
 乘局部元素数量增长；本批不宣称性能收益。
-普通提交在 Runtime 正常完成前保留临时存储；退休工作区复用和 prepared Graph 接入仍待完成。
+普通提交在 Runtime 正常完成前保留临时存储，退休工作区复用仍可后续优化。
+定义包 Graph 在 bind 时从同一参数快照确定尺寸，使用原 ExecutionPlan 私有数组资源；每次
+prepare 独立拥有工作区，replay 复用它们，不再逐次分配。不同数值入口的局部名称分别绑定，
+同一顺序 Graph 内重复使用同一入口可复用其片段；原生 prepared 所有权负责在途保留与释放。
 
 CPU/CUDA/Vulkan 局部检查覆盖屏蔽前端的新 DOF 129、独立实例、拷贝、重复初始化及回收。
 GeoPhys 原 exact EFC 装配的编译器层检查也通过 DOF 3/17/65 共用代码、原 JIT 和独立质量
 响应对照；该测试显式提供模型声明投影，不是整类定义包资格。`real_func` 内部动态局部变量、
-Graph replay 工作区绑定、SharedArray 和一般整张量代数仍拒绝或待实现。
+SharedArray 和一般整张量代数仍拒绝或待实现。旧显式 Component Graph 的局部工作区尚未接入。
 
 ## 原定义中的 Kernel 工厂
 

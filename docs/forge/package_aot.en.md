@@ -657,15 +657,21 @@ only a valid minimal descriptor. Arithmetic and total indexing must fit the exis
 i32 array ABI; this is not a finite model-size domain. Storage currently scales with
 logical work items times local element count; no performance improvement is claimed.
 Ordinary submissions retain this temporary memory until normal Runtime completion;
-reuse of retired workspace and prepared Graph integration are follow-up work.
+reuse of retired workspace remains a possible follow-up optimization. Package Graph
+binding sizes private ExecutionPlan array resources from the same argument snapshot.
+Each prepare owns independent workspace, reused on replay without per-call allocation.
+Local names are scoped to their numerical entry; repeated uses of one entry in a
+sequential Graph can reuse its slices. Existing native prepared ownership retains
+in-flight resources and releases them on retirement.
 
 Focused CPU/CUDA/Vulkan tests cover new DOF 129 without the frontend, independent
 instances, copies, repeated initialization and retirement. GeoPhys's original exact
 EFC assembly also passes compiler-layer checks at DOF 3/17/65 with shared code, against
 ordinary JIT and an independent mass-response calculation. That test supplies the
 model declaration projection; it is not whole-class package qualification. Dynamic
-locals inside `real_func`, Graph replay workspace binding, SharedArray, and general
-whole-tensor algebra still reject or require further implementation.
+locals inside `real_func`, SharedArray, and general whole-tensor algebra still reject
+or require further implementation. Local workspace is not yet integrated with the
+older explicit Component Graph path.
 
 ## Kernel factories in original definitions
 

@@ -2595,9 +2595,19 @@ class Model:
                     total += self.solve(i, gain + repeat)
             self.result[i] = total
 
-    def graph(self):
+    @ti.kernel
+    def accumulate(self, gain: ti.f32):
+        for i in range(1, self.n):
+            values = ti.Vector.zero(ti.f32, self.dof + 1)
+            for j in range(self.dof + 1):
+                values[j] = gain * (i + 1)
+                self.result[i] += values[j]
+
+    def graph(self, mixed=False):
         builder = ti.graph.GraphBuilder()
         builder.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        if mixed:
+            builder.dispatch(self.accumulate, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
         return builder.compile()
 """
 
@@ -2688,12 +2698,61 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
             model.step(1.0)  # empty range, no model-sized scratch allocation
             runtime.wait()
             assert runtime._resources == resources
+            model.n = 7
+            graphs = [model.graph(mixed=True) for model in models]
+            prepared = [graph.bind({'gain': gain}) for graph, gain in zip(graphs, gains)]
+            for call, model in zip(prepared, models):
+                assert call.info['resource_bytes'] == (model.n - 1) * (5 * model.dof + 1) * 4
+            # A second bind of the same Graph also owns independent scratch.
+            extra = graphs[0].bind({'gain': 9.0})
+            from taichi_forge_runtime.aot import _package_graph
+            original_graph_capture = _package_graph.capture_value
+            _package_graph.capture_value = changed_after_snapshot
             try:
-                models[0].graph()
-            except ValueError as error:
-                assert 'invocation workspace binding' in str(error)
-            else:
-                raise AssertionError('shared Graph workspace admitted')
+                frozen = graphs[0].bind({'gain': 2.0})
+            finally:
+                _package_graph.capture_value = original_graph_capture
+                models[0].dof = 3
+            original_array = runtime.ndarray
+            def no_allocation(*args, **kwargs):
+                raise AssertionError('prepared replay allocated a Python workspace')
+            runtime.ndarray = no_allocation
+            waits.clear()
+            runtime.wait = observed_wait
+            try:
+                for _ in range(2):
+                    extra.run()
+                    frozen.run()
+                    for call in reversed(prepared):
+                        call.run()
+            finally:
+                runtime.ndarray = original_array
+                runtime.wait = original_wait
+            assert not waits, 'prepared replay added a Runtime.wait'
+            # Closing an in-flight instance must leave the others usable.
+            extra.close()
+            frozen.close()
+            prepared[0].close()
+            prepared[1].run()
+            for model, gain in zip(models, gains):
+                indices = np.arange(model.n)
+                expected = np.where(indices % 2 == 1, (indices + 1) * (2 * gain + 1) * (model.dof + 1), 0)
+                expected += np.where(indices >= 1, (indices + 1) * gain * (model.dof + 1), 0)
+                np.testing.assert_array_equal(model.result.to_numpy(), expected)
+            for call in prepared[1:]:
+                call.close()
+            runtime.wait()
+            assert runtime._resources == resources, 'prepared workspaces leaked'
+            for invalid in (0, 2**30):
+                models[0].dof = invalid
+                try:
+                    graphs[0].bind({'gain': 1.0})
+                except ValueError as error:
+                    assert 'tensor axes' in str(error) or 'indexing range' in str(error)
+                else:
+                    raise AssertionError('invalid Graph workspace extent accepted')
+                assert runtime._resources == resources
+            models[0].dof = 3
         print('MODEL_LOCAL_TENSOR_SOURCE_FREE_OK')
     """), encoding="utf8")
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
