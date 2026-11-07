@@ -146,8 +146,8 @@ analytic/original-JIT comparisons and temporary-resource release checks.
 
 The source-boundary mode is also exercised with the original winding module.
 The larger original sampling closure reaches resource owners such as `MeshSDF`
-and currently rejects at its undeclared `res` capture. ResourceScope and complex
-resources remain pending. No dependency was deleted
+and currently rejects its target-dependent ResourceScope construction. ResourceScope
+Field/Sparse placements remain pending. No dependency was deleted
 to obtain a pass; correct rejection does not qualify sampling. Declaration
 preflight aggregates syntax/schema failures across modules; compiler dependency
 failures are diagnosed when compiling the affected entry.
@@ -167,6 +167,18 @@ still use normal numerical compilation and diagnostics. The helper must not retu
 a violated contract raises at consumption. This also preserves inherited interface
 failures and concrete overrides. Calls from numerical code still need a compilable
 implementation; an error interface is not a device implementation.
+
+An unconditional local `scope = ti.experimental.ResourceScope(self)` with ordinary
+`scope.value('name', dtype)` declarations now supplies scalar/vector/matrix owner
+types without constructing a model. These packages use manifest version 4;
+consumers retain version 1–3 support. Native per-call ABI packing receives tensor
+shape metadata, and only values read by a kernel enter that kernel's capture
+contract. Unused declarations do not add arguments. Original Host value assignments
+and later changes remain normal Python. Focused CPU/CUDA/Vulkan checks cover
+source-free tensor captures, two independent instances and original JIT behavior.
+This slice does not yet cover ResourceScope resource allocations, conditional or
+reassigned scopes, dynamic attribute names, scope escapes or static domains. These
+declarations reject before publishing a package.
 
 ## Remaining shared mechanisms
 

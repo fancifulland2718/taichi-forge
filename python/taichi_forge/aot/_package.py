@@ -23,6 +23,7 @@ from ._package_fields import field_declarations, construct_fields, field_allocat
 from ._package_sources import collect_sources
 from ._package_owners import resolve_owners
 from ._package_errors import is_error_interface, project_error_interface
+from ._package_resources import scope_values
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
@@ -88,6 +89,10 @@ def _owner_schema(module, node, kind):
             if target.attr in schema and schema[target.attr] != spec:
                 _fail(module, statement, f"attribute {target.attr!r} has conflicting types")
             schema[target.attr] = spec
+    for name, declaration in scope_values(module, constructor, kind, _fail).items():
+        if name in schema and schema[name]["kind"] != "value":
+            _fail(module, constructor, f"ResourceScope value {name!r} conflicts with a resource allocation")
+        schema[name] = declaration
     return schema
 
 
@@ -450,6 +455,21 @@ def _host_projection(
             return node
 
         def visit_Call(self, node):
+            if qualified_kind(node, kind) == "experimental.ResourceScope":
+                if (
+                    len(node.args) == 1
+                    and not node.keywords
+                    and isinstance(node.args[0], ast.Name)
+                    and node.args[0].id == "self"
+                    and any(
+                        item.get("scope_allocation") == [node.lineno, node.col_offset]
+                        for item in owners.get(self.owner, {}).values()
+                    )
+                ):
+                    # The normal scope forwards attributes to this same owner;
+                    # declarations are projected separately at their source sites.
+                    return ast.copy_location(ast.Name("self", ast.Load()), node)
+                _fail(module, node, "Package ResourceScope builder/initialization requires further support")
             if (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Call)
@@ -464,6 +484,33 @@ def _host_projection(
                 return ast.copy_location(type_expression(type_spec(resolve_type(node, namespace), builder)), node)
             if kind(node) in _DTYPES:
                 _fail(module, node, "Host scalar casts require further Runtime projection support")
+            return self.generic_visit(node)
+
+        def visit_Expr(self, node):
+            declaration = next(
+                (
+                    (name, item)
+                    for name, item in owners.get(self.owner, {}).items()
+                    if item.get("value_declaration") == [node.lineno, node.col_offset]
+                ),
+                None,
+            )
+            if declaration is not None:
+                name, item = declaration
+                return ast.copy_location(
+                    ast.Expr(
+                        ast.Call(
+                            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "declare_value", ast.Load()),
+                            [
+                                ast.Name("self", ast.Load()),
+                                ast.Constant(name),
+                                ast.parse(repr(item["element"]), mode="eval").body,
+                            ],
+                            [],
+                        )
+                    ),
+                    node,
+                )
             return self.generic_visit(node)
 
     projected = Project().visit(copy.deepcopy(tree))
@@ -576,6 +623,13 @@ def export_package(package, output, *, arch=None, source_root=None):
         ],
     )
     payloads = {}
+    if any(
+        "value_declaration" in item
+        for _, _, _, _, _, _, schemas, _ in sources
+        for schema in schemas.values()
+        for item in schema.values()
+    ):
+        manifest["version"] = max(4, manifest["version"])
     if source_root is not None:
         manifest.update(
             version=max(2, manifest["version"]),
@@ -613,16 +667,33 @@ def export_package(package, output, *, arch=None, source_root=None):
                     # Structural ABI witness only: every extent remains a runtime parameter.
                     value = ti.ndarray(dtype, (1,) * item["ndim"])
                 else:
-                    dtype = getattr(ti, item["dtype"])
+                    if "type_node" in item:
+                        dtype = resolve_type(
+                            item.pop("type_node"), vars(imported_modules[item.get("declaration_module", name)])
+                        )
+                        item["element"] = type_spec(dtype, module)
+                        if item["element"]["kind"] not in ("scalar", "tensor"):
+                            raise PackageExportError("ResourceScope.value requires a scalar/vector/matrix type")
+                        item["dtype"] = item["element"]["dtype"]
+                    else:
+                        dtype = getattr(ti, item["dtype"])
                     declarations[attribute] = RuntimeValue(dtype)
-                    value = 0.0 if item["dtype"].startswith("f") else 0
+                    value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
                 setattr(owner, attribute, value)
             owners[class_name], environments[class_name] = owner, Component(**declarations)
             manifest["owners"][name + "." + class_name] = {
                 attribute: {
                     key: value
                     for key, value in item.items()
-                    if key not in ("allocation", "dimension_sources", "declaration_module", "declaration_owner")
+                    if key
+                    not in (
+                        "allocation",
+                        "dimension_sources",
+                        "declaration_module",
+                        "declaration_owner",
+                        "value_declaration",
+                        "scope_allocation",
+                    )
                 }
                 for attribute, item in schema.items()
             }
@@ -712,7 +783,12 @@ def export_package(package, output, *, arch=None, source_root=None):
             symbol = "definition_" + code.semantic_key
             code.export(module, symbol)
             capture = [
-                {"name": capture_name, "kind": schema[0], "dtype": schema[1]}
+                {
+                    "name": capture_name,
+                    "kind": schema[0],
+                    "dtype": schema[1],
+                    **({"element_shape": list(schema[2])} if schema[0] == "value" and schema[2] else {}),
+                }
                 for capture_name, schema in code.contract["captures"]
             ]
             # Ndarray descriptors are passed unchanged, not encoded as scalar arguments.

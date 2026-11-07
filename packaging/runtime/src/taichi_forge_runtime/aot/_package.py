@@ -152,6 +152,16 @@ class _ModuleBinding:
     def type(self, spec):
         return _ElementType(self.package, spec)
 
+    def declare_value(self, owner, name, spec):
+        self.package._check()
+        if getattr(owner, "_forge_package_owner", None) is not self.package:
+            raise ValueError("Value declaration belongs to another loaded package")
+        # Match ResourceScope.value's presence/type-role check. Packing and
+        # per-call ABI validation remain in the native Kernel API.
+        getattr(owner, name)
+        if spec["kind"] not in ("scalar", "tensor"):
+            raise ValueError("Runtime value requires a scalar/vector/matrix type")
+
     def managed_class(self, cls):
         return managed_class(self.package, cls)
 
@@ -253,7 +263,11 @@ class entry:
         ]
         for item in contract["captures"]:
             value = getattr(owner, item["name"])
-            arguments.append(Scalar(item["dtype"], value) if item["kind"] in ("value", "dimension") else value)
+            arguments.append(
+                Scalar(item["dtype"], value)
+                if item["kind"] in ("value", "dimension") and not item.get("element_shape")
+                else value
+            )
         kernel = package._kernels.get(self.symbol)
         if kernel is None:
             kernel = package._kernels[self.symbol] = package._module.kernel(self.symbol)
@@ -275,7 +289,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3)
+            self.manifest.get("version") not in (1, 2, 3, 4)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

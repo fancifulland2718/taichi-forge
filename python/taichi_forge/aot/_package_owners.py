@@ -68,7 +68,13 @@ def resolve_owners(sources, imported, owner_schema, fail):
                     fail(name, n, "declared owner assignments must follow super().__init__")
         for key in inherited.keys() & own.keys():
             left, right = inherited[key], own[key]
-            if left["kind"] != "value" or right["kind"] != "value" or left["dtype"] != right["dtype"]:
+            if (
+                left["kind"] != "value"
+                or right["kind"] != "value"
+                or "type_node" in left
+                or "type_node" in right
+                or left["dtype"] != right["dtype"]
+            ):
                 fail(name, constructor, f"inherited resource/type replacement for {key!r} requires further support")
         result = {**inherited, **own}
         field_owners = {

@@ -1260,3 +1260,105 @@ class Model:
     with pytest.raises(ti.aot.PackageExportError, match="undeclared global/closure capture 'unsupported'"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert not (tmp_path / "sdk").exists()
+
+
+SCOPE_VALUES_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, gain, shift, transform):
+        global constructors
+        constructors += 1
+        self.gain, self.shift, self.transform = gain, shift, transform
+        self.unused = 11
+        scope = ti.experimental.ResourceScope(self)
+        scope.value('gain', ti.f32)
+        scope.value('shift', ti.types.vector(2, ti.f32))
+        scope.value('transform', ti.types.matrix(2, 2, ti.f32))
+        scope.value('unused', ti.i32)
+
+    @ti.kernel
+    def compute(self, x: ti.f32) -> ti.f32:
+        value = self.transform @ ti.Vector([x, self.gain]) + self.shift
+        return value[0] + value[1]
+
+    @ti.kernel
+    def independent(self, x: ti.i32) -> ti.i32:
+        return x + 5
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_resource_scope_values_preserve_compound_captures(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, SCOPE_VALUES_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    original = sys.modules["definition_fixture.model"]
+    assert manifest["version"] == 4 and original.constructors == 0
+    entries = {entry["definition"].rsplit(".", 1)[-1]: entry for entry in manifest["entries"].values()}
+    captures = {item["name"]: item for item in entries["compute"]["captures"]}
+    assert set(captures) == {"gain", "shift", "transform"}
+    assert captures["shift"]["element_shape"] == [2]
+    assert captures["transform"]["element_shape"] == [2, 2]
+    assert not entries["independent"]["captures"]
+    reference = original.Model(2.0, ti.Vector([1.0, 3.0]), ti.Matrix([[2.0, 1.0], [0.0, 4.0]]))
+    assert reference.compute(3.0) == 20.0
+    probe = tmp_path / "consume_scope_values.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        class NoPrivateSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoPrivateSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a = code.host.Model(2.0, [1.0, 3.0], [[2.0, 1.0], [0.0, 4.0]])
+            b = code.host.Model(-1.0, [0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]])
+            assert a.compute(3.0) == 20.0 and b.compute(3.0) == 2.0
+            a.shift = [10.0, -3.0]
+            assert a.compute(3.0) == 23.0 and b.compute(3.0) == 2.0
+            assert a.independent(7) == 12
+        print('SCOPE_VALUES_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SCOPE_VALUES_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "replacement,diagnostic",
+    [
+        ("if gain > 0:\n            scope.value('gain', ti.f32)", "unconditional declarations"),
+        ("alias = scope\n        scope.value('gain', ti.f32)", "beyond value declarations"),
+        ("scope = ti.experimental.ResourceScope(self)\n        scope.value('gain', ti.f32)", "must not be reassigned"),
+        ("scope.array = scope.field(ti.f32, shape=2)", "beyond value declarations"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_resource_scope_rejects_unproven_roles(tmp_path, monkeypatch, replacement, diagnostic):
+    package = _source_package(
+        tmp_path, monkeypatch, SCOPE_VALUES_SOURCE.replace("scope.value('gain', ti.f32)", replacement)
+    )
+    with pytest.raises(ti.aot.PackageExportError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
