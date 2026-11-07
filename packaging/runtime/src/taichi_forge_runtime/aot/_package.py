@@ -335,7 +335,11 @@ class _ModuleBinding:
                 raise ValueError("Borrowed target relation differs from its declared expression")
         check_constraints(
             {key: value["spec"] for key, value in contract.get("constraints", {}).items()},
-            lambda key: dimension_value(scope._root, key),
+            lambda key: (
+                path_value(scope._root, contract["dimension_paths"][key])
+                if key in contract.get("dimension_paths", {})
+                else dimension_value(scope._root, key)
+            ),
         )
         setattr(scope._owner, name, field)
         return field
@@ -591,6 +595,16 @@ def managed_class(package, cls):
         token = _construction.set((package, allocated, self))
         try:
             original(self, *args, **kwargs)
+            from ._package_values import check_owner_bindings
+
+            check_owner_bindings(
+                self,
+                (
+                    dict(path=item.get("path", [name]), owner_type=item["owner_type"])
+                    for name, item in package.manifest["owners"].get(key, {}).items()
+                    if item["kind"] == "owner"
+                ),
+            )
         except BaseException:
             for value in reversed(allocated):
                 value.close()
@@ -598,8 +612,13 @@ def managed_class(package, cls):
             raise
         finally:
             _construction.reset(token)
+        if construction is not None and construction[0] is package:
+            # A successful child is part of the enclosing constructor transaction.
+            # The parent must also release these resources if its construction fails.
+            construction[1].extend(allocated)
 
     cls.__init__ = initialize
+    cls._forge_package_type = key
     return cls
 
 
@@ -657,9 +676,9 @@ class entry:
         selected = self._select(owner)
         if selected is not self:
             return selected._call(package, owner, *args, **kwargs)
-        self._check_layout(owner)
         contract = self.contract
         check_admission(owner, contract)
+        self._check_layout(owner)
         bound = self.signature.bind(*args, **kwargs)
         arguments = [
             (
@@ -688,8 +707,11 @@ class entry:
         if owner is None:
             return
         for item in self.contract["captures"]:
-            for name, value in owner._forge_package_member_layouts.get(item["name"], {}).items():
-                if getattr(owner, name) is not value:
+            allocated_owner = path_value(owner, item.get("layout_owner_path", ()))
+            for name, value in allocated_owner._forge_package_member_layouts.get(
+                item.get("layout_member", item["name"]), {}
+            ).items():
+                if getattr(allocated_owner, name) is not value:
                     raise ValueError("Conditional layout configuration changed; construct a new instance")
 
     def _select(self, owner):
@@ -737,7 +759,8 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
+            self.manifest.get("version")
+            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

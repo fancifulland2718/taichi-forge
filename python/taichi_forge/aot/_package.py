@@ -19,13 +19,13 @@ from types import ModuleType, SimpleNamespace
 
 from taichi_forge.tools._compiled_host import decorator_resolver
 from ._package_types import qualified_kind, resolve_type, type_expression, type_spec
-from ._package_fields import field_declarations, construct_fields, field_allocation, field_environment
+from ._package_fields import field_declarations, field_allocation
 from ._package_sources import collect_sources
 from ._package_owners import resolve_owners
 from ._package_errors import is_error_interface, project_error_interface
 from ._package_resources import scope_declarations
 from ._package_targets import BACKEND_NAMES, backend_constant, backend_query, select_target_branches
-from ._package_records import write_member, dimension_relations
+from ._package_records import dimension_relations
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
@@ -132,16 +132,28 @@ def _analyze(module, source, namespace, target):
                 and any(kind(d) in ("kernel", "func", "real_func", "pyfunc") for d in n.decorator_list)
                 for n in node.body
             )
+            declared_owner = any(
+                isinstance(n, ast.FunctionDef)
+                and n.name == "__init__"
+                and any(
+                    isinstance(part, ast.Call)
+                    and qualified_kind(part, kind) == "experimental.ResourceScope"
+                    or getattr(part, "_package_resource_context", None) is not None
+                    for part in ast.walk(n)
+                )
+                for n in node.body
+            )
             if (
                 "data_oriented" not in decorators
                 and "dataclass" not in decorators
                 and not inherited_owner
                 and not device_mixin
+                and not declared_owner
             ):
                 continue
             if decorators not in ([], ["data_oriented"], ["dataclass"]):
                 _fail(module, node, "owner decorator combinations are not yet supported")
-            if decorators == ["data_oriented"] or inherited_owner:
+            if decorators == ["data_oriented"] or inherited_owner or declared_owner:
                 owners[node.name] = _owner_schema(module, node, kind, namespace)
             dataclass_owner = decorators == ["dataclass"]
             members = [(node.name, n) for n in node.body]
@@ -831,8 +843,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     scalar owner attributes form the current supported scope.
     """
     import taichi_forge as ti
-    from taichi_forge.aot._component import Array, Component, RuntimeValue, StaticValue
-    from taichi_forge_runtime._static_values import read_static_key, static_key
+    from taichi_forge.aot._component import Component
+    from taichi_forge_runtime._static_values import static_key
     from ._package_variants import compile_static_variants
     from taichi_forge.aot.module import Module
     from taichi_forge.types.ndarray_type import NdarrayType
@@ -896,6 +908,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 host_contexts.add(function, recipe)
     resolve_owners(sources, imported_modules, _owner_schema, _fail)
     module = Module(caps=caps)
+    from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
+
+    owner_graph = OwnerGraph(sources, imported_modules, module)
     manifest = dict(
         version=(
             3
@@ -983,54 +998,18 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
         imported = imported_modules[name]
         owners = {}
         environments = {}
-        for class_name, schema in schemas.items():
-            cls = getattr(imported, class_name)
-            owner = object.__new__(cls)  # Deliberately never call application __init__.
-            declarations = construct_fields(owner, schema, vars(imported), module, imported_modules=imported_modules)
-            for attribute, item in schema.items():
-                if item["kind"] in ("dense_field", "dimension", "borrowed_field"):
-                    continue
-                elif item["kind"] == "record":
-                    from ._component import Record
-
-                    declarations[attribute] = Record()
-                    # Earlier dimension witnesses may already populate this
-                    # namespace. Never replace it or construct a user record.
-                    continue
-                elif item["kind"] == "static":
-                    choices = tuple(read_static_key(key) for key in item["choices"])
-                    declarations[attribute] = StaticValue(choices=choices, kernel_only=item["kernel_only"])
-                    value = choices[0]
-                    manifest["version"] = max(11, manifest["version"])
-                    if "presence_parameter" in item:
-                        manifest["version"] = max(13, manifest["version"])
-                elif item["kind"] == "ndarray":
-                    dtype = resolve_type(
-                        item.pop("type_node"), vars(imported_modules[item.get("declaration_module", name)])
-                    )
-                    item["element"] = type_spec(dtype, module)
-                    declarations[attribute] = Array(dtype, item["ndim"])
-                    # Structural ABI witness only: every extent remains a runtime parameter.
-                    value = ti.ndarray(dtype, (1,) * item["ndim"])
-                else:
-                    if "type_node" in item:
-                        dtype = resolve_type(
-                            item.pop("type_node"), vars(imported_modules[item.get("declaration_module", name)])
-                        )
-                        item["element"] = type_spec(dtype, module)
-                        if item["element"]["kind"] not in ("scalar", "tensor"):
-                            raise PackageExportError("ResourceScope.value requires a scalar/vector/matrix type")
-                        item["dtype"] = item["element"]["dtype"]
-                    else:
-                        dtype = getattr(ti, item["dtype"])
-                    declarations[attribute] = RuntimeValue(dtype)
-                    value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
-                write_member(owner, attribute, value, schema)
-            from ._package_borrows import project as project_borrows
-
-            owners[class_name], environments[class_name] = owner, project_borrows(
-                owner, field_environment(declarations, schema), schema
-            )
+        compilation_schemas = {}
+        for class_name in schemas:
+            owner, schema, environment, expanded = owner_graph.construct(name + "." + class_name)
+            schemas[class_name] = schema
+            owners[class_name], environments[class_name] = owner, environment
+            compilation_schemas[class_name] = expanded
+            if any(item["kind"] == "owner" for item in schema.values()):
+                manifest["version"] = max(21, manifest["version"])
+            if any(item["kind"] == "static" for item in schema.values()):
+                manifest["version"] = max(11, manifest["version"])
+            if any("presence_parameter" in item for item in schema.values()):
+                manifest["version"] = max(13, manifest["version"])
             if any(item["kind"] == "record" or item.get("constraints") for item in schema.values()):
                 manifest["version"] = max(19, manifest["version"])
             if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):
@@ -1161,13 +1140,15 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     _fail(name, node, "kernel default arguments are not yet supported")
             environment = environments[owner_name] if owner_name is not None else Component()
             try:
-                codes = compile_static_variants(environment, entry, values, owner, schemas.get(owner_name, {}))
+                codes = compile_static_variants(
+                    environment, entry, values, owner, compilation_schemas.get(owner_name, {})
+                )
             except Exception as error:
                 raise PackageExportError(f"{name}.{definition['name']}: {error}") from error
             variants = []
             for code in codes:
                 for attribute, _ in code.contract["captures"]:
-                    required = schemas.get(owner_name, {}).get(attribute, {}).get("conditions", {})
+                    required = compilation_schemas.get(owner_name, {}).get(attribute, {}).get("conditions", {})
                     if any(code.static.get(key) != static_key(value) for key, value in required.items()):
                         _fail(
                             name,
@@ -1179,16 +1160,18 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 constraints, dimensions, _ = environment.constraint_facts(owner, code.used)
                 source_bindings = {
                     key: dict(path=list(environment._paths[key]), source_path=item["source_path"])
-                    for key, item in schemas.get(owner_name, {}).items()
+                    for key, item in compilation_schemas.get(owner_name, {}).items()
                     if key in code.used and item["kind"] == "borrowed_field"
                 }
+                child_bindings = owner_bindings(environment, compilation_schemas.get(owner_name, {}), code.used)
                 admission = (
                     dict(
                         constraints=constraints,
                         dimensions=dimension_relations(environment, dimensions),
                         **({"source_bindings": source_bindings} if source_bindings else {}),
+                        **({"owner_bindings": child_bindings} if child_bindings else {}),
                     )
-                    if constraints or source_bindings
+                    if constraints or source_bindings or child_bindings
                     else None
                 )
                 identity = (code.kernel, code.key)
@@ -1216,6 +1199,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         for capture_name, schema in code.contract["captures"]
                     ]
                     for item in capture:
+                        if item["kind"] == "dense_field":
+                            item.update(
+                                layout_owner(environment, compilation_schemas.get(owner_name, {}), item["name"])
+                            )
                         if item["kind"] in ("ndarray", "dense_field"):
                             item.pop("dtype")
                         if item["kind"] == "dimension" and environment.declarations[item["name"]].expression:
@@ -1243,7 +1230,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["entry_families"][symbol] = dict(
                     arguments=argument_schema,
                     variants=variants,
-                    domain={key: schemas[owner_name][key]["choices"] for key in sorted(used)},
+                    domain={key: compilation_schemas[owner_name][key]["choices"] for key in sorted(used)},
                     **(
                         {"paths": {key: list(environment._paths[key]) for key in used}}
                         if any(len(environment._paths[key]) > 1 for key in used)

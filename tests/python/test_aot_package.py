@@ -16,6 +16,202 @@ from taichi_forge._lib import utils
 from tests import test_utils
 from taichi_forge_runtime.aot import Runtime, load_package
 
+DECLARED_CHILD_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Storage:
+    def __init__(self, n: int, first: bool):
+        global constructors
+        constructors += 1
+        self.n, self.first = n, first
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        scope.static('first', choices=(False, True))
+        rows = scope.dim('n')
+        scope.values = scope.field(ti.f32, shape=rows)
+        self.tree = builder.finalize()
+
+    @ti.kernel
+    def fill(self, gain: ti.f32):
+        for i in self.values:
+            self.values[i] = gain * i
+
+    @ti.func
+    def bias(self):
+        result = 2
+        if ti.static(self.first):
+            result = 7
+        return result
+
+class Group:
+    def __init__(self, n: int, m: int, first: bool, second: bool, fail=False):
+        scope = ti.experimental.ResourceScope(self)
+        scope.left = Storage(n, first)
+        scope.right = Storage(m, second)
+        if fail:
+            raise ValueError('requested constructor failure')
+
+    def fill(self, gain):
+        self.left.fill(gain)
+        self.right.fill(-gain)
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, m: int, first: bool, second: bool, fail=False):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        rows = scope.dim('n')
+        scope.child = Group(n, m, first, second, fail)
+        scope.borrow('alias', self.child.left.values, source_scope=True, dimensions={'n': rows})
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.alias:
+            self.alias[i] = gain * i + self.child.left.bias()
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+        builder.dispatch(self.step, gain)
+        return builder.compile()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_declared_owner_graph_shares_children_and_keeps_instance_bindings(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, DECLARED_CHILD_SOURCE)
+    original = package.Model(7, 11, True, False)
+    original.step(3.0)
+    expected = original.alias.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 21
+    assert sys.modules["definition_fixture.model"].constructors == 2
+    assert len(manifest["field_groups"]) == 1
+    assert len(manifest["entries"]) == 4
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([n for n in archive.namelist() if n.endswith((".ll", ".bc", ".spv"))]) == 4
+    family = next(iter(manifest["entry_families"].values()))
+    assert list(family["paths"].values()) == [["child", "left", "first"]]
+    assert len(family["variants"]) == 2
+    host = (tmp_path / "sdk/host/model.py").read_text(encoding="utf8")
+    assert "self.left.fill(gain)" in host and "scope.left = Storage(n, first)" in host
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, 11, True, False), code.host.Model(19, 3, False, True)
+        a.step(3.0)
+        np.testing.assert_array_equal(a.alias.to_numpy(), expected)
+        b.step(-2.0)
+        np.testing.assert_array_equal(b.alias.to_numpy(), -2 * np.arange(19) + 2)
+        assert a.alias is a.child.left.values
+        assert a.alias._group_owner is not a.child.right.values._group_owner
+        assert a.alias._group_owner is not b.alias._group_owner
+        a.n = 6
+        with pytest.raises(ValueError, match="constraint|Constraint"):
+            a.step(3.0)
+        a.n = 7
+        a.child.fill(5.0)
+        np.testing.assert_array_equal(a.child.right.values.to_numpy(), -5 * np.arange(11))
+        prepared = a.graph().bind(dict(gain=4.0))
+        saved = a.child
+        a.child = b.child
+        with pytest.raises(ValueError, match="Borrowed Field"):
+            a.step(1.0)
+        prepared.run()
+        np.testing.assert_array_equal(saved.left.values.to_numpy(), 4 * np.arange(7) + 7)
+        a.child = saved
+        registered = set(runtime._resources)
+        with pytest.raises(ValueError, match="requested constructor failure"):
+            code.host.Model(5, 6, False, False, True)
+        assert runtime._resources == registered
+        with load_package(runtime, tmp_path / "sdk") as foreign:
+            a.child = foreign.host.Model(7, 11, True, False).child
+            with pytest.raises(ValueError, match="child owner"):
+                a.step(1.0)
+        a.child = saved
+        a.child.left.tree.destroy()
+        with pytest.raises((ValueError, RuntimeError)):
+            a.step(1.0)
+        b.step(1.0)
+        np.testing.assert_array_equal(b.alias.to_numpy(), np.arange(19) + 2)
+        prepared.close()
+    probe = tmp_path / "consume_children.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class BlockSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, BlockSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3, 5, True, False), code.host.Model(13, 7, False, True)
+            a.step(4.0)
+            b.step(-2.0)
+            np.testing.assert_array_equal(a.alias.to_numpy(), 4 * np.arange(3) + 7)
+            np.testing.assert_array_equal(b.alias.to_numpy(), -2 * np.arange(13) + 2)
+            assert a.alias._group_owner is not b.alias._group_owner
+            a.child.fill(9.0)
+            np.testing.assert_array_equal(a.child.right.values.to_numpy(), -9 * np.arange(5))
+        print('CHILD_DEFINITIONS_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CHILD_DEFINITIONS_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "before,after,diagnostic",
+    [
+        ("scope.left = Storage(n, first)", "scope.left = Group(n, n, first, first)", "cyclic"),
+        ("scope.left = Storage(n, first)", "scope.left = list()", "supported resource declaration"),
+        ("second: bool, fail=False):", "second: bool, fail=False, Storage=None):", "unshadowed"),
+        ("scope.left = Storage(n, first)", "if first:\n            scope.left = Storage(n, first)", "unconditional"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_declared_children_reject_unproven_construction(tmp_path, monkeypatch, before, after, diagnostic):
+    package = _source_package(tmp_path, monkeypatch, DECLARED_CHILD_SOURCE.replace(before, after))
+    with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_child_capture_checks_original_conditional_layout(tmp_path, monkeypatch):
+    source = DECLARED_CHILD_SOURCE.replace(
+        "self.tree = builder.finalize()",
+        "if self.first:\n            scope.extra = scope.field(ti.f32, shape=rows)\n        self.tree = builder.finalize()",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a = code.host.Model(7, 11, True, False)
+        a.step(3.0)
+        a.child.left.first = False
+        with pytest.raises(ValueError, match="Conditional layout configuration changed"):
+            a.step(3.0)
+
+
 BORROWED_FIELDS_SOURCE = """
 import taichi_forge as ti
 constructors = 0

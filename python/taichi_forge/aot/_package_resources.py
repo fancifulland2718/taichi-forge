@@ -991,6 +991,28 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 receiver = scope_binding(target.value)
                 if receiver in scopes and not scope_paths[receiver]:
                     scope_writes.append(target)
+                    if isinstance(statement.value, ast.Call):
+                        from ._package_factories import _source_value
+                        import inspect
+
+                        cls = _source_value(statement.value.func, namespace)
+                        if inspect.isclass(cls):
+                            root = statement.value.func
+                            while isinstance(root, ast.Attribute):
+                                root = root.value
+                            if not isinstance(root, ast.Name) or root.id in stores:
+                                fail(module, statement, "Declared child owner requires an unshadowed class definition")
+                            if conditions or member_stores[target.attr] != 1:
+                                fail(module, statement, "Declared child owner requires one unconditional construction")
+                            add(
+                                target.attr,
+                                dict(
+                                    kind="owner",
+                                    owner_type=cls.__module__ + "." + cls.__qualname__,
+                                    scope_allocation=origin(receiver),
+                                ),
+                                statement,
+                            )
             if len(targets) == 1 and isinstance(targets[0], (ast.Name, ast.Tuple, ast.List)):
                 target = targets[0]
                 expression = statement.value
@@ -1013,7 +1035,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                         alias_conditions[name.id] = dict(conditions)
 
     for target in scope_writes:
-        if declarations.get(target.attr, {}).get("kind") in ("dimension", "value", "static"):
+        if declarations.get(target.attr, {}).get("kind") in ("dimension", "value", "static", "owner"):
             allowed.add(id(target.value))
     for node in ast.walk(constructor):
         if (

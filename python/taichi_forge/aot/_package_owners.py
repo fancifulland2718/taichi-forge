@@ -97,7 +97,7 @@ def resolve_owners(sources, imported, owner_schema, fail):
             if (
                 not isinstance(node, ast.ClassDef)
                 or not inspect.isclass(cls)
-                or not getattr(cls, "_data_oriented", False)
+                or not (getattr(cls, "_data_oriented", False) or node.name in schemas)
             ):
                 continue
             schema = constructor_schema(cls)

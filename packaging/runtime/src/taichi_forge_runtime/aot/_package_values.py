@@ -24,6 +24,7 @@ def dimension_value(owner, name):
 def check_admission(owner, contract):
     admission = contract.get("admission")
     if admission:
+        check_owner_bindings(owner, admission.get("owner_bindings", {}).values())
         for binding in admission.get("source_bindings", {}).values():
             if path_value(owner, binding["path"]) is not path_value(owner, binding["source_path"]):
                 raise ValueError("Borrowed Field no longer refers to its declared allocation")
@@ -33,6 +34,16 @@ def check_admission(owner, contract):
             constraints,
             lambda name: capture_value(owner, dict(name=name, dimension_relations=dimensions)),
         )
+
+
+def check_owner_bindings(owner, bindings):
+    for binding in bindings:
+        child = path_value(owner, binding["path"])
+        if (
+            getattr(child, "_forge_package_owner", None) is not owner._forge_package_owner
+            or getattr(type(child), "_forge_package_type", None) != binding["owner_type"]
+        ):
+            raise ValueError("Declared child owner differs from its package definition")
 
 
 def capture_value(owner, spec):

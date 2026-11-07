@@ -517,6 +517,27 @@ invalid relations, replaced aliases and source-group retirement. GeoPhys
 verification reuses its original `resource_scope` factory without production
 adapters or new application decorators.
 
+Version 21 resolves unconditional existing `scope.child = KnownClass(...)`
+construction through the scanned class definitions. Plain Host classes with an
+existing resource scope need no additional decorator. The exporter builds type
+and resource witnesses without invoking application constructors, compiles each
+class's numerical definitions independently, and keeps ordinary child creation
+and method scheduling in `.py`. Merely nesting Host objects adds no numerical
+entry. A parent numerical entry can use declared child resources/functions;
+only its actual static dependencies generate variants. Source-scope borrowing
+can follow those proven child allocation paths, preserving native group layouts.
+Unknown, shadowed, conditional or cyclic construction types reject export.
+
+Calls and Graph bindings validate the used child definitions, loaded package,
+source aliases, dimensions and original conditional layouts. Prepared calls
+retain their instance snapshots. A failed enclosing constructor releases the
+resources already created by its children. Focused CPU/CUDA/Vulkan tests include
+two-level child paths, independent instances, no-source consumers and GeoPhys's
+original `resource_scope` factory. They do not establish whole-solver support:
+untyped constructor resource inputs, dynamic factories and model-driven local
+tensor type domains still need explicit source/type provenance. No model sample
+or combination-specific numerical package is introduced.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.
