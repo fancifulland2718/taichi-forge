@@ -1854,6 +1854,181 @@ def test_package_template_factory_keeps_shared_code_and_instance_bindings(tmp_pa
     assert "TEMPLATE_FACTORY_OK" in result.stdout
 
 
+SEQUENCE_FACTORY_SOURCE = (
+    TEMPLATE_FACTORY_SOURCE.replace(
+        "def __init__(self, n: int, offset: float):",
+        "def __init__(self, n: int, offset: float, first='fast', second='full', biased=False):",
+    )
+    .replace(
+        "        self.fast = make_update('positive', 'fast')\n"
+        "        self.full = make_update('positive', 'full')\n"
+        "        self.negative = make_update('negative', 'fast')",
+        "        self.first, self.second, self.biased = first, second, biased\n"
+        "        scope.static('first', choices=(None, 'fast', 'full'))\n"
+        "        scope.static('second', choices=(None, 'fast', 'full'))\n"
+        "        scope.static('biased', choices=(False, True))\n"
+        "        tiers = (self.first, self.second)\n"
+        "        self.selected = tuple(None if tier is None else make_update(stage, tier)\n"
+        "                              for stage, tier in zip(('positive', 'negative'), tiers))",
+    )
+    .replace(
+        "            self.values[i] = gain + i + self.offset",
+        "            self.values[i] = gain + i + self.offset\n"
+        "            if ti.static(self.biased):\n"
+        "                self.values[i] += 10",
+    )
+    .replace(
+        "        graph.dispatch(self.fast, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32), template_args={'self': self})",
+        "        for kernel in self.selected:\n"
+        "            if kernel is not None:\n"
+        "                graph.dispatch(kernel, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32), template_args={'self': self})",
+    )
+)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_factory_sequence_projects_each_stage_domain(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, SEQUENCE_FACTORY_SOURCE)
+    original = sys.modules["definition_fixture.model"]
+    forbidden = {original.Model.__init__.__code__, original.make_update.__wrapped__.__code__}
+    previous = sys.getprofile()
+
+    def no_sample(frame, event, arg):
+        if event == "call" and frame.f_code in forbidden:
+            raise AssertionError("export executed model/factory code")
+
+    sys.setprofile(no_sample)
+    try:
+        manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    finally:
+        sys.setprofile(previous)
+    # 18 legal Host configurations: 2 stages x 2 non-None options x 2 actual
+    # numerical specializations, plus the fixture's unrelated entry. No product
+    # of the two stage option domains appears in numerical code or families.
+    assert len(manifest["entries"]) == 9 and len(manifest["entry_families"]) == 4
+    for family in manifest["entry_families"].values():
+        assert set(family["domain"]) == {"biased"}
+        assert len(family["variants"]) == 2
+    for candidates in manifest["closure_entries"].values():
+        assert len(candidates) == 2
+        assert len({candidate["symbol"] for candidate in candidates}) == 2
+        for candidate in candidates:
+            option = candidate["options"]["opt_level"][1]
+            for variant in manifest["entry_families"][candidate["symbol"]]["variants"]:
+                assert manifest["entries"][variant["symbol"]]["compile_options"]["opt_level"] == option
+    assert original.make_update.cache_info().currsize == 0
+    reference = original.Model(3, 2.0, "fast", "full", True)
+    reference.selected[1](reference, 5.0)
+    np.testing.assert_array_equal(reference.values.to_numpy(), np.arange(3) + 7)
+    probe = tmp_path / "consume_factory_sequence.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a = code.host.Model(3, 2., 'fast', 'full', True)
+            b = code.host.Model(17, 7., 'full', 'fast', False)
+            c = code.host.Model(5, 3., 'full', None, False)
+            assert c.selected[1] is None
+            ga, gb, gc = a.graph(), b.graph(), c.graph()
+            with ga.bind({'gain': 5.}) as pa, gb.bind({'gain': 11.}) as pb:
+                a.offset, a.biased = -100., False
+                b.offset, b.biased = 100., True
+                pb.run()
+                pa.run()
+                pb.run()
+                np.testing.assert_array_equal(a.values.to_numpy(), np.arange(3) + 7)
+                np.testing.assert_array_equal(b.values.to_numpy(), np.arange(17) - 4)
+            gc.run({'gain': 4.})
+            np.testing.assert_array_equal(c.values.to_numpy(), np.arange(5) + 7)
+            try:
+                code.host.Model(1, 0., 'balanced', 'fast')
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('undeclared option accepted')
+        print('FACTORY_SEQUENCE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FACTORY_SEQUENCE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "runtime_sequence",
+        "rebound",
+        "mutation",
+        "mutating_call",
+        "alias_mutation",
+        "shadowed_zip",
+        "shadowed_factory",
+        "filtered",
+        "kernel_only",
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_factory_sequence_rejects_unproven_input_domains(tmp_path, monkeypatch, change):
+    source = SEQUENCE_FACTORY_SOURCE
+    if change == "runtime_sequence":
+        source = source.replace("tiers = (self.first, self.second)", "tiers = range(n)")
+    elif change == "rebound":
+        source = source.replace(
+            "tiers = (self.first, self.second)", "tiers = (self.first, self.second)\n        tiers = ('fast', 'fast')"
+        )
+    elif change == "mutation":
+        source = source.replace(
+            "tiers = (self.first, self.second)", "tiers = [self.first, self.second]\n        tiers[0] = 'full'"
+        )
+    elif change == "mutating_call":
+        source = source.replace(
+            "tiers = (self.first, self.second)", "tiers = [self.first, self.second]\n        tiers.reverse()"
+        )
+    elif change == "alias_mutation":
+        source = source.replace(
+            "tiers = (self.first, self.second)",
+            "tiers = [self.first, self.second]\n        alias = tiers\n        alias[0] = 'full'",
+        )
+    elif change == "shadowed_zip":
+        source = source.replace(
+            "import taichi_forge as ti", "import taichi_forge as ti\ndef zip(*args):\n    raise AssertionError()"
+        )
+    elif change == "shadowed_factory":
+        source = source.replace("biased=False):", "biased=False, make_update=None):")
+    elif change == "filtered":
+        source = source.replace("'negative'), tiers))", "'negative'), tiers) if tier is not None)")
+    else:
+        source = source.replace("choices=(None, 'fast', 'full')", "choices=(None, 'fast', 'full'), kernel_only=True")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize("change", ["extra_template", "mixed_lexical"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_template_factory_rejects_ambiguous_receiver_sources(tmp_path, monkeypatch, change):

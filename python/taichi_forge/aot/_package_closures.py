@@ -125,6 +125,8 @@ def _code(function, node):
 
 
 def calls(sources, imported, fail):
+    from ._package_factory_inputs import constructor_calls
+
     factories = {
         function: recipe
         for *_, tree, kind, schemas, definitions in sources
@@ -138,23 +140,17 @@ def calls(sources, imported, fail):
             constructor = next((n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
             if constructor is None:
                 continue
-            for statement in constructor.body:
-                if not (
-                    isinstance(statement, ast.Assign)
-                    and len(statement.targets) == 1
-                    and isinstance(statement.targets[0], ast.Attribute)
-                    and isinstance(statement.targets[0].value, ast.Name)
-                    and statement.targets[0].value.id == "self"
-                    and isinstance(statement.value, ast.Call)
-                ):
-                    continue
-                call = statement.value
-                target = _source_value(call.func, vars(imported[module]))
-                recipe = factories.get(target) if _callable(target) else None
-                if recipe is not None:
-                    key = module + "." + owner.name
-                    result.setdefault(key, []).append((statement.targets[0].attr, call, recipe))
-                    covered.add(id(call))
+            try:
+                inputs, observed = constructor_calls(
+                    constructor,
+                    schemas[owner.name],
+                    vars(imported[module]),
+                    lambda value: factories.get(value) if _callable(value) else None,
+                )
+            except (ValueError, TypeError, SyntaxError) as error:
+                fail(module, constructor, str(error))
+            result.setdefault(module + "." + owner.name, []).extend(inputs)
+            covered.update(observed)
         for call in ast.walk(tree):
             if isinstance(call, ast.Call) and id(call) not in covered:
                 target = _source_value(call.func, vars(imported[module]))

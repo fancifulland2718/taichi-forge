@@ -1416,7 +1416,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             if any(variant["selection"] for variant in variants):
                 # Logical method identity is separate from its shared numerical
                 # entries. Unread owner options are absent from this family.
-                symbol = "family_" + hashlib.sha256((name + "." + definition["name"]).encode()).hexdigest()
+                # One Host sequence position may select several factory
+                # compilation options. Each family retains its own code map.
+                family_identity = json.dumps([name + "." + definition["name"], variants], sort_keys=True).encode()
+                symbol = "family_" + hashlib.sha256(family_identity).hexdigest()
                 used = {key for variant in variants for key in variant["selection"]}
                 manifest["entry_families"][symbol] = dict(
                     arguments=argument_schema,

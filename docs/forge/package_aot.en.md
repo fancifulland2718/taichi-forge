@@ -772,7 +772,7 @@ quota, and prepared replay does not repeat the checks. Legacy explicit Component
 Graphs reject these loops until they can preserve the
 snapshot checks. The Graph evidence here applies to definition packages; raw
 kernel callers remain responsible for exported argument/range contracts.
-Comprehension-based factory input domains and conditional model layouts remain open. Model-dependent
+Finite comprehension inputs are covered below; unproven factory domains and conditional model layouts remain open. Model-dependent
 CUDA block sizes use the preparation path documented above; this does not
 establish whole-class EFC export. Focused CPU/CUDA/Vulkan
 source-free checks cover new sizes, instance isolation, ordering and Graphs.
@@ -829,13 +829,32 @@ provided instance; preparation snapshots each invocation's parameters/resources,
 and replay does not select a receiver again. Entry descriptors are reused rather
 than rebuilding selection tables on every call.
 
-This path accepts fixed literal factory inputs and direct constructor bindings,
-without mixing lexical Field owners. Additional template arguments, unknown receiver
-types, foreign-package instances and retired resources reject. Comprehension-based
-input domains and model-dependent factory types remain pending. Focused checks pass
+This path does not mix lexical Field owners. Additional template arguments, unknown
+receiver types, foreign-package instances and retired resources reject.
+Model-dependent factory types remain pending. Focused checks pass
 on three backends, alongside CPU/CUDA source-free consumption of GeoPhys's original
 `_cooperative_kernel` factory source. That probe uses a minimal numerical owner to
 test binding; it does not qualify the complete Newton algorithm.
+
+Finite constructor factory inputs can also come from existing
+`scope.static(..., choices=...)` declarations, without new registration. Fixed
+tuples/lists, `zip`, and single-level comprehensions (including `tuple(...)`) are
+supported, with optional `None` selected by proven fixed or finite conditions.
+Only inputs reaching each factory call are expanded. Two stages project their
+options independently rather than generating the Cartesian product of complete
+owner configurations. Static conditions actually read by numerical code still
+retain their specializations. Different compilation options at the same stage
+keep separate entry-selection maps rather than overwriting each other.
+
+Export does not execute these Host expressions; consumers retain Python ordering,
+optional stages and cache behavior. Aliases require proven single assignment.
+Rebinding, sequence mutation or escape, shadowed builtins/factories, filters and
+model-data-dependent sequences reject. A `kernel_only` declaration cannot supply
+the Host factory-selection contract. This reuses the version 32 consumer format.
+Focused CPU/CUDA/Vulkan source-free checks pass. A GeoPhys CUDA check uses the
+original Newton factory and comprehension expression with independent stage options;
+its minimal owner provides explicit finite declarations. It does not qualify the
+original Newton instance-valued static choices, iteration plan or construction closure.
 
 ## Definition constants
 
@@ -858,7 +877,7 @@ Focused CPU/CUDA/Vulkan checks cover code sharing, inheritance, mixed finite
 configuration, independent state, source-free consumption and prepare snapshots.
 A GeoPhys check reuses its original constant/layout helpers and current EFC group
 size value with DOF 17/129 through one entry. This is not complete Newton or engine
-qualification; comprehension-based factory domains, configuration declarations and construction closure remain.
+qualification; configuration declarations, iteration plans and construction closure remain.
 This changes the Python Producer/Runtime contract only, not the native AOT format.
 It provides no new whole-wheel size or performance measurement.
 
