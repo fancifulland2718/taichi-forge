@@ -426,6 +426,13 @@ class _ModuleBinding:
         setattr(scope._root, name, value)
         check_owner_bindings(scope._root, (dict(path=[name], owner_type=declaration["owner_type"]),))
 
+    def check_alias_mapping(self, actual, expected):
+        from types import MappingProxyType
+
+        self.package._check()
+        if type(actual) is not MappingProxyType or tuple(actual.items()) != expected:
+            raise ValueError("Alias mapping differs from its declared definition")
+
     def borrow(self, owner_key, scope, name, field, *, dimensions=None, source_scope=False, external=False):
         self.package._check()
         construction = _construction.get()
@@ -966,6 +973,7 @@ class LoadedPackage:
                 33,
                 34,
                 35,
+                36,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

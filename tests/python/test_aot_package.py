@@ -597,6 +597,27 @@ def test_package_owner_inputs_allow_same_or_distinct_resource_instances(tmp_path
         np.testing.assert_array_equal(b.storage.values.to_numpy(), 1)
 
 
+@pytest.mark.parametrize("change", ["mutable", "model", "shadowed", "path", "rebind"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_fixed_alias_mapping_rejects_unproven_inputs(tmp_path, monkeypatch, change):
+    source = _borrowed_alias_source(BORROWED_FIELDS_SOURCE, False, "mapping")
+    if change == "mutable":
+        source = source.replace("MappingProxyType({'alias': ('values',)})", "{'alias': ('values',)}")
+    elif change == "model":
+        source = source.replace("for name, (member,) in ALIASES.items():", "for name, (member,) in self.aliases.items():")
+    elif change == "shadowed":
+        source = source.replace("constructors = 0", "getattr = lambda *a: None\nconstructors = 0")
+    elif change == "path":
+        source = source.replace("('values',)", "['values']")
+    else:
+        source = source.replace("for name, (member,)", "ALIASES = self.aliases\n        for name, (member,)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="Alias"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize(
     "before,after,diagnostic",
     [
@@ -902,9 +923,38 @@ class Model:
 """
 
 
+def _borrowed_alias_source(source, struct_member, alias_form):
+    path = "('values', 'x')" if struct_member else "('values',)"
+    source = source.replace(
+        "constructors = 0",
+        f"from types import MappingProxyType\nALIASES = MappingProxyType({{'alias': {path}}})\nconstructors = 0",
+    )
+    original_borrow = next(line.strip() for line in source.splitlines() if "scope.borrow(" in line)
+    access = "getattr(getattr(self, group), member)" if struct_member else "getattr(self, member)"
+    target = "name, (group, member)" if struct_member else "name, (member,)"
+    relation = ", dimensions={'n': cols}" if alias_form == "mapping" else ""
+    loop = f"for {target} in ALIASES.items():\n            scope.borrow(name, {access}, source_scope=True{relation})"
+    source = source.replace(original_borrow, loop if alias_form == "mapping" else "self._bind_aliases()")
+    if alias_form == "method":
+        start = source.index("        builder = ti.FieldsBuilder()")
+        end = source.index("        self._bind_aliases()", start)
+        allocation = source[start:end]
+        source = source[:start] + "        self._allocate()\n" + source[end:]
+        source = source.replace(
+            "    @ti.kernel\n    def step",
+            "    def _bind_aliases(self):\n        scope = ti.experimental.ResourceScope(self)\n        "
+            + loop
+            + "\n\n    def _allocate(self):\n" + allocation + "\n    @ti.kernel\n    def step",
+        )
+    return source
+
+
 @pytest.mark.parametrize("struct_member", [False, True])
+@pytest.mark.parametrize("alias_form", ["direct", "mapping", "method"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(tmp_path, monkeypatch, struct_member):
+def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(
+    tmp_path, monkeypatch, struct_member, alias_form
+):
     from tests.python.test_aot_dense_snode_group import _compiled_nodes
 
     source = BORROWED_FIELDS_SOURCE
@@ -916,6 +966,8 @@ def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(tmp
         source = source.replace("self.values, source_scope", "self.values.x, source_scope")
         source = source.replace("self.values[i]", "self.values.x[i]")
         source = source.replace("in self.values:", "in self.values.x:")
+    if alias_form != "direct":
+        source = _borrowed_alias_source(source, struct_member, alias_form)
     package = _source_package(tmp_path, monkeypatch, source)
     original = package.Model(7, 7)
     original.step(3.0)
@@ -924,7 +976,7 @@ def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(tmp
     root = ti.lang.impl.get_runtime().prog.get_snode_root(original_field.snode.ptr.get_snode_tree_id())
     layout = _compiled_nodes(root)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 20
+    assert manifest["version"] == (20 if alias_form == "direct" else 36)
     assert sys.modules["definition_fixture.model"].constructors == 1
     assert len(manifest["field_groups"]) == 1
     assert len(manifest["entries"]) == 3  # step, clear and the unimported public definition
@@ -941,12 +993,14 @@ def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(tmp
         b.step(-2.0)
         np.testing.assert_array_equal(b.alias.to_numpy(), -2 * np.arange(19) + 2)
         registered = set(runtime._resources)
-        with pytest.raises(ValueError, match="constraint|Constraint"):
-            code.host.Model(5, 6)
+        if alias_form != "method":
+            with pytest.raises(ValueError, match="constraint|Constraint"):
+                code.host.Model(5, 6)
         assert runtime._resources == registered
         a.m = 6
-        with pytest.raises(ValueError, match="constraint|Constraint"):
-            a.step(3.0)
+        if alias_form != "method":
+            with pytest.raises(ValueError, match="constraint|Constraint"):
+                a.step(3.0)
         a.clear()
         a.m = 7
         plan = a.graph()
@@ -967,6 +1021,22 @@ def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(tmp
         b.step(1.0)
         np.testing.assert_array_equal(b.alias.to_numpy(), np.arange(19) + 2)
         prepared.close()
+        if alias_form != "direct":
+            from types import MappingProxyType
+
+            original_mapping = (
+                code.host.Model._bind_aliases.__globals__
+                if alias_form == "method"
+                else code.host.Model.__init__.__wrapped__.__globals__
+            )
+            # Host-side edits cannot silently change or remove declared aliases.
+            saved_mapping = original_mapping["ALIASES"]
+            original_mapping["ALIASES"] = MappingProxyType({})
+            resources = set(runtime._resources)
+            with pytest.raises(ValueError, match="Alias mapping differs"):
+                code.host.Model(3, 3)
+            assert runtime._resources == resources
+            original_mapping["ALIASES"] = saved_mapping
     probe = tmp_path / "consume_borrows.py"
     probe.write_text(
         textwrap.dedent("""

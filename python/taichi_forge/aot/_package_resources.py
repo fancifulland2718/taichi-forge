@@ -65,6 +65,13 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
             return ast.copy_location(ast.If(choice.test, [present], [absent]), node)
 
         def visit_For(self, node):
+            from ._package_aliases import expand_alias_loop
+
+            aliases = expand_alias_loop(
+                node, scope_names, constructor, namespace, lambda n, message: fail(module, n, message)
+            )
+            if aliases is not None:
+                return aliases
             declaration_calls = [
                 statement.value
                 for statement in node.body
@@ -163,7 +170,7 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
     Declarations().visit(constructor)
 
 
-def scope_declarations(module, constructor, kind, fail, namespace):
+def scope_declarations(module, constructor, kind, fail, namespace, earlier=None):
     if constructor is None:
         return {}
     _normalize_field_loops(module, constructor, kind, fail, namespace)
@@ -988,7 +995,8 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             from ._package_borrows import declaration
 
             name, spec = declaration(
-                call, scope_paths[scope], declarations, dimension, lambda node, message: fail(module, node, message)
+                call, scope_paths[scope], {**(earlier or {}), **declarations}, dimension,
+                lambda node, message: fail(module, node, message)
             )
             parameter = spec.get("input_parameter")
             if parameter is not None and (parameter not in parameter_names or stores[parameter] != 1):

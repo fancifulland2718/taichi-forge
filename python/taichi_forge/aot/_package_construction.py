@@ -30,7 +30,9 @@ def construction_functions(node):
         if isinstance(child, ast.FunctionDef)
         and (child.name == "__init__" or getattr(child, "_package_construction_method", False))
     ]
-    return sorted(functions, key=lambda function: function.name != "__init__")
+    return sorted(functions, key=lambda function: (
+        function.name != "__init__", getattr(function, "_package_construction_order", 0)
+    ))
 
 
 def discover_construction_methods(tree, namespace, module, fail, kind):
@@ -123,6 +125,7 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     fail(module, method, "Construction resource methods cannot return or yield")
                 selected.add(method.name)
                 method._package_construction_method = True
+                method._package_construction_order = len(selected)
                 visit(method)
                 facts.append(
                     dict(

@@ -374,6 +374,15 @@ Reassignment, escape, side effects, and overriding the forwarded method are reje
 Allocation retains the original native group and instance ownership, without new
 numerical variants or executing construction methods during discovery.
 
+Fixed alias declarations may iterate an immutable `MappingProxyType` definition
+with string names and tuple attribute paths, calling the existing `scope.borrow`.
+The exporter resolves the paths without allocating model state. Earlier ordinary
+construction methods may own the source group; declaration discovery follows
+their call order. The consumer checks the mapping before binding aliases and
+retains the original source group and lifetime. Mutable/model-dependent maps and
+shadowed attribute lookup are rejected. This uses package format version 36;
+local CPU/CUDA checks cover independent instances and source-free consumption.
+
 The original compiler records presence dependencies when a conditional field is
 actually read, including `ti.static(field is not None)`. Common methods that do
 not read that field retain shared code. An instance's

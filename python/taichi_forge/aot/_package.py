@@ -53,14 +53,14 @@ def _owner_schema(module, node, kind, namespace):
         _fail(module, node, "custom owner metaclasses require further support")
     schema = {}
     for function in construction_functions(node):
-        for name, declaration in _construction_schema(module, node, function, kind, namespace).items():
+        for name, declaration in _construction_schema(module, node, function, kind, namespace, schema).items():
             if name in schema and schema[name]["kind"] != "value":
                 _fail(module, function, f"Repeated construction resource declaration {name!r}")
             schema[name] = declaration
     return schema
 
 
-def _construction_schema(module, node, constructor, kind, namespace):
+def _construction_schema(module, node, constructor, kind, namespace, earlier=None):
     annotations = {
         a.arg: a.annotation
         for a in (*constructor.args.posonlyargs, *constructor.args.args, *constructor.args.kwonlyargs)
@@ -104,7 +104,7 @@ def _construction_schema(module, node, constructor, kind, namespace):
             if target.attr in schema and schema[target.attr] != spec:
                 _fail(module, statement, f"attribute {target.attr!r} has conflicting types")
             schema[target.attr] = spec
-    for name, declaration in scope_declarations(module, constructor, kind, _fail, namespace).items():
+    for name, declaration in scope_declarations(module, constructor, kind, _fail, namespace, earlier).items():
         if name in schema and schema[name]["kind"] != "value":
             _fail(module, constructor, f"ResourceScope role {name!r} conflicts with a resource allocation")
         schema[name] = declaration
@@ -838,6 +838,14 @@ def _host_projection(
             return self.generic_visit(node)
 
         def visit_Expr(self, node):
+            aliases = getattr(node, "_package_alias_mapping", None)
+            if aliases is not None:
+                self.minimum_version = max(self.minimum_version, 36)
+                source, expected = aliases
+                return ast.copy_location(ast.Expr(ast.Call(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "check_alias_mapping", ast.Load()),
+                    [self.visit(source), ast.Constant(expected)], [],
+                )), node)
             constant = next(
                 (
                     item
