@@ -104,7 +104,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
     scopes, declarations, allowed = {}, {}, set()
     scope_groups, builders = {}, {}
     contexts, context_bindings, context_stores = {}, {}, {}
-    for statement in constructor.body:
+    for statement in ast.walk(constructor):
         recipe = getattr(statement, "_package_resource_context", None)
         if recipe is None:
             continue
@@ -261,6 +261,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
     aliases, alias_conditions, placements = {}, {}, {}
     current_conditions = {}
     stores = {n.arg: 1 for n in ast.walk(constructor.args) if isinstance(n, ast.arg)}
+    parameter_names = frozenset(stores)
     member_stores = {}
     for node in ast.walk(constructor):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
@@ -447,7 +448,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     len(targets) != 1
                     or not isinstance(targets[0], ast.Attribute)
                     or not isinstance(targets[0].value, ast.Name)
-                    or targets[0].value.id not in ("self", *scopes)
+                    or not (targets[0].value.id == "self" or scope_binding(targets[0].value) in scopes)
                 ):
                     return None
                 fields.add(targets[0].attr)
@@ -491,10 +492,52 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         optional_records.update(id(call) for call in calls)
         return name
 
+    def declare_static(scope, call, statement):
+        from ._component import StaticValue
+        from taichi_forge_runtime._static_values import static_key
+
+        if (
+            len(call.args) != 1
+            or not isinstance(call.args[0], ast.Constant)
+            or type(call.args[0].value) is not str
+            or not call.args[0].value.isidentifier()
+            or statement.lineno < scopes[scope].lineno
+        ):
+            fail(module, call, "Static declaration requires one literal owner attribute name")
+        keywords = {k.arg: k.value for k in call.keywords}
+        if (
+            len(keywords) != len(call.keywords)
+            or "choices" not in keywords
+            or set(keywords) - {"choices", "kernel_only"}
+        ):
+            fail(module, call, "Static declaration requires explicit finite choices")
+        try:
+            choices = ast.literal_eval(keywords["choices"])
+            kernel_only = ast.literal_eval(keywords.get("kernel_only", ast.Constant(False)))
+            if not isinstance(choices, (tuple, list)):
+                raise ValueError("choices must be a tuple or list")
+            declaration = StaticValue(choices=choices, kernel_only=kernel_only)
+        except (TypeError, ValueError) as error:
+            fail(module, call, f"Static domain must contain distinct immutable literal choices: {error}")
+        allowed.add(id(call.func.value))
+        add(
+            call.args[0].value,
+            dict(
+                kind="static",
+                choices=[static_key(v) for v in declaration.choices],
+                kernel_only=kernel_only,
+                static_declaration=[statement.lineno, statement.col_offset],
+                scope_allocation=origin(scope),
+            ),
+            statement,
+        )
+
     def statements(body, conditions=None):
         conditions = conditions or {}
         for statement in body:
             if id(statement) in contexts:
+                group = scope_groups[contexts[id(statement)]]
+                builders[group]["conditions"] = dict(conditions)
                 yield from statements(statement.body, conditions)
             elif isinstance(statement, ast.If) and any(operation(n)[0] for n in ast.walk(statement)):
                 test, expected = statement.test, True
@@ -514,7 +557,11 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     and not declaration["kernel_only"]
                     and name not in conditions
                 ):
-                    fail(module, statement, "Conditional resources require a previously declared boolean owner static")
+                    fail(
+                        module,
+                        statement,
+                        "Conditional resources require an unconditional declared boolean owner static",
+                    )
                 calls = paired_records(statement)
                 if calls is not None:
                     optional_records.update(id(call) for call in calls)
@@ -522,6 +569,21 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 yield from statements(statement.orelse, {**conditions, name: not expected})
             else:
                 yield statement, conditions
+
+    def unconditional_statements(body):
+        for statement in body:
+            if id(statement) in contexts:
+                yield from unconditional_statements(statement.body)
+            else:
+                yield statement
+
+    # A declaration describes the legal domain, independent of when Host Python
+    # performs its check. Actual attribute values remain checked at allocation.
+    for statement in unconditional_statements(constructor.body):
+        if isinstance(statement, ast.Expr):
+            scope, method = operation(statement.value)
+            if method == "static":
+                declare_static(scope, statement.value, statement)
 
     conditional_fields = set()
     for statement, conditions in statements(constructor.body):
@@ -534,44 +596,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             allowed.add(id(call.func.value))
             optional_members.add(absent_record(call))
         elif method == "static" and isinstance(statement, ast.Expr):
-            from ._component import StaticValue
-            from taichi_forge_runtime._static_values import static_key
-
-            if (
-                len(call.args) != 1
-                or not isinstance(call.args[0], ast.Constant)
-                or type(call.args[0].value) is not str
-                or not call.args[0].value.isidentifier()
-                or statement.lineno < scopes[scope].lineno
-            ):
-                fail(module, call, "Static declaration requires one literal owner attribute name")
-            keywords = {k.arg: k.value for k in call.keywords}
-            if (
-                len(keywords) != len(call.keywords)
-                or "choices" not in keywords
-                or set(keywords) - {"choices", "kernel_only"}
-            ):
-                fail(module, call, "Static declaration requires explicit finite choices")
-            try:
-                choices = ast.literal_eval(keywords["choices"])
-                kernel_only = ast.literal_eval(keywords.get("kernel_only", ast.Constant(False)))
-                if not isinstance(choices, (tuple, list)):
-                    raise ValueError("choices must be a tuple or list")
-                declaration = StaticValue(choices=choices, kernel_only=kernel_only)
-            except (TypeError, ValueError) as error:
-                fail(module, call, f"Static domain must contain distinct immutable literal choices: {error}")
-            allowed.add(id(call.func.value))
-            add(
-                call.args[0].value,
-                dict(
-                    kind="static",
-                    choices=[static_key(v) for v in declaration.choices],
-                    kernel_only=kernel_only,
-                    static_declaration=[statement.lineno, statement.col_offset],
-                    scope_allocation=origin(scope),
-                ),
-                statement,
-            )
+            declare_static(scope, call, statement)
         elif method == "value" and isinstance(statement, ast.Expr):
             if statement.lineno < scopes[scope].lineno:
                 fail(module, statement, "Value declaration precedes its resource scope")
@@ -790,7 +815,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     if len(names) != len(values):
                         continue
                     for name, value in zip(names, values):
-                        if not isinstance(name, ast.Name) or stores[name.id] != 1:
+                        if not isinstance(name, ast.Name) or stores[name.id] != 1 + int(name.id in parameter_names):
                             continue
                         aliases[name.id] = value
                         alias_conditions[name.id] = dict(conditions)
@@ -821,8 +846,11 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             fail(module, constructor, "Declared Dense placement requires a member whenever its branch is active")
     for name in conditional_fields:
         group = declarations[name]["group"]
+        group_conditions = builders.get(group, {}).get("conditions", {})
         if not any(
-            item["kind"] == "dense_field" and item.get("group") == group and not item.get("conditions")
+            item["kind"] == "dense_field"
+            and item.get("group") == group
+            and item.get("conditions", {}) == group_conditions
             for item in declarations.values()
         ):
             fail(module, constructor, "Conditional Dense groups currently require an unconditional member")

@@ -1937,7 +1937,7 @@ def test_package_scope_fields_share_dimension_and_native_layout_rules(tmp_path, 
         (
             "rows, cols = scope.dim('n'), scope.dim('m')",
             "if n > 0:\n            rows, cols = scope.dim('n'), scope.dim('m')",
-            "previously declared boolean owner static",
+            "unconditional declared boolean owner static",
         ),
     ],
 )
@@ -2308,6 +2308,112 @@ def test_package_context_alias_rejects_ambiguous_rebinding(tmp_path, monkeypatch
     with pytest.raises(ti.aot.PackageExportError, match="ResourceScope"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+CONDITIONAL_CONTEXT_SOURCE = """
+import taichi_forge as ti
+from resource_contexts import resource_group, read_events
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, m: int, first=False, second=False):
+        global constructors
+        constructors += 1
+        self.n, self.m = n, m
+        self.first, self.second = first, second
+        self.a = self.b = None
+        if self.first:
+            with resource_group(self, 'a', initialization='zero') as scope:
+                n = scope.dim('n')
+                scope.a = scope.field(ti.i32, shape=n)
+        if self.second:
+            with resource_group(self, 'b', initialization='zero') as scope:
+                scope.b = scope.field(ti.i32, shape=scope.dim('m'))
+        with resource_group(self, 'base', initialization='zero') as scope:
+            scope.static('first', choices=(False, True))
+            scope.static('second', choices=(False, True))
+            scope.total = scope.field(ti.i32, shape=())
+    @ti.kernel
+    def common(self):
+        self.total[None] += 1
+    @ti.kernel
+    def first_step(self):
+        self.total[None] += 2
+        if ti.static(self.first):
+            for i in self.a:
+                self.a[i] += 3
+    @ti.kernel
+    def second_step(self):
+        self.total[None] += 4
+        if ti.static(self.second):
+            for i in self.b:
+                self.b[i] += 5
+"""
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_conditional_contexts_prepare_only_enabled_native_groups(tmp_path, monkeypatch):
+    from tests.python.test_aot_dense_snode_group import _compiled_nodes
+
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=CONDITIONAL_CONTEXT_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["field_groups"]) == 3
+    assert len(manifest["entries"]) == 6  # 1 common + 2 per used flag + 1 other public function.
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([n for n in archive.namelist() if n.endswith((".ll", ".bc"))]) == 6
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        instances = []
+        for first, second in ((False, False), (True, False), (False, True), (True, True)):
+            # Inactive group extents are deliberately invalid and never evaluated.
+            n, m = (3 if first else -17), (19 if second else -29)
+            original = package.Model(n, m, first, second)
+            original.common()
+            original.first_step()
+            original.second_step()
+            current = code.host.Model(n, m, first, second)
+            instances.append(current)
+            assert len(current._forge_package_field_groups) == 1 + first + second
+            assert (current.a is not None) is first and (current.b is not None) is second
+            current.common()
+            current.first_step()
+            current.second_step()
+            for name in ("total", "a", "b"):
+                field = getattr(current, name)
+                if field is not None:
+                    expected = getattr(original, name)
+                    np.testing.assert_array_equal(field.to_numpy(), expected.to_numpy())
+                    root = ti.lang.impl.get_runtime().prog.get_snode_root(expected.snode.ptr.get_snode_tree_id())
+                    assert field._group_owner.layout["nodes"] == _compiled_nodes(root)
+        instances[-1].a._group_owner.close()
+        instances[-1].common()
+        instances[-1].second_step()
+        np.testing.assert_array_equal(instances[-1].b.to_numpy(), 10)
+        instances[1].first_step()
+        np.testing.assert_array_equal(instances[1].a.to_numpy(), 6)
+
+
+@pytest.mark.parametrize("change", ["missing", "conditional_domain", "reassign_extent", "loop"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_conditional_contexts_reject_unproven_domains(tmp_path, monkeypatch, change):
+    model = CONDITIONAL_CONTEXT_SOURCE
+    if change == "missing":
+        model = model.replace("            scope.static('first', choices=(False, True))", "            pass")
+    elif change == "conditional_domain":
+        model = model.replace(
+            "            scope.static('first', choices=(False, True))",
+            "            if self.first:\n                scope.static('first', choices=(False, True))",
+        )
+    elif change == "reassign_extent":
+        model = model.replace(
+            "                n = scope.dim('n')", "                n = scope.dim('n')\n                n = 9"
+        )
+    else:
+        model = model.replace("        if self.first:", "        for ignored in (1,):", 1)
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=model)
+    with pytest.raises(ti.aot.PackageExportError, match="declared boolean|declared dimensions|conditional branches"):
+        ti.aot.export_package(package, tmp_path / "sdk")
     assert not (tmp_path / "sdk").exists()
 
 
@@ -2936,8 +3042,8 @@ def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path,
 @pytest.mark.parametrize(
     "change, diagnostic",
     [
-        ("missing_declaration", "previously declared boolean"),
-        ("kernel_only", "previously declared boolean"),
+        ("missing_declaration", "unconditional declared boolean"),
+        ("kernel_only", "unconditional declared boolean"),
         ("unguarded_field", "None"),
         ("empty_placement", "requires a member whenever its branch is active"),
         ("escaped_dimension", "Dimension alias must remain within its declaration branch"),
@@ -3083,7 +3189,7 @@ def test_package_optional_fields_reject_ambiguous_presence(tmp_path, monkeypatch
     else:
         source = source.replace("first: bool", "first")
     package = _source_package(tmp_path, monkeypatch, source)
-    with pytest.raises(ti.aot.PackageExportError, match="previously declared boolean"):
+    with pytest.raises(ti.aot.PackageExportError, match="unconditional declared boolean"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk").exists()

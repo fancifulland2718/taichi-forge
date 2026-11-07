@@ -219,6 +219,7 @@ def discover_contexts(tree, namespace, module, fail):
         for constructor in cls.body:
             if not isinstance(constructor, ast.FunctionDef) or constructor.name != "__init__":
                 continue
+            parents = {id(child): parent for parent in ast.walk(constructor) for child in ast.iter_child_nodes(parent)}
             for node in ast.walk(constructor):
                 if not isinstance(node, ast.With) or len(node.items) != 1:
                     continue
@@ -232,8 +233,17 @@ def discover_contexts(tree, namespace, module, fail):
                     fail(module, node, f"Resource context declaration is unproven: {error}")
                 if recipe is None:
                     continue
-                if node not in constructor.body or not isinstance(item.optional_vars, ast.Name):
-                    fail(module, node, "Resource contexts require one unconditional local scope binding")
+                if not isinstance(item.optional_vars, ast.Name):
+                    fail(module, node, "Resource contexts require one local scope binding")
+                enclosing = parents[id(node)]
+                while enclosing is not constructor:
+                    if not isinstance(enclosing, ast.If):
+                        fail(
+                            module,
+                            node,
+                            "Resource contexts require constructor statements or declared conditional branches",
+                        )
+                    enclosing = parents[id(enclosing)]
                 root = call.func
                 while isinstance(root, ast.Attribute):
                     root = root.value

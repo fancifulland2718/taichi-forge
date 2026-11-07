@@ -312,9 +312,10 @@ actually read, including `ti.static(field is not None)`. Common methods that do
 not read that field retain shared code. An instance's
 layout selection is fixed: changing it rejects new calls and requires a new
 instance; already prepared native calls retain their snapshots. Each group
-currently needs an unconditional member, and each explicit Dense placement must
-have a provable member whenever enabled. Arbitrary model conditions and entirely
-optional empty groups remain unsupported.
+needs a member whenever that group is enabled, and each explicit Dense placement
+must have a provable member whenever enabled. A conditional resource context can
+omit its entire group; arbitrary model conditions and allocated empty groups
+remain unsupported.
 
 Focused CPU/CUDA/Vulkan checks cover two independent flags, invalid but unused
 disabled-branch extents, every native layout node and original JIT values,
@@ -384,7 +385,7 @@ relations and GeoPhys's original `declare_derived`. They qualify this shared
 declaration path, not complete solvers or a new full-engine wheel.
 
 Version 16 recognizes ordinary `contextlib.contextmanager` allocation scopes:
-an unconditional constructor context creates one FieldsBuilder and ResourceScope,
+the original generator unconditionally creates one FieldsBuilder and ResourceScope,
 then yields only that scope. Fields, dimensions and shared placements inside the
 block use the existing declaration analysis, without executing the generator or
 model. Allocation, yield, finalization locations and source hashes are retained.
@@ -408,11 +409,22 @@ scope variable: declaration lookup distinguishes lexical allocation sites while
 Host names and native group ownership remain unchanged. Ordinary reassignment
 or use of the scope outside its block rejects export. Two-group checks verify
 that retiring one tree preserves the other tree and other instances.
-GeoPhys production code is unchanged. Conditional
-groups, model-dependent field-name loops and the complete
-engine Host closure remain pending; Candidate Storage uses these unsupported
-forms and is not yet qualified. Context allocation currently runs only inside
+GeoPhys production code is unchanged. Model-dependent field-name loops and the
+complete engine Host closure remain pending. Candidate Storage declaration
+preflight passes; full export and consumption are not yet qualified.
+Context allocation currently runs only inside
 managed constructors, without in-flight growth or rebinding.
+
+Constructor `if self.flag` / `if not self.flag` branches can contain complete
+resource contexts. Their domains must be unconditional literal boolean static
+declarations, which may appear later in the constructor. Attribute values are
+still checked by allocation and ordinary Host declarations. Disabled groups do
+not allocate or evaluate their dimensions. One assignment may bind a constructor
+parameter name to its declared extent; further reassignment remains rejected.
+Four configurations of two independent groups retain three group descriptions
+and six numerical assets in the focused CPU check (including the other public
+function); only the methods reading each flag specialize. The original GeoPhys
+helper passes three-backend source-free checks with an optional second group.
 
 Fixed field-name tuples/lists used in `setattr(scope, name, scope.field(...))`
 (also vector/matrix/struct factories) expand to ordinary resource declarations.
