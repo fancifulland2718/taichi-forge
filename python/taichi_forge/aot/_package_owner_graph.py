@@ -71,8 +71,18 @@ class OwnerGraph:
             schema = {key: item for key, item in schema.items() if item["kind"] != "owner"}
         imported = self.imported[name]
         owner = object.__new__(getattr(imported, class_name))
-        declarations = construct_fields(owner, schema, vars(imported), self.module, imported_modules=self.imported)
+        # Dimension relations may read a non-owning source before this owner's
+        # fields are allocated. Construct only those resource definitions first;
+        # owned algorithms remain in their original phase below.
         children = {}
+        for attribute, item in schema.items():
+            if item["kind"] == "owner_input":
+                value, _, child, expanded = self.construct(
+                    item["owner_type"], resource_only=True, references=references
+                )
+                children[attribute] = (child, expanded)
+                write_member(owner, attribute, value, schema)
+        declarations = construct_fields(owner, schema, vars(imported), self.module, imported_modules=self.imported)
         for attribute, item in schema.items():
             if item["kind"] in ("dense_field", "dimension", "borrowed_field"):
                 continue
@@ -80,9 +90,10 @@ class OwnerGraph:
                 declarations[attribute] = Record()
                 continue
             if item["kind"] in ("owner", "owner_input"):
-                value, _, child, expanded = self.construct(
-                    item["owner_type"], resource_only=item["kind"] == "owner_input", references=references
-                )
+                if item["kind"] == "owner_input":
+                    declarations[attribute] = Record(optional=bool(item.get("conditions")))
+                    continue
+                value, _, child, expanded = self.construct(item["owner_type"], references=references)
                 declarations[attribute] = Record(optional=bool(item.get("conditions")))
                 children[attribute] = (child, expanded)
             elif item["kind"] == "static":

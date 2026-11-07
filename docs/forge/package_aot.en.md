@@ -717,6 +717,14 @@ one consistent source type; extra unscoped calls, unknown or conflicting sources
 reject instead of selecting one successful path. Host wrapping and different
 instances of that type reuse the same numerical entry.
 
+Version 42 supports the existing `scope.owner_dim('source', 'n')`. The reference
+must be an unconditional declared owner input and the target a declared dimension.
+Original size relations are checked before new allocations; numerical code keeps
+dynamic dimensions. Export constructs resource-type witnesses without running
+application constructors. CPU/CUDA checks cover new sizes, independent instances,
+rejection of mismatches, prepared snapshots and consumption without numerical
+source. Heterogeneous owner collections are not qualified by this slice.
+
 Version 38 also resolves `owner_reference` from an already declared owner path,
 such as `self.storage.child`, including guarded optional references. Its source
 type is proven from definitions. Constructor binding and numerical admission

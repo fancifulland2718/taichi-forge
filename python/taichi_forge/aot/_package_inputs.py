@@ -237,6 +237,17 @@ def resolve_inputs(sources, imported):
     for (owner, name), item in aliases.items():
         if "owner_type" not in item:
             raise ValueError(f"Owner reference {owner}.{name} requires a resolved declared owner path")
+    for owner, (schema, _) in owners.items():
+        for item in schema.values():
+            if "owner_dimension" not in item:
+                continue
+            reference, dimension = item["owner_dimension"]
+            source_type = schema[reference].get("owner_type")
+            source = owners.get(source_type, ({}, None))[0].get(dimension, {})
+            if source.get("kind") != "dimension" or source.get("conditions") or source.get("owner_dimension"):
+                raise ValueError(
+                    f"Referenced dimension {owner}.{reference}.{dimension} requires an unconditional declared source dimension"
+                )
     for (owner, name), item in inputs.items():
         if (owner, name) in annotated:
             continue

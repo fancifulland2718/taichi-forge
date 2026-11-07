@@ -1143,6 +1143,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(39, manifest["version"])
             if any(item.get("struct_borrow") for item in schema.values()):
                 manifest["version"] = max(41, manifest["version"])
+            if any(item.get("owner_dimension") for item in schema.values()):
+                manifest["version"] = max(42, manifest["version"])
             if any(item["kind"] == "borrowed_field" and "input_parameter" in item for item in schema.values()):
                 manifest["version"] = max(23, manifest["version"])
             if any(item.get("optional_input") for item in schema.values()):

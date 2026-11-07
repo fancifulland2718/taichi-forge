@@ -569,6 +569,107 @@ def test_package_constructor_inputs_share_source_allocation_without_combination_
     assert "OWNER_INPUT_SOURCE_FREE_OK" in result.stdout
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_owner_dimensions_preserve_source_relations_before_allocation(tmp_path, monkeypatch):
+    source = (
+        OWNER_INPUT_SOURCE.replace("def __init__(self, source):", "def __init__(self, source, offset: int = 0):")
+        .replace(
+            "scope.borrow('alias', self.source.values, source_scope=True)",
+            "scope.borrow('alias', self.source.values, source_scope=True)\n"
+            "        self.count = source.n * 2 + offset\n"
+            "        scope.derived_dim('count', scope.owner_dim('source', 'n') * 2)\n"
+            "        scope.scratch = scope.field(ti.f32, shape=scope.dim('count'), initialization='zero')",
+        )
+        .replace(
+            "        for i in self.alias:",
+            "        for j in range(self.count):\n            self.scratch[j] = gain * j\n        for i in self.alias:",
+        )
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 42
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    original = package.Model(7, True)
+    original.step(3.0)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, True), code.host.Model(11, True)
+        a.step(3.0)
+        b.step(-2.0)
+        np.testing.assert_array_equal(a.reader.reader.scratch.to_numpy(), original.reader.reader.scratch.to_numpy())
+        np.testing.assert_array_equal(b.reader.reader.scratch.to_numpy(), -2 * np.arange(22))
+        prepared = a.reader.reader.graph().bind(dict(gain=4.0))
+        a.reader.reader.count += 1
+        with pytest.raises(ValueError, match="dimension|Dimension"):
+            a.step(1.0)
+        prepared.run()
+        np.testing.assert_array_equal(a.reader.reader.scratch.to_numpy(), 4 * np.arange(14))
+        prepared.close()
+        assert b.reader.reader.count == 22
+        with pytest.raises(ValueError, match="Derived dimension"):
+            type(b.reader.reader)(b.storage, 1)
+        b.step(2.0)
+        np.testing.assert_array_equal(b.reader.reader.scratch.to_numpy(), 2 * np.arange(22))
+    probe = tmp_path / "consume_owner_dimensions.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError('Numerical source is unavailable: ' + fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(5, True), code.host.Model(13, True)
+    a.step(3.0)
+    b.step(-2.0)
+    np.testing.assert_array_equal(a.reader.reader.scratch.to_numpy(), 3 * np.arange(10))
+    np.testing.assert_array_equal(b.reader.reader.scratch.to_numpy(), -2 * np.arange(26))
+print('OWNER_DIMENSION_SOURCE_FREE_OK')
+""",
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OWNER_DIMENSION_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["missing", "value", "unbound", "computed"])
+@test_utils.test(arch=ti.cpu)
+def test_package_owner_dimension_requires_declared_source(tmp_path, monkeypatch, change):
+    source = OWNER_INPUT_SOURCE.replace(
+        "scope.borrow('alias', self.source.values, source_scope=True)",
+        "scope.borrow('alias', self.source.values, source_scope=True)\n" "        scope.owner_dim('source', 'n')",
+    )
+    if change == "missing":
+        source = source.replace("owner_dim('source', 'n')", "owner_dim('source', 'missing')")
+    elif change == "value":
+        source = source.replace("shape=scope.dim('n')", "shape=3")
+    elif change == "unbound":
+        source = source.replace("owner_dim('source', 'n')", "owner_dim('alias', 'n')")
+    else:
+        source = source.replace("owner_dim('source', 'n')", "owner_dim('source', str('n'))")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match="owner_dim|Referenced dimension"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_owner_inputs_allow_same_or_distinct_resource_instances(tmp_path, monkeypatch):
     source = (

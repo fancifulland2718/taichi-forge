@@ -710,6 +710,26 @@ class _ResourceScope:
             raise ValueError("parent_dim requires a declared record scope")
         return self._parent.dim(name)
 
+    def owner_dim(self, reference, name):
+        if self._parent is not None or any(
+            type(value) is not str or not value.isidentifier() for value in (reference, name)
+        ):
+            raise ValueError("owner_dim requires a declared owner reference and dimension")
+        package = self._root._forge_package_owner
+        schema = package.manifest["owners"][type(self._root)._forge_package_type]
+        path = (reference, name)
+        identity = "__record_" + "_".join(f"{len(part)}_{part}" for part in path)
+        if schema.get(identity, {}).get("owner_dimension") != list(path):
+            raise ValueError("owner_dim differs from its declared source relation")
+        from ._package_values import check_owner_bindings
+
+        check_owner_bindings(self._root, (dict(path=[reference], owner_type=schema[reference]["owner_type"]),))
+        value = operator.index(getattr(getattr(self._root, reference), name))
+        if not 0 <= value <= 2**31 - 1:
+            raise ValueError("Referenced dimension is outside the i32 count range")
+        self._root._forge_package_dimension_paths[identity] = path
+        return Extent(("dim", identity))
+
     def derived_dim(self, name, expression):
         if not isinstance(expression, Extent):
             raise TypeError("A derived dimension requires an Extent expression")
@@ -1075,6 +1095,7 @@ class LoadedPackage:
                 39,
                 40,
                 41,
+                42,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

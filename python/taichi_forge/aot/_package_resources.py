@@ -604,6 +604,35 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 node,
             )
             return scoped_extent(scope, name)
+        if method == "owner_dim":
+            if (
+                scope_paths[scope]
+                or len(node.args) != 2
+                or node.keywords
+                or any(
+                    not isinstance(arg, ast.Constant) or type(arg.value) is not str or not arg.value.isidentifier()
+                    for arg in node.args
+                )
+            ):
+                fail(module, node, "owner_dim requires a declared owner reference and a literal dimension name")
+            reference, name = (arg.value for arg in node.args)
+            source = declarations.get(reference, {})
+            if source.get("kind") != "owner_input" or source.get("conditions"):
+                fail(module, node, "owner_dim requires an unconditional declared owner reference")
+            identity = _capture_id((reference, name))
+            add(
+                identity,
+                dict(
+                    kind="dimension",
+                    dtype="i32",
+                    path=[reference, name],
+                    owner_dimension=[reference, name],
+                    scope_allocation=origin(scope),
+                ),
+                node,
+            )
+            allowed.add(id(node.func.value))
+            return scoped_extent(scope, identity)
         if method in ("dim", "parent_dim"):
             name = (
                 (
@@ -1533,7 +1562,13 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
             )
             if conditions:
                 conditional_fields.add(target.attr)
-        elif isinstance(statement, ast.Expr) and method in ("dim", "parent_dim", "derived_dim", "power_of_two_dim"):
+        elif isinstance(statement, ast.Expr) and method in (
+            "dim",
+            "parent_dim",
+            "owner_dim",
+            "derived_dim",
+            "power_of_two_dim",
+        ):
             dimension(call)
         elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
             targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]

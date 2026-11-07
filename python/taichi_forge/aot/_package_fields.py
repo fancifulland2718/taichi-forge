@@ -190,6 +190,11 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
     def witness(name, visiting=()):
         if name in visiting:
             raise ValueError(f"Cyclic derived dimension {name!r}")
+        if "owner_dimension" in schema[name]:
+            value = read_member(owner, name, schema)
+            if type(value) is not int or not 0 <= value <= 2**31 - 1:
+                raise ValueError("Referenced dimension needs a legal symbolic construction witness")
+            return value
         expression = schema[name].get("expression")
         value = evaluate_extent(expression, lambda key: witness(key, (*visiting, name))) if expression else 1
         if not 0 <= value <= 2**31 - 1:
