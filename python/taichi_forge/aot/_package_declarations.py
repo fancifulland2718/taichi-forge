@@ -10,7 +10,7 @@ from ._package_factories import _Unproven, _literal
 
 
 def expand_declarations(function, statement, scopes):
-    """Inline lexical declaration forwarding with literal control and names.
+    """Inline lexical declaration forwarding with literal control and Host paths.
 
     Application functions are never called. Only ResourceScope operations are
     admitted; normal dimension/type analyzers still decide their contracts.
@@ -37,20 +37,24 @@ def expand_declarations(function, statement, scopes):
     inputs = []
 
     def input_node(node):
-        if isinstance(node, ast.Name):
-            if node.id in scopes:
+        root = node
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if isinstance(root, ast.Name):
+            if isinstance(node, ast.Name) and node.id in scopes:
                 return copy.deepcopy(node)
             name = f"_forge_package_decl_{call.lineno}_{call.col_offset}_input_{len(inputs)}"
             inputs.append(ast.Assign([ast.Name(name, ast.Store())], copy.deepcopy(node)))
             reference = ast.Name(name, ast.Load())
-            # Preserve fixed type-name resolution without evaluating an input.
-            # The temporary still evaluates once, in Python call order, in Host.
+            # Preserve attribute/type provenance without evaluating descriptors
+            # during export. Host evaluates the complete path once, in normal
+            # argument order, including unused inputs and any getter exception.
             reference._package_forwarded_argument = copy.deepcopy(node)
             return reference
         try:
             value = ast.literal_eval(node)
         except (ValueError, TypeError, SyntaxError):
-            raise _Unproven("declaration helper inputs require local names or immutable literals") from None
+            raise _Unproven("declaration helper inputs require names, attribute paths or immutable literals") from None
         if not _literal(value):
             raise _Unproven("declaration helper inputs require immutable literals")
         return ast.parse(repr(value), mode="eval").body

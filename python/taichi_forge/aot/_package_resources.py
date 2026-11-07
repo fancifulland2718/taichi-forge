@@ -324,11 +324,20 @@ def scope_declarations(module, constructor, kind, fail, namespace):
     def member_spec(scope, name, **spec):
         return {**spec, **({"path": list((*scope_paths[scope], name))} if scope_paths[scope] else {})}
 
+    source_aliases = {}
+
     def source_expression(node):
         class Forwarded(ast.NodeTransformer):
             def visit_Name(self, value):
                 forwarded = getattr(value, "_package_forwarded_argument", None)
                 return self.visit(copy.deepcopy(forwarded)) if forwarded is not None else value
+
+            def visit_Attribute(self, value):
+                if isinstance(value.value, ast.Name) and value.value.id == "self":
+                    alias = source_aliases.get(value.attr)
+                    if alias is not None and alias.lineno < getattr(value, "lineno", 0):
+                        return copy.deepcopy(alias.value)
+                return self.generic_visit(value)
 
         return ast.dump(Forwarded().visit(copy.deepcopy(node)), include_attributes=False)
 
@@ -356,6 +365,30 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             and node.value.id in ("self", *scope_names)
         ):
             member_stores[node.attr] = member_stores.get(node.attr, 0) + 1
+
+    # A record may be forwarded as self.layout while its Field type uses the
+    # original local layout. Compare this one-time binding as provenance only;
+    # preserve both Host reads and the normal allocation/record validation.
+    deleted = {n.id for n in ast.walk(constructor) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Del)}
+    deleted_members = {
+        n.attr for n in ast.walk(constructor) if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Del)
+    }
+    record_members = {path[0] for path in scope_paths.values() if len(path) == 1}
+    for statement in constructor.body:
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            target, value = statement.targets[0], statement.value
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+                and target.attr in record_members
+                and member_stores[target.attr] == 1
+                and target.attr not in deleted_members
+                and isinstance(value, ast.Name)
+                and stores.get(value.id) == 1
+                and value.id not in deleted
+            ):
+                source_aliases[target.attr] = statement
 
     def dimension(node, bindings=None):
         """Only the already-declared dimension algebra; no model-value evaluation."""

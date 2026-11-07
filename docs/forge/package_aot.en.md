@@ -518,12 +518,20 @@ constraints and independent source-free consumption. Multiple declarations in an
 ordinary helper can also be proven and projected: only known ResourceScope
 declaration methods, fixed literal name loops, literal build conditions and
 ordinary record attribute forwarding are admitted. Export never invokes the
-helper to discover dependencies. Hygienic locals preserve declaration scopes;
-arguments still evaluate once in their original order. Unknown calls, effects,
+helper to discover dependencies. Hygienic locals preserve declaration scopes.
+Arguments may use ordinary attribute paths such as `self.layout` and
+`self.capacity`. Export does not read model objects or invoke getters; Host
+evaluates arguments once in order, preserving exceptions from unused inputs.
+An unconditional, single binding `self.layout = layout` can establish matching
+dimension provenance between declarations and Field types. Rebound names are
+not equivalent; Host reads and allocation/record validation remain intact.
+Unknown calls, effects,
 model-driven loops/conditions and shadowed helper bindings reject. Focused
-CPU/CUDA/Vulkan source-free checks pass. The original EFC declare_batch_layout
-passes this expansion, but its class still needs borrowed-input and type-domain
-support. Arbitrary declaration helpers, populated optional records, borrowed Fields with unresolved cross-object provenance and model-driven
+CPU/CUDA/Vulkan source-free checks pass. The new attribute forwarding and
+rebinding rejection have focused CPU coverage; the original EFC layout helper's
+attribute path has CUDA source-free coverage. The original Newton initializer
+also consumes different point capacities from one TCM. Complete class export
+still needs later declarations and construction closure. Arbitrary declaration helpers, populated optional records, borrowed Fields with unresolved cross-object provenance and model-driven
 local tensor type domains remain unfinished; this is not full EFC qualification.
 
 Version 20 supports constructor declarations of

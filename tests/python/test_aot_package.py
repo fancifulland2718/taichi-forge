@@ -1104,10 +1104,14 @@ def _record_helper_fixture(tmp_path, monkeypatch, helper=RECORD_HELPER_SOURCE):
     return source[:start] + "        parent = declare_layout(scope, layout, capacity, Scalar)\n" + source[end:]
 
 
-@pytest.mark.parametrize("forwarded", [False, True])
+@pytest.mark.parametrize("forwarded", [False, True, "attribute"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_records_preserve_paths_static_projection_and_parent_constraints(tmp_path, monkeypatch, forwarded):
     source = _record_helper_fixture(tmp_path, monkeypatch) if forwarded else RECORD_RESOURCES_SOURCE
+    if forwarded == "attribute":
+        source = source.replace("        self.capacity = capacity", "        self.input_layout = layout\n        self.capacity = capacity")
+        source = source.replace("declare_layout(scope, layout, capacity, Scalar)",
+                                "declare_layout(scope, self.input_layout, self.capacity, Scalar)")
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert manifest["version"] == 19
@@ -1220,22 +1224,57 @@ def test_package_declaration_helpers_reject_unproven_execution(tmp_path, monkeyp
     assert not (tmp_path / "sdk").exists()
 
 
+@pytest.mark.parametrize("attribute", [False, True])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_package_declaration_helper_preserves_unused_argument_evaluation(tmp_path, monkeypatch):
+def test_package_declaration_helper_preserves_unused_argument_evaluation(tmp_path, monkeypatch, attribute):
     helper = RECORD_HELPER_SOURCE.replace("bounded=True", "bounded=True, unused=None")
+    missing = "layout.missing_input" if attribute else "missing_input"
+    error = AttributeError if attribute else NameError
     source = _record_helper_fixture(tmp_path, monkeypatch, helper).replace(
-        "scope, layout, capacity, Scalar)", "scope, layout, capacity, Scalar, unused=missing_input)"
+        "scope, layout, capacity, Scalar)", f"scope, layout, capacity, Scalar, unused={missing})"
     )
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     Layout = sys.modules["definition_fixture.model"].Layout
-    with pytest.raises(NameError, match="missing_input"):
+    with pytest.raises(error, match="missing_input"):
         package.Model(7, Layout(5, 2.5))
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
         registered = set(runtime._resources)
-        with pytest.raises(NameError, match="missing_input"):
+        with pytest.raises(error, match="missing_input"):
             library.host.Model(7, Layout(5, 2.5))
         assert set(runtime._resources) == registered
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_declaration_helper_reads_attribute_arguments_once_in_order(tmp_path, monkeypatch):
+    helper = RECORD_HELPER_SOURCE.replace("bounded=True", "bounded=True, first=None, second=None")
+    source = _record_helper_fixture(tmp_path, monkeypatch, helper).replace(
+        "capacity: int, layout):", "capacity: int, layout, inputs):"
+    ).replace("scope, layout, capacity, Scalar)",
+              "scope, layout, capacity, Scalar, first=inputs.first, second=inputs.second)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    Layout = sys.modules["definition_fixture.model"].Layout
+
+    class Inputs:
+        def __init__(self):
+            self.reads = []
+
+        @property
+        def first(self):
+            self.reads.append("first")
+            return 1
+
+        @property
+        def second(self):
+            self.reads.append("second")
+            return 2
+
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        for constructor in (package.Model, library.host.Model):
+            inputs = Inputs()
+            constructor(7, Layout(5, 2.5), inputs)
+            assert inputs.reads == ["first", "second"]
 
 
 @pytest.mark.parametrize(
@@ -3442,6 +3481,34 @@ def test_package_keeps_computed_statics_without_tensor_axis_use_rejected(tmp_pat
     with pytest.raises(ti.aot.PackageExportError, match="proven model tensor axis"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert not (tmp_path / "sdk").exists()
+
+
+@pytest.mark.parametrize("rebind", [None, "local", "owner", "delete"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_record_tensor_axis_requires_single_binding_provenance(tmp_path, monkeypatch, rebind):
+    source = MODEL_TENSOR_SOURCE.replace(
+        "self.layout = SimpleNamespace(dof=dof)",
+        "model_layout = SimpleNamespace(dof=dof)\n        self.layout = model_layout",
+    ).replace("'J': ti.types.vector(self.layout.dof, ti.f32)",
+              "'J': ti.types.vector(model_layout.dof, ti.f32)")
+    extra = {"local": "model_layout = SimpleNamespace(dof=dof + 1)",
+             "owner": "self.layout = SimpleNamespace(dof=dof + 1)",
+             "delete": "del model_layout"}.get(rebind)
+    if extra:
+        source = source.replace("        scope.rows = scope.struct_field({", f"        {extra}\n        scope.rows = scope.struct_field({{")
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model, Rows\n")
+    if rebind:
+        with pytest.raises(ti.aot.PackageExportError, match="proven model tensor axis"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        assert not (tmp_path / "sdk").exists()
+        return
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert not manifest["entry_families"]
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for dof in (17, 65):
+            model = code.host.Rows(2, dof)
+            model.step(2.0)
+            np.testing.assert_array_equal(model.rows.J.to_numpy(), 2 * (np.arange(2)[:, None] + np.arange(dof)))
 
 
 FIELD_SOURCE = """
