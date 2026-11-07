@@ -195,6 +195,22 @@ class _ModuleBinding:
         contract = self.package.manifest["field_groups"][group_key]
         if dimensions.keys() != set(contract["dimensions"]):
             raise ValueError("Field group dimensions differ from its native schema")
+        declared_members = contract["members"]
+        from ._package_layout import layout_selection, select_layout
+
+        selection = layout_selection(contract, owner)
+        selected = owner._forge_package_layouts.get(group_key)
+        if selected is None:
+            selected = (selection, select_layout(contract, selection))
+            owner._forge_package_layouts[group_key] = selected
+        elif selected[0] != selection:
+            raise ValueError("Conditional layout configuration changed during construction")
+        contract = selected[1]
+        if name not in contract["members"]:
+            raise ValueError("Field allocation contradicts its declared static layout condition")
+        dimensions = {key: value for key, value in dimensions.items() if key in contract["dimensions"]}
+        if dimensions.keys() != set(contract["dimensions"]):
+            raise ValueError("Field group dimensions differ from its native schema")
         expected_shape = tuple(dimensions[n] if isinstance(n, str) else n for n in member["shape"])
         if placement is not None and tuple(placement) != expected_shape:
             raise ValueError("Declared Dense placement changed before its Field allocation")
@@ -217,6 +233,8 @@ class _ModuleBinding:
         value = group.member(contract["members"][name], element["dtype"], element_shape=element["element_shape"])
         self.package._arrays.append(value)
         allocated.append(value)
+        for attribute in declared_members:
+            owner._forge_package_member_layouts[attribute] = selection
         return value
 
     def placement(self, owner, shape):
@@ -354,6 +372,8 @@ def managed_class(package, cls):
             return original(self, *args, **kwargs)
         self._forge_package_owner = package
         self._forge_package_field_groups = {}
+        self._forge_package_layouts = {}
+        self._forge_package_member_layouts = {}
         allocated = []
         token = _construction.set((package, allocated, self))
         try:
@@ -424,6 +444,7 @@ class entry:
         selected = self._select(owner)
         if selected is not self:
             return selected._call(package, owner, *args, **kwargs)
+        self._check_layout(owner)
         contract = self.contract
         bound = self.signature.bind(*args, **kwargs)
         arguments = [
@@ -448,6 +469,14 @@ class entry:
 
         with HostBuffers(package.runtime, contract["arguments"], arguments) as prepared:
             return kernel.run(*prepared)
+
+    def _check_layout(self, owner):
+        if owner is None:
+            return
+        for item in self.contract["captures"]:
+            for name, value in owner._forge_package_member_layouts.get(item["name"], {}).items():
+                if getattr(owner, name) is not value:
+                    raise ValueError("Conditional layout configuration changed; construct a new instance")
 
     def _select(self, owner):
         if self.family is None:
@@ -491,7 +520,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

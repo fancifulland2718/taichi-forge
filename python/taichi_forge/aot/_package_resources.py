@@ -125,7 +125,8 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         call = scopes[scope].value
         return [call.lineno, call.col_offset]
 
-    aliases, placements = {}, {}
+    aliases, alias_conditions, placements = {}, {}, {}
+    current_conditions = {}
     stores = {n.arg: 1 for n in ast.walk(constructor.args) if isinstance(n, ast.arg)}
     member_stores = {}
     for node in ast.walk(constructor):
@@ -147,6 +148,10 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         if isinstance(node, ast.Name):
             if node.id in bindings:
                 return bindings[node.id]
+            if any(
+                current_conditions.get(key) is not value for key, value in alias_conditions.get(node.id, {}).items()
+            ):
+                fail(module, node, "Dimension alias must remain within its declaration branch")
             return aliases.get(node.id)
         if isinstance(node, (ast.Tuple, ast.List)):
             values = tuple(dimension(item, bindings) for item in node.elts)
@@ -213,9 +218,38 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 return getattr(left, node.func.attr)(right)
         return None
 
-    for statement in constructor.body:
+    def statements(body, conditions=None):
+        conditions = conditions or {}
+        for statement in body:
+            if isinstance(statement, ast.If) and any(operation(n)[0] for n in ast.walk(statement)):
+                test, expected = statement.test, True
+                if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                    test, expected = test.operand, False
+                name = (
+                    test.attr
+                    if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name) and test.value.id == "self"
+                    else None
+                )
+                declaration = declarations.get(name, {})
+                if not (
+                    declaration.get("kind") == "static"
+                    and {tuple(v) for v in declaration["choices"]} == {("bool", False), ("bool", True)}
+                    and not declaration["kernel_only"]
+                    and name not in conditions
+                ):
+                    fail(module, statement, "Conditional resources require a previously declared boolean owner static")
+                yield from statements(statement.body, {**conditions, name: expected})
+                yield from statements(statement.orelse, {**conditions, name: not expected})
+            else:
+                yield statement, conditions
+
+    conditional_fields = set()
+    for statement, conditions in statements(constructor.body):
+        current_conditions = conditions
         call = statement.value if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)) else None
         scope, method = operation(call)
+        if conditions and method in ("static", "value"):
+            fail(module, statement, "Value/static declarations must remain unconditional")
         if method == "static" and isinstance(statement, ast.Expr):
             from ._component import StaticValue
             from taichi_forge_runtime._static_values import static_key
@@ -310,6 +344,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 axes=axes,
                 declaration=[statement.lineno, statement.col_offset],
                 expression=ast.unparse(call.args[1]),
+                conditions=dict(conditions),
             )
             allowed.add(id(call.func.value))
         elif method in ("field", "vector_field", "matrix_field"):
@@ -324,7 +359,27 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 and isinstance(target.value, ast.Name)
                 and target.value.id in ("self", *scopes)
                 and statement.lineno > scopes[scope].lineno
-                and member_stores[target.attr] == 1
+                and (
+                    member_stores[target.attr] == 1
+                    or (
+                        conditions
+                        and member_stores[target.attr] == 2
+                        and any(
+                            isinstance(n, ast.Assign)
+                            and isinstance(n.value, ast.Constant)
+                            and n.value.value is None
+                            and n.lineno < statement.lineno
+                            and any(
+                                isinstance(initial, ast.Attribute)
+                                and isinstance(initial.value, ast.Name)
+                                and initial.value.id == "self"
+                                and initial.attr == target.attr
+                                for initial in n.targets
+                            )
+                            for n in constructor.body
+                        )
+                    )
+                )
             ):
                 fail(module, statement, "ResourceScope Field requires one unconditional owner attribute")
             if target.value.id in scopes:
@@ -369,6 +424,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     or placement["group"] != group
                     or placement["shape"] != shape
                     or placement["declaration"][0] >= statement.lineno
+                    or any(conditions.get(key) is not value for key, value in placement["conditions"].items())
                 ):
                     fail(module, placement_node, "Field placement must retain its declared group and extent relations")
                 allowed.add(id(placement_node))
@@ -396,6 +452,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     allocation=[statement.lineno, statement.col_offset],
                     scope_allocation=origin(scope),
                     group=group,
+                    **({"conditions": dict(conditions)} if conditions else {}),
                     **({"group_builder": builders[group]} if group in builders else {}),
                     **(
                         {
@@ -408,11 +465,18 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 ),
                 statement,
             )
+            if conditions:
+                conditional_fields.add(target.attr)
         elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
             targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
             if len(targets) == 1 and isinstance(targets[0], (ast.Name, ast.Tuple, ast.List)):
                 target = targets[0]
-                value = dimension(statement.value)
+                expression = statement.value
+                if isinstance(target, (ast.Tuple, ast.List)) and isinstance(expression, ast.GeneratorExp):
+                    # Tuple unpacking consumes the same literal-name generator
+                    # once. Reuse the existing proof; do not run the generator.
+                    expression = ast.Call(ast.Name("tuple", ast.Load()), [expression], [])
+                value = dimension(expression)
                 if value is not None:
                     names = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
                     values = (
@@ -424,6 +488,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                         if not isinstance(name, ast.Name) or stores[name.id] != 1:
                             continue
                         aliases[name.id] = value
+                        alias_conditions[name.id] = dict(conditions)
 
     for node in ast.walk(constructor):
         if (
@@ -441,6 +506,19 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         ):
             fail(module, node, "ResourceScope use requires an unconditional supported resource declaration")
     for name, placement in placements.items():
-        if not any(item.get("placement_alias") == name for item in declarations.values()):
+        members = [item for item in declarations.values() if item.get("placement_alias") == name]
+        if not members:
             fail(module, constructor, "Unused Dense placement requires an explicit resource closure")
+        if not any(
+            all(placement["conditions"].get(key) is value for key, value in item.get("conditions", {}).items())
+            for item in members
+        ):
+            fail(module, constructor, "Declared Dense placement requires a member whenever its branch is active")
+    for name in conditional_fields:
+        group = declarations[name]["group"]
+        if not any(
+            item["kind"] == "dense_field" and item.get("group") == group and not item.get("conditions")
+            for item in declarations.values()
+        ):
+            fail(module, constructor, "Conditional Dense groups currently require an unconditional member")
     return declarations

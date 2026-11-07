@@ -201,13 +201,37 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
 
 
 def field_allocation(owner_key, name, schema):
-    sources = {
-        key: expression
+    fields = [
+        item
         for item in schema.values()
         if item["kind"] == "dense_field" and item.get("group", "fields") == schema[name].get("group", "fields")
-        for key, expression in item["dimension_sources"].items()
-    }
+    ]
+    sources = {key: expression for item in fields for key, expression in item["dimension_sources"].items()}
     dimensions = sorted(sources)
+
+    def dimension_value(key):
+        value = ast.parse(sources[key], mode="eval").body
+        conditions = [
+            item.get("placement", {}).get("conditions", item.get("conditions", {}))
+            for item in fields
+            if key in item["dimension_sources"]
+        ]
+        if any(not condition for condition in conditions):
+            return value
+        tests = []
+        for condition in conditions:
+            terms = [
+                ast.Compare(
+                    ast.Attribute(ast.Name("self", ast.Load()), attribute, ast.Load()),
+                    [ast.Is()],
+                    [ast.Constant(expected)],
+                )
+                for attribute, expected in condition.items()
+            ]
+            tests.append(terms[0] if len(terms) == 1 else ast.BoolOp(ast.And(), terms))
+        test = tests[0] if len(tests) == 1 else ast.BoolOp(ast.Or(), tests)
+        return ast.IfExp(test, value, ast.Constant(None))
+
     return ast.Call(
         ast.Attribute(ast.Name("_forge_package_runtime", ast.Load()), "field", ast.Load()),
         [
@@ -215,7 +239,7 @@ def field_allocation(owner_key, name, schema):
             ast.Constant(name),
             ast.Dict(
                 [ast.Constant(key) for key in dimensions],
-                [ast.parse(sources[key], mode="eval").body for key in dimensions],
+                [dimension_value(key) for key in dimensions],
             ),
         ],
         (

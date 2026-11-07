@@ -688,7 +688,7 @@ def export_package(package, output, *, arch=None, source_root=None):
     """
     import taichi_forge as ti
     from taichi_forge.aot._component import Array, Component, RuntimeValue, StaticValue
-    from taichi_forge_runtime._static_values import read_static_key
+    from taichi_forge_runtime._static_values import read_static_key, static_key
     from ._package_variants import compile_static_variants
     from taichi_forge.aot.module import Module
     from taichi_forge.types.ndarray_type import NdarrayType
@@ -893,6 +893,22 @@ def export_package(package, output, *, arch=None, source_root=None):
                     layout, members, dimensions, _ = _dense_group(environments[class_name], owner, group)
                     key = owner_key if group == "fields" else owner_key + ":" + group
                     manifest["field_groups"][key] = dict(schema=layout, members=members, dimensions=sorted(dimensions))
+                    conditions = {
+                        attribute: schema[attribute]["conditions"]
+                        for attribute in members
+                        if schema[attribute].get("conditions")
+                    }
+                    if conditions:
+                        manifest["field_groups"][key]["conditions"] = conditions
+                        containers = {
+                            tuple(members[attribute][0][:-1]): schema[attribute]["placement"]["conditions"]
+                            for attribute in members
+                            if "placement" in schema[attribute]
+                        }
+                        manifest["field_groups"][key]["containers"] = [
+                            dict(path=list(path), conditions=guard) for path, guard in sorted(containers.items())
+                        ]
+                        manifest["version"] = max(12, manifest["version"])
                     for attribute in members:
                         manifest["owners"][owner_key][attribute]["field_group"] = key
         entries = {}
@@ -961,6 +977,14 @@ def export_package(package, output, *, arch=None, source_root=None):
                 raise PackageExportError(f"{name}.{definition['name']}: {error}") from error
             variants = []
             for code in codes:
+                for attribute, _ in code.contract["captures"]:
+                    required = schemas.get(owner_name, {}).get(attribute, {}).get("conditions", {})
+                    if any(code.static.get(key) != static_key(value) for key, value in required.items()):
+                        _fail(
+                            name,
+                            node,
+                            f"Conditional resource {attribute!r} requires its declared static guard in the numerical entry",
+                        )
                 # Sharing is decided by the compiler object/key and its actual
                 # ABI/dependency guards, never by a semantic hash alone.
                 identity = (code.kernel, code.key)

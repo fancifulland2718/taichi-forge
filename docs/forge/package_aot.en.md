@@ -194,8 +194,9 @@ compare every layout node with JIT, numerical outputs, new counts including 0/3/
 state isolation and source-free consumption. Counts may be zero; physical extents
 must remain legal. Expressions not satisfied by the current structural witness reject,
 rather than executing a model to obtain sample values. Raw SNode/Sparse
-layouts, conditional/reassigned scopes, dynamic attribute names, scope escapes and
-static domains remain unsupported and reject before publishing a package.
+layouts, conditional/reassigned scopes, dynamic attribute names and scope escapes
+remain unsupported. See below for static domains and conditional fields; unsupported
+declarations reject before publishing a package.
 
 Constructor conditions proved by the selected backend (`ti.cfg.arch` or
 `ti.lang.impl.current_cfg().arch`, optionally through a single-assignment alias)
@@ -227,7 +228,7 @@ decorated definitions continue through the original compiler. Focused three-back
 checks cover captures, typed compound arguments, state isolation and source-free use.
 
 Graph capture projection and related Host support use manifest version 9; the
-consumer reads versions 1–11. Local frontend imports, `ti.sync()` and the Runtime
+consumer reads versions 1–12. Local frontend imports, `ti.sync()` and the Runtime
 program identity query are projected without importing the compiler. Logical
 `types.vector/matrix` factories accept Host dimensions/dtypes; they do not allocate
 device storage. `NdArray.from_numpy/to_numpy` use existing native transfers with
@@ -291,14 +292,40 @@ select code at recording and retain invocation snapshots through existing
 bindings, without new combination code or module-wide pointer switching.
 Focused three-backend tests cover branch-dependent captures, irrelevant options,
 inherited sharing, independent instances, source-free consumption and original
-JIT results. Static-dependent resource presence/layout is still unsupported;
-code specialization support does not establish conditional layout qualification.
+JIT results.
 The same check covers transitive `real_func` static dependencies on CPU/CUDA;
 Vulkan retains the existing LLVM-only rejection boundary.
 
+### Conditional Dense members
+
+Manifest version 12 supports field and Dense placement declarations guarded by
+`if self.flag` / `if not self.flag`, using an existing boolean `scope.static`.
+The declaration cannot be `kernel_only`; its value must exist before the first
+allocation in that group. One native topology and member conditions describe
+the group. Consumers select members, then use the original native SNode and
+StructCompiler rules. They neither store a layout product for every combination,
+calculate independent byte offsets nor allocate fields in disabled branches.
+Direct tuple unpacking of a literal dimension-name generator uses the same extent algebra.
+
+Numerical entries must guard conditional field access with the declared static
+condition. Common methods that do not read it retain shared code. An instance's
+layout selection is fixed: changing it rejects new calls and requires a new
+instance; already prepared native calls retain their snapshots. Each group
+currently needs an unconditional member, and each explicit Dense placement must
+have a provable member whenever enabled. Arbitrary model conditions, implicit
+`field is not None` domains and entirely optional empty groups remain unsupported.
+
+Focused CPU/CUDA/Vulkan checks cover two independent flags, invalid but unused
+disabled-branch extents, every native layout node and original JIT values,
+independent source-free instances and group retirement. Two flags share one
+layout description; each affected method has two code variants and common code
+is not multiplied by four owner combinations. A separate check keeps distinct
+complete interleaved layout contracts while storing their compatible affine
+kernel only once. Native sharing identity rules are unchanged.
+
 ## Remaining shared mechanisms
 
-Complex SNode/Field layouts, the inheritance restrictions above, template/conditional-resource domains,
+Complex SNode/Field layouts, the inheritance restrictions above, template/other conditional-resource domains,
 untyped or Python-specific `pyfunc`, gradients, arbitrary Python resource factories,
 complete Host array access, full Graph/ExecutionPlan and provider references are not integrated.
 Recognized unsupported declarations or Host frontend operations reject export;

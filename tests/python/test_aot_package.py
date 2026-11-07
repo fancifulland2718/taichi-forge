@@ -1746,7 +1746,7 @@ def test_package_scope_fields_share_dimension_and_native_layout_rules(tmp_path, 
         (
             "rows, cols = scope.dim('n'), scope.dim('m')",
             "if n > 0:\n            rows, cols = scope.dim('n'), scope.dim('m')",
-            "shape requires declared dimensions",
+            "previously declared boolean owner static",
         ),
     ],
 )
@@ -2076,6 +2076,279 @@ def test_package_rejects_shadowed_resource_factory(tmp_path, monkeypatch, bindin
         )
     package = _resource_factory_fixture(tmp_path, monkeypatch, model_source=source)
     with pytest.raises(ti.aot.PackageExportError, match="factory binding is shadowed"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+LAYOUT_SHARING_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+
+class Methods:
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.values:
+            self.values[i] = gain * (i + 1)
+
+@ti.data_oriented
+class Model(Methods):
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields)
+        cells = scope.dense(ti.i, scope.dim('n'))
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), placement=cells)
+        scope.padding = scope.field(ti.i32, shape=scope.dim('n'), placement=cells)
+        self.tree = fields.finalize()
+
+@ti.data_oriented
+class Expanded(Methods):
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields)
+        cells = scope.dense(ti.i, scope.dim('n'))
+        scope.padding = scope.vector_field(3, ti.i32, shape=scope.dim('n'), placement=cells)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), placement=cells)
+        self.tree = fields.finalize()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_layout_contracts_do_not_duplicate_compatible_numerical_code(tmp_path, monkeypatch):
+    from tests.python.test_aot_dense_snode_group import _compiled_nodes
+
+    package = _source_package(
+        tmp_path, monkeypatch, LAYOUT_SHARING_SOURCE, initializer="from .model import Model, Expanded\n"
+    )
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    groups = manifest["field_groups"]
+    assert len(groups) == 2
+    assert (
+        groups["definition_fixture.model.Model:builder_fields"]
+        != groups["definition_fixture.model.Expanded:builder_fields"]
+    )
+    # Different complete layout/binding contracts remain explicit. Both access
+    # ABIs are affine, so the original native builder stores their code once.
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        code = [item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]
+        assert len(code) == 2  # shared step + unimported public entry
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        a, b = loaded.host.Model(7), loaded.host.Expanded(19)
+        assert a.values._group_owner is not b.values._group_owner
+        a.step(2.0)
+        b.step(-3.0)
+        np.testing.assert_array_equal(a.values.to_numpy(), 2 * (np.arange(7) + 1))
+        np.testing.assert_array_equal(b.values.to_numpy(), -3 * (np.arange(19) + 1))
+        for cls, instance, n in ((package.Model, a, 7), (package.Expanded, b, 19)):
+            original = cls(n)
+            original.step(1.0)
+            root = ti.lang.impl.get_runtime().prog.get_snode_root(original.values.snode.ptr.get_snode_tree_id())
+            assert instance.values._group_owner.layout["nodes"] == _compiled_nodes(root)
+        a.tree.destroy()
+        b.step(4.0)
+        np.testing.assert_array_equal(b.values.to_numpy(), 4 * (np.arange(19) + 1))
+        with pytest.raises(RuntimeError):
+            a.step(1.0)
+
+
+CONDITIONAL_LAYOUT_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, m: int, first: bool, second: bool):
+        global constructors
+        constructors += 1
+        self.n, self.m = n, m
+        self.first, self.second = first, second
+        self.extra = self.other = None
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields)
+        scope.static('first', choices=(False, True))
+        scope.static('second', choices=(False, True))
+        cells = scope.dense(ti.i, scope.dim('n'))
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), placement=cells)
+        if self.first:
+            scope.extra = scope.vector_field(3, ti.f32, shape=scope.dim('n'), placement=cells)
+        if self.second:
+            scope.other = scope.field(ti.f32, shape=scope.dim('m'))
+        self.tree = fields.finalize()
+
+    @ti.kernel
+    def common(self, gain: ti.f32):
+        for i in self.values:
+            self.values[i] = gain * (i + 1)
+
+    @ti.kernel
+    def first_step(self):
+        if ti.static(self.first):
+            for i in self.extra:
+                self.extra[i] = ti.Vector([i, i + 1, i + 2])
+        else:
+            for i in self.values:
+                self.values[i] = 10.0
+
+    @ti.kernel
+    def second_step(self):
+        if ti.static(self.second):
+            for i in self.other:
+                self.other[i] = i * 3.0
+        else:
+            for i in self.values:
+                self.values[i] = 20.0
+"""
+
+
+@pytest.mark.parametrize("placement", ["implicit", "conditional"])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path, monkeypatch, placement):
+    import itertools
+    from tests.python.test_aot_dense_snode_group import _compiled_nodes
+
+    source = CONDITIONAL_LAYOUT_SOURCE
+    if placement == "conditional":
+        source = source.replace(
+            "if self.second:", "if self.second:\n            other_cells = scope.dense(ti.i, scope.dim('m'))"
+        )
+    if placement != "implicit":
+        source = source.replace("shape=scope.dim('m'))", "shape=scope.dim('m'), placement=other_cells)")
+        source = source.replace(
+            "other_cells = scope.dense(ti.i, scope.dim('m'))",
+            "other_count, = (scope.dim(name) for name in ('m',))\n            other_cells = scope.dense(ti.i, other_count)",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 12
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["field_groups"]) == 1  # one conditional topology, not four layout products
+    assert sorted(len(family["variants"]) for family in manifest["entry_families"].values()) == [2, 2]
+    assert all(len(family["domain"]) == 1 for family in manifest["entry_families"].values())
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        code = [item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]
+        assert len(code) == 6  # common + two per actual static dependency + public entry
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        instances = []
+        for first, second in itertools.product((False, True), repeat=2):
+            # A disabled branch must not evaluate its invalid, unused extent.
+            m = 5 if second else -3
+            original, current = package.Model(7, m, first, second), loaded.host.Model(7, m, first, second)
+            instances.append(current)
+            for instance in (original, current):
+                instance.first_step()
+                instance.second_step()
+                instance.common(2.0)
+            for name in ("values", "extra", "other"):
+                left, right = getattr(original, name), getattr(current, name)
+                if left is None:
+                    assert right is None
+                else:
+                    np.testing.assert_array_equal(right.to_numpy(), left.to_numpy())
+            root = ti.lang.impl.get_runtime().prog.get_snode_root(original.values.snode.ptr.get_snode_tree_id())
+            assert current.values._group_owner.layout["nodes"] == _compiled_nodes(root)
+        assert len({id(instance.values._group_owner) for instance in instances}) == 4
+        assert instances[0].values._group_owner.nbytes < instances[-1].values._group_owner.nbytes
+        builder = loaded.module("definition_fixture.model").ti.graph.GraphBuilder()
+        builder.dispatch(instances[-1].first_step)
+        with builder.compile().bind({}) as prepared:
+            instances[0].tree.destroy()
+            prepared.run()
+        instances[-1].first = False
+        with pytest.raises(ValueError, match="layout configuration changed"):
+            instances[-1].common(1.0)
+        with pytest.raises(ValueError, match="layout configuration changed"):
+            builder.dispatch(instances[-1].common)
+        instances[1].first = True
+        with pytest.raises(ValueError, match="layout configuration changed"):
+            instances[1].first_step()
+        resources = set(runtime._resources)
+        with pytest.raises((ValueError, RuntimeError)):
+            loaded.host.Model(7, -3, False, True)
+        assert set(runtime._resources) == resources
+    probe = tmp_path / "consume_conditional.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in {'definition_fixture','taichi','taichi_forge'}:
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a,b=code.host.Model(3,-1,False,False),code.host.Model(19,11,True,True)
+            a.common(2.0)
+            b.common(-1.0)
+            b.first_step()
+            b.second_step()
+            np.testing.assert_array_equal(a.values.to_numpy(),2*(np.arange(3)+1))
+            np.testing.assert_array_equal(b.values.to_numpy(),-(np.arange(19)+1))
+            np.testing.assert_array_equal(b.other.to_numpy(),3*np.arange(11))
+            assert a.extra is None and a.other is None
+            a.tree.destroy()
+            b.common(4.0)
+        print('CONDITIONAL_LAYOUT_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CONDITIONAL_LAYOUT_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change, diagnostic",
+    [
+        ("missing_declaration", "previously declared boolean"),
+        ("kernel_only", "previously declared boolean"),
+        ("missing_kernel_guard", "requires its declared static guard"),
+        ("empty_placement", "requires a member whenever its branch is active"),
+        ("escaped_dimension", "Dimension alias must remain within its declaration branch"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_conditional_layouts_reject_unproven_guards(tmp_path, monkeypatch, change, diagnostic):
+    source = CONDITIONAL_LAYOUT_SOURCE
+    if change == "missing_declaration":
+        source = source.replace("scope.static('first', choices=(False, True))", "pass")
+    elif change == "kernel_only":
+        source = source.replace("'first', choices=(False, True)", "'first', choices=(False, True), kernel_only=True")
+    elif change == "empty_placement":
+        source = source.replace(
+            "if self.second:", "other_cells = scope.dense(ti.i, scope.dim('m'))\n        if self.second:"
+        )
+        source = source.replace("shape=scope.dim('m'))", "shape=scope.dim('m'), placement=other_cells)")
+    elif change == "escaped_dimension":
+        source = source.replace("if self.first:", "if self.first:\n            only_here = scope.dim('n')")
+        source = source.replace(
+            "self.tree = fields.finalize()",
+            "scope.invalid = scope.field(ti.f32, shape=only_here)\n        self.tree = fields.finalize()",
+        )
+    else:
+        source = source.replace("if ti.static(self.first):", "if ti.static(self.extra is not None):")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match=diagnostic):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk").exists()
