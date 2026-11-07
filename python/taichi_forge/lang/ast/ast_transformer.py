@@ -68,9 +68,12 @@ def boundary_type_cast_warning(expression):
 class ASTTransformer(Builder):
     @staticmethod
     def build_Name(ctx, node):
+        lexical, value = False, None
         if ctx.deployment is not None and not ctx.is_var_declared(node.id):
-            ctx.deployment.check_name(ctx, node)
-        node.ptr = ctx.get_var_by_name(node.id)
+            lexical, value = ctx.deployment.lexical_name(ctx, node)
+            if not lexical:
+                ctx.deployment.check_name(ctx, node)
+        node.ptr = value if lexical else ctx.get_var_by_name(node.id)
         if ctx.deployment is not None:
             node.ptr = ctx.deployment.resolve_template(ctx, node.ptr)
         if isinstance(node, (ast.stmt, ast.expr)) and isinstance(node.ptr, Expr):

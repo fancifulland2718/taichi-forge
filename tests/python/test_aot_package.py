@@ -1547,6 +1547,111 @@ def _source_package(tmp_path, monkeypatch, source=SOURCE, *, initializer="from .
     return importlib.import_module("definition_fixture")
 
 
+COLD_FACTORY_SOURCE = """
+import taichi_forge as ti
+def make_upload(fields):
+    pose_fields = tuple(fields)
+    field_count = len(pose_fields)
+    if field_count <= 0:
+        raise ValueError('empty fields')
+    pose_type = ti.types.vector(field_count * 3, ti.f32)
+    @ti.kernel
+    def upload(pose: pose_type):
+        for index in ti.static(range(field_count)):
+            base = index * 3
+            pose_fields[index][None] = ti.Vector([pose[base], pose[base + 1], pose[base + 2]])
+    return upload
+
+class Model:
+    def __init__(self):
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        scope.position = scope.vector_field(3, dtype=ti.f32, shape=())
+        scope.direction = scope.vector_field(3, dtype=ti.f32, shape=())
+        self.tree = builder.finalize()
+        self.upload = make_upload((self.position, self.direction))
+        self.same_upload = make_upload((self.position, self.direction))
+    def update(self, values):
+        self.upload(ti.Vector(values))
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_cold_factory_uses_definitions_and_retains_lexical_instance_snapshot(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, "\ufeff" + COLD_FACTORY_SOURCE)
+    original = sys.modules["definition_fixture.model"]
+    forbidden = {original.Model.__init__.__code__, original.make_upload.__code__}
+    previous = sys.getprofile()
+
+    def no_sample(frame, event, arg):
+        if event == "call" and frame.f_code in forbidden:
+            raise AssertionError("export executed an application constructor/factory")
+
+    sys.setprofile(no_sample)
+    try:
+        manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    finally:
+        sys.setprofile(previous)
+    assert manifest["version"] == 25
+    assert len(manifest["entries"]) == 2 and len(manifest["field_groups"]) == 1
+    assert len(manifest["closure_entries"]) == 1
+    assert len({item["symbol"] for item in next(iter(manifest["closure_entries"].values()))}) == 1
+    host = (tmp_path / "sdk/host/model.py").read_text()
+    assert "def make_upload" in host and "field_count = len(pose_fields)" in host
+    assert "pose_fields[index][None]" not in host and "@ti.kernel" not in host
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(), code.host.Model()
+        a.update([1, 2, 3, 4, 5, 6])
+        a.same_upload([1, 2, 3, 4, 5, 6])
+        b.update([-1, -2, -3, -4, -5, -6])
+        old = a.position
+        a.position = b.position
+        a.update([7, 8, 9, 10, 11, 12])
+        np.testing.assert_array_equal(old.to_numpy(), [7, 8, 9])
+        np.testing.assert_array_equal(b.position.to_numpy(), [-1, -2, -3])
+        with pytest.raises(ValueError, match="declared source/type binding"):
+            code.host.model.make_upload((b.position, a.direction))
+        a.tree.destroy()
+        with pytest.raises((RuntimeError, ValueError), match="closed|retired"):
+            a.update([0] * 6)
+        b.update([1] * 6)
+    reference = original.Model()
+    reference.update([1, 2, 3, 4, 5, 6])
+    np.testing.assert_array_equal(reference.position.to_numpy(), [1, 2, 3])
+
+
+@pytest.mark.parametrize(
+    "before,after,diagnostic",
+    [
+        ("pose_fields = tuple(fields)", "print('side effect')\n    pose_fields = tuple(fields)", "side effect"),
+        ("make_upload((self.position, self.direction))", "make_upload(())", "input guard"),
+        ("make_upload((self.position, self.direction))", "make_upload(self.unknown)", "declared Field"),
+        ("pose_fields = tuple(fields)", "pose_fields = sorted(fields)", "Unproven cold factory"),
+        ("return upload", "upload(0)\n    return upload", "must return its numerical definition"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_cold_factory_rejects_unproven_inputs_without_execution(
+    tmp_path, monkeypatch, before, after, diagnostic
+):
+    package = _source_package(tmp_path, monkeypatch, COLD_FACTORY_SOURCE.replace(before, after))
+    original = sys.modules["definition_fixture.model"]
+    forbidden = {original.Model.__init__.__code__, original.make_upload.__code__}
+    previous = sys.getprofile()
+
+    def no_sample(frame, event, arg):
+        if event == "call" and frame.f_code in forbidden:
+            raise AssertionError("export executed an unproven constructor/factory")
+
+    sys.setprofile(no_sample)
+    try:
+        with pytest.raises(ti.aot.PackageExportError, match=diagnostic):
+            ti.aot.export_package(package, tmp_path / "sdk")
+    finally:
+        sys.setprofile(previous)
+    assert not (tmp_path / "sdk").exists()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_host_ndarray_checks_distinguish_field_views(tmp_path, monkeypatch):
     source = """

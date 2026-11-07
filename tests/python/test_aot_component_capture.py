@@ -59,6 +59,103 @@ def _declarations(**extra):
     )
 
 
+def _pose_factory(fields):
+    pose_fields = tuple(fields)
+    field_count = len(pose_fields)
+    pose_type = ti.types.vector(field_count * 3, ti.f32)
+
+    @ti.kernel
+    def upload(pose: pose_type):
+        for field_index in ti.static(range(field_count)):
+            base = field_index * 3
+            pose_fields[field_index][None] = ti.Vector([pose[base], pose[base + 1], pose[base + 2]])
+
+    return upload
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_lexical_resources_use_declared_fields_and_independent_instance_bindings():
+    from types import MappingProxyType
+
+    class Camera:
+        def __init__(self):
+            builder = ti.FieldsBuilder()
+            scope = ti.experimental.ResourceScope(self, builder=builder)
+            scope.position = scope.vector_field(3, dtype=ti.f32, shape=())
+            scope.direction = scope.vector_field(3, dtype=ti.f32, shape=())
+            self.tree = builder.finalize()
+
+    first, second = Camera(), Camera()
+    upload = _pose_factory((first.position, first.direction))
+    function = upload._primal.func
+    environment = Component.from_owner(first)
+    environment._lexical_bindings = MappingProxyType(
+        {
+            (function, "pose_fields"): ("sequence", (("path", ("position",)), ("path", ("direction",)))),
+            (function, "field_count"): ("static", ("int", 2)),
+        }
+    )
+    values = ti.Vector([1, 2, 3, 4, 5, 6])
+    code = environment.compile(upload, values, owner=first)
+    assert len(code.contract["groups"]) == 1
+    assert {name for name, _ in code.contract["captures"]} == {"position", "direction"}
+    code.run(environment, second, values)
+    np.testing.assert_array_equal(first.position.to_numpy(), [0, 0, 0])
+    np.testing.assert_array_equal(second.position.to_numpy(), [1, 2, 3])
+    np.testing.assert_array_equal(second.direction.to_numpy(), [4, 5, 6])
+    assert environment.compile(upload, values, owner=second) is code
+    # The original closure and JIT path are unchanged, even after AOT lowering.
+    upload(values * -1)
+    np.testing.assert_array_equal(first.position.to_numpy(), [-1, -2, -3])
+    np.testing.assert_array_equal(second.position.to_numpy(), [1, 2, 3])
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_lexical_bindings_are_lazy_and_reject_changed_used_paths():
+    from types import MappingProxyType, SimpleNamespace
+
+    first, second = ti.ndarray(ti.i32, 7), ti.ndarray(ti.i32, 13)
+    fields = (first, second)
+
+    @ti.kernel
+    def fill(value: ti.i32):
+        for i in fields[0]:
+            fields[0][i] = value
+
+    owner = SimpleNamespace(left=first, right=second)
+    environment = Component(left=Array(ti.i32, 1), right=Array(ti.i32, 1))
+    function = fill._primal.func
+    environment._lexical_bindings = MappingProxyType(
+        {
+            (function, "fields"): ("sequence", (("path", ("left",)), ("path", ("right",)))),
+        }
+    )
+    code = environment.compile(fill, 3, owner=owner)
+    assert [name for name, _ in code.contract["captures"]] == ["left"]
+    environment._lexical_bindings = MappingProxyType(
+        {
+            (function, "fields"): ("sequence", (("path", ("left",)), ("path", ("missing_unused",)))),
+        }
+    )
+    assert environment.compile(fill, 4, owner=owner) is code
+    code.run(environment, owner, 4)
+    np.testing.assert_array_equal(first.to_numpy(), np.full(7, 4))
+    environment._lexical_bindings = MappingProxyType(
+        {
+            (function, "fields"): ("sequence", (("path", ("right",)), ("path", ("left",)))),
+        }
+    )
+    with pytest.raises(ValueError, match="bindings do not match"):
+        code.run(environment, owner, 5)
+    other = environment.compile(fill, 5, owner=owner)
+    assert other is not code
+    other.run(environment, owner, 5)
+    np.testing.assert_array_equal(second.to_numpy(), np.full(13, 5))
+    environment._lexical_bindings = MappingProxyType({})
+    with pytest.raises(ti.TaichiCompilationError, match="undeclared global/closure capture"):
+        environment.compile(fill, 1, owner=owner)
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_used_abi_single_lowering_and_independent_bindings(monkeypatch):
     lowerings = []
@@ -243,8 +340,10 @@ def test_svd_intrinsic_results_are_inline_arguments_not_model_captures():
 
     matrix = ti.types.matrix(3, 3, ti.f32)
     environment = Component(**{name: Array(matrix, 1) for name in ("source", "u", "s", "v")})
-    matrices = np.array([[[1, .3, -.2], [0, 1.2, .1], [.1, 0, .8]],
-                         np.diag([-.5, 2., 1.5]), np.diag([0., 1., 1.])], dtype=np.float32)
+    matrices = np.array(
+        [[[1, 0.3, -0.2], [0, 1.2, 0.1], [0.1, 0, 0.8]], np.diag([-0.5, 2.0, 1.5]), np.diag([0.0, 1.0, 1.0])],
+        dtype=np.float32,
+    )
     owners = [Model(matrices[:1]), Model(matrices)]
     code = environment.compile(owners[0].decompose)
     assert environment.compile(owners[1].decompose) is code

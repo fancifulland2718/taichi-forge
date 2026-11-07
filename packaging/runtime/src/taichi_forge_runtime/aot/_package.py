@@ -210,6 +210,11 @@ class _ModuleBinding:
     def entry(self, symbol):
         return entry(self.package, symbol)
 
+    def closure_entry(self, identity, values):
+        from ._package_closures import bind_closure
+
+        return bind_closure(self.package, identity, values)
+
     def import_module(self, name):
         self.package._check()
         modules = self.package.manifest.get("application_modules")
@@ -798,7 +803,7 @@ class LoadedPackage:
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
             self.manifest.get("version")
-            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24)
+            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

@@ -615,6 +615,28 @@ CPU/CUDA/Vulkan source-free consumers and the original GeoPhys helper cover thes
 paths. Optional object references and model-driven tensor element or local-vector
 lengths are not thereby supported.
 
+Version 25 supports straight-line kernel factories bound unconditionally in ordinary
+constructors: one original nested `@ti.kernel`, followed by returning that definition.
+Inputs must be proven direct, unconditional Dense Fields of the same owner, tuples of
+those fields, or immutable literals. Type preparation accepts the original `tuple`,
+`len`, integer expressions and builtin vector/matrix constructors. Export invokes
+neither the factory nor application constructors. It reuses the original Python code
+object and numerical compiler; Host retains the factory's orchestration/type prelude,
+replacing the numerical body with a generic binding call and carrying no private AST.
+
+Lexical resources use ordinary capture parameters and native group layouts. Only read
+members enter the ABI. Identical definitions and argument structures share code;
+Host binding locations do not create copies. Vector/matrix/struct value arguments use
+structural type identities rather than Python object addresses. Instance closures retain
+their original resource snapshots despite owner attribute replacement, and reject use
+after allocation retirement. Unknown type sources, factory effects, mixed source
+instances and incompatible bindings reject export or consumption.
+
+Focused CPU/CUDA/Vulkan checks and source-free consumers of GeoPhys's original camera
+upload factory pass. The latter uses unchanged factory source with minimal resource
+declarations, not a complete camera/rendering package export. Cached or conditional
+multi-kernel factories, template owners and model-driven tensor lengths remain pending.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

@@ -105,7 +105,7 @@ def _owner_schema(module, node, kind, namespace):
 
 
 def _analyze(module, source, namespace, target):
-    tree = ast.parse(source)
+    tree = ast.parse(source.removeprefix("\ufeff"))
     if any(
         (isinstance(n, ast.Name) and n.id.startswith(_PREFIX))
         or (isinstance(n, ast.Attribute) and n.attr.startswith(_PREFIX))
@@ -123,6 +123,11 @@ def _analyze(module, source, namespace, target):
     tree._package_factory_declarations = normalize_factories(tree, namespace, module, _fail, kind)
     definitions, owners = [], {}
     supported = set()
+    from ._package_closures import discover
+
+    tree._package_closure_factories, closures = discover(module, tree, kind, namespace, _fail)
+    definitions.extend(closures)
+    supported.update(id(item["node"]) for item in closures)
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             decorators = [kind(d) for d in node.decorator_list]
@@ -554,6 +559,20 @@ def _host_projection(
                     kind = previous
             if definition.get("error_interface"):
                 return self.generic_visit(project_error_interface(node, module + "." + definition["name"]))
+            if definition.get("closure_definition"):
+                self.minimum_version = max(self.minimum_version, 25)
+                names = definition["closure_names"]
+                descriptor = ast.Call(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "closure_entry", ast.Load()),
+                    [
+                        ast.Constant(module + "." + definition["name"]),
+                        ast.Dict(
+                            [ast.Constant(name) for name in names], [ast.Name(name, ast.Load()) for name in names]
+                        ),
+                    ],
+                    [],
+                )
+                return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
             if definition["kind"] in ("func", "real_func"):
                 return None
             if definition.get("requires_owner"):
@@ -928,6 +947,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     from ._package_inputs import resolve_inputs
 
     resolve_inputs(sources, imported_modules)
+    from ._package_closures import calls as closure_calls, materialize as materialize_closure
+
+    factory_calls = closure_calls(sources, imported_modules, _fail)
     module = Module(caps=caps)
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
 
@@ -949,6 +971,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
         discovery="all_decorated_definitions",
         entries={},
         entry_families={},
+        closure_entries={},
         files={},
         sources={},
         owners={},
@@ -967,6 +990,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             for name, _, _, _, _, _, _, definitions in sources
             for definition in definitions
             if definition.get("requires_owner")
+            and not definition.get("closure_definition")
             and definition["kind"] in ("kernel", "pyfunc")
             and not definition.get("error_interface")
         ],
@@ -1014,7 +1038,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
         for definition in definitions
         if definition["kind"] in ("func", "real_func") and not definition.get("error_interface")
     }
-    shared_entries, pyfunc_kernels = {}, {}
+    shared_entries, pyfunc_kernels, closure_kernels = {}, {}, {}
     for name, path, relative, text, tree, kind, schemas, definitions in sources:
         imported = imported_modules[name]
         owners = {}
@@ -1109,7 +1133,29 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         if len(path) > 1:
                             item.setdefault("member_ids", {})[path[1]] = attribute
         entries = {}
-        for definition in definitions:
+        compiled_definitions = list(definitions)
+        for class_name in schemas:
+            for attribute, call, recipe in factory_calls.get(name + "." + class_name, ()):
+                closure_environment = copy.copy(environments[class_name])
+                try:
+                    kernel, bindings = materialize_closure(
+                        recipe, call, owners[class_name], closure_environment, closure_kernels
+                    )
+                except (KeyError, TypeError, ValueError) as error:
+                    _fail(name, call, str(error))
+                compiled_definitions.append(
+                    dict(
+                        owner=class_name,
+                        node=recipe["node"],
+                        kind="kernel",
+                        name=class_name + "." + attribute,
+                        closure_kernel=kernel,
+                        closure_bindings=bindings,
+                        closure_identity=recipe["identity"],
+                        closure_environment=closure_environment,
+                    )
+                )
+        for definition in compiled_definitions:
             if (
                 definition["kind"] not in ("kernel", "pyfunc")
                 or definition.get("requires_owner")
@@ -1118,7 +1164,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 continue
             owner_name, node = definition["owner"], definition["node"]
             owner = owners.get(owner_name)
-            entry = getattr(owner if owner is not None else imported, node.name)
+            entry = (
+                definition["closure_kernel"]
+                if "closure_kernel" in definition
+                else getattr(owner if owner is not None else imported, node.name)
+            )
             if definition["kind"] == "pyfunc":
                 from taichi_forge.lang.kernel_impl import Kernel, AutodiffMode
 
@@ -1135,7 +1185,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             kernel = getattr(entry, "_primal", None)
             if kernel is None:
                 _fail(name, node, "decorated definition did not resolve to a Forge kernel")
-            arguments = kernel.arguments[1:] if owner is not None else kernel.arguments
+            arguments = (
+                kernel.arguments[1:] if owner is not None and "closure_kernel" not in definition else kernel.arguments
+            )
             values, argument_schema = [], []
             for argument in arguments:
                 annotation = argument.annotation
@@ -1167,7 +1219,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     argument_schema.append(dict(name=argument.name, kind="value", dtype=dtype))
                 if argument.default is not inspect.Parameter.empty:
                     _fail(name, node, "kernel default arguments are not yet supported")
-            environment = environments[owner_name] if owner_name is not None else Component()
+            environment = (
+                definition["closure_environment"]
+                if "closure_environment" in definition
+                else environments[owner_name] if owner_name is not None else Component()
+            )
             try:
                 codes = compile_static_variants(
                     environment, entry, values, owner, compilation_schemas.get(owner_name, {})
@@ -1286,6 +1342,15 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 entries[definition["name"]] = dict(symbol=symbol)
             else:
                 entries[definition["name"]] = entry_manifest
+            if "closure_kernel" in definition:
+                manifest["version"] = max(manifest["version"], 25)
+                manifest["closure_entries"].setdefault(definition["closure_identity"], []).append(
+                    dict(
+                        symbol=entries[definition["name"]]["symbol"],
+                        owner_type=name + "." + owner_name,
+                        bindings=definition["closure_bindings"],
+                    )
+                )
         host_source, minimum_version, producer_only = _host_projection(
             name,
             tree,

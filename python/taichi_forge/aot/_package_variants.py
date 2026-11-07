@@ -20,7 +20,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema):
         if item["kind"] == "static"
     }
     if not domains:
-        return [environment.compile(entry, *arguments)]
+        return [environment.compile(entry, *arguments, owner=owner)]
     initial = {name: values[0] for name, values in domains.items()}
     previous = {name: read_member(owner, name, schema) for name in domains}
     pending, visited, codes = deque([initial]), set(), []
@@ -36,7 +36,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema):
                 continue
             for name, value in selection.items():
                 write_member(owner, name, value, schema)
-            code = environment.compile(entry, *arguments)
+            code = environment.compile(entry, *arguments, owner=owner)
             if not code.static.keys() <= domains.keys():
                 raise ValueError("Kernel static dependencies are outside the declared package domain")
             codes.append(code)

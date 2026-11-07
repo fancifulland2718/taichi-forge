@@ -779,7 +779,7 @@ class Component:
     """
 
     __slots__ = ("_declarations", "_dense_members", "_sources", "_paths", "_borrowed_reads", "_source_scope_paths",
-                 "_derived_attributes", "_constraints")
+                 "_derived_attributes", "_constraints", "_lexical_bindings")
 
     def __init__(self, **declarations):
         flattened, paths = {}, {}
@@ -840,6 +840,9 @@ class Component:
         self._source_scope_paths = MappingProxyType({})
         self._derived_attributes = frozenset()
         self._constraints = MappingProxyType({})
+        # Filled only by definition-based producer analysis. It does not alter
+        # Python closure cells or the ordinary JIT specialization path.
+        self._lexical_bindings = MappingProxyType({})
 
     def _set_declarations(self, declarations):
         # Construction/borrow projection can extend the immutable environment.
@@ -1445,7 +1448,10 @@ class Component:
                     raise TaichiCompilationError("Component explicit ndarray gradients are not qualified")
                 features.append(feature)
                 abi.append(("ndarray", str(feature[0]), feature[1], feature[2], str(feature[3]), feature[4]))
-            elif id(argument.annotation) in primitive_types.type_ids or isinstance(argument.annotation, (MatrixType, StructType)):
+            elif isinstance(argument.annotation, (MatrixType, StructType)):
+                features.append(None)
+                abi.append(("value", describe_element_type(argument.annotation).structural_key()))
+            elif id(argument.annotation) in primitive_types.type_ids:
                 features.append(None)
                 abi.append(("value", str(argument.annotation)))
             elif isinstance(argument.annotation, AccelerationStructureType):
@@ -1604,6 +1610,7 @@ class _Capture:
         if entry_path:
             self._method_owners.append((component.read(owner, _capture_id(entry_path)), entry_path))
         self.functions = {}
+        self.lexical = {}
         self.constants = {}
         self.struct_types = {}
         self.entry_definition = _definition(kernel.func)
@@ -1815,6 +1822,10 @@ class _Capture:
 
     def static_operand(self, ctx, value):
         """Unroll only a declared fixed owner composition, never live Python objects."""
+        from ._component_lexical import LexicalSequence, subscript
+
+        if isinstance(value, LexicalSequence):
+            return tuple(subscript(self, ctx, value, (index,)) for index in range(len(value)))
         if not isinstance(value, _RecordReference):
             return value
         name = _capture_id(value.path)
@@ -1836,6 +1847,10 @@ class _Capture:
 
     def owner_sequence_subscript(self, ctx, value, indices):
         """Resolve one compile-time member without capturing unused owners."""
+        from ._component_lexical import LexicalSequence, subscript
+
+        if isinstance(value, LexicalSequence):
+            return True, subscript(self, ctx, value, indices)
         if not isinstance(value, _RecordReference):
             return False, None
         name = _capture_id(value.path)
@@ -1911,6 +1926,14 @@ class _Capture:
         if isinstance(owner, _RecordReference):
             return self.attribute(ctx, name, prefix=owner.path)
         raise TaichiCompilationError("Component getattr requires a declared owner or record")
+
+    def lexical_name(self, ctx, node):
+        from ._component_lexical import resolve
+
+        function = ctx.func.func
+        if (function, node.id) not in self.component._lexical_bindings:
+            return False, None
+        return True, resolve(self, ctx, function, node.id)
 
     def check_name(self, ctx, node):
         if node.id not in ctx.global_vars:
@@ -2025,6 +2048,10 @@ class _Capture:
             self.contract["constants"] = sorted(
                 (function.__module__, function.__qualname__, name, value)
                 for (function, name), value in self.constants.items())
+        if self.lexical:
+            from ._component_lexical import contract
+
+            self.contract["lexical_bindings"] = contract(self)
         if self.struct_types:
             self.contract["struct_types"] = sorted(
                 (function.__module__, function.__qualname__, name, value)
@@ -2041,6 +2068,11 @@ class _Capture:
         return self.dependency_mismatch(component, owner, layouts=layouts) is None
 
     def dependency_mismatch(self, component, owner, *, layouts=None):
+        from ._component_lexical import mismatch
+
+        lexical_mismatch = mismatch(self, component)
+        if lexical_mismatch:
+            return lexical_mismatch
         if layouts is None:
             layouts = _DenseLayoutValidation(component, owner)
         if _definition(self.kernel.func) != self.entry_definition:
@@ -2164,6 +2196,7 @@ class _ComponentCode:
         self.methods = dict(context.methods)
         self.method_paths = dict(context.method_paths)
         self.functions = dict(context.functions)
+        self.lexical = dict(context.lexical)
         self.constants = dict(context.constants)
         self.struct_types = dict(context.struct_types)
         self.groups = dict(context.groups)

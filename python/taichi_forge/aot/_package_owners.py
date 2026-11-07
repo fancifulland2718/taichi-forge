@@ -142,6 +142,7 @@ def resolve_owners(sources, imported, owner_schema, fail):
         for entry in entries:
             if (
                 entry.get("requires_owner")
+                and not entry.get("closure_definition")
                 and entry["kind"] in ("kernel", "pyfunc")
                 and not entry.get("error_interface")
                 and id(entry["node"]) not in bound_nodes
