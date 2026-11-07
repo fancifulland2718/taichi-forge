@@ -1,11 +1,46 @@
-"""Plain Host tensor values for construction and native argument encoding.
+"""Host tensor values and namespaces over native Field members.
 
-These own CPU values only. They are neither device resources nor a numerical
-interpreter. Algebra outside the supported Host value surface fails explicitly.
+Tensor values own CPU data only; Struct Field namespaces delegate transfers to
+native members. Neither interprets numerical definitions or computes layouts.
 """
 
 from collections.abc import Sequence
 import numbers
+
+
+def capture_value(owner, spec):
+    for name in spec.get("path", (spec["name"],)):
+        owner = getattr(owner, name)
+    return owner
+
+
+class StructField:
+    """Host namespace over native Field members; no independent storage ABI."""
+
+    def __init__(self, members):
+        self.field_dict = dict(members)
+
+    def __getattr__(self, name):
+        try:
+            return self.field_dict[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+    @property
+    def shape(self):
+        return next(iter(self.field_dict.values())).shape
+
+    def to_numpy(self):
+        return {name: field.to_numpy() for name, field in self.field_dict.items()}
+
+    def from_numpy(self, arrays):
+        if not isinstance(arrays, dict) or arrays.keys() != self.field_dict.keys():
+            raise ValueError("Struct Field upload requires its complete member mapping")
+        for name, field in self.field_dict.items():
+            if getattr(arrays[name], "shape", None) != field.shape + field.element_shape:
+                raise ValueError("Struct Field upload shape differs from its declared member")
+        for name, field in self.field_dict.items():
+            field.from_numpy(arrays[name])
 
 
 def _numpy_dtype(dtype):

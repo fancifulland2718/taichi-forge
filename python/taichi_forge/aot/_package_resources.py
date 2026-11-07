@@ -460,7 +460,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 conditions=dict(conditions),
             )
             allowed.add(id(call.func.value))
-        elif method in ("field", "vector_field", "matrix_field"):
+        elif method in ("field", "vector_field", "matrix_field", "struct_field"):
             targets = (
                 statement.targets
                 if isinstance(statement, ast.Assign)
@@ -499,13 +499,31 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 allowed.add(id(target.value))
             allowed.add(id(call.func.value))
             normalized = copy.deepcopy(call)
-            normalized.keywords = [k for k in call.keywords if k.arg not in ("initialization", "placement")]
+            normalized.keywords = [k for k in call.keywords if k.arg not in ("initialization", "placement", "layout")]
+            layout = "AOS"
+            if method == "struct_field":
+                if conditions:
+                    fail(module, call, "Conditional Struct Field presence requires further package support")
+                layouts = [k.value for k in call.keywords if k.arg == "layout"]
+                if layouts:
+                    layout = {"Layout.AOS": "AOS", "Layout.SOA": "SOA"}.get(qualified_kind(layouts[0], kind))
+                    if len(layouts) != 1 or layout is None:
+                        fail(module, call, "Struct Field layout requires the original AOS/SOA enum")
+                if layout == "SOA" and scope_groups[scope] in builders:
+                    fail(module, call, "Explicit ResourceScope groups require the original AOS Struct Field layout")
+            elif any(k.arg == "layout" for k in call.keywords):
+                fail(module, call, "Package Field declarations currently require plain default AOS layout")
             for keyword in call.keywords:
                 if keyword.arg == "initialization" and not (
                     isinstance(keyword.value, ast.Constant) and keyword.value.value in ("zero", "consumer_explicit")
                 ):
                     fail(module, keyword, "Field initialization requires its existing zero/consumer_explicit policy")
-            role = {"field": "field", "vector_field": "Vector.field", "matrix_field": "Matrix.field"}[method]
+            role = {
+                "field": "field",
+                "vector_field": "Vector.field",
+                "matrix_field": "Matrix.field",
+                "struct_field": "Struct.field",
+            }[method]
             dtype, shape_node = field_type_shape(normalized, role, module, fail)
             # Use original shape nodes for declaration provenance.
             original_args = dict(
@@ -514,6 +532,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                         "field": ("dtype", "shape"),
                         "vector_field": ("n", "dtype", "shape"),
                         "matrix_field": ("n", "m", "dtype", "shape"),
+                        "struct_field": ("members", "shape"),
                     }[method],
                     call.args,
                 )
@@ -565,6 +584,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     allocation=[statement.lineno, statement.col_offset],
                     scope_allocation=origin(scope),
                     group=group,
+                    **({"struct_field": True, "layout": layout} if method == "struct_field" else {}),
                     **({"conditions": dict(conditions)} if conditions else {}),
                     **({"group_builder": builders[group]} if group in builders else {}),
                     **(

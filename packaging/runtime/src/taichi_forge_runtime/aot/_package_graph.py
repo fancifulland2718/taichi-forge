@@ -10,6 +10,7 @@ import itertools
 
 from ._plan import ExecutionPlan
 from ._runtime import Scalar
+from ._package_values import capture_value
 
 
 class ArgKind(Enum):
@@ -187,7 +188,7 @@ class Graph:
                 value = self.plan.value(self.package._module, name, value)
             values[name] = value
         for name, (owner, schema) in self.captures.items():
-            value = getattr(owner, schema["name"])
+            value = capture_value(owner, schema)
             if schema["kind"] in ("value", "dimension"):
                 value = (
                     self.plan.value(self.package._module, name, value)

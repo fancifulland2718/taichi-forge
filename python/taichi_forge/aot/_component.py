@@ -46,6 +46,13 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _struct_type_definition(value):
+    if type(value) is not StructType:
+        raise TaichiCompilationError("Captured Struct type was replaced by a different constructor")
+    return (describe_element_type(value).structural_key(),
+            tuple((name, _definition(method)) for name, method in sorted(value.methods.items())))
+
+
 def _static_value(value):
     # No repr(), object IDs, getters or user-defined serialization in a key.
     try:
@@ -1592,6 +1599,7 @@ class _Capture:
             self._method_owners.append((component.read(owner, _capture_id(entry_path)), entry_path))
         self.functions = {}
         self.constants = {}
+        self.struct_types = {}
         self.entry_definition = _definition(kernel.func)
         self.contract = None
         self.groups = {}
@@ -1920,6 +1928,12 @@ class _Capture:
             return
         if id(value) in primitive_types.type_ids or isinstance(value, MatrixType):
             return
+        if type(value) is StructType:
+            key = _struct_type_definition(value)
+            binding = (ctx.func.func, node.id)
+            if self.struct_types.setdefault(binding, key) != key:
+                raise TaichiCompilationError(f"Struct type {node.id!r} changed during compilation; retry")
+            return
         if value is Matrix or value is Vector:
             return  # Built-in DSL constructors, also available through ti.Matrix/Vector.
         function = ctx.func.func
@@ -2005,6 +2019,10 @@ class _Capture:
             self.contract["constants"] = sorted(
                 (function.__module__, function.__qualname__, name, value)
                 for (function, name), value in self.constants.items())
+        if self.struct_types:
+            self.contract["struct_types"] = sorted(
+                (function.__module__, function.__qualname__, name, value)
+                for (function, name), value in self.struct_types.items())
         if self.resource_templates:
             self.contract["resource_templates"] = [
                 (path[0] if len(path) == 1 else path, binding)
@@ -2097,6 +2115,14 @@ class _Capture:
             value = inspect.getattr_static(namespace, path[-1], None)
             if not getattr(value, "_is_taichi_function", False) or _definition(value) != definition:
                 return f"method {name!r}"
+        for (function, name), definition in self.struct_types.items():
+            cells = dict(zip(function.__code__.co_freevars, function.__closure__ or ()))
+            try:
+                value = cells[name].cell_contents if name in cells else function.__globals__.get(name)
+                if _struct_type_definition(value) != definition:
+                    return f"Struct type {name!r} in {function.__qualname__}"
+            except (ValueError, TaichiCompilationError):
+                return f"Struct type {name!r} in {function.__qualname__}"
         for (function, name), definition in self.functions.items():
             # getclosurevars only examines the outer code's co_names. A
             # comprehension can read a global helper solely from its nested
@@ -2133,6 +2159,7 @@ class _ComponentCode:
         self.method_paths = dict(context.method_paths)
         self.functions = dict(context.functions)
         self.constants = dict(context.constants)
+        self.struct_types = dict(context.struct_types)
         self.groups = dict(context.groups)
         self.member_paths = dict(context.member_paths)
         self.fixed_groups = dict(context.fixed_groups)

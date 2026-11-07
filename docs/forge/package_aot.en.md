@@ -228,7 +228,7 @@ decorated definitions continue through the original compiler. Focused three-back
 checks cover captures, typed compound arguments, state isolation and source-free use.
 
 Graph capture projection and related Host support use manifest version 9; the
-consumer reads versions 1–13. Local frontend imports, `ti.sync()` and the Runtime
+consumer reads versions 1–14. Local frontend imports, `ti.sync()` and the Runtime
 program identity query are projected without importing the compiler. Logical
 `types.vector/matrix` factories accept Host dimensions/dtypes; they do not allocate
 device storage. `NdArray.from_numpy/to_numpy` use existing native transfers with
@@ -340,6 +340,26 @@ normal `clear`, `resize` and `read_resources`. Partial clears and untouched regi
 match original JIT. Export forbids constructor execution; consumers block original
 application/frontend imports and verify new dimensions and independent instances.
 This qualifies that GBuffer path, not the complete renderer or engine wheel.
+
+Version 14 accepts existing `scope.struct_field` declarations containing flat
+scalar/vector/matrix records, from a literal member dictionary or the original
+StructType's `.members`. Implicit groups retain AOS/SOA; explicit builders/shared
+placements retain the original API's AOS restriction. Dimensions remain in the
+allocation scope. Original Record/DenseField lowering handles whole-record
+indexing, iteration and member access. Consumers bind original member paths,
+without splitting storage into independently allocated Ndarrays. Native SNode
+rules still determine nodes, offsets and strides.
+
+The Host record supplies member attributes, shape and dictionary-based
+`to_numpy/from_numpy`, delegated to existing native member transfers. Graph
+binding preserves the same paths and instance leases. Used Struct constructors
+enter compiler dependency checks, so changed member types cannot reuse stale
+code. Focused CPU/CUDA/Vulkan checks compare original AOS/SOA nodes and numerical
+results, including source-free consumers, new dimensions and independent
+retirement. The original GeoPhys `resource_scope` factory also passes three-backend
+checks with explicit shared placement. This does not qualify the complete EFC/MPM
+resource closure. Nested records, conditional StructFields, member initialization
+overrides and complete Host element access remain pending.
 
 ## Remaining shared mechanisms
 

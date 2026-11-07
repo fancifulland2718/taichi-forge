@@ -16,6 +16,197 @@ from taichi_forge._lib import utils
 from tests import test_utils
 from taichi_forge_runtime.aot import Runtime, load_package
 
+STRUCT_FIELDS_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+Particle = ti.types.struct(mass=ti.f32, position=ti.types.vector(3, ti.f32), tag=ti.i32)
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        count = scope.dim('n')
+        scope.particles = scope.struct_field(Particle.members, shape=count, layout=ti.Layout.LAYOUT)
+        scope.total = scope.field(ti.f32, shape=())
+
+    @ti.kernel
+    def initialize(self, gain: ti.f32):
+        for i in self.particles:
+            self.particles[i] = Particle(gain * (i + 1), ti.Vector([i, i+1, i+2]), i)
+
+    @ti.kernel
+    def step(self, delta: ti.f32):
+        for i in self.particles:
+            self.particles.mass[i] += delta
+            self.particles.position[i] += ti.Vector([delta, 0.0, 0.0])
+        self.total[None] = self.particles.mass[0]
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'delta', ti.f32))
+        return builder.compile()
+"""
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_struct_constructor_type_is_a_compiler_dependency(tmp_path, monkeypatch):
+    from taichi_forge.aot._component import Component
+    from taichi_forge_runtime.aot import Scalar
+
+    _source_package(
+        tmp_path,
+        monkeypatch,
+        """
+import taichi_forge as ti
+Packet = ti.types.struct(x=ti.i32)
+class Model:
+    pass
+@ti.kernel
+def convert(value: ti.f32) -> ti.f32:
+    return Packet(value).x
+""",
+    )
+    source = sys.modules["definition_fixture.model"]
+    environment = Component()
+    first = environment.compile(source.convert, 1.75)
+    source.Packet = ti.types.struct(x=ti.f32)
+    second = environment.compile(source.convert, 1.75)
+    assert first.semantic_key != second.semantic_key
+    assert environment.compile(source.convert, 9.25) is second
+    module = ti.aot.Module()
+    first.export(module, "integer")
+    second.export(module, "floating")
+    path = tmp_path / "types.tcm"
+    module.archive(str(path))
+    with Runtime("cpu") as runtime, runtime.load_module(path) as loaded:
+        assert loaded.kernel("integer").run(Scalar("f32", 1.75)) == 1.0
+        assert loaded.kernel("floating").run(Scalar("f32", 1.75)) == 1.75
+
+
+@pytest.mark.parametrize(
+    "change,diagnostic",
+    [
+        ("nested", "flat scalar/vector/matrix"),
+        ("dynamic_layout", "original AOS/SOA"),
+        ("explicit_soa", "original AOS"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_struct_fields_reject_unproven_layouts(tmp_path, monkeypatch, change, diagnostic):
+    source = STRUCT_FIELDS_SOURCE.replace("LAYOUT", "AOS")
+    if change == "nested":
+        source = source.replace("tag=ti.i32", "tag=ti.types.struct(code=ti.i32)")
+    elif change == "dynamic_layout":
+        source = source.replace("layout=ti.Layout.AOS", "layout=self.layout")
+    else:
+        source = source.replace(
+            "scope = ti.experimental.ResourceScope(self)",
+            "fields = ti.FieldsBuilder()\n        scope = ti.experimental.ResourceScope(self, builder=fields)",
+        )
+        source = source.replace("layout=ti.Layout.AOS", "layout=ti.Layout.SOA")
+        source = source.replace(
+            "scope.total = scope.field(ti.f32, shape=())",
+            "scope.total = scope.field(ti.f32, shape=())\n        self.tree = fields.finalize()",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises((ValueError, ti.aot.PackageExportError), match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
+@pytest.mark.parametrize("layout", ["AOS", "SOA"])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_struct_fields_keep_original_layout_and_member_paths(tmp_path, monkeypatch, layout):
+    from tests.python.test_aot_dense_snode_group import _compiled_nodes
+
+    source = STRUCT_FIELDS_SOURCE.replace("LAYOUT", layout)
+    if layout == "SOA":
+        source = source.replace(
+            "Particle = ti.types.struct(mass=ti.f32, position=ti.types.vector(3, ti.f32), tag=ti.i32)",
+            "@ti.dataclass\nclass Particle:\n    mass: ti.f32\n    position: ti.types.vector(3, ti.f32)\n    tag: ti.i32",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 14
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["field_groups"]) == 1
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        # Vulkan emits the loop and trailing serial task of step separately.
+        assert len([item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]) == (
+            4 if ti.cfg.arch == ti.vulkan else 3
+        )
+    original = package.Model(7)
+    original.initialize(2.0)
+    original.step(3.0)
+    expected = original.particles.to_numpy()
+    root = ti.lang.impl.get_runtime().prog.get_snode_root(original.total.snode.ptr.get_snode_tree_id())
+    nodes = _compiled_nodes(root)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        a, b = loaded.host.Model(7), loaded.host.Model(19)
+        assert a.total._group_owner.layout["nodes"] == nodes
+        assert a.particles.mass._group_owner is a.particles.position._group_owner is a.total._group_owner
+        assert a.total._group_owner is not b.total._group_owner
+        a.initialize(2.0)
+        b.initialize(-1.0)
+        prepared = a.graph().bind({"delta": 3.0})
+        prepared.run()
+        for name, array in a.particles.to_numpy().items():
+            np.testing.assert_array_equal(array, expected[name])
+        before = b.particles.to_numpy()
+        a.particles.from_numpy({name: np.zeros_like(array) for name, array in expected.items()})
+        np.testing.assert_array_equal(a.particles.mass.to_numpy(), 0)
+        for name, array in b.particles.to_numpy().items():
+            np.testing.assert_array_equal(array, before[name])
+        a.total._group_owner.close()
+        with pytest.raises((RuntimeError, ValueError)):
+            a.step(1.0)
+        b.step(2.0)
+        np.testing.assert_array_equal(b.particles.mass.to_numpy(), 1 - np.arange(19))
+    probe = tmp_path / "consume_struct_fields.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as loaded:
+            a, b = loaded.host.Model(3), loaded.host.Model(19)
+            a.initialize(2.0)
+            b.initialize(-1.0)
+            a.graph().bind({'delta': 4.0}).run()
+            np.testing.assert_array_equal(a.particles.mass.to_numpy(), [6, 8, 10])
+            np.testing.assert_array_equal(b.particles.mass.to_numpy(), -np.arange(1,20))
+        print('STRUCT_FIELDS_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "STRUCT_FIELDS_OK" in result.stdout
+
+
 SOURCE = """
 import taichi_forge as ti
 from .device_helpers import scale
@@ -2479,9 +2670,7 @@ def test_package_optional_fields_reuse_explicit_and_negated_presence(tmp_path, m
     constructor = source.index("class Model(Always)")
     source = source[:constructor] + source[constructor:].replace(
         "        if first:", "        scope.static('first', choices=(False, True))\n        if not self.first:"
-    ).replace(
-        "        if second:", "        scope.static('second', choices=(False, True))\n        if self.second:"
-    )
+    ).replace("        if second:", "        scope.static('second', choices=(False, True))\n        if self.second:")
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert manifest["version"] == 13

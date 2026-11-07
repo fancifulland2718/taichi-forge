@@ -22,7 +22,7 @@ def qualified_kind(node, kind):
     return result
 
 
-def resolve_type(node, namespace, *, allow_ndarray=False):
+def resolve_type(node, namespace, *, allow_ndarray=False, allow_members=False):
     """Resolve only fixed type declarations; do not execute application factories."""
     import taichi_forge as ti
 
@@ -31,6 +31,10 @@ def resolve_type(node, namespace, *, allow_ndarray=False):
             return expression.value
         if isinstance(expression, (ast.Tuple, ast.List)):
             return tuple(value(item) for item in expression.elts)
+        if allow_members and isinstance(expression, ast.Dict):
+            if any(not isinstance(key, ast.Constant) or type(key.value) is not str for key in expression.keys):
+                raise ValueError("Struct Field members require literal names")
+            return {key.value: value(item) for key, item in zip(expression.keys, expression.values)}
         if isinstance(expression, ast.Name):
             defaults = dict(int=ti.i32, float=ti.f32, bool=ti.i32)
             if expression.id in defaults and expression.id not in namespace:
@@ -38,6 +42,8 @@ def resolve_type(node, namespace, *, allow_ndarray=False):
             return namespace[expression.id]
         if isinstance(expression, ast.Attribute):
             parent = value(expression.value)
+            if allow_members and isinstance(parent, ti.lang.struct.StructType) and expression.attr == "members":
+                return parent.members
             if not isinstance(parent, ModuleType):
                 raise ValueError("Type paths must use module attributes")
             return inspect.getattr_static(parent, expression.attr)
@@ -54,6 +60,8 @@ def resolve_type(node, namespace, *, allow_ndarray=False):
         raise ValueError("Type declarations require fixed names, constants or builtin factories")
 
     result = value(node)
+    if allow_members and type(result) is dict:
+        result = ti.types.struct(**result)
     if allow_ndarray and isinstance(result, ti.types.ndarray):
         return result
     describe_element_type(result)  # Reject arbitrary Host objects.

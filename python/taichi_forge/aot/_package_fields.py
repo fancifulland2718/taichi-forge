@@ -10,6 +10,7 @@ def field_type_shape(call, role, module, fail):
         "field": ("dtype", "shape"),
         "Vector.field": ("n", "dtype", "shape"),
         "Matrix.field": ("n", "m", "dtype", "shape"),
+        "Struct.field": ("members", "shape"),
     }[role]
     if len(call.args) > len(names) or any(k.arg not in names for k in call.keywords):
         fail(module, call, "Package Field declarations currently require plain default AOS layout")
@@ -20,8 +21,8 @@ def field_type_shape(call, role, module, fail):
         args[keyword.arg] = keyword.value
     if not set(names) <= args.keys():
         fail(module, call, "Field declaration requires its type dimensions, dtype and shape")
-    dtype = args["dtype"]
-    if role != "field":
+    dtype = args["members"] if role == "Struct.field" else args["dtype"]
+    if role in ("Vector.field", "Matrix.field"):
         factory = "_forge_package_vector" if role == "Vector.field" else "_forge_package_matrix"
         dimensions = [args["n"]] + ([args["m"]] if role == "Matrix.field" else [])
         dtype = ast.Call(ast.Name(factory, ast.Load()), [*dimensions, dtype], [])
@@ -115,7 +116,7 @@ def field_declarations(module, constructor, kind, fail):
 def construct_fields(owner, schema, namespace, module, *, imported_modules=None):
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
-    from ._component import DenseField, Dimension, _ConditionalDenseField
+    from ._component import DenseField, Dimension, Record, _ConditionalDenseField
     from taichi_forge_runtime._dimensions import evaluate_extent
 
     fields = dict(
@@ -145,9 +146,17 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
                 "_forge_package_vector": ti.types.vector,
                 "_forge_package_matrix": ti.types.matrix,
             },
+            allow_members=item.get("struct_field", False),
         )
         item["element"] = type_spec(dtype, module)
-        if item["element"]["kind"] not in ("scalar", "tensor"):
+        if item.get("struct_field"):
+            if (
+                item["element"]["kind"] != "struct"
+                or not item["element"]["members"]
+                or any(part["kind"] not in ("scalar", "tensor") for part in item["element"]["members"].values())
+            ):
+                raise ValueError("Package Struct Field requires flat scalar/vector/matrix members")
+        elif item["element"]["kind"] not in ("scalar", "tensor"):
             raise ValueError("Package Field declaration currently requires scalar/vector/matrix elements")
         concrete = []
         for extent in item["shape"]:
@@ -182,7 +191,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         if kind == "placement":
             placements[position] = builder.dense(axes, tuple(concrete))
             continue
-        value = ti.field(dtype)
+        value = ti.Struct.field(dtype.members) if item.get("struct_field") else ti.field(dtype)
         # This is the documented default field(shape=...) placement through the
         # ordinary builder. Native capture verifies the complete group below.
         # Even shape=() uses the ordinary factory's empty-axis Dense node.
@@ -191,17 +200,46 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         parent = (
             placements[tuple(item["placement"]["declaration"])]
             if "placement" in item
-            else builder.dense(axes, tuple(concrete))
+            else None if item.get("layout") == "SOA" else builder.dense(axes, tuple(concrete))
         )
-        parent.place(value)
+        if item.get("layout") == "SOA":
+            for member in value.field_dict.values():
+                builder.dense(axes, tuple(concrete)).place(member)
+        else:
+            parent.place(value)
         setattr(owner, name, value)
         declarations[name] = (
-            _ConditionalDenseField(dtype, tuple(item["shape"]), group, tuple(sorted(item["conditions"].items())))
-            if item.get("conditions")
-            else DenseField(dtype, tuple(item["shape"]), group)
+            Record(
+                **{
+                    member: DenseField(element, tuple(item["shape"]), group)
+                    for member, element in dtype.members.items()
+                }
+            )
+            if item.get("struct_field")
+            else (
+                _ConditionalDenseField(dtype, tuple(item["shape"]), group, tuple(sorted(item["conditions"].items())))
+                if item.get("conditions")
+                else DenseField(dtype, tuple(item["shape"]), group)
+            )
         )
     owner._forge_package_field_trees = [builder._finalize_for_aot() for builder in builders.values()]
     return declarations
+
+
+def field_environment(declarations, schema):
+    """Retain the allocation scope of record dimensions, as from_owner does."""
+    from ._component import Component, DenseField, _capture_id
+
+    environment = Component(**declarations)
+    flattened = dict(environment.declarations)
+    for name, item in schema.items():
+        if item.get("struct_field"):
+            for member in item["element"]["members"]:
+                identity = _capture_id((name, member))
+                original = flattened[identity]
+                flattened[identity] = DenseField(original.dtype, tuple(item["shape"]), original.group)
+    environment._set_declarations(flattened)
+    return environment
 
 
 def field_allocation(owner_key, name, schema):

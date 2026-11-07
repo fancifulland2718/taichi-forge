@@ -19,6 +19,7 @@ import sys
 from types import SimpleNamespace
 
 from ._runtime import Scalar
+from ._package_values import StructField, capture_value
 from .._dimensions import Extent, evaluate_extent
 from .._static_values import read_static_key, static_key
 
@@ -206,7 +207,8 @@ class _ModuleBinding:
         elif selected[0] != selection:
             raise ValueError("Conditional layout configuration changed during construction")
         contract = selected[1]
-        if name not in contract["members"]:
+        member_ids = member.get("member_ids", {name: name})
+        if any(identity not in contract["members"] for identity in member_ids.values()):
             raise ValueError("Field allocation contradicts its declared static layout condition")
         dimensions = {key: value for key, value in dimensions.items() if key in contract["dimensions"]}
         if dimensions.keys() != set(contract["dimensions"]):
@@ -229,13 +231,18 @@ class _ModuleBinding:
             group, original = previous
             if original != dimensions:
                 raise ValueError("Field group dimensions changed during construction")
-        element = member["element"]
-        value = group.member(contract["members"][name], element["dtype"], element_shape=element["element_shape"])
-        self.package._arrays.append(value)
-        allocated.append(value)
+        values = {}
+        for attribute, identity in member_ids.items():
+            element = member["element"]["members"][attribute] if member.get("struct_field") else member["element"]
+            value = group.member(
+                contract["members"][identity], element["dtype"], element_shape=element["element_shape"]
+            )
+            self.package._arrays.append(value)
+            allocated.append(value)
+            values[attribute] = value
         for attribute in declared_members:
             owner._forge_package_member_layouts[attribute] = selection
-        return value
+        return StructField(values) if member.get("struct_field") else values[name]
 
     def placement(self, owner, shape):
         shape = shape if isinstance(shape, tuple) else (shape,)
@@ -482,7 +489,7 @@ class entry:
             for item in contract["arguments"]
         ]
         for item in contract["captures"]:
-            value = getattr(owner, item["name"])
+            value = capture_value(owner, item)
             arguments.append(
                 Scalar(item["dtype"], value)
                 if item["kind"] in ("value", "dimension") and not item.get("element_shape")
@@ -546,7 +553,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

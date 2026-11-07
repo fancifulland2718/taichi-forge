@@ -169,7 +169,7 @@ Host 的 `ti.Vector`/`ti.Matrix` 构造（含 import 别名）、固定张量类
 装饰器内的数值矩阵运算继续由原编译器处理。三后端局部检查覆盖捕获、复合参数、
 独立状态及无源码消费。
 
-Graph 捕获及相关 Host 支持使用清单版本 9，当前消费者读取版本 1–13。函数内前端导入、
+Graph 捕获及相关 Host 支持使用清单版本 9，当前消费者读取版本 1–14。函数内前端导入、
 `ti.sync()` 和 Runtime program 身份查询均投影到现有 Runtime，不导入编译器。
 逻辑 `types.vector/matrix` 工厂接受 Host 维度/dtype，不分配设备存储。
 `NdArray.from_numpy/to_numpy` 复用原生传输并检查形状，包括 Dense 成员视图；Struct
@@ -243,6 +243,19 @@ CPU/CUDA/Vulkan 局部检查覆盖两独立开关、关闭分支的无效但未�
 两个数值变体，保留正常 `clear`、`resize`、`read_resources`，并对照原 JIT 的局部清零与未覆盖区域。
 导出时禁止原构造器执行，消费进程禁止原应用/编译前端导入；新尺寸和独立实例通过。
 这只资格 GBuffer 的此路径，不等于整个渲染器或全引擎 wheel 已完成。
+
+版本 14 接入已有 `scope.struct_field` 的扁平标量/向量/矩阵记录，成员类型可来自
+字面量字典或原 StructType 的 `.members`。隐式组支持原 AOS/SOA；显式 builder/共享
+placement 保留原 API 的 AOS 限制。记录成员的维度仍属于分配 scope，原 Record/DenseField
+捕获处理整体索引、遍历和成员访问；消费端按原字段路径绑定，不拆成独立 Ndarray。
+物理节点、offset、stride 继续由原生 SNode 布局规则决定。
+
+Host 记录提供成员属性、shape 和字典式 `to_numpy/from_numpy`，委托既有原生成员传输。
+已导出入口的 Graph 绑定同样保留成员路径和实例租约。直接使用的 Struct 类型构造器进入
+编译依赖检查，成员类型变化不能误用旧代码。CPU/CUDA/Vulkan 局部检查对照 AOS/SOA 的
+原 JIT 节点与数值，并验证无源码进程、新尺寸和独立退休；GeoPhys 原 `resource_scope`
+工厂的显式共享 placement 同样通过三后端检查。这不表示 EFC/MPM 的完整资源闭包已接入。
+嵌套记录、条件 StructField、逐成员初始化覆盖及完整 Host 元素访问仍待接入。
 
 ## 仍需补齐的共同机制
 

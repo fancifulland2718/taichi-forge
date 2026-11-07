@@ -19,7 +19,7 @@ from types import ModuleType, SimpleNamespace
 
 from taichi_forge.tools._compiled_host import decorator_resolver
 from ._package_types import qualified_kind, resolve_type, type_expression, type_spec
-from ._package_fields import field_declarations, construct_fields, field_allocation
+from ._package_fields import field_declarations, construct_fields, field_allocation, field_environment
 from ._package_sources import collect_sources
 from ._package_owners import resolve_owners
 from ._package_errors import is_error_interface, project_error_interface
@@ -866,7 +866,9 @@ def export_package(package, output, *, arch=None, source_root=None):
                     declarations[attribute] = RuntimeValue(dtype)
                     value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
                 setattr(owner, attribute, value)
-            owners[class_name], environments[class_name] = owner, Component(**declarations)
+            owners[class_name], environments[class_name] = owner, field_environment(declarations, schema)
+            if any(item.get("struct_field") for item in schema.values()):
+                manifest["version"] = max(14, manifest["version"])
             if any(item.get("optional_presence") for item in schema.values()):
                 manifest["version"] = max(13, manifest["version"])
             manifest["owners"][name + "." + class_name] = {
@@ -899,24 +901,31 @@ def export_package(package, output, *, arch=None, source_root=None):
                     layout, members, dimensions, _ = _dense_group(environments[class_name], owner, group)
                     key = owner_key if group == "fields" else owner_key + ":" + group
                     manifest["field_groups"][key] = dict(schema=layout, members=members, dimensions=sorted(dimensions))
+                    member_schemas = {
+                        attribute: schema[environments[class_name]._paths[attribute][0]] for attribute in members
+                    }
                     conditions = {
-                        attribute: schema[attribute]["conditions"]
+                        attribute: member_schemas[attribute]["conditions"]
                         for attribute in members
-                        if schema[attribute].get("conditions")
+                        if member_schemas[attribute].get("conditions")
                     }
                     if conditions:
                         manifest["field_groups"][key]["conditions"] = conditions
                         containers = {
-                            tuple(members[attribute][0][:-1]): schema[attribute]["placement"]["conditions"]
+                            tuple(members[attribute][0][:-1]): member_schemas[attribute]["placement"]["conditions"]
                             for attribute in members
-                            if "placement" in schema[attribute]
+                            if "placement" in member_schemas[attribute]
                         }
                         manifest["field_groups"][key]["containers"] = [
                             dict(path=list(path), conditions=guard) for path, guard in sorted(containers.items())
                         ]
                         manifest["version"] = max(12, manifest["version"])
                     for attribute in members:
-                        manifest["owners"][owner_key][attribute]["field_group"] = key
+                        path = environments[class_name]._paths[attribute]
+                        item = manifest["owners"][owner_key][path[0]]
+                        item["field_group"] = key
+                        if len(path) > 1:
+                            item.setdefault("member_ids", {})[path[1]] = attribute
         entries = {}
         for definition in definitions:
             if (
@@ -1004,6 +1013,11 @@ def export_package(package, output, *, arch=None, source_root=None):
                     capture = [
                         {
                             "name": capture_name,
+                            **(
+                                {"path": list(environment._paths[capture_name])}
+                                if len(environment._paths[capture_name]) > 1
+                                else {}
+                            ),
                             "kind": schema[0],
                             "dtype": schema[1],
                             **({"element_shape": list(schema[2])} if schema[0] == "value" and schema[2] else {}),
