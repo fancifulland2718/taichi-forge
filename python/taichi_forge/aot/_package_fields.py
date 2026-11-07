@@ -167,18 +167,36 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         typed.append((name, item, dtype, concrete, axes))
     # Expected type/rank/extent rejection must not leave an unfinalized
     # FieldsBuilder behind and poison the caller's otherwise valid JIT.
-    builder = ti.FieldsBuilder()
+    builders, placements, events = {}, {}, {}
     for name, item, dtype, concrete, axes in typed:
+        group = item.get("group", "fields")
+        if group not in builders:
+            builders[group] = ti.FieldsBuilder()
+        events[tuple(item["allocation"])] = ("field", name, item, dtype, concrete, axes)
+        if "placement" in item:
+            event = item["placement"]
+            events[tuple(event["declaration"])] = ("placement", name, item, dtype, concrete, axes)
+    for position, (kind, name, item, dtype, concrete, axes) in sorted(events.items()):
+        group = item.get("group", "fields")
+        builder = builders[group]
+        if kind == "placement":
+            placements[position] = builder.dense(axes, tuple(concrete))
+            continue
         value = ti.field(dtype)
         # This is the documented default field(shape=...) placement through the
         # ordinary builder. Native capture verifies the complete group below.
         # Even shape=() uses the ordinary factory's empty-axis Dense node.
         # Placing a tensor directly at root would split its lanes into separate
         # implicit nodes, unlike Matrix.field(shape=())'s one packed element.
-        builder.dense(axes, tuple(concrete)).place(value)
+        parent = (
+            placements[tuple(item["placement"]["declaration"])]
+            if "placement" in item
+            else builder.dense(axes, tuple(concrete))
+        )
+        parent.place(value)
         setattr(owner, name, value)
-        declarations[name] = DenseField(dtype, tuple(item["shape"]), "fields")
-    owner._forge_package_field_tree = builder._finalize_for_aot()
+        declarations[name] = DenseField(dtype, tuple(item["shape"]), group)
+    owner._forge_package_field_trees = [builder._finalize_for_aot() for builder in builders.values()]
     return declarations
 
 
@@ -186,7 +204,7 @@ def field_allocation(owner_key, name, schema):
     sources = {
         key: expression
         for item in schema.values()
-        if item["kind"] == "dense_field"
+        if item["kind"] == "dense_field" and item.get("group", "fields") == schema[name].get("group", "fields")
         for key, expression in item["dimension_sources"].items()
     }
     dimensions = sorted(sources)
@@ -200,5 +218,9 @@ def field_allocation(owner_key, name, schema):
                 [ast.parse(sources[key], mode="eval").body for key in dimensions],
             ),
         ],
-        [],
+        (
+            [ast.keyword("placement", ast.Name(schema[name]["placement_alias"], ast.Load()))]
+            if "placement_alias" in schema[name]
+            else []
+        ),
     )

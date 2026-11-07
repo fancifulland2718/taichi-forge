@@ -140,7 +140,7 @@ Producer 与消费者复用同一个 `Extent`/求值实现，不执行模型准�
 零维张量保留正常 JIT 的空轴 Dense 节点。CPU/CUDA/Vulkan 对照原 JIT 的所有布局节点，
 并检查数值、0/3/7/19 等新计数、独立状态及无源码消费。声明计数可为零，Field 的实际
 extent 仍须合法；当前结构见证不能满足的表达式明确拒绝，不运行模型求样本。
-显式 FieldsBuilder/Sparse 布局、条件或重绑定 scope、动态属性名、scope 逃逸和静态域
+原始 SNode/Sparse 布局、条件或重绑定 scope、动态属性名、scope 逃逸和静态域
 仍未接入；不支持的声明在发布包前明确拒绝。
 
 构造函数中可由所选后端证明的条件（`ti.cfg.arch` 或
@@ -169,7 +169,7 @@ Host 的 `ti.Vector`/`ti.Matrix` 构造（含 import 别名）、固定张量类
 装饰器内的数值矩阵运算继续由原编译器处理。三后端局部检查覆盖捕获、复合参数、
 独立状态及无源码消费。
 
-Graph 捕获及相关 Host 支持使用清单版本 9，消费者读取版本 1–9。函数内前端导入、
+Graph 捕获及相关 Host 支持使用清单版本 9，当前消费者读取版本 1–10。函数内前端导入、
 `ti.sync()` 和 Runtime program 身份查询均投影到现有 Runtime，不导入编译器。
 逻辑 `types.vector/matrix` 工厂接受 Host 维度/dtype，不分配设备存储。
 `NdArray.from_numpy/to_numpy` 复用原生传输并检查形状，包括 Dense 成员视图；Struct
@@ -180,6 +180,14 @@ Graph 捕获及相关 Host 支持使用清单版本 9，消费者读取版本 1�
 也不阻止原 Graph recorder 引用已加载入口。其他未投影前端 API 继续拒绝。
 三后端局部检查覆盖两实例交错 Graph、绑定快照、私有标量作用域、外来 owner 拒绝，
 以及记录/重放前后代码资产不变。
+
+局部显式 `FieldsBuilder()`、`ResourceScope(self, builder=...)` 和一次无条件 `finalize()`
+现使用清单版本 10。`scope.dense` 的常规有序轴放置保留共同 cell 和原节点顺序；不同
+builder 保留各自原生组 schema，同一 owner 维度可供多个组使用。构造期间检查放置尺寸
+快照和共享维度一致性；保留树的 `destroy()` 只退休对应原生资源族，其他组和实例仍独立。
+不执行应用构造/数值计算发现声明。builder/placement 逃逸、原始 SNode 构建和动态 Sparse
+仍拒绝。三后端局部检查逐节点对照 JIT 布局并独立无源码消费；本次 Vulkan AOT 目标拒绝
+f64，因此 Vulkan 用 f32 验证相同布局路径，CPU/CUDA 保留 f64 检查。
 
 ## 仍需补齐的共同机制
 

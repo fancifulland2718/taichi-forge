@@ -254,6 +254,22 @@ def _host_projection(
         def _allocation(self, node):
             target = node.targets[0] if isinstance(node, ast.Assign) else node.target
             schema = owners.get(self.owner, {})
+            placement = next(
+                (
+                    item["placement"]
+                    for item in schema.values()
+                    if item.get("placement", {}).get("declaration") == [node.lineno, node.col_offset]
+                ),
+                None,
+            )
+            if placement is not None:
+                self.minimum_version = max(self.minimum_version, 10)
+                node.value = ast.Call(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "placement", ast.Load()),
+                    [ast.Name("self", ast.Load()), ast.parse(placement["expression"], mode="eval").body],
+                    [],
+                )
+                return node
             if (
                 isinstance(target, ast.Attribute)
                 and isinstance(target.value, ast.Name)
@@ -522,6 +538,24 @@ def _host_projection(
             return node
 
         def visit_Call(self, node):
+            for item in owners.get(self.owner, {}).values():
+                if item.get("group_builder", {}).get("allocation") == [
+                    getattr(node, "lineno", None),
+                    getattr(node, "col_offset", None),
+                ]:
+                    self.minimum_version = max(self.minimum_version, 10)
+                    return ast.copy_location(
+                        ast.Call(
+                            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "group_builder", ast.Load()),
+                            [
+                                ast.Name("self", ast.Load()),
+                                ast.Constant(module + "." + self.owner),
+                                ast.Constant(item["group"]),
+                            ],
+                            [],
+                        ),
+                        node,
+                    )
             role = qualified_kind(node, kind)
             if role in ("types.vector", "types.matrix"):
                 self.minimum_version = max(self.minimum_version, 9)
@@ -536,7 +570,6 @@ def _host_projection(
             if qualified_kind(node, kind) == "experimental.ResourceScope":
                 if (
                     len(node.args) == 1
-                    and not node.keywords
                     and isinstance(node.args[0], ast.Name)
                     and node.args[0].id == "self"
                     and any(
@@ -812,6 +845,9 @@ def export_package(package, output, *, arch=None, source_root=None):
                         "declaration_owner",
                         "value_declaration",
                         "scope_allocation",
+                        "group_builder",
+                        "placement",
+                        "placement_alias",
                     )
                 }
                 for attribute, item in schema.items()
@@ -819,10 +855,15 @@ def export_package(package, output, *, arch=None, source_root=None):
             if any(item["kind"] == "dense_field" for item in schema.values()):
                 from ._component import _dense_group
 
-                layout, members, dimensions, _ = _dense_group(environments[class_name], owner, "fields")
-                manifest["field_groups"][name + "." + class_name] = dict(
-                    schema=layout, members=members, dimensions=sorted(dimensions)
-                )
+                owner_key = name + "." + class_name
+                for group in sorted(
+                    {item.get("group", "fields") for item in schema.values() if item["kind"] == "dense_field"}
+                ):
+                    layout, members, dimensions, _ = _dense_group(environments[class_name], owner, group)
+                    key = owner_key if group == "fields" else owner_key + ":" + group
+                    manifest["field_groups"][key] = dict(schema=layout, members=members, dimensions=sorted(dimensions))
+                    for attribute in members:
+                        manifest["owners"][owner_key][attribute]["field_group"] = key
         entries = {}
         for definition in definitions:
             if (

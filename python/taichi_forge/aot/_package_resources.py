@@ -13,6 +13,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
     if constructor is None:
         return {}
     scopes, declarations, allowed = {}, {}, set()
+    scope_groups, builders = {}, {}
     for statement in ast.walk(constructor):
         if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
             continue
@@ -28,8 +29,64 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             and call.args[0].id == "self"
         ):
             fail(module, statement, "Package ResourceScope requires one unconditional local scope for self")
-        if call.keywords:
-            fail(module, call, "Explicit ResourceScope builders/initialization require further package support")
+        keywords = {item.arg: item.value for item in call.keywords}
+        if len(keywords) != len(call.keywords) or set(keywords) - {"builder", "initialization"}:
+            fail(module, call, "ResourceScope requires explicit builder/initialization arguments")
+        policy = keywords.get("initialization", ast.Constant("consumer_explicit"))
+        if not isinstance(policy, ast.Constant) or policy.value not in ("consumer_explicit", "zero"):
+            fail(module, policy, "ResourceScope initialization requires its zero/consumer_explicit policy")
+        builder = keywords.get("builder")
+        if builder is not None:
+            if not isinstance(builder, ast.Name):
+                fail(module, builder, "ResourceScope builder requires a single local FieldsBuilder")
+            allocations = [
+                n
+                for n in constructor.body
+                if isinstance(n, ast.Assign)
+                and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Name)
+                and n.targets[0].id == builder.id
+                and isinstance(n.value, ast.Call)
+                and qualified_kind(n.value, kind) == "FieldsBuilder"
+            ]
+            if len(allocations) != 1 or allocations[0].value.args or allocations[0].value.keywords:
+                fail(module, builder, "ResourceScope builder requires one unconditional FieldsBuilder allocation")
+            allocation = allocations[0]
+            uses = [n for n in ast.walk(constructor) if isinstance(n, ast.Name) and n.id == builder.id]
+            finalizers = [
+                n
+                for n in constructor.body
+                if isinstance(n, (ast.Expr, ast.Assign))
+                and isinstance(n.value, ast.Call)
+                and isinstance(n.value.func, ast.Attribute)
+                and isinstance(n.value.func.value, ast.Name)
+                and n.value.func.value.id == builder.id
+                and n.value.func.attr == "finalize"
+                and not n.value.args
+                and not n.value.keywords
+            ]
+            if len(finalizers) != 1 or not allocation.lineno < statement.lineno < finalizers[0].lineno:
+                fail(module, call, "Declared FieldsBuilder must finalize once after its resource scopes")
+            finalize = finalizers[0].value
+            accepted = {id(allocation.targets[0]), id(finalize.func.value)}
+            accepted.update(
+                id(k.value)
+                for n in ast.walk(constructor)
+                if isinstance(n, ast.Call) and qualified_kind(n, kind) == "experimental.ResourceScope"
+                for k in n.keywords
+                if k.arg == "builder" and isinstance(k.value, ast.Name) and k.value.id == builder.id
+            )
+            if any(id(n) not in accepted for n in uses):
+                fail(
+                    module,
+                    call,
+                    "Explicit ResourceScope builders/initialization require further package support: "
+                    "raw SNode construction or escaping/reassigned builders",
+                )
+            builders["builder_" + builder.id] = dict(
+                allocation=[allocation.value.lineno, allocation.value.col_offset],
+                finalization=[finalize.lineno, finalize.col_offset],
+            )
         scope = statement.targets[0].id
         if (
             sum(
@@ -40,6 +97,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         ):
             fail(module, statement, "Package ResourceScope aliases must not be reassigned")
         scopes[scope] = statement
+        scope_groups[scope] = "builder_" + builder.id if builder is not None else "fields"
     if not scopes:
         return {}
 
@@ -55,6 +113,10 @@ def scope_declarations(module, constructor, kind, fail, namespace):
 
     def add(name, spec, node):
         existing = declarations.get(name)
+        if existing is not None and existing["kind"] == spec["kind"] == "dimension":
+            # Two explicit groups may use the same owner count. Provenance of
+            # its declaration does not create a different dimension value.
+            return
         if existing is not None and existing != spec:
             fail(module, node, f"Conflicting or repeated ResourceScope role for {name!r}")
         declarations[name] = spec
@@ -63,7 +125,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         call = scopes[scope].value
         return [call.lineno, call.col_offset]
 
-    aliases = {}
+    aliases, placements = {}, {}
     stores = {n.arg: 1 for n in ast.walk(constructor.args) if isinstance(n, ast.arg)}
     member_stores = {}
     for node in ast.walk(constructor):
@@ -180,6 +242,37 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 ),
                 statement,
             )
+        elif method == "dense":
+            if not (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and stores[statement.targets[0].id] == 1
+                and len(call.args) == 2
+                and not call.keywords
+                and statement.lineno > scopes[scope].lineno
+                and (
+                    scope_groups[scope] not in builders
+                    or statement.lineno < builders[scope_groups[scope]]["finalization"][0]
+                )
+            ):
+                fail(module, statement, "Declared Dense placement requires one local alias and explicit axes/shape")
+            axes = qualified_kind(call.args[0], kind)
+            if axes not in ("i", "ij", "ijk", "ijkl"):
+                fail(module, call.args[0], "Declared Dense placement requires canonical ordered axes")
+            shape = dimension(call.args[1])
+            shape = (shape,) if isinstance(shape, Extent) else shape
+            if not isinstance(shape, tuple) or len(shape) != len(axes):
+                fail(module, call, "Declared Dense placement rank differs from its declared axes")
+            alias = statement.targets[0].id
+            placements[alias] = dict(
+                shape=shape,
+                group=scope_groups[scope],
+                axes=axes,
+                declaration=[statement.lineno, statement.col_offset],
+                expression=ast.unparse(call.args[1]),
+            )
+            allowed.add(id(call.func.value))
         elif method in ("field", "vector_field", "matrix_field"):
             targets = (
                 statement.targets
@@ -199,7 +292,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 allowed.add(id(target.value))
             allowed.add(id(call.func.value))
             normalized = copy.deepcopy(call)
-            normalized.keywords = [k for k in call.keywords if k.arg != "initialization"]
+            normalized.keywords = [k for k in call.keywords if k.arg not in ("initialization", "placement")]
             for keyword in call.keywords:
                 if keyword.arg == "initialization" and not (
                     isinstance(keyword.value, ast.Constant) and keyword.value.value in ("zero", "consumer_explicit")
@@ -225,6 +318,21 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 shape = (shape,)
             if not isinstance(shape, tuple):
                 fail(module, shape_node, "ResourceScope Field shape requires declared dimensions and their algebra")
+            group = scope_groups[scope]
+            if group in builders and statement.lineno >= builders[group]["finalization"][0]:
+                fail(module, statement, "Resource declaration follows FieldsBuilder finalization")
+            placement_node = original_args.get("placement")
+            placement = None
+            if placement_node is not None:
+                placement = placements.get(placement_node.id) if isinstance(placement_node, ast.Name) else None
+                if (
+                    placement is None
+                    or placement["group"] != group
+                    or placement["shape"] != shape
+                    or placement["declaration"][0] >= statement.lineno
+                ):
+                    fail(module, placement_node, "Field placement must retain its declared group and extent relations")
+                allowed.add(id(placement_node))
             extents, expressions, sources = [], {}, {}
             for extent in shape:
                 expression = extent.expression
@@ -248,6 +356,16 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     dimension_expressions=expressions,
                     allocation=[statement.lineno, statement.col_offset],
                     scope_allocation=origin(scope),
+                    group=group,
+                    **({"group_builder": builders[group]} if group in builders else {}),
+                    **(
+                        {
+                            "placement": {k: v for k, v in placement.items() if k != "shape"},
+                            "placement_alias": placement_node.id,
+                        }
+                        if placement is not None
+                        else {}
+                    ),
                 ),
                 statement,
             )
@@ -272,8 +390,18 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         if (
             isinstance(node, ast.Name)
             and isinstance(node.ctx, ast.Load)
+            and node.id in placements
+            and id(node) not in allowed
+        ):
+            fail(module, node, "Declared Dense placement may only be used by its scoped Field allocations")
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
             and node.id in scopes
             and id(node) not in allowed
         ):
             fail(module, node, "ResourceScope use requires an unconditional supported resource declaration")
+    for name, placement in placements.items():
+        if not any(item.get("placement_alias") == name for item in declarations.values()):
+            fail(module, constructor, "Unused Dense placement requires an explicit resource closure")
     return declarations

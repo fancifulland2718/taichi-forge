@@ -1610,7 +1610,7 @@ def test_package_resource_scope_values_preserve_compound_captures(tmp_path, monk
         ("if gain > 0:\n            scope.value('gain', ti.f32)", "unconditional supported resource declaration"),
         ("alias = scope\n        scope.value('gain', ti.f32)", "unconditional supported resource declaration"),
         ("scope = ti.experimental.ResourceScope(self)\n        scope.value('gain', ti.f32)", "must not be reassigned"),
-        ("scope.array = scope.field(ti.f32, shape=2, placement=None)", "default AOS layout"),
+        ("scope.array = scope.field(ti.f32, shape=2, placement=None)", "placement must retain"),
     ],
 )
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -1759,6 +1759,179 @@ def test_package_scope_fields_reject_unproven_dimensions_and_replacements(
         ti.aot.export_package(package, tmp_path / "sdk")
     assert not (tmp_path / "sdk").exists()
     assert sys.modules["definition_fixture.model"].constructors == 0
+
+
+EXPLICIT_GROUP_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, m: int):
+        global constructors
+        constructors += 1
+        self.n, self.m = n, m
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields, initialization='zero')
+        other = scope.dense(ti.i, scope.dim('m'))
+        cells = scope.dense(ti.i, scope.dim('n'))
+        scope.a = scope.field(ti.f32, shape=scope.dim('n'), placement=cells)
+        scope.v = scope.vector_field(2, ti.f64, shape=scope.dim('n'), placement=cells)
+        scope.extra = scope.field(ti.i32, shape=scope.dim('m'), placement=other)
+        self.tree = fields.finalize()
+        separate = ti.FieldsBuilder()
+        scalar = ti.experimental.ResourceScope(self, builder=separate)
+        scalar.total = scalar.field(ti.f32, shape=())
+        scalar.independent = scalar.field(ti.f32, shape=scalar.dim('n'))
+        self.scalar_tree = separate.finalize()
+        self.ordinary = ti.field(ti.i32, shape=1)
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.a:
+            self.a[i] = gain * i
+            self.v[i] = ti.Vector([i, gain])
+        for i in self.extra:
+            self.extra[i] = i + 9
+        self.total[None] = gain
+        self.ordinary[0] = 7
+
+    @ti.kernel
+    def summary(self, gain: ti.f32):
+        self.total[None] += gain
+
+    def destroy_fields(self):
+        self.tree.destroy()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_explicit_groups_preserve_placement_and_lifetime(tmp_path, monkeypatch):
+    from tests.python.test_aot_dense_snode_group import _compiled_nodes
+
+    # The current Vulkan AOT target does not enable f64; retain f64 coverage
+    # on LLVM and exercise the same placement/ownership rules with f32 there.
+    source = EXPLICIT_GROUP_SOURCE.replace("ti.f64", "ti.f32") if ti.cfg.arch == ti.vulkan else EXPLICIT_GROUP_SOURCE
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = package.Model(7, 3)
+    original.step(2.0)
+    expected = {name: getattr(original, name).to_numpy() for name in ("a", "v", "extra", "total", "ordinary")}
+    program = ti.lang.impl.get_runtime().prog
+    layouts = {
+        name: _compiled_nodes(program.get_snode_root(getattr(original, name).snode.ptr.get_snode_tree_id()))
+        for name in ("a", "total", "ordinary")
+    }
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 10
+    assert len(manifest["field_groups"]) == 3
+    assert sys.modules["definition_fixture.model"].constructors == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, 3), code.host.Model(19, 5)
+        for name, layout in layouts.items():
+            assert getattr(a, name)._group_owner.layout["nodes"] == layout
+        assert a.a._group_owner is a.v._group_owner is a.extra._group_owner
+        assert a.a._group_owner is not a.total._group_owner
+        a.step(2.0)
+        b.step(-1.0)
+        for name, data in expected.items():
+            np.testing.assert_array_equal(getattr(a, name).to_numpy(), data)
+        a.destroy_fields()
+        a.summary(3.0)
+        assert a.total.to_numpy().item() == 5.0
+        with pytest.raises(RuntimeError):
+            a.a.to_numpy()
+        b.step(-2.0)
+        np.testing.assert_array_equal(b.a.to_numpy(), -2 * np.arange(19))
+        registered = set(runtime._resources)
+        with pytest.raises((ValueError, RuntimeError)):
+            code.host.Model(0, 3)
+        assert set(runtime._resources) == registered
+    probe = tmp_path / "consume_explicit_groups.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3, 2), code.host.Model(19, 4)
+            a.step(2.)
+            b.step(-1.)
+            np.testing.assert_array_equal(a.a.to_numpy(), np.arange(3)*2)
+            a.destroy_fields()
+            a.summary(7.)
+            assert a.total.to_numpy().item() == 9.
+            np.testing.assert_array_equal(b.a.to_numpy(), -np.arange(19))
+        print('EXPLICIT_GROUPS_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "EXPLICIT_GROUPS_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "before,after,diagnostic",
+    [
+        ("placement=cells)", "placement=other)", "group and extent relations"),
+        (
+            "self.tree = fields.finalize()",
+            "leak = fields\n        self.tree = fields.finalize()",
+            "escaping/reassigned",
+        ),
+        ("self.tree = fields.finalize()", "self.tree = fields.finalize()\n        fields.finalize()", "finalize once"),
+        (
+            "cells = scope.dense(ti.i, scope.dim('n'))",
+            "cells = scope.dense(ti.j, scope.dim('n'))",
+            "canonical ordered axes",
+        ),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_explicit_groups_reject_ambiguous_ownership(tmp_path, monkeypatch, before, after, diagnostic):
+    package = _source_package(tmp_path, monkeypatch, EXPLICIT_GROUP_SOURCE.replace(before, after))
+    with pytest.raises(ti.aot.PackageExportError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
+@pytest.mark.parametrize(
+    "before,after,diagnostic",
+    [
+        ("scope.a =", "self.n += 1\n        scope.a =", "placement changed"),
+        ("scalar = ti.experimental", "self.n += 1\n        scalar = ti.experimental", "Shared dimension changed"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_explicit_placement_keeps_its_construction_snapshot(tmp_path, monkeypatch, before, after, diagnostic):
+    source = EXPLICIT_GROUP_SOURCE.replace(before, after)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        registered = set(runtime._resources)
+        with pytest.raises(ValueError, match=diagnostic):
+            code.host.Model(7, 3)
+        assert set(runtime._resources) == registered
 
 
 TARGET_FIELDS_SOURCE = """

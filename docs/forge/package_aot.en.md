@@ -193,7 +193,7 @@ tensors use the same empty-axis Dense node as ordinary JIT. CPU/CUDA/Vulkan chec
 compare every layout node with JIT, numerical outputs, new counts including 0/3/7/19,
 state isolation and source-free consumption. Counts may be zero; physical extents
 must remain legal. Expressions not satisfied by the current structural witness reject,
-rather than executing a model to obtain sample values. Explicit FieldsBuilder/Sparse
+rather than executing a model to obtain sample values. Raw SNode/Sparse
 layouts, conditional/reassigned scopes, dynamic attribute names, scope escapes and
 static domains remain unsupported and reject before publishing a package.
 
@@ -227,7 +227,7 @@ decorated definitions continue through the original compiler. Focused three-back
 checks cover captures, typed compound arguments, state isolation and source-free use.
 
 Graph capture projection and related Host support use manifest version 9; the
-consumer reads versions 1–9. Local frontend imports, `ti.sync()` and the Runtime
+consumer reads versions 1–10. Local frontend imports, `ti.sync()` and the Runtime
 program identity query are projected without importing the compiler. Logical
 `types.vector/matrix` factories accept Host dimensions/dtypes; they do not allocate
 device storage. `NdArray.from_numpy/to_numpy` use existing native transfers with
@@ -243,6 +243,18 @@ original Graph recorders with loaded entries. Other unprojected frontend APIs
 continue to reject. Focused three-backend checks cover interleaved instance Graphs,
 binding snapshots, scalar scopes, rejection of foreign owners and unchanged code
 assets after recording/replay.
+
+Explicit local `FieldsBuilder()` groups with `ResourceScope(self, builder=...)`
+and one unconditional `finalize()` use manifest version 10. Declared `scope.dense`
+placements on canonical ordered axes retain shared cells and original node order;
+independent builders retain independent native group schemas. The same owner count
+can supply multiple groups. Shape snapshots and shared-dimension checks reject
+changes during construction. A retained tree's `destroy()` retires only its native
+family, preserving other groups and instances. Builder/placement escapes, raw SNode
+construction and dynamic Sparse layouts still reject. No application constructor
+or numerical step runs to discover these declarations. Focused CPU/CUDA/Vulkan
+checks compare every layout node with JIT and consume independent source-free
+instances; the current Vulkan AOT target uses f32 here because it rejects f64.
 
 ## Remaining shared mechanisms
 

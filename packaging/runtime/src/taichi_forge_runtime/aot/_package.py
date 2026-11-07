@@ -183,32 +183,60 @@ class _ModuleBinding:
             raise ImportError("Definition packages cannot dynamically import the numerical frontend")
         return importlib.import_module(resolved)
 
-    def field(self, owner_key, name, dimensions):
+    def field(self, owner_key, name, dimensions, *, placement=None):
         self.package._check()
         construction = _construction.get()
         if construction is None or construction[0] is not self.package:
             raise ValueError("Field allocation requires its managed constructor")
         _, allocated, owner = construction
-        contract = self.package.manifest["field_groups"][owner_key]
+        member = self.package.manifest["owners"][owner_key][name]
+        group_key = member.get("field_group", owner_key)
+        contract = self.package.manifest["field_groups"][group_key]
         if dimensions.keys() != set(contract["dimensions"]):
             raise ValueError("Field group dimensions differ from its native schema")
-        previous = owner._forge_package_field_groups.get(owner_key)
+        expected_shape = tuple(dimensions[n] if isinstance(n, str) else n for n in member["shape"])
+        if placement is not None and tuple(placement) != expected_shape:
+            raise ValueError("Declared Dense placement changed before its Field allocation")
+        previous = owner._forge_package_field_groups.get(group_key)
         if previous is None:
+            for _, bindings in owner._forge_package_field_groups.values():
+                if any(bindings[key] != dimensions[key] for key in bindings.keys() & dimensions.keys()):
+                    raise ValueError("Shared dimension changed between resource groups")
             group = self.package.runtime.dense_snode_group(contract["schema"], dimensions)
             self.package._arrays.append(group)
             allocated.append(group)
-            owner._forge_package_field_groups[owner_key] = (group, dict(dimensions))
+            owner._forge_package_field_groups[group_key] = (group, dict(dimensions))
             for key, value in dimensions.items():
                 setattr(owner, key, value)
         else:
             group, original = previous
             if original != dimensions:
                 raise ValueError("Field group dimensions changed during construction")
-        element = self.package.manifest["owners"][owner_key][name]["element"]
+        element = member["element"]
         value = group.member(contract["members"][name], element["dtype"], element_shape=element["element_shape"])
         self.package._arrays.append(value)
         allocated.append(value)
         return value
+
+    def placement(self, owner, shape):
+        shape = shape if isinstance(shape, tuple) else (shape,)
+        dimensions = tuple(
+            (
+                evaluate_extent(n.expression, lambda key: getattr(owner, key))
+                if isinstance(n, Extent)
+                else operator.index(n)
+            )
+            for n in shape
+        )
+        if any(not 0 < n <= 2**31 - 1 for n in dimensions):
+            raise ValueError("Declared Dense placement extents must be positive i32 values")
+        return dimensions
+
+    def group_builder(self, owner, owner_key, group):
+        self.package._check()
+        if getattr(owner, "_forge_package_owner", None) is not self.package:
+            raise ValueError("Resource builder belongs to another loaded package")
+        return _GroupBuilder(owner, owner_key + ":" + group)
 
     def type(self, spec):
         if spec["kind"] == "ndarray_annotation":
@@ -241,6 +269,29 @@ class _ModuleBinding:
 
     def unbound_entry(self, definition):
         return _UnboundEntry(definition)
+
+
+class _GroupBuilder:
+    def __init__(self, owner, key):
+        self.owner, self.key, self.finalized = owner, key, False
+
+    def finalize(self):
+        if self.finalized:
+            raise RuntimeError("FieldsBuilder already finalized")
+        allocation = self.owner._forge_package_field_groups.get(self.key)
+        if allocation is None:
+            raise ValueError("Declared group finalized without its resource allocation")
+        self.finalized = True
+        return _FieldTree(allocation[0])
+
+
+@dataclass(frozen=True)
+class _FieldTree:
+    group: object
+
+    def destroy(self):
+        # The existing native family retirement revokes all member views.
+        self.group.close()
 
 
 class _ResourceScope:
@@ -393,7 +444,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")
