@@ -359,6 +359,14 @@ a new extent of 129. Automatic lowering of original `field[i][j]` syntax,
 dynamic local tensor values and package model-dimension inference still need
 integration; this foundation is not complete dynamic TensorType support.
 
+`capture_tensor_members` also returns producer SNode IDs mapped to persistent
+recipe nodes. `group.schema_member(nodes, ..., scalar_axes=True)` resolves these
+nodes through the original native instantiation, including expanded tensor
+lanes. Fixed siblings keep the same selector when preceding model tensors grow;
+no producer IDs or expanded lane paths enter the persistent selector. Legacy
+path-based members remain supported. Invalid, repeated and non-place recipe
+selectors are rejected before a view is published.
+
 Original `self.field` captures now retain the complete root schema and member
 paths. Sibling blocks require declared dimension provenance; logical groups
 cannot split or merge physical roots. Attribute aliases of the same member share

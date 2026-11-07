@@ -65,14 +65,21 @@ def _tensor_group(n, dofs):
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_tensor_member_dimensions_keep_one_authoritative_layout_recipe():
-    schema, producer, root, _, _ = _tensor_group(3, 7)
+    schema, producer, root, parameters, tensors = _tensor_group(3, 7)
+    projected, members = core.DenseSNodeSchema.capture_tensor_members(root, parameters, tensors)
+    assert projected.to_json() == schema.to_json()
+    selectors = tuple(tuple(dict.fromkeys(members[node.id] for node in tensor[0])) for tensor in tensors)
     frozen = schema.to_json()
     assert json.loads(frozen)["version"] == 2
     program = ti.lang.impl.get_runtime().prog
     baseline = _layout(root)
     for n, dofs in ((5, 1), (2, 19), (7, 65)):
-        expected, reference, reference_root, _, _ = _tensor_group(n, dofs)
+        expected, reference, reference_root, reference_parameters, reference_tensors = _tensor_group(n, dofs)
         assert expected.to_json() == frozen
+        _, reference_members = core.DenseSNodeSchema.capture_tensor_members(
+            reference_root, reference_parameters, reference_tensors)
+        assert tuple(tuple(dict.fromkeys(reference_members[node.id] for node in tensor[0]))
+                     for tensor in reference_tensors) == selectors
         materialized = core.DenseSNodeSchema.from_json(frozen).instantiate(program, {"N": n, "D": dofs})
         try:
             assert _layout(materialized.root()) == _layout(reference_root)

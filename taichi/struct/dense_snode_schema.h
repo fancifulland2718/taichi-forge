@@ -56,9 +56,18 @@ struct DenseSNodeSchema {
       const SNode &root,
       const std::vector<Parameter> &parameters,
       const std::vector<TensorParameter> &tensors);
+  // Producer-only live SNode ID -> persistent recipe node. Compacted tensor
+  // components share one node; source IDs are never serialized in the recipe.
+  static std::pair<DenseSNodeSchema, std::map<int, int>> capture_tensor_members(
+      const SNode &root,
+      const std::vector<Parameter> &parameters,
+      const std::vector<TensorParameter> &tensors);
   void validate() const;
   std::unique_ptr<SNode> instantiate(
       const std::map<std::string, int> &dimensions) const;
+  std::unique_ptr<SNode> instantiate_projected(
+      const std::map<std::string, int> &dimensions,
+      std::vector<std::vector<SNode *>> &recipe_nodes) const;
   std::string to_json() const;
   static DenseSNodeSchema from_json(const std::string &text);
 };

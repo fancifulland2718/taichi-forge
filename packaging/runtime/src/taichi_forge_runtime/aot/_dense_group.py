@@ -63,6 +63,16 @@ class DenseSNodeGroup:
             or any(not isinstance(path, (list, tuple)) or any(type(i) is not int for i in path) for path in paths)
         ):
             raise TypeError("Dense member requires explicit scalar-place child paths")
+        selection = dict(paths=paths, scalar_axes=True) if scalar_axes else paths
+        return self._bind_member(selection, dtype, element_shape, scalar_axes)
+
+    def schema_member(self, nodes, dtype, *, element_shape=(), scalar_axes=False):
+        """Bind stable recipe nodes; native instantiation resolves tensor lanes."""
+        if not isinstance(nodes, (tuple, list)) or not nodes or any(type(i) is not int for i in nodes):
+            raise TypeError("Dense schema member requires integer recipe node indices")
+        return self._bind_member(dict(schema_nodes=nodes, scalar_axes=scalar_axes), dtype, element_shape, scalar_axes)
+
+    def _bind_member(self, selection, dtype, element_shape, scalar_axes):
         code, _, width = _dtype(dtype)
         if type(scalar_axes) is not bool:
             raise TypeError("scalar_axes must be a boolean")
@@ -77,7 +87,7 @@ class DenseSNodeGroup:
                 api.ti_get_dense_snode_group_member_ext,
                 runtime._handle,
                 self._memory._handle,
-                json.dumps(dict(paths=paths, scalar_axes=True) if scalar_axes else paths).encode("utf8"),
+                json.dumps(selection).encode("utf8"),
                 code,
                 C.byref(shape),
                 C.byref(array),

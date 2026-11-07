@@ -267,6 +267,12 @@ ABI、局部向量和共享工作区尚未因此获得支持，定义包也尚�
 lowering、动态张量局部值和定义包模型尺寸推导仍需接入；该基础接口不等同于完整
 动态 TensorType 支持。
 
+`capture_tensor_members` 同时提供 producer SNode ID 到持久配方节点的映射。
+`group.schema_member(nodes, ..., scalar_axes=True)` 通过原生实例化结果解析节点及
+展开后的张量分量。前面的模型张量增长时，后面固定成员仍使用同一选择器；持久引用
+不包含 producer ID 或展开分量路径。旧路径成员保持兼容，非法、重复或非 place 的
+配方节点在发布视图前拒绝。
+
 原 `self.field` 捕获现在保存完整的实际根 schema 和成员路径；同根兄弟块的维度必须有
 声明，逻辑组不能拆开或合并实际根。相同成员的属性别名共用一个物理参数。每次调用
 通过已有零复制 Field view 绑定成员，保留原根、偏移及 owner；不会复制成独立 Ndarray，

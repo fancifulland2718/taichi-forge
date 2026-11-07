@@ -1,6 +1,7 @@
 #include "taichi_core_impl.h"
 #include <cstring>
 #include <limits>
+#include <set>
 
 #include "argument_binding.h"
 #ifdef TI_WITH_LLVM
@@ -50,6 +51,7 @@ struct Layout {
 
 struct capi::DenseSNodeGroup {
   std::unique_ptr<taichi::lang::SNode> root;
+  std::vector<std::vector<taichi::lang::SNode *>> recipe_nodes;
   std::shared_ptr<Runtime::BorrowedMemory> storage;
   std::string layout;
 };
@@ -104,7 +106,7 @@ TiMemory Runtime::create_dense_snode_group(const std::string &schema_json,
     extents.emplace(name, static_cast<int>(value.num_int));
   }
   auto group = std::make_shared<capi::DenseSNodeGroup>();
-  group->root = schema.instantiate(extents);
+  group->root = schema.instantiate_projected(extents, group->recipe_nodes);
   Layout layout;
   layout.root_size = compile_dense_snode_layout(*group->root);
   std::vector<SNode *> nodes;
@@ -176,43 +178,67 @@ TiNdArray Runtime::dense_snode_group_member(TiMemory handle,
   const uint64_t lanes = element_layout.element_bytes / width;
   const auto selection = liong::json::parse_complete(text);
   bool scalar_axes = false;
+  bool schema_nodes = false;
   if (selection.is_obj()) {
+    schema_nodes = selection.obj.inner.count("schema_nodes") != 0;
     if (selection.obj.inner.size() != 2 ||
-        !selection.obj.inner.count("paths") ||
+        (!schema_nodes && !selection.obj.inner.count("paths")) ||
         !selection.obj.inner.count("scalar_axes") ||
         !selection["scalar_axes"].is_bool())
       throw MemoryBindingError("Invalid Dense member scalar-axis projection");
     scalar_axes = selection["scalar_axes"].b;
   }
-  const auto &paths_json = selection.is_obj() ? selection["paths"] : selection;
+  const auto &paths_json =
+      selection.is_obj() ? selection[schema_nodes ? "schema_nodes" : "paths"]
+                         : selection;
   if (!paths_json.is_arr())
     throw MemoryBindingError("Dense member paths must be an array");
   std::vector<std::vector<int>> paths;
-  for (const auto &path_json : paths_json.elems()) {
-    if (!path_json.is_arr())
-      throw MemoryBindingError("Dense member path must be an integer array");
-    std::vector<int> path;
-    for (const auto &index : path_json.elems()) {
+  std::vector<SNode *> selected_nodes;
+  if (schema_nodes) {
+    std::set<int> seen;
+    for (const auto &index : paths_json.elems()) {
       if (index.ty != liong::json::L_JSON_INT || index.num_int < 0 ||
-          index.num_int > std::numeric_limits<int>::max())
+          index.num_int >= group->recipe_nodes.size() ||
+          !seen.insert(static_cast<int>(index.num_int)).second)
         throw MemoryBindingError(
-            "Dense member path requires nonnegative native child indices");
-      path.push_back(static_cast<int>(index.num_int));
+            "Dense member requires distinct valid recipe nodes");
+      const auto &expanded = group->recipe_nodes[index.num_int];
+      if (expanded.empty() || expanded.front()->type != SNodeType::place)
+        throw MemoryBindingError(
+            "Dense recipe member must select scalar or tensor places");
+      selected_nodes.insert(selected_nodes.end(), expanded.begin(),
+                            expanded.end());
     }
-    paths.push_back(std::move(path));
+  } else {
+    for (const auto &path_json : paths_json.elems()) {
+      if (!path_json.is_arr())
+        throw MemoryBindingError("Dense member path must be an integer array");
+      std::vector<int> path;
+      for (const auto &index : path_json.elems()) {
+        if (index.ty != liong::json::L_JSON_INT || index.num_int < 0 ||
+            index.num_int > std::numeric_limits<int>::max())
+          throw MemoryBindingError(
+              "Dense member path requires nonnegative native child indices");
+        path.push_back(static_cast<int>(index.num_int));
+      }
+      paths.push_back(std::move(path));
+    }
   }
-  if (lanes != paths.size())
+  if (lanes != (schema_nodes ? selected_nodes.size() : paths.size()))
     throw MemoryBindingError(
         "Dense member element shape differs from component paths");
   const auto scalar_type = capi::ndarray_scalar_type(dtype);
   SNode *anchor = nullptr;
-  for (std::size_t lane = 0; lane < paths.size(); ++lane) {
-    auto *node = group->root.get();
-    for (int child : paths[lane]) {
-      if (child < 0 || static_cast<std::size_t>(child) >= node->ch.size())
-        throw MemoryBindingError(
-            "Dense member path is outside the group schema");
-      node = node->ch[child].get();
+  for (std::size_t lane = 0; lane < lanes; ++lane) {
+    auto *node = schema_nodes ? selected_nodes[lane] : group->root.get();
+    if (!schema_nodes) {
+      for (int child : paths[lane]) {
+        if (child < 0 || static_cast<std::size_t>(child) >= node->ch.size())
+          throw MemoryBindingError(
+              "Dense member path is outside the group schema");
+        node = node->ch[child].get();
+      }
     }
     if (node->type != SNodeType::place || node->dt != scalar_type)
       throw MemoryBindingError(

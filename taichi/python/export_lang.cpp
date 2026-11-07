@@ -9031,6 +9031,7 @@ void export_lang(py::module &m) {
   py::class_<DenseSNodeSchema>(m, "DenseSNodeSchema")
       .def_static("capture", &DenseSNodeSchema::capture)
       .def_static("capture_tensors", &DenseSNodeSchema::capture_tensors)
+      .def_static("capture_tensor_members", &DenseSNodeSchema::capture_tensor_members)
       .def_static("from_json", &DenseSNodeSchema::from_json)
       .def("to_json", &DenseSNodeSchema::to_json)
       .def("instantiate",

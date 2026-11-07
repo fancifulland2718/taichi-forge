@@ -129,9 +129,15 @@ DenseSNodeSchema DenseSNodeSchema::capture_tensors(
     const SNode &root,
     const std::vector<Parameter> &parameters,
     const std::vector<TensorParameter> &tensors) {
+  return capture_tensor_members(root, parameters, tensors).first;
+}
+
+std::pair<DenseSNodeSchema, std::map<int, int>>
+DenseSNodeSchema::capture_tensor_members(
+    const SNode &root,
+    const std::vector<Parameter> &parameters,
+    const std::vector<TensorParameter> &tensors) {
   auto schema = capture(root, parameters);
-  if (tensors.empty())
-    return schema;
   std::vector<const SNode *> source_nodes;
   std::map<const SNode *, int> indices;
   std::function<void(const SNode &)> collect = [&](const SNode &node) {
@@ -145,6 +151,7 @@ DenseSNodeSchema DenseSNodeSchema::capture_tensors(
   for (const auto &[node, axis, name] : parameters)
     dimension_values.emplace(name, node->extractors[axis].shape);
   std::set<int> claimed, removed;
+  std::map<int, int> prototypes;
   for (const auto &[leaves, shape, names] : tensors) {
     require(!leaves.empty() && !shape.empty() && shape.size() <= 2 &&
                 names.size() == shape.size(),
@@ -189,6 +196,7 @@ DenseSNodeSchema DenseSNodeSchema::capture_tensors(
               "Tensor schema components overlap another declaration");
       if (lane)
         removed.insert(found->second);
+      prototypes[found->second] = start;
     }
     schema.nodes[start].extents = std::move(extents);
   }
@@ -204,9 +212,15 @@ DenseSNodeSchema DenseSNodeSchema::capture_tensors(
     compact.push_back(std::move(node));
   }
   schema.nodes = std::move(compact);
-  schema.version = 2;
+  schema.version = tensors.empty() ? 1 : 2;
   schema.validate();
-  return schema;
+  std::map<int, int> members;
+  for (size_t i = 0; i < source_nodes.size(); ++i) {
+    const auto prototype = prototypes.find(static_cast<int>(i));
+    members.emplace(source_nodes[i]->id,
+                    remap[prototype == prototypes.end() ? i : prototype->second]);
+  }
+  return {std::move(schema), std::move(members)};
 }
 
 void DenseSNodeSchema::validate() const {
@@ -268,6 +282,13 @@ void DenseSNodeSchema::validate() const {
 
 std::unique_ptr<SNode> DenseSNodeSchema::instantiate(
     const std::map<std::string, int> &dimensions) const {
+  std::vector<std::vector<SNode *>> ignored;
+  return instantiate_projected(dimensions, ignored);
+}
+
+std::unique_ptr<SNode> DenseSNodeSchema::instantiate_projected(
+    const std::map<std::string, int> &dimensions,
+    std::vector<std::vector<SNode *>> &recipe_nodes) const {
   validate();
   // Validate all bounds before constructing nodes. SNode's index extractors
   // use i32; allowing an overflowing product would corrupt address mapping.
@@ -307,6 +328,8 @@ std::unique_ptr<SNode> DenseSNodeSchema::instantiate(
           "Unknown Dense schema dimension binding");
   auto root = std::make_unique<SNode>(0, SNodeType::root);
   std::vector<SNode *> materialized{root.get()};
+  std::vector<std::vector<SNode *>> projection(nodes.size());
+  projection[0].push_back(root.get());
   for (size_t i = 1; i < nodes.size(); ++i) {
     const auto &node = nodes[i];
     auto *parent = materialized[node.parent];
@@ -315,6 +338,7 @@ std::unique_ptr<SNode> DenseSNodeSchema::instantiate(
       for (const auto &extent : node.extents)
         axes.emplace_back(extent.axis);
       materialized.push_back(&parent->dense(axes, sizes[i]));
+      projection[i].push_back(materialized.back());
     } else {
       SNode *first = nullptr;
       for (int64_t lane = 0; lane < lane_counts[i]; ++lane) {
@@ -322,10 +346,12 @@ std::unique_ptr<SNode> DenseSNodeSchema::instantiate(
         place.dt = node.dtype;
         if (!first)
           first = &place;
+        projection[i].push_back(&place);
       }
       materialized.push_back(first);
     }
   }
+  recipe_nodes = std::move(projection);
   return root;
 }
 

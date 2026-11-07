@@ -55,7 +55,12 @@ def test_scalarized_tensor_axes_share_kernel_abi_across_model_sizes(tmp_path):
     module.add_kernel(matrix_increment, template_args={"values": scalar_matrix})
     archive = tmp_path / "scalar_axes.tcm"
     module.archive(str(archive))
-    schema, producer, _, _, _ = _tensor_group(3, 7)
+    schema, producer, source_root, parameters, tensors = _tensor_group(3, 7)
+    projected, member_nodes = core.DenseSNodeSchema.capture_tensor_members(source_root, parameters, tensors)
+    assert projected.to_json() == schema.to_json()
+    vector_nodes = list(dict.fromkeys(member_nodes[node.id] for node in tensors[0][0]))
+    matrix_nodes = list(dict.fromkeys(member_nodes[node.id] for node in tensors[1][0]))
+    fixed_nodes = [member_nodes[source_root.get_ch(0).get_ch(8 + i).id] for i in range(3)]
     with Runtime(ti.cfg.arch.name) as runtime:
         loaded = runtime.load_module(archive)
         groups, views, prepared = [], [], []
@@ -64,9 +69,12 @@ def test_scalarized_tensor_axes_share_kernel_abi_across_model_sizes(tmp_path):
             groups.append(group)
             paths = [[0, 1 + i] for i in range(dofs)]
             original = group.member(paths, "f32", element_shape=(dofs,))
-            scalar = group.member(paths, "f32", element_shape=(dofs,), scalar_axes=True)
-            fixed = group.member([[0, 1 + dofs + i] for i in range(3)], "f64", element_shape=(3,))
-            matrices = group.member([[1, i] for i in range(2 * dofs)], "f32", element_shape=(2, dofs), scalar_axes=True)
+            scalar = group.schema_member(vector_nodes, "f32", element_shape=(dofs,), scalar_axes=True)
+            fixed = group.schema_member(fixed_nodes, "f64", element_shape=(3,))
+            matrices = group.schema_member(matrix_nodes, "f32", element_shape=(2, dofs), scalar_axes=True)
+            for invalid in ([-1], [0], [999999], vector_nodes * 2):
+                with pytest.raises(AotError):
+                    group.schema_member(invalid, "f32", element_shape=(dofs,), scalar_axes=True)
             assert scalar.shape == (n, dofs) and scalar.element_shape == ()
             assert scalar.nbytes == original.nbytes
             assert matrices.shape == (n, 2, dofs)
@@ -105,9 +113,9 @@ def test_scalarized_tensor_axes_share_kernel_abi_across_model_sizes(tmp_path):
     # A fresh process cannot import the producer or frontend. New extents must
     # bind the same frozen numerical code and the same native layout recipe.
     recipe = tmp_path / "layout.json"
-    recipe.write_text(schema.to_json())
+    recipe.write_text(json.dumps(dict(schema=schema.to_json(), vector=vector_nodes)))
     consumer = textwrap.dedent("""
-        import importlib.abc, sys
+        import importlib.abc, json, sys
         class NoFrontend(importlib.abc.MetaPathFinder):
             def find_spec(self, name, *args):
                 if name.split('.')[0] in ('taichi', 'taichi_forge', 'tests'):
@@ -118,8 +126,9 @@ def test_scalarized_tensor_axes_share_kernel_abi_across_model_sizes(tmp_path):
         from taichi_forge_runtime.aot import Runtime
         with Runtime(sys.argv[1]) as runtime:
             module = runtime.load_module(sys.argv[2])
-            with runtime.dense_snode_group(Path(sys.argv[3]).read_text(), {'N': 3, 'D': 129}) as group:
-                view = group.member([[0, 1 + i] for i in range(129)], 'f32',
+            contract = json.loads(Path(sys.argv[3]).read_text())
+            with runtime.dense_snode_group(contract['schema'], {'N': 3, 'D': 129}) as group:
+                view = group.schema_member(contract['vector'], 'f32',
                                     element_shape=(129,), scalar_axes=True)
                 try:
                     module.kernel('increment')(view)
