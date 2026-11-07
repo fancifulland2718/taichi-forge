@@ -2136,13 +2136,17 @@ class Equivalent(Model):
 """
 
 
+@pytest.mark.parametrize("helper_kind", ["func", "real_func"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_package_specializes_only_observed_static_dependencies(tmp_path, monkeypatch):
+def test_package_specializes_only_observed_static_dependencies(tmp_path, monkeypatch, helper_kind):
     import itertools
 
-    package = _source_package(
-        tmp_path, monkeypatch, STATIC_DOMAIN_SOURCE, initializer="from .model import Model, Equivalent\n"
-    )
+    if helper_kind == "real_func" and ti.cfg.arch == ti.vulkan:
+        pytest.skip("Real functions require LLVM; the separate rejection test covers Vulkan")
+    source = STATIC_DOMAIN_SOURCE
+    if helper_kind == "real_func":
+        source = source.replace("@ti.func\n    def mode(self):", "@ti.real_func\n    def mode(self) -> ti.i32:")
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model, Equivalent\n")
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert manifest["version"] == 11

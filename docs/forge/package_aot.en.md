@@ -293,6 +293,8 @@ Focused three-backend tests cover branch-dependent captures, irrelevant options,
 inherited sharing, independent instances, source-free consumption and original
 JIT results. Static-dependent resource presence/layout is still unsupported;
 code specialization support does not establish conditional layout qualification.
+The same check covers transitive `real_func` static dependencies on CPU/CUDA;
+Vulkan retains the existing LLVM-only rejection boundary.
 
 ## Remaining shared mechanisms
 
