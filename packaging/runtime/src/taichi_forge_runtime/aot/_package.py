@@ -7,6 +7,7 @@ Bindings use the ordinary Runtime Kernel API and its per-call resource leases.
 from contextvars import ContextVar
 import functools
 import hashlib
+import importlib
 import importlib.util
 import inspect
 import itertools
@@ -79,6 +80,22 @@ class _ModuleBinding:
 
     def entry(self, symbol):
         return entry(self.package, symbol)
+
+    def import_module(self, name):
+        self.package._check()
+        root = self.package.manifest["module_root"]
+        if name != root and not name.startswith(root + "."):
+            raise ImportError("Module is outside this definition package: " + name)
+        return importlib.import_module(self.package._name + name[len(root) :])
+
+    def import_from(self, origin, name):
+        module = self.import_module(origin)
+        try:
+            return getattr(module, name)
+        except AttributeError:
+            if not hasattr(module, "__path__"):
+                raise ImportError(f"Cannot import {name} from {origin}") from None
+        return self.import_module(origin + "." + name)
 
     def field(self, owner_key, name, dimensions):
         self.package._check()

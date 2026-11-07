@@ -161,6 +161,16 @@ def _host_projection(
     }
     imported_helpers = set()
 
+    def internal_import(origin):
+        return origin == package_name or (origin or "").startswith(package_name + ".")
+
+    def module_import(origin):
+        return ast.Call(
+            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "import_module", ast.Load()),
+            [ast.Constant(origin)],
+            [],
+        )
+
     def device_import(alias, origin):
         value = namespace.get(alias.asname or alias.name)
         return f"{origin}.{alias.name}" in device_functions or (
@@ -213,8 +223,18 @@ def _host_projection(
                     )
                 elif alias.name.startswith(("taichi.", "taichi_forge.")):
                     _fail(module, node, "frontend submodule imports require further Host projection support")
-                elif alias.name == package_name or alias.name.startswith(package_name + "."):
-                    _fail(module, node, "use relative package imports in the initial exporter")
+                elif internal_import(alias.name):
+                    # Keep Python's import binding rules, while resolving the
+                    # code owner through this loaded package's private namespace.
+                    if alias.asname is None and "." in package_name:
+                        _fail(module, node, "nested package absolute imports require an explicit alias")
+                    value = module_import(alias.name)
+                    if alias.asname is None and alias.name != package_name:
+                        replacements.append(ast.Expr(value))
+                        value = module_import(package_name)
+                    replacements.append(
+                        ast.Assign([ast.Name(alias.asname or alias.name.split(".")[0], ast.Store())], value)
+                    )
                 else:
                     replacements.append(ast.Import([alias]))
             return replacements
@@ -241,8 +261,20 @@ def _host_projection(
                 ]
             if not node.level and (node.module or "").startswith(("taichi.", "taichi_forge.")):
                 _fail(module, node, "frontend submodule imports require further Host projection support")
-            if not node.level and (node.module == package_name or (node.module or "").startswith(package_name + ".")):
-                _fail(module, node, "use relative package imports in the initial exporter")
+            if not node.level and internal_import(origin):
+                if any(a.name == "*" for a in node.names):
+                    _fail(module, node, "wildcard imports cannot expose removed device-only definitions")
+                return [
+                    ast.Assign(
+                        [ast.Name(a.asname or a.name, ast.Store())],
+                        ast.Call(
+                            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "import_from", ast.Load()),
+                            [ast.Constant(origin), ast.Constant(a.name)],
+                            [],
+                        ),
+                    )
+                    for a in node.names
+                ]
             return node
 
         def visit_ClassDef(self, node):
@@ -392,6 +424,7 @@ def export_package(package, output, *, arch=None):
         version=1,
         kind="forge_definition_package_prototype",
         target=module._arch.name,
+        module_root=package.__name__,
         discovery="all_decorated_definitions",
         entries={},
         files={},

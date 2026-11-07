@@ -676,3 +676,61 @@ def test_package_field_preflight_rejection_preserves_normal_jit(tmp_path, monkey
 
     fill()
     np.testing.assert_array_equal(output.to_numpy(), [7, 8, 9])
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_absolute_and_lazy_imports_keep_their_code_owner(tmp_path, monkeypatch):
+    source = SOURCE.replace("from .device_helpers import scale", "from definition_fixture.device_helpers import scale")
+    source += """
+
+def imports(x):
+    import definition_fixture.unimported
+    import definition_fixture.unimported as alias
+    from definition_fixture import unimported as from_root
+    from definition_fixture.unimported import available_without_a_test as call
+    return (definition_fixture.unimported.available_without_a_test(x)
+            + alias.available_without_a_test(x) + from_root.available_without_a_test(x) + call(x))
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    ti.aot.export_package(package, tmp_path / "sdk")
+    probe = tmp_path / "consume_imports.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError('Private frontend/source import: ' + fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime('cpu') as runtime, load_package(runtime, sys.argv[1]) as a:
+            with load_package(runtime, sys.argv[1]) as b:
+                assert a.host.model.imports(2) == 40
+                assert b.host.model.imports(3) == 60
+                assert a.host.unimported is not b.host.unimported
+                assert a.host.unimported.available_without_a_test.package is a
+                assert b.host.unimported.available_without_a_test.package is b
+                assert 'definition_fixture' not in sys.modules
+            assert a.host.model.imports(4) == 80
+        print('PACKAGE_IMPORT_ISOLATION_OK')
+        """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PACKAGE_IMPORT_ISOLATION_OK" in result.stdout
