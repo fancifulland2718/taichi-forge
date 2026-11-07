@@ -102,6 +102,31 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
           case HostRangeOp::add: value = builder->CreateAdd(left, right); break;
           case HostRangeOp::subtract: value = builder->CreateSub(left, right); break;
           case HostRangeOp::multiply: value = builder->CreateMul(left, right); break;
+          case HostRangeOp::less:
+            value = builder->CreateZExt(builder->CreateICmpSLT(left, right), i64);
+            break;
+          case HostRangeOp::less_equal:
+            value = builder->CreateZExt(builder->CreateICmpSLE(left, right), i64);
+            break;
+          case HostRangeOp::greater:
+            value = builder->CreateZExt(builder->CreateICmpSGT(left, right), i64);
+            break;
+          case HostRangeOp::greater_equal:
+            value = builder->CreateZExt(builder->CreateICmpSGE(left, right), i64);
+            break;
+          case HostRangeOp::equal:
+            value = builder->CreateZExt(builder->CreateICmpEQ(left, right), i64);
+            break;
+          case HostRangeOp::not_equal:
+            value = builder->CreateZExt(builder->CreateICmpNE(left, right), i64);
+            break;
+          case HostRangeOp::logical_not:
+            value = builder->CreateZExt(builder->CreateICmpEQ(left, constant(0)), i64);
+            break;
+          case HostRangeOp::select:
+            value = builder->CreateSelect(
+                builder->CreateICmpNE(values.at(node.condition), constant(0)), left, right);
+            break;
           case HostRangeOp::minimum:
             value = builder->CreateSelect(builder->CreateICmpSLT(left, right), left, right);
             break;

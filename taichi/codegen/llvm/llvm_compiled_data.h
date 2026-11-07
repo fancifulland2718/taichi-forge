@@ -31,6 +31,7 @@ class OffloadedTask {
   // Device/function capacity resolved alongside native_function, never stored
   // in an artifact or inferred from the producer's device.
   int available_dynamic_shared_bytes{-1};
+  int available_block_threads{-1};
   OffloadedTaskType task_type{OffloadedTaskType::serial};
   int requested_block_dim{0};
   int requested_grid_dim{0};
@@ -44,13 +45,30 @@ class OffloadedTask {
   int requested_range_work_per_thread_target{1};
   std::string requested_memory_strategy{"direct"};
   int block_dim{0};
+  std::optional<HostRangeBound> host_block_dim;
   int grid_dim{0};
+  int launch_block(const void *arguments, std::uint64_t argument_bytes,
+                   const std::vector<std::pair<std::uint64_t, std::uint64_t>>
+                       *mutable_arguments = nullptr) const {
+    if (!host_block_dim)
+      return block_dim;
+    if (mutable_arguments)
+      for (const auto &[offset, bytes] : *mutable_arguments)
+        TI_ERROR_IF(host_block_dim->reads(offset, bytes),
+                    "Model-dependent block size cannot use mutable Graph parameters");
+    const auto selected = host_block_dim->evaluate(arguments, argument_bytes);
+    TI_ERROR_IF(!selected || *selected <= 0 || *selected > block_dim ||
+                    *selected > available_block_threads ||
+                    (*selected % 32 != 0 && (*selected & (*selected - 1)) != 0),
+                "Model-dependent block size is invalid or exceeds the loaded CUDA function capacity");
+    return *selected;
+  }
   std::optional<RangeForBounds> range_bounds;
   int launch_grid(const void *arguments, std::uint64_t argument_bytes,
                   const std::vector<std::pair<std::uint64_t, std::uint64_t>>
-                      *mutable_arguments = nullptr) const {
+                      *mutable_arguments = nullptr, int selected_block = 0) const {
     return range_bounds ? range_bounds->launch_grid(
-                              grid_dim, block_dim, arguments, argument_bytes,
+                              grid_dim, selected_block ? selected_block : block_dim, arguments, argument_bytes,
                               mutable_arguments)
                         : grid_dim;
   }
@@ -63,6 +81,7 @@ class OffloadedTask {
            task_type == OffloadedTaskType::range_for && range_bounds &&
            range_bounds->supports_device_dispatch() &&
            !one_to_one && !external_shared_staged &&
+           !host_block_dim &&
            !static_shared_array_bytes && !dynamic_shared_array_bytes &&
            dynamic_shared_arrays.empty() &&
            ((thread_local_bytes != 0) ==
@@ -140,6 +159,7 @@ class OffloadedTask {
             requested_block_dim,
             requested_grid_dim,
             source_block_dim_explicit,
+            host_block_dim,
             requested_thread_local_mode,
             requested_cuda_min_blocks_per_sm,
             requested_cuda_max_registers,

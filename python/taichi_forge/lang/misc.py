@@ -698,6 +698,15 @@ def _serialize():
 
 def _block_dim(dim):
     """Set the number of threads in a block to `dim`."""
+    from taichi_forge.lang._local_tensor import extent, is_model_value
+
+    if isinstance(dim, Expr):
+        deployment = getattr(get_runtime().current_kernel, "_deployment_context", None)
+        if deployment is None or not is_model_value(dim) or extent(dim) is None:
+            raise ValueError("A runtime block size requires an immutable AOT model expression")
+        deployment.model_blocks.add(extent(dim))
+        get_runtime().compiling_callable.ast_builder().model_block_dim(dim.ptr)
+        return
     get_runtime().compiling_callable.ast_builder().block_dim(dim)
 
 

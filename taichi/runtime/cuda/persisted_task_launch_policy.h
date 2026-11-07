@@ -23,7 +23,7 @@ inline void validate_persisted_task_launch_policy(const OffloadedTask &task,
   if (waves == 0 && work == 1)
     return;
   TI_ERROR_IF(task.task_type != OffloadedTaskType::range_for ||
-                  task.one_to_one || !task.dynamic_shared_arrays.empty() ||
+                  task.one_to_one || task.host_block_dim || !task.dynamic_shared_arrays.empty() ||
                   task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
                   task.may_mutate_sparse_topology || task.grid_dim <= 0 ||
                   task.block_dim <= 0 || task.dynamic_shared_array_bytes < 0,

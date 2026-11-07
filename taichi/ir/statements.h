@@ -1062,6 +1062,7 @@ class ConstStmt : public Stmt {
 class RangeForStmt : public Stmt {
  public:
   Stmt *begin, *end;
+  Stmt *model_block_dim{nullptr};
   std::unique_ptr<Block> body;
   bool reversed;
   bool is_bit_vectorized;
@@ -1096,6 +1097,7 @@ class RangeForStmt : public Stmt {
 
   TI_STMT_DEF_FIELDS(begin,
                      end,
+                     model_block_dim,
                      reversed,
                      is_bit_vectorized,
                      num_cpu_threads,
@@ -1472,6 +1474,7 @@ class OffloadedStmt : public Stmt {
   int32 begin_value{0};
   int32 end_value{0};
   std::optional<HostRangeBounds> host_launch_range;
+  std::optional<HostRangeBound> host_block_dim;
   int grid_dim{1};
   int block_dim{1};
   // Records whether the frontend loop owned the block contract before the
@@ -1567,6 +1570,7 @@ class OffloadedStmt : public Stmt {
                      begin_value,
                      end_value,
                      host_launch_range,
+                     host_block_dim,
                      grid_dim,
                      block_dim,
                      source_block_dim_explicit,

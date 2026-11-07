@@ -33,9 +33,9 @@ inline constexpr std::uint32_t kTypedRangeBoundsAotSchemaVersion = 10;
 inline constexpr std::uint32_t kDeviceRangeProofAotSchemaVersion = 19;
 // Entry aliases and selected range policies reference shared code metadata.
 inline constexpr std::uint32_t kKernelEntryPolicyAotSchemaVersion = 20;
-// Schema 21 adds runtime-sized shared allocations to the native task record.
+// Schema 22 adds model block expressions and conditional host-range programs.
 // All new LLVM artifacts use this layout; older artifacts must be rebuilt.
-inline constexpr std::uint32_t kDynamicSharedAotSchemaVersion = 21;
+inline constexpr std::uint32_t kDynamicSharedAotSchemaVersion = 22;
 
 inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";

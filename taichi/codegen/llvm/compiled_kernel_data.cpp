@@ -164,7 +164,13 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
       item.selected_block_size = positive_geometry(task.block_dim);
       item.actual_grid_size = item.selected_grid_size;
       item.actual_block_size = item.selected_block_size;
-      if (task.external_shared_staged) {
+      if (task.host_block_dim) {
+        item.selected_block_size.reset();
+        item.actual_block_size.reset();
+        item.actual_grid_size.reset();
+        item.actual_geometry_kind = "host_argument_block";
+        item.actual_geometry_reason = "prepare resolves the block and grid from immutable model arguments";
+      } else if (task.external_shared_staged) {
         if (task.external_shared_iteration_shape.size() == 2) {
           item.actual_geometry_kind = "static_exact_tiled_2d";
           item.actual_geometry_reason =
@@ -208,6 +214,7 @@ CompiledKernelData::Err CompiledKernelData::check() const {
   }
   for (const auto &t : tasks) {
     if ((t.range_bounds && !t.range_bounds->valid(data_.args_size)) ||
+        (t.host_block_dim && !t.host_block_dim->valid(data_.args_size)) ||
         !t.valid_device_range_dispatch_contract()) {
       return Err::kCompiledKernelDataBroken;
     }
@@ -231,6 +238,7 @@ CompiledKernelData::Err CompiledKernelData::load_impl(
   }
   for (const auto &task : data_.compiled_data.tasks) {
     if ((task.range_bounds && !task.range_bounds->valid(data_.args_size)) ||
+        (task.host_block_dim && !task.host_block_dim->valid(data_.args_size)) ||
         !task.valid_device_range_dispatch_contract()) {
       return Err::kCompiledKernelDataBroken;
     }

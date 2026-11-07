@@ -39,9 +39,21 @@ def binary_extent(result, operation, left, right):
     # Retain only operations whose complete immutable inputs are known.
     if not hasattr(left, "_uniform_extent") and not hasattr(right, "_uniform_extent"):
         return result
-    left, right = extent(left), extent(right)
-    if left is not None and right is not None and operation in ("add", "sub", "mul", "max", "min", "floordiv"):
+    boolean = operation in ("logical_and", "logical_or")
+    left, right = tuple(("const", int(value)) if boolean and isinstance(value, bool) else extent(value)
+                        for value in (left, right))
+    if left is not None and right is not None and operation in (
+        "add", "sub", "mul", "max", "min", "floordiv", "cmp_lt", "cmp_le", "cmp_gt", "cmp_ge", "cmp_eq", "cmp_ne",
+        "logical_and", "logical_or"
+    ):
         result._uniform_extent = (operation, left, right)
+    return result
+
+
+def select_extent(result, condition, yes, no):
+    dimensions = tuple(extent(value) for value in (condition, yes, no))
+    if all(value is not None for value in dimensions):
+        result._uniform_extent = ("select", *dimensions)
     return result
 
 

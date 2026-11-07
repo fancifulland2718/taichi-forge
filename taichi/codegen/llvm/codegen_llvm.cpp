@@ -2485,6 +2485,12 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
   current_task->requested_block_dim = stmt->block_dim;
   current_task->source_block_dim_explicit =
       stmt->source_block_dim_explicit;
+  current_task->host_block_dim = stmt->host_block_dim;
+  TI_ERROR_IF(stmt->host_block_dim &&
+                  (stmt->task_type != OffloadedTaskType::range_for || stmt->one_to_one ||
+                   stmt->external_shared_staged || stmt->bls_size || stmt->bls_prologue ||
+                   stmt->bls_epilogue || stmt->tls_prologue || stmt->tls_epilogue),
+              "Model-dependent block size is incompatible with a fixed block layout or reduction");
   if (kernel->get_offload_execution_plan().has_value()) {
     const auto &spec = kernel->offload_task_optimization_spec(
         task_codegen_id, stmt->task_type);
@@ -2502,7 +2508,7 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
   }
   current_task->range_bounds = describe_launch_range_for_bounds(*stmt);
   current_task->device_range_dispatch_version =
-      compile_config.arch == Arch::cuda && current_task->range_bounds &&
+      compile_config.arch == Arch::cuda && !stmt->host_block_dim && current_task->range_bounds &&
               current_task->range_bounds->supports_device_dispatch()
           ? 1u
           : 0u;

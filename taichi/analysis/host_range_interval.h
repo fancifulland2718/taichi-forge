@@ -69,6 +69,19 @@ inline std::optional<HostRangeInterval> static_host_range_interval(
       case HostRangeOp::shape_i32:
         result = {0, INT32_MAX};
         break;
+      case HostRangeOp::less:
+      case HostRangeOp::less_equal:
+      case HostRangeOp::greater:
+      case HostRangeOp::greater_equal:
+      case HostRangeOp::equal:
+      case HostRangeOp::not_equal:
+      case HostRangeOp::logical_not:
+        result = {0, 1};
+        break;
+      case HostRangeOp::select:
+        result = {std::min(values[node.lhs].lower, values[node.rhs].lower),
+                  std::max(values[node.lhs].upper, values[node.rhs].upper)};
+        break;
       case HostRangeOp::add:
         result = {values[node.lhs].lower + values[node.rhs].lower,
                   values[node.lhs].upper + values[node.rhs].upper};

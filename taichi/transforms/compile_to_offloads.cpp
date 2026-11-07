@@ -1170,6 +1170,8 @@ void offload_to_executable(IRNode *ir,
     auto task_index = first_task_index;
     const auto select = [&](OffloadedStmt *task) {
       const auto index = task_index++;
+      if (task->host_block_dim)
+        return;  // prepare owns the actual block; the stored value is an upper bound.
       const char *owner = task->source_block_dim_explicit ? "source loop/launch policy" : nullptr;
       if (offload_plan) {
         TI_ASSERT(index < offload_plan->tasks.size());

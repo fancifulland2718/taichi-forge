@@ -346,6 +346,10 @@ class LowerAST : public IRVisitor {
   }
 
   void visit(FrontendForStmt *stmt) override {
+    TI_ERROR_IF(stmt->model_block_dim &&
+                    (stmt->snode || stmt->mesh || stmt->strictly_serialized ||
+                     detected_fors_with_break_.count(stmt)),
+                "Model-dependent block size requires a parallel range without break");
     auto fctx = make_flatten_ctx();
     if (stmt->snode) {
       auto snode = stmt->snode;
@@ -422,6 +426,8 @@ class LowerAST : public IRVisitor {
           stmt->num_cpu_threads, stmt->block_dim, stmt->strictly_serialized,
           /*range_hint=*/fmt::format("arg ({})", fmt::join(arg_id, ", ")));
       new_for->one_to_one = stmt->one_to_one;
+      if (stmt->model_block_dim)
+        new_for->model_block_dim = flatten_rvalue(stmt->model_block_dim, &fctx);
       VecStatement new_statements;
       Stmt *loop_index =
           new_statements.push_back<LoopIndexStmt>(new_for.get(), 0);
@@ -464,6 +470,11 @@ class LowerAST : public IRVisitor {
             stmt->is_bit_vectorized, stmt->num_cpu_threads, stmt->block_dim,
             stmt->strictly_serialized);
         new_for->one_to_one = stmt->one_to_one;
+        if (stmt->model_block_dim) {
+          TI_ERROR_IF(stmt->strictly_serialized,
+                      "Model-dependent block size requires a parallel range");
+          new_for->model_block_dim = flatten_rvalue(stmt->model_block_dim, &fctx);
+        }
         new_for->body->insert(std::make_unique<LoopIndexStmt>(new_for.get(), 0),
                               0);
         new_for->body->local_var_to_stmt[stmt->loop_var_ids[0]] =

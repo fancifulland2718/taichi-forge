@@ -307,6 +307,7 @@ py::dict offloaded_task_manifest_to_python(
           instruction["lhs"] = node.lhs;
           instruction["rhs"] = node.rhs;
           instruction["offset"] = node.offset;
+          instruction["condition"] = node.condition;
           program.append(instruction);
         }
         result["program"] = program;
@@ -1442,6 +1443,7 @@ void export_lang(py::module &m) {
       .def("parallelize", &ASTBuilder::parallelize)
       .def("strictly_serialize", &ASTBuilder::strictly_serialize)
       .def("block_dim", &ASTBuilder::block_dim)
+      .def("model_block_dim", &ASTBuilder::model_block_dim)
       .def("one_to_one", &ASTBuilder::one_to_one)
       .def("insert_snode_access_flag", &ASTBuilder::insert_snode_access_flag)
       .def("reset_snode_access_flag", &ASTBuilder::reset_snode_access_flag);

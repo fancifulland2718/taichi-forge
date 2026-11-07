@@ -1701,6 +1701,7 @@ class _Capture:
         self.workspaces = {}
         self.shared_arrays = {}
         self.model_static_ranges = set()
+        self.model_blocks = set()
         self.local_tensor_scope = None
 
     def model_static_range(self, ctx, value):
@@ -2221,6 +2222,8 @@ class _Capture:
             self.contract["model_shared_arrays"] = self.shared_arrays
         if self.model_static_ranges:
             self.contract["model_static_ranges"] = sorted(self.model_static_ranges, key=repr)
+        if self.model_blocks:
+            self.contract["model_blocks"] = sorted(self.model_blocks, key=repr)
         if self.objects:
             self.contract.update(
                 objects=sorted(self.objects.items()),

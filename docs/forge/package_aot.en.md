@@ -444,6 +444,30 @@ method is cloned by this normalization. Focused checks compare original native
 layout, values and Host state; GeoPhys's original helper also passes source-free
 CPU/CUDA/Vulkan consumption with this declaration form.
 
+## Model-dependent CUDA block sizes
+
+Definition package version 29 accepts proven model integer expressions for
+`ti.loop_config(block_dim=...)` on outer CUDA ranges, such as
+`ti.static(128 if self.dof > 32 else 32)`. Existing Host argument expressions
+resolve block, grid and dynamic shared memory from one immutable snapshot at
+prepare time. Native prepared replay retains those results; ordinary calls bind
+them before submission. Changed models need a new preparation, without changing
+another instance's or an in-flight call's launch descriptors.
+
+One numerical definition does not produce a copy for each DOF. Code generation
+retains a launch upper bound; the loaded function and device constrain the actual
+size. This is not a model-size quota. Device values, mutable Graph parameters,
+nested/serial loops and BLS/TLS reductions requiring fixed block layouts are not
+admitted on this path. Ordinary fixed-block JIT keeps its existing behavior.
+No autotuning or performance warnings are introduced. LLVM AOT schema is 22 and
+the cache version is 102; older artifacts need rebuilding.
+
+Measure first preparation, preparation after model changes, and end-to-end Host
+calls separately. `Graph.run(arguments)` is a convenience entry that binds on
+every call. For stable dimensions and resources, bind once during preparation
+and retain the returned execution. Warm Graph replay timings do not replace
+first-preparation or ordinary-call measurements.
+
 ## Remaining shared mechanisms
 
 Complex SNode/Field layouts, the inheritance restrictions above, template/other conditional-resource domains,
@@ -721,8 +745,9 @@ quota, and prepared replay does not repeat the checks. Legacy explicit Component
 Graphs reject these loops until they can preserve the
 snapshot checks. The Graph evidence here applies to definition packages; raw
 kernel callers remain responsible for exported argument/range contracts.
-Model-dependent CUDA block sizes, conditional factories and conditional model layouts remain open;
-this does not establish whole-class EFC export. Focused CPU/CUDA/Vulkan
+Conditional factories and conditional model layouts remain open. Model-dependent
+CUDA block sizes use the preparation path documented above; this does not
+establish whole-class EFC export. Focused CPU/CUDA/Vulkan
 source-free checks cover new sizes, instance isolation, ordering and Graphs.
 
 Dynamic control can reduce compile-time expansion while adding runtime loops,

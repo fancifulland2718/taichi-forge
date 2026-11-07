@@ -2756,8 +2756,9 @@ class Model:
 
 
 @pytest.mark.parametrize("square", [False, True])
+@pytest.mark.parametrize("model_block", [False, True])
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_package_model_shared_arrays_bind_native_storage(tmp_path, monkeypatch, square):
+def test_package_model_shared_arrays_bind_native_storage(tmp_path, monkeypatch, square, model_block):
     import ctypes as C
     driver = C.WinDLL("nvcuda.dll") if sys.platform == "win32" else C.CDLL("libcuda.so.1")
     device, capacity = C.c_int(), C.c_int()
@@ -2765,13 +2766,38 @@ def test_package_model_shared_arrays_bind_native_storage(tmp_path, monkeypatch, 
     if driver.cuDeviceGetAttribute(C.byref(capacity), 97, device) != 0:
         assert driver.cuDeviceGetAttribute(C.byref(capacity), 8, device) == 0
     source = MODEL_SHARED_SOURCE
+    if model_block:
+        source = source.replace("ti.loop_config(block_dim=32)",
+                                "workers = ti.static(128 if self.dof > 32 else 32)\n"
+                                "        ti.loop_config(block_dim=workers)")
+        source = source.replace("self.n * 32", "self.n * workers").replace(
+            "i % 32, i // 32", "i % workers, i // workers").replace("j += 32", "j += workers")
+        # This allocation ties prepare geometry to the same selector used by
+        # device indexing; no per-DOF compilation or fixed shared-array proxy.
+        source = source.replace("(self.dof + 1,)", "(self.dof + workers,)")
+        source = source.replace("            matrix = ti.simt.block.SharedArray",
+                                "            local = ti.Vector.zero(ti.f32, (self.dof + workers - 1) // workers)\n"
+                                "            local[0] = gain\n"
+                                "            matrix = ti.simt.block.SharedArray")
+        source = source.replace("self.shared_sum(matrix, extra, fixed)",
+                                "self.shared_sum(matrix, extra, fixed) + local[0] - gain")
     if square:
         source = source.replace("(self.dof, 2)", "(self.dof, self.dof + 1)")
+        if model_block:
+            source = source.replace("128 if self.dof > 32", "64 if self.dof > 32")
+            source = source.replace("    @ti.kernel\n    def step(self, gain: ti.f32):",
+                                    "    @ti.func\n    def shared_step(self, gain: ti.f32):")
+            source = source.replace("    def graph(self):", "    @ti.kernel\n"
+                                    "    def step(self, gain: ti.f32):\n"
+                                    "        self.shared_step(gain)\n\n    def graph(self):")
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cuda)
     assert sys.modules["definition_fixture.model"].constructors == 0
     entries = [entry for entry in manifest["entries"].values() if entry["definition"].endswith("Model.step")]
     assert len(entries) == 1
+    if model_block:
+        assert manifest["version"] >= 29
+        assert entries[0]["model_blocks"]
     expected = package.Model(3, 17)
     expected.step(2.0)
     np.testing.assert_array_equal(expected.result.to_numpy(), 2 * (np.arange(3) + 52))
@@ -2788,12 +2814,12 @@ def test_package_model_shared_arrays_bind_native_storage(tmp_path, monkeypatch, 
         from taichi_forge_runtime.aot import Runtime, load_package
         with Runtime('cuda') as runtime, load_package(runtime, sys.argv[1]) as code:
             capacity = int(sys.argv[3])
-            cases = ((1, 1), (3, 17), (7, 65))
+            cases = ((1, 1), (3, 17), (2, 32), (4, 33), (7, 65))
             if sys.argv[2] == 'False':
                 cases += ((5, 129),)
-                if capacity >= 60016:
+                if capacity >= 60528:
                     cases += ((2, 5000),)  # exceeds the historical 48 KiB cap
-            elif capacity >= 67616:
+            elif capacity >= 68128:
                 cases += ((5, 129),)
             elif capacity >= 49304:
                 cases += ((5, 110),)
@@ -2833,18 +2859,28 @@ def test_package_model_shared_arrays_bind_native_storage(tmp_path, monkeypatch, 
     assert "MODEL_SHARED_SOURCE_FREE_OK" in result.stdout
 
 
-@pytest.mark.parametrize("invalid", ["device_extent", "serial_scope"])
+@pytest.mark.parametrize("invalid", ["device_extent", "serial_scope", "device_block", "nested_block", "serial_block"])
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_model_shared_arrays_reject_unproven_storage(tmp_path, monkeypatch, invalid):
     source = MODEL_SHARED_SOURCE
     if invalid == "device_extent":
         source = source.replace("(self.dof, 2)", "(ti.cast(self.result[0], ti.i32), 2)")
         message = "immutable declared dimensions"
-    else:
+    elif invalid == "serial_scope":
         source = source.replace("        ti.loop_config(block_dim=32)",
                                 "        unused = ti.simt.block.SharedArray((self.dof,), ti.f32)\n"
                                 "        ti.loop_config(block_dim=32)")
         message = "parallel kernel range"
+    elif invalid == "device_block":
+        source = source.replace("block_dim=32", "block_dim=ti.cast(self.result[0], ti.i32)")
+        message = "immutable AOT model expression"
+    elif invalid == "nested_block":
+        source = source.replace("            lane, world =", "            ti.loop_config(block_dim=self.dof)\n"
+                                "            lane, world =")
+        message = "outer kernel range"
+    else:
+        source = source.replace("block_dim=32", "serialize=True, block_dim=self.dof")
+        message = "parallel range"
     package = _source_package(tmp_path, monkeypatch, source)
     with pytest.raises(Exception, match=message):
         ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cuda)

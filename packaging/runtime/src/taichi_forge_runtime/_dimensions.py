@@ -22,7 +22,9 @@ def validate_extent(expression):
             if valid:
                 visit(args[0], depth + 1)
         else:
-            valid = op in ("add", "sub", "mul", "max", "min", "floordiv") and len(args) == 2
+            valid = (op == "select" and len(args) == 3) or (
+                op in ("add", "sub", "mul", "max", "min", "floordiv", "cmp_lt", "cmp_le",
+                       "cmp_gt", "cmp_ge", "cmp_eq", "cmp_ne", "logical_and", "logical_or") and len(args) == 2)
             if valid:
                 for argument in args:
                     visit(argument, depth + 1)
@@ -56,6 +58,11 @@ def evaluate_extent(expression, resolve, *, max_value=2**63 - 1, min_value=0):
             if minimum < 0:
                 raise ValueError("A power-of-two dimension minimum must be nonnegative")
             result = 1 << (max(1, minimum) - 1).bit_length()
+        elif op == "select":
+            # Match the scalar select emitted by the numerical compiler: both
+            # value operands are pure expressions and retain overflow checks.
+            condition, yes, no = (evaluate(arg) for arg in args)
+            result = yes if condition else no
         else:
             result = evaluate_binary(op, *(evaluate(arg) for arg in args))
         if not min_value <= result <= max_value:
@@ -77,6 +84,12 @@ def evaluate_extent(expression, resolve, *, max_value=2**63 - 1, min_value=0):
             result = min(left, right)
         elif op == "floordiv" and right > 0:
             result = left // right
+        elif op.startswith("cmp_"):
+            result = int(getattr(operator, op[4:])(left, right))
+        elif op == "logical_and":
+            result = int(bool(left) and bool(right))
+        elif op == "logical_or":
+            result = int(bool(left) or bool(right))
         else:
             raise ValueError("A dimension divisor must be positive")
         return result

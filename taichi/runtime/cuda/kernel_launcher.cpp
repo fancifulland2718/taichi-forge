@@ -104,6 +104,9 @@ void bind_cuda_native_functions(JITModule *jit_module,
   for (auto &task : tasks) {
     task.native_function = cuda_module->lookup_function(task.name);
     TI_ASSERT(task.native_function != nullptr);
+    if (task.host_block_dim)
+      driver.kernel_get_attribute(&task.available_block_threads,
+                                  CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, task.native_function);
     if (!task.dynamic_shared_arrays.empty()) {
       int device_capacity = 0, static_bytes = 0;
       driver.device_get_attribute(
@@ -346,7 +349,7 @@ KernelLauncher::resolve_grid_policy_tasks(
         }
         ++range_tasks;
         TI_ERROR_IF(
-            task.one_to_one || !task.dynamic_shared_arrays.empty() ||
+            task.one_to_one || task.host_block_dim || !task.dynamic_shared_arrays.empty() ||
                 task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
                 task.may_mutate_sparse_topology || task.grid_dim <= 0 ||
                 task.block_dim <= 0 || task.dynamic_shared_array_bytes < 0,
@@ -534,7 +537,7 @@ KernelLauncher::resolve_task_execution_plan(
         continue;
       }
       TI_ERROR_IF(
-          task.task_type != OffloadedTaskType::range_for || task.one_to_one ||
+          task.task_type != OffloadedTaskType::range_for || task.one_to_one || task.host_block_dim ||
               !task.dynamic_shared_arrays.empty() ||
               task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
               task.may_mutate_sparse_topology || task.grid_dim <= 0 ||
@@ -840,6 +843,10 @@ bool KernelLauncher::prepare_cuda_graph_context(
       return false;
     for (std::size_t i = 0; i < offloaded_tasks.size(); ++i) {
       const auto &task = offloaded_tasks[i];
+      const int block = task.launch_block(ctx.get_context().arg_buffer, ctx.arg_buffer_size,
+                                         &ctx.mutable_argument_ranges);
+      if (block != (*recorded_tasks)[i].block_dim)
+        return false;
       if (!task.dynamic_shared_arrays.empty() &&
           task.launch_shared_bytes(ctx.get_context().arg_buffer, ctx.arg_buffer_size,
                                    &ctx.mutable_argument_ranges) !=
@@ -847,7 +854,7 @@ bool KernelLauncher::prepare_cuda_graph_context(
         return false;  // Rebind/recapture before uploading a larger allocation.
       if (task.range_bounds && task.range_bounds->uses_host_launch_grid() &&
           task.launch_grid(ctx.get_context().arg_buffer, ctx.arg_buffer_size,
-                           &ctx.mutable_argument_ranges) !=
+                           &ctx.mutable_argument_ranges, block) !=
               (*recorded_tasks)[i].grid_dim)
         return false;
     }
@@ -983,6 +990,8 @@ bool KernelLauncher::prepare_cuda_graph_context(
   if (resolved_tasks != nullptr) {
     *resolved_tasks = offloaded_tasks;
     for (auto &task : *resolved_tasks) {
+      task.block_dim = task.launch_block(context.arg_buffer, ctx.arg_buffer_size,
+                                        &ctx.mutable_argument_ranges);
       task.grid_dim = task.launch_grid(context.arg_buffer, ctx.arg_buffer_size,
                                       &ctx.mutable_argument_ranges);
       task.dynamic_shared_array_bytes = task.launch_shared_bytes(
@@ -1657,6 +1666,15 @@ void KernelLauncher::launch_ordinary_context(const Context &selected,
   // buffers or submitting an earlier task. In particular an oversized later
   // allocation must not leave a partially executed kernel or leaked buffers.
   std::vector<int> bound_shared_bytes;
+  std::vector<int> bound_blocks;
+  if (std::any_of(offloaded_tasks.begin(), offloaded_tasks.end(), [](const auto &task) {
+        return task.host_block_dim.has_value();
+      })) {
+    bound_blocks.reserve(offloaded_tasks.size());
+    for (const auto &task : offloaded_tasks)
+      bound_blocks.push_back(task.launch_block(
+          ctx.get_context().arg_buffer, ctx.arg_buffer_size, &ctx.mutable_argument_ranges));
+  }
   if (std::any_of(offloaded_tasks.begin(), offloaded_tasks.end(), [](const auto &task) {
         return !task.dynamic_shared_arrays.empty();
       })) {
@@ -1921,23 +1939,25 @@ void KernelLauncher::launch_ordinary_context(const Context &selected,
       TI_TRACE("Skipping current sparse list kernel {}", task.name);
       continue;
     }
+    const int block = bound_blocks.empty() ? task.block_dim
+                         : bound_blocks[&task - offloaded_tasks.data()];
     const int grid = task.launch_grid(host_arg_buffer, ctx.arg_buffer_size,
-                                      &ctx.mutable_argument_ranges);
+                                      &ctx.mutable_argument_ranges, block);
     const int shared_bytes = bound_shared_bytes.empty()
                                  ? task.dynamic_shared_array_bytes
                                  : bound_shared_bytes[&task - offloaded_tasks.data()];
     TI_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, grid,
-             task.block_dim);
+             block);
     if (ctx.dispatch_label().empty()) {
       cuda_jit_module->launch_function_with_stream(
-          task.native_function, task.name, grid, task.block_dim,
+          task.native_function, task.name, grid, block,
           shared_bytes, {&ctx.get_context()}, {}, nullptr);
     } else {
       const auto trace_name = make_labeled_task_name(
           task.name, task.task_id, ctx.dispatch_label());
       ScopedExternalProfilerAnnotation annotation(trace_name);
       cuda_jit_module->launch_function_with_stream(
-          task.native_function, task.name, grid, task.block_dim,
+          task.native_function, task.name, grid, block,
           shared_bytes, {&ctx.get_context()}, {}, nullptr,
           &trace_name);
     }
@@ -2230,7 +2250,7 @@ KernelLauncher::qualify_llvm_kernel_artifacts(
                     &item.max_dynamic_shared_bytes);
     query_attribute(CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
                     &item.preferred_shared_carveout);
-    item.block_dim = task.block_dim;
+    item.block_dim = task.host_block_dim ? -1 : task.block_dim;
     item.dynamic_shared_bytes = task.dynamic_shared_arrays.empty()
                                     ? task.dynamic_shared_array_bytes : -1;
     item.multiprocessor_count = multiprocessor_count;

@@ -77,8 +77,10 @@ def cast(obj, dtype):
     result = expr.Expr(_ti_core.value_cast(expr.Expr(obj).ptr, dtype))
     if getattr(obj, "_model_uniform", False):
         result._model_uniform = True
-    if dtype == primitive_types.i32 and isinstance(obj, expr.Expr) and obj.ptr.get_rvalue_type() == dtype:
-        if hasattr(obj, "_uniform_extent"):
+    if isinstance(obj, expr.Expr) and hasattr(obj, "_uniform_extent"):
+        source_type = obj.ptr.get_rvalue_type()
+        if ((dtype == source_type and dtype in (primitive_types.i32, primitive_types.u1))
+                or (dtype == primitive_types.i32 and source_type == primitive_types.u1)):
             result._uniform_extent = obj._uniform_extent
     return result
 
@@ -120,9 +122,12 @@ def _unary_operation(taichi_op, python_op, a):
     if isinstance(a, Field):
         return NotImplemented
     if is_taichi_expr(a):
-        from taichi_forge.lang._local_tensor import model_expression
+        from taichi_forge.lang._local_tensor import extent, model_expression
 
-        return model_expression(expr.Expr(taichi_op(a.ptr), dbg_info=_ti_core.DebugInfo(stack_info())), a)
+        result = model_expression(expr.Expr(taichi_op(a.ptr), dbg_info=_ti_core.DebugInfo(stack_info())), a)
+        if taichi_op.__name__ == "expr_logic_not" and extent(a) is not None:
+            result._uniform_extent = ("cmp_eq", extent(a), ("const", 0))
+        return result
     from taichi_forge.lang.matrix import Matrix  # pylint: disable-msg=C0415
 
     if isinstance(a, Matrix):
@@ -134,16 +139,26 @@ def _binary_operation(taichi_op, python_op, a, b):
     if isinstance(a, Field) or isinstance(b, Field):
         return NotImplemented
     if is_taichi_expr(a) or is_taichi_expr(b):
-        from taichi_forge.lang._local_tensor import model_expression
+        from taichi_forge.lang._local_tensor import extent, is_model_value, model_expression
 
         original = a, b
         a, b = wrap_if_not_expr(a), wrap_if_not_expr(b)
+        operation_name = taichi_op.__name__.removeprefix("expr_")
+        if (
+            operation_name in ("logical_and", "logical_or")
+            and any(is_model_value(value) for value in original)
+            and all(isinstance(value, bool) or extent(value) is not None for value in original)
+            and all(value.ptr.get_rvalue_type() == primitive_types.u1 for value in (a, b))
+        ):
+            # Immutable booleans have no short-circuit side effects. Keep their
+            # expression visible to launch/shared-memory analysis before DCE.
+            taichi_op = _ti_core.expr_bit_and if operation_name == "logical_and" else _ti_core.expr_bit_or
         result = expr.Expr(taichi_op(a.ptr, b.ptr), dbg_info=_ti_core.DebugInfo(stack_info()))
         model_expression(result, *original)
-        if result.ptr.get_rvalue_type() == primitive_types.i32:
+        if result.ptr.get_rvalue_type() in (primitive_types.i32, primitive_types.u1):
             from taichi_forge.lang._local_tensor import binary_extent
 
-            binary_extent(result, taichi_op.__name__.removeprefix("expr_"), a, b)
+            binary_extent(result, operation_name, *original)
         return result
     from taichi_forge.lang.matrix import Matrix  # pylint: disable-msg=C0415
 
@@ -160,8 +175,19 @@ def _ternary_operation(taichi_op, python_op, a, b, c):
 
         original = a, b, c
         a, b, c = wrap_if_not_expr(a), wrap_if_not_expr(b), wrap_if_not_expr(c)
-        return model_expression(
+        from taichi_forge.lang._local_tensor import extent, select_extent
+
+        host_select = taichi_op.__name__ in ("expr_select", "expr_ifte") and all(
+            extent(value) is not None for value in (a, b, c))
+        if host_select:
+            # Pure immutable integer operands need no device control-flow
+            # temporary. The same select can be evaluated during preparation.
+            taichi_op = _ti_core.expr_select
+        result = model_expression(
             expr.Expr(taichi_op(a.ptr, b.ptr, c.ptr), dbg_info=_ti_core.DebugInfo(stack_info())), *original)
+        if host_select:
+            select_extent(result, a, b, c)
+        return result
     from taichi_forge.lang.matrix import Matrix  # pylint: disable-msg=C0415
 
     if isinstance(a, Matrix) or isinstance(b, Matrix) or isinstance(c, Matrix):

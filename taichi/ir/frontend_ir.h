@@ -22,6 +22,7 @@ struct ForLoopConfig {
   bool strictly_serialized{false};
   MemoryAccessOptions mem_access_opt;
   int block_dim{0};
+  Expr model_block_dim;
   bool uniform{false};
   bool one_to_one{false};
 };
@@ -208,6 +209,7 @@ class FrontendForStmt : public Stmt {
   bool strictly_serialized;
   MemoryAccessOptions mem_access_opt;
   int block_dim;
+  Expr model_block_dim;
   bool one_to_one;
 
   FrontendForStmt(const ExprGroup &loop_vars,
@@ -1114,6 +1116,7 @@ class ASTBuilder {
       config.uniform = false;
       config.mem_access_opt.clear();
       config.block_dim = 0;
+      config.model_block_dim = Expr();
       config.strictly_serialized = false;
       config.one_to_one = false;
     }
@@ -1270,6 +1273,15 @@ class ASTBuilder {
       TI_ASSERT(bit::is_power_of_two(v));
     }
     for_loop_dec_.config.block_dim = v;
+    for_loop_dec_.config.model_block_dim = Expr();
+  }
+
+  void model_block_dim(const Expr &value) {
+    TI_ERROR_IF(arch_ != Arch::cuda,
+                "Model-dependent block size currently requires CUDA");
+    TI_ERROR_IF(!is_kernel_ || loop_state_stack_.back() != None || stack_.size() != 1,
+                "Model-dependent block size requires an outer kernel range");
+    for_loop_dec_.config.model_block_dim = value;
   }
 
   void one_to_one() {

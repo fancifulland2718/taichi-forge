@@ -21,6 +21,7 @@ class HostRangeInstruction:
     lhs: int
     rhs: int
     offset: int
+    condition: int = 0
 
 
 @dataclass(frozen=True)

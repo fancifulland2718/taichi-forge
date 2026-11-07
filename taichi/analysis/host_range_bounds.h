@@ -150,11 +150,13 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
     pending.pop_back();
     if (indices.count(stmt))
       continue;
-    if (stmt->ret_type != PrimitiveType::i32)
+    if (stmt->ret_type != PrimitiveType::i32 && stmt->ret_type != PrimitiveType::u1)
       return std::nullopt;
     HostRangeInstruction node;
     if (auto *constant = stmt->cast<ConstStmt>()) {
-      node.immediate = constant->val.val_int32();
+      node.immediate = constant->ret_type == PrimitiveType::u1
+                           ? static_cast<std::int32_t>(constant->val.val_uint())
+                           : constant->val.val_int32();
     } else if (auto *shape = stmt->cast<ExternalTensorShapeAlongAxisStmt>()) {
       if (shape->arg_id.size() != 1)
         return std::nullopt;
@@ -165,10 +167,30 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
       node.offset = arguments->get_element_offset(path);
     } else if (auto *arg = stmt->cast<ArgLoadStmt>()) {
       if (arg->is_ptr || !arg->create_load || arg->arg_depth != 0 ||
-          arg->arg_id.size() != 1)
+          arg->arg_id.size() != 1 || arg->ret_type != PrimitiveType::i32)
         return std::nullopt;
       node.op = HostRangeOp::argument_i32;
       node.offset = arguments->get_element_offset(arg->arg_id);
+    } else if (auto *unary = stmt->cast<UnaryOpStmt>();
+               unary && unary->op_type == UnaryOpType::logic_not) {
+      if (!emit) {
+        pending.emplace_back(stmt, true);
+        pending.emplace_back(unary->operand, false);
+        continue;
+      }
+      node.op = HostRangeOp::logical_not;
+      node.lhs = indices.at(unary->operand);
+    } else if (auto *cast = stmt->cast<UnaryOpStmt>();
+               cast && cast->op_type == UnaryOpType::cast_value &&
+               (cast->cast_type == cast->operand->ret_type ||
+                (cast->cast_type == PrimitiveType::i32 && cast->operand->ret_type == PrimitiveType::u1))) {
+      if (!emit) {
+        pending.emplace_back(stmt, true);
+        pending.emplace_back(cast->operand, false);
+      } else {
+        indices.emplace(stmt, indices.at(cast->operand));
+      }
+      continue;
     } else if (auto *binary = stmt->cast<BinaryOpStmt>()) {
       if (binary->is_bit_vectorized)
         return std::nullopt;
@@ -179,6 +201,21 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
         case BinaryOpType::mul: node.op = HostRangeOp::multiply; break;
         case BinaryOpType::min: node.op = HostRangeOp::minimum; break;
         case BinaryOpType::max: node.op = HostRangeOp::maximum; break;
+        case BinaryOpType::cmp_lt: node.op = HostRangeOp::less; break;
+        case BinaryOpType::cmp_le: node.op = HostRangeOp::less_equal; break;
+        case BinaryOpType::cmp_gt: node.op = HostRangeOp::greater; break;
+        case BinaryOpType::cmp_ge: node.op = HostRangeOp::greater_equal; break;
+        case BinaryOpType::cmp_eq: node.op = HostRangeOp::equal; break;
+        case BinaryOpType::cmp_ne: node.op = HostRangeOp::not_equal; break;
+        case BinaryOpType::logical_and:
+        case BinaryOpType::bit_and:
+        case BinaryOpType::logical_or:
+        case BinaryOpType::bit_or:
+          if (binary->lhs->ret_type != PrimitiveType::u1 || binary->rhs->ret_type != PrimitiveType::u1)
+            return std::nullopt;
+          node.op = (binary->op_type == BinaryOpType::logical_and || binary->op_type == BinaryOpType::bit_and)
+                        ? HostRangeOp::minimum : HostRangeOp::maximum;
+          break;
         case BinaryOpType::div: node.op = HostRangeOp::divide; division = true; break;
         case BinaryOpType::floordiv: node.op = HostRangeOp::floor_divide; division = true; break;
         default: return std::nullopt;
@@ -204,6 +241,19 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
       // of these expressions too: ndrange multiplies clamped dimension spans,
       // not just bare ndarray shapes. The evaluator checks each original i32
       // operation before later clamps or zero factors can hide an overflow.
+    } else if (auto *select = stmt->cast<TernaryOpStmt>();
+               select && select->op_type == TernaryOpType::select) {
+      if (!emit) {
+        pending.emplace_back(stmt, true);
+        pending.emplace_back(select->op3, false);
+        pending.emplace_back(select->op2, false);
+        pending.emplace_back(select->op1, false);
+        continue;
+      }
+      node.op = HostRangeOp::select;
+      node.condition = indices.at(select->op1);
+      node.lhs = indices.at(select->op2);
+      node.rhs = indices.at(select->op3);
     } else {
       return std::nullopt;
     }

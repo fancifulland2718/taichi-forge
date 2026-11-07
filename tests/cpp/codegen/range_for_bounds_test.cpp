@@ -14,6 +14,55 @@
 namespace taichi::lang {
 namespace {
 
+TEST(HostRangeInterval, ModelBlockSelectAndInvocationIsolation) {
+  HostRangeBound bound;
+  bound.program = {{HostRangeOp::argument_i32}, {HostRangeOp::constant_i32, 32},
+                   {HostRangeOp::greater, 0, 0, 1}, {HostRangeOp::constant_i32, 128},
+                   {HostRangeOp::select, 0, 3, 1, 0, 2}};
+  const auto envelope = static_host_range_interval(bound);
+  ASSERT_TRUE(envelope);
+  EXPECT_EQ(envelope->lower, 32);
+  EXPECT_EQ(envelope->upper, 128);
+  std::int32_t dof = 32;
+  EXPECT_EQ(bound.evaluate(&dof, sizeof(dof)), 32);
+  dof = 33;
+  EXPECT_EQ(bound.evaluate(&dof, sizeof(dof)), 128);
+  EXPECT_TRUE(bound.reads(0, sizeof(dof)));
+  EXPECT_FALSE(bound.evaluate(&dof, 3));
+  OffloadedStmt offload(OffloadedTaskType::range_for, Arch::cuda, nullptr);
+  offload.host_block_dim = bound;
+  auto clone = offload.clone();
+  ASSERT_TRUE(clone->as<OffloadedStmt>()->host_block_dim);
+  EXPECT_TRUE(*clone->as<OffloadedStmt>()->host_block_dim == bound);
+#ifdef TI_WITH_LLVM
+  OffloadedTask task;
+  task.block_dim = 128;
+  task.available_block_threads = 1024;
+  task.host_block_dim = bound;
+  EXPECT_EQ(task.launch_block(&dof, sizeof(dof)), 128);
+  auto prepared = task;
+  dof = 32;
+  prepared.block_dim = task.launch_block(&dof, sizeof(dof));
+  EXPECT_EQ(prepared.block_dim, 32);
+  EXPECT_EQ(task.block_dim, 128);
+  dof = 65;
+  EXPECT_EQ(task.launch_block(&dof, sizeof(dof)), 128);
+  EXPECT_EQ(prepared.block_dim, 32);
+  const std::vector<std::pair<std::uint64_t, std::uint64_t>> mutable_args{{0, 4}};
+  EXPECT_ANY_THROW(task.launch_block(&dof, sizeof(dof), &mutable_args));
+  task.available_block_threads = 64;
+  EXPECT_ANY_THROW(task.launch_block(&dof, sizeof(dof)));
+  task.host_block_dim = HostRangeBound{1, {0}, false};
+  task.available_block_threads = 1024;
+  for (auto bad : {0, -1, 33, 256, INT32_MAX}) {
+    dof = bad;
+    EXPECT_ANY_THROW(task.launch_block(&dof, sizeof(dof)));
+  }
+#endif
+  bound.program.back().condition = bound.program.size();
+  EXPECT_FALSE(bound.valid(sizeof(dof)));
+}
+
 TEST(DynamicSharedLayout, AlignsAllocationsAndRejectsUnsafeArguments) {
   HostRangeBound dimension;
   dimension.offsets = {0};

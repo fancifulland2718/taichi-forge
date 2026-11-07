@@ -22,6 +22,9 @@ enum class HostRangeOp {
   maximum,
   divide,
   floor_divide,
+  less, less_equal, greater, greater_equal, equal, not_equal,
+  select,
+  logical_not,
 };
 
 // A topologically ordered DAG. Leaves carry an argument byte offset or an i32
@@ -30,7 +33,7 @@ enum class HostRangeOp {
 struct HostRangeInstruction {
   HostRangeOp op{HostRangeOp::constant_i32};
   std::int32_t immediate{0};
-  std::uint64_t lhs{0}, rhs{0}, offset{0};
+  std::uint64_t lhs{0}, rhs{0}, offset{0}, condition{0};
 
   bool is_input() const {
     return op == HostRangeOp::argument_i32 || op == HostRangeOp::shape_i32;
@@ -38,10 +41,12 @@ struct HostRangeInstruction {
 
   bool operator==(const HostRangeInstruction &other) const {
     return op == other.op && immediate == other.immediate && lhs == other.lhs &&
-           rhs == other.rhs && offset == other.offset;
+           rhs == other.rhs && offset == other.offset && condition == other.condition;
   }
 
   bool valid(std::uint64_t index, std::uint64_t argument_bytes) const {
+    if (op != HostRangeOp::select && condition != 0)
+      return false;
     switch (op) {
       case HostRangeOp::constant_i32:
         return lhs == 0 && rhs == 0 && offset == 0;
@@ -56,7 +61,17 @@ struct HostRangeInstruction {
       case HostRangeOp::multiply:
       case HostRangeOp::minimum:
       case HostRangeOp::maximum:
+      case HostRangeOp::less:
+      case HostRangeOp::less_equal:
+      case HostRangeOp::greater:
+      case HostRangeOp::greater_equal:
+      case HostRangeOp::equal:
+      case HostRangeOp::not_equal:
         return lhs < index && rhs < index && immediate == 0 && offset == 0;
+      case HostRangeOp::select:
+        return condition < index && lhs < index && rhs < index && immediate == 0 && offset == 0;
+      case HostRangeOp::logical_not:
+        return lhs < index && rhs == 0 && immediate == 0 && offset == 0;
       case HostRangeOp::divide:
       case HostRangeOp::floor_divide:
         return lhs < index && rhs == 0 && immediate > 0 && offset == 0;
@@ -64,7 +79,7 @@ struct HostRangeInstruction {
     return false;
   }
 
-  TI_IO_DEF(op, immediate, lhs, rhs, offset);
+  TI_IO_DEF(op, immediate, lhs, rhs, offset, condition);
 };
 
 inline bool valid_host_range_program(
@@ -132,6 +147,16 @@ inline std::optional<std::int32_t> evaluate_host_range_program(
         value = values[node.lhs] / node.immediate -
                 (values[node.lhs] % node.immediate < 0);
         break;
+      case HostRangeOp::less: value = values[node.lhs] < values[node.rhs]; break;
+      case HostRangeOp::less_equal: value = values[node.lhs] <= values[node.rhs]; break;
+      case HostRangeOp::greater: value = values[node.lhs] > values[node.rhs]; break;
+      case HostRangeOp::greater_equal: value = values[node.lhs] >= values[node.rhs]; break;
+      case HostRangeOp::equal: value = values[node.lhs] == values[node.rhs]; break;
+      case HostRangeOp::not_equal: value = values[node.lhs] != values[node.rhs]; break;
+      case HostRangeOp::select:
+        value = values[node.condition] ? values[node.lhs] : values[node.rhs];
+        break;
+      case HostRangeOp::logical_not: value = !values[node.lhs]; break;
     }
     // Check every original arithmetic node, before a later min/max can hide
     // overflow. On failure the caller keeps the backend's original grid.

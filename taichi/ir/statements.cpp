@@ -279,6 +279,7 @@ std::unique_ptr<RangeForStmt> RangeForStmt::clone_with_body(
       block_dim, strictly_serialized, range_hint);
   new_stmt->reversed = reversed;
   new_stmt->one_to_one = one_to_one;
+  new_stmt->model_block_dim = model_block_dim;
   return new_stmt;
 }
 
@@ -437,6 +438,7 @@ std::unique_ptr<Stmt> OffloadedStmt::clone() const {
   new_stmt->begin_value = begin_value;
   new_stmt->end_value = end_value;
   new_stmt->host_launch_range = host_launch_range;
+  new_stmt->host_block_dim = host_block_dim;
   new_stmt->grid_dim = grid_dim;
   new_stmt->block_dim = block_dim;
   new_stmt->source_block_dim_explicit = source_block_dim_explicit;

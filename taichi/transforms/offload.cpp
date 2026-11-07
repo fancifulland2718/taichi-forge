@@ -4,6 +4,7 @@
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/analysis/host_range_bounds.h"
+#include "taichi/analysis/host_range_interval.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/program/program.h"
 #include "taichi/transforms/sink_serial_integer_prelude.h"
@@ -191,6 +192,20 @@ class Offloader {
           offloaded->block_dim = s->block_dim;
         }
         offloaded->source_block_dim_explicit = s->block_dim != 0;
+        if (s->model_block_dim) {
+          TI_ERROR_IF(arch != Arch::cuda || !kernel,
+                      "Model-dependent block size requires a CUDA kernel range");
+          offloaded->host_block_dim = describe_host_range_bound(s->model_block_dim, kernel->args_type);
+          TI_ERROR_IF(!offloaded->host_block_dim,
+                      "Model-dependent block size must be an immutable i32 argument expression");
+          auto envelope = static_host_range_interval(*offloaded->host_block_dim);
+          // This is a code-generation launch bound, not a model-size domain.
+          // Actual device/function capacity is checked for each prepared call.
+          offloaded->block_dim = envelope && envelope->upper > 0
+              ? static_cast<int>(std::min<std::int64_t>(envelope->upper, taichi_max_gpu_block_dim))
+              : taichi_max_gpu_block_dim;
+          offloaded->source_block_dim_explicit = true;
+        }
         if (auto val = s->begin->cast<ConstStmt>()) {
           offloaded->const_begin = true;
           offloaded->begin_value = val->val.val_int32();

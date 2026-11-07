@@ -310,6 +310,10 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
     throw aot::ArtifactLoadError("Failed to read LLVM AOT kernel: " + name);
   }
   for (const auto &task : loaded.compiled_data.tasks) {
+    TI_ERROR_IF(task.host_block_dim &&
+                    (arch() != Arch::cuda || task.task_type != OffloadedTaskType::range_for ||
+                     task.block_dim <= 0 || !task.host_block_dim->valid(loaded.args_size)),
+                "AOT model block size requires a valid CUDA range argument expression");
     if (!task.dynamic_shared_arrays.empty()) {
       TI_ERROR_IF(arch() != Arch::cuda || task.task_type != OffloadedTaskType::range_for ||
                       task.dynamic_shared_array_bytes != 0,

@@ -441,6 +441,7 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     emit(stmt->strictly_serialized);
     emit(stmt->mem_access_opt);
     emit(stmt->block_dim);
+    emit(stmt->model_block_dim);
     emit(stmt->one_to_one);
     emit(stmt->body.get());
   }
