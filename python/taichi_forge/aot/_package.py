@@ -1340,7 +1340,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 raise PackageExportError(f"{name}.{definition['name']}: {error}") from error
             variants = []
             for code in codes:
-                for attribute, _ in code.contract["captures"]:
+                for attribute in {key for key, _ in code.contract["captures"]} | code.static.keys():
                     required = compilation_schemas.get(owner_name, {}).get(attribute, {}).get("conditions", {})
                     if any(code.static.get(key) != static_key(value) for key, value in required.items()):
                         _fail(
@@ -1482,6 +1482,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         else {}
                     ),
                 )
+                conditions = {
+                    key: compilation_schemas[owner_name][key]["conditions"]
+                    for key in sorted(used)
+                    if compilation_schemas[owner_name][key].get("conditions")
+                }
+                if conditions:
+                    manifest["version"] = max(manifest["version"], 37)
+                    manifest["entry_families"][symbol]["conditions"] = conditions
                 entries[definition["name"]] = dict(symbol=symbol)
             else:
                 entries[definition["name"]] = entry_manifest

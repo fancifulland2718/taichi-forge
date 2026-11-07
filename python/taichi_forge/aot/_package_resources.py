@@ -381,6 +381,8 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
             if spec.get("expression"):
                 if existing.get("expression") not in (None, spec["expression"]):
                     fail(module, node, f"Conflicting derived dimension {name!r}")
+                if not existing.get("expression") and spec.get("conditions"):
+                    existing["conditions"] = dict(spec["conditions"])
                 existing["expression"] = spec["expression"]
             return
         if existing is not None and existing != spec:
@@ -524,10 +526,9 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                 or not isinstance(node.args[0], ast.Constant)
                 or type(node.args[0].value) is not str
                 or not node.args[0].value.isidentifier()
-                or current_conditions
                 or node.lineno < scopes[scope].lineno
             ):
-                fail(module, node, "Derived dimensions require an unconditional literal name and declared expression")
+                fail(module, node, "Derived dimensions require a literal name and declared expression")
             local_name = node.args[0].value
             name = member(scope, local_name)
             value = dimension(node.args[1], bindings)
@@ -560,6 +561,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                     kind="dimension",
                     dtype="i32",
                     expression=expression,
+                    **({"conditions": dict(current_conditions)} if current_conditions else {}),
                     scope_allocation=origin(scope),
                 ),
                 node,
@@ -779,7 +781,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
         optional_records.update(id(call) for call in calls)
         return name
 
-    def declare_static(scope, call, statement):
+    def declare_static(scope, call, statement, conditions=None):
         from ._component import StaticValue
         from taichi_forge_runtime._static_values import static_key
 
@@ -837,6 +839,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                 choices=[static_key(v) for v in declaration.choices],
                 kernel_only=kernel_only,
                 static_declaration=[statement.lineno, statement.col_offset],
+                **({"conditions": dict(conditions)} if conditions else {}),
                 scope_allocation=origin(scope),
             ),
             statement,
@@ -878,6 +881,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                     and {tuple(v) for v in declaration["choices"]} == {("bool", False), ("bool", True)}
                     and not declaration["kernel_only"]
                     and name not in conditions
+                    and all(conditions.get(key) is value for key, value in declaration.get("conditions", {}).items())
                 ):
                     fail(
                         module,
@@ -912,15 +916,15 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
         current_conditions = conditions
         call = statement.value if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)) else None
         scope, method = operation(call)
-        if conditions and method in ("static", "constant", "value"):
-            fail(module, statement, "Value/static declarations must remain unconditional")
+        if conditions and method == "constant":
+            fail(module, statement, "Definition constants must remain unconditional")
         if method == "record" and id(call) in record_calls:
             continue
         if method == "record" and isinstance(statement, ast.Expr) and id(call) in optional_records:
             allowed.add(id(call.func.value))
             optional_members.add(absent_record(call))
         elif method == "static" and isinstance(statement, ast.Expr):
-            declare_static(scope, call, statement)
+            declare_static(scope, call, statement, conditions)
         elif method == "constant" and isinstance(statement, ast.Expr):
             if (
                 scope_paths[scope]
@@ -970,6 +974,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                     name.value,
                     kind="value",
                     type_node=args["dtype"],
+                    **({"conditions": dict(conditions)} if conditions else {}),
                     **({"affects_plan": True} if plan_option.value else {}),
                     value_declaration=[statement.lineno, statement.col_offset],
                     scope_allocation=origin(scope),

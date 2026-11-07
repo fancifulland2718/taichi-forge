@@ -6997,6 +6997,148 @@ def test_package_layout_contracts_do_not_duplicate_compatible_numerical_code(tmp
             a.step(1.0)
 
 
+CONDITIONAL_VALUES_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool, mode: int = 0, gain: float = 2.0):
+        global constructors
+        constructors += 1
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        if self.enabled:
+            self.mode, self.gain, self.size = mode, gain, n + 1
+            scope.static('mode', choices=(0, 1))
+            scope.value('gain', ti.f32)
+            scope.derived_dim('size', scope.dim('n') + 1)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+        if self.enabled:
+            scope.extra = scope.field(ti.f32, shape=scope.dim('size'), initialization='zero')
+        else:
+            scope.record('extra', None, optional=True)
+
+    @ti.kernel
+    def step(self):
+        if ti.static(self.enabled):
+            for i in range(self.size):
+                self.extra[i] = self.gain * (i + ti.static(self.mode))
+        else:
+            for i in self.values:
+                self.values[i] = -i
+
+    @ti.kernel
+    def common(self):
+        for i in self.values:
+            self.values[i] = i + 1
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_conditional_values_and_domains_follow_actual_guards(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, CONDITIONAL_VALUES_SOURCE)
+    original = package.Model(7, True, 1, 3.0)
+    original.step()
+    expected = original.extra.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 37
+    assert sys.modules["definition_fixture.model"].constructors == 1
+    assert len(manifest["entries"]) == 5  # Three step paths, common, unimported public entry.
+    (family,) = manifest["entry_families"].values()
+    assert len(family["variants"]) == 3
+    assert family["conditions"] == {"mode": {"enabled": True}}
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b, c = code.host.Model(7, True, 1, 3.0), code.host.Model(19, True, 0, -2.0), code.host.Model(5, False)
+        assert not hasattr(c, "mode") and not hasattr(c, "gain") and not hasattr(c, "size")
+        a.step()
+        b.step()
+        c.step()
+        np.testing.assert_array_equal(a.extra.to_numpy(), expected)
+        np.testing.assert_array_equal(b.extra.to_numpy(), -2 * np.arange(20))
+        np.testing.assert_array_equal(c.values.to_numpy(), -np.arange(5))
+        assert c.extra is None
+        assert a.extra._group_owner is not b.extra._group_owner
+        plan = a.graph()
+        prepared = plan.bind({})
+        a.gain = 7.0
+        prepared.run()
+        np.testing.assert_array_equal(a.extra.to_numpy(), expected)
+        a.step()
+        np.testing.assert_array_equal(a.extra.to_numpy(), 7 * (np.arange(8) + 1))
+        a.mode = 9
+        with pytest.raises(ValueError, match="outside its declared package domain"):
+            a.step()
+        a.common()  # Unused optional configuration does not enter this code.
+        np.testing.assert_array_equal(a.values.to_numpy(), np.arange(7) + 1)
+        a.mode = 1
+        a.size = 3
+        with pytest.raises(ValueError, match="[Dd]erived dimension"):
+            a.step()
+        prepared.close()
+    probe = tmp_path / "consume_conditional_values.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(17, True, 1, 3.0), code.host.Model(33, False)
+            a.step()
+            b.step()
+            np.testing.assert_array_equal(a.extra.to_numpy(), 3 * (np.arange(18) + 1))
+            np.testing.assert_array_equal(b.values.to_numpy(), -np.arange(33))
+            assert not hasattr(b, 'mode') and b.extra is None
+        print('CONDITIONAL_VALUES_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CONDITIONAL_VALUES_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("expression", ["self.gain", "self.size", "0 + ti.static(self.mode)"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_conditional_values_require_their_numerical_guard(tmp_path, monkeypatch, expression):
+    begin = CONDITIONAL_VALUES_SOURCE.index("    @ti.kernel\n    def step")
+    end = CONDITIONAL_VALUES_SOURCE.index("    @ti.kernel\n    def common")
+    source = (
+        CONDITIONAL_VALUES_SOURCE[:begin]
+        + "    @ti.kernel\n    def step(self):\n"
+        + f"        for i in self.values:\n            self.values[i] = {expression}\n\n"
+        + CONDITIONAL_VALUES_SOURCE[end:]
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="requires its declared static guard"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
 CONDITIONAL_LAYOUT_SOURCE = """
 import taichi_forge as ti
 constructors = 0

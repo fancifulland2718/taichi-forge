@@ -637,6 +637,15 @@ The retained Host passes its actual mapping to the existing consumer check;
 changed keys or extent expressions are rejected before binding. This adds no
 code variants or artifact format and does not infer relations from model values.
 
+Conditional Host branches guarded by a declared boolean may declare runtime
+values, derived dimensions and finite static options. Numerical users must
+capture the same guard; an unguarded read is rejected. Version 37 entry families
+retain the static-option presence conditions and check guards before reading
+branch-local attributes. An inactive option need not exist on that instance.
+Only observed numerical paths produce code; common entries and prepared calls
+retain their existing sharing and snapshot rules. Group dimensions must still
+be available before their first allocation. Constants remain unconditional.
+
 Version 20 supports constructor declarations of
 `scope.borrow('alias', self.field, source_scope=True, ...)` from an earlier,
 unconditional Field or StructField member on the same owner. It reuses

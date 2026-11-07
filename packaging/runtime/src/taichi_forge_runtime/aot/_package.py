@@ -797,6 +797,8 @@ class entry:
         self._variants = []
         self._domain = {}
         self._selected = {}
+        self._conditions = {}
+        self._selection_order = []
         if self.family is not None:
             self._domain = {
                 name: {static_key(read_static_key(key)) for key in values}
@@ -809,6 +811,33 @@ class entry:
                 if not selection.keys() <= self._domain.keys():
                     raise ValueError("Static entry selection differs from its declared domain")
                 self._variants.append((selection, variant["symbol"]))
+            self._conditions = self.family.get("conditions", {})
+            if not isinstance(self._conditions, dict) or not self._conditions.keys() <= self._domain.keys():
+                raise ValueError("Static presence conditions differ from their package domain")
+            visiting, complete = set(), set()
+
+            def order(name):
+                if name in visiting:
+                    raise ValueError("Cyclic static presence conditions")
+                if name in complete:
+                    return
+                visiting.add(name)
+                condition = self._conditions.get(name, {})
+                if not isinstance(condition, dict) or any(
+                    key not in self._domain
+                    or self._domain[key] != {static_key(False), static_key(True)}
+                    or type(value) is not bool
+                    for key, value in condition.items()
+                ):
+                    raise ValueError("Static presence requires declared boolean guards")
+                for key in condition:
+                    order(key)
+                visiting.remove(name)
+                complete.add(name)
+                self._selection_order.append(name)
+
+            for name in self._domain:
+                order(name)
         self.signature = inspect.Signature(
             [
                 inspect.Parameter(item["name"], inspect.Parameter.POSITIONAL_OR_KEYWORD)
@@ -896,16 +925,20 @@ class entry:
             return self
         if owner is None:
             raise ValueError("Static package entries require their bound instance")
-        values = {
-            name: static_key(path_value(owner, self.family.get("paths", {}).get(name, (name,))))
-            for name in self._domain
-        }
-        if any(value not in self._domain[name] for name, value in values.items()):
-            raise ValueError("Static configuration is outside its declared package domain")
+        values = {}
+        for name in self._selection_order:
+            if not all(
+                values.get(key) == static_key(expected) for key, expected in self._conditions.get(name, {}).items()
+            ):
+                continue
+            value = static_key(path_value(owner, self.family.get("paths", {}).get(name, (name,))))
+            if value not in self._domain[name]:
+                raise ValueError("Static configuration is outside its declared package domain")
+            values[name] = value
         matches = {
             symbol
             for selection, symbol in self._variants
-            if all(values[name] == value for name, value in selection.items())
+            if all(values.get(name) == value for name, value in selection.items())
         }
         if len(matches) != 1:
             raise ValueError("Static configuration has missing or ambiguous package code")
@@ -974,6 +1007,7 @@ class LoadedPackage:
                 34,
                 35,
                 36,
+                37,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
