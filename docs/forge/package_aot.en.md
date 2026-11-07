@@ -2,24 +2,29 @@
 
 [中文](package_aot.zh.md) · [Standalone AOT SDK](aot_sdk.en.md)
 
-`ti.aot.export_package(module, directory)` exports numerical TCM code, readable
+`ti.aot.export_package(module, directory, arch="cuda")` exports numerical TCM code, readable
 Host Python and an entry manifest from ordinary Python definitions. Applications
-use their existing `@ti.kernel`, `@ti.func` and `@ti.data_oriented` decorators.
+use their existing `@ti.kernel`, `@ti.func`, `@ti.real_func`, `@ti.dataclass`
+and `@ti.data_oriented` decorators.
 No export decorator, per-kernel registration or component root is required.
 This is a limited prototype, not a complete engine distribution interface.
 Its format and supported scope are experimental.
 
 ## Producing and consuming a package
 
-Initialize Forge normally, then export an imported source package:
+Export an imported source package, selecting the backend explicitly:
 
 ```python
 import taichi_forge as ti
 import my_engine
 
-ti.init(arch=ti.cuda)
-ti.aot.export_package(my_engine, "dist/my_engine_cuda")
+ti.aot.export_package(my_engine, "dist/my_engine_cuda", arch="cuda")
 ```
+
+`arch` accepts `cpu`/`x64`, `cuda`, `vulkan`, or the corresponding Forge enum.
+It initializes a cold Runtime without backend fallback. If JIT is already
+initialized, the target must match; export never resets a live JIT Runtime.
+Omitting `arch` uses the already selected backend.
 
 The output directory must not exist. Export scans all `.py` definitions under
 the selected package, including modules not imported by its initializer and
@@ -62,8 +67,10 @@ independent object retirement is not implemented.
 ## Initial scope and validation
 
 - Top-level kernels, ordinary `data_oriented` instance kernels and their `func` helpers; ordinary import aliases are recognized.
-- Explicit scalar and scalar-Ndarray arguments with fixed dtype/rank, without gradient arguments.
-- Scalar Ndarrays directly allocated in constructors, and `self` attributes assigned scalar constants or constructor parameters annotated with `int/float/bool` or Forge scalar types.
+- Explicit scalar, vector, matrix and struct values; scalar/tensor/struct Ndarrays with fixed element type/rank, without gradient arguments.
+- Typed Ndarrays directly allocated in constructors, and `self` attributes assigned scalar constants or constructor parameters annotated with `int/float/bool` or Forge scalar types.
+- `types.vector/matrix/struct`, math vector/matrix aliases and `dataclass` type declarations retain their existing logical types. Struct storage uses `Module.add_ndarray_layout` and the native consumer layout query, without a second packing rule. Host type projection currently supplies argument construction, not the full Python Matrix/Struct manipulation API.
+- LLVM `real_func` calls retain real function boundaries. Nested helpers can capture scalar values and ndarrays through typed hidden parameters. Explicit-parameter shallow recursion is checked; recursive functions with implicit captures reject with a diagnostic. Vulkan real functions remain unsupported and reject before publication.
 - Array extents and ordinary scalar attributes remain runtime data. Existing Component lowering supplies the internal type contract without user Component registration. Extent-one temporary arrays provide type/rank witnesses, not sample models or static-branch choices.
 - Normal JIT decorators and invocation remain unchanged. Scanning and Host projection run only on explicit export.
 
@@ -71,13 +78,18 @@ Focused tests use the same source for ordinary JIT and source-free AOT. They
 cover sizes 7/19/3, distinct initial states, both Host branches, mutable scalar
 inputs, an unimported module's entry, lazy imports during nested package loading,
 and rejection after close. The independent consumer blocks imports of `taichi`,
-`taichi_forge` and the original source package. CPU and CUDA have execution
-evidence; this prototype has no Vulkan qualification.
+`taichi_forge` and the original source package. CPU/CUDA have source-free scalar
+and real-function evidence. Compound values/arrays and independent instances
+have focused CPU/CUDA/Vulkan execution evidence. This does not qualify other
+Vulkan capabilities. A CUDA recursion probe at depth 18 hit an illegal address;
+the cause is not confirmed, with default device stack capacity the leading
+explanation. Standalone Runtime does not yet expose stack-size configuration.
+Deep CUDA recursion is not qualified by the passing shallow-recursion check.
 
 ## Remaining shared mechanisms
 
 Complex SNode/Field layouts, inheritance, template/static configuration domains,
-`real_func/pyfunc`, gradients, arbitrary Python resource factories, complete Host
+`pyfunc`, gradients, arbitrary Python resource factories, complete Host
 array access, Graph/ExecutionPlan and provider references are not integrated.
 Recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute

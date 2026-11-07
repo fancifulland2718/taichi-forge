@@ -1,6 +1,6 @@
 """Experimental definition-driven package export; no model execution tracing.
 
-The first supported slice is scalar/ndarray owners with ordinary decorators.
+The supported slice is typed value/ndarray owners with ordinary decorators.
 Existing component lowering is an internal compiler service, not a registration
 or recording API required of the application. Unsupported definitions fail the
 whole export rather than silently disappearing from the package.
@@ -18,9 +18,10 @@ import tempfile
 from types import ModuleType
 
 from taichi_forge.tools._compiled_host import decorator_resolver
+from ._package_types import qualified_kind, resolve_type, type_expression, type_spec
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
-_DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented"))
+_DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
 _PREFIX = "_forge_package_"
 
 
@@ -54,19 +55,18 @@ def _owner_schema(module, node, kind):
             ):
                 continue
             value = statement.value
-            if isinstance(value, ast.Call) and kind(value.func) == "ndarray":
+            if isinstance(value, ast.Call) and qualified_kind(value, kind) == "ndarray":
                 if statement not in constructor.body or len(targets) != 1:
                     _fail(module, statement, "conditional or aliased allocation requires a resource contract")
                 arguments = dict(zip(("dtype", "shape"), value.args))
                 if len(value.args) > 2 or any(k.arg not in ("dtype", "shape") for k in value.keywords):
-                    _fail(module, value, "only scalar ndarray dtype and shape are supported")
+                    _fail(module, value, "only ndarray dtype and shape are supported")
                 arguments.update((k.arg, k.value) for k in value.keywords)
-                dtype = kind(arguments.get("dtype"))
                 shape = arguments.get("shape")
-                if dtype not in _DTYPES or shape is None:
-                    _fail(module, value, "ndarray requires a fixed scalar dtype and explicit shape")
+                if "dtype" not in arguments or shape is None:
+                    _fail(module, value, "ndarray requires a fixed element type and explicit shape")
                 rank = len(shape.elts) if isinstance(shape, (ast.Tuple, ast.List)) else 1
-                spec = dict(kind="ndarray", dtype=dtype, ndim=rank)
+                spec = dict(kind="ndarray", type_node=arguments["dtype"], ndim=rank)
             else:
                 annotation = annotations.get(value.id) if isinstance(value, ast.Name) else None
                 dtype = {"int": "i32", "float": "f32", "bool": "i32"}.get(
@@ -94,11 +94,12 @@ def _analyze(module, source):
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             decorators = [kind(d) for d in node.decorator_list]
-            if "data_oriented" not in decorators:
+            if "data_oriented" not in decorators and "dataclass" not in decorators:
                 continue
-            if decorators != ["data_oriented"]:
+            if decorators not in (["data_oriented"], ["dataclass"]):
                 _fail(module, node, "owner decorator combinations are not yet supported")
-            owners[node.name] = _owner_schema(module, node, kind)
+            if decorators == ["data_oriented"]:
+                owners[node.name] = _owner_schema(module, node, kind)
             members = [(node.name, n) for n in node.body]
         else:
             members = [(None, node)]
@@ -109,8 +110,10 @@ def _analyze(module, source):
             dsl = next((d for d in decorators if d in _DECORATORS), None)
             if dsl is None:
                 continue
-            if dsl not in ("kernel", "func") or decorators != [dsl]:
-                _fail(module, entry, "only ordinary kernel/func methods are supported in this prototype")
+            if owner is not None and owner not in owners and dsl == "kernel":
+                _fail(module, entry, "dataclass device methods must be functions, not kernels")
+            if dsl not in ("kernel", "func", "real_func") or decorators != [dsl]:
+                _fail(module, entry, "unsupported numerical decorator combination")
             supported.add(id(entry))
             definitions.append(
                 dict(owner=owner, node=entry, kind=dsl, name=".".join(p for p in (owner, entry.name) if p))
@@ -125,7 +128,9 @@ def _analyze(module, source):
     return tree, kind, owners, definitions
 
 
-def _host_projection(module, tree, kind, owners, definitions, entries, package_name, device_functions, is_package):
+def _host_projection(
+    module, tree, kind, owners, definitions, entries, package_name, device_functions, is_package, namespace, builder
+):
     numerical = {item["name"]: item for item in definitions}
     definitions_at = {(item["node"].lineno, item["node"].col_offset): item for item in definitions}
     owners_at = {
@@ -192,6 +197,13 @@ def _host_projection(module, tree, kind, owners, definitions, entries, package_n
             return node
 
         def visit_ClassDef(self, node):
+            if [kind(d) for d in node.decorator_list] == ["dataclass"]:
+                return ast.copy_location(
+                    ast.Assign(
+                        [ast.Name(node.name, ast.Store())], type_expression(type_spec(namespace[node.name], builder))
+                    ),
+                    node,
+                )
             previous, self.owner = self.owner, node.name
             managed = (node.lineno, node.col_offset) in owners_at
             if managed:
@@ -210,7 +222,7 @@ def _host_projection(module, tree, kind, owners, definitions, entries, package_n
             definition = definitions_at.get((node.lineno, node.col_offset))
             if definition is None:
                 return self.generic_visit(node)
-            if definition["kind"] == "func":
+            if definition["kind"] in ("func", "real_func"):
                 return None
             descriptor = ast.Call(
                 ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "entry", ast.Load()),
@@ -224,22 +236,39 @@ def _host_projection(module, tree, kind, owners, definitions, entries, package_n
                 isinstance(node.ctx, ast.Load)
                 and isinstance(node.value, ast.Name)
                 and node.value.id == "self"
-                and numerical.get(f"{self.owner}.{node.attr}", {}).get("kind") == "func"
+                and numerical.get(f"{self.owner}.{node.attr}", {}).get("kind") in ("func", "real_func")
             ):
                 _fail(module, node, "Host references a device-only helper")
             role = kind(node)
+            if qualified_kind(node, kind) in (
+                "math.vec2",
+                "math.vec3",
+                "math.vec4",
+                "math.mat2",
+                "math.mat3",
+                "math.mat4",
+                "math.ivec2",
+                "math.ivec3",
+                "math.ivec4",
+                "math.uvec2",
+                "math.uvec3",
+                "math.uvec4",
+            ):
+                return ast.copy_location(type_expression(type_spec(resolve_type(node, namespace), builder)), node)
             if role is not None and role not in _DTYPES | {"ndarray"}:
                 _fail(module, node, f"Host frontend operation {role!r} needs a Runtime projection")
             return self.generic_visit(node)
 
         def visit_Name(self, node):
             if isinstance(node.ctx, ast.Load) and (
-                numerical.get(node.id, {}).get("kind") == "func" or node.id in imported_helpers
+                numerical.get(node.id, {}).get("kind") in ("func", "real_func") or node.id in imported_helpers
             ):
                 _fail(module, node, "Host references a device-only helper")
             return node
 
         def visit_Call(self, node):
+            if qualified_kind(node, kind) in ("types.vector", "types.matrix", "types.struct"):
+                return ast.copy_location(type_expression(type_spec(resolve_type(node, namespace), builder)), node)
             if kind(node) in _DTYPES:
                 _fail(module, node, "Host scalar casts require further Runtime projection support")
             return self.generic_visit(node)
@@ -263,17 +292,35 @@ def _host_projection(module, tree, kind, owners, definitions, entries, package_n
     return ast.unparse(projected) + "\n"
 
 
-def export_package(package, output):
+def export_package(package, output, *, arch=None):
     """Experimentally export all decorated definitions in an imported module/package.
 
-    Uses the currently initialized backend. No constructor, test, Host branch,
-    initializer or step is executed to discover numerical coverage. Scalar
-    ndarrays and directly typed scalar owner attributes are the initial scope.
+    Selects ``arch`` on a cold Runtime or validates the currently initialized
+    backend. No constructor, test, Host branch, initializer or step is executed
+    to discover numerical coverage. Typed arrays/values and directly typed
+    scalar owner attributes form the current supported scope.
     """
     import taichi_forge as ti
     from taichi_forge.aot._component import Array, Component, RuntimeValue
     from taichi_forge.aot.module import Module
     from taichi_forge.types.ndarray_type import NdarrayType
+    from taichi_forge.types._argument_descriptor import describe_annotation
+    from taichi_forge.lang.matrix import MatrixType
+    from taichi_forge.lang.struct import StructType
+
+    if arch is not None:
+        from taichi_forge.lang import impl
+
+        targets = {"cpu": ti.cpu, "x64": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan}
+        selected = targets.get(arch) if isinstance(arch, str) else arch
+        if selected not in (ti.cpu, ti.cuda, ti.vulkan):
+            raise ValueError("Package arch must be cpu, cuda or vulkan")
+        if impl.get_runtime().prog is None:
+            ti.init(arch=selected, enable_fallback=False)
+        elif impl.current_cfg().arch != selected:
+            raise ValueError(
+                "Package arch differs from the live JIT Runtime; initialize the chosen backend in a fresh process"
+            )
 
     if not isinstance(package, ModuleType) or not getattr(package, "__file__", None):
         raise TypeError("export_package requires an imported source module or package")
@@ -307,7 +354,7 @@ def export_package(package, output):
         name + "." + definition["name"]
         for name, _, _, _, _, _, _, definitions in sources
         for definition in definitions
-        if definition["kind"] == "func"
+        if definition["kind"] in ("func", "real_func")
     }
     for name, path, relative, text, tree, kind, schemas, definitions in sources:
         imported = package if name == package.__name__ else importlib.import_module(name)
@@ -320,12 +367,14 @@ def export_package(package, output):
             owner = object.__new__(cls)  # Deliberately never call application __init__.
             declarations = {}
             for attribute, item in schema.items():
-                dtype = getattr(ti, item["dtype"])
                 if item["kind"] == "ndarray":
+                    dtype = resolve_type(item.pop("type_node"), vars(imported))
+                    item["element"] = type_spec(dtype, module)
                     declarations[attribute] = Array(dtype, item["ndim"])
                     # Structural ABI witness only: every extent remains a runtime parameter.
                     value = ti.ndarray(dtype, (1,) * item["ndim"])
                 else:
+                    dtype = getattr(ti, item["dtype"])
                     declarations[attribute] = RuntimeValue(dtype)
                     value = 0.0 if item["dtype"].startswith("f") else 0
                 setattr(owner, attribute, value)
@@ -344,14 +393,28 @@ def export_package(package, output):
             arguments = kernel.arguments[1:] if owner is not None else kernel.arguments
             values, argument_schema = [], []
             for argument in arguments:
-                dtype = str(argument.annotation)
-                if isinstance(argument.annotation, NdarrayType):
-                    annotation = argument.annotation
-                    dtype = str(annotation.dtype)
-                    if dtype not in _DTYPES or type(annotation.ndim) is not int or annotation.needs_grad:
-                        _fail(name, node, "ndarray arguments require explicit scalar dtype/rank and no gradients")
+                annotation = argument.annotation
+                descriptor = describe_annotation(annotation)
+                if descriptor.element is None:
+                    _fail(name, node, f"argument {argument.name!r} requires an explicit value or ndarray type")
+                dtype = str(descriptor.element.scalar_type)
+                if isinstance(annotation, NdarrayType):
+                    if not descriptor.element.is_complete or type(annotation.ndim) is not int or annotation.needs_grad:
+                        _fail(name, node, "ndarray arguments require explicit element type/rank and no gradients")
                     values.append(ti.ndarray(annotation.dtype, (1,) * annotation.ndim))
-                    argument_schema.append(dict(name=argument.name, kind="ndarray", dtype=dtype, ndim=annotation.ndim))
+                    argument_schema.append(
+                        dict(
+                            name=argument.name,
+                            kind="ndarray",
+                            element=type_spec(annotation.dtype, module),
+                            ndim=annotation.ndim,
+                        )
+                    )
+                elif isinstance(annotation, (MatrixType, StructType)):
+                    values.append(annotation(0) if isinstance(annotation, MatrixType) else annotation())
+                    argument_schema.append(
+                        dict(name=argument.name, kind="compound", element=type_spec(annotation, module))
+                    )
                 elif dtype not in _DTYPES:
                     _fail(name, node, f"argument {argument.name!r} requires a supported scalar type; got {dtype}")
                 else:
@@ -393,6 +456,8 @@ def export_package(package, output):
             package.__name__,
             device_functions,
             relative.name == "__init__.py",
+            vars(imported),
+            module,
         ).encode("utf8")
         manifest["sources"][name] = hashlib.sha256(text.encode("utf8")).hexdigest()
     if not manifest["entries"]:

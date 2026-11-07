@@ -22,6 +22,33 @@ _ids = itertools.count()
 _DTYPES = ("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
 
 
+class _ElementType:
+    def __init__(self, package, spec):
+        self.package, self.spec = package, spec
+
+    def __call__(self, *args, **kwargs):
+        if self.spec["kind"] == "struct":
+            result = {}
+            for index, (name, member) in enumerate(self.spec["members"].items()):
+                value = args[index] if index < len(args) else kwargs.get(name, 0)
+                if member["kind"] != "scalar" and not isinstance(value, (dict, list, tuple)):
+                    value = _ElementType(self.package, member)(value)
+                result[name] = value
+            return result
+        shape = self.spec["element_shape"]
+        if kwargs:
+            raise TypeError("Host tensor values require positional components")
+        if len(args) == 1 and isinstance(args[0], (list, tuple)):
+            return args[0]
+        if len(args) == 1:
+
+            def fill(dimensions):
+                return [fill(dimensions[1:]) for _ in range(dimensions[0])] if dimensions else args[0]
+
+            return fill(shape)
+        return list(args)
+
+
 class _ModuleBinding:
     def __init__(self, package):
         self.package = package
@@ -29,7 +56,15 @@ class _ModuleBinding:
 
     def ndarray(self, dtype, shape):
         self.package._check()
-        value = self.package.runtime.ndarray(dtype, shape)
+        element_shape = ()
+        if isinstance(dtype, _ElementType):
+            if dtype.package is not self.package:
+                raise ValueError("Element type belongs to another loaded package")
+            if dtype.spec["kind"] == "struct":
+                dtype = self.package._module.ndarray_layout(dtype.spec["layout"])
+            else:
+                element_shape, dtype = dtype.spec["element_shape"], dtype.spec["dtype"]
+        value = self.package.runtime.ndarray(dtype, shape, element_shape=element_shape)
         self.package._arrays.append(value)
         construction = _construction.get()
         if construction is not None and construction[0] is self.package:
@@ -38,6 +73,9 @@ class _ModuleBinding:
 
     def entry(self, symbol):
         return entry(self.package, symbol)
+
+    def type(self, spec):
+        return _ElementType(self.package, spec)
 
     def managed_class(self, cls):
         return managed_class(self.package, cls)

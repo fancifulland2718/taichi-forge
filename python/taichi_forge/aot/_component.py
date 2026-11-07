@@ -28,6 +28,7 @@ from taichi_forge.lang._resource_declaration import (
 )
 from taichi_forge.lang.exception import TaichiCompilationError
 from taichi_forge.lang.matrix import Matrix, MatrixType, Vector
+from taichi_forge.lang.struct import StructType
 from taichi_forge.lang.util import cook_dtype
 from taichi_forge.types import primitive_types
 from taichi_forge.types.ndarray_type import NdarrayType
@@ -1419,7 +1420,7 @@ class Component:
                     raise TaichiCompilationError("Component explicit ndarray gradients are not qualified")
                 features.append(feature)
                 abi.append(("ndarray", str(feature[0]), feature[1], feature[2], str(feature[3]), feature[4]))
-            elif id(argument.annotation) in primitive_types.type_ids or isinstance(argument.annotation, MatrixType):
+            elif id(argument.annotation) in primitive_types.type_ids or isinstance(argument.annotation, (MatrixType, StructType)):
                 features.append(None)
                 abi.append(("value", str(argument.annotation)))
             elif isinstance(argument.annotation, AccelerationStructureType):
@@ -1431,7 +1432,7 @@ class Component:
                 abi.append(("acceleration_structure",))
             else:
                 raise TaichiCompilationError(
-                    "Component explicit arguments require scalar/vector/matrix values, ndarrays, or Vulkan acceleration structures"
+                    "Component explicit arguments require scalar/vector/matrix/struct values, ndarrays, or Vulkan acceleration structures"
                 )
         signature = (tuple(template_facts), tuple(abi))
         runtime = impl.get_runtime()
@@ -1590,6 +1591,49 @@ class _Capture:
         self.fixed_dependencies = {}
         self.resource_templates = {}
         self._layouts = _DenseLayoutValidation(component, owner)
+        # Functions retain real call boundaries. Each callable has its own
+        # parameter expressions while dependency facts remain in this capture.
+        self._real_functions = {}
+
+    def call_real_function(self, function, args):
+        from taichi_forge._lib import core
+
+        if not core.arch_uses_llvm(impl.current_cfg().arch):
+            raise TaichiCompilationError("real_func AOT requires an LLVM backend (CPU or CUDA)")
+        function._ensure_real_function_cache_current_program()
+        instance_id, features = function.mapper.lookup(args)
+        identity = (function, instance_id)
+        state = self._real_functions.get(identity)
+        if state is None:
+            variant = function._next_real_function_variant_id
+            function._next_real_function_variant_id += 1
+            key = core.FunctionKey(function.func.__name__, function.func_id, variant)
+            state = dict(key=key, compiling=True, recursive=False, captures=())
+            self._real_functions[identity] = state
+            previous = self.expressions, self.dynamic, self.resource_aliases
+            self.expressions, self.dynamic, self.resource_aliases = {}, [], {}
+            try:
+                function.do_compile(key, args, features)
+                state["captures"] = tuple(self.dynamic)
+                if state["recursive"] and state["captures"]:
+                    raise TaichiCompilationError(
+                        "Recursive real_func captures require an explicit parameter contract; "
+                        "pass runtime values and arrays as typed function arguments"
+                    )
+            except BaseException:
+                self._real_functions.pop(identity, None)
+                raise
+            finally:
+                self.expressions, self.dynamic, self.resource_aliases = previous
+                state["compiling"] = False
+        elif state["compiling"]:
+            state["recursive"] = True
+        values, arguments = [], []
+        for name in state["captures"]:
+            path = self.component._paths[name]
+            values.append(self.attribute(None, path[-1], prefix=path[:-1]))
+            arguments.append(kernel_arguments.KernelArgument(self.declarations[name].annotation, "__capture_" + name))
+        return function.func_call_rvalue(state["key"], args, capture_arguments=arguments, capture_values=values)
 
     def resolve_template(self, ctx, value):
         for child, path in self._method_owners:
@@ -1674,7 +1718,7 @@ class _Capture:
         # its storage, shape and contents remain runtime inputs. This matches
         # ordinary ti.static(Field/AnyArray); scalar values still cannot escape
         # their declared runtime role through a static selection.
-        if ctx.is_in_static_scope() and not isinstance(declaration, (Array, DenseField, FixedSNodeField)):
+        if ctx is not None and ctx.is_in_static_scope() and not isinstance(declaration, (Array, DenseField, FixedSNodeField)):
             raise TaichiCompilationError(
                 f"Component entry {self.kernel.func.__qualname__}: runtime capture self.{name} "
                 "cannot be used in ti.static; its declaration is dynamic"

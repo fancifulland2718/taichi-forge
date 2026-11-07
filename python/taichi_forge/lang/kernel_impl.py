@@ -370,7 +370,7 @@ class Func:
         # entering the inline path. Once promoted, stays promoted.
         deployment = getattr(impl.get_runtime().current_kernel, "_deployment_context", None)
         if deployment is not None and self.is_real_function:
-            raise TaichiSyntaxError("Component capture does not yet support real_func; use an inline ti.func")
+            return deployment.call_real_function(self, args)
         if deployment is None and not self.is_real_function and not self._auto_promoted:
             if self._can_auto_promote() and self._should_auto_promote():
                 self._auto_promoted = True
@@ -567,12 +567,13 @@ class Func:
             )
             return Expr(result)
 
-    def func_call_rvalue(self, key, args):
+    def func_call_rvalue(self, key, args, *, capture_arguments=(), capture_values=()):
         # Skip the template args, e.g., |self|
         assert self.is_real_function
         non_template_args = []
         dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
-        for i, kernel_arg in enumerate(self.arguments):
+        args = (*args, *capture_values)
+        for i, kernel_arg in enumerate((*self.arguments, *capture_arguments)):
             anno = kernel_arg.annotation
             if not isinstance(anno, template):
                 if id(anno) in primitive_types.type_ids:
@@ -644,11 +645,13 @@ class Func:
             old_callable = impl.get_runtime().compiling_callable
             impl.get_runtime().compiling_callable = fn
             ctx.ast_builder = fn.ast_builder()
-            with python_compile_profile_event(
-                f"python.func.real_transform:{self.func.__name__}"
-            ):
-                transform_tree(tree, ctx)
-            impl.get_runtime().compiling_callable = old_callable
+            try:
+                with python_compile_profile_event(
+                    f"python.func.real_transform:{self.func.__name__}"
+                ):
+                    transform_tree(tree, ctx)
+            finally:
+                impl.get_runtime().compiling_callable = old_callable
 
         self.taichi_functions[key.instance_id] = fn
         self.compiled[key.instance_id] = func_body

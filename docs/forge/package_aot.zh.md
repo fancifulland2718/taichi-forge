@@ -2,22 +2,25 @@
 
 [English](package_aot.en.md) · [独立 AOT SDK](aot_sdk.zh.md)
 
-`ti.aot.export_package(module, directory)` 尝试从普通 Python 包的计算定义生成
+`ti.aot.export_package(module, directory, arch="cuda")` 尝试从普通 Python 包的计算定义生成
 数值 TCM、可读 Host Python 和入口清单。应用继续使用已有的 `@ti.kernel`、
-`@ti.func` 和 `@ti.data_oriented`，无需增加导出装饰器、逐 Kernel 注册或组件根。
+`@ti.func`、`@ti.real_func`、`@ti.dataclass` 和 `@ti.data_oriented`，无需增加导出装饰器、逐 Kernel 注册或组件根。
 这个接口目前是小范围原型，不是完整引擎的一键发行接口，格式和支持范围尚未稳定。
 
 ## 生产与消费
 
-生产端先正常初始化 Forge，然后对导入的源码包调用一次导出接口：
+生产端对导入的源码包调用一次导出接口，并显式选择后端：
 
 ```python
 import taichi_forge as ti
 import my_engine
 
-ti.init(arch=ti.cuda)
-ti.aot.export_package(my_engine, "dist/my_engine_cuda")
+ti.aot.export_package(my_engine, "dist/my_engine_cuda", arch="cuda")
 ```
+
+`arch` 接受 `cpu`/`x64`、`cuda`、`vulkan` 或对应 Forge 枚举。尚未初始化时按指定
+后端启动，禁用静默回退；已有 JIT Runtime 时必须与其后端一致，不重置活跃的 JIT。
+省略 `arch` 则使用已经选择的后端。
 
 输出目录必须不存在。导出扫描选定包目录中的所有 `.py` 定义，包含没有被包入口
 导入的模块和未在测试中调用的 Kernel；也可传入单个源码模块。它不运行构造函数、
@@ -53,19 +56,24 @@ with Runtime("cuda") as runtime:
 ## 首批支持范围与验证
 
 - 顶层 Kernel 和普通 `data_oriented` 类的实例 Kernel、它们调用的 `func` helper；支持普通导入别名。
-- 显式标量参数及固定标量 dtype/rank 的 Ndarray 参数；不支持梯度参数。
-- 构造函数中直接分配的标量 Ndarray，以及由标量常量或带 `int/float/bool`、Forge 标量类型注解的构造参数赋值的 `self` 属性。
+- 显式标量、向量、矩阵和结构体值，以及固定元素类型/rank 的标量、张量和结构体 Ndarray；不支持梯度参数。
+- 构造函数中直接分配的带类型 Ndarray，以及由标量常量或带 `int/float/bool`、Forge 标量类型注解的构造参数赋值的 `self` 属性。
+- `types.vector/matrix/struct`、math 向量/矩阵别名及 `dataclass` 保留原逻辑类型。结构体存储复用 `Module.add_ndarray_layout` 和消费者原生布局查询，不建立另一套 packing 规则。Host 类型投影目前提供参数构造，不等于完整 Python Matrix/Struct 操作接口。
+- LLVM 的 `real_func` 保留真实函数调用边界。嵌套函数通过类型化隐藏参数接收标量和数组捕获；显式参数的浅层递归已检查，递归函数带隐式捕获时明确拒绝。Vulkan 尚不支持 real function，在发布产物前拒绝。
 - 数组尺寸、普通标量属性按运行时数据传递。内部复用 Component lowering 的类型合同，不要求用户注册 Component；extent 为 1 的临时数组只提供类型/维数见证，不选择模型或静态分支。
 - 正常 JIT 装饰器与调用路径不变；包扫描和 Host 投影仅在显式导出时执行。
 
 局部测试使用同一源码同时验证普通 JIT 和无数值源码的 AOT 消费。覆盖动态尺寸
 7/19/3、不同初态、两条 Host 分支、动态标量更新、未导入模块中的入口、嵌套加载
 时的延迟导入绑定，以及关闭后拒绝调用。独立消费进程阻止导入 `taichi`、
-`taichi_forge` 和原源码包。CPU 与 CUDA 有实际运行证据；本原型未做 Vulkan 资格。
+`taichi_forge` 和原源码包。CPU/CUDA 的标量及 real function 路径有无源码消费证据；
+复合值/数组和独立实例有 CPU/CUDA/Vulkan 局部运行证据，不扩大为其他 Vulkan 能力资格。
+CUDA 深度为 18 的递归探针曾发生非法地址，原因尚未确认，目前首先怀疑默认设备栈容量。
+独立 Runtime 尚未暴露栈大小配置；浅层递归通过不代表深层 CUDA 递归已合格。
 
 ## 仍需补齐的共同机制
 
-复杂 SNode/Field 布局、继承、模板/静态合法域、`real_func/pyfunc`、梯度、任意 Python
+复杂 SNode/Field 布局、继承、模板/静态合法域、`pyfunc`、梯度、任意 Python
 资源工厂、完整 Host 数组访问接口、Graph/ExecutionPlan 和 provider 引用还没有接入。
 当前识别到不支持的声明或 Host 前端操作会拒绝导出，不借助样本运行或私有 JIT 回退。
 这不等于已完成对任意 Python Host 代码的语义验证。
