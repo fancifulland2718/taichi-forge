@@ -46,7 +46,9 @@ def select_target_branches(tree, kind, target, module, fail):
         if not isinstance(cls, ast.ClassDef):
             continue
         for function in cls.body:
-            if not isinstance(function, ast.FunctionDef) or function.name != "__init__":
+            if not isinstance(function, ast.FunctionDef) or not (
+                function.name == "__init__" or getattr(function, "_package_construction_method", False)
+            ):
                 continue
             writes = {}
             locals_ = {n.arg for n in ast.walk(function.args) if isinstance(n, ast.arg)}

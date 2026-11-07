@@ -27,6 +27,7 @@ from ._package_resources import scope_declarations
 from ._package_targets import BACKEND_NAMES, backend_constant, backend_query, select_target_branches
 from ._package_records import dimension_relations
 from ._package_constants import resolve_constants
+from ._package_construction import construction_functions, discover_construction_methods
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
@@ -50,9 +51,16 @@ def _owner_schema(module, node, kind, namespace):
     """Infer types from syntax, never run __init__ or select a model branch."""
     if node.keywords:
         _fail(module, node, "custom owner metaclasses require further support")
-    constructor = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
-    if constructor is None:
-        return {}
+    schema = {}
+    for function in construction_functions(node):
+        for name, declaration in _construction_schema(module, node, function, kind, namespace).items():
+            if name in schema and schema[name]["kind"] != "value":
+                _fail(module, function, f"Repeated construction resource declaration {name!r}")
+            schema[name] = declaration
+    return schema
+
+
+def _construction_schema(module, node, constructor, kind, namespace):
     annotations = {
         a.arg: a.annotation
         for a in (*constructor.args.posonlyargs, *constructor.args.args, *constructor.args.kwonlyargs)
@@ -102,7 +110,7 @@ def _owner_schema(module, node, kind, namespace):
         schema[name] = declaration
         if "presence_parameter" in declaration:
             declaration["presence_owner"] = module + "." + node.name
-    resolve_constants(module, node, schema, namespace, _fail)
+    resolve_constants(module, node, schema, namespace, _fail, constructor=constructor)
     return schema
 
 
@@ -117,12 +125,13 @@ def _analyze(module, source, namespace, target):
     ):
         _fail(module, tree, "reserved package-export identifier")
     kind = decorator_resolver(tree)
+    construction = discover_construction_methods(tree, namespace, module, _fail, kind)
     tree._package_target_selections = select_target_branches(tree, kind, target, module, _fail)
     from ._package_factories import normalize_factories
     from ._package_contexts import discover_contexts
 
     tree._package_resource_contexts = discover_contexts(tree, namespace, module, _fail)
-    tree._package_factory_declarations = normalize_factories(tree, namespace, module, _fail, kind)
+    tree._package_factory_declarations = construction + normalize_factories(tree, namespace, module, _fail, kind)
     definitions, owners = [], {}
     supported = set()
     from ._package_closures import discover
@@ -140,15 +149,13 @@ def _analyze(module, source, namespace, target):
                 for n in node.body
             )
             declared_owner = any(
-                isinstance(n, ast.FunctionDef)
-                and n.name == "__init__"
-                and any(
+                any(
                     isinstance(part, ast.Call)
                     and qualified_kind(part, kind) == "experimental.ResourceScope"
                     or getattr(part, "_package_resource_context", None) is not None
                     for part in ast.walk(n)
                 )
-                for n in node.body
+                for n in construction_functions(node)
             )
             if (
                 "data_oriented" not in decorators

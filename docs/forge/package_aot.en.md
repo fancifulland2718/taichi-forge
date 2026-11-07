@@ -147,6 +147,15 @@ query implicitly. `GraphBuilder` retains class-method visibility for checks such
 as `private_ndarray`. This does not qualify arbitrary nested/provider graphs;
 concrete graph eligibility remains a preparation check.
 
+An ordinary constructor may unconditionally call resource-allocation methods on
+the same class. Forge reuses its resource and context-manager analysis without
+executing constructors or flattening/removing consumer Host methods. Currently a
+method accepts only `self`, has one standalone call site, and may forward to another
+construction method. Conditional calls, returns/yields, replacement, and inherited
+overrides are rejected. Subsequent Host initialization and context exception cleanup
+retain their original order. Repeated declarations of the same resource role across
+methods require explicit source cleanup, rather than inferred reallocation contracts.
+
 Version 33 adds `scope.value('iterations', ti.i32, affects_plan=True)` to separate
 a numerical runtime input from a Host plan dependency. Numerical code keeps an
 ordinary ABI parameter, without iteration-count specializations. Graph recording

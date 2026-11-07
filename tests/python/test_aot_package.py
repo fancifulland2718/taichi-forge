@@ -5264,11 +5264,19 @@ class Model:
 """
 
 
+@pytest.mark.parametrize("construction_method", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_package_scope_fields_share_dimension_and_native_layout_rules(tmp_path, monkeypatch):
+def test_package_scope_fields_share_dimension_and_native_layout_rules(tmp_path, monkeypatch, construction_method):
     from tests.python.test_aot_dense_snode_group import _compiled_nodes
 
-    package = _source_package(tmp_path, monkeypatch, SCOPE_FIELDS_SOURCE)
+    source = SCOPE_FIELDS_SOURCE
+    if construction_method:
+        source = source.replace(
+            "        scope = ti.experimental.ResourceScope(self)",
+            "        self._allocate()\n        self.after_allocation = self.a.shape\n"
+            "    def _allocate(self):\n        scope = ti.experimental.ResourceScope(self)",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
     original = package.Model(7, 3)
     original.step(2.0)
     expected = {name: getattr(original, name).to_numpy() for name in ("a", "v", "mat", "total")}
@@ -5284,6 +5292,8 @@ def test_package_scope_fields_share_dimension_and_native_layout_rules(tmp_path, 
         assert a.a._group_owner is a.v._group_owner is a.mat._group_owner is a.total._group_owner
         assert a.a._group_owner is not b.a._group_owner
         assert a.a.shape == (16,) and b.a.shape == (2,) and b.v.shape == (1, 5)
+        if construction_method:
+            assert a.after_allocation == (16,) and b.after_allocation == (2,)
         a.step(2.0)
         b.step(-3.0)
         for name, values in expected.items():
@@ -5337,6 +5347,40 @@ def test_package_scope_fields_share_dimension_and_native_layout_rules(tmp_path, 
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "SCOPE_FIELDS_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change", ["conditional", "argument", "repeated", "replace", "return", "override", "recursive"]
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_ambiguous_construction_methods(tmp_path, monkeypatch, change):
+    source = SCOPE_FIELDS_SOURCE.replace(
+        "        scope = ti.experimental.ResourceScope(self)",
+        "        self._allocate()\n    def _allocate(self):\n        scope = ti.experimental.ResourceScope(self)",
+    )
+    if change == "conditional":
+        source = source.replace("        self._allocate()", "        if n:\n            self._allocate()")
+    elif change == "argument":
+        source = source.replace("self._allocate()", "self._allocate(n)").replace(
+            "def _allocate(self)", "def _allocate(self, n)"
+        )
+    elif change == "repeated":
+        source = source.replace("        self._allocate()", "        self._allocate()\n        self._allocate()")
+    elif change == "replace":
+        source = source.replace(
+            "        self._allocate()", "        self._allocate = lambda: None\n        self._allocate()"
+        )
+    elif change == "return":
+        source = source.replace("    @ti.kernel", "        return self.a\n    @ti.kernel")
+    elif change == "recursive":
+        source = source.replace("    def _allocate(self):", "    def _allocate(self):\n        self._allocate()")
+    else:
+        source += "\nclass Other(Model):\n    def _allocate(self):\n        pass\n"
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="[Cc]onstruction"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
 
 
 @pytest.mark.parametrize(
@@ -5598,9 +5642,11 @@ def _resource_context_fixture(tmp_path, monkeypatch, *, helper=RESOURCE_CONTEXT_
     return package, source
 
 
-@pytest.mark.parametrize("inline", [False, True])
+@pytest.mark.parametrize("inline,construction_method", [(False, False), (True, False), (False, True)])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_package_discovers_context_group_without_discarding_host_lifecycle(tmp_path, monkeypatch, inline):
+def test_package_discovers_context_group_without_discarding_host_lifecycle(
+    tmp_path, monkeypatch, inline, construction_method
+):
     from taichi_forge.aot._package import _analyze
 
     model = (
@@ -5609,6 +5655,13 @@ def test_package_discovers_context_group_without_discarding_host_lifecycle(tmp_p
         if inline
         else CONTEXT_FIELDS_SOURCE
     )
+    if construction_method:
+        model = model.replace(
+            "        with resource_group(self,",
+            "        self.fail = fail\n        self._initialize()\n"
+            "    def _initialize(self):\n        self._allocate()\n"
+            "    def _allocate(self):\n        fail = self.fail\n        with resource_group(self,",
+        )
     package, source = _resource_context_fixture(tmp_path, monkeypatch, model=model)
     module = sys.modules["definition_fixture.model"]
     helper = module if inline else sys.modules["resource_contexts"]

@@ -29,6 +29,11 @@ def resolve_owners(sources, imported, owner_schema, fail):
             name, node, _, _ = classes[cls]
             fail(name, node, "inherited constructor is outside the scanned source boundary")
         name, node, kind, schemas = classes[base]
+        for method in node.body:
+            if getattr(method, "_package_construction_method", False) and (
+                inspect.getattr_static(cls, method.name) is not inspect.getattr_static(base, method.name)
+            ):
+                fail(name, method, "Overridden construction resource methods require their own constructor contract")
         constructor = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
         if constructor is None:
             fail(name, node, "constructor replacement requires an explicit resource contract")

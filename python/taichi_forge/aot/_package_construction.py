@@ -1,0 +1,150 @@
+"""Find ordinary construction methods without executing or flattening Host code."""
+
+import ast
+import hashlib
+import inspect
+
+from ._package_factories import _source_value, prove_factory
+from ._package_contexts import prove_context
+from ._package_types import qualified_kind
+
+
+def construction_functions(node):
+    functions = [
+        child
+        for child in node.body
+        if isinstance(child, ast.FunctionDef)
+        and (child.name == "__init__" or getattr(child, "_package_construction_method", False))
+    ]
+    return sorted(functions, key=lambda function: function.name != "__init__")
+
+
+def discover_construction_methods(tree, namespace, module, fail, kind):
+    facts = []
+    for cls in tree.body:
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
+        constructor = methods.get("__init__")
+        if constructor is None:
+            continue
+        selected, active = set(), set()
+
+        def calls(function):
+            return [
+                n
+                for n in ast.walk(function)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and isinstance(n.func.value, ast.Name)
+                and n.func.value.id == "self"
+                and n.func.attr in methods
+                and not methods[n.func.attr].decorator_list
+                and n.func.attr != "__init__"
+            ]
+
+        def allocates(function):
+            for call in (n for n in ast.walk(function) if isinstance(n, ast.Call)):
+                if qualified_kind(call, kind) in (
+                    "experimental.ResourceScope",
+                    "field",
+                    "ndarray",
+                    "Vector.field",
+                    "Matrix.field",
+                    "Struct.field",
+                ):
+                    return True
+                target = _source_value(call.func, namespace)
+                try:
+                    normalized = prove_factory(target, call)
+                    if normalized is not None and qualified_kind(normalized, kind) == "experimental.ResourceScope":
+                        return True
+                    if prove_context(target, call) is not None:
+                        return True
+                except (TypeError, ValueError, OSError):
+                    # The normal factory/context analyzer supplies the precise
+                    # rejection; an unproved allocation cannot disappear.
+                    return True
+            return False
+
+        needed = {name for name, function in methods.items() if not function.decorator_list and allocates(function)}
+        while True:
+            expanded = needed | {
+                name
+                for name, function in methods.items()
+                if not function.decorator_list and any(c.func.attr in needed for c in calls(function))
+            }
+            if expanded == needed:
+                break
+            needed = expanded
+
+        def visit(function):
+            if function.name in active:
+                fail(module, function, "Recursive construction methods require explicit resource declarations")
+            active.add(function.name)
+            for call in calls(function):
+                method = methods[call.func.attr]
+                if method.name not in needed:
+                    continue
+                if not any(isinstance(s, ast.Expr) and s.value is call for s in function.body):
+                    fail(module, call, "Construction method calls require an unconditional standalone statement")
+                args = method.args
+                if (
+                    call.args
+                    or call.keywords
+                    or args.posonlyargs
+                    or len(args.args) != 1
+                    or args.args[0].arg != "self"
+                    or args.kwonlyargs
+                    or args.vararg
+                    or args.kwarg
+                ):
+                    fail(module, call, "Construction methods currently require only the owner receiver")
+                if method.name in selected:
+                    fail(module, call, "Construction resource methods must have one call site")
+                if any(
+                    isinstance(n, (ast.Return, ast.Yield, ast.YieldFrom, ast.AsyncFunctionDef))
+                    for n in ast.walk(method)
+                ):
+                    fail(module, method, "Construction resource methods cannot return or yield")
+                selected.add(method.name)
+                method._package_construction_method = True
+                visit(method)
+                facts.append(
+                    dict(
+                        kind="construction_method",
+                        module=module,
+                        definition=f"{module}.{cls.name}.{method.name}",
+                        line=call.lineno,
+                        sha256=hashlib.sha256(ast.dump(method).encode()).hexdigest(),
+                    )
+                )
+            active.remove(function.name)
+
+        visit(constructor)
+        for name in selected:
+            for node in ast.walk(cls):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "self"
+                    and node.attr == name
+                    and isinstance(node.ctx, (ast.Store, ast.Del))
+                ):
+                    fail(module, node, "Construction method cannot be replaced on the owner")
+            owner = namespace.get(cls.name)
+            from taichi_forge.lang.kernel_impl import data_oriented
+
+            def ordinary_lookup(base):
+                lookup = vars(base).get("__getattribute__", object.__getattribute__)
+                return lookup is object.__getattribute__ or (
+                    inspect.isfunction(lookup) and lookup.__code__ in data_oriented.__code__.co_consts
+                )
+
+            if inspect.isclass(owner) and (
+                not all(ordinary_lookup(base) for base in owner.__mro__)
+                or "__getattribute__" in methods
+                or inspect.getattr_static(owner, "__setattr__") is not object.__setattr__
+            ):
+                fail(module, methods[name], "Construction methods require ordinary owner attribute lookup")
+    return facts

@@ -103,6 +103,12 @@ call，可反复 `run()`；`graph.run(arguments)` 是每次重新 prepare 的单
 普通构造代码可据此选择控制资源，重放不隐式重复查询。`GraphBuilder` 保留类方法可见性，
 支持检查 `private_ndarray`。这不是任意嵌套/provider 图的资格承诺，具体图仍在 prepare 验证。
 
+普通构造器可无条件调用同类的资源分配方法；Forge 复用原资源声明和 context manager
+分析，不执行构造器，不展开或删除消费端 Host 方法。当前方法只接收 `self`，须为单次、
+独立调用，允许嵌套转发；条件调用、返回/yield、替换或继承覆盖该方法会明确拒绝。
+分配之后的普通 Host 初始化及 context 的异常清理仍按原顺序执行。不同方法重复声明同一
+资源角色仍需整理来源，不推断隐式重分配合同。
+
 版本 33 的 `scope.value('iterations', ti.i32, affects_plan=True)` 将“数值运行参数”与
 “Host 计划依赖”分开：数值代码仍读取普通 ABI 输入，不按次数生成特化；Graph 记录时
 保存该参数，编译及重新 bind 检查它没有改变。改变后重新运行正常 Host 构图，再 prepare。

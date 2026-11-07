@@ -20,11 +20,12 @@ def check_constant_slot(cls, name):
         raise ValueError("Definition constant cannot execute an owner descriptor or custom assignment")
 
 
-def resolve_constants(module, node, schema, namespace, fail):
+def resolve_constants(module, node, schema, namespace, fail, *, constructor=None):
     constants = {name: item for name, item in schema.items() if item["kind"] == "constant"}
     if not constants:
         return
-    constructor = next(n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+    if constructor is None:
+        constructor = next(n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
     parameters = {n.arg for n in ast.walk(constructor.args) if isinstance(n, ast.arg)}
     locals_ = parameters | {
         n.id for n in ast.walk(constructor) if isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load)

@@ -217,7 +217,9 @@ def discover_contexts(tree, namespace, module, fail):
         if not isinstance(cls, ast.ClassDef):
             continue
         for constructor in cls.body:
-            if not isinstance(constructor, ast.FunctionDef) or constructor.name != "__init__":
+            if not isinstance(constructor, ast.FunctionDef) or not (
+                constructor.name == "__init__" or getattr(constructor, "_package_construction_method", False)
+            ):
                 continue
             parents = {id(child): parent for parent in ast.walk(constructor) for child in ast.iter_child_nodes(parent)}
             for node in ast.walk(constructor):
