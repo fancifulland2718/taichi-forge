@@ -27,17 +27,12 @@ void Function::set_function_body(const std::function<void()> &func) {
   finalize_params();
   finalize_rets();
 
-  // Inline templates also participate in in-memory kernel identity. Without
-  // their body, two specializations with different captures can hash alike
-  // even when disk caching is disabled.
-  if (is_inline_template_ || program->compile_config().offline_cache) {
-    std::ostringstream oss;
-    gen_offline_cache_key(ir.get(), &oss, &source_snode_tree_dependencies_);
-    ast_serialization_data_ = oss.str();
-  } else {
-    source_snode_tree_dependencies_ =
-        irpass::analysis::gather_frontend_snode_tree_dependencies(*ir);
-  }
+  // Both real functions and inline templates participate in in-memory kernel
+  // identity and AOT code sharing. Disk-cache policy must never omit a callee's
+  // body: different real functions would otherwise alias at identical callers.
+  std::ostringstream oss;
+  gen_offline_cache_key(ir.get(), &oss, &source_snode_tree_dependencies_);
+  ast_serialization_data_ = oss.str();
 }
 
 void Function::set_function_body(std::unique_ptr<IRNode> func_body) {

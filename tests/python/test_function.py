@@ -4,6 +4,42 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_real_function_bodies_distinguish_memory_and_aot_code_identity(tmp_path):
+    import zipfile
+    from taichi_forge_runtime.aot import Runtime, Scalar
+
+    @ti.real_func
+    def add_one(value: ti.i32) -> ti.i32:
+        return value + 1
+
+    @ti.real_func
+    def add_ten(value: ti.i32) -> ti.i32:
+        return value + 10
+
+    @ti.kernel
+    def first(value: ti.i32) -> ti.i32:
+        return add_one(value)
+
+    @ti.kernel
+    def second(value: ti.i32) -> ti.i32:
+        return add_ten(value)
+
+    for value in (3, 8):
+        assert first(value) == value + 1
+        assert second(value) == value + 10
+    module = ti.aot.Module()
+    module.add_kernel(first, name="first")
+    module.add_kernel(second, name="second")
+    archive = tmp_path / "real_functions.tcm"
+    module.archive(str(archive))
+    with zipfile.ZipFile(archive) as payload:
+        assert len([name for name in payload.namelist() if name.endswith((".bc", ".ll"))]) == 2
+    with Runtime(ti.cfg.arch.name) as runtime, runtime.load_module(archive) as loaded:
+        assert loaded.kernel("first").run(Scalar("i32", 3)) == 4
+        assert loaded.kernel("second").run(Scalar("i32", 3)) == 13
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda])
 def test_function_without_return():
     x = ti.field(ti.i32, shape=())
