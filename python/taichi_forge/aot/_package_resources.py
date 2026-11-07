@@ -181,7 +181,7 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
     Declarations().visit(constructor)
 
 
-def scope_declarations(module, constructor, kind, fail, namespace, earlier=None):
+def scope_declarations(module, constructor, kind, fail, namespace, earlier=None, *, owner_node=None):
     if constructor is None:
         return {}
     _normalize_field_loops(module, constructor, kind, fail, namespace)
@@ -529,7 +529,19 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                     # scope's Extent object. Its qualified declaration still
                     # determines the layout; explicit dim() aliases retain
                     # their namespace checks below.
+                    if scope_binding(node.value) in scopes:
+                        allowed.add(id(node.value))
                     return Extent(("dim", name))
+            if isinstance(node.value, ast.Name) and node.value.id == "self":
+                item = declarations.get(node.attr, (earlier or {}).get(node.attr, {}))
+                if item.get("kind") == "constant" and "value" in item:
+                    from taichi_forge_runtime._static_values import read_static_key
+
+                    value = read_static_key(item["value"])
+                    if type(value) is int and 0 <= value <= 2**31 - 1:
+                        if scope_binding(node.value) in scopes:
+                            allowed.add(id(node.value))
+                        return Extent(("const", value))
         if isinstance(node, (ast.Tuple, ast.List)):
             values = tuple(dimension(item, bindings) for item in node.elts)
             return values if all(isinstance(v, Extent) for v in values) else None
@@ -942,6 +954,28 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
             else:
                 yield statement
 
+    def declare_constant(scope, call, statement):
+        if (
+            scope_paths[scope]
+            or len(call.args) != 1
+            or call.keywords
+            or not isinstance(call.args[0], ast.Constant)
+            or type(call.args[0].value) is not str
+            or not call.args[0].value.isidentifier()
+            or statement.lineno < scopes[scope].lineno
+        ):
+            fail(module, call, "Constant declaration requires one literal owner attribute name")
+        allowed.add(id(call.func.value))
+        add(
+            call.args[0].value,
+            dict(
+                kind="constant",
+                constant_declaration=[statement.lineno, statement.col_offset],
+                scope_allocation=origin(scope),
+            ),
+            statement,
+        )
+
     # A declaration describes the legal domain, independent of when Host Python
     # performs its check. Actual attribute values remain checked at allocation.
     for statement in unconditional_statements(constructor.body):
@@ -949,6 +983,12 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
             scope, method = operation(statement.value)
             if method == "static":
                 declare_static(scope, statement.value, statement)
+            elif method == "constant":
+                declare_constant(scope, statement.value, statement)
+    if owner_node is not None:
+        from ._package_constants import resolve_constants
+
+        resolve_constants(module, owner_node, declarations, namespace, fail, constructor=constructor)
 
     conditional_fields = set()
     for statement, conditions in statements(constructor.body):
@@ -965,26 +1005,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
         elif method == "static" and isinstance(statement, ast.Expr):
             declare_static(scope, call, statement, conditions)
         elif method == "constant" and isinstance(statement, ast.Expr):
-            if (
-                scope_paths[scope]
-                or len(call.args) != 1
-                or call.keywords
-                or not isinstance(call.args[0], ast.Constant)
-                or type(call.args[0].value) is not str
-                or not call.args[0].value.isidentifier()
-                or statement.lineno < scopes[scope].lineno
-            ):
-                fail(module, call, "Constant declaration requires one literal owner attribute name")
-            allowed.add(id(call.func.value))
-            add(
-                call.args[0].value,
-                dict(
-                    kind="constant",
-                    constant_declaration=[statement.lineno, statement.col_offset],
-                    scope_allocation=origin(scope),
-                ),
-                statement,
-            )
+            continue  # Definition values were proven before reading Field shapes.
         elif method == "value" and isinstance(statement, ast.Expr):
             if statement.lineno < scopes[scope].lineno:
                 fail(module, statement, "Value declaration precedes its resource scope")
@@ -1372,14 +1393,55 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                 shape = (shape,)
             if not isinstance(shape, tuple):
                 fail(module, shape_node, "ResourceScope Field shape requires declared dimensions and their algebra")
-            order = field_order(call, len(shape), module, fail)
+            order_policy = None
+            order_nodes = [keyword.value for keyword in call.keywords if keyword.arg == "order"]
+            order_call = call
+            if len(order_nodes) == 1 and isinstance(order_nodes[0], ast.IfExp):
+                choice = order_nodes[0]
+                test, invert = choice.test, False
+                if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                    test, invert = test.operand, True
+                name = (
+                    test.attr
+                    if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name) and test.value.id == "self"
+                    else None
+                )
+                declaration = declarations.get(name, {})
+                if not (
+                    declaration.get("kind") == "static"
+                    and {tuple(value) for value in declaration["choices"]} == {("bool", False), ("bool", True)}
+                    and not declaration["kernel_only"]
+                    and not declaration.get("conditions")
+                ):
+                    fail(
+                        module, choice, "Field order selection requires an unconditional declared boolean owner static"
+                    )
+                if scope_binding(test.value) in scopes:
+                    allowed.add(id(test.value))
+                alternatives = []
+                for branch in (choice.body, choice.orelse):
+                    branch_call = copy.deepcopy(call)
+                    for keyword in branch_call.keywords:
+                        if keyword.arg == "order":
+                            keyword.value = copy.deepcopy(branch)
+                    alternatives.append(field_order(branch_call, len(shape), module, fail))
+                if invert:
+                    alternatives.reverse()
+                order_policy = dict(condition=name, if_true=alternatives[0], if_false=alternatives[1])
+                order_call = copy.deepcopy(call)
+                for keyword in order_call.keywords:
+                    if keyword.arg == "order":
+                        keyword.value = ast.Constant(alternatives[0])
+                if not shape or method == "struct_field" or conditions:
+                    fail(module, choice, "Field order selection requires an unconditional nonempty AOS Field")
+            order = field_order(order_call, len(shape), module, fail)
             group = scope_groups[scope]
             if group in builders and statement.lineno >= builders[group]["finalization"][0]:
                 fail(module, statement, "Resource declaration follows FieldsBuilder finalization")
             placement_node = original_args.get("placement")
             placement = None
             if placement_node is not None:
-                if order is not None:
+                if order is not None or order_policy is not None:
                     fail(module, placement_node, "Explicit placement already determines the Field index order")
                 placement = placements.get(placement_node.id) if isinstance(placement_node, ast.Name) else None
                 if (
@@ -1431,6 +1493,11 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                     ),
                     shape=extents,
                     **({"order": order} if order is not None else {}),
+                    **(
+                        {"order_policy": order_policy, "order_source": copy.deepcopy(order_nodes[0])}
+                        if order_policy
+                        else {}
+                    ),
                     dimension_sources=sources,
                     dimension_expressions=expressions,
                     **({"dimension_alias_checks": dict(alias_checks)} if alias_checks else {}),

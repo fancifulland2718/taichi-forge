@@ -320,6 +320,7 @@ class _ModuleBinding:
         dimension_aliases=(),
         declared_type=None,
         like_source=None,
+        order=None,
     ):
         self.package._check()
         construction = _construction.get()
@@ -354,6 +355,10 @@ class _ModuleBinding:
         from ._package_layout import layout_selection, select_layout
 
         selection = layout_selection(contract, owner)
+        if "order_policy" in member:
+            policy = member["order_policy"]
+            if order != policy["if_true" if selection[policy["condition"]] else "if_false"]:
+                raise ValueError("Field order differs from its declared layout selection")
         selected = owner._forge_package_layouts.get(group_key)
         if selected is None:
             selected = (selection, select_layout(contract, selection))
@@ -1064,6 +1069,7 @@ class LoadedPackage:
                 37,
                 38,
                 39,
+                40,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

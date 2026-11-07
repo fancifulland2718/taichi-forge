@@ -81,7 +81,7 @@ with Runtime("cuda") as runtime:
 - 带类型的数值 `pyfunc` 作为 AOT 入口供 Host 调用，在 Kernel 内继续使用正常函数 lowering；数值 Python 源码移除。未注解的公开参数拒绝，不根据先前调用推导发行签名。这只覆盖已声明数值域，不支持任意 Python 对象、副作用或按调用作用域改变的实现；显式作用域查询会拒绝。原 JIT/Python 装饰器行为不变。
 - 单模块导出按原模块命名空间解析相对设备 helper 导入，编译依赖后从 Host 导入中移除这些 helper；此类导入不要求消费者保留私有父包。
 - 包内绝对导入（含函数内延迟导入）映射到本次加载的独立命名空间。普通 `import`、别名及 `from ... import ...` 保留绑定方式；不修改全局原包名，也不回到私有源码。没有 `source_root` 时，嵌套包的无别名绝对导入尚不支持；通配符与 builtin `__import__` 仍有明确限制。包外依赖按上述源码边界处理。
-- 构造函数直接调用 `field`、`Vector.field`、`Matrix.field` 的 AOS 分配保留为每个 owner 的完整原生 SNode 组。extent 支持正整数常量、构造参数及其无条件单次赋值的 owner 别名。普通 FieldsBuilder 仅编译结构并提供原生 schema；消费者由同一原生布局编译器实例化。导出不执行应用构造函数，也不把 Field 拆成分别分配的 Ndarray。条件/歧义 extent、offset、模型选择的 order、梯度及用户显式构建的树仍待接入。
+- 构造函数直接调用 `field`、`Vector.field`、`Matrix.field` 的 AOS 分配保留为每个 owner 的完整原生 SNode 组。extent 支持正整数常量、构造参数及其无条件单次赋值的 owner 别名。普通 FieldsBuilder 仅编译结构并提供原生 schema；消费者由同一原生布局编译器实例化。导出不执行应用构造函数，也不把 Field 拆成分别分配的 Ndarray。条件/歧义 extent、offset、未证明的 order 选择、梯度及用户显式构建的树仍待接入。
 
 同包入口的 Host recorder 可使用 `ti.graph.Arg`、`ArgKind`、
 `GraphBuilder.dispatch`、顺序节点和 `append`。`compile()` 生成引用已导出符号的
@@ -179,8 +179,12 @@ ABI；只有 Kernel 实际读取的值进入其捕获合同，无关声明不增
 字面量 `order="ji"` 等合法索引排列与普通标量/Vector/Matrix Field 共用轴检查和
 Dense 构造方法。直接分配与 ResourceScope 分配（含显式 FieldsBuilder 组）均保留
 原有嵌套 SNode 布局，字节偏移和步长仍由原生 schema 编译器决定。CPU/CUDA 局部检查
-对照原节点布局、新尺寸、独立实例及无源码消费者。模型相关的 order 选择仍待补齐布局
-选择合同，不从 producer 模型取一次分支作为发行代码域。
+对照原节点布局、新尺寸、独立实例及无源码消费者。版本 40 进一步支持无条件 AOS Field 的 `order='ji' if self.tiled else None`，
+其中 `tiled` 必须是已声明布尔 static。这是布局依赖；Kernel 未读取的独立布局开关不制造
+数值代码变体。构造时选择 Dense 节点序列并沿用原尺寸及元素声明，偏移和步长仍由原生
+编译器计算。每个实例缓存选择，后续直接调用拒绝被改动的开关；prepared 调用保留已绑定
+资源快照。CPU/CUDA 局部检查覆盖两个独立开关、原 JIT 布局、单份公共数值实现、新尺寸
+和无源码消费。共享 placement、条件存在、SOA/Struct 布局替换及未知模型条件不进入此路径。
 
 ResourceScope 的默认 AOS `field/vector_field/matrix_field` 也可从声明导出：支持
 `dim('name')`、单赋值局部别名及已有加减乘、整除、minimum/maximum 维度代数。

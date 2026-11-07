@@ -369,6 +369,8 @@ def field_allocation(owner_key, name, schema):
     sources = {key: expression for item in fields for key, expression in item["dimension_sources"].items()}
     dimensions = sorted(sources)
     keywords = []
+    if "order_source" in schema[name]:
+        keywords.append(ast.keyword("order", schema[name]["order_source"]))
     if "like_source_path" in schema[name]:
         source = ast.Name("self", ast.Load())
         for part in schema[name]["like_source_path"]:

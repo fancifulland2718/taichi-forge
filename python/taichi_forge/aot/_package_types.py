@@ -40,6 +40,17 @@ def project_tensor_axes(node, kind, dimension):
                 projected = dimension(arguments[axis])
                 if isinstance(projected, str):
                     arguments[axis]._package_model_extent = projected
+                elif type(projected) is int:
+                    # A declared definition constant is a fixed mathematical
+                    # type axis, not a model tensor dimension or a Host lookup.
+                    replacement = ast.copy_location(ast.Constant(projected), arguments[axis])
+                    position = axes.index(axis)
+                    if position < len(call.args):
+                        call.args[position] = replacement
+                    else:
+                        for keyword in call.keywords:
+                            if keyword.arg == axis:
+                                keyword.value = replacement
 
 
 def expand_local_type(node, bindings, kind):

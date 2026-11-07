@@ -119,7 +119,9 @@ def _construction_schema(module, node, constructor, kind, namespace, earlier=Non
             if target.attr in schema and schema[target.attr] != spec:
                 _fail(module, statement, f"attribute {target.attr!r} has conflicting types")
             schema[target.attr] = spec
-    for name, declaration in scope_declarations(module, constructor, kind, _fail, namespace, earlier).items():
+    for name, declaration in scope_declarations(
+        module, constructor, kind, _fail, namespace, earlier, owner_node=node
+    ).items():
         if name in schema and schema[name]["kind"] != "value":
             _fail(module, constructor, f"ResourceScope role {name!r} conflicts with a resource allocation")
         schema[name] = declaration
@@ -1188,6 +1190,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "reference_declaration",
                         "constructor_call",
                         "default_constructor_call",
+                        "order_source",
                     )
                 }
                 for attribute, item in schema.items()
@@ -1232,6 +1235,24 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                             dict(path=list(path), conditions=guard) for path, guard in sorted(containers.items())
                         ]
                         manifest["version"] = max(12, manifest["version"])
+                    orders = {
+                        attribute: member_schemas[attribute]["order_policy"]
+                        for attribute in members
+                        if member_schemas[attribute].get("order_policy")
+                    }
+                    if orders:
+                        from taichi_forge_runtime.aot._package_layout import select_layout
+
+                        contract = manifest["field_groups"][key]
+                        contract["orders"] = orders
+                        selection = {policy["condition"]: True for policy in orders.values()}
+                        selection.update({flag: True for guards in conditions.values() for flag in guards})
+                        # Validate each independent layout choice, not a Cartesian
+                        # product of owner configurations or numerical entries.
+                        select_layout(contract, selection)
+                        for flag in {policy["condition"] for policy in orders.values()}:
+                            select_layout(contract, {**selection, flag: False})
+                        manifest["version"] = max(40, manifest["version"])
                     for attribute in members:
                         path = environments[class_name]._paths[attribute]
                         item = manifest["owners"][owner_key][path[0]]

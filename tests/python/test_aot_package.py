@@ -6114,7 +6114,7 @@ def test_package_scope_fields_share_dimension_and_native_layout_rules(tmp_path, 
     assert "SCOPE_FIELDS_SOURCE_FREE_OK" in result.stdout
 
 
-@pytest.mark.parametrize("declaration", ["direct", "scope", "builder"])
+@pytest.mark.parametrize("declaration", ["direct", "scope", "builder", "selected"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_field_index_order_uses_original_native_layout(tmp_path, monkeypatch, declaration):
     from tests.python.test_aot_dense_snode_group import _compiled_nodes
@@ -6141,13 +6141,31 @@ class Model:
 """
     if declaration != "direct":
         setup = "        scope = ti.experimental.ResourceScope(self)\n"
-        if declaration == "builder":
+        if declaration in ("builder", "selected"):
             setup = "        builder = ti.FieldsBuilder()\n        scope = ti.experimental.ResourceScope(self, builder=builder)\n"
+        if declaration == "selected":
+            source = source.replace(
+                "n: int, m: int):", "n: int, m: int, island_local: bool=True, alternate: bool=False):"
+            )
+            source = source.replace("class Model:\n", "class Model:\n    width = 3\n")
+            setup = "        self.island_local, self.alternate = island_local, alternate\n" + setup
+            setup += "        scope.static('island_local', choices=(False, True))\n        scope.static('alternate', choices=(False, True))\n        scope.constant('width')\n"
+            source = source.replace("shape=(n, 3, m)", "shape=(n, self.width, m)")
+            source = source.replace("ti.Vector.field(3,", "ti.Vector.field(self.width,")
+            for order in ("kij", "ji"):
+                source = source.replace("order='" + order + "'", "order='" + order + "' if self.island_local else None")
+            source = source.replace("order='ij'", "order=None if self.alternate else 'ij'")
+            source += """
+    def graph(self):
+        graph = ti.graph.GraphBuilder()
+        graph.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32), template_args={'self': self})
+        return graph.compile()
+"""
         setup += "        n, m = scope.dim('n'), scope.dim('m')\n"
         source = source.replace("        self.a =", setup + "        self.a =", 1)
         source = source.replace("ti.field(", "scope.field(").replace("ti.Vector.field(", "scope.vector_field(")
         source = source.replace("ti.Matrix.field(", "scope.matrix_field(")
-        if declaration == "builder":
+        if declaration in ("builder", "selected"):
             source = source.replace("    @ti.kernel", "        self.tree = builder.finalize()\n    @ti.kernel", 1)
     package = _source_package(tmp_path, monkeypatch, source)
     original = package.Model(5, 7)
@@ -6155,15 +6173,23 @@ class Model:
     root = ti.lang.impl.get_runtime().prog.get_snode_root(original.a.snode.ptr.get_snode_tree_id())
     layout = _compiled_nodes(root)
     expected = {name: getattr(original, name).to_numpy() for name in ("a", "v", "mat")}
+    if declaration == "selected":
+        other = package.Model(3, 11, False, True)
+        other.step(-3.0)
+        other_root = ti.lang.impl.get_runtime().prog.get_snode_root(other.a.snode.ptr.get_snode_tree_id())
+        other_layout = _compiled_nodes(other_root)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert sys.modules["definition_fixture.model"].constructors == 1
+    assert sys.modules["definition_fixture.model"].constructors == (2 if declaration == "selected" else 1)
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
         assert len([name for name in archive.namelist() if name.endswith((".ll", ".bc", ".spv"))]) == 2
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
-        a, b = code.host.Model(5, 7), code.host.Model(3, 11)
+        a = code.host.Model(5, 7)
+        b = code.host.Model(3, 11, False, True) if declaration == "selected" else code.host.Model(3, 11)
         assert a.a._group_owner.layout["nodes"] == layout
         assert a.a._group_owner is a.v._group_owner is a.mat._group_owner
         assert b.a._group_owner is not a.a._group_owner
+        if declaration == "selected":
+            assert b.a._group_owner.layout["nodes"] == other_layout
         a.step(2.0)
         b.step(-3.0)
         for name, value in expected.items():
@@ -6172,7 +6198,18 @@ class Model:
         np.testing.assert_array_equal(b.a.to_numpy(), grid[0] * 100 + grid[1] * 10 + grid[2])
         i, j = np.indices((3, 11))
         np.testing.assert_array_equal(b.v.to_numpy(), -3 * np.stack((i, j, i + j), axis=-1))
-    if declaration == "builder":
+        if declaration == "selected":
+            pa, pb = a.graph().bind({"gain": 5.0}), b.graph().bind({"gain": -2.0})
+            a.island_local = False
+            with pytest.raises(ValueError, match="layout configuration changed"):
+                a.step(3.0)
+            pa.run()
+            pb.run()
+            i, j = np.indices((5, 7))
+            np.testing.assert_array_equal(a.v.to_numpy(), 5 * np.stack((i, j, i + j), axis=-1))
+            i, j = np.indices((3, 11))
+            np.testing.assert_array_equal(b.v.to_numpy(), -2 * np.stack((i, j, i + j), axis=-1))
+    if declaration in ("builder", "selected"):
         probe = tmp_path / "consume_ordered.py"
         probe.write_text(
             textwrap.dedent("""
@@ -6197,6 +6234,12 @@ class Model:
         """),
             encoding="utf8",
         )
+        if declaration == "selected":
+            probe.write_text(
+                probe.read_text()
+                .replace("code.host.Model(19, 2)", "code.host.Model(19, 2, False)")
+                .replace("code.host.Model(2, 13)", "code.host.Model(2, 13, True, True)")
+            )
         env = dict(
             os.environ,
             PYTHONDONTWRITEBYTECODE="1",
@@ -6214,6 +6257,71 @@ class Model:
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "ORDERED_FIELDS_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["kernel_only", "runtime_value", "model_condition", "unproven_branch"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_order_rejects_unproven_layout_selection(tmp_path, monkeypatch, change):
+    source = SCOPE_FIELDS_SOURCE.replace("        scope =", "        self.tiled = True\n        scope =", 1)
+    source = source.replace(
+        "        rows, cols =", "        scope.static('tiled', choices=(False, True))\n        rows, cols =", 1
+    )
+    source = source.replace(
+        "shape=(rows.maximum(1), cols))", "shape=(rows.maximum(1), cols), order='ji' if self.tiled else None)"
+    )
+    if change == "kernel_only":
+        source = source.replace("choices=(False, True)", "choices=(False, True), kernel_only=True")
+    elif change == "runtime_value":
+        source = source.replace("scope.static('tiled', choices=(False, True))", "scope.value('tiled', ti.i32)")
+    elif change == "model_condition":
+        source = source.replace("if self.tiled else", "if self.n > 4 else")
+    else:
+        source = source.replace("else None)", "else self.order)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="Field order"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_order_selection_retains_model_tensor_recipe_members(tmp_path, monkeypatch):
+    from tests.python.test_aot_dense_snode_group import _compiled_nodes
+
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, dofs: int, tiled: bool):
+        self.n, self.dofs, self.tiled = n, dofs, tiled
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        scope.static('tiled', choices=(False, True))
+        scope.dim('dofs')
+        scope.values = scope.vector_field(self.dofs, ti.f32,
+            shape=(scope.dim('n'), 2), order='ji' if self.tiled else None)
+        self.tree = builder.finalize()
+    @ti.kernel
+    def step(self):
+        for i, j in self.values:
+            for k in range(self.dofs):
+                self.values[i, j][k] = 100 * i + 10 * j + k
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = package.Model(4, 5, False)
+    original.step()
+    root = ti.lang.impl.get_runtime().prog.get_snode_root(original.values.snode.ptr.get_snode_tree_id())
+    expected_layout = _compiled_nodes(root)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(4, 5, False), code.host.Model(7, 19, True)
+        assert a.values._group_owner.layout["nodes"] == expected_layout
+        a.step()
+        b.step()
+        np.testing.assert_array_equal(a.values.to_numpy(), original.values.to_numpy())
+        i, j, k = np.indices((7, 2, 19))
+        np.testing.assert_array_equal(b.values.to_numpy(), 100 * i + 10 * j + k)
+    assert len(manifest["entries"]) == 2
 
 
 INHERITED_CONSTRUCTION_SOURCE = """
