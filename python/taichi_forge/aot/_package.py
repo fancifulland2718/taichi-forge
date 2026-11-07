@@ -26,6 +26,7 @@ from ._package_errors import is_error_interface, project_error_interface
 from ._package_resources import scope_declarations
 from ._package_targets import BACKEND_NAMES, backend_constant, backend_query, select_target_branches
 from ._package_records import dimension_relations
+from ._package_constants import resolve_constants
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
@@ -101,6 +102,7 @@ def _owner_schema(module, node, kind, namespace):
         schema[name] = declaration
         if "presence_parameter" in declaration:
             declaration["presence_owner"] = module + "." + node.name
+    resolve_constants(module, node, schema, namespace, _fail)
     return schema
 
 
@@ -808,6 +810,28 @@ def _host_projection(
             return self.generic_visit(node)
 
         def visit_Expr(self, node):
+            constant = next(
+                (
+                    item
+                    for item in owners.get(self.owner, {}).values()
+                    if item.get("constant_declaration") == [node.lineno, node.col_offset]
+                ),
+                None,
+            )
+            if constant is not None:
+                # Keep the ordinary declaration's position and attribute read.
+                name = node.value.args[0].value
+                self.minimum_version = max(self.minimum_version, 30)
+                return ast.copy_location(
+                    ast.Expr(
+                        ast.Call(
+                            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "declare_constant", ast.Load()),
+                            [ast.Name("self", ast.Load()), ast.Constant(name)],
+                            [],
+                        )
+                    ),
+                    node,
+                )
             declaration = next(
                 (
                     (name, item)
@@ -1059,6 +1083,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(24, manifest["version"])
             if any(item["kind"] == "static" for item in schema.values()):
                 manifest["version"] = max(11, manifest["version"])
+            if any(item["kind"] == "constant" for item in schema.values()):
+                manifest["version"] = max(30, manifest["version"])
             if any("presence_parameter" in item for item in schema.values()):
                 manifest["version"] = max(13, manifest["version"])
             if any(item["kind"] == "record" or item.get("constraints") for item in schema.values()):
@@ -1081,6 +1107,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "declaration_owner",
                         "value_declaration",
                         "static_declaration",
+                        "constant_declaration",
+                        "constant_from_class",
                         "scope_allocation",
                         "group_builder",
                         "placement",
@@ -1271,6 +1299,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     if key in bound_used and item["kind"] == "borrowed_field"
                 }
                 child_bindings = owner_bindings(environment, compilation_schemas.get(owner_name, {}), bound_used)
+                constants = {
+                    key: dict(path=list(environment._paths[key]), value=value)
+                    for key, value in code.static.items()
+                    if compilation_schemas.get(owner_name, {}).get(key, {}).get("kind") == "constant"
+                }
                 admission = (
                     dict(
                         constraints=constraints,
@@ -1278,8 +1311,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         **({"source_bindings": source_bindings} if source_bindings else {}),
                         **({"owner_bindings": child_bindings} if child_bindings else {}),
                         **({"input_presence": input_presence} if input_presence else {}),
+                        **({"constants": constants} if constants else {}),
                     )
-                    if constraints or source_bindings or child_bindings or input_presence
+                    if constraints or source_bindings or child_bindings or input_presence or constants
                     else None
                 )
                 identity = (code.kernel, code.key)
@@ -1344,7 +1378,12 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     shared_entries[identity] = entry_manifest
                 if admission:
                     entry_manifest["admission"] = admission
-                variants.append(dict(selection=code.static, symbol=entry_manifest["symbol"]))
+                variants.append(
+                    dict(
+                        selection={key: value for key, value in code.static.items() if key not in constants},
+                        symbol=entry_manifest["symbol"],
+                    )
+                )
             if any(variant["selection"] for variant in variants):
                 # Logical method identity is separate from its shared numerical
                 # entries. Unread owner options are absent from this family.

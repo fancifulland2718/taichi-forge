@@ -85,6 +85,9 @@ class OwnerGraph:
                 choices = tuple(read_static_key(key) for key in item["choices"])
                 declarations[attribute] = StaticValue(choices=choices, kernel_only=item["kernel_only"])
                 value = choices[0]
+            elif item["kind"] == "constant":
+                declarations[attribute] = StaticValue()
+                value = read_static_key(item["value"])
             elif item["kind"] == "ndarray":
                 dtype = resolve_type(item.pop("type_node"), vars(self.imported[item.get("declaration_module", name)]))
                 item["element"] = type_spec(dtype, self.module)

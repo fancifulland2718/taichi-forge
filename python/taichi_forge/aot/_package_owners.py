@@ -77,6 +77,24 @@ def resolve_owners(sources, imported, owner_schema, fail):
             ):
                 fail(name, constructor, f"inherited resource/type replacement for {key!r} requires further support")
         result = {**inherited, **own}
+        from ._package_constants import class_constant, check_constant_slot
+
+        for key, item in result.items():
+            if item["kind"] == "constant":
+                try:
+                    check_constant_slot(cls, key)
+                except ValueError as error:
+                    fail(name, constructor, str(error))
+            if item.get("constant_from_class"):
+                if key not in own and any(
+                    isinstance(n, ast.Attribute) and n.attr == key and not isinstance(n.ctx, ast.Load)
+                    for n in ast.walk(constructor)
+                ):
+                    fail(name, constructor, "Inherited definition constant has an unproven assignment: " + key)
+                try:
+                    item["value"] = class_constant(cls, key)
+                except (AttributeError, ValueError) as error:
+                    fail(name, constructor, f"Definition constant {key!r}: {error}")
         field_owners = {
             (item["declaration_module"], item["declaration_owner"])
             for item in result.values()

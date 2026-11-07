@@ -9,6 +9,7 @@ import numbers
 import operator
 
 from .._dimensions import evaluate_extent, check_constraints, validate_constraints
+from .._static_values import read_static_key, static_key
 
 
 def path_value(owner, path):
@@ -24,6 +25,8 @@ def dimension_value(owner, name):
 def check_admission(owner, contract):
     admission = contract.get("admission")
     if admission:
+        for binding in admission.get("constants", {}).values():
+            check_constant(owner, binding["path"], binding["value"])
         for binding in admission.get("input_presence", {}).values():
             if (path_value(owner, binding["path"]) is not None) is not binding["present"]:
                 raise ValueError("Optional Field input presence changed after construction")
@@ -37,6 +40,11 @@ def check_admission(owner, contract):
             constraints,
             lambda name: capture_value(owner, dict(name=name, dimension_relations=dimensions)),
         )
+
+
+def check_constant(owner, path, value):
+    if static_key(path_value(owner, path)) != static_key(read_static_key(value)):
+        raise ValueError(f"Definition constant {'.'.join(path)!r} changed; rebuild the package")
 
 
 def check_owner_bindings(owner, bindings):

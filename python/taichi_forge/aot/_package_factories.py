@@ -146,7 +146,7 @@ def prove_factory(function, call, scopes=frozenset(), *, allow_void=False, absen
     trusted_builtins = dict(getattr=getattr, hasattr=hasattr, all=all, type=type, isinstance=isinstance)
     declaration_methods = {
         name: vars(ResourceScope)[name]
-        for name in ("dim", "derived_dim", "power_of_two_dim", "borrow", "record", "owner_reference")
+        for name in ("dim", "derived_dim", "power_of_two_dim", "borrow", "record", "owner_reference", "constant")
     }
     constructions = []
     field_obligations = {}

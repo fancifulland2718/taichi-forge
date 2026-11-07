@@ -5261,6 +5261,171 @@ def resource_scope(owner, *, builder=None, requires=(), initialization='consumer
 """
 
 
+CONSTANT_SOURCE = """
+import taichi_forge as ti
+GROUP_SIZE = 4
+constructors = 0
+def declare_constant(scope, name):
+    method = getattr(type(scope), 'constant', None)
+    if method is not None:
+        method(scope, name)
+    else:
+        scope.static(name, choices=(getattr(scope, name),), kernel_only=True)
+@ti.data_oriented
+class Model:
+    group_size = GROUP_SIZE
+    unused = 99
+    def __init__(self, n: int, mode: bool = False):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.mode = mode
+        self.scale = 2.0
+        scope = ti.experimental.ResourceScope(self)
+        declare_constant(scope, 'group_size')
+        scope.constant('scale')
+        scope.constant('unused')
+        scope.static('mode', choices=(False, True))
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self):
+        for i in self.values:
+            value = self.scale
+            for j in ti.static(range(self.group_size)):
+                value += j
+            if ti.static(self.mode):
+                value += 10
+            self.values[i] = value + i
+    @ti.kernel
+    def clear(self):
+        for i in self.values:
+            self.values[i] = 0
+    def graph(self):
+        graph = ti.graph.GraphBuilder()
+        graph.dispatch(self.step)
+        return graph.compile()
+class Wider(Model):
+    group_size = 6
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_definition_constants_preserve_dependencies_and_snapshots(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, CONSTANT_SOURCE, initializer="from .model import Model, Wider\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 30
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    entries = [entry for entry in manifest["entries"].values() if ".model." in entry["definition"]]
+    assert len(entries) == 5  # Four used static combinations and one shared clear.
+    assert all(set(family["domain"]) == {"mode"} for family in manifest["entry_families"].values())
+    clear = next(entry for entry in manifest["entries"].values() if entry["definition"].endswith(".clear"))
+    assert not clear.get("admission")
+    assert len(clear["definitions"]) == 2
+    for entry in manifest["entries"].values():
+        if entry["definition"].endswith(".step"):
+            assert set(entry["admission"]["constants"]) == {"group_size", "scale"}
+    original = package.Wider(5, True)
+    original.step()
+    np.testing.assert_array_equal(original.values.to_numpy(), np.arange(5) + 27)
+    probe = tmp_path / "consume_constants.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3), code.host.Wider(5, True)
+            graph = a.graph()
+            with graph.bind({}) as prepared:
+                a.unused = 101
+                a.step()
+                np.testing.assert_array_equal(a.values.to_numpy(), np.arange(3) + 8)
+                b.step()
+                np.testing.assert_array_equal(b.values.to_numpy(), np.arange(5) + 27)
+                a.group_size = 6
+                for operation in (a.step, lambda: graph.bind({})):
+                    try:
+                        operation()
+                    except ValueError as error:
+                        assert 'Definition constant' in str(error)
+                    else:
+                        raise AssertionError('changed constant accepted')
+                a.clear()  # Unread constants do not guard unrelated entries.
+                prepared.run()
+                np.testing.assert_array_equal(a.values.to_numpy(), np.arange(3) + 8)
+            code.host.Wider.group_size = 9
+            before = set(runtime._resources)
+            try:
+                code.host.Wider(7)
+            except ValueError as error:
+                assert 'Definition constant' in str(error)
+            else:
+                raise AssertionError('changed class constant accepted')
+            assert set(runtime._resources) == before
+        print('DEFINITION_CONSTANTS_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "DEFINITION_CONSTANTS_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["model", "call", "rebound", "conditional", "descriptor", "setter"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_definition_constants_reject_unproven_sources(tmp_path, monkeypatch, change):
+    source = CONSTANT_SOURCE
+    if change == "model":
+        source = source.replace("self.scale = 2.0", "self.scale = n")
+    elif change == "call":
+        source = source.replace("self.scale = 2.0", "self.scale = float(2)")
+    elif change == "rebound":
+        source = source.replace("self.scale = 2.0", "self.scale = 2.0\n        self.scale = 3.0")
+    elif change == "conditional":
+        source = source.replace("self.scale = 2.0", "if mode:\n            self.scale = 2.0")
+    elif change == "setter":
+        source = source.replace(
+            "    unused = 99",
+            """    unused = 99
+    @property
+    def scale(self):
+        raise AssertionError('getter evaluated')
+    @scale.setter
+    def scale(self, value):
+        raise AssertionError('setter evaluated')""",
+        )
+    else:
+        source = source.replace(
+            "group_size = GROUP_SIZE",
+            "@property\n    def group_size(self):\n        raise AssertionError('getter evaluated')",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="Definition constant"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 def _resource_factory_fixture(
     tmp_path,
     monkeypatch,

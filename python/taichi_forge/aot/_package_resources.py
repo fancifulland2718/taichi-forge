@@ -809,7 +809,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         current_conditions = conditions
         call = statement.value if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)) else None
         scope, method = operation(call)
-        if conditions and method in ("static", "value"):
+        if conditions and method in ("static", "constant", "value"):
             fail(module, statement, "Value/static declarations must remain unconditional")
         if method == "record" and id(call) in record_calls:
             continue
@@ -818,6 +818,27 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             optional_members.add(absent_record(call))
         elif method == "static" and isinstance(statement, ast.Expr):
             declare_static(scope, call, statement)
+        elif method == "constant" and isinstance(statement, ast.Expr):
+            if (
+                scope_paths[scope]
+                or len(call.args) != 1
+                or call.keywords
+                or not isinstance(call.args[0], ast.Constant)
+                or type(call.args[0].value) is not str
+                or not call.args[0].value.isidentifier()
+                or statement.lineno < scopes[scope].lineno
+            ):
+                fail(module, call, "Constant declaration requires one literal owner attribute name")
+            allowed.add(id(call.func.value))
+            add(
+                call.args[0].value,
+                dict(
+                    kind="constant",
+                    constant_declaration=[statement.lineno, statement.col_offset],
+                    scope_allocation=origin(scope),
+                ),
+                statement,
+            )
         elif method == "value" and isinstance(statement, ast.Expr):
             if statement.lineno < scopes[scope].lineno:
                 fail(module, statement, "Value declaration precedes its resource scope")
@@ -1198,7 +1219,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                         alias_conditions[name.id] = dict(conditions)
 
     for target in scope_writes:
-        if declarations.get(target.attr, {}).get("kind") in ("dimension", "value", "static", "owner"):
+        if declarations.get(target.attr, {}).get("kind") in ("dimension", "value", "static", "constant", "owner"):
             allowed.add(id(target.value))
     for node in ast.walk(constructor):
         if (

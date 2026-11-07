@@ -71,7 +71,7 @@ def expand_declarations(function, statement, scopes):
     serial = 0
     declaration_calls = 0
     operations = frozenset(
-        ("record", "dim", "parent_dim", "derived_dim", "power_of_two_dim", "static", "value", "require_le")
+        ("record", "dim", "parent_dim", "derived_dim", "power_of_two_dim", "static", "constant", "value", "require_le")
     )
 
     def literal(node):

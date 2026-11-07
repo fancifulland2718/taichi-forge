@@ -805,6 +805,31 @@ upload factory pass. The latter uses unchanged factory source with minimal resou
 declarations, not a complete camera/rendering package export. Cached or conditional
 multi-kernel factories, template owners and model-driven tensor lengths remain pending.
 
+## Definition constants
+
+Version 30 supports the existing `ResourceScope.constant('name')`, including
+ordinary helpers forwarding it through fixed frontend capability checks. A
+constant must come from an immutable class attribute or one unconditional fixed
+constructor assignment. Literal values, module constants and proven local aliases
+are accepted. Export does not execute constructors, getters, setters or application
+computations. Model inputs, unknown calls, conditional assignments and rebinding
+cannot become frozen constants. This slice covers direct owner attributes.
+
+Inheritance resolves overrides on the actual receiver. Only numerical entries
+reading a constant record its value; constants add neither consumer configuration
+axes nor dynamic ABI arguments. Existing finite static domains remain separate.
+Declarations check their fixed values. Ordinary calls and Graph preparation check
+used constants, and changed definitions require a rebuilt package. Prepared calls
+retain their snapshots without rereading constants or selecting configurations on replay.
+
+Focused CPU/CUDA/Vulkan checks cover code sharing, inheritance, mixed finite
+configuration, independent state, source-free consumption and prepare snapshots.
+A GeoPhys check reuses its original constant/layout helpers and current EFC group
+size value with DOF 17/129 through one entry. This is not complete Newton or engine
+qualification; cached/conditional kernel factories and construction closure remain.
+This changes the Python Producer/Runtime contract only, not the native AOT format.
+It provides no new whole-wheel size or performance measurement.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

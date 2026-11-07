@@ -19,6 +19,11 @@ def compile_static_variants(environment, entry, arguments, owner, schema):
         for name, item in schema.items()
         if item["kind"] == "static"
     }
+    # Constants are fixed definition dependencies, not consumer configuration
+    # axes. Include their one value in the existing coverage/guard machinery.
+    domains.update(
+        (name, (read_static_key(item["value"]),)) for name, item in schema.items() if item["kind"] == "constant"
+    )
     if not domains:
         return [environment.compile(entry, *arguments, owner=owner)]
     initial = {name: values[0] for name, values in domains.items()}
