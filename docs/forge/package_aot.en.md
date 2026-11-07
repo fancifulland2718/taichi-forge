@@ -665,6 +665,18 @@ lengths are not thereby supported.
 
 ## Inferring model tensor element dimensions
 
+Version 34 supports single-assignment local dimension aliases read before resource
+declarations, including tuple/list unpacking and the existing integer dimension
+algebra. Export relates these expressions to later declarations without running
+constructors. Allocation checks the original alias values against the current
+declared dimensions and rejects changed sources. Reassignment, deletion, and
+escaping the declaration branch are unsupported. Ordinary integer reads remain
+distinct from `scope.dim()` Extent objects: explicit Extents keep their namespace
+rules, and `require_le` still requires declared symbolic expressions. Local
+CPU/CUDA checks cover dynamic two-dimensional Fields, model vector elements,
+source-free consumption at new sizes, and rejection before allocation. They do
+not qualify complete Newton export.
+
 Version 26 infers model element axes from `Vector.field` / `Matrix.field` constructor
 parameters and proven single-assignment aliases, and from existing ResourceScope
 dimensions. Flat Struct Field vector/matrix members use the same rules and retain

@@ -323,6 +323,30 @@ def field_allocation(owner_key, name, schema):
     ]
     sources = {key: expression for item in fields for key, expression in item["dimension_sources"].items()}
     dimensions = sorted(sources)
+    keywords = []
+    if "placement_alias" in schema[name]:
+        keywords.append(ast.keyword("placement", ast.Name(schema[name]["placement_alias"], ast.Load())))
+    checks = schema[name].get("dimension_alias_checks", {})
+    if checks:
+        keywords.append(
+            ast.keyword(
+                "dimension_aliases",
+                ast.List(
+                    [
+                        ast.Tuple(
+                            [
+                                ast.Constant(alias),
+                                ast.Name(alias, ast.Load()),
+                                ast.parse(repr(expression), mode="eval").body,
+                            ],
+                            ast.Load(),
+                        )
+                        for alias, expression in sorted(checks.items())
+                    ],
+                    ast.Load(),
+                ),
+            )
+        )
 
     def dimension_value(key):
         value = ast.parse(sources[key], mode="eval").body
@@ -357,9 +381,5 @@ def field_allocation(owner_key, name, schema):
                 [dimension_value(key) for key in dimensions],
             ),
         ],
-        (
-            [ast.keyword("placement", ast.Name(schema[name]["placement_alias"], ast.Load()))]
-            if "placement_alias" in schema[name]
-            else []
-        ),
+        keywords,
     )

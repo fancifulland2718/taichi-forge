@@ -431,6 +431,13 @@ Vector/MatrixField 以及 StructField 的数值成员，不将整个 StructField
 
 ## 从定义推导模型张量元素尺寸
 
+版本 34 支持资源声明之前读取的单次局部尺寸别名，包括 tuple/list 解包和已有整数
+维度代数。导出只关联别名与后续声明的尺寸来源，不执行构造器；分配时核对原别名值与
+当前声明尺寸，来源在中途变化会拒绝。重赋值、删除和越出声明分支的别名不能用于这一
+推导。普通整数读取与 `scope.dim()` 的 Extent 对象分别处理：显式 Extent 仍受原命名空间
+约束，`require_le` 仍要求声明的符号表达式。CPU/CUDA 局部检查覆盖动态二维 Field、
+模型 vector 元素、新尺寸无源码消费及分配前失配拒绝，不表示完整 Newton 已导出。
+
 版本 26 可从 `Vector.field` / `Matrix.field` 构造参数及已证明的单次赋值别名，
 以及 ResourceScope 的已声明维度，自动推导模型元素轴。平坦 Struct Field 的 vector/matrix
 成员采用相同规则，保留原 AOS/SOA 布局；固定 `3`、`2×2` 等数学维度仍是固定类型。

@@ -348,6 +348,8 @@ def scope_declarations(module, constructor, kind, fail, namespace):
     model_candidates, used_model_dimensions = {}, set()
 
     aliases, alias_conditions, placements = {}, {}, {}
+    deferred_aliases, resolving_aliases, alias_checks = {}, set(), {}
+    allow_member_dimensions = True
     extent_namespaces = {}
     constraint_declarations = {}
     scope_writes = []
@@ -402,14 +404,31 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 current_conditions.get(key) is not value for key, value in alias_conditions.get(node.id, {}).items()
             ):
                 fail(module, node, "Dimension alias must remain within its declaration branch")
+            if node.id in deferred_aliases:
+                if node.id in resolving_aliases:
+                    return None
+                resolving_aliases.add(node.id)
+                try:
+                    value = dimension(deferred_aliases[node.id], bindings)
+                finally:
+                    resolving_aliases.remove(node.id)
+                if isinstance(value, Extent):
+                    alias_checks[node.id] = value.expression
+                return value
             return aliases.get(node.id)
         if isinstance(node, ast.Attribute):
+            if not allow_member_dimensions:
+                return None
             for scope in scopes:
                 name = member(scope, node.attr)
                 if declarations.get(name, {}).get("kind") == "dimension" and source_expression(
                     node
                 ) == dimension_source(scope, node.attr):
-                    return scoped_extent(scope, name)
+                    # Reading an ordinary integer member is not exporting a
+                    # scope's Extent object. Its qualified declaration still
+                    # determines the layout; explicit dim() aliases retain
+                    # their namespace checks below.
+                    return Extent(("dim", name))
         if isinstance(node, (ast.Tuple, ast.List)):
             values = tuple(dimension(item, bindings) for item in node.elts)
             return values if all(isinstance(v, Extent) for v in values) else None
@@ -961,7 +980,14 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 and call.keywords[0].value.value.isidentifier()
             ):
                 fail(module, call, "Dimension constraint requires a literal name, declared expressions and trigger")
-            left, right = dimension(call.args[1]), dimension(call.args[2])
+            # require_le receives Extent objects (or literal constants) in
+            # ordinary Python. A raw member read is an integer snapshot, not a
+            # symbolic constraint, even if layouts use that declared member.
+            allow_member_dimensions = False
+            try:
+                left, right = dimension(call.args[1]), dimension(call.args[2])
+            finally:
+                allow_member_dimensions = True
             if not isinstance(left, Extent) or not isinstance(right, Extent):
                 fail(module, call, "Dimension constraint requires the declared dimension algebra")
             namespace_check(scope, (left, right), call)
@@ -1018,6 +1044,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             )
             allowed.add(id(call.func.value))
         elif method in ("field", "vector_field", "matrix_field", "struct_field"):
+            alias_checks.clear()
             if scope_paths[scope]:
                 fail(module, call, "A record describes existing members and cannot allocate Fields")
             targets = (
@@ -1152,6 +1179,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     shape=extents,
                     dimension_sources=sources,
                     dimension_expressions=expressions,
+                    **({"dimension_alias_checks": dict(alias_checks)} if alias_checks else {}),
                     allocation=[statement.lineno, statement.col_offset],
                     scope_allocation=origin(scope),
                     group=group,
@@ -1211,6 +1239,30 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     # once. Reuse the existing proof; do not run the generator.
                     expression = ast.Call(ast.Name("tuple", ast.Load()), [expression], [])
                 value = dimension(expression)
+                # Local integer aliases are often read before the resource
+                # helper declares their dimensions. Retain only expression
+                # provenance, then resolve against declarations at use. No
+                # constructor or attribute getter is executed at export.
+                names = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
+                expressions = (
+                    expression.elts
+                    if isinstance(target, (ast.Tuple, ast.List)) and isinstance(expression, (ast.Tuple, ast.List))
+                    else [expression]
+                )
+                deferred = value is None or any(
+                    isinstance(n, ast.Name) and n.id in deferred_aliases for n in ast.walk(expression)
+                )
+                if deferred and len(names) == len(expressions):
+                    for name, source in zip(names, expressions):
+                        if (
+                            isinstance(name, ast.Name)
+                            and stores[name.id] == 1
+                            and name.id not in deleted
+                            and isinstance(source, (ast.Attribute, ast.Name, ast.BinOp))
+                            and not any(isinstance(n, (ast.Call, ast.Subscript)) for n in ast.walk(source))
+                        ):
+                            deferred_aliases[name.id] = source
+                            alias_conditions[name.id] = dict(conditions)
                 if value is not None:
                     names = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
                     values = (

@@ -1101,6 +1101,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(30, manifest["version"])
             if any(item.get("affects_plan") for item in schema.values()):
                 manifest["version"] = max(33, manifest["version"])
+            if any(item.get("dimension_alias_checks") for item in schema.values()):
+                manifest["version"] = max(34, manifest["version"])
             if any("presence_parameter" in item for item in schema.values()):
                 manifest["version"] = max(13, manifest["version"])
             if any(item["kind"] == "record" or item.get("constraints") for item in schema.values()):
@@ -1119,6 +1121,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     not in (
                         "allocation",
                         "dimension_sources",
+                        "dimension_alias_checks",
                         "declaration_module",
                         "declaration_owner",
                         "value_declaration",

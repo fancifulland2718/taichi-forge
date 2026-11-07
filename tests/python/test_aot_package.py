@@ -3249,6 +3249,102 @@ class Reader:
 """
 
 
+DEFERRED_DIMENSION_SOURCE = """
+import taichi_forge as ti
+from types import SimpleNamespace
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, worlds: int, dof: int, mutate=False):
+        global constructors
+        constructors += 1
+        self.layout = SimpleNamespace(dof=dof)
+        self.worlds = worlds
+        w, d = self.worlds, self.layout.dof
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('worlds')
+        record = scope.record('layout', self.layout)
+        record.static('dof', choices=(self.layout.dof,))
+        if mutate:
+            self.layout.dof += 1
+        scope.rows = scope.struct_field({'H': ti.types.vector(d, ti.f32)}, shape=(w, d))
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for world, row in self.rows.H:
+            for col in range(self.layout.dof):
+                self.rows.H[world, row][col] = gain * (world + row + col)
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_resolves_early_dimension_aliases_and_checks_snapshots(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, DEFERRED_DIMENSION_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    assert manifest["version"] == 34
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len([entry for entry in manifest["entries"].values() if entry["definition"].endswith("Model.step")]) == 1
+    assert not manifest["entry_families"]
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        original = package.Model(2, 3)
+        original.step(2.0)
+        first = library.host.Model(2, 3)
+        second = library.host.Model(3, 17)
+        first.step(2.0)
+        second.step(-1.0)
+        np.testing.assert_array_equal(first.rows.H.to_numpy(), original.rows.H.to_numpy())
+        np.testing.assert_array_equal(second.rows.H.to_numpy(), -np.indices((3, 17, 17)).sum(axis=0))
+        before = set(runtime._resources)
+        with pytest.raises(ValueError, match="Dimension alias 'd'"):
+            library.host.Model(2, 3, mutate=True)
+        assert set(runtime._resources) == before
+    probe = tmp_path / "consume_dimensions.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys, numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as library:
+            owner = library.host.Model(2, 65)
+            owner.step(3.0)
+            np.testing.assert_array_equal(owner.rows.H.to_numpy(), 3 * np.indices((2, 65, 65)).sum(axis=0))
+        print('DIMENSION_ALIAS_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "DIMENSION_ALIAS_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["d = dof", "del d", "d = self.layout.dof + 1"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_rebound_early_dimension_aliases(tmp_path, monkeypatch, change):
+    source = DEFERRED_DIMENSION_SOURCE.replace("        scope.rows =", "        " + change + "\n        scope.rows =")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="declared dimensions"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 MODEL_STATIC_SOURCE = """
 import taichi_forge as ti
 constructors = 0

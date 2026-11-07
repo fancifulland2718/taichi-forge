@@ -255,12 +255,16 @@ class _ModuleBinding:
             raise ImportError("Definition packages cannot dynamically import the numerical frontend")
         return importlib.import_module(resolved)
 
-    def field(self, owner_key, name, dimensions, *, placement=None):
+    def field(self, owner_key, name, dimensions, *, placement=None, dimension_aliases=()):
         self.package._check()
         construction = _construction.get()
         if construction is None or construction[0] is not self.package:
             raise ValueError("Field allocation requires its managed constructor")
         _, allocated, owner = construction
+        for alias, value, expression in dimension_aliases:
+            actual = self.extent(value.expression, owner) if isinstance(value, Extent) else operator.index(value)
+            if actual != self.extent(expression, owner):
+                raise ValueError(f"Dimension alias {alias!r} changed before its Field allocation")
         member = self.package.manifest["owners"][owner_key][name]
         group_key = member.get("field_group", owner_key)
         contract = self.package.manifest["field_groups"][group_key]
@@ -890,6 +894,7 @@ class LoadedPackage:
                 31,
                 32,
                 33,
+                34,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
