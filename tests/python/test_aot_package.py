@@ -1075,7 +1075,7 @@ def _borrowed_alias_source(source, struct_member, alias_form):
 
 
 @pytest.mark.parametrize("struct_member", [False, True])
-@pytest.mark.parametrize("alias_form", ["direct", "mapping", "method"])
+@pytest.mark.parametrize("alias_form", ["direct", "mapping", "method", "relations"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(
     tmp_path, monkeypatch, struct_member, alias_form
@@ -1091,7 +1091,14 @@ def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(
         source = source.replace("self.values, source_scope", "self.values.x, source_scope")
         source = source.replace("self.values[i]", "self.values.x[i]")
         source = source.replace("in self.values:", "in self.values.x:")
-    if alias_form != "direct":
+    if alias_form == "relations":
+        source += "\ndef relations(scope):\n    return {name: scope.dim('m') for name in ('n',)}\n"
+        source = source.replace(
+            "        scope.borrow('alias', self.values", "        dims = relations(scope)\n        scope.borrow('alias', self.values"
+        ).replace("dimensions={'n': cols}", "dimensions=dims")
+        # Use an ordinary helper-returned mapping, retaining the actual local
+        # dictionary and Runtime's per-binding relation check.
+    elif alias_form != "direct":
         source = _borrowed_alias_source(source, struct_member, alias_form)
     package = _source_package(tmp_path, monkeypatch, source)
     original = package.Model(7, 7)
@@ -1101,7 +1108,7 @@ def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(
     root = ti.lang.impl.get_runtime().prog.get_snode_root(original_field.snode.ptr.get_snode_tree_id())
     layout = _compiled_nodes(root)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == (20 if alias_form == "direct" else 36)
+    assert manifest["version"] == (20 if alias_form in ("direct", "relations") else 36)
     assert sys.modules["definition_fixture.model"].constructors == 1
     assert len(manifest["field_groups"]) == 1
     assert len(manifest["entries"]) == 3  # step, clear and the unimported public definition
@@ -1146,7 +1153,7 @@ def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(
         b.step(1.0)
         np.testing.assert_array_equal(b.alias.to_numpy(), np.arange(19) + 2)
         prepared.close()
-        if alias_form != "direct":
+        if alias_form in ("mapping", "method"):
             from types import MappingProxyType
 
             original_mapping = (
@@ -1202,6 +1209,28 @@ def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "BORROW_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("mutation", ["dims['n'] = rows", "dims.clear()"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_borrowed_relation_alias_checks_actual_host_mapping(tmp_path, monkeypatch, mutation):
+    source = BORROWED_FIELDS_SOURCE.replace("n: int, m: int):", "n: int, m: int, corrupt=False):")
+    source = source.replace(
+        "        scope.borrow('alias', self.values",
+        "        dims = {'n': cols}\n        if corrupt:\n            " + mutation
+        + "\n        scope.borrow('alias', self.values",
+    ).replace("dimensions={'n': cols}", "dimensions=dims")
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(7, 7)
+        model.step(3.0)
+        np.testing.assert_array_equal(model.alias.to_numpy(), 3 * np.arange(7) + 2)
+        resources = set(runtime._resources)
+        with pytest.raises(ValueError, match="Borrowed (dimensions|target relation)"):
+            code.host.Model(7, 7, True)
+        assert runtime._resources == resources
+        model.clear()
 
 
 @pytest.mark.parametrize(

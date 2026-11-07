@@ -506,6 +506,16 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
         if isinstance(node, (ast.Tuple, ast.List)):
             values = tuple(dimension(item, bindings) for item in node.elts)
             return values if all(isinstance(v, Extent) for v in values) else None
+        if isinstance(node, ast.Dict):
+            result = {}
+            for key, value in zip(node.keys, node.values):
+                if not isinstance(key, ast.Constant) or type(key.value) is not str or key.value in result:
+                    return None
+                extent = dimension(value, bindings)
+                if not isinstance(extent, Extent):
+                    return None
+                result[key.value] = extent
+            return result
         scope, method = operation(node)
         if method in ("derived_dim", "power_of_two_dim"):
             if (

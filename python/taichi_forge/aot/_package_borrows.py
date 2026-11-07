@@ -42,27 +42,36 @@ def declaration(call, scope_path, schema, dimension, fail):
     mapping = keywords.get("dimensions", ast.Dict([], []))
     if isinstance(mapping, ast.Constant) and mapping.value is None:
         mapping = ast.Dict([], [])
-    if not isinstance(mapping, ast.Dict):
-        fail(call, "Borrowed dimensions require a literal mapping of source names to declared target extents")
+    # A normal declaration helper may return a fixed relation dictionary. Its
+    # single-assignment local alias carries the same symbolic extents; retained
+    # Host code still passes the actual dictionary to Runtime.borrow, which
+    # checks every key/expression before binding (including later mutations).
+    resolved = {}
+    if isinstance(mapping, ast.Dict):
+        for key, value in zip(mapping.keys, mapping.values):
+            if not isinstance(key, ast.Constant) or type(key.value) is not str or key.value in resolved:
+                fail(call, "Borrowed dimensions require unique literal source names")
+            resolved[key.value] = dimension(value)
+    else:
+        resolved = dimension(mapping)
+    if not isinstance(resolved, dict):
+        fail(call, "Borrowed dimensions require a declared mapping of source names to target extents")
     relations = {}
     from taichi_forge_runtime._dimensions import Extent, extent_dependencies
 
-    for key, value in zip(mapping.keys, mapping.values):
-        if not isinstance(key, ast.Constant) or type(key.value) is not str or key.value in relations:
-            fail(call, "Borrowed dimensions require unique literal source names")
+    for key, target in resolved.items():
         if (
             parameter is None
             and source.get("kind") not in ("owner", "owner_input")
-            and (schema.get(key.value, {}).get("kind") != "dimension" or schema[key.value].get("path"))
+            and (schema.get(key, {}).get("kind") != "dimension" or schema[key].get("path"))
         ):
             fail(call, "Borrowed dimension is absent from the original allocation namespace")
-        target = dimension(value)
         if not isinstance(target, Extent) or any(
             schema.get(n, {}).get("kind") != "dimension" or schema[n].get("path")
             for n in extent_dependencies(target.expression)
         ):
             fail(call, "Borrowed target relation requires dimensions in its declaration namespace")
-        relations[key.value] = target.expression
+        relations[key] = target.expression
     return name, dict(
         kind="borrowed_field",
         source_path=path,

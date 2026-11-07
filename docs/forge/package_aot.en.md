@@ -631,6 +631,12 @@ dimension helper passes nested-call analysis; its remaining resource domains
 still need work. Arbitrary declaration helpers, populated optional records, borrowed Fields with unresolved cross-object provenance and model-driven
 local tensor type domains remain unfinished; this is not full EFC qualification.
 
+Borrowed dimension relations may use a single-assignment local dictionary,
+including a fixed-key dictionary returned by a proven declaration helper.
+The retained Host passes its actual mapping to the existing consumer check;
+changed keys or extent expressions are rejected before binding. This adds no
+code variants or artifact format and does not infer relations from model values.
+
 Version 20 supports constructor declarations of
 `scope.borrow('alias', self.field, source_scope=True, ...)` from an earlier,
 unconditional Field or StructField member on the same owner. It reuses
