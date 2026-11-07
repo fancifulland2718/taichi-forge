@@ -1183,6 +1183,8 @@ TI_DLL_EXPORT TiMemory TI_API_CALL ti_create_dense_snode_group_ext(
 TI_DLL_EXPORT void TI_API_CALL ti_get_dense_snode_group_layout_ext(
     TiRuntime runtime, TiMemory group, uint64_t *size, char *json);
 // paths_json is an ordered list of root-relative scalar-place child paths.
+// It may also be {"paths": [...], "scalar_axes": true}, which retains those
+// same members and promotes element axes to runtime scalar index axes.
 // Compact or positive uniform-record members; aliases share the group lifetime.
 // Strided member memory must be accessed with the logical ndarray transfers.
 // Each returned memory handle must be freed, including after group retirement.

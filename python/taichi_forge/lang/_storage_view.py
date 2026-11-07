@@ -303,6 +303,15 @@ def _flatten_storage_to_scalar_vector(description):
     )
 
 
+def _scalarized_ndarray_view(source):
+    """Internal model-tensor ABI projection; preserve axes, strides and owner."""
+    description = describe_storage(source)
+    if not description.supported:
+        raise ValueError(f"storage cannot be described: {description.failure_reason}")
+    projected = StorageDescription(_ti_core._scalarize_dense_storage(description.descriptor))
+    return DenseNdarrayView(source, projected)
+
+
 def _slice_storage_description(description, slices):
     descriptor = description.descriptor
     rank = len(tuple(descriptor.index_shape))

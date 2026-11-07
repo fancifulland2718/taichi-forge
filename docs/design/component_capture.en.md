@@ -347,6 +347,18 @@ persistent-storage capability: it does not yet support dynamic tensor numerical
 ABIs, local vectors or shared workspaces, and definition packages do not yet
 select this recipe automatically.
 
+An internal scalar-axis projection appends element axes to the runtime index
+axes while preserving native byte strides, offsets and ownership. It reuses
+the affine Ndarray argument ABI so one scalar-access implementation can bind
+different model widths, without copying the original Field into another array.
+Standalone `group.member(..., scalar_axes=True)` uses the same native projection.
+Host transfers coalesce contiguous inner axes and retain the existing bulk
+transfer paths. Focused CPU/CUDA/Vulkan checks cover interleaved members, two
+instances, rejected tensor ABI mismatches and a frontend-blocked consumer with
+a new extent of 129. Automatic lowering of original `field[i][j]` syntax,
+dynamic local tensor values and package model-dimension inference still need
+integration; this foundation is not complete dynamic TensorType support.
+
 Original `self.field` captures now retain the complete root schema and member
 paths. Sibling blocks require declared dimension provenance; logical groups
 cannot split or merge physical roots. Attribute aliases of the same member share

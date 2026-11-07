@@ -258,6 +258,15 @@ size 和 offset 与普通 FieldsBuilder 对照，包含标量、vector、matrix 
 64 的模型尺寸、双实例隔离和错误维度拒绝。这是持久存储层能力；动态元素的数值
 ABI、局部向量和共享工作区尚未因此获得支持，定义包也尚未自动接入该配方。
 
+内部标量轴投影可将元素轴追加为普通运行时索引轴，保留原 native 字节 stride、偏移
+和 owner。它复用既有 affine Ndarray 参数 ABI，允许一份标量访问代码绑定不同模型
+宽度；不是将原 Field 复制为独立数组。独立 Runtime 的
+`group.member(..., scalar_axes=True)` 使用同一原生投影，Host 传输合并连续的内层
+轴后沿现有批量传输路径处理。局部 CPU/CUDA/Vulkan 检查包含交错成员、两实例、
+张量 ABI 错绑拒绝，以及屏蔽前端后使用新尺寸 129 的消费者。原 `field[i][j]` 自动
+lowering、动态张量局部值和定义包模型尺寸推导仍需接入；该基础接口不等同于完整
+动态 TensorType 支持。
+
 原 `self.field` 捕获现在保存完整的实际根 schema 和成员路径；同根兄弟块的维度必须有
 声明，逻辑组不能拆开或合并实际根。相同成员的属性别名共用一个物理参数。每次调用
 通过已有零复制 Field view 绑定成员，保留原根、偏移及 owner；不会复制成独立 Ndarray，

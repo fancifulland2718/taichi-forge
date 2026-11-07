@@ -915,12 +915,27 @@ void transfer_ndarray(Runtime &runtime, const TiNdArray &array, void *host,
       reorder();
     return;
   }
-  if (!analysis || !analysis.properties.single_record_stride_compatible ||
-      analysis.properties.record_stride <= 0)
+  // Scalarized tensor axes retain the same physical records but move their
+  // components into index_shape. Coalesce only proven contiguous suffix axes
+  // for the existing bulk record transfers; never copy neighboring padding.
+  auto records = *memory.dense_layout;
+  uint64_t width = capi::ndarray_storage_layout(array).element_bytes;
+  while (!records.index_shape.empty()) {
+    const auto extent = records.index_shape.back();
+    if (extent != 1 && records.index_strides_bytes.back() != width)
+      break;
+    records.element_shape.insert(records.element_shape.begin(), extent);
+    records.element_strides_bytes.insert(records.element_strides_bytes.begin(), width);
+    records.index_shape.pop_back();
+    records.index_strides_bytes.pop_back();
+    width *= extent;  // The validated logical byte product already bounds this.
+  }
+  const auto record_analysis = storage::analyze_dense_storage_layout(records);
+  if (!record_analysis || !record_analysis.properties.single_record_stride_compatible ||
+      record_analysis.properties.record_stride <= 0)
     throw MemoryBindingError("Host ndarray transfer requires a positive uniform record view");
-  const auto count = analysis.properties.item_count;
-  const auto width = capi::ndarray_storage_layout(array).element_bytes;
-  const auto stride = uint64_t(analysis.properties.record_stride);
+  const auto count = record_analysis.properties.item_count;
+  const auto stride = uint64_t(record_analysis.properties.record_stride);
 #ifdef TI_WITH_LLVM
   if (taichi::arch_is_cpu(runtime.arch)) {
     auto &device = static_cast<cpu::CpuDevice &>(runtime.get());

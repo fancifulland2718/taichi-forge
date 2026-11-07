@@ -1067,6 +1067,32 @@ DenseStorageBuildResult flatten_dense_storage_to_scalar_vector(
       descriptor.owner(), descriptor.source_kind(), layout);
 }
 
+DenseStorageLayoutSpec scalarize_dense_storage_layout(
+    DenseStorageLayoutSpec layout) {
+  layout.index_shape.insert(layout.index_shape.end(), layout.element_shape.begin(),
+                            layout.element_shape.end());
+  layout.index_strides_bytes.insert(layout.index_strides_bytes.end(),
+                                    layout.element_strides_bytes.begin(),
+                                    layout.element_strides_bytes.end());
+  layout.element_shape.clear();
+  layout.element_strides_bytes.clear();
+  return layout;
+}
+
+DenseStorageBuildResult scalarize_dense_storage(
+    const DenseStorageDescriptor &descriptor) {
+  DenseStorageLayoutSpec layout;
+  layout.scalar_type = descriptor.scalar_type();
+  layout.index_shape = descriptor.index_shape();
+  layout.index_strides_bytes = descriptor.index_strides_bytes();
+  layout.element_shape = descriptor.element_shape();
+  layout.element_strides_bytes = descriptor.element_strides_bytes();
+  layout.byte_offset = descriptor.byte_offset();
+  layout.access = descriptor.access();
+  return build_dense_storage_descriptor(descriptor.owner(), descriptor.source_kind(),
+                                        scalarize_dense_storage_layout(std::move(layout)));
+}
+
 DenseStorageBuildResult slice_dense_storage(
     const DenseStorageDescriptor &descriptor,
     const std::vector<std::int64_t> &starts,

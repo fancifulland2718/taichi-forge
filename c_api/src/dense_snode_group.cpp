@@ -174,7 +174,17 @@ TiNdArray Runtime::dense_snode_group_member(TiMemory handle,
   const auto element_layout = capi::ndarray_storage_layout(array);
   const uint64_t width = element_layout.alignment;
   const uint64_t lanes = element_layout.element_bytes / width;
-  const auto paths_json = liong::json::parse_complete(text);
+  const auto selection = liong::json::parse_complete(text);
+  bool scalar_axes = false;
+  if (selection.is_obj()) {
+    if (selection.obj.inner.size() != 2 ||
+        !selection.obj.inner.count("paths") ||
+        !selection.obj.inner.count("scalar_axes") ||
+        !selection["scalar_axes"].is_bool())
+      throw MemoryBindingError("Invalid Dense member scalar-axis projection");
+    scalar_axes = selection["scalar_axes"].b;
+  }
+  const auto &paths_json = selection.is_obj() ? selection["paths"] : selection;
   if (!paths_json.is_arr())
     throw MemoryBindingError("Dense member paths must be an array");
   std::vector<std::vector<int>> paths;
@@ -248,7 +258,7 @@ TiNdArray Runtime::dense_snode_group_member(TiMemory handle,
   };
   layout->index_strides_bytes = member_layout.strides;
   layout->element_strides_bytes = strides(layout->element_shape, width);
-  const auto analysis = storage::analyze_dense_storage_layout(*layout);
+  auto analysis = storage::analyze_dense_storage_layout(*layout);
   if (!analysis || !analysis.properties.element_contiguous ||
       !(analysis.properties.single_record_stride_compatible ||
         analysis.properties.compact_contiguous) ||
@@ -256,6 +266,21 @@ TiNdArray Runtime::dense_snode_group_member(TiMemory handle,
       analysis.properties.uniqueness != storage::StorageMappingUniqueness::kProvenUnique ||
       analysis.properties.reachable_begin != 0)
     throw MemoryBindingError("Dense member has an unqualified record mapping");
+  if (scalar_axes) {
+    *layout = storage::scalarize_dense_storage_layout(std::move(*layout));
+    if (layout->index_shape.size() > 16)
+      throw MemoryBindingError("Scalarized Dense member rank exceeds the argument ABI");
+    analysis = storage::analyze_dense_storage_layout(*layout);
+    if (!analysis || analysis.properties.has_negative_stride ||
+        analysis.properties.uniqueness != storage::StorageMappingUniqueness::kProvenUnique)
+      throw MemoryBindingError("Dense member scalar projection has an invalid mapping");
+    array.shape = {};
+    array.shape.dim_count = layout->index_shape.size();
+    for (uint32_t i = 0; i < array.shape.dim_count; ++i)
+      array.shape.dims[i] = layout->index_shape[i];
+    array.elem_shape = {};
+    capi::ndarray_storage_layout(array);
+  }
   const auto bytes = uint64_t(analysis.properties.reachable_end);
   const auto source = get_memory(handle);
   if (offset > source.size || bytes > source.size - offset)

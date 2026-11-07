@@ -204,6 +204,11 @@ struct DenseStorageLayoutAnalysis {
 TI_DLL_EXPORT DenseStorageLayoutAnalysis analyze_dense_storage_layout(
     const DenseStorageLayoutSpec &layout);
 
+// Promote tensor element axes to ordinary scalar index axes, preserving every
+// byte stride and offset. This is a logical projection, not a layout compiler.
+TI_DLL_EXPORT DenseStorageLayoutSpec scalarize_dense_storage_layout(
+    DenseStorageLayoutSpec layout);
+
 // Submission-scoped device capability derived from an immutable descriptor
 // only after its owner generation has been validated. Descriptors deliberately
 // do not contain DeviceAllocation or raw-pointer state; backends may consume
@@ -406,6 +411,10 @@ describe_ndarray_storage(const Ndarray &array,
 // performed. Non-compact or non-unique mappings fail closed.
 TI_DLL_EXPORT DenseStorageBuildResult
 flatten_dense_storage_to_scalar_vector(
+    const DenseStorageDescriptor &descriptor);
+
+// Unlike flattening, retain all index/element axes and inter-record padding.
+TI_DLL_EXPORT DenseStorageBuildResult scalarize_dense_storage(
     const DenseStorageDescriptor &descriptor);
 
 // Compose a zero-copy positive-stride subview over the logical index axes.

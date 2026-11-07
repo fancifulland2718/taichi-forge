@@ -1,5 +1,10 @@
 import ctypes as C
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 import zipfile
 
 import numpy as np
@@ -12,6 +17,128 @@ from taichi_forge._lib import core
 from tests import test_utils
 from tests.python.test_dense_snode_schema import _group
 from tests.python.test_dense_snode_schema import _tensor_group
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_scalarized_tensor_axes_share_kernel_abi_across_model_sizes(tmp_path):
+    from taichi_forge.lang._storage_view import _scalarized_ndarray_view, describe_storage
+
+    @ti.kernel
+    def increment(values: ti.types.ndarray(ti.f32, 2)):
+        for i, j in values:
+            values[i, j] += i * 100 + j + 1
+
+    @ti.kernel
+    def matrix_increment(values: ti.types.ndarray(ti.f32, 3)):
+        for i, j, k in values:
+            values[i, j, k] += i * 100 + j * 10 + k + 1
+
+    # An actual original interleaved Field proves affine code generation. A
+    # contiguous stand-in would incorrectly omit the runtime record stride.
+    builder = ti.FieldsBuilder()
+    vector = ti.Vector.field(7, ti.f32)
+    neighbor = ti.field(ti.f32)
+    builder.dense(ti.i, 3).place(neighbor, vector)
+    matrix = ti.Matrix.field(2, 7, ti.f32)
+    builder.dense(ti.i, 3).place(matrix)
+    tree = builder.finalize()
+    scalar_vector, scalar_matrix = _scalarized_ndarray_view(vector), _scalarized_ndarray_view(matrix)
+    assert scalar_vector.shape == (3, 7) and scalar_matrix.shape == (3, 2, 7)
+    assert scalar_vector.descriptor.byte_offset == describe_storage(vector).descriptor.byte_offset
+    neighbor.fill(123)
+    vector.fill(0)
+    increment(scalar_vector)
+    np.testing.assert_array_equal(vector.to_numpy(), np.arange(3)[:, None] * 100 + np.arange(7) + 1)
+    np.testing.assert_array_equal(neighbor.to_numpy(), np.full(3, 123))
+    module = ti.aot.Module()
+    module.add_kernel(increment, template_args={"values": scalar_vector})
+    module.add_kernel(matrix_increment, template_args={"values": scalar_matrix})
+    archive = tmp_path / "scalar_axes.tcm"
+    module.archive(str(archive))
+    schema, producer, _, _, _ = _tensor_group(3, 7)
+    with Runtime(ti.cfg.arch.name) as runtime:
+        loaded = runtime.load_module(archive)
+        groups, views, prepared = [], [], []
+        for n, dofs in ((5, 19), (2, 65)):
+            group = runtime.dense_snode_group(schema.to_json(), {"N": n, "D": dofs})
+            groups.append(group)
+            paths = [[0, 1 + i] for i in range(dofs)]
+            original = group.member(paths, "f32", element_shape=(dofs,))
+            scalar = group.member(paths, "f32", element_shape=(dofs,), scalar_axes=True)
+            fixed = group.member([[0, 1 + dofs + i] for i in range(3)], "f64", element_shape=(3,))
+            matrices = group.member([[1, i] for i in range(2 * dofs)], "f32", element_shape=(2, dofs), scalar_axes=True)
+            assert scalar.shape == (n, dofs) and scalar.element_shape == ()
+            assert scalar.nbytes == original.nbytes
+            assert matrices.shape == (n, 2, dofs)
+            original.write(np.zeros(n * dofs, np.float32))
+            matrices.write(np.zeros(n * 2 * dofs, np.float32))
+            fixed.write(np.full(n * 3, 123, np.float64))
+            with pytest.raises(AotError, match="ABI"):
+                loaded.kernel("increment")(original)
+            prepared.append(loaded.kernel("increment").prepare(scalar))
+            loaded.kernel("matrix_increment")(matrices)
+            np.testing.assert_array_equal(
+                matrices.to_numpy(),
+                np.arange(n)[:, None, None] * 100 + np.arange(2)[None, :, None] * 10 + np.arange(dofs) + 1,
+            )
+            views.append((original, scalar, fixed, matrices))
+        # The same loaded code has two independent descriptor snapshots.
+        prepared[0]()
+        prepared[1]()
+        prepared[0]()
+        for (n, dofs), count, resources in zip(((5, 19), (2, 65)), (2, 1), views):
+            expected = (np.arange(n)[:, None] * 100 + np.arange(dofs) + 1) * count
+            np.testing.assert_array_equal(resources[0].to_numpy(), expected)
+            np.testing.assert_array_equal(resources[2].to_numpy(), np.full((n, 3), 123))
+        groups[0].close()
+        with pytest.raises(AotError, match="retired"):
+            views[0][1].read()
+        prepared[1]()
+        for item in prepared:
+            item.close()
+        for resources in views:
+            for view in resources:
+                view.close()
+        groups[1].close()
+    producer.destroy()
+    tree.destroy()
+    # A fresh process cannot import the producer or frontend. New extents must
+    # bind the same frozen numerical code and the same native layout recipe.
+    recipe = tmp_path / "layout.json"
+    recipe.write_text(schema.to_json())
+    consumer = textwrap.dedent("""
+        import importlib.abc, sys
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, *args):
+                if name.split('.')[0] in ('taichi', 'taichi_forge', 'tests'):
+                    raise AssertionError('consumer attempted frontend import: ' + name)
+        sys.meta_path.insert(0, NoFrontend())
+        import numpy as np
+        from pathlib import Path
+        from taichi_forge_runtime.aot import Runtime
+        with Runtime(sys.argv[1]) as runtime:
+            module = runtime.load_module(sys.argv[2])
+            with runtime.dense_snode_group(Path(sys.argv[3]).read_text(), {'N': 3, 'D': 129}) as group:
+                view = group.member([[0, 1 + i] for i in range(129)], 'f32',
+                                    element_shape=(129,), scalar_axes=True)
+                try:
+                    module.kernel('increment')(view)
+                    np.testing.assert_array_equal(view.to_numpy(),
+                        np.arange(3)[:, None] * 100 + np.arange(129) + 1)
+                finally:
+                    view.close()
+        print('SCALAR_AXES_SOURCE_FREE_OK')
+    """)
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", consumer, ti.cfg.arch.name, str(archive), str(recipe)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "packaging/runtime/src")},
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SCALAR_AXES_SOURCE_FREE_OK" in result.stdout
 
 
 def _compiled_nodes(root):

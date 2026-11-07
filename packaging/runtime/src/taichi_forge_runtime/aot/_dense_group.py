@@ -55,8 +55,8 @@ class DenseSNodeGroup:
     def nbytes(self):
         return self._memory.size
 
-    def member(self, paths, dtype, *, element_shape=()):
-        """Bind declared scalar-place paths as one compact ndarray argument."""
+    def member(self, paths, dtype, *, element_shape=(), scalar_axes=False):
+        """Bind native member paths, optionally promoting element axes to indices."""
         if (
             not isinstance(paths, (list, tuple))
             or not paths
@@ -64,6 +64,8 @@ class DenseSNodeGroup:
         ):
             raise TypeError("Dense member requires explicit scalar-place child paths")
         code, _, width = _dtype(dtype)
+        if type(scalar_axes) is not bool:
+            raise TypeError("scalar_axes must be a boolean")
         element_shape = _shape(element_shape)
         shape = abi.Shape(len(element_shape), (abi.UInt * 16)(*element_shape))
         runtime = self._memory._runtime
@@ -75,7 +77,7 @@ class DenseSNodeGroup:
                 api.ti_get_dense_snode_group_member_ext,
                 runtime._handle,
                 self._memory._handle,
-                json.dumps(paths).encode("utf8"),
+                json.dumps(dict(paths=paths, scalar_axes=True) if scalar_axes else paths).encode("utf8"),
                 code,
                 C.byref(shape),
                 C.byref(array),
@@ -83,9 +85,10 @@ class DenseSNodeGroup:
             memory = None
             try:
                 index_shape = tuple(array.shape.dims[: array.shape.dim_count])
-                size = math.prod(index_shape) * math.prod(element_shape) * width
+                result_element_shape = tuple(array.elem_shape.dims[: array.elem_shape.dim_count])
+                size = math.prod(index_shape) * math.prod(result_element_shape) * width
                 memory = _Memory._from_import(runtime, array.memory, size)
-                result = NdArray(memory, dtype, code, index_shape, element_shape)
+                result = NdArray(memory, dtype, code, index_shape, result_element_shape)
                 # Python collection of the group must not retire live views.
                 # Explicit group.close() still revokes the native family.
                 result._group_owner = self

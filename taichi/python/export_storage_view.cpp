@@ -269,6 +269,9 @@ void export_storage_view(py::module &m) {
         &flatten_dense_storage_to_scalar_vector,
         py::arg("descriptor"));
 
+  m.def("_scalarize_dense_storage", &scalarize_dense_storage,
+        py::arg("descriptor"));
+
   m.def("_slice_dense_storage", &slice_dense_storage,
         py::arg("descriptor"), py::arg("starts"), py::arg("lengths"),
         py::arg("steps"));
