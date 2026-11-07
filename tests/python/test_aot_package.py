@@ -1684,6 +1684,37 @@ def unused_public_function(x: ti.i32) -> ti.i32:
 """
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_host_preparation_arrays_are_not_owner_declaration_methods(tmp_path, monkeypatch):
+    source = SOURCE.replace("        self.initialize(self.values, 0.5)",
+        "        self.initialize(self.values, 0.5)\n        self.reference = self.prepare_reference(n, 0.75)")
+    source = source.replace(
+        "    @ti.func\n    def affine",
+        """    def prepare_reference(self, n, offset):
+        temporary = ti.ndarray(ti.f32, shape=n)
+        self.initialize(temporary, offset)
+        return temporary.to_numpy()
+
+    @ti.func
+    def affine""",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not any(
+        item.get("definition", "").endswith(".prepare_reference") for item in manifest.get("declaration_factories", ())
+    )
+    assert len(manifest["entries"]) == 5
+    original = package.Model(7, 2.0)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, 2.0), code.host.Model(19, -3.0)
+        np.testing.assert_array_equal(a.reference, original.reference)
+        np.testing.assert_array_equal(b.reference, -3 * np.arange(19) + 0.75)
+        a.step(True, 1.0)
+        np.testing.assert_array_equal(a.reference, original.reference)
+        np.testing.assert_array_equal(a.values.to_numpy(), 2 * np.arange(7) + 1.5)
+
+
 def _source_package(tmp_path, monkeypatch, source=SOURCE, *, initializer="from .model import Model\n"):
     root = tmp_path / "definition_fixture"
     root.mkdir()

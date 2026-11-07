@@ -356,6 +356,10 @@ JIT 对照、无源码消费、新尺寸、分配前/后异常回收、正常树
 可变/模型驱动映射、被遮蔽的属性访问拒绝。此路径使用版本 36，局部 CPU/CUDA
 检查覆盖双实例隔离、篡改映射拒绝及无源码消费。
 
+普通 Host 准备方法可接收参数，并沿已有 Runtime 投影创建传给已加载 Kernel 的临时
+Ndarray。局部数组不使该方法成为持久状态分配方法；直接分配到 owner 属性的数组仍须
+满足构造资源合同。此分类已做 CPU/CUDA 局部检查，未增加临时数组的新生命周期策略。
+
 `from taichi_forge.lang._ndarray import Ndarray`（含 Taichi 兼容路径、别名和函数内导入）
 可保留为 Host 类型检查，使用版本 17。`isinstance` 接受普通标量/张量/记录 ndarray；
 Dense Field 成员即使复用 ndarray ABI 也不属于该类型，普通 Python/NumPy 对象同样不属于。

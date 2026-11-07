@@ -383,6 +383,11 @@ retains the original source group and lifetime. Mutable/model-dependent maps and
 shadowed attribute lookup are rejected. This uses package format version 36;
 local CPU/CUDA checks cover independent instances and source-free consumption.
 
+Ordinary Host preparation methods may take arguments and allocate temporary
+Ndarrays for loaded kernels through the existing Runtime projection. Those local
+arrays do not make the method a persistent owner-allocation method. Direct
+allocations into owner attributes still require the construction contract.
+
 The original compiler records presence dependencies when a conditional field is
 actually read, including `ti.static(field is not None)`. Common methods that do
 not read that field retain shared code. An instance's

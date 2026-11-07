@@ -61,6 +61,21 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
 
         def allocates(function):
             for call in (n for n in ast.walk(function) if isinstance(n, ast.Call)):
+                if qualified_kind(call, kind) == "ndarray" and not any(
+                    isinstance(statement, (ast.Assign, ast.AnnAssign))
+                    and statement.value is call
+                    and any(
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "self"
+                        for target in (statement.targets if isinstance(statement, ast.Assign) else [statement.target])
+                    )
+                    for statement in ast.walk(function)
+                ):
+                    # Ordinary Host helpers may allocate temporary argument
+                    # arrays. The existing Runtime projection handles those;
+                    # they are not persistent owner declaration methods.
+                    continue
                 if qualified_kind(call, kind) in (
                     "experimental.ResourceScope",
                     "field",
