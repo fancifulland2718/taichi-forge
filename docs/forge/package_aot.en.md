@@ -138,6 +138,15 @@ private arrays and interleaved prepared snapshots. Nested/Vulkan control recipes
 native-provider Graph nodes remain outside this facade. Loop bounds are currently
 recording-time values; changing a bound requires rerecording the Host plan.
 
+Consumer Host code can query `ti.graph.structured_control_capabilities()` against
+the loaded Runtime for flat kernel loops: exact Host control on CPU and device
+control when native CUDA conditional graphs are available. The query shares the
+native preparation capability check without compiling, capturing, or allocating
+arrays. Ordinary constructors can select control resources once; replay does not
+query implicitly. `GraphBuilder` retains class-method visibility for checks such
+as `private_ndarray`. This does not qualify arbitrary nested/provider graphs;
+concrete graph eligibility remains a preparation check.
+
 Version 33 adds `scope.value('iterations', ti.i32, affects_plan=True)` to separate
 a numerical runtime input from a Host plan dependency. Numerical code keeps an
 ordinary ABI parameter, without iteration-count specializations. Graph recording

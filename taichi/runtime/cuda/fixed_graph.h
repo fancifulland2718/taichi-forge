@@ -80,6 +80,9 @@ class FixedGraph {
   FixedGraph(const FixedGraph &) = delete;
   FixedGraph &operator=(const FixedGraph &) = delete;
   static bool available();
+  // Same cold route check used by preparation and source-free consumers.
+  // Concrete operations/resources still require normal preparation admission.
+  static bool conditional_control_available();
   // Cold preparation of an independent fixed execution. Registered code and
   // every bound allocation/provider are retained by operands. The caller
   // supplies the selected recipe and its shared-storage hazard contract;

@@ -207,6 +207,21 @@ class Runtime:
                 for entry in entries[: count.value]
             }
 
+    def execution_control_capabilities(self):
+        """Cold native route facts for flat kernel while preparation.
+
+        Queries this loaded Runtime and device, without compiling, capturing or
+        allocating arrays. Concrete graph eligibility remains a prepare check;
+        this does not certify arbitrary nested or provider graphs.
+        """
+        with self._lock:
+            self._check()
+            self._api.load_execution_control()
+            flags = self._api.call(self._api.ti_get_execution_control_capabilities_ext, self._handle)
+            return frozenset(
+                name for bit, name in ((1, "cpu_exact_while"), (2, "cuda_conditional_while")) if flags & bit
+            )
+
     def execution_domain(self, *, capacity=2, instance_capacity=64, priority=0, gpu_timing=False, queue="compute"):
         """Create an independent CUDA stream or additional Vulkan queue.
 

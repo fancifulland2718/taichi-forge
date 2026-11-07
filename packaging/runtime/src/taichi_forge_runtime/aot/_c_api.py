@@ -427,6 +427,17 @@ class Api:
             function.argtypes, function.restype = arguments, result
             setattr(self, name, function)
 
+    def load_execution_control(self):
+        name = "ti_get_execution_control_capabilities_ext"
+        if getattr(self, name, None) is not None:
+            return
+        try:
+            function = getattr(self.library, name)
+        except AttributeError as error:
+            raise NotImplementedError("The selected Forge runtime has no execution-control capability query") from error
+        function.argtypes, function.restype = [Handle], UInt
+        setattr(self, name, function)
+
     def load_cuda_external_memory(self):
         if getattr(self, "ti_import_cuda_external_memory_ext", None) is not None:
             return

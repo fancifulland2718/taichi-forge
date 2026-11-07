@@ -138,11 +138,40 @@ class _ModuleBinding:
         self.package = package
         self.target = _BACKENDS[package.runtime.arch]
         self.importlib = _Importlib(self)
+
+        class PackageGraphBuilder(GraphBuilder):
+            def __init__(self):
+                super().__init__(package)
+
         self.host = _HostAPI(
             ndarray=self.ndarray,
             sync=package.runtime.wait,
-            graph=SimpleNamespace(Arg=Arg, ArgKind=ArgKind, GraphBuilder=lambda: GraphBuilder(package)),
+            graph=SimpleNamespace(
+                Arg=Arg,
+                ArgKind=ArgKind,
+                GraphBuilder=PackageGraphBuilder,
+                structured_control_capabilities=self.control_capabilities,
+            ),
             **{dtype: dtype for dtype in _DTYPES},
+        )
+
+    def control_capabilities(self):
+        self.package._check()
+        modes = self.package.runtime.execution_control_capabilities()
+        native = "cuda_conditional_while" in modes
+        return dict(
+            schema_version=1,
+            backend=self.package.runtime.arch,
+            scope="definition_package_flat_kernel_while",
+            portable={"while": "cpu_exact_host_loop" if "cpu_exact_while" in modes else "unavailable"},
+            device_control={
+                "while": native,
+                "exact_dynamic_termination": native,
+                "structured_submit": native,
+                "runtime_path_qualified": native,
+                "stops_command_issue_after_exit": native,
+                "per_iteration_host_observation": not native,
+            },
         )
 
     def ndarray(self, dtype, shape):

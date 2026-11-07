@@ -97,6 +97,12 @@ call，可反复 `run()`；`graph.run(arguments)` 是每次重新 prepare 的单
 交错执行。嵌套/Vulkan 控制配方和原生 provider 节点尚未接入此接口。循环上限目前在
 录图时确定；改变上限须重新运行 Host 构图。
 
+消费端 Host 的 `ti.graph.structured_control_capabilities()` 从当前加载的 Runtime
+查询平坦 Kernel 循环路径：CPU 为精确 Host 循环，CUDA 在原生 conditional graph
+可用时报告设备控制。查询与实际 prepare 共用原生能力判定，不编译、录图或分配数组；
+普通构造代码可据此选择控制资源，重放不隐式重复查询。`GraphBuilder` 保留类方法可见性，
+支持检查 `private_ndarray`。这不是任意嵌套/provider 图的资格承诺，具体图仍在 prepare 验证。
+
 版本 33 的 `scope.value('iterations', ti.i32, affects_plan=True)` 将“数值运行参数”与
 “Host 计划依赖”分开：数值代码仍读取普通 ABI 输入，不按次数生成特化；Graph 记录时
 保存该参数，编译及重新 bind 检查它没有改变。改变后重新运行正常 Host 构图，再 prepare。

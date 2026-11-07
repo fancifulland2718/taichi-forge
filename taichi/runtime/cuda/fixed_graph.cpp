@@ -286,6 +286,11 @@ bool FixedGraph::available() {
          driver.graph_launch.available();
 }
 
+bool FixedGraph::conditional_control_available() {
+  return available() && GraphRegionBuilder::available() &&
+         driver_graph_conditional_setter_compiled();
+}
+
 FixedGraph::FixedGraph(const std::vector<Dispatch> &dispatches,
                        std::shared_ptr<RuntimeFaultDomain> fault_domain)
     : FixedGraph(std::vector<Operation>(dispatches.begin(), dispatches.end()),
@@ -813,7 +818,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
     state.parallel.back()->prepare(parallel->branches.size());
   }
   if (!controls.empty() || !branch_controls.empty()) {
-    if (!GraphRegionBuilder::available())
+    if (!conditional_control_available())
       throw std::invalid_argument(
           "Fixed CUDA control requires native conditional graph support");
     driver_graph_prepare_conditional_setter();

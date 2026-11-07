@@ -30,6 +30,7 @@
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/binding_frame_replay.h"
 #include "taichi/runtime/cuda/execution_domain.h"
+#include "taichi/runtime/cuda/fixed_graph.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/sparse_runtime_view.h"
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
@@ -3096,6 +3097,28 @@ void probe_native_object(TiRuntime runtime,
   TI_CAPI_TRY_CATCH_END();
 }
 }  // namespace
+
+TiFlags ti_get_execution_control_capabilities_ext(TiRuntime runtime) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  if (!runtime) {
+    ti_set_last_error(TI_ERROR_ARGUMENT_NULL, "runtime");
+    return 0;
+  }
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+#ifdef TI_WITH_LLVM
+  if (taichi::arch_is_cpu(rt.arch))
+    return TI_EXECUTION_CONTROL_CAPABILITY_CPU_EXACT_WHILE_BIT_EXT;
+#endif
+#ifdef TI_WITH_CUDA
+  if (rt.arch == taichi::Arch::cuda &&
+      taichi::lang::cuda::FixedGraph::conditional_control_available())
+    return TI_EXECUTION_CONTROL_CAPABILITY_CUDA_CONDITIONAL_WHILE_BIT_EXT;
+#endif
+  return 0;
+  TI_CAPI_TRY_CATCH_END();
+  return 0;
+}
 
 TiFlags ti_get_native_operation_capabilities_ext(TiRuntime runtime,
                                                  const char *kind,

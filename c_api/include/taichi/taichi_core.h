@@ -1476,6 +1476,19 @@ ti_configure_native_library_ext(TiRuntime runtime,
                                 const char *name,
                                 const char *path);
 
+typedef enum TiExecutionControlCapabilityFlagBitsExt {
+  TI_EXECUTION_CONTROL_CAPABILITY_CPU_EXACT_WHILE_BIT_EXT = 1 << 0,
+  TI_EXECUTION_CONTROL_CAPABILITY_CUDA_CONDITIONAL_WHILE_BIT_EXT = 1 << 1,
+  TI_EXECUTION_CONTROL_CAPABILITY_FLAG_BITS_MAX_ENUM_EXT = 0x7fffffff,
+} TiExecutionControlCapabilityFlagBitsExt;
+
+// Cold availability of qualified flat kernel while routes on this runtime.
+// Does not allocate control arrays, compile, capture, or launch work. This is
+// not admission of arbitrary nested/provider graphs; preparation still checks
+// concrete operands, layouts, backend limits and capture legality.
+TI_DLL_EXPORT TiFlags TI_API_CALL
+ti_get_execution_control_capabilities_ext(TiRuntime runtime);
+
 // Query the compiled factory for an exact operation kind/version and this
 // runtime's backend, without loading code or allocating operation resources.
 // Returns zero for an unregistered kind, version or backend. A nonzero result

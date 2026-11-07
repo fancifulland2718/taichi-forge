@@ -3001,6 +3001,9 @@ class Model:
         builder = ti.graph.GraphBuilder()
         self.record(builder, maximum)
         return builder.compile()
+    def control_info(self):
+        return (ti.graph.structured_control_capabilities(),
+                callable(getattr(ti.graph.GraphBuilder, 'private_ndarray', None)))
 """
 
 
@@ -3039,6 +3042,19 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
         from taichi_forge_runtime.aot import Runtime, load_package
         with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
             a, b = code.host.Model(3, 5, 2), code.host.Model(17, 2, -3)
+            control, private_arrays = a.control_info()
+            assert private_arrays
+            assert control['scope'] == 'definition_package_flat_kernel_while'
+            expected = 'cuda_conditional_while' if sys.argv[2] == 'cuda' else 'cpu_exact_while'
+            assert runtime.execution_control_capabilities() == {expected}
+            assert control['device_control']['while'] == (sys.argv[2] == 'cuda')
+            assert control['device_control']['per_iteration_host_observation'] == (sys.argv[2] != 'cuda')
+            if sys.argv[2] != 'cuda':
+                assert control['portable']['while'] == 'cpu_exact_host_loop'
+            # Queries are cold Host decisions, never implicit replay work.
+            def unexpected_query():
+                raise AssertionError('control capability queried during recording/preparation/replay')
+            runtime.execution_control_capabilities = unexpected_query
             ga, gb = a.graph(5), b.graph(9)
             document = json.loads(ga.plan.to_json())
             assert len(document['operations']) == 2
@@ -3105,6 +3121,12 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
                 pass
             else:
                 raise AssertionError('private scope collision accepted')
+        try:
+            Runtime.execution_control_capabilities(runtime)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('closed runtime accepted a capability query')
         print('PACKAGE_WHILE_OK')
     """),
         encoding="utf8",
