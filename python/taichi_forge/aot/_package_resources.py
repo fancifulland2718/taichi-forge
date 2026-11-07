@@ -755,7 +755,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
         return call.args[0].value
 
     def optional_arm(body):
-        fields, records = set(), {}
+        fields, records, borrows = set(), {}, set()
         for node in body:
             call = node.value if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Expr)) else None
             scope, method = operation(call)
@@ -782,6 +782,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 if len(call.args) != 2 or not isinstance(call.args[0], ast.Constant):
                     return None
                 fields.add(call.args[0].value)
+                borrows.add(call.args[0].value)
             elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(call, ast.Call):
                 target = node.targets[0]
                 if isinstance(target, ast.Attribute) and scope_binding(target.value) in scopes:
@@ -790,14 +791,24 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
 
                     if inspect.isclass(_source_value(call.func, namespace)):
                         fields.add(target.attr)
-        return fields, records
+        return fields, records, borrows
 
     def paired_records(statement):
         arms = [optional_arm(statement.body), optional_arm(statement.orelse)]
         if any(arm is None for arm in arms):
             return None
-        (left, absent_left), (right, absent_right) = arms
-        if not (left or right) or left != absent_right.keys() or right != absent_left.keys() or left & right:
+        (left, absent_left, borrowed_left), (right, absent_right, borrowed_right) = arms
+        # A source alias follows its guarded allocation; it need not invent a
+        # second absent record when the owning child already has one. Explicit
+        # absence declarations must still name a resource in the opposite arm.
+        if (
+            not (left or right)
+            or left - borrowed_left != absent_right.keys() - borrowed_left
+            or right - borrowed_right != absent_left.keys() - borrowed_right
+            or not absent_right.keys() <= left
+            or not absent_left.keys() <= right
+            or left & right
+        ):
             return None
         return [*absent_left.values(), *absent_right.values()]
 
