@@ -1297,7 +1297,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                             "name": capture_name,
                             **(
                                 {"path": list(environment._paths[capture_name])}
-                                if len(environment._paths[capture_name]) > 1
+                                if capture_name not in code.workspaces and len(environment._paths[capture_name]) > 1
                                 else {}
                             ),
                             "kind": schema[0],
@@ -1307,6 +1307,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         for capture_name, schema in code.contract["captures"]
                     ]
                     for item in capture:
+                        if item["kind"] == "local_tensor_workspace":
+                            item.update(code.workspaces[item["name"]])
+                            manifest["version"] = max(27, manifest["version"])
                         if item["kind"] == "model_tensor_field":
                             shape = environment.declarations[item["name"]].element_shape
                             item["model_element_shape"] = list(shape)

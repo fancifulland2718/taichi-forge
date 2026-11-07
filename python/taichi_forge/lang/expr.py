@@ -23,6 +23,8 @@ class Expr(TaichiOperations):
                 self.ptr = args[0].ptr
                 self.ptr_type_checked = args[0].ptr_type_checked
                 self.dbg_info = args[0].dbg_info
+                if hasattr(args[0], "_uniform_extent"):
+                    self._uniform_extent = args[0]._uniform_extent
             elif is_matrix_class(args[0]):
                 self.ptr = make_matrix(args[0].to_list()).ptr
             elif isinstance(args[0], (list, tuple)):
@@ -37,6 +39,8 @@ class Expr(TaichiOperations):
                         )
                     arg = arg.dtype.type(arg)
                 self.ptr = make_constant_expr(arg, dtype).ptr
+                if isinstance(arg, (int, np.integer)) and not isinstance(arg, bool) and 0 <= arg <= 2**31 - 1:
+                    self._uniform_extent = ("const", int(arg))
         else:
             assert False
         if self.dbg_info:

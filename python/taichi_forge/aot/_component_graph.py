@@ -194,6 +194,8 @@ class _GraphCapture:
             if arg.name in managed_symbols:
                 continue
             self.explicit_argument(arg)
+        if code.workspaces:
+            raise TaichiCompilationError("Model local tensors in component Graphs require invocation workspace binding")
         contract = code.contract
         for group, schema in code.fixed_groups.items():
             if self.fixed_groups.setdefault(group, schema) != schema or (

@@ -9,6 +9,7 @@ from taichi_forge.lang import expr, impl
 from taichi_forge.lang.exception import TaichiSyntaxError
 from taichi_forge.lang.field import Field
 from taichi_forge.lang.util import cook_dtype, is_matrix_class, is_taichi_class, taichi_scope
+from taichi_forge.types import primitive_types
 
 
 def stack_info():
@@ -73,7 +74,11 @@ def cast(obj, dtype):
     if is_taichi_class(obj):
         # TODO: unify with element_wise_unary
         return obj.cast(dtype)
-    return expr.Expr(_ti_core.value_cast(expr.Expr(obj).ptr, dtype))
+    result = expr.Expr(_ti_core.value_cast(expr.Expr(obj).ptr, dtype))
+    if dtype == primitive_types.i32 and isinstance(obj, expr.Expr) and obj.ptr.get_rvalue_type() == dtype:
+        if hasattr(obj, "_uniform_extent"):
+            result._uniform_extent = obj._uniform_extent
+    return result
 
 
 def bit_cast(obj, dtype):
@@ -126,7 +131,12 @@ def _binary_operation(taichi_op, python_op, a, b):
         return NotImplemented
     if is_taichi_expr(a) or is_taichi_expr(b):
         a, b = wrap_if_not_expr(a), wrap_if_not_expr(b)
-        return expr.Expr(taichi_op(a.ptr, b.ptr), dbg_info=_ti_core.DebugInfo(stack_info()))
+        result = expr.Expr(taichi_op(a.ptr, b.ptr), dbg_info=_ti_core.DebugInfo(stack_info()))
+        if result.ptr.get_rvalue_type() == primitive_types.i32:
+            from taichi_forge.lang._local_tensor import binary_extent
+
+            binary_extent(result, taichi_op.__name__.removeprefix("expr_"), a, b)
+        return result
     from taichi_forge.lang.matrix import Matrix  # pylint: disable-msg=C0415
 
     if isinstance(a, Matrix) or isinstance(b, Matrix):

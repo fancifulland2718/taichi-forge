@@ -638,9 +638,34 @@ Focused CPU/CUDA/Vulkan checks cover direct Vector/Matrix and Struct Fields,
 independent instances and frontend-blocked consumption at a new size of 129.
 CPU/CUDA also cover `real_func`. GeoPhys's unchanged `declare_batch_layout` helper
 passes source-free layout consumers on all three backends. This is not complete EFC:
-whole-element local copies/arithmetic, dynamic local vectors, shared workspaces and
-conditional layouts in a group containing model tensors still require support.
+whole Field-element copies/arithmetic, shared workspaces and conditional layouts
+in a group containing model tensors still require support.
 Fixed-element Ndarray and explicit value-argument type contracts are unchanged.
+
+Version 27 additionally lowers model-sized `Vector.zero` and `Matrix.zero` locals
+to private scalar-array workspace arguments. Shapes must be expressions of immutable
+captured i32 values or declared dimensions; mutable local aliases and device-loaded
+sizes reject. A declared outer range/ndrange assigns a separate slice to each logical
+work item, including inline helpers. Initialization runs at the original declaration
+site on every iteration. Local value copies own separate slices. Fixed-size locals
+and ordinary JIT keep their original lowering.
+
+The consumer sizes each invocation from its exact scalar argument snapshot and uses
+ordinary Runtime allocation and pending-submission ownership. No shared module pointer
+is switched; void calls do not explicitly wait to release scratch. Empty ranges need
+only a valid minimal descriptor. Arithmetic and total indexing must fit the existing
+i32 array ABI; this is not a finite model-size domain. Storage currently scales with
+logical work items times local element count; no performance improvement is claimed.
+Ordinary submissions retain this temporary memory until normal Runtime completion;
+reuse of retired workspace and prepared Graph integration are follow-up work.
+
+Focused CPU/CUDA/Vulkan tests cover new DOF 129 without the frontend, independent
+instances, copies, repeated initialization and retirement. GeoPhys's original exact
+EFC assembly also passes compiler-layer checks at DOF 3/17/65 with shared code, against
+ordinary JIT and an independent mass-response calculation. That test supplies the
+model declaration projection; it is not whole-class package qualification. Dynamic
+locals inside `real_func`, Graph replay workspace binding, SharedArray, and general
+whole-tensor algebra still reject or require further implementation.
 
 ## Kernel factories in original definitions
 

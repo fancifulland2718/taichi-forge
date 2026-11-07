@@ -1683,6 +1683,37 @@ class _Capture:
         # Functions retain real call boundaries. Each callable has its own
         # parameter expressions while dependency facts remain in this capture.
         self._real_functions = {}
+        self.workspaces = {}
+        self.local_tensor_scope = None
+
+    def local_tensor(self, dtype, shape):
+        from taichi_forge.lang._local_tensor import LocalTensor, extent
+
+        if any(state["compiling"] for state in self._real_functions.values()):
+            raise TaichiCompilationError("Model local tensors inside real_func require invocation workspace forwarding")
+        expressions = tuple(extent(size) for size in shape)
+        if any(item is None for item in expressions):
+            raise TaichiCompilationError("Model local tensor extents must be immutable declared dimensions or i32 captures")
+        index, count = (0, ("const", 1)) if self.local_tensor_scope is None else self.local_tensor_scope
+        if count is None:
+            raise TaichiCompilationError("Model local tensors require a declared range/ndrange iteration domain")
+        dtype = cook_dtype(dtype)
+        if id(dtype) not in primitive_types.type_ids or dtype == primitive_types.u1:
+            raise TaichiCompilationError("Model local tensors require a primitive scalar element type")
+        shapes = tuple(freeze_extent(item) for item in (count, *expressions))
+        for expression in shapes:
+            for name in extent_dependencies(expression):
+                if isinstance(self.declarations[name], Dimension):
+                    self.dimension_dependency(name)
+        name = f"__local_tensor_{len(self.workspaces)}"
+        if name in self.declarations:
+            raise TaichiCompilationError("Component declaration uses a reserved local tensor name")
+        declaration = Array(dtype, len(shapes))
+        self.declarations[name] = declaration
+        self.workspaces[name] = dict(dtype=str(dtype), shape=shapes)
+        self.dynamic.append(name)
+        array = declaration.declare(name)
+        return LocalTensor(self, array, index, shape, dtype)
 
     def call_real_function(self, function, args):
         from taichi_forge._lib import core
@@ -1875,6 +1906,10 @@ class _Capture:
                 self.expressions[name] = declaration.declare("__capture_" + name, runtime_affine=not compact)
             else:
                 self.expressions[name] = declaration.declare("__capture_" + name)
+            if isinstance(declaration, Dimension) or (
+                isinstance(declaration, RuntimeValue) and declaration.dtype == primitive_types.i32
+            ):
+                self.expressions[name]._uniform_extent = ("dim", name)
         return self.expressions[name]
 
     def static_operand(self, ctx, value):
@@ -2078,7 +2113,8 @@ class _Capture:
             "entry": self.entry_definition,
             "explicit_abi": self.call_signature[1],
             "templates": self.call_signature[0],
-            "captures": [(name, self.used[name]) for name in self.dynamic],
+            "captures": [(name, ("local_tensor_workspace", self.workspaces[name]["dtype"])
+                          if name in self.workspaces else self.used[name]) for name in self.dynamic],
             "static": sorted(self.static.items()),
             "groups": self.groups,
             "members": self.member_paths,
@@ -2090,6 +2126,8 @@ class _Capture:
                 name: self.component._sources[name] for name in self.used if name in self.component._sources
             },
         }
+        if self.workspaces:
+            self.contract["local_tensor_workspaces"] = self.workspaces
         if self.objects:
             self.contract.update(
                 objects=sorted(self.objects.items()),
@@ -2267,13 +2305,14 @@ class _ComponentCode:
         self.fixed_members = dict(context.fixed_members)
         self.fixed_dependencies = dict(context.fixed_dependencies)
         self.dynamic = tuple(context.dynamic)
+        self.workspaces = dict(context.workspaces)
         self.resource_templates = dict(context.resource_templates)
         self._contract = json.dumps(context.contract)
         self.explicit_arguments = tuple(
             arg for i, arg in enumerate(kernel.arguments) if i not in kernel.template_slot_locations
         )
         self.arguments = self.explicit_arguments + tuple(
-            kernel_arguments.KernelArgument(context.component.declarations[name].annotation, "__capture_" + name)
+            kernel_arguments.KernelArgument(context.declarations[name].annotation, "__capture_" + name)
             for name in self.dynamic
         )
 
@@ -2289,6 +2328,8 @@ class _ComponentCode:
         for name in self.static:
             component.declarations[name].validate(component.read(owner, name), name, self.kernel.func.__qualname__)
         for name in self.dynamic:
+            if name in self.workspaces:
+                continue
             value = component.read(owner, name)
             declaration = component.declarations[name]
             if isinstance(declaration, (Array, DenseField)):
@@ -2350,14 +2391,23 @@ class _ComponentCode:
         if len(args) != len(self.explicit_arguments):
             raise TypeError("Wrong number of explicit component arguments")
         from taichi_forge.lang._storage_view import ndarray_view, _scalarized_ndarray_view
+        from taichi_forge_runtime._dimensions import local_workspace_shape
+
+        captured = {name: component.read(owner, name) for name in self.dynamic if name not in self.workspaces}
+        workspaces = {
+            name: impl.ndarray(getattr(primitive_types, spec["dtype"]), local_workspace_shape(
+                spec["shape"], captured.__getitem__))
+            for name, spec in self.workspaces.items()
+        }
 
         values = tuple(
             (
-                _scalarized_ndarray_view(component.read(owner, name))
+                workspaces[name] if name in workspaces else
+                _scalarized_ndarray_view(captured[name])
                 if isinstance(component.declarations[name], _ModelTensorField)
-                else ndarray_view(component.read(owner, name))
+                else ndarray_view(captured[name])
                 if isinstance(component.declarations[name], (DenseField, _ExternalField))
-                else component.read(owner, name)
+                else captured[name]
             )
             for name in self.dynamic
         )

@@ -766,6 +766,10 @@ class Matrix(TaichiOperations):
         """
         from taichi_forge.lang import matrix_ops  # pylint: disable=C0415
 
+        if isinstance(n, expr.Expr) or isinstance(m, expr.Expr):
+            from taichi_forge.lang._local_tensor import filled
+
+            return filled(dt, (n,) if m is None else (n, m), 0)
         if m is None:
             return matrix_ops._filled_vector(n, dt, 0)
         return matrix_ops._filled_matrix(n, m, dt, 0)

@@ -14,6 +14,7 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import _ndarray, any_array, expr, impl, kernel_arguments, matrix, mesh
 from taichi_forge.lang import ops as ti_ops
 from taichi_forge.lang._ndrange import _Ndrange, ndrange
+from taichi_forge.lang._local_tensor import LocalTensor, iteration_scope
 from taichi_forge.lang.argpack import ArgPackType
 from taichi_forge.lang.ast.ast_transformer_utils import Builder, LoopStatus, ReturnStatus
 from taichi_forge.lang.ast.symbol_resolver import ASTResolver
@@ -133,7 +134,7 @@ class ASTTransformer(Builder):
         # Keep all generated assign statements and compose single one at last.
         # The variable is introduced to support chained assignments.
         # Ref https://github.com/taichi-dev/taichi/issues/2659.
-        values = node.value.ptr if is_static_assign else impl.expr_init(node.value.ptr)
+        values = node.value.ptr if is_static_assign or isinstance(node.value.ptr, LocalTensor) else impl.expr_init(node.value.ptr)
 
         for node_target in node.targets:
             ASTTransformer.build_assign_unpack(ctx, node_target, values, is_static_assign)
@@ -1418,7 +1419,8 @@ class ASTTransformer(Builder):
 
             for_di = _ti_core.DebugInfo(ctx.get_pos_info(node))
             ctx.ast_builder.begin_frontend_range_for(loop_var.ptr, begin.ptr, end.ptr, for_di)
-            build_stmts(ctx, node.body)
+            with iteration_scope(ctx, loop_var, begin, end):
+                build_stmts(ctx, node.body)
             ctx.ast_builder.end_frontend_range_for()
         return None
 
@@ -1464,7 +1466,8 @@ class ASTTransformer(Builder):
                     # Keep coordinate decoding in SSA form even without CFG
                     # optimization; Graph analysis must see the loop index.
                     I = I - target_tmp * ndrange_var.acc_dimensions[i + 1]
-            build_stmts(ctx, node.body)
+            with iteration_scope(ctx, ndrange_loop_var, ndrange_begin, ndrange_end):
+                build_stmts(ctx, node.body)
             ctx.ast_builder.end_frontend_range_for()
         return None
 
@@ -1500,7 +1503,8 @@ class ASTTransformer(Builder):
                 if i + 1 < len(ndrange_var.dimensions):
                     # Each dimension consumes the previous remainder once.
                     I = I - target_tmp * ndrange_var.acc_dimensions[i + 1]
-            build_stmts(ctx, node.body)
+            with iteration_scope(ctx, ndrange_loop_var, ndrange_begin, ndrange_end):
+                build_stmts(ctx, node.body)
             ctx.ast_builder.end_frontend_range_for()
         return None
 
@@ -1527,7 +1531,8 @@ class ASTTransformer(Builder):
                 expr_group = expr.make_expr_group(loop_indices)
                 impl.begin_frontend_struct_for(ctx.ast_builder, expr_group, loop_var)
                 ctx.create_variable(target, matrix.make_matrix(loop_indices, dt=primitive_types.i32))
-                build_stmts(ctx, node.body)
+                with iteration_scope(ctx):
+                    build_stmts(ctx, node.body)
                 ctx.ast_builder.end_frontend_struct_for()
             else:
                 loop_var = node.iter.ptr
@@ -1544,7 +1549,8 @@ class ASTTransformer(Builder):
                     ctx.create_variable(name, var)
                 expr_group = expr.make_expr_group(*_vars)
                 impl.begin_frontend_struct_for(ctx.ast_builder, expr_group, loop_var)
-                build_stmts(ctx, node.body)
+                with iteration_scope(ctx):
+                    build_stmts(ctx, node.body)
                 ctx.ast_builder.end_frontend_struct_for()
         return None
 
@@ -1567,7 +1573,8 @@ class ASTTransformer(Builder):
                 node.iter.ptr._type,
                 _ti_core.DebugInfo(impl.get_runtime().get_current_src_info()),
             )
-            build_stmts(ctx, node.body)
+            with iteration_scope(ctx):
+                build_stmts(ctx, node.body)
             ctx.mesh = None
             ctx.ast_builder.end_frontend_mesh_for()
         return None

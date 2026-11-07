@@ -88,6 +88,8 @@ class GraphBuilder:
         if not isinstance(kernel, entry) or kernel.package is not self.package:
             raise ValueError("Package Graph dispatch requires an entry in the same loaded package")
         kernel = kernel._select(owner)
+        if any(item["kind"] == "local_tensor_workspace" for item in kernel.contract["captures"]):
+            raise ValueError("Model local tensors in Graphs require invocation workspace binding")
         check_admission(owner, kernel.contract)
         kernel._check_layout(owner)
         if template_args:

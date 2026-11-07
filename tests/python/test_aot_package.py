@@ -2559,6 +2559,177 @@ class Reader:
 """
 
 
+MODEL_LOCAL_TENSOR_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, dof: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.dof = dof
+        self.vector = ti.Vector.field(self.dof, ti.f32, shape=self.n)
+        self.result = ti.field(ti.f32, shape=self.n)
+
+    @ti.func
+    def solve(self, i, gain):
+        forward = ti.Vector.zero(ti.f32, self.dof)
+        matrix = ti.Matrix.zero(ti.f32, self.dof, 2)
+        for j in range(self.dof):
+            value = gain * (i + 1)
+            if j > 0:
+                value += forward[j - 1]
+            forward[j] = value
+            matrix[j, 1] = forward[j] + matrix[j, 0]
+        copied = forward
+        copied[0] = 123.0
+        return matrix[self.dof - 1, 1] + forward[0]
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in range(1, self.n):
+            total = 0.0
+            for repeat in range(2):
+                if i % 2 == 1:
+                    total += self.solve(i, gain + repeat)
+            self.result[i] = total
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        return builder.compile()
+"""
+
+
+@pytest.mark.parametrize("ndrange", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypatch, ndrange):
+    source = MODEL_LOCAL_TENSOR_SOURCE
+    if ndrange:
+        source = source.replace("for i in range(1, self.n):", "for i, unused in ti.ndrange((1, self.n), 1):")
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    assert manifest["version"] == 27
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    entries = [entry for entry in manifest["entries"].values() if entry["definition"].endswith("Model.step")]
+    assert len(entries) == 1
+    captures = entries[0]["captures"]
+    workspaces = [item for item in captures if item["kind"] == "local_tensor_workspace"]
+    assert len(workspaces) == 3  # vector, matrix, independent value copy
+    expected = package.Model(7, 3)
+    expected.step(2.0)
+    answer = np.where(np.arange(7) % 2 == 1, (np.arange(7) + 1) * 5 * 4, 0)
+    np.testing.assert_array_equal(expected.result.to_numpy(), answer)
+    probe = tmp_path / "consume_locals.py"
+    probe.write_text(textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            models = [code.host.Model(7, 3), code.host.Model(19, 65), code.host.Model(11, 129)]
+            gains = [2.0, 4.0, 7.0]
+            original_wait, waits = runtime.wait, []
+            def observed_wait():
+                waits.append(True)
+                return original_wait()
+            runtime.wait = observed_wait
+            for model, gain in zip(models, gains):
+                model.step(gain)
+            runtime.wait = original_wait
+            assert not waits, 'void local workspace call added a Runtime.wait'
+            for model, gain in zip(models, gains):
+                indices = np.arange(model.n)
+                expected = np.where(indices % 2 == 1, (indices + 1) * (2 * gain + 1) * (model.dof + 1), 0)
+                np.testing.assert_array_equal(np.frombuffer(model.result.read(), np.float32), expected)
+            runtime.wait()
+            resources = set(runtime._resources)
+            for model in models:
+                model.step(3.0)
+            runtime.wait()
+            assert runtime._resources == resources, 'workspace resources leaked'
+            from taichi_forge_runtime.aot import _package
+            original_capture = _package.capture_value
+            def changed_after_snapshot(owner, spec):
+                value = original_capture(owner, spec)
+                if owner is models[0] and spec['name'] == 'dof':
+                    owner.dof = 2**30
+                return value
+            _package.capture_value = changed_after_snapshot
+            try:
+                models[0].step(2.0)
+            finally:
+                _package.capture_value = original_capture
+                models[0].dof = 3
+            indices = np.arange(7)
+            np.testing.assert_array_equal(models[0].result.to_numpy(),
+                np.where(indices % 2 == 1, (indices + 1) * 5 * 4, 0))
+            runtime.wait()
+            assert runtime._resources == resources
+            model = models[0]
+            original_dof = model.dof
+            for invalid in (0, 2**30):
+                model.dof = invalid
+                try:
+                    model.step(1.0)
+                except ValueError as error:
+                    assert 'tensor axes' in str(error) or 'indexing range' in str(error)
+                else:
+                    raise AssertionError('invalid workspace extent accepted')
+                assert runtime._resources == resources
+            model.dof = original_dof
+            model.n = 1
+            model.step(1.0)  # empty range, no model-sized scratch allocation
+            runtime.wait()
+            assert runtime._resources == resources
+            try:
+                models[0].graph()
+            except ValueError as error:
+                assert 'invocation workspace binding' in str(error)
+            else:
+                raise AssertionError('shared Graph workspace admitted')
+        print('MODEL_LOCAL_TENSOR_SOURCE_FREE_OK')
+    """), encoding="utf8")
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+               PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+               TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+               TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    result = subprocess.run([sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "MODEL_LOCAL_TENSOR_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("failure", ["device_extent", "mutable_alias", "device_range", "real_func"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unproven_model_local_workspaces(tmp_path, monkeypatch, failure):
+    source = MODEL_LOCAL_TENSOR_SOURCE
+    if failure == "device_extent":
+        source = source.replace("ti.Vector.zero(ti.f32, self.dof)", "ti.Vector.zero(ti.f32, ti.cast(self.result[0], ti.i32))")
+        message = "immutable declared dimensions"
+    elif failure == "mutable_alias":
+        source = source.replace("forward = ti.Vector.zero(ti.f32, self.dof)",
+                                "size = self.dof\n        forward = ti.Vector.zero(ti.f32, size)")
+        message = "immutable declared dimensions"
+    elif failure == "device_range":
+        source = source.replace("range(1, self.n)", "range(1, ti.cast(self.result[0], ti.i32))")
+        message = "declared range/ndrange iteration domain"
+    else:
+        source = source.replace("@ti.func\n    def solve(self, i, gain):",
+                                "@ti.real_func\n    def solve(self, i: ti.i32, gain: ti.f32) -> ti.f32:")
+        message = "real_func require invocation workspace forwarding"
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match=message):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize("real_helper", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_infers_model_tensor_axes_without_constructor_samples(tmp_path, monkeypatch, real_helper):

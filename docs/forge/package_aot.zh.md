@@ -432,8 +432,24 @@ Vector/MatrixField 以及 StructField 的数值成员，不将整个 StructField
 局部检查覆盖 CPU/CUDA/Vulkan 的直接 Vector/Matrix 和 Struct Field、独立实例、
 屏蔽前端后的新尺寸 129 消费；CPU/CUDA 另覆盖 `real_func`。GeoPhys 原
 `declare_batch_layout` helper 也通过三后端无源码布局消费检查，未改写生产 helper。
-这不等于完整 EFC：整元素局部值拷贝/运算、动态局部向量、共享工作区，以及同组条件布局
+这不等于完整 EFC：Field 整元素值拷贝/运算、共享工作区，以及同组条件布局
 与模型张量的组合仍待接入。固定元素 Ndarray 和显式值参数的类型合同保持原范围。
+
+版本 27 另将模型尺寸的 `Vector.zero`、`Matrix.zero` 局部变量降低为调用私有的标量数组
+工作区。长度须来自不可变的 i32 捕获值或声明维度表达式；可变局部别名、设备读回的长度
+明确拒绝。已声明的外层 range/ndrange 为每个逻辑工作项分配独立片段，包含 inline helper；
+每轮在原声明位置初始化，局部值拷贝使用独立片段。固定尺寸局部变量与普通 JIT 仍走原路径。
+
+消费端使用本次调用已冻结的标量参数计算尺寸，复用 Runtime 分配和在途提交所有权；
+不切换模块共享指针，void 调用不为释放临时存储显式等待。空范围只需最小合法描述符。
+表达式和总索引须满足现有 i32 数组 ABI，未设有限模型尺寸域。目前存储随逻辑工作项数量
+乘局部元素数量增长；本批不宣称性能收益。
+普通提交在 Runtime 正常完成前保留临时存储；退休工作区复用和 prepared Graph 接入仍待完成。
+
+CPU/CUDA/Vulkan 局部检查覆盖屏蔽前端的新 DOF 129、独立实例、拷贝、重复初始化及回收。
+GeoPhys 原 exact EFC 装配的编译器层检查也通过 DOF 3/17/65 共用代码、原 JIT 和独立质量
+响应对照；该测试显式提供模型声明投影，不是整类定义包资格。`real_func` 内部动态局部变量、
+Graph replay 工作区绑定、SharedArray 和一般整张量代数仍拒绝或待实现。
 
 ## 原定义中的 Kernel 工厂
 

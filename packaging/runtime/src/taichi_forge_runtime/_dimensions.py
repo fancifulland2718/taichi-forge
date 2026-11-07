@@ -42,24 +42,25 @@ def freeze_extent(expression):
     return freeze(expression)
 
 
-def evaluate_extent(expression, resolve):
+def evaluate_extent(expression, resolve, *, max_value=2**63 - 1):
     validate_extent(expression)
 
     def evaluate(node):
         op, *args = node
         if op == "dim":
-            return operator.index(resolve(args[0]))
-        if op == "const":
-            return args[0]
-        if op == "ceil_pow2":
+            result = operator.index(resolve(args[0]))
+        elif op == "const":
+            result = args[0]
+        elif op == "ceil_pow2":
             minimum = evaluate(args[0])
             if minimum < 0:
                 raise ValueError("A power-of-two dimension minimum must be nonnegative")
             result = 1 << (max(1, minimum) - 1).bit_length()
         else:
             result = evaluate_binary(op, *(evaluate(arg) for arg in args))
-        if not 0 <= result <= 2**63 - 1:
-            raise ValueError("Dimension expression exceeds its nonnegative i64 intermediate range")
+        if not 0 <= result <= max_value:
+            width = "i64" if max_value == 2**63 - 1 else "i32"
+            raise ValueError(f"Dimension expression exceeds its nonnegative {width} intermediate range")
         return result
 
     def evaluate_binary(op, left, right):
@@ -80,6 +81,23 @@ def evaluate_extent(expression, resolve):
         return result
 
     return evaluate(expression)
+
+
+def local_workspace_shape(expressions, resolve):
+    """Validate the i32 scalar-array ABI before allocating per-call storage."""
+    shape = tuple(evaluate_extent(item, resolve, max_value=2**31 - 1) for item in expressions)
+    if len(shape) not in (2, 3) or any(size <= 0 for size in shape[1:]):
+        raise ValueError("Model local tensor axes must be positive")
+    # An empty parallel range executes no local allocation. The ABI still
+    # receives a valid descriptor; it need not allocate a model-sized payload.
+    if shape[0] == 0:
+        return (1,) * len(shape)
+    count = 1
+    for size in shape:
+        count *= size
+        if count > 2**31 - 1:
+            raise ValueError("Model local workspace exceeds the i32 scalar indexing range")
+    return shape
 
 
 def extent_dependencies(expression):

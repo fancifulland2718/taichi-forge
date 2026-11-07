@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 from ._runtime import NdArray, Scalar
 from ._package_values import StructField, capture_value, path_value, dimension_value, check_admission
-from .._dimensions import Extent, evaluate_extent
+from .._dimensions import Extent, evaluate_extent, local_workspace_shape
 from .._static_values import read_static_key, static_key
 
 _construction = ContextVar("forge_definition_owner", default=None)
@@ -750,20 +750,41 @@ class entry:
             )
             for item in contract["arguments"]
         ]
-        for item in contract["captures"]:
-            value = capture_value(owner, item)
-            arguments.append(
-                Scalar(item["dtype"], value)
-                if item["kind"] in ("value", "dimension") and not item.get("element_shape")
-                else value
-            )
-        kernel = package._kernels.get(self.symbol)
-        if kernel is None:
-            kernel = package._kernels[self.symbol] = package._module.kernel(self.symbol)
-        from ._package_buffers import HostBuffers
+        captured = {
+            item["name"]: capture_value(owner, item)
+            for item in contract["captures"] if item["kind"] != "local_tensor_workspace"
+        }
+        workspaces = []
+        try:
+            for item in contract["captures"]:
+                if item["kind"] == "local_tensor_workspace":
+                    # Size the workspace from the exact scalar argument
+                    # snapshot, never a second read of mutable Host attributes.
+                    shape = local_workspace_shape(item["shape"], captured.__getitem__)
+                    value = package.runtime.ndarray(item["dtype"], shape)
+                    workspaces.append(value)
+                else:
+                    value = captured[item["name"]]
+                arguments.append(
+                    Scalar(item["dtype"], value)
+                    if item["kind"] in ("value", "dimension") and not item.get("element_shape")
+                    else value
+                )
+            kernel = package._kernels.get(self.symbol)
+            if kernel is None:
+                kernel = package._kernels[self.symbol] = package._module.kernel(self.symbol)
+            from ._package_buffers import HostBuffers
 
-        with HostBuffers(package.runtime, contract["arguments"], arguments) as prepared:
-            return kernel.run(*prepared)
+            with HostBuffers(package.runtime, contract["arguments"], arguments) as prepared:
+                return kernel.run(*prepared)
+        finally:
+            # BoundCall retains memory even on a partially submitted failure.
+            # Closing an in-flight allocation would add a host wait here.
+            # Unsubmitted storage can be released immediately; submitted
+            # storage retires through the Runtime's normal pending owners.
+            for workspace in reversed(workspaces):
+                if workspace._memory not in package.runtime._pending:
+                    workspace.close()
 
     def _check_layout(self, owner):
         if owner is None:
@@ -822,7 +843,7 @@ class LoadedPackage:
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
             self.manifest.get("version")
-            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)
+            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")
