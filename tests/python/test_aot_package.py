@@ -2260,6 +2260,57 @@ def test_package_context_rejects_unproven_group_boundaries(tmp_path, monkeypatch
     assert not (tmp_path / "sdk").exists()
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_context_alias_reuse_preserves_distinct_native_groups(tmp_path, monkeypatch):
+    helper = RESOURCE_CONTEXT_SOURCE.replace(
+        "    owner.tree = builder.finalize()",
+        "    if not hasattr(owner, 'trees'):\n        owner.trees = {}\n" "    owner.trees[name] = builder.finalize()",
+    )
+    model = CONTEXT_FIELDS_SOURCE.replace(
+        "    @ti.kernel",
+        "        with resource_group(self, 'scratch', initialization='zero') as scope:\n"
+        "            scope.aux = scope.field(ti.i32, shape=scope.dim('n'))\n"
+        "    @ti.kernel",
+    ).replace("            self.values[i] += 1", "            self.values[i] += 1\n            self.aux[i] += 2")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, helper=helper, model=model)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 16
+    assert len(manifest["field_groups"]) == 2
+    original = package.Model(5)
+    original.step()
+    np.testing.assert_array_equal(original.aux.to_numpy(), 2)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(3), code.host.Model(19)
+        assert a.values._group_owner is a.weights._group_owner
+        assert a.values._group_owner is not a.aux._group_owner
+        assert a.aux._group_owner is not b.aux._group_owner
+        a.step()
+        b.step()
+        np.testing.assert_array_equal(a.values.to_numpy(), 1)
+        np.testing.assert_array_equal(a.aux.to_numpy(), 2)
+        a.trees["state"].destroy()
+        np.testing.assert_array_equal(a.aux.to_numpy(), 2)
+        b.step()
+        np.testing.assert_array_equal(b.aux.to_numpy(), 4)
+
+
+@pytest.mark.parametrize("change", ["reassign", "escape", "after"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_context_alias_rejects_ambiguous_rebinding(tmp_path, monkeypatch, change):
+    model = CONTEXT_FIELDS_SOURCE
+    if change == "reassign":
+        model = model.replace("            cells =", "            scope = None\n            cells =")
+    elif change == "escape":
+        model = model.replace("    @ti.kernel", "        self.scope = scope\n    @ti.kernel")
+    else:
+        model = model.replace("    @ti.kernel", "        scope.late = scope.field(ti.i32, shape=())\n    @ti.kernel")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=model)
+    with pytest.raises(ti.aot.PackageExportError, match="ResourceScope"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 DERIVED_FIELDS_SOURCE = """
 import taichi_forge as ti
 from resource_factories import declare_extent

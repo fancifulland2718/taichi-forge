@@ -403,8 +403,13 @@ resource when an exception precedes allocation.
 Focused CPU/CUDA/Vulkan checks with GeoPhys's original `resource_group` and
 `collect_resource_trees` cover JIT comparison, source-free consumption, new sizes,
 failure before/after allocation, tree ownership, independent instance retirement
-and loaded-package namespaces. GeoPhys production code is unchanged. Conditional
-groups, reused scope aliases across groups, field-name loops and the complete
+and loaded-package namespaces. Sequential contexts may reuse the same local
+scope variable: declaration lookup distinguishes lexical allocation sites while
+Host names and native group ownership remain unchanged. Ordinary reassignment
+or use of the scope outside its block rejects export. Two-group checks verify
+that retiring one tree preserves the other tree and other instances.
+GeoPhys production code is unchanged. Conditional
+groups, field-name loops and the complete
 engine Host closure remain pending; Candidate Storage uses these unsupported
 forms and is not yet qualified. Context allocation currently runs only inside
 managed constructors, without in-flight growth or rebinding.

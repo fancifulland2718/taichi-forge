@@ -14,12 +14,13 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         return {}
     scopes, declarations, allowed = {}, {}, set()
     scope_groups, builders = {}, {}
-    contexts = {}
+    contexts, context_bindings, context_stores = {}, {}, {}
     for statement in constructor.body:
         recipe = getattr(statement, "_package_resource_context", None)
         if recipe is None:
             continue
-        scope = statement.items[0].optional_vars.id
+        target = statement.items[0].optional_vars
+        scope = (target.id, statement.lineno, statement.col_offset)
         call = copy.deepcopy(recipe["call"])
         # The declared group belongs to this lexical scope. Its Host generator
         # still owns finalization, exception handling and external bookkeeping.
@@ -33,14 +34,20 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             context={k: v for k, v in recipe.items() if k != "call"},
         )
         contexts[id(statement)] = scope
+        context_stores.setdefault(target.id, set()).add(id(target))
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Name) and node.id == target.id:
+                context_bindings[id(node)] = scope
+    for node in ast.walk(constructor):
         if (
-            sum(
-                isinstance(n, ast.Name) and n.id == scope and isinstance(n.ctx, (ast.Store, ast.Del))
-                for n in ast.walk(constructor)
-            )
-            != 1
+            isinstance(node, ast.Name)
+            and node.id in context_stores
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and id(node) not in context_stores[node.id]
+            or isinstance(node, ast.arg)
+            and node.arg in context_stores
         ):
-            fail(module, statement, "Package ResourceScope aliases must not be reassigned")
+            fail(module, node, "Package ResourceScope aliases may only be rebound by distinct resource contexts")
     for statement in ast.walk(constructor):
         if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
             continue
@@ -127,15 +134,21 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         scope_groups[scope] = "builder_" + builder.id if builder is not None else "fields"
     if not scopes:
         return {}
+    scope_names = {key[0] if isinstance(key, tuple) else key for key in scopes}
+
+    def scope_binding(node):
+        # Context variables retain Python's original names in emitted Host code.
+        # Only declaration lookup distinguishes their lexical allocation sites.
+        return context_bindings.get(id(node), node.id) if isinstance(node, ast.Name) else None
 
     def operation(node):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in scopes
+            and scope_binding(node.func.value) in scopes
         ):
-            return node.func.value.id, node.func.attr
+            return scope_binding(node.func.value), node.func.attr
         return None, None
 
     def add(name, spec, node):
@@ -167,7 +180,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             isinstance(node, ast.Attribute)
             and isinstance(node.ctx, ast.Store)
             and isinstance(node.value, ast.Name)
-            and node.value.id in ("self", *scopes)
+            and node.value.id in ("self", *scope_names)
         ):
             member_stores[node.attr] = member_stores.get(node.attr, 0) + 1
 
@@ -538,7 +551,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             if not (
                 isinstance(target, ast.Attribute)
                 and isinstance(target.value, ast.Name)
-                and target.value.id in ("self", *scopes)
+                and (target.value.id == "self" or scope_binding(target.value) in scopes)
                 and statement.lineno > scopes[scope].lineno
                 and (
                     member_stores[target.attr] == 1
@@ -563,7 +576,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 )
             ):
                 fail(module, statement, "ResourceScope Field requires one unconditional owner attribute")
-            if target.value.id in scopes:
+            if scope_binding(target.value) in scopes:
                 allowed.add(id(target.value))
             allowed.add(id(call.func.value))
             normalized = copy.deepcopy(call)
@@ -704,7 +717,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         if (
             isinstance(node, ast.Name)
             and isinstance(node.ctx, ast.Load)
-            and node.id in scopes
+            and node.id in scope_names
             and id(node) not in allowed
         ):
             fail(module, node, "ResourceScope use requires an unconditional supported resource declaration")
