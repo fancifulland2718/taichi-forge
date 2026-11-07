@@ -108,18 +108,21 @@ TiMemory Runtime::create_dense_snode_group(const std::string &schema_json,
   Layout layout;
   layout.root_size = compile_dense_snode_layout(*group->root);
   std::vector<SNode *> nodes;
-  std::function<void(SNode &)> collect = [&](SNode &node) {
+  std::vector<int> parents;
+  std::function<void(SNode &, int)> collect = [&](SNode &node, int parent) {
+    const auto index = static_cast<int>(nodes.size());
     nodes.push_back(&node);
+    parents.push_back(parent);
     for (auto &child : node.ch)
-      collect(*child);
+      collect(*child, index);
   };
-  collect(*group->root);
+  collect(*group->root, -1);
   if (!layout.root_size)
     throw std::invalid_argument("Dense group requires nonempty storage");
   for (std::size_t i = 0; i < nodes.size(); ++i) {
     const auto &node = *nodes[i];
     LayoutNode entry;
-    entry.parent = schema.nodes.at(i).parent;
+    entry.parent = parents[i];
     entry.type = static_cast<int>(node.type);
     entry.dtype = node.dt->to_string();
     for (int axis = 0; axis < node.num_active_indices; ++axis)

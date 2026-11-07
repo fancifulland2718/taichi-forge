@@ -336,6 +336,17 @@ cell size and offset to ordinary FieldsBuilder at previously unseen extents.
 It includes scalar, vector, matrix and rank-zero placements, and validates that
 rejected bindings do not leave active tree instances.
 
+Version 2 layout recipes can also represent adjacent, same-type vector/matrix
+scalar components as one place with symbolic element extents.
+`DenseSNodeSchema.capture_tensors` validates component order, completeness and
+shared dimensions. Consumers expand it into ordinary SNodes and use the same
+backend layout rules. Fixed mathematical extents remain constants; version 1
+recipes are unchanged. Focused checks cover mixed types and fixed vec3 siblings,
+model extents above 64, independent instances and invalid dimensions. This is a
+persistent-storage capability: it does not yet support dynamic tensor numerical
+ABIs, local vectors or shared workspaces, and definition packages do not yet
+select this recipe automatically.
+
 Original `self.field` captures now retain the complete root schema and member
 paths. Sibling blocks require declared dimension provenance; logical groups
 cannot split or merge physical roots. Attribute aliases of the same member share

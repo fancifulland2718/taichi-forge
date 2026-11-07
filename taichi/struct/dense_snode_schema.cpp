@@ -125,8 +125,92 @@ DenseSNodeSchema DenseSNodeSchema::capture(
   return schema;
 }
 
+DenseSNodeSchema DenseSNodeSchema::capture_tensors(
+    const SNode &root,
+    const std::vector<Parameter> &parameters,
+    const std::vector<TensorParameter> &tensors) {
+  auto schema = capture(root, parameters);
+  if (tensors.empty())
+    return schema;
+  std::vector<const SNode *> source_nodes;
+  std::map<const SNode *, int> indices;
+  std::function<void(const SNode &)> collect = [&](const SNode &node) {
+    indices.emplace(&node, static_cast<int>(source_nodes.size()));
+    source_nodes.push_back(&node);
+    for (const auto &child : node.ch)
+      collect(*child);
+  };
+  collect(root);
+  std::map<std::string, int> dimension_values;
+  for (const auto &[node, axis, name] : parameters)
+    dimension_values.emplace(name, node->extractors[axis].shape);
+  std::set<int> claimed, removed;
+  for (const auto &[leaves, shape, names] : tensors) {
+    require(!leaves.empty() && !shape.empty() && shape.size() <= 2 &&
+                names.size() == shape.size(),
+            "Tensor schema requires scalar components and vector/matrix axes");
+    std::uint64_t lanes = 1;
+    std::vector<Extent> extents;
+    for (size_t axis = 0; axis < shape.size(); ++axis) {
+      require(shape[axis] > 0 &&
+                  lanes <= std::numeric_limits<int>::max() / shape[axis],
+              "Tensor schema component product exceeds native indexing");
+      lanes *= shape[axis];
+      Extent extent;
+      extent.axis = static_cast<int>(axis);
+      extent.parameter = names[axis];
+      if (extent.parameter.empty()) {
+        extent.constant = shape[axis];
+      } else {
+        const auto [entry, inserted] =
+            dimension_values.emplace(extent.parameter, shape[axis]);
+        require(inserted || entry->second == shape[axis],
+                "Tensor dimension disagrees with another declared extent");
+      }
+      extents.push_back(std::move(extent));
+    }
+    require(lanes == leaves.size(),
+            "Tensor schema shape differs from its scalar components");
+    const auto first = indices.find(leaves.front());
+    require(first != indices.end(),
+            "Tensor component is outside the source root");
+    const int start = first->second;
+    for (size_t lane = 0; lane < leaves.size(); ++lane) {
+      const auto found = indices.find(leaves[lane]);
+      require(found != indices.end(),
+              "Tensor component is outside the source root");
+      const auto *leaf = leaves[lane];
+      require(leaf->type == SNodeType::place && leaf->parent &&
+                  leaf->parent == leaves.front()->parent &&
+                  leaf->dt == leaves.front()->dt &&
+                  found->second == start + static_cast<int>(lane),
+              "Tensor components must be adjacent same-type scalar siblings");
+      require(claimed.insert(found->second).second,
+              "Tensor schema components overlap another declaration");
+      if (lane)
+        removed.insert(found->second);
+    }
+    schema.nodes[start].extents = std::move(extents);
+  }
+  std::vector<Node> compact;
+  std::vector<int> remap(schema.nodes.size(), -1);
+  for (size_t i = 0; i < schema.nodes.size(); ++i) {
+    if (removed.count(static_cast<int>(i)))
+      continue;
+    auto node = schema.nodes[i];
+    if (node.parent >= 0)
+      node.parent = remap[node.parent];
+    remap[i] = static_cast<int>(compact.size());
+    compact.push_back(std::move(node));
+  }
+  schema.nodes = std::move(compact);
+  schema.version = 2;
+  schema.validate();
+  return schema;
+}
+
 void DenseSNodeSchema::validate() const {
-  require(version == 1, "Unsupported Dense schema version");
+  require(version == 1 || version == 2, "Unsupported Dense schema version");
   // Parent references and the normal SNode construction API use signed ints.
   // Do not impose a smaller deployment-only node-count policy.
   require(!nodes.empty() && nodes.size() <= std::numeric_limits<int>::max(),
@@ -153,20 +237,29 @@ void DenseSNodeSchema::validate() const {
             "Dense schema place requires a supported scalar dtype");
     require(node.type == SNodeType::place || node.dtype == PrimitiveType::gen,
             "Dense schema container must not have a scalar dtype");
-    require(node.type == SNodeType::dense || node.extents.empty(),
-            "Only dense nodes may declare extents");
+    const bool tensor = version == 2 && node.type == SNodeType::place;
+    require(node.type == SNodeType::dense || tensor || node.extents.empty(),
+            "Only dense nodes or version 2 tensor places may declare extents");
+    require(!tensor || node.extents.size() <= 2,
+            "Tensor schema requires vector/matrix axes");
     int previous_axis = -1;
     for (const auto &extent : node.extents) {
-      require(extent.axis > previous_axis && extent.axis < taichi_max_num_indices,
-              "Dense schema axes must be unique and ordered");
+      require(
+          extent.axis > previous_axis && extent.axis < taichi_max_num_indices,
+          "Dense schema axes must be unique and ordered");
+      require(!tensor || extent.axis == previous_axis + 1,
+              "Tensor schema axes must be consecutive from zero");
       previous_axis = extent.axis;
-      require(extent.parameter.empty() ? extent.constant > 0
-                                       : extent.constant == 0,
-              "Dense schema extent must be either a positive constant or a parameter");
-      for (int ancestor : ancestors) {
-        for (const auto &outer : nodes[ancestor].extents)
-          require(outer.axis != extent.axis,
-                  "Dense schema repeated axes require non-affine addressing");
+      require(
+          extent.parameter.empty() ? extent.constant > 0 : extent.constant == 0,
+          "Dense schema extent must be either a positive constant or a "
+          "parameter");
+      if (!tensor) {
+        for (int ancestor : ancestors) {
+          for (const auto &outer : nodes[ancestor].extents)
+            require(outer.axis != extent.axis,
+                    "Dense schema repeated axes require non-affine addressing");
+        }
       }
     }
     ancestors.push_back(static_cast<int>(i));
@@ -181,8 +274,13 @@ std::unique_ptr<SNode> DenseSNodeSchema::instantiate(
   std::set<std::string> used_dimensions;
   std::vector<std::vector<int>> sizes(nodes.size());
   std::vector<int64_t> path_products(nodes.size(), 1);
+  std::vector<int64_t> lane_counts(nodes.size(), 1);
+  std::uint64_t expanded_nodes = nodes.size();
   for (size_t i = 0; i < nodes.size(); ++i) {
-    int64_t product = nodes[i].parent < 0 ? 1 : path_products[nodes[i].parent];
+    const bool tensor = nodes[i].type == SNodeType::place;
+    const int64_t inherited =
+        nodes[i].parent < 0 ? 1 : path_products[nodes[i].parent];
+    int64_t product = tensor ? 1 : inherited;
     for (const auto &extent : nodes[i].extents) {
       int value = extent.constant;
       if (!extent.parameter.empty()) {
@@ -192,11 +290,18 @@ std::unique_ptr<SNode> DenseSNodeSchema::instantiate(
         value = found->second;
       }
       require(value > 0 && product <= std::numeric_limits<int>::max() / value,
-              "Dense schema extent/product exceeds the positive i32 indexing range");
+              "Dense schema extent/product exceeds the positive i32 indexing "
+              "range");
       product *= value;
       sizes[i].push_back(value);
     }
-    path_products[i] = product;
+    path_products[i] = tensor ? inherited : product;
+    if (tensor) {
+      lane_counts[i] = product;
+      expanded_nodes += product - 1;
+      require(expanded_nodes <= std::numeric_limits<int>::max(),
+              "Expanded tensor schema exceeds native node indexing");
+    }
   }
   require(used_dimensions.size() == dimensions.size(),
           "Unknown Dense schema dimension binding");
@@ -211,9 +316,14 @@ std::unique_ptr<SNode> DenseSNodeSchema::instantiate(
         axes.emplace_back(extent.axis);
       materialized.push_back(&parent->dense(axes, sizes[i]));
     } else {
-      auto &place = parent->insert_children(SNodeType::place);
-      place.dt = node.dtype;
-      materialized.push_back(&place);
+      SNode *first = nullptr;
+      for (int64_t lane = 0; lane < lane_counts[i]; ++lane) {
+        auto &place = parent->insert_children(SNodeType::place);
+        place.dt = node.dtype;
+        if (!first)
+          first = &place;
+      }
+      materialized.push_back(first);
     }
   }
   return root;

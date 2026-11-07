@@ -36,6 +36,8 @@ struct DenseSNodeSchema {
     int parent{-1};
     SNodeType type{SNodeType::undefined};
     DataType dtype{PrimitiveType::gen};
+    // Dense: index axes. Version 2 place: logical tensor axes, expanded as
+    // adjacent scalar places by the ordinary SNode construction API.
     std::vector<Extent> extents;
     TI_IO_DEF(parent, type, dtype, extents);
   };
@@ -47,6 +49,13 @@ struct DenseSNodeSchema {
   using Parameter = std::tuple<const SNode *, int, std::string>;
   static DenseSNodeSchema capture(const SNode &root,
                                   const std::vector<Parameter> &parameters);
+  using TensorParameter = std::tuple<std::vector<const SNode *>,
+                                     std::vector<int>,
+                                     std::vector<std::string>>;
+  static DenseSNodeSchema capture_tensors(
+      const SNode &root,
+      const std::vector<Parameter> &parameters,
+      const std::vector<TensorParameter> &tensors);
   void validate() const;
   std::unique_ptr<SNode> instantiate(
       const std::map<std::string, int> &dimensions) const;

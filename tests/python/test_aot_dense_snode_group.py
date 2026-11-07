@@ -11,6 +11,7 @@ from taichi_forge_runtime.aot import _c_api as abi
 from taichi_forge._lib import core
 from tests import test_utils
 from tests.python.test_dense_snode_schema import _group
+from tests.python.test_dense_snode_schema import _tensor_group
 
 
 def _compiled_nodes(root):
@@ -33,6 +34,44 @@ def _compiled_nodes(root):
 
     visit(root, -1)
     return nodes
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_parameterized_tensor_group_matches_native_jit_and_isolates_instances():
+    schema, producer, _, _, _ = _tensor_group(3, 7)
+    frozen = schema.to_json()
+    with Runtime(ti.cfg.arch.name) as runtime:
+        first = runtime.dense_snode_group(frozen, {"N": 5, "D": 19})
+        second = runtime.dense_snode_group(frozen, {"N": 2, "D": 65})
+        resources = []
+        for group, n, dofs in ((first, 5, 19), (second, 2, 65)):
+            expected, reference, root, _, _ = _tensor_group(n, dofs)
+            try:
+                assert expected.to_json() == frozen
+                assert group.layout["nodes"] == _compiled_nodes(root)
+                assert group.nbytes == root.cell_size_bytes
+            finally:
+                reference.destroy()
+            vector = group.member([[0, 1 + i] for i in range(dofs)], "f32", element_shape=(dofs,))
+            fixed = group.member([[0, 1 + dofs + i] for i in range(3)], "f64", element_shape=(3,))
+            matrix = group.member([[1, i] for i in range(2 * dofs)], "f32", element_shape=(2, dofs))
+            values = np.arange(n * dofs, dtype=np.float32)
+            vector.write(values)
+            fixed.write(np.arange(n * 3, dtype=np.float64))
+            matrix.write(np.arange(n * 2 * dofs, dtype=np.float32))
+            np.testing.assert_array_equal(np.frombuffer(vector.read(), np.float32), values)
+            np.testing.assert_array_equal(np.frombuffer(fixed.read(), np.float64), np.arange(n * 3))
+            np.testing.assert_array_equal(np.frombuffer(matrix.read(), np.float32), np.arange(n * 2 * dofs))
+            resources.append((vector, fixed, matrix))
+        first.close()
+        with pytest.raises(AotError, match="retired"):
+            resources[0][0].read()
+        assert len(resources[1][0].read()) == 2 * 65 * 4
+        for views in resources:
+            for view in views:
+                view.close()
+        second.close()
+    producer.destroy()
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
