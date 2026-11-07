@@ -6,10 +6,10 @@ import hashlib
 import inspect
 import textwrap
 
-from ._package_factories import _Unproven, _literal
+from ._package_factories import _Unproven, _literal, _source_value, prove_factory
 
 
-def expand_declarations(function, statement, scopes):
+def expand_declarations(function, statement, scopes, *, _active=(), _prefix=None):
     """Inline lexical declaration forwarding with literal control and Host paths.
 
     Application functions are never called. Only ResourceScope operations are
@@ -22,6 +22,9 @@ def expand_declarations(function, statement, scopes):
         return None
     if not any(isinstance(n, ast.Name) and n.id in scopes for n in (*call.args, *(k.value for k in call.keywords))):
         return None
+    if function in _active:
+        raise _Unproven("recursive declaration helper dependencies are not supported")
+    active = (*_active, function)
     try:
         source = textwrap.dedent(inspect.getsource(function))
     except (OSError, TypeError):
@@ -35,6 +38,7 @@ def expand_declarations(function, statement, scopes):
     if any(k.arg is None for k in call.keywords):
         raise _Unproven("declaration helper cannot infer expanded arguments")
     inputs = []
+    prefix = _prefix or f"_forge_package_decl_{call.lineno}_{call.col_offset}"
 
     def input_node(node):
         root = node
@@ -43,7 +47,7 @@ def expand_declarations(function, statement, scopes):
         if isinstance(root, ast.Name):
             if isinstance(node, ast.Name) and node.id in scopes:
                 return copy.deepcopy(node)
-            name = f"_forge_package_decl_{call.lineno}_{call.col_offset}_input_{len(inputs)}"
+            name = f"{prefix}_input_{len(inputs)}"
             inputs.append(ast.Assign([ast.Name(name, ast.Store())], copy.deepcopy(node)))
             reference = ast.Name(name, ast.Load())
             # Preserve attribute/type provenance without evaluating descriptors
@@ -70,9 +74,38 @@ def expand_declarations(function, statement, scopes):
     emitted = []
     serial = 0
     declaration_calls = 0
+    dependencies = []
+    extent_names = set()
+    lexical_names = {
+        node.id
+        for node in ast.walk(tree.body[0])
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
+    } | set(signature.parameters)
+    lexical_names.update(
+        node.asname or node.name.split(".")[0] for node in ast.walk(tree.body[0]) if isinstance(node, ast.alias)
+    )
+    lexical_names.update(
+        node.name
+        for node in ast.walk(tree.body[0])
+        if node is not tree.body[0] and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    )
     operations = frozenset(
         ("record", "dim", "parent_dim", "derived_dim", "power_of_two_dim", "static", "constant", "value", "require_le")
     )
+
+    def extent(node):
+        if isinstance(node, ast.Name):
+            return node.id in extent_names
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv)):
+            return extent(node.left) or extent(node.right)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            receiver = node.func.value
+            return (
+                isinstance(receiver, ast.Name)
+                and receiver.id in known_scopes
+                and node.func.attr in ("dim", "parent_dim", "derived_dim", "power_of_two_dim")
+            ) or (node.func.attr in ("maximum", "minimum") and extent(receiver))
+        return False
 
     def literal(node):
         try:
@@ -83,7 +116,24 @@ def expand_declarations(function, statement, scopes):
             raise _Unproven("declaration helper control requires immutable literals")
         return value
 
-    def expression(node):
+    def dictionary(pairs):
+        keys, values, names = [], [], set()
+        for key, value in pairs:
+            key = expression(key)
+            name = literal(key)
+            if type(name) is not str or name in names:
+                raise _Unproven("declaration dictionary requires distinct literal names")
+            names.add(name)
+            value = expression(value)
+            temporary = local("dictionary_value")
+            emit(ast.Assign([ast.Name(temporary, ast.Store())], value))
+            if extent(value):
+                extent_names.add(temporary)
+            keys.append(key)
+            values.append(ast.Name(temporary, ast.Load()))
+        return ast.Dict(keys, values)
+
+    def expression(node, *, allow_helper=False, void=False):
         nonlocal declaration_calls
         if isinstance(node, ast.Constant) and _literal(node.value):
             return copy.deepcopy(node)
@@ -95,6 +145,35 @@ def expand_declarations(function, statement, scopes):
             return ast.Attribute(expression(node.value), node.attr, ast.Load())
         if isinstance(node, (ast.Tuple, ast.List)):
             return type(node)([expression(n) for n in node.elts], ast.Load())
+        if isinstance(node, ast.Dict) and all(key is not None for key in node.keys):
+            if not allow_helper:
+                raise _Unproven("declaration dictionaries require their own assignment or return")
+            return dictionary(zip(node.keys, node.values))
+        if isinstance(node, ast.DictComp) and len(node.generators) == 1:
+            if not allow_helper:
+                raise _Unproven("declaration dictionaries require their own assignment or return")
+            loop = node.generators[0]
+            values = expression(loop.iter)
+            if (
+                loop.is_async
+                or loop.ifs
+                or not isinstance(loop.target, ast.Name)
+                or not isinstance(values, (ast.Tuple, ast.List))
+            ):
+                raise _Unproven("declaration dictionary requires one fixed literal sequence")
+            literal(values)
+            previous = environment.copy()
+            keys, members = [], []
+            for value in values.elts:
+                environment[loop.target.id] = copy.deepcopy(value)
+                item = dictionary(((node.key, node.value),))
+                if any(literal(key) == literal(item.keys[0]) for key in keys):
+                    raise _Unproven("declaration dictionary requires distinct literal names")
+                keys.extend(item.keys)
+                members.extend(item.values)
+            environment.clear()
+            environment.update(previous)
+            return ast.Dict(keys, members)
         if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv)):
             left, right = expression(node.left), expression(node.right)
             if isinstance(node.op, ast.Add) and all(
@@ -119,7 +198,59 @@ def expand_declarations(function, statement, scopes):
             if isinstance(op, (ast.Is, ast.IsNot)) and right is None:
                 return ast.Constant(left is None if isinstance(op, ast.Is) else left is not None)
         if isinstance(node, ast.Call):
+            root = node.func
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            target = _source_value(node.func, function.__globals__)
+            if inspect.isfunction(target) and isinstance(root, ast.Name) and root.id not in lexical_names:
+                if not allow_helper:
+                    raise _Unproven("nested declaration helper calls require their own assignment or statement")
+                forwarded = ast.copy_location(
+                    ast.Call(
+                        copy.deepcopy(node.func),
+                        [expression(n) for n in node.args],
+                        [ast.keyword(k.arg, expression(k.value)) for k in node.keywords],
+                    ),
+                    call,
+                )
+                normalized = None
+                try:
+                    normalized = prove_factory(target, forwarded, known_scopes, allow_void=void)
+                except (TypeError, _Unproven):
+                    pass
+                if normalized is not None:
+                    if not isinstance(normalized.func, ast.Attribute) or normalized.func.attr not in operations:
+                        raise _Unproven("nested helper must forward supported ResourceScope declarations")
+                    declaration_calls += 1
+                    dependencies.append(normalized._package_factory)
+                    return normalized
+                name = local("result")
+                nested = expand_declarations(
+                    target,
+                    ast.Assign([ast.Name(name, ast.Store())], forwarded),
+                    known_scopes,
+                    _active=active,
+                    _prefix=name,
+                )
+                if nested is None:
+                    raise _Unproven("nested declaration helper has no proved scope forwarding")
+                body, facts = nested
+                for child in body:
+                    emit(child)
+                    if isinstance(child, ast.Assign) and extent(child.value):
+                        extent_names.update(t.id for t in child.targets if isinstance(t, ast.Name))
+                declaration_calls += 1
+                dependencies.append(facts)
+                return ast.Name(name, ast.Load())
             function_node = expression(node.func)
+            if (
+                isinstance(function_node, ast.Attribute)
+                and function_node.attr in ("maximum", "minimum")
+                and extent(function_node.value)
+                and len(node.args) == 1
+                and not node.keywords
+            ):
+                return ast.Call(function_node, [expression(node.args[0])], [])
             if not (
                 isinstance(function_node, ast.Attribute)
                 and isinstance(function_node.value, ast.Name)
@@ -152,7 +283,7 @@ def expand_declarations(function, statement, scopes):
     def local(name):
         nonlocal serial
         serial += 1
-        return f"_forge_package_decl_{call.lineno}_{call.col_offset}_{serial}_{name}"
+        return f"{prefix}_{serial}_{name}"
 
     def assign(target, value, *, fixed=False):
         if isinstance(target, (ast.Tuple, ast.List)):
@@ -168,6 +299,8 @@ def expand_declarations(function, statement, scopes):
                 name = local(target.id)
                 environment[target.id] = ast.Name(name, ast.Load())
                 emit(ast.Assign([ast.Name(name, ast.Store())], value))
+                if extent(value):
+                    extent_names.add(name)
                 if (
                     isinstance(value, ast.Call)
                     and isinstance(value.func, ast.Attribute)
@@ -189,9 +322,9 @@ def expand_declarations(function, statement, scopes):
             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and type(node.value.value) is str:
                 continue
             if isinstance(node, ast.Assign) and len(node.targets) == 1:
-                assign(node.targets[0], expression(node.value))
+                assign(node.targets[0], expression(node.value, allow_helper=True))
             elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-                emit(ast.Expr(expression(node.value)))
+                emit(ast.Expr(expression(node.value, allow_helper=True, void=True)))
             elif isinstance(node, ast.If):
                 result = statements(node.body if bool(literal(expression(node.test))) else node.orelse, in_loop=in_loop)
                 if result is not fallthrough:
@@ -209,7 +342,7 @@ def expand_declarations(function, statement, scopes):
             elif isinstance(node, ast.Continue) and in_loop:
                 return continued
             elif isinstance(node, ast.Return):
-                return expression(node.value) if node.value is not None else ast.Constant(None)
+                return expression(node.value, allow_helper=True) if node.value is not None else ast.Constant(None)
             else:
                 raise _Unproven(f"declaration helper has an unproven statement or side effect at line {node.lineno}")
         return fallthrough
@@ -227,4 +360,6 @@ def expand_declarations(function, statement, scopes):
     facts = dict(
         definition=function.__module__ + "." + function.__qualname__, sha256=hashlib.sha256(source.encode()).hexdigest()
     )
+    if dependencies:
+        facts["dependencies"] = dependencies
     return emitted, facts

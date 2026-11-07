@@ -1104,14 +1104,31 @@ def _record_helper_fixture(tmp_path, monkeypatch, helper=RECORD_HELPER_SOURCE):
     return source[:start] + "        parent = declare_layout(scope, layout, capacity, Scalar)\n" + source[end:]
 
 
-@pytest.mark.parametrize("forwarded", [False, True, "attribute"])
+@pytest.mark.parametrize("forwarded", [False, True, "attribute", "nested"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_records_preserve_paths_static_projection_and_parent_constraints(tmp_path, monkeypatch, forwarded):
     source = _record_helper_fixture(tmp_path, monkeypatch) if forwarded else RECORD_RESOURCES_SOURCE
+    if forwarded == "nested":
+        helper = RECORD_HELPER_SOURCE.replace(
+            "def declare_layout(scope, layout, capacity, dtype, *, bounded=True):",
+            "def declare_record(scope, layout, capacity, dtype, *, bounded=True):",
+        )
+        helper += """
+def declare_layout(scope, layout, capacity, dtype, *, bounded=True):
+    return declare_record(scope, layout, capacity, dtype, bounded=bounded)
+"""
+        helper = helper.replace(
+            "    return count", "    sizes = {name: scope.dim(name) for name in ('capacity',)}\n    return count"
+        )
+        source = _record_helper_fixture(tmp_path, monkeypatch, helper)
     if forwarded == "attribute":
-        source = source.replace("        self.capacity = capacity", "        self.input_layout = layout\n        self.capacity = capacity")
-        source = source.replace("declare_layout(scope, layout, capacity, Scalar)",
-                                "declare_layout(scope, self.input_layout, self.capacity, Scalar)")
+        source = source.replace(
+            "        self.capacity = capacity", "        self.input_layout = layout\n        self.capacity = capacity"
+        )
+        source = source.replace(
+            "declare_layout(scope, layout, capacity, Scalar)",
+            "declare_layout(scope, self.input_layout, self.capacity, Scalar)",
+        )
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert manifest["version"] == 19
@@ -1122,6 +1139,10 @@ def test_package_records_preserve_paths_static_projection_and_parent_constraints
     if forwarded:
         assert sys.modules["declaration_helpers"].effects == []
         assert manifest["declaration_factories"][0]["kind"] == "declaration_helper"
+        if forwarded == "nested":
+            dependency = manifest["declaration_factories"][0]["dependencies"][0]
+            assert dependency["definition"] == "declaration_helpers.declare_record"
+            assert len(dependency["sha256"]) == 64
         assert "from declaration_helpers" not in (tmp_path / "sdk/host/model.py").read_text()
     original = package.Model(7, sys.modules["definition_fixture.model"].Layout(5, 2.5, True))
     original.clear()
@@ -1218,6 +1239,47 @@ def test_package_declaration_helpers_reject_unproven_execution(tmp_path, monkeyp
         )
     package = _source_package(tmp_path, monkeypatch, source)
     with pytest.raises(ti.aot.PackageExportError, match="factory forwarding is unproven|binding is shadowed"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["declaration_helpers"].effects == []
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@pytest.mark.parametrize(
+    "change", ["recursive", "effect", "local_shadow", "argument_shadow", "argument_order", "model_dictionary"]
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_nested_declaration_helpers_reject_unproven_dependencies(tmp_path, monkeypatch, change):
+    helper = RECORD_HELPER_SOURCE.replace("def declare_layout(", "def declare_record(")
+    helper += """
+def declare_layout(scope, layout, capacity, dtype, *, bounded=True):
+    return declare_record(scope, layout, capacity, dtype, bounded=bounded)
+"""
+    if change == "recursive":
+        helper = helper.replace(
+            "    count = scope.dim('capacity')", "    count = declare_layout(scope, layout, capacity, dtype)"
+        )
+    elif change == "effect":
+        helper = helper.replace("    count =", "    effects.append(1)\n    count =")
+    elif change == "local_shadow":
+        helper += "    declare_record = layout\n"
+    elif change == "argument_shadow":
+        helper = helper.replace(
+            "def declare_layout(scope, layout, capacity, dtype, *, bounded=True):",
+            "def declare_layout(scope, layout, capacity, dtype, *, bounded=True, declare_record=None):",
+        )
+    elif change == "argument_order":
+        helper = helper.replace(
+            "return declare_record(scope, layout, capacity, dtype, bounded=bounded)",
+            "return scope.require_le('bound', layout.n, declare_record(scope, layout, capacity, dtype), when='capacity')",
+        )
+    else:
+        helper = helper.replace(
+            "    count =", "    sizes = {name: scope.dim(name) for name in layout.names}\n    count ="
+        )
+    source = _record_helper_fixture(tmp_path, monkeypatch, helper)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="factory forwarding is unproven"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["declaration_helpers"].effects == []
     assert sys.modules["definition_fixture.model"].constructors == 0
@@ -5874,12 +5936,22 @@ def declare_extent(scope, name, expression):
 """
 
 
-@pytest.mark.parametrize("forwarded", [False, True])
+@pytest.mark.parametrize("forwarded", [False, True, "nested"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_derived_dimensions_preserve_relations_without_model_execution(tmp_path, monkeypatch, forwarded):
-    (tmp_path / "resource_factories.py").write_text(textwrap.dedent(DERIVED_HELPER_SOURCE), encoding="utf8")
+    helper = DERIVED_HELPER_SOURCE
+    if forwarded == "nested":
+        helper += """
+def declare_layout(scope):
+    size = 2 * scope.dim('n') + 1
+    return declare_extent(scope, 'work', size.maximum(1))
+"""
+    (tmp_path / "resource_factories.py").write_text(textwrap.dedent(helper), encoding="utf8")
     monkeypatch.delitem(sys.modules, "resource_factories", raising=False)
     source = DERIVED_FIELDS_SOURCE
+    if forwarded == "nested":
+        source = source.replace("import declare_extent", "import declare_layout")
+        source = source.replace("declare_extent(scope, 'work', 2 * scope.dim('n') + 1)", "declare_layout(scope)")
     if not forwarded:
         source = source.replace("declare_extent(scope, 'work',", "scope.derived_dim('work',").replace(
             "from resource_factories import declare_extent\n", ""
@@ -5891,7 +5963,7 @@ def test_package_derived_dimensions_preserve_relations_without_model_execution(t
     assert len(manifest["entries"]) == 2  # One implementation plus the unimported public entry.
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
         assert len([item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]) == 2
-    assert len(manifest["declaration_factories"]) == int(forwarded)
+    assert len(manifest["declaration_factories"]) == int(bool(forwarded))
     assert "from resource_factories import" not in (tmp_path / "sdk/host/model.py").read_text()
     original = package.Model(7)
     original.step(5)

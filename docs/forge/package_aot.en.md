@@ -548,7 +548,17 @@ CPU/CUDA/Vulkan source-free checks pass. The new attribute forwarding and
 rebinding rejection have focused CPU coverage; the original EFC layout helper's
 attribute path has CUDA source-free coverage. The original Newton initializer
 also consumes different point capacities from one TCM. Complete class export
-still needs later declarations and construction closure. Arbitrary declaration helpers, populated optional records, borrowed Fields with unresolved cross-object provenance and model-driven
+still needs later declarations and construction closure.
+Declaration helpers may call other proved ordinary declaration helpers, reusing
+the existing forwarding proof and declaration projection. Each dependency has
+a source hash; no application helper is executed. Declared extent minimum/maximum
+and fixed-name dictionaries, including single fixed-name comprehensions, are
+supported. Nested calls must occupy their own assignment, statement or return
+to preserve other arguments' evaluation order. Recursion, shadowed bindings,
+model-driven calls and effects reject. Focused CPU/CUDA source-free checks retain
+shared code, record constraints and instance isolation. The original rigid
+dimension helper passes nested-call analysis; its remaining resource domains
+still need work. Arbitrary declaration helpers, populated optional records, borrowed Fields with unresolved cross-object provenance and model-driven
 local tensor type domains remain unfinished; this is not full EFC qualification.
 
 Version 20 supports constructor declarations of
