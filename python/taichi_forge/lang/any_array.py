@@ -78,17 +78,22 @@ class ModelTensorArray(AnyArray):
     Component access uses the ordinary scalar external-tensor lowering.
     """
 
-    def __init__(self, scalar_array, index_rank, element_extents, dtype):
+    def __init__(self, scalar_array, index_rank, element_extents, dtype, index_extents):
         super().__init__(scalar_array.ptr)
         self.scalar_array = scalar_array
         self.index_rank = index_rank
+        self.index_extents = tuple(index_extents)
         self.element_extents = element_extents
         self.dtype = dtype
         self.ndim = len(element_extents)
 
     @property
     def shape(self):
-        return self.scalar_array.shape[:self.index_rank]
+        values = self.scalar_array.shape[:self.index_rank]
+        for value, extent in zip(values, self.index_extents):
+            value._uniform_extent = ("dim", extent) if isinstance(extent, str) else ("const", extent)
+            value._model_uniform = isinstance(extent, str)
+        return values
 
     def _element_extent(self, axis):
         extent = self.element_extents[axis]

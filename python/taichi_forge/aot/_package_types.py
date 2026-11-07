@@ -143,6 +143,8 @@ def resolve_type(node, namespace, *, allow_ndarray=False, allow_members=False, m
             return {key.value: value(item) for key, item in zip(expression.keys, expression.values)}
         if isinstance(expression, ast.Name):
             defaults = dict(int=ti.i32, float=ti.f32, bool=ti.i32)
+            if allow_members:
+                defaults["dict"] = dict
             if expression.id in defaults and expression.id not in namespace:
                 return defaults[expression.id]
             return namespace[expression.id]
@@ -156,12 +158,16 @@ def resolve_type(node, namespace, *, allow_ndarray=False, allow_members=False, m
         if isinstance(expression, ast.Call):
             factory = value(expression.func)
             factories = (ti.types.vector, ti.types.matrix, ti.types.struct)
+            if allow_members:
+                factories += (dict,)
             if allow_ndarray:
                 factories += (ti.types.ndarray,)
             if factory not in factories:
                 raise ValueError("Type construction requires a builtin vector/matrix/struct factory")
             if any(k.arg is None for k in expression.keywords):
                 raise ValueError("Expanded type arguments are unsupported")
+            if factory is dict and expression.args:
+                raise ValueError("Struct member dict requires explicit named type arguments")
             axes = ("n",) if factory is ti.types.vector else ("n", "m") if factory is ti.types.matrix else ()
             arguments = dict(zip((*axes, "dtype"), expression.args)) if axes else {}
             arguments.update((k.arg, k.value) for k in expression.keywords)

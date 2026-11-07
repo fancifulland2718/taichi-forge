@@ -220,6 +220,8 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             )
         if model_tensors and item.get("conditions"):
             raise ValueError("Conditional model tensor Fields require projected layout selection")
+        if model_tensors and item.get("layout") == "SOA" and not item.get("struct_field"):
+            raise ValueError("Model tensor SOA lanes require further native layout support")
         if item.get("struct_field"):
             if (
                 item["element"]["kind"] != "struct"
@@ -270,7 +272,13 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             else None if item.get("layout") == "SOA" else builder.dense(axes, tuple(concrete))
         )
         if item.get("layout") == "SOA":
-            for member in value.field_dict.values():
+            if item.get("struct_field"):
+                members = value.field_dict.values()
+            elif isinstance(value, ti.MatrixField):
+                members = (value.get_scalar_field(i, j) for i in range(value.n) for j in range(value.m))
+            else:
+                members = (value,)
+            for member in members:
                 builder.dense(axes, tuple(concrete)).place(member)
         else:
             parent.place(value)
@@ -332,6 +340,11 @@ def field_allocation(owner_key, name, schema):
     sources = {key: expression for item in fields for key, expression in item["dimension_sources"].items()}
     dimensions = sorted(sources)
     keywords = []
+    if "like_source_path" in schema[name]:
+        source = ast.Name("self", ast.Load())
+        for part in schema[name]["like_source_path"]:
+            source = ast.Attribute(source, part, ast.Load())
+        keywords.append(ast.keyword("like_source", source))
     if "local_type_source" in schema[name]:
         keywords.append(ast.keyword("declared_type", schema[name]["local_type_source"]))
     if "placement_alias" in schema[name]:

@@ -978,7 +978,246 @@ def test_package_declared_owner_graph_shares_children_and_keeps_instance_binding
     assert "CHILD_DEFINITIONS_SOURCE_FREE_OK" in result.stdout
 
 
-CONDITIONAL_CHILD_SOURCE = DECLARED_CHILD_SOURCE[: DECLARED_CHILD_SOURCE.index("@ti.data_oriented\nclass Model:")] + """
+FIELD_LIKE_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Storage:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.vector_field(self.n, ti.f32, shape=scope.dim('n'), initialization='zero')
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        scope = ti.experimental.ResourceScope(self)
+        scope.storage = Storage(n)
+        scope.backup = scope.field_like(self.storage.values, layout=ti.Layout.AOS, initialization='zero')
+
+    @ti.kernel
+    def fill(self, gain: ti.f32):
+        for i in self.storage.values:
+            for j in range(self.storage.n):
+                self.storage.values[i][j] = gain * i + j
+
+    @ti.kernel
+    def save(self):
+        for i in range(self.storage.n):
+            self.backup[i] = self.storage.values[i]
+
+    @ti.kernel
+    def restore(self):
+        for i in range(self.storage.n):
+            self.storage.values[i] = self.backup[i]
+"""
+
+
+@pytest.mark.parametrize('kind', ['scalar', 'vector', 'matrix', 'struct'])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_field_like_keeps_dynamic_axes_and_independent_storage(
+    tmp_path, monkeypatch, kind
+):
+    source = FIELD_LIKE_SOURCE
+    if kind == "scalar":
+        source = source.replace(
+            "scope.vector_field(self.n, ti.f32,", "scope.field(ti.f32,"
+        )
+        source = source.replace(
+            "            for j in range(self.storage.n):\n                self.storage.values[i][j] = gain * i + j",
+            "            self.storage.values[i] = gain * i",
+        )
+    elif kind == "matrix":
+        source = source.replace(
+            "scope.vector_field(self.n, ti.f32,",
+            "scope.matrix_field(self.n, 2, ti.f32,",
+        )
+        source = source.replace(
+            "self.storage.values[i][j] = gain * i + j",
+            "for k in range(2):\n                    self.storage.values[i][j, k] = gain * i + j + k",
+        )
+    elif kind == "struct":
+        source = source.replace("layout=ti.Layout.AOS", "layout=ti.Layout.SOA")
+        source = source.replace(
+            "scope.vector_field(self.n, ti.f32,",
+            "scope.struct_field(dict(value=ti.f32, tag=ti.i32),",
+        )
+        source = source.replace(
+            "            for j in range(self.storage.n):\n                self.storage.values[i][j] = gain * i + j",
+            "            self.storage.values[i].value = gain * i\n            self.storage.values[i].tag = i + 1",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = package.Model(3)
+    original.fill(2.0)
+    original.save()
+    original.fill(9.0)
+    original.restore()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 39
+    assert sys.modules["definition_fixture.model"].constructors == 1
+    with (
+        Runtime(manifest["target"]) as runtime,
+        load_package(runtime, tmp_path / "sdk") as code,
+    ):
+        a, b = code.host.Model(3), code.host.Model(7)
+        for model, gain, n in ((a, 2.0, 3), (b, -3.0, 7)):
+            model.fill(gain)
+            model.save()
+            model.fill(9.0)
+            model.restore()
+            actual = model.storage.values.to_numpy()
+            expected = gain * np.arange(n)
+            if kind in ("vector", "matrix"):
+                expected = expected[:, None] + np.arange(n)
+            if kind == "matrix":
+                expected = expected[:, :, None] + np.arange(2)
+            if kind == "struct":
+                np.testing.assert_array_equal(actual["tag"], np.arange(n) + 1)
+                actual = actual["value"]
+                assert (
+                    model.backup.value._group_owner
+                    is not model.storage.values.value._group_owner
+                )
+            else:
+                assert (
+                    model.backup._group_owner is not model.storage.values._group_owner
+                )
+            np.testing.assert_array_equal(actual, expected)
+        a.fill(13.0)
+        b.restore()
+        actual = b.storage.values.to_numpy()
+        np.testing.assert_array_equal(
+            actual["value"] if kind == "struct" else actual, expected
+        )
+    if kind == "vector":
+        probe = tmp_path / "field_like_consumer.py"
+        probe.write_text(
+            textwrap.dedent("""
+            import importlib.abc
+            import sys
+            import numpy as np
+            class NoSource(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                        raise AssertionError(fullname)
+            sys.meta_path.insert(0, NoSource())
+            from taichi_forge_runtime.aot import Runtime, load_package
+            with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+                a, b = code.host.Model(11), code.host.Model(5)
+                for model, n in ((a, 11), (b, 5)):
+                    model.fill(3.0)
+                    model.save()
+                    model.fill(-2.0)
+                    model.restore()
+                    np.testing.assert_array_equal(model.storage.values.to_numpy(), 3 * np.arange(n)[:, None] + np.arange(n))
+            print('FIELD_LIKE_SOURCE_FREE_OK')
+        """),
+            encoding="utf8",
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(probe),
+                str(tmp_path / "sdk"),
+                manifest["target"],
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env=dict(
+                os.environ,
+                PYTHONDONTWRITEBYTECODE="1",
+                PYTHONPATH=str(
+                    Path(__file__).resolve().parents[2] / "packaging/runtime/src"
+                ),
+                TAICHI_NATIVE_RUNTIME_DIR=str(
+                    Path(utils._loaded_native_runtime_path).parent
+                ),
+                TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+            ),
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "FIELD_LIKE_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("failure", ["missing", "forward", "soa_model"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_like_rejects_unproved_layouts(tmp_path, monkeypatch, failure):
+    source = FIELD_LIKE_SOURCE
+    if failure == "missing":
+        source = source.replace(
+            "scope.field_like(self.storage.values", "scope.field_like(self.unknown"
+        )
+        message = "declared complete Field"
+    elif failure == "forward":
+        source = source.replace(
+            "scope.field_like(self.storage.values", "scope.field_like(self.backup"
+        )
+        message = "Cyclic field_like"
+    else:
+        source = source.replace("layout=ti.Layout.AOS", "layout=ti.Layout.SOA")
+        message = "Model tensor SOA"
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match=message):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_field_like_borrowed_input_preserves_source_dimensions(
+    tmp_path, monkeypatch
+):
+    source = FIELD_LIKE_SOURCE.replace(
+        "scope.backup = scope.field_like(self.storage.values, layout=ti.Layout.AOS, initialization='zero')",
+        "scope.checkpoint = Checkpoint(self.storage.values)",
+    )
+    source = source[: source.index("    @ti.kernel\n    def save(self):")]
+    source += """
+    def save(self):
+        self.checkpoint.save()
+    def restore(self):
+        self.checkpoint.restore()
+
+@ti.data_oriented
+class Checkpoint:
+    def __init__(self, values):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('source', values, source_scope=True)
+        scope.backup = scope.field_like(self.source, initialization='zero')
+    @ti.kernel
+    def save(self):
+        for i in range(self.source.shape[0]):
+            self.backup[i] = self.source[i]
+    @ti.kernel
+    def restore(self):
+        for i in range(self.source.shape[0]):
+            self.source[i] = self.backup[i]
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with (
+        Runtime(manifest["target"]) as runtime,
+        load_package(runtime, tmp_path / "sdk") as code,
+    ):
+        model = code.host.Model(6)
+        model.fill(4.0)
+        model.save()
+        model.fill(-2.0)
+        model.restore()
+        np.testing.assert_array_equal(
+            model.storage.values.to_numpy(), 4 * np.arange(6)[:, None] + np.arange(6)
+        )
+
+
+CONDITIONAL_CHILD_SOURCE = (
+    DECLARED_CHILD_SOURCE[
+        : DECLARED_CHILD_SOURCE.index("@ti.data_oriented\nclass Model:")
+    ]
+    + """
 @ti.data_oriented
 class Model:
     def __init__(self, n: int, enabled: bool, first: bool = False):
@@ -1009,6 +1248,7 @@ class Model:
         builder.dispatch(self.step, gain)
         return builder.compile()
 """
+)
 
 
 @pytest.mark.parametrize("absence", ["initial", "record"])

@@ -707,6 +707,16 @@ check both the package/type and identity with that source path; replacing only
 the alias rejects. CPU/CUDA local source-free checks retain independent state
 and prepared snapshots. This does not admit arbitrary reflected object graphs.
 
+Version 39 resolves `scope.field_like(self.source)` from declared complete Field
+allocations or proven borrowed inputs. The clone keeps the source's dynamic
+index and model element dimensions, but owns independent native storage. Normal
+Host construction checks the source type and extents before allocation; the
+original SNode schema compiler remains authoritative. Scalar, AOS model vector/
+matrix and flat StructField copies have local CPU/CUDA checks; a new process
+also consumes model vectors without numerical sources. SOA model tensor lanes,
+conditional sources and heterogeneous checkpoint input families remain open.
+This is not qualification of an entire engine checkpoint or EFC export.
+
 Fields within optional children can be borrowed under the same presence guards,
 retaining their source path, dimension relations and native allocation group.
 Guarded model-length vectors keep dynamic element axes rather than a fixed

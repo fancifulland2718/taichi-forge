@@ -310,7 +310,17 @@ class _ModuleBinding:
             raise ImportError("Definition packages cannot dynamically import the numerical frontend")
         return importlib.import_module(resolved)
 
-    def field(self, owner_key, name, dimensions, *, placement=None, dimension_aliases=(), declared_type=None):
+    def field(
+        self,
+        owner_key,
+        name,
+        dimensions,
+        *,
+        placement=None,
+        dimension_aliases=(),
+        declared_type=None,
+        like_source=None,
+    ):
         self.package._check()
         construction = _construction.get()
         if construction is None or construction[0] is not self.package:
@@ -358,8 +368,43 @@ class _ModuleBinding:
         if dimensions.keys() != set(contract["dimensions"]):
             raise ValueError("Field group dimensions differ from its native schema")
         expected_shape = tuple(dimensions[n] if isinstance(n, str) else n for n in member["shape"])
+        if "like_source_path" in member:
+            if path_value(owner, member["like_source_path"]) is not like_source:
+                raise ValueError(
+                    "field_like source differs from its declared allocation"
+                )
+
+            def check_source(source, element):
+                if element["kind"] == "struct":
+                    if not isinstance(source, StructField) or set(
+                        source.field_dict
+                    ) != set(element["members"]):
+                        raise ValueError(
+                            "field_like source members differ from their declared type"
+                        )
+                    for key, part in element["members"].items():
+                        check_source(getattr(source, key), part)
+                elif (
+                    getattr(source, "_forge_package_field_source", None) is None
+                    or tuple(source.shape) != expected_shape
+                    or source.dtype != element["dtype"]
+                    or tuple(source.element_shape)
+                    != tuple(
+                        dimensions[n] if isinstance(n, str) else n
+                        for n in element["element_shape"]
+                    )
+                ):
+                    raise ValueError(
+                        "field_like source differs from its declared type or dimensions"
+                    )
+                else:
+                    source._descriptor(self.package.runtime)
+
+            check_source(like_source, member["element"])
         if placement is not None and tuple(placement) != expected_shape:
-            raise ValueError("Declared Dense placement changed before its Field allocation")
+            raise ValueError(
+                "Declared Dense placement changed before its Field allocation"
+            )
         previous = owner._forge_package_field_groups.get(group_key)
         if previous is None:
             for _, bindings in owner._forge_package_field_groups.values():
@@ -1018,6 +1063,7 @@ class LoadedPackage:
                 36,
                 37,
                 38,
+                39,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

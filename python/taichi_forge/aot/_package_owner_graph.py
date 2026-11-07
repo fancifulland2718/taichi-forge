@@ -112,7 +112,10 @@ class OwnerGraph:
                 value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
             write_member(owner, attribute, value, schema)
         environment, expanded = _compose(field_environment(declarations, schema), schema, children)
+        from ._package_field_like import project_field_likes
+
         project_borrows(owner, environment, expanded)
+        project_field_likes(environment, expanded)
         return owner, schema, environment, expanded
 
 
@@ -176,6 +179,8 @@ def _compose(environment, schema, children):
                 transformed["source_path"] = [attribute, *item["source_path"]]
             if "reference_path" in item:
                 transformed["reference_path"] = [attribute, *item["reference_path"]]
+            if "like_source_path" in item:
+                transformed["like_source_path"] = [attribute, *item["like_source_path"]]
             if "conditions" in item:
                 transformed["conditions"] = {names[n]: expected for n, expected in item["conditions"].items()}
             if owner_conditions:

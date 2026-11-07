@@ -1026,6 +1026,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     from ._package_inputs import resolve_inputs
 
     resolve_inputs(sources, imported_modules)
+    from ._package_field_like import resolve_field_likes
+
+    resolve_field_likes(sources)
     from ._package_closures import calls as closure_calls, materialize as materialize_closure
 
     factory_calls = closure_calls(sources, imported_modules, _fail)
@@ -1134,6 +1137,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(22, manifest["version"])
             if any("reference_path" in item for item in schema.values()):
                 manifest["version"] = max(38, manifest["version"])
+            if any("like_source_path" in item for item in schema.values()):
+                manifest["version"] = max(39, manifest["version"])
             if any(item["kind"] == "borrowed_field" and "input_parameter" in item for item in schema.values()):
                 manifest["version"] = max(23, manifest["version"])
             if any(item.get("optional_input") for item in schema.values()):

@@ -1182,6 +1182,68 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                 conditions=dict(conditions),
             )
             allowed.add(id(call.func.value))
+        elif method == "field_like":
+            targets = statement.targets if isinstance(statement, ast.Assign) else []
+            target = targets[0] if len(targets) == 1 else None
+            if (
+                scope_paths[scope]
+                or conditions
+                or scope_groups[scope] in builders
+                or not isinstance(target, ast.Attribute)
+                or not isinstance(target.value, ast.Name)
+                or scope_binding(target.value) not in scopes
+                or member_stores[target.attr] != 1
+                or len(call.args) != 1
+                or any(k.arg not in ("layout", "initialization") for k in call.keywords)
+            ):
+                fail(
+                    module,
+                    statement,
+                    "field_like requires one unconditional scoped allocation and a declared source",
+                )
+            layout = "AOS"
+            for keyword in call.keywords:
+                if keyword.arg == "layout":
+                    layout = {"Layout.AOS": "AOS", "Layout.SOA": "SOA"}.get(
+                        qualified_kind(keyword.value, kind)
+                    )
+                    if layout is None:
+                        fail(
+                            module,
+                            call,
+                            "field_like layout requires the original AOS/SOA enum",
+                        )
+                elif not isinstance(
+                    keyword.value, ast.Constant
+                ) or keyword.value.value not in ("zero", "consumer_explicit"):
+                    fail(
+                        module,
+                        call,
+                        "field_like initialization requires zero/consumer_explicit",
+                    )
+            source, path = call.args[0], []
+            while isinstance(source, ast.Attribute):
+                path.insert(0, source.attr)
+                source = source.value
+            if not isinstance(source, ast.Name) or source.id != "self" or not path:
+                fail(
+                    module,
+                    call,
+                    "field_like source requires a declared self allocation or owner path",
+                )
+            allowed.update((id(target.value), id(call.func.value)))
+            add(
+                target.attr,
+                dict(
+                    kind="field_like",
+                    source_path=path,
+                    layout=layout,
+                    allocation=[statement.lineno, statement.col_offset],
+                    scope_allocation=origin(scope),
+                    group=scope_groups[scope],
+                ),
+                statement,
+            )
         elif method in ("field", "vector_field", "matrix_field", "struct_field"):
             alias_checks.clear()
             if scope_paths[scope]:

@@ -439,7 +439,7 @@ class _ModelTensorField(DenseField):
             scalar, len(self.shape) + len(self.element_shape), name, False,
             core.BoundaryMode.UNSAFE, runtime_affine=True,
         )
-        return ModelTensorArray(reference, len(self.shape), self.element_shape, scalar)
+        return ModelTensorArray(reference, len(self.shape), self.element_shape, scalar, self.shape)
 
     @property
     def annotation(self):
