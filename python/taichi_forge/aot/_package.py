@@ -94,6 +94,8 @@ def _owner_schema(module, node, kind, namespace):
         if name in schema and schema[name]["kind"] != "value":
             _fail(module, constructor, f"ResourceScope role {name!r} conflicts with a resource allocation")
         schema[name] = declaration
+        if "presence_parameter" in declaration:
+            declaration["presence_owner"] = module + "." + node.name
     return schema
 
 
@@ -840,6 +842,8 @@ def export_package(package, output, *, arch=None, source_root=None):
                     declarations[attribute] = StaticValue(choices=choices, kernel_only=item["kernel_only"])
                     value = choices[0]
                     manifest["version"] = max(11, manifest["version"])
+                    if "presence_parameter" in item:
+                        manifest["version"] = max(13, manifest["version"])
                 elif item["kind"] == "ndarray":
                     dtype = resolve_type(
                         item.pop("type_node"), vars(imported_modules[item.get("declaration_module", name)])
@@ -863,6 +867,8 @@ def export_package(package, output, *, arch=None, source_root=None):
                     value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
                 setattr(owner, attribute, value)
             owners[class_name], environments[class_name] = owner, Component(**declarations)
+            if any(item.get("optional_presence") for item in schema.values()):
+                manifest["version"] = max(13, manifest["version"])
             manifest["owners"][name + "." + class_name] = {
                 attribute: {
                     key: value

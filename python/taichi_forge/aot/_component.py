@@ -402,6 +402,18 @@ class DenseField:
 
 
 @dataclass(frozen=True)
+class _ConditionalDenseField(DenseField):
+    """A declaration-derived presence predicate with a complete layout witness.
+
+    The package builder supplies the witness without executing a constructor.
+    Presence affects only actual reads during ordinary compiler lowering; its
+    dependencies use the existing StaticValue guards and code-family mechanism.
+    """
+
+    conditions: tuple
+
+
+@dataclass(frozen=True)
 class _ExternalField(Array):
     """Typed read-only input; storage remains in its supplying SNode group."""
 
@@ -1568,6 +1580,7 @@ class _Capture:
         self.static = {}
         self.static_objects = {}
         self.objects = {}
+        self.resource_conditions = {}
         self.record_equalities = set()
         self.owner_sequence_lengths = {}
         self.methods = {}
@@ -1692,6 +1705,18 @@ class _Capture:
                 "declare it as a runtime value, resource or static configuration"
             )
         self.used[name] = declaration.schema
+        if isinstance(declaration, _ConditionalDenseField):
+            self.resource_conditions[name] = declaration.conditions
+            present = True
+            for condition, expected in declaration.conditions:
+                if not isinstance(self.declarations.get(condition), StaticValue):
+                    raise TaichiCompilationError("Conditional Field presence requires a declared static value")
+                actual = self.attribute(ctx, condition)
+                if type(actual) is not bool or type(expected) is not bool:
+                    raise TaichiCompilationError("Conditional Field presence requires boolean values")
+                present = present and actual is expected
+            if not present:
+                return None
         if isinstance(declaration, _OwnerReference):
             if not declaration.matches(self.component, self.owner, name):
                 raise TaichiCompilationError(f"Component owner reference {'.'.join(path)!r} changed; rebuild declarations")
@@ -1965,6 +1990,8 @@ class _Capture:
                 objects=sorted(self.objects.items()),
                 access_paths={name: self.component._paths[name] for name in self.used},
             )
+        if self.resource_conditions:
+            self.contract["resource_conditions"] = sorted(self.resource_conditions.items())
         if self.record_equalities:
             self.contract["record_equalities"] = sorted(self.record_equalities)
         if self.owner_sequence_lengths:
@@ -2001,6 +2028,9 @@ class _Capture:
             declaration = component.declarations.get(name)
             if declaration is None or declaration.schema != schema:
                 return f"declaration {name!r}"
+            if (isinstance(declaration, DenseField)
+                    and getattr(declaration, "conditions", ()) != self.resource_conditions.get(name, ())):
+                return f"resource presence declaration {name!r}"
         for name, length in self.owner_sequence_lengths.items():
             declaration = component.declarations.get(name)
             if not isinstance(declaration, _OwnerSequence) or len(declaration.members) != length:
@@ -2096,6 +2126,7 @@ class _ComponentCode:
         self.used = dict(context.used)
         self.static = dict(context.static)
         self.objects = dict(context.objects)
+        self.resource_conditions = dict(context.resource_conditions)
         self.record_equalities = frozenset(context.record_equalities)
         self.owner_sequence_lengths = dict(context.owner_sequence_lengths)
         self.methods = dict(context.methods)

@@ -228,7 +228,7 @@ decorated definitions continue through the original compiler. Focused three-back
 checks cover captures, typed compound arguments, state isolation and source-free use.
 
 Graph capture projection and related Host support use manifest version 9; the
-consumer reads versions 1–12. Local frontend imports, `ti.sync()` and the Runtime
+consumer reads versions 1–13. Local frontend imports, `ti.sync()` and the Runtime
 program identity query are projected without importing the compiler. Logical
 `types.vector/matrix` factories accept Host dimensions/dtypes; they do not allocate
 device storage. `NdArray.from_numpy/to_numpy` use existing native transfers with
@@ -307,13 +307,14 @@ StructCompiler rules. They neither store a layout product for every combination,
 calculate independent byte offsets nor allocate fields in disabled branches.
 Direct tuple unpacking of a literal dimension-name generator uses the same extent algebra.
 
-Numerical entries must guard conditional field access with the declared static
-condition. Common methods that do not read it retain shared code. An instance's
+The original compiler records presence dependencies when a conditional field is
+actually read, including `ti.static(field is not None)`. Common methods that do
+not read that field retain shared code. An instance's
 layout selection is fixed: changing it rejects new calls and requires a new
 instance; already prepared native calls retain their snapshots. Each group
 currently needs an unconditional member, and each explicit Dense placement must
-have a provable member whenever enabled. Arbitrary model conditions, implicit
-`field is not None` domains and entirely optional empty groups remain unsupported.
+have a provable member whenever enabled. Arbitrary model conditions and entirely
+optional empty groups remain unsupported.
 
 Focused CPU/CUDA/Vulkan checks cover two independent flags, invalid but unused
 disabled-branch extents, every native layout node and original JIT values,
@@ -322,6 +323,23 @@ layout description; each affected method has two code variants and common code
 is not multiplied by four owner combinations. A separate check keeps distinct
 complete interleaved layout contracts while storing their compatible affine
 kernel only once. Native sharing identity rules are unchanged.
+
+Version 13 also recognizes an existing boolean constructor parameter that selects
+field allocation in one branch and `scope.record(name, None, optional=True)` in
+the other. No added `scope.static` or decorator is needed. The parameter must have
+a bool annotation or literal boolean default and must not be reassigned. Consumers
+require an actual bool rather than coercing arbitrary objects. The source relation
+determines an instance-local presence selector, not another dynamic kernel argument.
+Missing pairs, unknown domains and unguarded accesses to absent fields reject;
+normal JIT still executes the original definitions. Compilation-cache reuse checks
+presence declarations when the same method moves from always-present to optional storage.
+
+The original GeoPhys GBuffer has focused CPU/CUDA/Vulkan source-free consumption:
+both presence states share one package and two numerical variants, preserving
+normal `clear`, `resize` and `read_resources`. Partial clears and untouched regions
+match original JIT. Export forbids constructor execution; consumers block original
+application/frontend imports and verify new dimensions and independent instances.
+This qualifies that GBuffer path, not the complete renderer or engine wheel.
 
 ## Remaining shared mechanisms
 

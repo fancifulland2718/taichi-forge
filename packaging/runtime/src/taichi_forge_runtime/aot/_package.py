@@ -340,6 +340,11 @@ class _ResourceScope:
             raise ValueError(f"Dimension {name!r} is outside the i32 count range")
         return Extent(("dim", name))
 
+    def record(self, name, value, *, optional=False):
+        if type(name) is not str or not name.isidentifier() or value is not None or optional is not True:
+            raise ValueError("Package record projection requires its declared absent optional resource")
+        setattr(self._owner, name, None)
+
 
 class _Importlib:
     """Local importlib binding; never install a process-global import hook."""
@@ -361,10 +366,31 @@ def bind_module(name):
 def managed_class(package, cls):
     """Bind a projected Host instance once; never switch module pointers."""
     original = cls.__init__
+    relative = cls.__module__[len(package._name) :]
+    module = (
+        relative.lstrip(".")
+        if "application_modules" in package.manifest
+        else package.manifest["module_root"] + relative
+    )
+    key = module + "." + cls.__name__
+    parameters = {
+        name: item["presence_parameter"]
+        for name, item in package.manifest["owners"].get(key, {}).items()
+        if item.get("presence_owner") == key
+    }
+    signature = inspect.signature(original) if parameters else None
 
     @functools.wraps(original)
     def initialize(self, *args, **kwargs):
         package._check()
+        if parameters:
+            bound = signature.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            for attribute, parameter in parameters.items():
+                value = bound.arguments[parameter]
+                if type(value) is not bool:
+                    raise ValueError(f"Optional resource parameter {parameter!r} requires a boolean")
+                setattr(self, attribute, value)
         construction = _construction.get()
         if construction is not None and construction[0] is package and construction[2] is self:
             # Cooperative base construction belongs to this same invocation.
@@ -520,7 +546,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

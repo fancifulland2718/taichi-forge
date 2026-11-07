@@ -218,6 +218,111 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 return getattr(left, node.func.attr)(right)
         return None
 
+    parameters = (*constructor.args.posonlyargs, *constructor.args.args, *constructor.args.kwonlyargs)
+    defaults = (
+        dict(
+            zip(
+                [arg.arg for arg in (*constructor.args.posonlyargs, *constructor.args.args)][
+                    -len(constructor.args.defaults) :
+                ],
+                constructor.args.defaults,
+            )
+        )
+        if constructor.args.defaults
+        else {}
+    )
+    defaults.update(zip((arg.arg for arg in constructor.args.kwonlyargs), constructor.args.kw_defaults))
+    boolean_parameters = {
+        arg.arg
+        for arg in parameters
+        if stores.get(arg.arg) == 1
+        and (
+            isinstance(defaults.get(arg.arg), ast.Constant)
+            and type(defaults[arg.arg].value) is bool
+            or isinstance(arg.annotation, ast.Name)
+            and arg.annotation.id == "bool"
+            and namespace.get("bool", bool) is bool
+        )
+    }
+    optional_records = set()
+    optional_members = set()
+
+    def absent_record(call):
+        if not (
+            operation(call)[1] == "record"
+            and len(call.args) == 2
+            and isinstance(call.args[0], ast.Constant)
+            and type(call.args[0].value) is str
+            and call.args[0].value.isidentifier()
+            and isinstance(call.args[1], ast.Constant)
+            and call.args[1].value is None
+            and len(call.keywords) == 1
+            and call.keywords[0].arg == "optional"
+            and isinstance(call.keywords[0].value, ast.Constant)
+            and call.keywords[0].value.value is True
+        ):
+            return None
+        return call.args[0].value
+
+    def optional_arm(body):
+        fields, records = set(), {}
+        for node in body:
+            call = node.value if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Expr)) else None
+            scope, method = operation(call)
+            if method in ("field", "vector_field", "matrix_field"):
+                targets = (
+                    node.targets
+                    if isinstance(node, ast.Assign)
+                    else [node.target] if isinstance(node, ast.AnnAssign) else []
+                )
+                if (
+                    len(targets) != 1
+                    or not isinstance(targets[0], ast.Attribute)
+                    or not isinstance(targets[0].value, ast.Name)
+                    or targets[0].value.id not in ("self", *scopes)
+                ):
+                    return None
+                fields.add(targets[0].attr)
+            elif method == "record":
+                name = absent_record(call)
+                if not isinstance(node, ast.Expr) or name is None or name in records:
+                    return None
+                records[name] = call
+        return fields, records
+
+    def paired_records(statement):
+        arms = [optional_arm(statement.body), optional_arm(statement.orelse)]
+        if any(arm is None for arm in arms):
+            return None
+        (left, absent_left), (right, absent_right) = arms
+        if not (left or right) or left != absent_right.keys() or right != absent_left.keys() or left & right:
+            return None
+        return [*absent_left.values(), *absent_right.values()]
+
+    def presence_parameter(statement, parameter):
+        calls = paired_records(statement)
+        if calls is None:
+            return None
+        name = (
+            "_forge_package_presence_"
+            + hashlib.sha256(f"{module}:{constructor.lineno}:{parameter}".encode()).hexdigest()
+        )
+        scope, _ = operation(calls[0])
+        if name not in declarations:
+            add(
+                name,
+                dict(
+                    kind="static",
+                    choices=[("bool", False), ("bool", True)],
+                    kernel_only=False,
+                    presence_parameter=parameter,
+                    scope_allocation=origin(scope),
+                ),
+                statement,
+            )
+        optional_records.update(id(call) for call in calls)
+        return name
+
     def statements(body, conditions=None):
         conditions = conditions or {}
         for statement in body:
@@ -230,6 +335,8 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name) and test.value.id == "self"
                     else None
                 )
+                if isinstance(test, ast.Name) and test.id in boolean_parameters:
+                    name = presence_parameter(statement, test.id)
                 declaration = declarations.get(name, {})
                 if not (
                     declaration.get("kind") == "static"
@@ -238,6 +345,9 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     and name not in conditions
                 ):
                     fail(module, statement, "Conditional resources require a previously declared boolean owner static")
+                calls = paired_records(statement)
+                if calls is not None:
+                    optional_records.update(id(call) for call in calls)
                 yield from statements(statement.body, {**conditions, name: expected})
                 yield from statements(statement.orelse, {**conditions, name: not expected})
             else:
@@ -250,7 +360,10 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         scope, method = operation(call)
         if conditions and method in ("static", "value"):
             fail(module, statement, "Value/static declarations must remain unconditional")
-        if method == "static" and isinstance(statement, ast.Expr):
+        if method == "record" and isinstance(statement, ast.Expr) and id(call) in optional_records:
+            allowed.add(id(call.func.value))
+            optional_members.add(absent_record(call))
+        elif method == "static" and isinstance(statement, ast.Expr):
             from ._component import StaticValue
             from taichi_forge_runtime._static_values import static_key
 
@@ -521,4 +634,6 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             for item in declarations.values()
         ):
             fail(module, constructor, "Conditional Dense groups currently require an unconditional member")
+    for name in optional_members:
+        declarations[name]["optional_presence"] = True
     return declarations

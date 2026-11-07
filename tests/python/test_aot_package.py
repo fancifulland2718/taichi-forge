@@ -2322,7 +2322,7 @@ def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path,
     [
         ("missing_declaration", "previously declared boolean"),
         ("kernel_only", "previously declared boolean"),
-        ("missing_kernel_guard", "requires its declared static guard"),
+        ("unguarded_field", "None"),
         ("empty_placement", "requires a member whenever its branch is active"),
         ("escaped_dimension", "Dimension alias must remain within its declaration branch"),
     ],
@@ -2346,12 +2346,153 @@ def test_package_conditional_layouts_reject_unproven_guards(tmp_path, monkeypatc
             "scope.invalid = scope.field(ti.f32, shape=only_here)\n        self.tree = fields.finalize()",
         )
     else:
-        source = source.replace("if ti.static(self.first):", "if ti.static(self.extra is not None):")
+        source = source.replace("if ti.static(self.first):", "if ti.static(True):")
     package = _source_package(tmp_path, monkeypatch, source)
     with pytest.raises(ti.aot.PackageExportError, match=diagnostic):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk").exists()
+
+
+def _optional_layout_source():
+    source = CONDITIONAL_LAYOUT_SOURCE
+    for flag, field in (("first", "extra"), ("second", "other")):
+        source = source.replace(f"        scope.static('{flag}', choices=(False, True))\n", "")
+        source = source.replace(f"if self.{flag}:", f"if {flag}:")
+        source = source.replace(f"if ti.static(self.{flag}):", f"if ti.static(self.{field} is not None):")
+    source = source.replace(
+        "        if second:",
+        "        else:\n            scope.record('extra', None, optional=True)\n        if second:",
+    )
+    source = source.replace(
+        "        self.tree = fields.finalize()",
+        "        else:\n            scope.record('other', None, optional=True)\n        self.tree = fields.finalize()",
+    )
+    constructor = source[source.index("    def __init__") : source.index("    @ti.kernel")]
+    # The original method object first compiles against an always-present
+    # declaration. A later optional receiver must not reuse that presence fact.
+    always = source.replace("class Model:", "class Always:").replace("        self.extra = self.other = None\n", "")
+    for flag, field in (("first", "extra"), ("second", "other")):
+        always = always.replace(f"        if {flag}:\n            scope.{field}", f"        scope.{field}")
+        always = always.replace(f"        else:\n            scope.record('{field}', None, optional=True)\n", "")
+    return always + "\nclass Model(Always):\n" + constructor
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_optional_fields_infer_presence_without_new_declarations(tmp_path, monkeypatch):
+    import itertools
+
+    package = _source_package(tmp_path, monkeypatch, _optional_layout_source())
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 13
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    families = manifest["entry_families"]
+    assert sorted(len(family["variants"]) for family in families.values()) == [2, 2]
+    assert all(len(family["domain"]) == 1 for family in families.values())
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]) == 6
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        for first, second in itertools.product((False, True), repeat=2):
+            original, current = package.Model(7, 5, first, second), loaded.host.Model(7, 5, first, second)
+            for owner in (original, current):
+                owner.first_step()
+                owner.second_step()
+                owner.common(4.0)
+            for field in ("values", "extra", "other"):
+                expected, actual = getattr(original, field), getattr(current, field)
+                if expected is None:
+                    assert actual is None
+                else:
+                    np.testing.assert_array_equal(actual.to_numpy(), expected.to_numpy())
+        resources = set(runtime._resources)
+        with pytest.raises(ValueError, match="requires a boolean"):
+            loaded.host.Model(7, 5, 1, False)
+        assert resources == set(runtime._resources)
+    probe = tmp_path / "consume_optional.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in {'definition_fixture','taichi','taichi_forge'}:
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a,b=code.host.Model(3,-1,False,False),code.host.Model(19,11,True,True)
+            a.first_step()
+            b.first_step()
+            a.second_step()
+            b.second_step()
+            np.testing.assert_array_equal(a.values.to_numpy(),20)
+            np.testing.assert_array_equal(b.other.to_numpy(),3*np.arange(11))
+            assert a.extra is None and a.other is None
+            a.tree.destroy()
+            b.common(4.0)
+            np.testing.assert_array_equal(b.values.to_numpy(),4*(np.arange(19)+1))
+        print('OPTIONAL_LAYOUT_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OPTIONAL_LAYOUT_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["wrong_absence", "mutated_parameter", "unknown_domain"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_optional_fields_reject_ambiguous_presence(tmp_path, monkeypatch, change):
+    source = _optional_layout_source()
+    if change == "wrong_absence":
+        source = source.replace(
+            "scope.record('extra', None, optional=True)", "scope.record('different', None, optional=True)"
+        )
+    elif change == "mutated_parameter":
+        source = source.replace("        if first:", "        first = not first\n        if first:")
+    else:
+        source = source.replace("first: bool", "first")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="previously declared boolean"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_optional_fields_reuse_explicit_and_negated_presence(tmp_path, monkeypatch):
+    source = _optional_layout_source()
+    constructor = source.index("class Model(Always)")
+    source = source[:constructor] + source[constructor:].replace(
+        "        if first:", "        scope.static('first', choices=(False, True))\n        if not self.first:"
+    ).replace(
+        "        if second:", "        scope.static('second', choices=(False, True))\n        if self.second:"
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 13
+    assert not any("presence_parameter" in item for owner in manifest["owners"].values() for item in owner.values())
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        a, b = loaded.host.Model(3, 2, False, False), loaded.host.Model(7, 5, True, True)
+        a.first_step()
+        b.first_step()
+        assert b.extra is None
+        np.testing.assert_array_equal(b.values.to_numpy(), 10)
+        np.testing.assert_array_equal(a.extra.to_numpy(), np.arange(3)[:, None] + np.arange(3)[None, :])
 
 
 STATIC_DOMAIN_SOURCE = """

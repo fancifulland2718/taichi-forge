@@ -115,7 +115,7 @@ def field_declarations(module, constructor, kind, fail):
 def construct_fields(owner, schema, namespace, module, *, imported_modules=None):
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
-    from ._component import DenseField, Dimension
+    from ._component import DenseField, Dimension, _ConditionalDenseField
     from taichi_forge_runtime._dimensions import evaluate_extent
 
     fields = dict(
@@ -195,7 +195,11 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         )
         parent.place(value)
         setattr(owner, name, value)
-        declarations[name] = DenseField(dtype, tuple(item["shape"]), group)
+        declarations[name] = (
+            _ConditionalDenseField(dtype, tuple(item["shape"]), group, tuple(sorted(item["conditions"].items())))
+            if item.get("conditions")
+            else DenseField(dtype, tuple(item["shape"]), group)
+        )
     owner._forge_package_field_trees = [builder._finalize_for_aot() for builder in builders.values()]
     return declarations
 
