@@ -73,6 +73,7 @@ independent object retirement is not implemented.
 - LLVM `real_func` calls retain real function boundaries. Nested helpers can capture scalar values and ndarrays through typed hidden parameters. Explicit-parameter shallow recursion is checked; recursive functions with implicit captures reject with a diagnostic. Vulkan real functions remain unsupported and reject before publication.
 - Typed numerical `pyfunc` definitions become callable AOT entries for Host use and retain ordinary function lowering inside kernels. Their numerical Python source is removed. Untyped public parameters reject instead of learning a signature from prior calls. This covers the declared numerical domain, not arbitrary Python objects, side effects, or scope-dependent implementations; explicit scope queries reject. Original JIT/Python decorators remain unchanged.
 - Single-module exports resolve relative device-helper imports against the original module namespace. Such helpers compile as dependencies and are removed from Host imports; the private parent package is not required for these imports.
+- Direct constructor `field`, `Vector.field` and `Matrix.field` allocations with plain default AOS layout form one complete native SNode group per owner. Extents may be positive constants, constructor parameters or their unconditional single-assignment owner aliases. A compile-only ordinary FieldsBuilder supplies the native schema; the consumer instantiates that schema through the same native layout compiler. No application constructor runs during export and Fields are not split into separately allocated ndarrays. Conditional/ambiguous extents, offsets, custom order, gradients and explicit user-built trees require further support.
 
 For stateless entries in the same package, retained Host recorders can use
 `ti.graph.Arg`, `ArgKind`, `GraphBuilder.dispatch`, sequential nodes and `append`.
@@ -96,6 +97,14 @@ Vulkan capabilities. A CUDA recursion probe at depth 18 hit an illegal address;
 the cause is not confirmed, with default device stack capacity the leading
 explanation. Standalone Runtime does not yet expose stack-size configuration.
 Deep CUDA recursion is not qualified by the passing shallow-recursion check.
+
+The Dense Field check compares every native layout node against normal JIT at
+the same dimensions, then exercises independent sizes and zero initialization.
+CPU/CUDA/Vulkan also consume this Field package in a frontend-blocked process.
+The original GeoPhys winding module has separate CPU/CUDA/Vulkan source-free
+checks: export never invokes its recorder; the retained recorder binds two
+different point/triangle counts to the same compiled entry and existing native
+Plan. This qualifies that module, not whole-engine package export.
 
 ## Remaining shared mechanisms
 

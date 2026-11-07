@@ -80,6 +80,33 @@ class _ModuleBinding:
     def entry(self, symbol):
         return entry(self.package, symbol)
 
+    def field(self, owner_key, name, dimensions):
+        self.package._check()
+        construction = _construction.get()
+        if construction is None or construction[0] is not self.package:
+            raise ValueError("Field allocation requires its managed constructor")
+        _, allocated, owner = construction
+        contract = self.package.manifest["field_groups"][owner_key]
+        if dimensions.keys() != set(contract["dimensions"]):
+            raise ValueError("Field group dimensions differ from its native schema")
+        previous = owner._forge_package_field_groups.get(owner_key)
+        if previous is None:
+            group = self.package.runtime.dense_snode_group(contract["schema"], dimensions)
+            self.package._arrays.append(group)
+            allocated.append(group)
+            owner._forge_package_field_groups[owner_key] = (group, dict(dimensions))
+            for key, value in dimensions.items():
+                setattr(owner, key, value)
+        else:
+            group, original = previous
+            if original != dimensions:
+                raise ValueError("Field group dimensions changed during construction")
+        element = self.package.manifest["owners"][owner_key][name]["element"]
+        value = group.member(contract["members"][name], element["dtype"], element_shape=element["element_shape"])
+        self.package._arrays.append(value)
+        allocated.append(value)
+        return value
+
     def type(self, spec):
         return _ElementType(self.package, spec)
 
@@ -102,8 +129,9 @@ def managed_class(package, cls):
     def initialize(self, *args, **kwargs):
         package._check()
         self._forge_package_owner = package
+        self._forge_package_field_groups = {}
         allocated = []
-        token = _construction.set((package, allocated))
+        token = _construction.set((package, allocated, self))
         try:
             original(self, *args, **kwargs)
         except BaseException:
@@ -154,7 +182,7 @@ class entry:
         ]
         for item in contract["captures"]:
             value = getattr(owner, item["name"])
-            arguments.append(Scalar(item["dtype"], value) if item["kind"] == "value" else value)
+            arguments.append(Scalar(item["dtype"], value) if item["kind"] in ("value", "dimension") else value)
         kernel = package._kernels.get(self.symbol)
         if kernel is None:
             kernel = package._kernels[self.symbol] = package._module.kernel(self.symbol)

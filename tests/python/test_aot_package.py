@@ -217,7 +217,7 @@ def test_package_compiles_definitions_without_constructor_or_test_trace(tmp_path
             ),
             "conditional",
         ),
-        (SOURCE.replace("ti.ndarray(ti.f32, shape=n)", "ti.field(ti.f32, shape=n)"), "Host frontend operation 'field'"),
+        (SOURCE.replace("ti.ndarray(ti.f32, shape=n)", "ti.field(ti.f32, shape=n, order='i')"), "plain default AOS"),
         (SOURCE.replace("range(self.n)", "ti.static(range(self.n))"), "runtime capture"),
         (
             SOURCE.replace('return f"Model with {self.n} values"', "return self.affine(3)"),
@@ -493,3 +493,186 @@ def record(builder):
         # Host recording references the same compiled definition; it never
         # creates another artifact for this sequence or argument value.
         assert len(library.manifest["entries"]) == 4
+
+
+FIELD_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, m: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.a = ti.field(ti.f32, shape=(self.n, m))
+        self.v = ti.Vector.field(3, ti.f32, shape=n)
+        self.mat = ti.Matrix.field(2, 2, ti.f32, shape=m)
+        self.total = ti.field(ti.f32, shape=())
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i, j in self.a:
+            self.a[i, j] += gain * (i * 10 + j)
+        for i in self.v:
+            self.v[i] += ti.Vector([gain, i, self.a.shape[1]])
+        for j in self.mat:
+            self.mat[j] += ti.Matrix([[gain, j], [2, 3]])
+        self.total[None] += gain * self.n
+"""
+
+
+@pytest.mark.parametrize("real_helper", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_dense_fields_use_native_group_layout_and_dynamic_instances(tmp_path, monkeypatch, real_helper):
+    from tests.python.test_aot_dense_snode_group import _compiled_nodes
+
+    if real_helper and ti.cfg.arch == ti.vulkan:
+        pytest.skip("Vulkan does not support real functions")
+    source = FIELD_SOURCE
+    if real_helper:
+        source = source.replace("self.a[i, j] += gain * (i * 10 + j)", "self.touch(i, j, gain)")
+        source = source.replace(
+            "    @ti.kernel\n    def step",
+            """    @ti.real_func
+    def touch(self, i: ti.i32, j: ti.i32, gain: ti.f32):
+        self.a[i, j] += gain * (i * 10 + j)
+
+    @ti.kernel
+    def step""",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = package.Model(7, 3)
+    original.step(2.0)
+    expected = {name: getattr(original, name).to_numpy() for name in ("a", "v", "mat", "total")}
+    root = ti.lang.impl.get_runtime().prog.get_snode_root(original.a.snode.ptr.get_snode_tree_id())
+    expected_layout = _compiled_nodes(root)
+    result = ti.aot.export_package(package, tmp_path / "sdk")
+    original.step(0.0)  # Existing JIT remains callable after structural export.
+    np.testing.assert_array_equal(original.a.to_numpy(), expected["a"])
+    assert sys.modules["definition_fixture.model"].constructors == 1  # no export-time model
+    assert len(result["field_groups"]) == 1
+    with Runtime(result["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        a, b = library.host.Model(7, 3), library.host.Model(19, 5)
+        group, dimensions = next(iter(a._forge_package_field_groups.values()))
+        assert group.layout["nodes"] == expected_layout
+        assert dimensions == {
+            "_forge_package_extent_arg_n": 7,
+            "_forge_package_extent_arg_m": 3,
+            "_forge_package_extent_self_n": 7,
+        }
+        assert a.a._group_owner is a.v._group_owner is a.mat._group_owner is a.total._group_owner
+        assert a.a._group_owner is not b.a._group_owner
+        assert not np.frombuffer(a.a.read(), np.float32).any()
+        a.step(2.0)
+        b.step(-3.0)
+        for name, data in expected.items():
+            actual = np.frombuffer(getattr(a, name).read(), np.float32).reshape(data.shape)
+            np.testing.assert_array_equal(actual, data)
+        np.testing.assert_array_equal(
+            np.frombuffer(b.a.read(), np.float32).reshape(19, 5), -3 * (np.arange(19)[:, None] * 10 + np.arange(5))
+        )
+        assert np.frombuffer(b.total.read(), np.float32).item() == -57
+        b.step(1.0)
+        np.testing.assert_array_equal(np.frombuffer(a.a.read(), np.float32).reshape(7, 3), expected["a"])
+        registered = set(runtime._resources)
+        with pytest.raises((ValueError, RuntimeError)):
+            library.host.Model(0, 3)
+        assert runtime._resources == registered
+    if not real_helper:
+        probe = tmp_path / "consume_fields.py"
+        probe.write_text(
+            textwrap.dedent("""
+            import importlib.abc
+            import sys
+            import numpy as np
+            class NoFrontend(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                        raise AssertionError('Private frontend/source import: ' + fullname)
+            sys.meta_path.insert(0, NoFrontend())
+            from taichi_forge_runtime.aot import Runtime, load_package
+            with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as library:
+                model = library.host.Model(3, 2)
+                model.step(2.0)
+                np.testing.assert_array_equal(np.frombuffer(model.a.read(), np.float32), [0, 2, 20, 22, 40, 42])
+                assert model.a._group_owner is model.v._group_owner is model.mat._group_owner
+                assert np.frombuffer(model.total.read(), np.float32).item() == 6
+            print('FIELD_PACKAGE_SOURCE_FREE_OK')
+        """),
+            encoding="utf8",
+        )
+        env = dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        )
+        consumer = subprocess.run(
+            [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), result["target"]],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert consumer.returncode == 0, consumer.stdout + consumer.stderr
+        assert "FIELD_PACKAGE_SOURCE_FREE_OK" in consumer.stdout
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "self.n = n\n        self.n += 1",
+        "if n > 0:\n            self.n = n",
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unproved_field_extent_aliases(tmp_path, monkeypatch, replacement):
+    package = _source_package(tmp_path, monkeypatch, FIELD_SOURCE.replace("self.n = n", replacement))
+    with pytest.raises(ti.aot.PackageExportError, match="Field extents require"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_keeps_actual_host_field_extent_expressions(tmp_path, monkeypatch):
+    source = FIELD_SOURCE.replace("self.n = n", "self.n = n\n        self.bump()")
+    source += "\n    def bump(self):\n        self.n += 1\n"
+    package = _source_package(tmp_path, monkeypatch, source)
+    result = ti.aot.export_package(package, tmp_path / "sdk")
+    original = package.Model(7, 3)
+    original.step(1.0)
+    with Runtime(result["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        model = library.host.Model(7, 3)
+        assert model.a.shape == (8, 3) and model.v.shape == (7,)
+        model.step(1.0)
+        np.testing.assert_array_equal(np.frombuffer(model.a.read(), np.float32).reshape(8, 3), original.a.to_numpy())
+
+
+@pytest.mark.parametrize(
+    "allocation,diagnostic",
+    [
+        ("ti.field(ti.f32, shape=2147483648)", "positive i32 dimension"),
+        ("ti.field(ti.types.struct(x=ti.f32), shape=())", "scalar/vector/matrix elements"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_preflight_rejection_preserves_normal_jit(tmp_path, monkeypatch, allocation, diagnostic):
+    source = FIELD_SOURCE.replace("ti.field(ti.f32, shape=())", allocation)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    # Earlier fields in the rejected owner must not leave a pending builder or
+    # unplaced fields that break later, otherwise unrelated JIT execution.
+    output = ti.field(ti.i32, shape=3)
+
+    @ti.kernel
+    def fill():
+        for i in output:
+            output[i] = i + 7
+
+    fill()
+    np.testing.assert_array_equal(output.to_numpy(), [7, 8, 9])

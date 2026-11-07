@@ -19,6 +19,7 @@ from types import ModuleType, SimpleNamespace
 
 from taichi_forge.tools._compiled_host import decorator_resolver
 from ._package_types import qualified_kind, resolve_type, type_expression, type_spec
+from ._package_fields import field_declarations, construct_fields, field_allocation
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
@@ -44,7 +45,7 @@ def _owner_schema(module, node, kind):
         a.arg: a.annotation
         for a in (*constructor.args.posonlyargs, *constructor.args.args, *constructor.args.kwonlyargs)
     }
-    schema = {}
+    schema = field_declarations(module, constructor, kind, _fail)
     for statement in ast.walk(constructor):
         if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
             continue
@@ -55,6 +56,8 @@ def _owner_schema(module, node, kind):
             ):
                 continue
             value = statement.value
+            if target.attr in schema and schema[target.attr]["kind"] == "dense_field":
+                continue
             if isinstance(value, ast.Call) and qualified_kind(value, kind) == "ndarray":
                 if statement not in constructor.body or len(targets) != 1:
                     _fail(module, statement, "conditional or aliased allocation requires a resource contract")
@@ -86,7 +89,13 @@ def _owner_schema(module, node, kind):
 
 def _analyze(module, source):
     tree = ast.parse(source)
-    if any(isinstance(n, ast.Name) and n.id.startswith(_PREFIX) for n in ast.walk(tree)):
+    if any(
+        (isinstance(n, ast.Name) and n.id.startswith(_PREFIX))
+        or (isinstance(n, ast.Attribute) and n.attr.startswith(_PREFIX))
+        or (isinstance(n, ast.arg) and n.arg.startswith(_PREFIX))
+        or (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name.startswith(_PREFIX))
+        for n in ast.walk(tree)
+    ):
         _fail(module, tree, "reserved package-export identifier")
     kind = decorator_resolver(tree)
     definitions, owners = [], {}
@@ -171,6 +180,26 @@ def _host_projection(
 
     class Project(ast.NodeTransformer):
         owner = None
+
+        def visit_Assign(self, node):
+            return self._allocation(node)
+
+        def visit_AnnAssign(self, node):
+            return self._allocation(node)
+
+        def _allocation(self, node):
+            target = node.targets[0] if isinstance(node, ast.Assign) else node.target
+            schema = owners.get(self.owner, {})
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+                and schema.get(target.attr, {}).get("kind") == "dense_field"
+                and schema[target.attr]["allocation"] == [node.lineno, node.col_offset]
+            ):
+                node.value = field_allocation(module + "." + self.owner, target.attr, schema)
+                return node
+            return self.generic_visit(node)
 
         def visit_Import(self, node):
             replacements = []
@@ -368,6 +397,7 @@ def export_package(package, output, *, arch=None):
         files={},
         sources={},
         owners={},
+        field_groups={},
     )
     payloads = {}
     device_functions = {
@@ -385,9 +415,11 @@ def export_package(package, output, *, arch=None):
         for class_name, schema in schemas.items():
             cls = getattr(imported, class_name)
             owner = object.__new__(cls)  # Deliberately never call application __init__.
-            declarations = {}
+            declarations = construct_fields(owner, schema, vars(imported), module)
             for attribute, item in schema.items():
-                if item["kind"] == "ndarray":
+                if item["kind"] == "dense_field":
+                    continue
+                elif item["kind"] == "ndarray":
                     dtype = resolve_type(item.pop("type_node"), vars(imported))
                     item["element"] = type_spec(dtype, module)
                     declarations[attribute] = Array(dtype, item["ndim"])
@@ -399,7 +431,17 @@ def export_package(package, output, *, arch=None):
                     value = 0.0 if item["dtype"].startswith("f") else 0
                 setattr(owner, attribute, value)
             owners[class_name], environments[class_name] = owner, Component(**declarations)
-            manifest["owners"][name + "." + class_name] = schema
+            manifest["owners"][name + "." + class_name] = {
+                attribute: {key: value for key, value in item.items() if key not in ("allocation", "dimension_sources")}
+                for attribute, item in schema.items()
+            }
+            if any(item["kind"] == "dense_field" for item in schema.values()):
+                from ._component import _dense_group
+
+                layout, members, dimensions, _ = _dense_group(environments[class_name], owner, "fields")
+                manifest["field_groups"][name + "." + class_name] = dict(
+                    schema=layout, members=members, dimensions=sorted(dimensions)
+                )
         entries = {}
         for definition in definitions:
             if definition["kind"] not in ("kernel", "pyfunc"):
@@ -463,7 +505,7 @@ def export_package(package, output, *, arch=None):
             ]
             # Ndarray descriptors are passed unchanged, not encoded as scalar arguments.
             for item in capture:
-                if item["kind"] == "ndarray":
+                if item["kind"] in ("ndarray", "dense_field"):
                     item.pop("dtype")
             entry_manifest = dict(
                 symbol=symbol,
