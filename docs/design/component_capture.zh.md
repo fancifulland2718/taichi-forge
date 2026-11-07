@@ -160,6 +160,13 @@ Dense Field 的固定元素元数据 `n/m/ndim` 也随声明保留。`hasattr`/`
 区分 scalar 与 vector；scalar 不伪造 vector 维度。该资格只涉及已验证的元素类型，
 不允许用 `hasattr` 执行 owner getter、探测未声明配置或静态化动态 Field shape。
 
+原 `isinstance(field, ti.StructField/ti.MatrixField)` 也可用于已声明 Field 的类型分支，
+完整 StructField 的 `keys` 保留成员类型顺序并进入代码依赖检查。静态选出的成员先保留
+声明引用；只读 dtype 等类型信息不增加该成员的存储参数，真正索引时才接入原 ABI。
+模型向量/矩阵的 `n/m` 继续使用动态元素轴，可在原静态循环写法中降低为运行时循环。
+这不执行应用类的实例检查或任意 Host 反射。CPU/CUDA 的定义包检查覆盖动态尺寸、
+标量/向量成员、整数成员跳过、NaN/Inf 检出与恢复及无数值源码消费。
+
 普通 Kernel 的 `ti.template()` Field 参数可以引用组件 owner 已声明的 Dense Field，
 包含已声明别名。首次使用时接入原捕获/隐藏参数路径；未使用的 Field 模板不增加
 资源 ABI，也不因选择了另一无关资源而特化代码。实际模板到资源的映射进入代码

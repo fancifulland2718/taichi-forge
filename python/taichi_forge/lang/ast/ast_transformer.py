@@ -588,8 +588,14 @@ class ASTTransformer(Builder):
         func = node.func.ptr
         if ctx.deployment is not None:
             if func is impl.static:
+                from taichi_forge.aot._component import _FieldReference
+
                 args = [ctx.deployment.static_operand(ctx, arg) for arg in args]
-                if len(args) == 1 and not keywords and is_model_value(args[0]):
+                if (
+                    len(args) == 1
+                    and not keywords
+                    and (is_model_value(args[0]) or isinstance(args[0], _FieldReference))
+                ):
                     node.ptr = args[0]
                     return node.ptr
             if func is range and ctx.is_in_static_scope() and any(is_model_value(arg) for arg in args):
@@ -601,6 +607,9 @@ class ASTTransformer(Builder):
                 return node.ptr
             if func is getattr or func is hasattr:
                 node.ptr = ctx.deployment.named_attribute(ctx, args, keywords, presence=func is hasattr)
+                return node.ptr
+            if func is isinstance:
+                node.ptr = ctx.deployment.field_type_check(args, keywords)
                 return node.ptr
             ctx.deployment.check_call(func)
 
@@ -1108,10 +1117,10 @@ class ASTTransformer(Builder):
             return node.ptr
 
         if ctx.deployment is not None:
-            from taichi_forge.aot._component import _RecordReference
+            from taichi_forge.aot._component import _FieldReference, _RecordReference
 
-            if isinstance(node.value.ptr, _RecordReference):
-                node.ptr = ctx.deployment.attribute(ctx, node.attr, prefix=node.value.ptr.path)
+            if isinstance(node.value.ptr, (_FieldReference, _RecordReference)):
+                node.ptr = ctx.deployment.named_attribute(ctx, [node.value.ptr, node.attr], {})
                 return node.ptr
 
         if isinstance(node.value.ptr, Expr) and not hasattr(node.value.ptr, node.attr):

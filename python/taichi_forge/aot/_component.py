@@ -635,6 +635,16 @@ class _RecordReference:
         raise TaichiCompilationError("A declared record is a namespace; test its presence with 'is not None'")
 
 
+@dataclass(frozen=True)
+class _FieldReference:
+    """A declared member selected for static type inspection or later access."""
+
+    path: tuple
+
+    def _ti_expr_init(self):
+        return self
+
+
 class _DenseStructFieldOperand:
     """Lower a whole record through its already captured member views."""
 
@@ -1719,6 +1729,8 @@ class _Capture:
         self.objects = {}
         self.resource_conditions = {}
         self.record_equalities = set()
+        self.record_field_keys = {}
+        self.field_metadata = {}
         self.owner_sequence_lengths = {}
         self.methods = {}
         self.method_paths = {}
@@ -2110,6 +2122,8 @@ class _Capture:
         normal intermediate Struct from captured member references. Fixed
         SNode records retain the original Field lowering and activation rules.
         """
+        if isinstance(value, _FieldReference):
+            return self.attribute(ctx, value.path[-1], prefix=value.path[:-1])
         if not isinstance(value, _RecordReference):
             return value
         from taichi_forge.lang.struct import StructField
@@ -2133,6 +2147,81 @@ class _Capture:
             self.attribute(ctx, name, prefix=value.path)
         return field
 
+    def record_field_members(self, value):
+        """Read the declared StructField type, without capturing member storage."""
+        from taichi_forge.lang.struct import StructField
+
+        name = _capture_id(value.path)
+        field = self.component.read(self.owner, name)
+        declaration = self.declarations.get(name)
+        if not isinstance(field, StructField) or not isinstance(declaration, Record):
+            raise TaichiCompilationError("Field type introspection requires a declared StructField")
+        keys = tuple(field.field_dict)
+        if not all(
+            isinstance(self.declarations.get(_capture_id((*value.path, key))), (DenseField, FixedSNodeField))
+            for key in keys
+        ):
+            raise TaichiCompilationError("StructField introspection requires all members to be declared")
+        previous = self.record_field_keys.setdefault(name, keys)
+        if previous != keys:
+            raise TaichiCompilationError("StructField member type changed during compilation; retry")
+        return keys
+
+    def field_type_check(self, args, keywords):
+        """Qualify builtin Field categories on their lowered resource references."""
+        from taichi_forge.lang.any_array import AnyArray, ModelTensorArray
+        from taichi_forge.lang.field import Field, ScalarField
+        from taichi_forge.lang.matrix import MatrixField
+        from taichi_forge.lang.struct import StructField
+
+        if keywords or len(args) != 2:
+            raise TaichiCompilationError("Component isinstance requires a captured Field and builtin Field types")
+        value, classes = args
+        classes = classes if type(classes) is tuple else (classes,)
+        if not classes or any(
+            cls is not Field and cls is not ScalarField and cls is not MatrixField and cls is not StructField
+            for cls in classes
+        ):
+            raise TaichiCompilationError("Component isinstance only supports builtin Field categories")
+        if isinstance(value, _FieldReference):
+            category = MatrixField if self.field_type_metadata(None, value, "matrix") else ScalarField
+        elif isinstance(value, _RecordReference):
+            self.record_field_members(value)
+            category = StructField
+        elif isinstance(value, ModelTensorArray):
+            category = MatrixField
+        elif type(value) is AnyArray and "_component_field_metadata" in vars(value):
+            category = MatrixField if "n" in value._component_field_metadata else ScalarField
+        elif isinstance(value, Field):
+            # Fixed SNode fields already retain their original qualified ABI.
+            category = type(value)
+        else:
+            raise TaichiCompilationError("Component isinstance requires a captured Field")
+        return any(issubclass(category, cls) for cls in classes)
+
+    def field_type_metadata(self, ctx, value, key):
+        name = _capture_id(value.path)
+        declaration = self.declarations[name]
+        self.used[name] = declaration.schema
+        matrix = isinstance(declaration, _ModelTensorField) or isinstance(declaration.dtype, MatrixType)
+        scalar = cook_dtype(declaration.dtype.dtype if isinstance(declaration.dtype, MatrixType) else declaration.dtype)
+        axes = (
+            declaration.element_shape
+            if isinstance(declaration, _ModelTensorField)
+            else declaration.dtype.get_shape() if matrix else ()
+        )
+        metadata = dict(dtype=scalar, matrix=matrix)
+        if matrix:
+            metadata.update(n=axes[0], m=axes[1] if len(axes) == 2 else 1, ndim=len(axes))
+        if key not in metadata:
+            # Storage/shape/SNode operations use the existing reference and ABI.
+            return getattr(self.field_operand(ctx, value), key)
+        result = metadata[key]
+        if key in ("n", "m") and isinstance(result, str):
+            return getattr(self.field_operand(ctx, value), key)
+        self.field_metadata[(name, key)] = str(result) if key == "dtype" else result
+        return result
+
     def named_attribute(self, ctx, args, keywords, *, presence=False):
         """Resolve builtin getattr through the same declared attribute path."""
         if keywords or len(args) not in ((2,) if presence else (2, 3)) or type(args[1]) is not str:
@@ -2146,6 +2235,12 @@ class _Capture:
         owner, name = args[:2]
         from taichi_forge.lang.any_array import AnyArray, ModelTensorArray
 
+        if isinstance(owner, _FieldReference):
+            if presence:
+                if name not in ("dtype", "n", "m", "ndim"):
+                    raise TaichiCompilationError("Component Field introspection requires declared element metadata")
+                return name == "dtype" or self.field_type_metadata(ctx, owner, "matrix")
+            return self.field_type_metadata(ctx, owner, name)
         if isinstance(owner, ModelTensorArray):
             if name not in ("dtype", "n", "m", "ndim"):
                 raise TaichiCompilationError("Component Field introspection requires declared element metadata")
@@ -2167,6 +2262,20 @@ class _Capture:
         if owner is self.owner:
             return self.attribute(ctx, name)
         if isinstance(owner, _RecordReference):
+            if name == "keys":
+                from taichi_forge.lang.struct import StructField
+
+                if isinstance(self.component.read(self.owner, _capture_id(owner.path)), StructField):
+                    return list(self.record_field_members(owner))
+            path = (*owner.path, name)
+            declaration = self.declarations.get(_capture_id(path))
+            if (
+                ctx is not None
+                and ctx.is_in_static_scope()
+                and isinstance(declaration, DenseField)
+                and not getattr(declaration, "conditions", ())
+            ):
+                return _FieldReference(path)
             return self.attribute(ctx, name, prefix=owner.path)
         raise TaichiCompilationError("Component getattr requires a declared owner or record")
 
@@ -2289,6 +2398,12 @@ class _Capture:
             self.contract["resource_conditions"] = sorted(self.resource_conditions.items())
         if self.record_equalities:
             self.contract["record_equalities"] = sorted(self.record_equalities)
+        if self.record_field_keys:
+            self.contract["record_field_keys"] = sorted(self.record_field_keys.items())
+        if self.field_metadata:
+            self.contract["field_metadata"] = sorted(
+                (name, key, value) for (name, key), value in self.field_metadata.items()
+            )
         if self.owner_sequence_lengths:
             self.contract["owner_sequence_lengths"] = sorted(self.owner_sequence_lengths.items())
         if self.dense_access:
@@ -2352,6 +2467,12 @@ class _Capture:
             if any(inspect.getattr_static(type(value), method) is not getattr(object, method)
                    for method in ("__eq__", "__ne__")):
                 return f"record equality {path!r}"
+        for name, keys in self.record_field_keys.items():
+            from taichi_forge.lang.struct import StructField
+
+            value = component.read(owner, name)
+            if not isinstance(value, StructField) or tuple(value.field_dict) != keys:
+                return f"StructField members {name!r}"
         arrays = {}
         for name in self.used:
             declaration = component.declarations[name]
@@ -2444,6 +2565,7 @@ class _ComponentCode:
         self.objects = dict(context.objects)
         self.resource_conditions = dict(context.resource_conditions)
         self.record_equalities = frozenset(context.record_equalities)
+        self.record_field_keys = dict(context.record_field_keys)
         self.owner_sequence_lengths = dict(context.owner_sequence_lengths)
         self.methods = dict(context.methods)
         self.method_paths = dict(context.method_paths)

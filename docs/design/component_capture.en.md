@@ -211,6 +211,16 @@ vector/matrix Fields and inline helper arguments. It is guarded by the existing
 type/ABI contract; changing dtype selects different code, while changing a
 legal extent can reuse it. This metadata does not make shape or contents static.
 
+Builtin `isinstance(field, ti.StructField/ti.MatrixField)` branches are qualified
+for declared Fields. A complete StructField's `keys` retain member order as a
+code dependency. Statically selected members keep declaration references until
+actual indexing: inspecting a member's dtype does not add its storage argument.
+Model tensor `n/m` remain dynamic element axes, including runtime lowering of
+the original static-loop spelling. Application instance hooks and arbitrary Host
+reflection are not executed. CPU/CUDA definition-package checks cover new sizes,
+scalar/vector members, skipped integer members, NaN/Inf detection and restore,
+and consumption without numerical source.
+
 A normal kernel's `ti.template()` Field argument can refer to a Dense Field
 already declared by the component owner, including a declared alias. Its first
 use joins the existing capture/hidden-argument path; unused Field templates do

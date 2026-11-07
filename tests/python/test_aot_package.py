@@ -1169,7 +1169,9 @@ def test_package_field_like_rejects_unproved_layouts(tmp_path, monkeypatch, fail
     assert not (tmp_path / "sdk").exists()
 
 
-@pytest.mark.parametrize("kind", ["vector", "struct", "struct_helper", "struct_rejected_helper"])
+@pytest.mark.parametrize(
+    "kind", ["vector", "struct", "struct_helper", "struct_rejected_helper", "invalid_type", "invalid_value"]
+)
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_field_like_borrowed_input_preserves_source_dimensions(tmp_path, monkeypatch, kind):
     source = FIELD_LIKE_SOURCE.replace(
@@ -1197,11 +1199,38 @@ class Checkpoint:
     def restore(self):
         for i in range(self.source.shape[0]):
             self.source[i] = self.backup[i]
+    @ti.func
+    def finite(self, field: ti.template(), index):
+        valid = True
+        if ti.static(isinstance(field, ti.MatrixField)):
+            if ti.static(field.ndim == 1):
+                for j in ti.static(range(field.n)):
+                    valid = valid and (-3.4028234663852886e38 <= field[index][j] <= 3.4028234663852886e38)
+            else:
+                for j, k in ti.static(ti.ndrange(field.n, field.m)):
+                    valid = valid and (-3.4028234663852886e38 <= field[index][j, k] <= 3.4028234663852886e38)
+        else:
+            valid = -3.4028234663852886e38 <= field[index] <= 3.4028234663852886e38
+        return valid
+    @ti.kernel
+    def invalid_count(self) -> ti.i32:
+        invalid = 0
+        for index in ti.grouped(self.source):
+            valid = True
+            if ti.static(isinstance(self.source, ti.StructField)):
+                for name in ti.static(self.source.keys):
+                    field = ti.static(getattr(self.source, name))
+                    if ti.static(field.dtype == ti.f32):
+                        valid = valid and self.finite(field, index)
+            elif ti.static(self.source.dtype == ti.f32):
+                valid = self.finite(self.source, index)
+            invalid += int(not valid)
+        return invalid
 """
     if kind.startswith("struct"):
         source = source.replace(
             "scope.vector_field(self.n, ti.f32,",
-            "scope.struct_field({'x': ti.f32, 'v': ti.types.vector(self.n, ti.f32)},",
+            "scope.struct_field({'x': ti.f32, 'v': ti.types.vector(self.n, ti.f32), 'id': ti.i32},",
         )
         source = source.replace("shape=scope.dim('n')", "shape=(scope.dim('n'), 2)")
         source = source.replace("for i in self.storage.values:", "for i in ti.grouped(self.storage.values):")
@@ -1225,7 +1254,16 @@ class Checkpoint:
             source = source.replace(
                 "scope.borrow('source', values, source_scope=True)", "declare_source(scope, 'source', values)"
             )
+    if kind.startswith("invalid_"):
+        query = "isinstance(self.source, int)" if kind == "invalid_type" else "isinstance(3, ti.StructField)"
+        source = source.replace("isinstance(self.source, ti.StructField)", query)
     package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model, Checkpoint\n")
+    if kind.startswith("invalid_"):
+        with pytest.raises(ValueError, match="Component isinstance"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        assert sys.modules["definition_fixture.model"].constructors == 0
+        assert not (tmp_path / "sdk").exists()
+        return
     if kind == "struct_rejected_helper":
         with pytest.raises(ValueError, match="helper excludes whole StructField"):
             ti.aot.export_package(package, tmp_path / "sdk")
@@ -1233,12 +1271,16 @@ class Checkpoint:
         assert not (tmp_path / "sdk").exists()
         return
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    if kind.startswith("struct"):
+        check = next(entry for entry in manifest["entries"].values() if entry["definition"].endswith(".invalid_count"))
+        assert not any(capture["path"][-1] == "id" for capture in check["captures"])
     assert sys.modules["definition_fixture.model"].constructors == 0
     original = package.Model(6)
     original.fill(4.0)
     original.save()
     original.fill(-2.0)
     original.restore()
+    assert original.checkpoint.invalid_count() == 0
     with (
         Runtime(manifest["target"]) as runtime,
         load_package(runtime, tmp_path / "sdk") as code,
@@ -1250,6 +1292,7 @@ class Checkpoint:
         model.restore()
         actual = model.storage.values.to_numpy()
         reference = original.storage.values.to_numpy()
+        assert model.checkpoint.invalid_count() == 0
         if kind.startswith("struct"):
             assert manifest["version"] == 41
             for name in actual:
@@ -1263,10 +1306,22 @@ class Checkpoint:
             np.testing.assert_array_equal(other.storage.values.x.to_numpy(), expected)
             np.testing.assert_array_equal(other.storage.values.v.to_numpy(), expected[:, :, None] + np.arange(9))
             np.testing.assert_array_equal(model.storage.values.x.to_numpy(), actual["x"])
+            invalid = other.storage.values.v.to_numpy()
+            invalid[-1, -1, -1] = np.nan
+            other.storage.values.v.from_numpy(invalid)
+            assert other.checkpoint.invalid_count() == 1
+            other.restore()
+            assert other.checkpoint.invalid_count() == 0
             with pytest.raises(ValueError, match="declared allocation member"):
                 code.host.Checkpoint(model.storage.values.v)
         else:
             np.testing.assert_array_equal(actual, reference)
+            invalid = model.storage.values.to_numpy()
+            invalid[-1, -1] = np.inf
+            model.storage.values.from_numpy(invalid)
+            assert model.checkpoint.invalid_count() == 1
+            model.restore()
+            assert model.checkpoint.invalid_count() == 0
     if kind == "struct":
         probe = tmp_path / "consume_struct_checkpoint.py"
         probe.write_text(
@@ -1289,6 +1344,12 @@ with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code
         expected = gain * np.arange(n)[:, None] + np.arange(2)
         np.testing.assert_array_equal(model.storage.values.x.to_numpy(), expected)
         np.testing.assert_array_equal(model.storage.values.v.to_numpy(), expected[:, :, None] + np.arange(n))
+        assert model.checkpoint.invalid_count() == 0
+        invalid = model.storage.values.v.to_numpy()
+        invalid[-1, -1, -1] = np.nan
+        model.storage.values.v.from_numpy(invalid)
+        assert model.checkpoint.invalid_count() == 1
+        model.restore()
     np.testing.assert_array_equal(a.storage.values.x.to_numpy(), 2 * np.arange(5)[:, None] + np.arange(2))
 print('STRUCT_CHECKPOINT_SOURCE_FREE_OK')
 """,
