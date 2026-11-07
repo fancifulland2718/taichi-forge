@@ -137,6 +137,16 @@ belong to the same recording. Focused source-free CPU/CUDA checks cover independ
 private arrays and interleaved prepared snapshots. Nested/Vulkan control recipes and
 native-provider Graph nodes remain outside this facade. Loop bounds are currently
 recording-time values; changing a bound requires rerecording the Host plan.
+
+Version 33 adds `scope.value('iterations', ti.i32, affects_plan=True)` to separate
+a numerical runtime input from a Host plan dependency. Numerical code keeps an
+ordinary ABI parameter, without iteration-count specializations. Graph recording
+snapshots the marked scalar; compilation and a new bind reject changes, requiring
+normal Host rerecording before preparation. Existing prepared calls keep their old
+snapshots. Unmarked values can still update at bind time. This scalar-only policy
+requires stable model parameters during recording; it does not infer arbitrary
+Python branches. Existing Component Graphs retain the selected value through
+their configuration admission without adding it to kernel static identity.
 - Array extents and ordinary scalar attributes remain runtime data. Existing Component lowering supplies the internal type contract without user Component registration. Extent-one temporary arrays provide type/rank witnesses, not sample models or static-branch choices.
 - Normal JIT decorators and invocation remain unchanged. Scanning and Host projection run only on explicit export.
 

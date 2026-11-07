@@ -128,7 +128,10 @@ class ResourceScope:
         values = self._registry.get("values", {})
         if name in values:
             previous = values[name]["declaration"]
-            if previous.schema != declaration.schema or (
+            if (
+                previous.schema != declaration.schema
+                or getattr(previous, "affects_plan", False) != getattr(declaration, "affects_plan", False)
+            ) or (
                 isinstance(declaration, StaticValue)
                 and (
                     (None if previous.choices is None else tuple(map(_static_value, previous.choices)))
@@ -144,15 +147,17 @@ class ResourceScope:
         )
         del caller
 
-    def value(self, name, dtype):
+    def value(self, name, dtype, *, affects_plan=False):
         """Declare an existing scalar/vector/matrix as a runtime input.
 
         The original owner value remains unchanged. Only entries that read it
         acquire an ABI input; dtype and fixed element shape come from this role.
+        A scalar affecting Host graph construction can also guard the recorded
+        plan. Its value remains a runtime kernel input, never a specialization.
         """
         from taichi_forge.aot._component import RuntimeValue
 
-        self._declare_value(name, RuntimeValue(dtype))
+        self._declare_value(name, RuntimeValue(dtype, affects_plan=affects_plan))
 
     def static(self, name, *, choices, kernel_only=False):
         """Declare finite configuration; kernel-only values cannot control Host recording.

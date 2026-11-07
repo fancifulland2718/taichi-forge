@@ -104,7 +104,7 @@ class OwnerGraph:
                     item["dtype"] = item["element"]["dtype"]
                 else:
                     dtype = getattr(ti, item["dtype"])
-                declarations[attribute] = RuntimeValue(dtype)
+                declarations[attribute] = RuntimeValue(dtype, affects_plan=item.get("affects_plan", False))
                 value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
             write_member(owner, attribute, value, schema)
         environment, expanded = _compose(field_environment(declarations, schema), schema, children)

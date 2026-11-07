@@ -88,6 +88,11 @@ class _GraphCapture:
             and declaration.choices is not None
             and (self.owner is None or component.available(self.owner, name))
         }
+        self._plan_values = {
+            name: declaration for name, declaration in component.declarations.items()
+            if isinstance(declaration, RuntimeValue) and declaration.affects_plan
+            and (self.owner is None or component.available(self.owner, name))
+        }
         self._options = {}
         if any(isinstance(declaration, RootOption) for declaration in self._choices.values()):
             signature = inspect.signature(record)
@@ -101,7 +106,7 @@ class _GraphCapture:
                     self._options[name] = parameters.arguments[name]
         self._root_name = getattr(record, "__qualname__", "component root")
         self.configuration = {}
-        if self._choices:
+        if self._choices or self._plan_values:
             self.owner = getattr(record, "__self__", None)
             if self.owner is None:
                 raise TaichiCompilationError(
@@ -114,7 +119,7 @@ class _GraphCapture:
         return {name: _static_value(self.component.read(self.owner, name)) for name in self._constants}
 
     def _configuration(self):
-        return {
+        configuration = {
             name: dict(
                 selected=declaration.validate(
                     (
@@ -129,6 +134,10 @@ class _GraphCapture:
             )
             for name, declaration in self._choices.items()
         }
+        for name in self._plan_values:
+            selected = _static_value(self.component.read(self.owner, name))
+            configuration[name] = dict(selected=selected, choices=[selected])
+        return configuration
 
     def dispatch(self, builder, entry, args, template_args, label):
         from taichi_forge.graph._graph import Arg, ArgKind, flatten_args
@@ -1161,7 +1170,7 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
         configuration = {
             name: spec
             for name, spec in capture.configuration.items()
-            if not capture._choices[name].kernel_only or name in used_static
+            if not getattr(capture._choices.get(name), "kernel_only", False) or name in used_static
         }
         # Collection membership is a normal Host algorithm choice. Reuse
         # static admission for its length, without adding a Kernel argument.
@@ -1192,7 +1201,7 @@ def compile_component_graph(component, record, *args, initializer=None, setup=No
         contract["compilation"]["configuration_sources"] = {
             name: dict(
                 kind=("sequence_length" if name in sequences else
-                      "recording_argument" if isinstance(capture._choices[name], RootOption) else "attribute"),
+                      "recording_argument" if isinstance(capture._choices.get(name), RootOption) else "attribute"),
                 path=component.source_path(component._paths[name]),
             )
             for name in configuration

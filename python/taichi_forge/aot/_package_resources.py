@@ -843,9 +843,14 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             if statement.lineno < scopes[scope].lineno:
                 fail(module, statement, "Value declaration precedes its resource scope")
             args = dict(zip(("name", "dtype"), call.args))
-            if len(call.args) > 2 or any(k.arg not in ("name", "dtype") or k.arg in args for k in call.keywords):
+            if len(call.args) > 2 or any(
+                k.arg not in ("name", "dtype", "affects_plan") or k.arg in args for k in call.keywords
+            ):
                 fail(module, statement, "ResourceScope.value requires explicit name and dtype")
             args.update((k.arg, k.value) for k in call.keywords)
+            plan_option = args.pop("affects_plan", ast.Constant(False))
+            if not isinstance(plan_option, ast.Constant) or type(plan_option.value) is not bool:
+                fail(module, statement, "ResourceScope.value affects_plan requires a literal bool")
             name = args.get("name")
             if not (
                 set(args) == {"name", "dtype"}
@@ -862,6 +867,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     name.value,
                     kind="value",
                     type_node=args["dtype"],
+                    **({"affects_plan": True} if plan_option.value else {}),
                     value_declaration=[statement.lineno, statement.col_offset],
                     scope_allocation=origin(scope),
                 ),

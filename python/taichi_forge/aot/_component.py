@@ -174,6 +174,13 @@ class _SourceScopeRequired:
 @dataclass(frozen=True)
 class RuntimeValue:
     dtype: object
+    affects_plan: bool = False
+
+    def __post_init__(self):
+        if type(self.affects_plan) is not bool:
+            raise ValueError("Runtime value affects_plan must be bool")
+        if self.affects_plan and isinstance(self.dtype, MatrixType):
+            raise ValueError("Plan-dependent runtime values currently require scalar types")
 
     @property
     def schema(self):

@@ -2934,7 +2934,7 @@ class Model:
         condition.dispatch(self.condition, predicate, counter)
         body.dispatch(self.advance, counter)
         builder.while_loop(condition, body, predicate=predicate, counter=counter,
-                           max_iterations=maximum, masked_execution=True, lowering_mode='native_required')
+                           max_iterations=maximum, masked_execution=True, lowering_mode='auto')
     def graph(self, maximum):
         builder = ti.graph.GraphBuilder()
         self.record(builder, maximum)
@@ -2942,9 +2942,13 @@ class Model:
 """
 
 
+@pytest.mark.parametrize("plan_value", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monkeypatch):
-    package = _source_package(tmp_path, monkeypatch, PACKAGE_WHILE_SOURCE)
+def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monkeypatch, plan_value):
+    source = PACKAGE_WHILE_SOURCE
+    if plan_value:
+        source = source.replace("scope.value('limit', ti.i32)", "scope.value('limit', ti.i32, affects_plan=True)")
+    package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert len(manifest["entries"]) == 4 and not manifest["entry_families"]  # three kernels plus fixture entry
     reference = package.Model(3, 5, 2)
@@ -2953,6 +2957,11 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
     for _ in range(5):
         reference.advance(counter)
     np.testing.assert_array_equal(reference.values.to_numpy(), np.arange(1, 4) * 10)
+    if plan_value:
+        assert manifest["version"] == 33
+        compiled = ti.aot.Component.from_owner(reference).compile_graph(reference.record, 5)
+        assert compiled.contract["configuration"]["limit"]["selected"] == ["int", 5]
+        assert all("limit" not in dict(entry["static"]) for entry in compiled.contract["entries"])
     probe = tmp_path / "consume_package_while.py"
     probe.write_text(
         textwrap.dedent("""
@@ -2977,6 +2986,24 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
             assert not ga.arguments and not gb.arguments
             pa, pb = ga.bind({}), gb.bind({})
             a.limit, a.gain = 1, 7
+            if sys.argv[3] == 'True':
+                try:
+                    ga.bind({})
+                except ValueError as error:
+                    assert 'Plan parameter' in str(error)
+                else:
+                    raise AssertionError('old plan accepted a changed iteration parameter')
+                ga = a.graph(5)
+                changing = code.graph_builder()
+                a.record(changing, 5)
+                a.limit = 3
+                try:
+                    changing.compile()
+                except ValueError as error:
+                    assert 'Plan parameter' in str(error)
+                else:
+                    raise AssertionError('changed recording published a plan')
+                a.limit = 1
             with ga.bind({}) as fresh:
                 fresh.run()
                 np.testing.assert_array_equal(a.values.to_numpy(), np.arange(1, 4) * 7)
@@ -3028,7 +3055,7 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
         TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
     )
     result = subprocess.run(
-        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"], str(plan_value)],
         cwd=tmp_path,
         env=env,
         capture_output=True,

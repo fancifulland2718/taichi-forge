@@ -1099,6 +1099,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(11, manifest["version"])
             if any(item["kind"] == "constant" for item in schema.values()):
                 manifest["version"] = max(30, manifest["version"])
+            if any(item.get("affects_plan") for item in schema.values()):
+                manifest["version"] = max(33, manifest["version"])
             if any("presence_parameter" in item for item in schema.values()):
                 manifest["version"] = max(13, manifest["version"])
             if any(item["kind"] == "record" or item.get("constraints") for item in schema.values()):

@@ -96,6 +96,13 @@ call，可反复 `run()`；`graph.run(arguments)` 是每次重新 prepare 的单
 和区域须来自同一录制。局部 CPU/CUDA 无源码检查覆盖私有数组隔离及 prepared 快照
 交错执行。嵌套/Vulkan 控制配方和原生 provider 节点尚未接入此接口。循环上限目前在
 录图时确定；改变上限须重新运行 Host 构图。
+
+版本 33 的 `scope.value('iterations', ti.i32, affects_plan=True)` 将“数值运行参数”与
+“Host 计划依赖”分开：数值代码仍读取普通 ABI 输入，不按次数生成特化；Graph 记录时
+保存该参数，编译及重新 bind 检查它没有改变。改变后重新运行正常 Host 构图，再 prepare。
+已准备调用保持旧快照。未标记的普通值仍可在 bind 时更新。该标记限标量，要求 Host
+录图期间保持模型参数稳定；它不自动分析任意 Python 分支。旧 Component Graph 复用
+现有配置准入保存选定值，Kernel 的静态身份不包含这个值。
 - 数组尺寸、普通标量属性按运行时数据传递。内部复用 Component lowering 的类型合同，不要求用户注册 Component；extent 为 1 的临时数组只提供类型/维数见证，不选择模型或静态分支。
 - 正常 JIT 装饰器与调用路径不变；包扫描和 Host 投影仅在显式导出时执行。
 

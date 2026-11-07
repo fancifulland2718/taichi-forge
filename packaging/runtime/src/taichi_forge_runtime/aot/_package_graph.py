@@ -13,6 +13,7 @@ from ._plan import ExecutionPlan
 from ._runtime import Scalar
 from ._package_values import capture_value, check_admission
 from .._dimensions import extent_dependencies, local_workspace_shape, check_model_static_ranges
+from .._static_values import static_key
 
 
 class ArgKind(Enum):
@@ -82,6 +83,27 @@ class GraphBuilder:
         self._captures, self._constants = {}, {}
         self._admissions = []
         self._range_checks = []
+        self._plan_values = {}
+
+    def _record_plan_values(self, owner):
+        if owner is None:
+            return
+        schema = self.package.manifest["owners"].get(type(owner)._forge_package_type, {})
+        for name, item in schema.items():
+            if not item.get("affects_plan"):
+                continue
+            spec = dict(name=name, kind="value", dtype=item["dtype"], path=item.get("path", [name]))
+            value = capture_value(owner, spec)
+            key = id(owner), name
+            previous = self._plan_values.get(key)
+            if previous is not None and static_key(previous[2]) != static_key(value):
+                raise ValueError(f"Plan parameter {name!r} changed while recording; rebuild the Graph")
+            self._plan_values[key] = owner, spec, value
+
+    def _check_plan_values(self):
+        for owner, spec, value in self._plan_values.values():
+            if static_key(capture_value(owner, spec)) != static_key(value):
+                raise ValueError(f"Plan parameter {spec['name']!r} changed; rebuild the Graph before preparing")
 
     def dispatch(self, kernel, *args, template_args=None):
         from ._package import entry, _BoundEntry
@@ -144,6 +166,7 @@ class GraphBuilder:
                 name, binding = captured[item["name"]]
             names.append(name)
             captures[name] = binding
+        self._record_plan_values(owner)
         self.operations.append(dict(kind="kernel", entry=kernel.symbol, arguments=names))
         self.arguments = arguments
         self._captures, self._constants = captures, constants
@@ -200,12 +223,16 @@ class GraphBuilder:
             if name in combined and combined[name] != schema:
                 raise ValueError(f"Graph argument {name!r} has conflicting declarations")
             combined[name] = schema
+        for key, binding in sequence._plan_values.items():
+            if key in self._plan_values and static_key(self._plan_values[key][2]) != static_key(binding[2]):
+                raise ValueError("Graph sequences recorded different plan parameters")
         self.operations.extend(sequence.operations)
         self.arguments = combined
         self._captures.update(sequence._captures)
         self._constants.update(sequence._constants)
         self._admissions.extend(sequence._admissions)
         self._range_checks.extend(sequence._range_checks)
+        self._plan_values.update(sequence._plan_values)
         return self
 
     def while_loop(
@@ -270,6 +297,7 @@ class GraphBuilder:
 
     def compile(self):
         self.package._check()
+        self._check_plan_values()
         return Graph(
             self.package,
             ExecutionPlan(self.operations, resources=self._constants.values()),
@@ -277,15 +305,17 @@ class GraphBuilder:
             dict(self._captures),
             list(self._admissions),
             list(self._range_checks),
+            dict(self._plan_values),
         )
 
 
 class Graph:
-    def __init__(self, package, plan, arguments, captures=None, admissions=None, range_checks=None):
+    def __init__(self, package, plan, arguments, captures=None, admissions=None, range_checks=None, plan_values=None):
         self.package, self.plan, self.arguments = package, plan, arguments
         self.captures = captures or {}
         self.admissions = admissions or []
         self.range_checks = range_checks or []
+        self.plan_values = plan_values or {}
 
     def bind(self, arguments):
         self.package._check()
@@ -293,6 +323,9 @@ class Graph:
             raise ValueError("Graph binding must supply exactly its declared arguments")
         for owner, contract in self.admissions:
             check_admission(owner, contract)
+        for owner, schema, previous in self.plan_values.values():
+            if static_key(capture_value(owner, schema)) != static_key(previous):
+                raise ValueError(f"Plan parameter {schema['name']!r} changed; rebuild the Graph before preparing")
         values = {}
         for name, schema in self.arguments.items():
             value = arguments[name]
@@ -302,7 +335,8 @@ class Graph:
                 value = self.plan.value(self.package._module, name, value)
             values[name] = value
         captured = {
-            name: capture_value(owner, schema)
+            name: (self.plan_values[(id(owner), schema["name"])][2]
+                   if (id(owner), schema["name"]) in self.plan_values else capture_value(owner, schema))
             for name, (owner, schema) in self.captures.items()
             if schema["kind"] != "local_tensor_workspace"
         }
