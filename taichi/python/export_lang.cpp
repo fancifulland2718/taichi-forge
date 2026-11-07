@@ -323,6 +323,7 @@ py::dict offloaded_task_manifest_to_python(
   }
   item["static_shared_bytes"] = task.static_shared_bytes;
   item["dynamic_shared_bytes"] = task.dynamic_shared_bytes;
+  item["dynamic_shared_bytes_runtime"] = task.dynamic_shared_bytes_runtime;
   item["thread_local_bytes"] = task.thread_local_bytes;
   return item;
 }
@@ -8135,6 +8136,12 @@ void export_lang(py::module &m) {
 
   m.def("make_reference",
         Expr::make<ReferenceExpression, const Expr &, const DebugInfo &>);
+
+  m.def("make_dynamic_shared_ptr_expr",
+        [](int allocation_id, DataType dtype, const ExprGroup &shape,
+           const Expr &offset, const DebugInfo &info) {
+          return Expr::make<DynamicSharedPtrExpression>(allocation_id, dtype, shape, offset, info);
+        });
 
   m.def(
       "make_external_tensor_expr",

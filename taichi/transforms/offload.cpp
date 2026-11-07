@@ -24,8 +24,9 @@ constexpr char kSharedArrayScopeError[] =
 class ValidateSharedArrayScope : public BasicStmtVisitor {
  private:
   using BasicStmtVisitor::visit;
+  bool qualify_;
 
-  static bool is_inside_parallel_range_for(const AllocaStmt *stmt) {
+  static bool is_inside_parallel_range_for(const Stmt *stmt) {
     for (auto block = stmt->parent; block != nullptr;
          block = block->parent_block()) {
       auto parent_stmt = block->parent_stmt();
@@ -39,14 +40,34 @@ class ValidateSharedArrayScope : public BasicStmtVisitor {
   }
 
  public:
+  explicit ValidateSharedArrayScope(bool qualify) : qualify_(qualify) {}
   void visit(AllocaStmt *stmt) override {
     if (stmt->is_shared && !is_inside_parallel_range_for(stmt)) {
       ErrorEmitter(TaichiSyntaxError(), stmt, kSharedArrayScopeError);
     }
   }
 
-  static void run(IRNode *root) {
-    ValidateSharedArrayScope pass;
+  void visit(DynamicSharedPtrStmt *stmt) override {
+    if (!is_inside_parallel_range_for(stmt))
+      ErrorEmitter(TaichiSyntaxError(), stmt, kSharedArrayScopeError);
+    auto *callable = stmt->get_callable();
+    TI_ERROR_IF(!dynamic_cast<Kernel *>(callable),
+                "Model-sized SharedArray requires an inlined kernel scope");
+    if (!qualify_)
+      return;
+    stmt->layout = {};
+    stmt->layout.allocation_id = stmt->allocation_id;
+    stmt->layout.element_bytes = data_type_size(stmt->ret_type.ptr_removed());
+    for (auto *size : stmt->shape) {
+      auto bound = describe_host_range_bound(size, callable->args_type);
+      TI_ERROR_IF(!bound,
+                  "SharedArray dimensions must use immutable launch arguments");
+      stmt->layout.extents.push_back(*bound);
+    }
+  }
+
+  static void run(IRNode *root, bool qualify = false) {
+    ValidateSharedArrayScope pass(qualify);
     root->accept(&pass);
   }
 };
@@ -951,6 +972,9 @@ void associate_continue_scope(IRNode *root, const CompileConfig &config) {
 
 void offload(IRNode *root, const CompileConfig &config) {
   TI_AUTO_PROF;
+  // Capture typed, simplified immutable extents before cross-task promotion
+  // can replace the original argument expression with a temporary load.
+  ValidateSharedArrayScope::run(root, true);
   auto offloaded_ranges = Offloader::run(root, config);
   type_check(root, config);
   if (config.opt_level > 0) {

@@ -1688,7 +1688,26 @@ class _Capture:
         self._real_functions = {}
         self._current_real_function = None
         self.workspaces = {}
+        self.shared_arrays = {}
         self.local_tensor_scope = None
+
+    def shared_array(self, dtype, shape):
+        from taichi_forge._lib import core
+        from taichi_forge.lang._local_tensor import extent
+
+        if impl.current_cfg().arch != core.cuda:
+            raise TaichiCompilationError("Model-sized SharedArray currently requires CUDA")
+        if self._current_real_function is not None or self.local_tensor_scope is None:
+            raise TaichiCompilationError("Model-sized SharedArray requires an inlined parallel kernel range")
+        dimensions = tuple(extent(size) for size in shape)
+        if not dimensions or any(item is None for item in dimensions):
+            raise TaichiCompilationError("Model-sized SharedArray extents require immutable declared dimensions")
+        dtype = cook_dtype(dtype)
+        if id(dtype) not in primitive_types.type_ids or dtype == primitive_types.u1:
+            raise TaichiCompilationError("Model-sized SharedArray requires primitive scalar elements")
+        allocation = len(self.shared_arrays)
+        self.shared_arrays[allocation] = dict(dtype=str(dtype), shape=dimensions)
+        return allocation
 
     def _local_tensor_slot(self):
         state = self._current_real_function
@@ -2168,6 +2187,8 @@ class _Capture:
         }
         if self.workspaces:
             self.contract["local_tensor_workspaces"] = self.workspaces
+        if self.shared_arrays:
+            self.contract["model_shared_arrays"] = self.shared_arrays
         if self.objects:
             self.contract.update(
                 objects=sorted(self.objects.items()),

@@ -356,11 +356,9 @@ void CUDAContext::launch(void *func,
   // then profiler->start and profiler->stop mismatch.
   // TODO: should we keep the handle?
 
-  TI_ERROR_IF(
-      dynamic_shared_mem_bytes > 0,
-      "CUDA dynamic shared memory is disabled because opt-in allocations can "
-      "trigger CUDA_ERROR_ILLEGAL_ADDRESS (IMA). Recompile the kernel with a "
-      "SharedArray no larger than 48 KiB.");
+  // The task launcher binds model-sized shared memory to the actual loaded
+  // function/device capacity and validates every task before submission. Direct
+  // driver callers remain subject to CUDA's function allocation limit.
 
   KernelProfilerBase::TaskHandle task_handle;
   // Kernel launch

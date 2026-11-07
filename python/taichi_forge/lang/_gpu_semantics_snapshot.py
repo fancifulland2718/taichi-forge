@@ -362,8 +362,10 @@ def _build_resident_gpu_semantics(raw, *, primal_program_id=""):
                 kind=launch_kind,
                 dispatch_group_count=groups,
                 workgroup_shape=workgroup,
-                dynamic_workgroup_memory_bytes=_resolved_bytes(
-                    task["dynamic_shared_bytes"], provenance
+                dynamic_workgroup_memory_bytes=(
+                    _GpuResolvedValue()
+                    if task.get("dynamic_shared_bytes_runtime", False)
+                    else _resolved_bytes(task["dynamic_shared_bytes"], provenance)
                 ),
                 actual_geometry_blocker=(
                     ""

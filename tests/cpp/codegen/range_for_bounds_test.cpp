@@ -3,6 +3,7 @@
 #include "taichi/analysis/range_for_bounds.h"
 #include "taichi/analysis/default_gpu_block_size.h"
 #include "taichi/analysis/host_range_bounds.h"
+#include "taichi/codegen/dynamic_shared_array.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/codegen/spirv/compiled_kernel_data.h"
@@ -12,6 +13,31 @@
 
 namespace taichi::lang {
 namespace {
+
+TEST(DynamicSharedLayout, AlignsAllocationsAndRejectsUnsafeArguments) {
+  HostRangeBound dimension;
+  dimension.offsets = {0};
+  HostRangeBound constant;
+  constant.factor = 2;
+  std::vector<DynamicSharedArray> arrays{{0, 4, {dimension}},
+                                       {1, 8, {dimension, constant}}};
+  std::int32_t size = 3;
+  const auto layout = evaluate_dynamic_shared_layout(arrays, &size, sizeof(size), 64);
+  ASSERT_TRUE(layout);
+  EXPECT_EQ(layout->offsets, (std::vector<std::uint32_t>{0, 16}));
+  EXPECT_EQ(layout->bytes, 64);
+  EXPECT_FALSE(evaluate_dynamic_shared_layout(arrays, &size, sizeof(size), 63));
+  EXPECT_FALSE(evaluate_dynamic_shared_layout(arrays, &size, 3, 64));
+  const std::vector<std::pair<std::uint64_t, std::uint64_t>> mutable_args{{0, 4}};
+  EXPECT_FALSE(evaluate_dynamic_shared_layout(arrays, &size, sizeof(size), 64, &mutable_args));
+  for (auto invalid : {0, -1, INT32_MAX}) {
+    size = invalid;
+    EXPECT_FALSE(evaluate_dynamic_shared_layout(arrays, &size, sizeof(size), 48 * 1024));
+  }
+  size = 3;
+  arrays[1].allocation_id = 0;
+  EXPECT_FALSE(evaluate_dynamic_shared_layout(arrays, &size, sizeof(size), 64));
+}
 
 TEST(DefaultGpuBlockSize, ShrinksOnlyKnownSingleBlockRanges) {
   for (auto arch : {Arch::cuda, Arch::vulkan}) {

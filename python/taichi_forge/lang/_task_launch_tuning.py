@@ -293,7 +293,7 @@ def _candidate_blocks(tasks, max_threads, semantics=None, backend="cuda"):
     if len(ranges) != 1:
         return (), "requires exactly one parallel range task"
     task = ranges[0]
-    if task.static_shared_bytes or task.dynamic_shared_bytes:
+    if task.static_shared_bytes or task.dynamic_shared_bytes or task.dynamic_shared_bytes_runtime:
         return (), "shared-memory kernels require a resource-aware tuning stage"
     limit = min(1024, int(max_threads)) if int(max_threads) > 0 else 1024
     candidates = tuple(value for value in _CANDIDATE_BLOCK_DIMS if value <= limit)

@@ -7,6 +7,7 @@
 #include "llvm/IR/Module.h"
 #include "taichi/common/serialization.h"
 #include "taichi/codegen/range_for_bounds.h"
+#include "taichi/codegen/dynamic_shared_array.h"
 #include "taichi/ir/offloaded_task_type.h"
 
 namespace taichi::lang {
@@ -27,6 +28,9 @@ class OffloadedTask {
   // registered. It is deliberately excluded from TI_IO_DEF; deserialized
   // tasks are rebound after their module is loaded.
   void *native_function{nullptr};
+  // Device/function capacity resolved alongside native_function, never stored
+  // in an artifact or inferred from the producer's device.
+  int available_dynamic_shared_bytes{-1};
   OffloadedTaskType task_type{OffloadedTaskType::serial};
   int requested_block_dim{0};
   int requested_grid_dim{0};
@@ -60,6 +64,7 @@ class OffloadedTask {
            range_bounds->supports_device_dispatch() &&
            !one_to_one && !external_shared_staged &&
            !static_shared_array_bytes && !dynamic_shared_array_bytes &&
+           dynamic_shared_arrays.empty() &&
            ((thread_local_bytes != 0) ==
             (range_bounds->empty_group_elision ==
              EmptyRangeGroupProof::compiler_tls_reduction)) &&
@@ -71,6 +76,25 @@ class OffloadedTask {
   }
   int static_shared_array_bytes{0};
   int dynamic_shared_array_bytes{0};
+  std::vector<DynamicSharedArray> dynamic_shared_arrays;
+
+  int launch_shared_bytes(
+      const void *arguments, std::uint64_t argument_bytes,
+      const std::vector<std::pair<std::uint64_t, std::uint64_t>>
+          *mutable_arguments = nullptr) const {
+    if (dynamic_shared_arrays.empty())
+      return dynamic_shared_array_bytes;
+    TI_ERROR_IF(available_dynamic_shared_bytes < 0,
+                "Model-sized shared memory has no bound device capacity");
+    auto layout = evaluate_dynamic_shared_layout(
+        dynamic_shared_arrays, arguments, argument_bytes,
+        available_dynamic_shared_bytes, mutable_arguments);
+    TI_ERROR_IF(!layout,
+                "Model-sized SharedArray dimensions are invalid, mutable, or "
+                "exceed the loaded function's available shared memory ({} bytes)",
+                available_dynamic_shared_bytes);
+    return static_cast<int>(layout->bytes);
+  }
   std::uint64_t thread_local_bytes{0};
   bool one_to_one{false};
   bool external_shared_staged{false};
@@ -128,6 +152,7 @@ class OffloadedTask {
             device_range_dispatch_version,
             static_shared_array_bytes,
             dynamic_shared_array_bytes,
+            dynamic_shared_arrays,
             thread_local_bytes,
             one_to_one,
             external_shared_staged,

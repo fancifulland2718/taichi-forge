@@ -1062,6 +1062,24 @@ class MeshIndexConversionExpression : public Expression {
   TI_DEFINE_ACCEPT_FOR_EXPRESSION
 };
 
+class DynamicSharedPtrExpression : public Expression {
+ public:
+  int allocation_id;
+  DataType element_type;
+  ExprGroup shape;
+  Expr offset;
+
+  DynamicSharedPtrExpression(int allocation_id, DataType element_type,
+                            const ExprGroup &shape, const Expr &offset,
+                            const DebugInfo &dbg_info)
+      : Expression(dbg_info), allocation_id(allocation_id),
+        element_type(element_type), shape(shape), offset(offset) {}
+  void type_check(const CompileConfig *config) override;
+  void flatten(FlattenContext *ctx) override;
+  bool is_lvalue() const override { return true; }
+  TI_DEFINE_ACCEPT_FOR_EXPRESSION
+};
+
 class ReferenceExpression : public Expression {
  public:
   Expr var;

@@ -19,6 +19,8 @@ DataType Expr::get_ret_type() const {
 }
 
 DataType Expr::get_rvalue_type() const {
+  if (is<DynamicSharedPtrExpression>())
+    return expr->ret_type.ptr_removed();
   if (auto argload = cast<ArgLoadExpression>()) {
     if (argload->is_ptr) {
       return argload->ret_type.ptr_removed();

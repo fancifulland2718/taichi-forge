@@ -257,6 +257,12 @@ class ExpressionHumanFriendlyPrinter : public ExpressionPrinter {
     emit(")");
   }
 
+  void visit(DynamicSharedPtrExpression *expr) override {
+    emit("shared(", expr->allocation_id, ", ");
+    expr->offset->accept(this);
+    emit(")");
+  }
+
   void visit(GetElementExpression *expr) override {
     emit("get_element(");
     expr->src->accept(this);

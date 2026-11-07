@@ -74,6 +74,16 @@ class SharedArray:
     _is_taichi_class = True
 
     def __init__(self, shape, dtype):
+        if isinstance(shape, impl.Expr):
+            shape = (shape,)
+        self._model_allocation = None
+        if isinstance(shape, (tuple, list)) and any(isinstance(size, impl.Expr) for size in shape):
+            deployment = getattr(impl.get_runtime().current_kernel, "_deployment_context", None)
+            if deployment is None:
+                raise ValueError("Model-sized SharedArray requires AOT model dimensions")
+            self._model_allocation = deployment.shared_array(dtype, shape)
+            self.shape, self.dtype = tuple(shape), dtype
+            return
         if isinstance(shape, int):
             self.shape = (shape,)
         elif (isinstance(shape, tuple) or isinstance(shape, list)) and all(isinstance(s, int) for s in shape):
@@ -89,6 +99,15 @@ class SharedArray:
 
     @taichi_scope
     def subscript(self, *indices):
+        if self._model_allocation is not None:
+            if len(indices) != len(self.shape):
+                raise IndexError("SharedArray requires one scalar index per dimension")
+            offset = 0
+            for size, index in zip(self.shape, indices):
+                offset = offset * size + index
+            return impl.Expr(_ti_core.make_dynamic_shared_ptr_expr(
+                self._model_allocation, self.dtype, make_expr_group(*self.shape),
+                impl.Expr(offset).ptr, _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())))
         ast_builder = impl.get_runtime().compiling_callable.ast_builder()
         return impl.Expr(
             ast_builder.expr_subscript(

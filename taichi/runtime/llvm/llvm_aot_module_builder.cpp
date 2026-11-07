@@ -250,7 +250,10 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
                 "AOT task launch policy requires the current CUDA launch ABI");
     metadata.schema_version = LLVM::kTaskLaunchPolicyAotSchemaVersion;
   }
-  metadata.schema_version = LLVM::kDeviceRangeProofAotSchemaVersion;
+  metadata.schema_version = LLVM::kDynamicSharedAotSchemaVersion;
+  if (metadata.abi_sha256.empty())
+    metadata.abi_sha256 = LLVM::aot_artifact_sha256(LLVM::read_aot_artifact(
+        taichi::join_path(output_dir, "metadata.tcb")));
   for (const auto &[name, code] : kernel_names_) {
     if (name != code)
       metadata.kernel_aliases.emplace(name, code);
@@ -258,7 +261,6 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
   for (const auto &[name, tasks] : range_selections_)
     metadata.device_range_dispatch.push_back({name, 1, tasks});
   if (!metadata.kernel_aliases.empty() || !metadata.device_range_dispatch.empty()) {
-    metadata.schema_version = LLVM::kKernelEntryPolicyAotSchemaVersion;
     if (metadata.abi_sha256.empty())
       metadata.abi_sha256 = LLVM::aot_artifact_sha256(LLVM::read_aot_artifact(
           taichi::join_path(output_dir, "metadata.tcb")));

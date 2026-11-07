@@ -582,8 +582,8 @@ class LowerAST : public IRVisitor {
         fctx.push_back<GlobalStoreStmt>(dest_stmt, expr_stmt);
       }
     } else {
-      TI_ASSERT(dest.is<ArgLoadExpression>() &&
-                dest.cast<ArgLoadExpression>()->is_ptr);
+      TI_ASSERT(dest.is<DynamicSharedPtrExpression>() ||
+                (dest.is<ArgLoadExpression>() && dest.cast<ArgLoadExpression>()->is_ptr));
       fctx.push_back<GlobalStoreStmt>(dest_stmt, expr_stmt);
     }
     fctx.stmts.back()->dbg_info = assign->dbg_info;

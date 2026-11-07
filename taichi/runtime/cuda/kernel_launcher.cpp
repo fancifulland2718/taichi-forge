@@ -98,9 +98,35 @@ void bind_cuda_native_functions(JITModule *jit_module,
                                 std::vector<OffloadedTask> &tasks) {
   auto *cuda_module = dynamic_cast<JITModuleCUDA *>(jit_module);
   TI_ASSERT(cuda_module != nullptr);
+  auto &cuda = CUDAContext::get_instance();
+  auto context_guard = cuda.get_guard();
+  auto &driver = CUDADriver::get_instance();
   for (auto &task : tasks) {
     task.native_function = cuda_module->lookup_function(task.name);
     TI_ASSERT(task.native_function != nullptr);
+    if (!task.dynamic_shared_arrays.empty()) {
+      int device_capacity = 0, static_bytes = 0;
+      driver.device_get_attribute(
+          &device_capacity,
+          !driver.is_musa() && cuda.get_compute_capability() >= 70
+              ? CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
+              : CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK,
+          cuda.get_device());
+      driver.kernel_get_attribute(&static_bytes, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+                                  task.native_function);
+      TI_ERROR_IF(static_bytes < 0 || device_capacity < static_bytes,
+                  "Invalid CUDA shared memory capacity for {}", task.name);
+      // Configure once per loaded code object, before publishing any calls.
+      // Instances only supply their requested byte count; no mutable per-model
+      // function policy, interned TensorType mutation, or warm driver query.
+      driver.kernel_set_attribute(task.native_function,
+          CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, device_capacity - static_bytes);
+      driver.kernel_get_attribute(&task.available_dynamic_shared_bytes,
+          CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, task.native_function);
+      TI_ERROR_IF(task.available_dynamic_shared_bytes < 0 ||
+                      task.available_dynamic_shared_bytes > device_capacity - static_bytes,
+                  "Invalid CUDA function shared memory capacity for {}", task.name);
+    }
   }
 }
 
@@ -320,7 +346,7 @@ KernelLauncher::resolve_grid_policy_tasks(
         }
         ++range_tasks;
         TI_ERROR_IF(
-            task.one_to_one ||
+            task.one_to_one || !task.dynamic_shared_arrays.empty() ||
                 task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
                 task.may_mutate_sparse_topology || task.grid_dim <= 0 ||
                 task.block_dim <= 0 || task.dynamic_shared_array_bytes < 0,
@@ -509,6 +535,7 @@ KernelLauncher::resolve_task_execution_plan(
       }
       TI_ERROR_IF(
           task.task_type != OffloadedTaskType::range_for || task.one_to_one ||
+              !task.dynamic_shared_arrays.empty() ||
               task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
               task.may_mutate_sparse_topology || task.grid_dim <= 0 ||
               task.block_dim <= 0 || task.dynamic_shared_array_bytes < 0,
@@ -813,6 +840,11 @@ bool KernelLauncher::prepare_cuda_graph_context(
       return false;
     for (std::size_t i = 0; i < offloaded_tasks.size(); ++i) {
       const auto &task = offloaded_tasks[i];
+      if (!task.dynamic_shared_arrays.empty() &&
+          task.launch_shared_bytes(ctx.get_context().arg_buffer, ctx.arg_buffer_size,
+                                   &ctx.mutable_argument_ranges) !=
+              (*recorded_tasks)[i].dynamic_shared_array_bytes)
+        return false;  // Rebind/recapture before uploading a larger allocation.
       if (task.range_bounds && task.range_bounds->uses_host_launch_grid() &&
           task.launch_grid(ctx.get_context().arg_buffer, ctx.arg_buffer_size,
                            &ctx.mutable_argument_ranges) !=
@@ -953,6 +985,8 @@ bool KernelLauncher::prepare_cuda_graph_context(
     for (auto &task : *resolved_tasks) {
       task.grid_dim = task.launch_grid(context.arg_buffer, ctx.arg_buffer_size,
                                       &ctx.mutable_argument_ranges);
+      task.dynamic_shared_array_bytes = task.launch_shared_bytes(
+          context.arg_buffer, ctx.arg_buffer_size, &ctx.mutable_argument_ranges);
     }
     if (uses_sparse && allow_sparse_replay && plan == nullptr) {
       // Reuse the existing grid-stride parent bound on the default fixed
@@ -1619,6 +1653,19 @@ void KernelLauncher::launch_ordinary_context(const Context &selected,
   }
   const auto &offloaded_tasks = *offloaded_tasks_ptr;
 
+  // Validate the complete invocation before allocating/copying argument
+  // buffers or submitting an earlier task. In particular an oversized later
+  // allocation must not leave a partially executed kernel or leaked buffers.
+  std::vector<int> bound_shared_bytes;
+  if (std::any_of(offloaded_tasks.begin(), offloaded_tasks.end(), [](const auto &task) {
+        return !task.dynamic_shared_arrays.empty();
+      })) {
+    bound_shared_bytes.reserve(offloaded_tasks.size());
+    for (const auto &task : offloaded_tasks)
+      bound_shared_bytes.push_back(task.launch_shared_bytes(
+          ctx.get_context().arg_buffer, ctx.arg_buffer_size, &ctx.mutable_argument_ranges));
+  }
+
   // |transfers| is only used for external arrays whose data is originally on
   // host. They are first transferred onto device and that device pointer is
   // stored in |device_ptrs| below. |transfers| saves its original pointer so
@@ -1876,19 +1923,22 @@ void KernelLauncher::launch_ordinary_context(const Context &selected,
     }
     const int grid = task.launch_grid(host_arg_buffer, ctx.arg_buffer_size,
                                       &ctx.mutable_argument_ranges);
+    const int shared_bytes = bound_shared_bytes.empty()
+                                 ? task.dynamic_shared_array_bytes
+                                 : bound_shared_bytes[&task - offloaded_tasks.data()];
     TI_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, grid,
              task.block_dim);
     if (ctx.dispatch_label().empty()) {
       cuda_jit_module->launch_function_with_stream(
           task.native_function, task.name, grid, task.block_dim,
-          task.dynamic_shared_array_bytes, {&ctx.get_context()}, {}, nullptr);
+          shared_bytes, {&ctx.get_context()}, {}, nullptr);
     } else {
       const auto trace_name = make_labeled_task_name(
           task.name, task.task_id, ctx.dispatch_label());
       ScopedExternalProfilerAnnotation annotation(trace_name);
       cuda_jit_module->launch_function_with_stream(
           task.native_function, task.name, grid, task.block_dim,
-          task.dynamic_shared_array_bytes, {&ctx.get_context()}, {}, nullptr,
+          shared_bytes, {&ctx.get_context()}, {}, nullptr,
           &trace_name);
     }
     mark_sparse_list_task_launched(task);
@@ -2181,7 +2231,8 @@ KernelLauncher::qualify_llvm_kernel_artifacts(
     query_attribute(CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
                     &item.preferred_shared_carveout);
     item.block_dim = task.block_dim;
-    item.dynamic_shared_bytes = task.dynamic_shared_array_bytes;
+    item.dynamic_shared_bytes = task.dynamic_shared_arrays.empty()
+                                    ? task.dynamic_shared_array_bytes : -1;
     item.multiprocessor_count = multiprocessor_count;
     if (item.block_dim > 0 && item.dynamic_shared_bytes >= 0) {
       CUDADriver::get_instance().kernel_get_occupancy(

@@ -59,6 +59,126 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
  public:
   using IRVisitor::visit;
   size_t explicit_static_shared_array_bytes{0};
+  std::map<int, DynamicSharedArray> dynamic_shared_layouts;
+  std::map<llvm::Function *, std::map<int, llvm::Value *>> dynamic_shared_offsets;
+  llvm::GlobalVariable *dynamic_shared_buffer{nullptr};
+
+  llvm::Value *emit_shared_extent(const HostRangeBound &bound) {
+    auto *i64 = llvm::Type::getInt64Ty(*llvm_context);
+    const auto constant = [&](std::int64_t value) {
+      return llvm::ConstantInt::getSigned(i64, value);
+    };
+    const auto input = [&](std::uint64_t offset) -> llvm::Value * {
+      auto *bytes = builder->CreatePointerCast(
+          get_args_ptr(kernel, get_context()),
+          llvm::PointerType::get(llvm::Type::getInt8Ty(*llvm_context), 0));
+      auto *address = builder->CreateGEP(llvm::Type::getInt8Ty(*llvm_context),
+                                       bytes, constant(offset));
+      auto *pointer = builder->CreatePointerCast(
+          address, llvm::PointerType::get(llvm::Type::getInt32Ty(*llvm_context), 0));
+      return builder->CreateSExt(
+          builder->CreateLoad(llvm::Type::getInt32Ty(*llvm_context), pointer), i64);
+    };
+    if (bound.program.empty()) {
+      llvm::Value *value = constant(bound.factor);
+      for (auto offset : bound.offsets)
+        value = builder->CreateMul(value, input(offset));
+      return builder->CreateAdd(builder->CreateMul(value, constant(bound.scale)),
+                                constant(bound.bias));
+    }
+    std::vector<llvm::Value *> values;
+    for (const auto &node : bound.program) {
+      llvm::Value *value = nullptr;
+      if (node.is_input()) {
+        value = input(node.offset);
+      } else if (node.op == HostRangeOp::constant_i32) {
+        value = constant(node.immediate);
+      } else {
+        auto *left = values.at(node.lhs);
+        auto *right = node.op == HostRangeOp::divide || node.op == HostRangeOp::floor_divide
+                          ? static_cast<llvm::Value *>(constant(node.immediate))
+                          : values.at(node.rhs);
+        switch (node.op) {
+          case HostRangeOp::add: value = builder->CreateAdd(left, right); break;
+          case HostRangeOp::subtract: value = builder->CreateSub(left, right); break;
+          case HostRangeOp::multiply: value = builder->CreateMul(left, right); break;
+          case HostRangeOp::minimum:
+            value = builder->CreateSelect(builder->CreateICmpSLT(left, right), left, right);
+            break;
+          case HostRangeOp::maximum:
+            value = builder->CreateSelect(builder->CreateICmpSGT(left, right), left, right);
+            break;
+          case HostRangeOp::divide: value = builder->CreateSDiv(left, right); break;
+          case HostRangeOp::floor_divide: {
+            auto *quotient = builder->CreateSDiv(left, right);
+            auto *negative_remainder = builder->CreateICmpSLT(
+                builder->CreateSRem(left, right), constant(0));
+            value = builder->CreateSub(quotient, builder->CreateZExt(negative_remainder, i64));
+            break;
+          }
+          default: TI_ERROR("Invalid shared-memory extent program");
+        }
+      }
+      values.push_back(value);
+    }
+    return values.back();
+  }
+
+  void prepare_dynamic_shared(OffloadedStmt *task) {
+    dynamic_shared_layouts.clear();
+    dynamic_shared_offsets.clear();
+    dynamic_shared_buffer = nullptr;
+    for (auto *statement : irpass::analysis::gather_statements(
+             task->body.get(), [](Stmt *s) { return s->is<DynamicSharedPtrStmt>(); })) {
+      auto *pointer = statement->as<DynamicSharedPtrStmt>();
+      TI_ERROR_IF(pointer->layout.extents.empty(), "Unqualified shared-memory extent");
+      auto [it, added] = dynamic_shared_layouts.emplace(pointer->allocation_id, pointer->layout);
+      TI_ERROR_IF(!added && !(it->second == pointer->layout),
+                  "Conflicting model-sized SharedArray declarations");
+    }
+    if (dynamic_shared_layouts.empty())
+      return;
+    auto *i8 = llvm::Type::getInt8Ty(*llvm_context);
+    dynamic_shared_buffer = new llvm::GlobalVariable(
+        *module, llvm::ArrayType::get(i8, 0), false,
+        llvm::GlobalValue::ExternalLinkage, nullptr, "model_shared_storage",
+        nullptr, llvm::GlobalVariable::NotThreadLocal, 3);
+    dynamic_shared_buffer->setAlignment(llvm::MaybeAlign(8));
+  }
+
+  const std::map<int, llvm::Value *> &shared_offsets_for_current_function() {
+    auto [found, inserted] = dynamic_shared_offsets.emplace(func, std::map<int, llvm::Value *>{});
+    if (!inserted)
+      return found->second;
+    // Range bodies are outlined before inlining. Each function must own the
+    // argument loads and arithmetic used by its pointers.
+    llvm::IRBuilderBase::InsertPointGuard guard(*builder);
+    builder->SetInsertPoint(entry_block);
+    auto *i64 = llvm::Type::getInt64Ty(*llvm_context);
+    llvm::Value *offset = llvm::ConstantInt::get(i64, 0);
+    for (const auto &[id, layout] : dynamic_shared_layouts) {
+      offset = builder->CreateAnd(builder->CreateAdd(offset, llvm::ConstantInt::get(i64, 7)),
+                                  llvm::ConstantInt::getSigned(i64, -8));
+      found->second[id] = offset;
+      llvm::Value *bytes = llvm::ConstantInt::get(i64, layout.element_bytes);
+      for (const auto &extent : layout.extents)
+        bytes = builder->CreateMul(bytes, emit_shared_extent(extent));
+      offset = builder->CreateAdd(offset, bytes);
+    }
+    return found->second;
+  }
+
+  void visit(DynamicSharedPtrStmt *stmt) override {
+    auto *i8 = llvm::Type::getInt8Ty(*llvm_context);
+    auto *i64 = llvm::Type::getInt64Ty(*llvm_context);
+    auto *offset = builder->CreateAdd(shared_offsets_for_current_function().at(stmt->allocation_id),
+        builder->CreateMul(builder->CreateSExt(llvm_val[stmt->offset], i64),
+                           llvm::ConstantInt::get(i64, stmt->layout.element_bytes)));
+    auto *base = builder->CreatePointerCast(dynamic_shared_buffer, llvm::PointerType::get(i8, 3));
+    auto *address = builder->CreateGEP(i8, base, offset);
+    llvm_val[stmt] = builder->CreatePointerCast(address,
+        llvm::PointerType::get(tlctx->get_data_type(stmt->ret_type.ptr_removed()), 0));
+  }
 
   explicit TaskCodeGenCUDA(int id,
                            const CompileConfig &config,
@@ -960,6 +1080,9 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
   void visit(OffloadedStmt *stmt) override {
+    dynamic_shared_layouts.clear();
+    dynamic_shared_offsets.clear();
+    dynamic_shared_buffer = nullptr;
     explicit_static_shared_array_bytes = 0;
     if (stmt->bls_size > 0)
       create_bls_buffer(stmt);
@@ -972,6 +1095,7 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
       emit_cuda_gc(stmt);
     } else {
       init_offloaded_task_function(stmt);
+      prepare_dynamic_shared(stmt);
       if (stmt->task_type == Type::serial) {
         stmt->body->accept(this);
       } else if (stmt->task_type == Type::range_for) {
@@ -1024,6 +1148,8 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
       current_task->static_shared_array_bytes = static_cast<int>(
           stmt->bls_size + explicit_static_shared_array_bytes);
       current_task->dynamic_shared_array_bytes = 0;
+      for (const auto &[id, layout] : dynamic_shared_layouts)
+        current_task->dynamic_shared_arrays.push_back(layout);
       TI_ASSERT(current_task->grid_dim != 0);
       TI_ASSERT(current_task->block_dim != 0);
       offloaded_tasks.push_back(*current_task);

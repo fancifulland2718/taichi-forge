@@ -57,12 +57,11 @@ LlvmAotModule::LlvmAotModule(
   auto json = liong::json::parse(contents.data(),
                                  contents.data() + contents.size());
   liong::json::deserialize(json, metadata);
-  TI_ERROR_IF(metadata.schema_version != kDeviceRangeProofAotSchemaVersion &&
-                  metadata.schema_version != kKernelEntryPolicyAotSchemaVersion,
-              "LLVM AOT task layout requires schema {} or {}. Rebuild the artifact "
+  TI_ERROR_IF(metadata.schema_version != kDynamicSharedAotSchemaVersion,
+              "LLVM AOT task layout requires schema {}. Rebuild the artifact "
               "with the current Forge AOT compiler.",
-              kDeviceRangeProofAotSchemaVersion, kKernelEntryPolicyAotSchemaVersion);
-  if (metadata.schema_version == kKernelEntryPolicyAotSchemaVersion) {
+              kDynamicSharedAotSchemaVersion);
+  {
     bool aliases = false, ranges = false, checksum = false;
     for (const auto &[name, value] : json.fields()) {
       if (name == "kernel_aliases") {
@@ -84,7 +83,7 @@ LlvmAotModule::LlvmAotModule(
                   : metadata.abi_sha256.size() != 64 ||
                         metadata.array_layout_sha256 != aot_array_layout_sha256(metadata),
               "AOT ndarray layout qualification checksum mismatch");
-  if (metadata.schema_version == kKernelEntryPolicyAotSchemaVersion)
+  if (!metadata.kernel_entry_sha256.empty())
     TI_ERROR_IF(metadata.kernel_entry_sha256 != aot_kernel_entry_sha256(metadata),
                 "AOT kernel entry policy checksum mismatch");
   if (!metadata.kernel_runtime_state.empty())
@@ -111,7 +110,7 @@ LlvmAotModule::LlvmAotModule(
       !metadata.kernel_launch_abis.empty() ||
       !metadata.kernel_runtime_state.empty() ||
       !metadata.kernel_runtime_affine_arrays.empty() ||
-      metadata.schema_version == kKernelEntryPolicyAotSchemaVersion) {
+      metadata.schema_version == kDynamicSharedAotSchemaVersion) {
     TI_ERROR_IF(aot_artifact_sha256(read_artifact(
                     *directory_, "metadata.tcb")) != metadata.abi_sha256,
                 "LLVM AOT launch ABI checksum mismatch");
@@ -311,13 +310,21 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
     throw aot::ArtifactLoadError("Failed to read LLVM AOT kernel: " + name);
   }
   for (const auto &task : loaded.compiled_data.tasks) {
+    if (!task.dynamic_shared_arrays.empty()) {
+      TI_ERROR_IF(arch() != Arch::cuda || task.task_type != OffloadedTaskType::range_for ||
+                      task.dynamic_shared_array_bytes != 0,
+                  "AOT dynamic shared memory requires a CUDA range task");
+      for (const auto &array : task.dynamic_shared_arrays)
+        for (const auto &extent : array.extents)
+          TI_ERROR_IF(!extent.valid(loaded.args_size),
+                      "AOT shared-memory extent references an invalid argument");
+    }
     TI_ERROR_IF((task.requested_grid_residency_waves != 0 ||
                  task.requested_range_work_per_thread_target != 1) &&
                     (arch() != Arch::cuda ||
-                     (metadata_.schema_version != kDeviceRangeProofAotSchemaVersion &&
-                      metadata_.schema_version != kKernelEntryPolicyAotSchemaVersion)),
-                "Persisted CUDA task launch policy requires AOT schema {} or {}: {}",
-                kDeviceRangeProofAotSchemaVersion, kKernelEntryPolicyAotSchemaVersion, name);
+                     metadata_.schema_version != kDynamicSharedAotSchemaVersion),
+                "Persisted CUDA task launch policy requires AOT schema {}: {}",
+                kDynamicSharedAotSchemaVersion, name);
   }
   for (int tree_id : loaded.used_snode_tree_ids) {
     TI_ERROR_IF(!std::binary_search(snode_tree_ids_.begin(),

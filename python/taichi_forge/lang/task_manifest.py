@@ -138,6 +138,7 @@ class OffloadedTaskManifest:
     sparse_mutation_snode_id: int
     device_range_dispatch_version: int = field(default=0, kw_only=True)
     requested_range_dispatch: str = field(default="fixed", kw_only=True)
+    dynamic_shared_bytes_runtime: bool = field(default=False, kw_only=True)
 
     @classmethod
     def _from_core(cls, value: Mapping[str, object]):

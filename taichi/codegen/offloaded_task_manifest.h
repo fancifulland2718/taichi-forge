@@ -96,6 +96,9 @@ struct OffloadedTaskManifest {
 
   std::uint64_t static_shared_bytes{0};
   std::uint64_t dynamic_shared_bytes{0};
+  // The byte field is a compile-time base when this is true. Invocation-bound
+  // allocation is resolved from the immutable argument image, never zero.
+  bool dynamic_shared_bytes_runtime{false};
   std::uint64_t thread_local_bytes{0};
 };
 

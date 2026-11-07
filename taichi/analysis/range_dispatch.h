@@ -66,6 +66,8 @@ inline EmptyRangeGroupProof describe_empty_range_group_elision(
       proof = EmptyRangeGroupProof::local_storage;
     else if (stmt->is<SNodeOpStmt>())
       proof = EmptyRangeGroupProof::sparse_topology;
+    if (stmt->is<DynamicSharedPtrStmt>())
+      proof = EmptyRangeGroupProof::local_storage;
     if (auto *allocation = stmt->cast<AllocaStmt>())
       if (allocation->is_shared) {
         if (task.device == Arch::cuda && !has_tls)

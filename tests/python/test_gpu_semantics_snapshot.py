@@ -155,6 +155,15 @@ def test_resident_snapshot_maps_program_and_physical_dispatches(backend, expecte
     assert _loads_gpu_semantics(_dumps_gpu_semantics(snapshot)) == snapshot
 
 
+def test_model_shared_memory_is_not_reported_as_zero_before_binding():
+    raw = _raw_snapshot("cuda")
+    raw["tasks"][0]["dynamic_shared_bytes_runtime"] = True
+    snapshot = _build_resident_gpu_semantics(raw)
+    shared = snapshot.launches[0].dynamic_workgroup_memory_bytes
+    for fact in (shared.selected, shared.materialized, shared.actual):
+        assert fact.availability == _GpuAvailability.UNKNOWN
+
+
 def test_resident_snapshot_preserves_proven_affine_stencil_footprints():
     raw = deepcopy(_raw_snapshot("cuda"))
     raw["graph_metadata"]["version"] = 2

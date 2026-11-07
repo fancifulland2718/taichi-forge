@@ -675,9 +675,31 @@ and work-item index arguments, including nested calls. Different call sites shar
 the function implementation; storage covers their maximum required range. Loops
 inside the function reuse the current work item's slice. Recursive hidden captures
 still reject, and explicit function arguments are not inferred as allocation sizes.
-The Vulkan real_func restriction is unchanged. SharedArray, general whole-tensor
-algebra, and local workspace in the older explicit Component Graph path remain
-unimplemented.
+The Vulkan real_func restriction is unchanged. General whole-tensor algebra and
+local workspace in the older explicit Component Graph path remain unimplemented.
+
+Model-sized `ti.simt.block.SharedArray` uses native block-owned shared memory in
+inlined CUDA parallel ranges. Scalar elements and multidimensional extents use
+immutable declared values. Each task computes aligned bytes from the invocation's
+argument snapshot. At initial code loading, the runtime queries the actual device
+capacity and compiled function's static usage, then configures the available dynamic
+allowance once. There is no additional uniform byte or model DOF cap, and instances
+do not modify function attributes. Host retains the application's alternative-algorithm
+selection; storage is never silently replaced by global arrays. The new lowering
+does not mutate interned TensorType objects, avoiding corruption of later compilations
+in the old large-array path. Ordinary calls validate all tasks first.
+Graph preparation freezes the allocation size; changed dimensions require rebinding.
+Existing block barriers and shared atomics retain their block semantics.
+
+Focused checks cover one code definition across new sizes, two model-sized axes,
+mixed fixed/dynamic arrays, atomic accumulation, independent instances, frontend-free
+consumption, Graph replay and actual device-capacity rejection, including instances
+above 48 KiB on capable devices. Dynamic SharedArray on CPU/Vulkan,
+declarations inside real_func and device-determined sizes remain unsupported.
+LLVM AOT task schema is now **21** and the compiled cache schema is **101**. Older
+build artifacts must be rebuilt; there is no legacy task-record compatibility layer.
+Ordinary fixed-size SharedArray JIT semantics remain unchanged. These checks do not
+qualify the complete EFC solver or engine export.
 
 ## Kernel factories in original definitions
 

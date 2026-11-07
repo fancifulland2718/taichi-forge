@@ -30,6 +30,21 @@
 
 namespace taichi::lang {
 
+TEST(LlvmAotMetadataTest, CurrentTaskSchemaSupportsOptionalEntryPolicies) {
+  LLVM::LlvmAotMetadata metadata;
+  metadata.schema_version = LLVM::kDynamicSharedAotSchemaVersion;
+  metadata.kernel_format = "ptx";
+  metadata.abi_sha256 = std::string(64, 'a');
+  EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  metadata.kernel_aliases["step"] = "solve";
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  metadata.kernel_entry_sha256 = LLVM::aot_kernel_entry_sha256(metadata);
+  EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  auto changed = metadata;
+  changed.abi_sha256 = std::string(64, 'b');
+  EXPECT_NE(changed.kernel_entry_sha256, LLVM::aot_kernel_entry_sha256(changed));
+}
+
 TEST(LlvmAotMetadataTest, CudaCompactRootsUseFinalLoweringDependencies) {
   // The same early-known root changes from a direct pointer to slot 1 when
   // final mesh lowering adds an earlier root. No placeholder call may survive.

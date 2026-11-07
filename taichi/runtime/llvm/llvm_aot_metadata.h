@@ -33,6 +33,9 @@ inline constexpr std::uint32_t kTypedRangeBoundsAotSchemaVersion = 10;
 inline constexpr std::uint32_t kDeviceRangeProofAotSchemaVersion = 19;
 // Entry aliases and selected range policies reference shared code metadata.
 inline constexpr std::uint32_t kKernelEntryPolicyAotSchemaVersion = 20;
+// Schema 21 adds runtime-sized shared allocations to the native task record.
+// All new LLVM artifacts use this layout; older artifacts must be rebuilt.
+inline constexpr std::uint32_t kDynamicSharedAotSchemaVersion = 21;
 
 inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";
@@ -130,9 +133,11 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                         metadata.abi_sha256.size() != 64,
               "AOT runtime-state inventory requires its metadata checksum");
   auto base_schema = metadata.schema_version;
-  const bool entry_policy = base_schema == kKernelEntryPolicyAotSchemaVersion;
   const bool has_entry_policy = !metadata.kernel_aliases.empty() ||
                                 !metadata.device_range_dispatch.empty();
+  const bool shared_layout = base_schema == kDynamicSharedAotSchemaVersion;
+  const bool entry_policy = base_schema == kKernelEntryPolicyAotSchemaVersion ||
+                            (shared_layout && has_entry_policy);
   TI_ERROR_IF(entry_policy != has_entry_policy ||
                   (entry_policy ? (metadata.kernel_entry_sha256.size() != 64 ||
                                     metadata.abi_sha256.size() != 64)
@@ -140,7 +145,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
               "AOT kernel entry policies require schema {} and checksums",
               kKernelEntryPolicyAotSchemaVersion);
   const bool typed_ranges = base_schema == kDeviceRangeProofAotSchemaVersion ||
-                            entry_policy;
+                            entry_policy || shared_layout;
   const bool launch_abi = base_schema == kKernelLaunchAbiAotSchemaVersion ||
                           base_schema == kTaskLaunchPolicyAotSchemaVersion ||
                           (typed_ranges && !metadata.kernel_launch_abis.empty());

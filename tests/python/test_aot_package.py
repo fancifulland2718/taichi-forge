@@ -2559,6 +2559,148 @@ class Reader:
 """
 
 
+MODEL_SHARED_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, dof: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.dof = dof
+        self.vector = ti.Vector.field(self.dof, ti.f32, shape=self.n)
+        self.result = ti.field(ti.f32, shape=self.n)
+
+    @ti.func
+    def shared_sum(self, matrix, extra, fixed):
+        return matrix[self.dof - 1, 1] + extra[self.dof] + fixed[0] + extra[0]
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        ti.loop_config(block_dim=32)
+        for i in range(self.n * 32):
+            lane, world = i % 32, i // 32
+            matrix = ti.simt.block.SharedArray((self.dof, 2), ti.f32)
+            extra = ti.simt.block.SharedArray((self.dof + 1,), ti.f32)
+            fixed = ti.simt.block.SharedArray((1,), ti.f32)
+            if lane == 0:
+                fixed[0] = gain
+                extra[0] = 0.0
+            ti.simt.block.sync()
+            j = lane
+            while j < self.dof:
+                matrix[j, 1] = gain * (world + j + 1)
+                extra[j + 1] = gain * (j + 1)
+                ti.atomic_add(extra[0], gain)
+                j += 32
+            ti.simt.block.sync()
+            if lane == 0:
+                self.result[world] = self.shared_sum(matrix, extra, fixed)
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        return builder.compile()
+"""
+
+
+@pytest.mark.parametrize("square", [False, True])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_model_shared_arrays_bind_native_storage(tmp_path, monkeypatch, square):
+    import ctypes as C
+    driver = C.WinDLL("nvcuda.dll") if sys.platform == "win32" else C.CDLL("libcuda.so.1")
+    device, capacity = C.c_int(), C.c_int()
+    assert driver.cuDeviceGet(C.byref(device), 0) == 0
+    if driver.cuDeviceGetAttribute(C.byref(capacity), 97, device) != 0:
+        assert driver.cuDeviceGetAttribute(C.byref(capacity), 8, device) == 0
+    source = MODEL_SHARED_SOURCE
+    if square:
+        source = source.replace("(self.dof, 2)", "(self.dof, self.dof + 1)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cuda)
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    entries = [entry for entry in manifest["entries"].values() if entry["definition"].endswith("Model.step")]
+    assert len(entries) == 1
+    expected = package.Model(3, 17)
+    expected.step(2.0)
+    np.testing.assert_array_equal(expected.result.to_numpy(), 2 * (np.arange(3) + 52))
+    probe = tmp_path / "consume_shared.py"
+    probe.write_text(textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime('cuda') as runtime, load_package(runtime, sys.argv[1]) as code:
+            capacity = int(sys.argv[3])
+            cases = ((1, 1), (3, 17), (7, 65))
+            if sys.argv[2] == 'False':
+                cases += ((5, 129),)
+                if capacity >= 60016:
+                    cases += ((2, 5000),)  # exceeds the historical 48 KiB cap
+            elif capacity >= 67616:
+                cases += ((5, 129),)
+            elif capacity >= 49304:
+                cases += ((5, 110),)
+            models = [code.host.Model(n, dof) for n, dof in cases]
+            for model in reversed(models):
+                model.step(3.0)
+            for model in models:
+                np.testing.assert_array_equal(model.result.to_numpy(), 3 * (np.arange(model.n) + 3 * model.dof + 1))
+            calls = [model.graph().bind({'gain': 5.0}) for model in models]
+            for call in reversed(calls):
+                call.run()
+            for model in models:
+                np.testing.assert_array_equal(model.result.to_numpy(), 5 * (np.arange(model.n) + 3 * model.dof + 1))
+            calls[0].close()
+            calls[1].run()
+            for call in calls[1:]:
+                call.close()
+            oversized = code.host.Model(1, capacity // 4 + 1)
+            for action in (lambda: oversized.step(1.0), lambda: oversized.graph().bind({'gain': 1.0})):
+                try:
+                    action()
+                except (RuntimeError, ValueError) as error:
+                    assert 'shared memory' in str(error), str(error)
+                else:
+                    raise AssertionError('oversized shared allocation was submitted')
+            models[1].step(7.0)
+            np.testing.assert_array_equal(models[1].result.to_numpy(), 7 * (np.arange(3) + 52))
+        print('MODEL_SHARED_SOURCE_FREE_OK')
+    """), encoding="utf8")
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+               PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+               TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+               TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    result = subprocess.run([sys.executable, "-B", str(probe), str(tmp_path / "sdk"), str(square), str(capacity.value)],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "MODEL_SHARED_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("invalid", ["device_extent", "serial_scope"])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_model_shared_arrays_reject_unproven_storage(tmp_path, monkeypatch, invalid):
+    source = MODEL_SHARED_SOURCE
+    if invalid == "device_extent":
+        source = source.replace("(self.dof, 2)", "(ti.cast(self.result[0], ti.i32), 2)")
+        message = "immutable declared dimensions"
+    else:
+        source = source.replace("        ti.loop_config(block_dim=32)",
+                                "        unused = ti.simt.block.SharedArray((self.dof,), ti.f32)\n"
+                                "        ti.loop_config(block_dim=32)")
+        message = "parallel kernel range"
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(Exception, match=message):
+        ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cuda)
+    assert not (tmp_path / "sdk" / "package.json").exists()
+
+
 MODEL_LOCAL_TENSOR_SOURCE = """
 import taichi_forge as ti
 constructors = 0

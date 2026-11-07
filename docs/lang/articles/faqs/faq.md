@@ -34,8 +34,9 @@ also be in an inlined `@ti.func` called from that loop. Kernel-root
 declarations and declarations in a serialized range-for are rejected at
 compile time; Taichi does not silently move them to global temporary memory.
 On CUDA, total static `SharedArray` storage is limited to 48 KiB per block.
-Larger requests fail explicitly; Forge does not enable opt-in dynamic shared
-memory.
+Larger fixed requests fail explicitly. Model-sized CUDA SharedArray in definition
+AOT packages instead uses dynamic shared storage admitted against the loaded
+function and actual device capacity; see [package AOT](../../../forge/package_aot.en.md).
 
 ## Data structures
 

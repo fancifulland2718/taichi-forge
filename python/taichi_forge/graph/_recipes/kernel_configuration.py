@@ -126,6 +126,7 @@ class GraphKernelConfigurationSource:
             task.source_block_size_explicit
             or task.static_shared_bytes
             or task.dynamic_shared_bytes
+            or task.dynamic_shared_bytes_runtime
             for task in tasks
         ):
             specs.extend(

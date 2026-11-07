@@ -381,10 +381,12 @@ consumer at a new width of 129. Whole Field-element value copies are still expli
 rejected. Direct component calls now support model-sized Vector/Matrix.zero locals
 and local copies through private invocation workspace. Package Graph uses existing
 Plan private resources; CPU/CUDA real_func forwards workspace and work-item indices.
-The older explicit Component Graph path and shared workspaces remain unqualified. Definition packages
+The older explicit Component Graph local workspace path remains unqualified.
+CUDA model-sized SharedArray now uses native block storage and launch sizes derived
+from argument snapshots; other backends and declarations inside real_func reject. Definition packages
 infer model axes from constructor parameters and existing declarations within
 the [documented package scope](../forge/package_aot.en.md). Local tensor arithmetic
-and shared GPU workspaces remain pending; no application decorator is added.
+remains pending; no application decorator is added.
 
 Original `self.field` captures now retain the complete root schema and member
 paths. Sibling blocks require declared dimension provenance; logical groups

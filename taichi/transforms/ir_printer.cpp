@@ -206,6 +206,12 @@ class IRPrinter : public IRVisitor {
     dbg_info_printer_(alloca);
   }
 
+  void visit(DynamicSharedPtrStmt *stmt) override {
+    print("{}{} = model_shared({}, {})", stmt->type_hint(), stmt->name(),
+          stmt->allocation_id, stmt->offset->name());
+    dbg_info_printer_(stmt);
+  }
+
   void visit(RandStmt *stmt) override {
     print("{}{} = rand()", stmt->type_hint(), stmt->name());
     dbg_info_printer_(stmt);

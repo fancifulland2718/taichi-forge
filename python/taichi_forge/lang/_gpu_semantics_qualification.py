@@ -211,6 +211,8 @@ def _qualify_cuda(snapshot, raw, fixed_cost_seconds):
                         "cuda_registered_launch_context",
                         provider,
                         provider_version,
+                    ) if int(task["dynamic_shared_bytes"]) >= 0 else _gpu_fact_unknown(
+                        "model-sized shared storage requires invocation arguments"
                     ),
                 ),
             )

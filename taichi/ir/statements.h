@@ -2,6 +2,7 @@
 
 #include "taichi/common/ad_stack.h"
 #include "taichi/codegen/range_for_bounds.h"
+#include "taichi/codegen/dynamic_shared_array.h"
 #include "taichi/ir/ir.h"
 #include "taichi/ir/offloaded_task_type.h"
 #include "taichi/ir/stmt_op_types.h"
@@ -65,9 +66,29 @@ class AllocaStmt : public Stmt, public ir_traits::Store {
   TI_DEFINE_ACCEPT_AND_CLONE
 };
 
-/**
- * Updates mask, break if all bits of the mask are 0.
- */
+// A scalar address in model-sized, block-owned shared storage. All addresses
+// with the same allocation id in one task refer to the same allocation.
+class DynamicSharedPtrStmt : public Stmt {
+ public:
+  int allocation_id;
+  std::vector<Stmt *> shape;
+  Stmt *offset;
+  DynamicSharedArray layout;
+
+  DynamicSharedPtrStmt(int allocation_id, DataType element_type,
+                      std::vector<Stmt *> shape, Stmt *offset,
+                      const DebugInfo &dbg_info = DebugInfo())
+      : Stmt(dbg_info), allocation_id(allocation_id),
+        shape(std::move(shape)), offset(offset) {
+    ret_type = TypeFactory::get_instance().get_pointer_type(element_type);
+    TI_STMT_REG_FIELDS;
+  }
+  bool has_global_side_effect() const override { return false; }
+  TI_STMT_DEF_FIELDS(ret_type, allocation_id, shape, offset, layout);
+  TI_DEFINE_ACCEPT_AND_CLONE
+};
+
+/** Updates mask, break if all bits of the mask are 0. */
 class WhileControlStmt : public Stmt {
  public:
   Stmt *mask;

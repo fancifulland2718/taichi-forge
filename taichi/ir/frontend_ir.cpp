@@ -1568,6 +1568,29 @@ void MeshIndexConversionExpression::flatten(FlattenContext *ctx) {
   stmt = ctx->back_stmt();
 }
 
+void DynamicSharedPtrExpression::type_check(const CompileConfig *config) {
+  TI_ASSERT_INFO(config->arch == Arch::cuda,
+                 "Model-sized SharedArray currently requires CUDA");
+  TI_ASSERT_INFO(allocation_id >= 0 && !shape.exprs.empty() &&
+                     element_type->is<PrimitiveType>(),
+                 "Invalid model-sized SharedArray declaration");
+  for (const auto &size : shape.exprs)
+    TI_ASSERT_INFO(size.get_rvalue_type() == PrimitiveType::i32,
+                   "SharedArray dimensions must be i32");
+  TI_ASSERT_INFO(offset.get_rvalue_type() == PrimitiveType::i32,
+                 "SharedArray offset must be i32");
+  ret_type = TypeFactory::get_instance().get_pointer_type(element_type);
+}
+
+void DynamicSharedPtrExpression::flatten(FlattenContext *ctx) {
+  std::vector<Stmt *> sizes;
+  for (auto size : shape.exprs)
+    sizes.push_back(flatten_rvalue(size, ctx));
+  auto index = flatten_rvalue(offset, ctx);
+  stmt = ctx->push_back<DynamicSharedPtrStmt>(
+      allocation_id, element_type, std::move(sizes), index, dbg_info);
+}
+
 void ReferenceExpression::type_check(const CompileConfig *) {
   ret_type = TypeFactory::get_instance().get_pointer_type(var->ret_type);
 }
@@ -2187,6 +2210,8 @@ Stmt *flatten_rvalue(Expr ptr, Expression::FlattenContext *ctx) {
     } else if (ptr_stmt->ret_type->is<PointerType>()) {
       return flatten_local_load(ptr_stmt, ctx);
     }
+  } else if (ptr.is<DynamicSharedPtrExpression>()) {
+    return flatten_global_load(ptr_stmt, ctx);
   } else if (ptr.is<ArgLoadExpression>() &&
              ptr.cast<ArgLoadExpression>()->is_ptr) {
     return flatten_global_load(ptr_stmt, ctx);

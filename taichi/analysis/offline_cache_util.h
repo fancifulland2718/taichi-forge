@@ -216,7 +216,8 @@ class Kernel;
 // 98 - Include external tensor addressing and affine ABI in frontend identity.
 // 99 - Qualify CPU code for instance-owned sparse runtime views.
 // 100 - Retain affine array proofs across layout-independent CUDA intrinsics.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 100;
+// 101 - Model-sized shared pointers and immutable invocation allocation contracts.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 101;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

@@ -296,6 +296,14 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     emit(expr->var);
   }
 
+  void visit(DynamicSharedPtrExpression *expr) override {
+    emit(ExprOpCode::DynamicSharedPtrExpression);
+    emit(expr->allocation_id);
+    emit(expr->element_type);
+    emit(expr->shape.exprs);
+    emit(expr->offset);
+  }
+
   void visit(GetElementExpression *expr) override {
     emit(ExprOpCode::GetElementExpression);
     emit(expr->src);
