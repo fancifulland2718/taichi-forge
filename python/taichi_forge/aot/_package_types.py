@@ -27,6 +27,8 @@ def resolve_type(node, namespace, *, allow_ndarray=False, allow_members=False):
     import taichi_forge as ti
 
     def value(expression):
+        if hasattr(expression, "_package_forwarded_argument"):
+            return value(expression._package_forwarded_argument)
         if isinstance(expression, ast.Constant):
             return expression.value
         if isinstance(expression, (ast.Tuple, ast.List)):

@@ -309,6 +309,9 @@ def normalize_factories(tree, namespace, module, fail, kind):
     """Normalize proved allocation declarations in constructors, not Host calls."""
     declarations = []
     from ._package_types import qualified_kind
+    from ._package_declarations import expand_declarations
+
+    replacements = {}
 
     for cls in tree.body:
         if not isinstance(cls, ast.ClassDef):
@@ -336,11 +339,18 @@ def normalize_factories(tree, namespace, module, fail, kind):
                     continue
                 call = statement.value
                 target = _source_value(call.func, namespace)
+                expanded = None
                 try:
                     normalized = prove_factory(target, call, scopes)
                 except (TypeError, _Unproven) as error:
-                    fail(module, call, f"Resource factory forwarding is unproven: {error}")
-                if normalized is not None:
+                    try:
+                        expanded = expand_declarations(target, statement, scopes)
+                    except (TypeError, _Unproven) as expansion_error:
+                        fail(module, call, f"Resource factory forwarding is unproven: {expansion_error}")
+                    if expanded is None:
+                        fail(module, call, f"Resource factory forwarding is unproven: {error}")
+                    normalized = None
+                if normalized is not None or expanded is not None:
                     root = call.func
                     while isinstance(root, ast.Attribute):
                         root = root.value
@@ -356,8 +366,15 @@ def normalize_factories(tree, namespace, module, fail, kind):
                     ]
                     if bindings:
                         fail(module, call, "Resource factory binding is shadowed or reassigned in the constructor")
-                    statement.value = normalized
-                    declarations.append({**normalized._package_factory, "module": module, "line": call.lineno})
+                    if expanded is not None:
+                        body, facts = expanded
+                        replacements[id(statement)] = body
+                        declarations.append(
+                            {**facts, "kind": "declaration_helper", "module": module, "line": call.lineno}
+                        )
+                    else:
+                        statement.value = normalized
+                        declarations.append({**normalized._package_factory, "module": module, "line": call.lineno})
                 if (
                     qualified_kind(statement.value, kind) == "experimental.ResourceScope"
                     and isinstance(statement, ast.Assign)
@@ -365,4 +382,11 @@ def normalize_factories(tree, namespace, module, fail, kind):
                     and isinstance(statement.targets[0], ast.Name)
                 ):
                     scopes.add(statement.targets[0].id)
+
+    class Replace(ast.NodeTransformer):
+        def visit(self, node):
+            replacement = replacements.get(id(node))
+            return replacement if replacement is not None else super().visit(node)
+
+    Replace().visit(tree)
     return declarations

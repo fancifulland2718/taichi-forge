@@ -63,15 +63,50 @@ class Model:
 """
 
 
+RECORD_HELPER_SOURCE = """
+effects = []
+def declare_layout(scope, layout, capacity, dtype, *, bounded=True):
+    scope.capacity = capacity
+    count = scope.dim('capacity')
+    record = scope.record('layout', layout)
+    for member, parent_name in (('n', 'capacity'),):
+        active = record.dim(member)
+        parent = record.parent_dim(parent_name)
+        if bounded:
+            record.require_le(member + '_fits', active, parent, when=member)
+    record.value('gain', dtype)
+    for flag in ('mode', 'ignored'):
+        record.static(flag, choices=(False, True))
+    return count
+"""
+
+
+def _record_helper_fixture(tmp_path, monkeypatch, helper=RECORD_HELPER_SOURCE):
+    (tmp_path / "declaration_helpers.py").write_text(textwrap.dedent(helper), encoding="utf8")
+    monkeypatch.delitem(sys.modules, "declaration_helpers", raising=False)
+    source = RECORD_RESOURCES_SOURCE.replace(
+        "import taichi_forge as ti\n",
+        "import taichi_forge as ti\nfrom declaration_helpers import declare_layout\nScalar = ti.f32\n",
+    )
+    start, end = source.index("        parent = scope.dim("), source.index("        scope.values =")
+    return source[:start] + "        parent = declare_layout(scope, layout, capacity, Scalar)\n" + source[end:]
+
+
+@pytest.mark.parametrize("forwarded", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_package_records_preserve_paths_static_projection_and_parent_constraints(tmp_path, monkeypatch):
-    package = _source_package(tmp_path, monkeypatch, RECORD_RESOURCES_SOURCE)
+def test_package_records_preserve_paths_static_projection_and_parent_constraints(tmp_path, monkeypatch, forwarded):
+    source = _record_helper_fixture(tmp_path, monkeypatch) if forwarded else RECORD_RESOURCES_SOURCE
+    package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert manifest["version"] == 19
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert len(manifest["entries"]) == 4  # two step variants, common clear, unimported public entry
     family = next(iter(manifest["entry_families"].values()))
     assert list(family["paths"].values()) == [["layout", "mode"]]
+    if forwarded:
+        assert sys.modules["declaration_helpers"].effects == []
+        assert manifest["declaration_factories"][0]["kind"] == "declaration_helper"
+        assert "from declaration_helpers" not in (tmp_path / "sdk/host/model.py").read_text()
     original = package.Model(7, sys.modules["definition_fixture.model"].Layout(5, 2.5, True))
     original.clear()
     original.step()
@@ -84,7 +119,7 @@ def test_package_records_preserve_paths_static_projection_and_parent_constraints
         import numpy as np
         class Block(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
-                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'declaration_helpers'):
                     raise AssertionError(fullname)
         sys.meta_path.insert(0, Block())
         from taichi_forge_runtime.aot import Runtime, load_package
@@ -145,6 +180,50 @@ def test_package_records_preserve_paths_static_projection_and_parent_constraints
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PACKAGE_RECORDS_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["effect", "condition", "loop", "call", "shadow"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_declaration_helpers_reject_unproven_execution(tmp_path, monkeypatch, change):
+    helper = RECORD_HELPER_SOURCE
+    if change == "effect":
+        helper = helper.replace("    count =", "    effects.append(1)\n    count =")
+    elif change == "condition":
+        helper = helper.replace("if bounded:", "if layout.n:")
+    elif change == "loop":
+        helper = helper.replace("('mode', 'ignored')", "layout.names")
+    elif change == "call":
+        helper = helper.replace("return count", "return layout.compute(count)")
+    source = _record_helper_fixture(tmp_path, monkeypatch, helper)
+    if change == "shadow":
+        source = source.replace(
+            "        parent = declare_layout",
+            "        declare_layout = layout.compute\n        parent = declare_layout",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="factory forwarding is unproven|binding is shadowed"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["declaration_helpers"].effects == []
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_declaration_helper_preserves_unused_argument_evaluation(tmp_path, monkeypatch):
+    helper = RECORD_HELPER_SOURCE.replace("bounded=True", "bounded=True, unused=None")
+    source = _record_helper_fixture(tmp_path, monkeypatch, helper).replace(
+        "scope, layout, capacity, Scalar)", "scope, layout, capacity, Scalar, unused=missing_input)"
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    Layout = sys.modules["definition_fixture.model"].Layout
+    with pytest.raises(NameError, match="missing_input"):
+        package.Model(7, Layout(5, 2.5))
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        registered = set(runtime._resources)
+        with pytest.raises(NameError, match="missing_input"):
+            library.host.Model(7, Layout(5, 2.5))
+        assert set(runtime._resources) == registered
 
 
 @pytest.mark.parametrize(

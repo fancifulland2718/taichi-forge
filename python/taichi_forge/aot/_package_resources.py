@@ -257,7 +257,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             and type(call.args[0].value) is str
             and call.args[0].value.isidentifier()
             and not call.args[0].value.startswith("__")
-            and statement.lineno > scopes[parent].lineno
+            and (statement.lineno, statement.col_offset) > (scopes[parent].lineno, scopes[parent].col_offset)
             and sum(
                 isinstance(n, ast.Name)
                 and n.id == statement.targets[0].id
@@ -327,6 +327,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
     aliases, alias_conditions, placements = {}, {}, {}
     extent_namespaces = {}
     constraint_declarations = {}
+    scope_writes = []
     current_conditions = {}
     stores = {n.arg: 1 for n in ast.walk(constructor.args) if isinstance(n, ast.arg)}
     parameter_names = frozenset(stores)
@@ -972,6 +973,11 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             dimension(call)
         elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
             targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            if len(targets) == 1 and isinstance(targets[0], ast.Attribute):
+                target = targets[0]
+                receiver = scope_binding(target.value)
+                if receiver in scopes and not scope_paths[receiver]:
+                    scope_writes.append(target)
             if len(targets) == 1 and isinstance(targets[0], (ast.Name, ast.Tuple, ast.List)):
                 target = targets[0]
                 expression = statement.value
@@ -993,6 +999,9 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                         aliases[name.id] = value
                         alias_conditions[name.id] = dict(conditions)
 
+    for target in scope_writes:
+        if declarations.get(target.attr, {}).get("kind") in ("dimension", "value", "static"):
+            allowed.add(id(target.value))
     for node in ast.walk(constructor):
         if (
             isinstance(node, ast.Name)

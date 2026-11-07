@@ -490,8 +490,16 @@ records; prepared calls keep their previous snapshots. Unread record static
 members create no code copies. Record-local extents cannot escape into parent
 Field allocations, and record scopes cannot allocate new Fields. Focused
 CPU/CUDA/Vulkan checks cover record values, static projection, parent capacity
-constraints and independent source-free consumption. Arbitrary multi-statement
-declaration helpers, populated optional records, borrowed Fields and model-driven
+constraints and independent source-free consumption. Multiple declarations in an
+ordinary helper can also be proven and projected: only known ResourceScope
+declaration methods, fixed literal name loops, literal build conditions and
+ordinary record attribute forwarding are admitted. Export never invokes the
+helper to discover dependencies. Hygienic locals preserve declaration scopes;
+arguments still evaluate once in their original order. Unknown calls, effects,
+model-driven loops/conditions and shadowed helper bindings reject. Focused
+CPU/CUDA/Vulkan source-free checks pass. The original EFC declare_batch_layout
+passes this expansion, but its class still needs borrowed-input and type-domain
+support. Arbitrary declaration helpers, populated optional records, borrowed Fields and model-driven
 local tensor type domains remain unfinished; this is not full EFC qualification.
 
 Other recognized unsupported declarations or Host frontend operations reject export;
