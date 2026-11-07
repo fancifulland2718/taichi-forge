@@ -28,7 +28,7 @@ def declaration(call, scope_path, schema, dimension, fail):
     if not isinstance(node, ast.Name) or node.id != "self" or not path:
         fail(call, "Borrowed Field requires a definition-proven self allocation path; untyped inputs are not sampled")
     source = schema.get(path[0], {})
-    if source.get("kind") != "owner" and (
+    if source.get("kind") not in ("owner", "owner_input") and (
         source.get("kind") != "dense_field"
         or source.get("conditions")
         or bool(source.get("struct_field")) != (len(path) == 2)
@@ -43,7 +43,7 @@ def declaration(call, scope_path, schema, dimension, fail):
     for key, value in zip(mapping.keys, mapping.values):
         if not isinstance(key, ast.Constant) or type(key.value) is not str or key.value in relations:
             fail(call, "Borrowed dimensions require unique literal source names")
-        if source.get("kind") != "owner" and (
+        if source.get("kind") not in ("owner", "owner_input") and (
             schema.get(key.value, {}).get("kind") != "dimension" or schema[key.value].get("path")
         ):
             fail(call, "Borrowed dimension is absent from the original allocation namespace")

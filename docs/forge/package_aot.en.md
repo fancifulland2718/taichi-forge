@@ -538,6 +538,33 @@ untyped constructor resource inputs, dynamic factories and model-driven local
 tensor type domains still need explicit source/type provenance. No model sample
 or combination-specific numerical package is introduced.
 
+Version 22 supports unconditional constructor references declared with
+`scope.owner_reference('source', source)`. The source object type comes from an
+existing Python parameter annotation (including quoted forward references), or
+from scanned declared construction calls. Constructors and tests are not run
+to discover signatures. Every declared call to an unannotated input must prove
+one consistent source type; extra unscoped calls, unknown or conflicting sources
+reject instead of selecting one successful path. Host wrapping and different
+instances of that type reuse the same numerical entry.
+
+The consumer borrows the existing instance without allocating another state.
+Compilation retains the source allocation's fields, dimensions and static facts,
+without recursively constructing its owned solver/workspace children. This also
+handles references back to an owner under construction. Actual input dependencies
+control specialization; Field and StructField member aliases preserve their
+native groups. The same code accepts inputs sharing an instance or referencing
+distinct instances. Leases, prepared snapshots and source retirement remain in
+effect. Ordinary Host construction/scheduling stays Python, with no application
+pyd or new registration requirement.
+
+Focused CPU/CUDA/Vulkan source-free tests and GeoPhys's original resource factory
+pass; StructField input provenance has a focused CPU numerical/group check.
+This slice requires mandatory object parameters and proven class definitions.
+Optional inputs, renamed inherited constructor parameters, unresolved numerical
+child access through inputs, compatible but different source classes, and direct
+untyped Field arguments still need support. Object inputs do not establish EFC
+qvel/mass_factor or DOF type-domain qualification.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

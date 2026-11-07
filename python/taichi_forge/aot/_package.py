@@ -682,6 +682,24 @@ def _host_projection(
 
         def visit_Call(self, node):
             for item in owners.get(self.owner, {}).values():
+                if item.get("reference_declaration") == [
+                    getattr(node, "lineno", None),
+                    getattr(node, "col_offset", None),
+                ]:
+                    self.minimum_version = max(self.minimum_version, 22)
+                    return ast.copy_location(
+                        ast.Call(
+                            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "owner_reference", ast.Load()),
+                            [
+                                ast.Constant(module + "." + self.owner),
+                                self.visit(node.func.value),
+                                *(self.visit(arg) for arg in node.args),
+                            ],
+                            [ast.keyword(k.arg, self.visit(k.value)) for k in node.keywords],
+                        ),
+                        node,
+                    )
+            for item in owners.get(self.owner, {}).values():
                 if item.get("borrow_declaration") == [getattr(node, "lineno", None), getattr(node, "col_offset", None)]:
                     self.minimum_version = max(self.minimum_version, 20)
                     return ast.copy_location(
@@ -907,6 +925,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 function = _source_value(node.items[0].context_expr.func, vars(imported_modules[name]))
                 host_contexts.add(function, recipe)
     resolve_owners(sources, imported_modules, _owner_schema, _fail)
+    from ._package_inputs import resolve_inputs
+
+    resolve_inputs(sources, imported_modules)
     module = Module(caps=caps)
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
 
@@ -1006,6 +1027,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             compilation_schemas[class_name] = expanded
             if any(item["kind"] == "owner" for item in schema.values()):
                 manifest["version"] = max(21, manifest["version"])
+            if any(item["kind"] == "owner_input" for item in schema.values()):
+                manifest["version"] = max(22, manifest["version"])
             if any(item["kind"] == "static" for item in schema.values()):
                 manifest["version"] = max(11, manifest["version"])
             if any("presence_parameter" in item for item in schema.values()):
@@ -1035,6 +1058,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "placement",
                         "placement_alias",
                         "borrow_declaration",
+                        "reference_declaration",
+                        "constructor_call",
                     )
                 }
                 for attribute, item in schema.items()

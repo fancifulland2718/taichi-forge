@@ -309,6 +309,25 @@ class _ModuleBinding:
             owner._forge_package_member_layouts[attribute] = selection
         return StructField(values) if member.get("struct_field") else values[name]
 
+    def owner_reference(self, owner_key, scope, name, value):
+        self.package._check()
+        construction = _construction.get()
+        if (
+            not isinstance(scope, _ResourceScope)
+            or scope._parent is not None
+            or construction is None
+            or construction[0] is not self.package
+            or construction[2] is not scope._root
+        ):
+            raise ValueError("Owner input requires its managed constructor scope")
+        declaration = self.package.manifest["owners"][owner_key].get(name, {})
+        if declaration.get("kind") != "owner_input":
+            raise ValueError("Owner input differs from its declared reference")
+        from ._package_values import check_owner_bindings
+
+        setattr(scope._root, name, value)
+        check_owner_bindings(scope._root, (dict(path=[name], owner_type=declaration["owner_type"]),))
+
     def borrow(self, owner_key, scope, name, field, *, dimensions=None, source_scope=False, external=False):
         self.package._check()
         construction = _construction.get()
@@ -602,7 +621,7 @@ def managed_class(package, cls):
                 (
                     dict(path=item.get("path", [name]), owner_type=item["owner_type"])
                     for name, item in package.manifest["owners"].get(key, {}).items()
-                    if item["kind"] == "owner"
+                    if item["kind"] in ("owner", "owner_input")
                 ),
             )
         except BaseException:
@@ -760,7 +779,7 @@ class LoadedPackage:
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
             self.manifest.get("version")
-            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21)
+            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

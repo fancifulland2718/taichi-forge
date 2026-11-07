@@ -754,6 +754,31 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 ),
                 statement,
             )
+        elif method == "owner_reference" and isinstance(statement, ast.Expr):
+            if (
+                conditions
+                or scope_paths[scope]
+                or len(call.args) != 2
+                or call.keywords
+                or not isinstance(call.args[0], ast.Constant)
+                or type(call.args[0].value) is not str
+                or not call.args[0].value.isidentifier()
+                or not isinstance(call.args[1], ast.Name)
+                or call.args[1].id not in parameter_names
+                or stores[call.args[1].id] != 1
+            ):
+                fail(module, call, "Owner input requires an unconditional named constructor parameter")
+            add(
+                call.args[0].value,
+                dict(
+                    kind="owner_input",
+                    input_parameter=call.args[1].id,
+                    reference_declaration=[call.lineno, call.col_offset],
+                    scope_allocation=origin(scope),
+                ),
+                call,
+            )
+            allowed.add(id(call.func.value))
         elif method == "borrow" and isinstance(statement, ast.Expr):
             from ._package_borrows import declaration
 
@@ -1009,6 +1034,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                                 dict(
                                     kind="owner",
                                     owner_type=cls.__module__ + "." + cls.__qualname__,
+                                    constructor_call=copy.deepcopy(statement.value),
                                     scope_allocation=origin(receiver),
                                 ),
                                 statement,

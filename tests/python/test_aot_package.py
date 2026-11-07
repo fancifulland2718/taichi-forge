@@ -16,6 +16,251 @@ from taichi_forge._lib import utils
 from tests import test_utils
 from taichi_forge_runtime.aot import Runtime, load_package
 
+OWNER_INPUT_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Storage:
+    def __init__(self, n: int, first: bool):
+        global constructors
+        constructors += 1
+        self.n, self.first = n, first
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields)
+        scope.static('first', choices=(False, True))
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+        self.tree = fields.finalize()
+        scope.reader = Reader(self)
+    @ti.kernel
+    def clear(self):
+        for i in self.values:
+            self.values[i] = 0
+    @ti.func
+    def bias(self):
+        result = 2
+        if ti.static(self.first):
+            result = 7
+        return result
+
+@ti.data_oriented
+class Reader:
+    def __init__(self, source):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('source', source)
+        scope.borrow('alias', self.source.values, source_scope=True)
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.alias:
+            self.alias[i] = gain * i + self.source.bias()
+    def graph(self):
+        graph = ti.graph.GraphBuilder()
+        graph.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        return graph.compile()
+
+class Forward:
+    def __init__(self, source):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('source', source)
+        scope.reader = Reader(source)
+    def step(self, gain):
+        self.reader.step(gain)
+
+class Model:
+    def __init__(self, n: int, first: bool):
+        scope = ti.experimental.ResourceScope(self)
+        scope.storage = Storage(n, first)
+        scope.reader = Forward(self.storage)
+    def step(self, gain):
+        self.reader.step(gain)
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_constructor_inputs_share_source_allocation_without_combination_code(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, OWNER_INPUT_SOURCE)
+    original = package.Model(7, True)
+    original.step(3.0)
+    expected = original.storage.values.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 22
+    assert sys.modules["definition_fixture.model"].constructors == 1
+    assert len(manifest["entries"]) == 4
+    assert len(manifest["field_groups"]) == 1
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([n for n in archive.namelist() if n.endswith((".ll", ".bc", ".spv"))]) == 4
+    family = next(iter(manifest["entry_families"].values()))
+    assert list(family["paths"].values()) == [["source", "first"]]
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, True), code.host.Model(19, False)
+        assert a.storage.reader.source is a.reader.source is a.storage
+        assert a.reader.reader.source is a.storage
+        assert a.storage.reader._forge_package_field_groups == a.reader.reader._forge_package_field_groups == {}
+        a.step(3.0)
+        np.testing.assert_array_equal(a.storage.values.to_numpy(), expected)
+        b.step(-2.0)
+        np.testing.assert_array_equal(b.storage.values.to_numpy(), -2 * np.arange(19) + 2)
+        inner = a.reader.reader
+        prepared = inner.graph().bind(dict(gain=4.0))
+        inner.source = b.storage
+        with pytest.raises(ValueError, match="Borrowed Field"):
+            inner.step(1.0)
+        prepared.run()
+        np.testing.assert_array_equal(a.storage.values.to_numpy(), 4 * np.arange(7) + 7)
+        inner.source = a.storage
+        with load_package(runtime, tmp_path / "sdk") as foreign:
+            source = foreign.host.Model(7, True).storage
+            with pytest.raises(ValueError, match="child owner"):
+                type(inner)(source)
+        a.storage.tree.destroy()
+        with pytest.raises((ValueError, RuntimeError)):
+            inner.step(1.0)
+        b.step(1.0)
+        np.testing.assert_array_equal(b.storage.values.to_numpy(), np.arange(19) + 2)
+        prepared.close()
+    probe = tmp_path / "consume_inputs.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3, True), code.host.Model(13, False)
+            assert a.storage.reader.source is a.reader.reader.source is a.storage
+            assert a.reader.reader._forge_package_field_groups == {}
+            a.step(4.0)
+            b.step(-2.0)
+            np.testing.assert_array_equal(a.storage.values.to_numpy(), 4 * np.arange(3) + 7)
+            np.testing.assert_array_equal(b.storage.values.to_numpy(), -2 * np.arange(13) + 2)
+        print('OWNER_INPUT_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OWNER_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_owner_inputs_allow_same_or_distinct_resource_instances(tmp_path, monkeypatch):
+    source = (
+        OWNER_INPUT_SOURCE.replace("Reader(self)", "Reader(self, self)")
+        .replace("Reader(source)", "Reader(source, source)")
+        .replace(
+            "class Reader:\n    def __init__(self, source):", "class Reader:\n    def __init__(self, source, other):"
+        )
+        .replace("scope.borrow('alias'", "scope.owner_reference('other', other)\n        scope.borrow('alias'")
+        .replace(
+            "self.alias[i] = gain * i + self.source.bias()",
+            "self.alias[i] = gain * i + self.source.bias()\n            self.other.values[i] += 1",
+        )
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert len(manifest["entries"]) == 4
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, True), code.host.Model(7, False)
+        a.step(3.0)
+        np.testing.assert_array_equal(a.storage.values.to_numpy(), 3 * np.arange(7) + 8)
+        b.storage.clear()
+        distinct = type(a.storage.reader)(a.storage, b.storage)
+        distinct.step(2.0)
+        np.testing.assert_array_equal(a.storage.values.to_numpy(), 2 * np.arange(7) + 7)
+        np.testing.assert_array_equal(b.storage.values.to_numpy(), 1)
+
+
+@pytest.mark.parametrize(
+    "before,after,diagnostic",
+    [
+        ("Reader(self)", "Reader(None)", "every declared constructor call"),
+        ("Forward(self.storage)", "Forward(self)", "incompatible source definitions"),
+        (
+            "scope.owner_reference('source', source)",
+            "scope.owner_reference('source', source, optional=True)",
+            "unconditional named constructor parameter",
+        ),
+        ("scope.reader = Reader(source)", "scope.reader = Reader(*[source])", "explicit arguments"),
+        (
+            "class Forward:",
+            "def make_reader(source):\n    return Reader(source)\n\nclass Forward:",
+            "Unscoped constructor input",
+        ),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_owner_inputs_reject_unproven_source_types(tmp_path, monkeypatch, before, after, diagnostic):
+    package = _source_package(tmp_path, monkeypatch, OWNER_INPUT_SOURCE.replace(before, after))
+    with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_owner_input_keeps_struct_member_allocation_scope(tmp_path, monkeypatch):
+    source = (
+        OWNER_INPUT_SOURCE.replace(
+            "scope.values = scope.field(ti.f32, shape=scope.dim('n'))",
+            "scope.values = scope.struct_field({'x': ti.f32, 'v': ti.types.vector(2, ti.f32)}, shape=scope.dim('n'))",
+        )
+        .replace("self.source.values, source_scope", "self.source.values.x, source_scope")
+        .replace("self.values[i]", "self.values.x[i]")
+        .replace("in self.values:", "in self.values.x:")
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = package.Model(7, True)
+    original.step(3.0)
+    expected = original.storage.values.x.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert len(manifest["entries"]) == 4 and len(manifest["field_groups"]) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a = code.host.Model(7, True)
+        a.step(3.0)
+        assert a.reader.reader.alias is a.storage.values.x
+        assert a.reader.reader.alias._group_owner is a.storage.values.v._group_owner
+        np.testing.assert_array_equal(a.storage.values.x.to_numpy(), expected)
+
+
+@pytest.mark.parametrize("annotation", ["Storage", '"Storage"', "'\"Storage\"'"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_typed_owner_input_needs_no_constructor_call_sample(tmp_path, monkeypatch, annotation):
+    source = OWNER_INPUT_SOURCE[: OWNER_INPUT_SOURCE.index("class Forward:")]
+    source = source.replace("        scope.reader = Reader(self)\n", "").replace(
+        "def __init__(self, source):", f"def __init__(self, source: {annotation}):"
+    )
+    package = _source_package(
+        tmp_path, monkeypatch, source, initializer="from .model import Reader as Model, Storage\n"
+    )
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["entries"]) == 4
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        storage = code.host.Storage(7, True)
+        reader = code.host.Model(storage)
+        reader.step(3.0)
+        assert reader.alias is storage.values
+        np.testing.assert_array_equal(storage.values.to_numpy(), 3 * np.arange(7) + 7)
+
+
 DECLARED_CHILD_SOURCE = """
 import taichi_forge as ti
 constructors = 0

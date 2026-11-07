@@ -10,7 +10,7 @@ def owner_bindings(environment, schema, used):
     return {
         key: dict(path=item.get("path", [key]), owner_type=item["owner_type"])
         for key, item in schema.items()
-        if item["kind"] == "owner"
+        if item["kind"] in ("owner", "owner_input")
         and any(tuple(path[: len(item.get("path", [key]))]) == tuple(item.get("path", [key])) for path in paths)
     }
 
@@ -19,7 +19,9 @@ def layout_owner(environment, schema, name):
     from ._component import _capture_id
 
     path = environment._source_scope_paths.get(name, environment._paths[name])
-    owners = [tuple(item.get("path", [key])) for key, item in schema.items() if item["kind"] == "owner"]
+    owners = [
+        tuple(item.get("path", [key])) for key, item in schema.items() if item["kind"] in ("owner", "owner_input")
+    ]
     owner = max((p for p in owners if tuple(path[: len(p)]) == p), key=len, default=())
     return dict(layout_owner_path=list(owner), layout_member=_capture_id(path[len(owner) :])) if owner else {}
 
@@ -44,7 +46,7 @@ class OwnerGraph:
             if item["kind"] == "owner":
                 self._validate(item["owner_type"], (*ancestors, identity))
 
-    def construct(self, identity):
+    def construct(self, identity, *, resource_only=False, references=()):
         import taichi_forge as ti
         from taichi_forge.lang.matrix import MatrixType
         from taichi_forge_runtime._static_values import read_static_key
@@ -56,6 +58,13 @@ class OwnerGraph:
 
         name, class_name, original = self.definitions[identity]
         schema = copy.deepcopy(original)
+        if resource_only:
+            # An input borrows its existing allocation scope. It does not create
+            # or recursively compile that scope's owned solver/workspace objects.
+            if identity in references:
+                raise ValueError("Cyclic input resource definitions require a resolved allocation path")
+            references = (*references, identity)
+            schema = {key: item for key, item in schema.items() if item["kind"] != "owner"}
         imported = self.imported[name]
         owner = object.__new__(getattr(imported, class_name))
         declarations = construct_fields(owner, schema, vars(imported), self.module, imported_modules=self.imported)
@@ -66,8 +75,10 @@ class OwnerGraph:
             if item["kind"] == "record":
                 declarations[attribute] = Record()
                 continue
-            if item["kind"] == "owner":
-                value, _, child, expanded = self.construct(item["owner_type"])
+            if item["kind"] in ("owner", "owner_input"):
+                value, _, child, expanded = self.construct(
+                    item["owner_type"], resource_only=item["kind"] == "owner_input", references=references
+                )
                 declarations[attribute] = Record()
                 children[attribute] = (child, expanded)
             elif item["kind"] == "static":
