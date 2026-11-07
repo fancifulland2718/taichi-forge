@@ -401,6 +401,25 @@ def _host_projection(
                     for a in tensors
                 ]
             if not node.level and (node.module or "").startswith(("taichi.", "taichi_forge.")):
+                if node.module in ("taichi.lang._ndarray", "taichi_forge.lang._ndarray"):
+                    from ..lang._ndarray import Ndarray
+
+                    imported = importlib.import_module(node.module)
+                    if all(a.name == "Ndarray" and getattr(imported, a.name, None) is Ndarray for a in node.names):
+                        self.minimum_version = max(self.minimum_version, 17)
+                        return [
+                            ast.Assign(
+                                [ast.Name(a.asname or a.name, ast.Store())],
+                                ast.Call(
+                                    ast.Attribute(
+                                        ast.Name(_PREFIX + "runtime", ast.Load()), "resource_type", ast.Load()
+                                    ),
+                                    [ast.Constant("ndarray")],
+                                    [],
+                                ),
+                            )
+                            for a in node.names
+                        ]
                 _fail(module, node, "frontend submodule imports require further Host projection support")
             if not node.level and internal_import(origin):
                 if any(a.name == "*" for a in node.names):

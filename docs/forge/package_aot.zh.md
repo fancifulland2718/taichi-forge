@@ -169,7 +169,7 @@ Host 的 `ti.Vector`/`ti.Matrix` 构造（含 import 别名）、固定张量类
 装饰器内的数值矩阵运算继续由原编译器处理。三后端局部检查覆盖捕获、复合参数、
 独立状态及无源码消费。
 
-Graph 捕获及相关 Host 支持使用清单版本 9，当前消费者读取版本 1–16。函数内前端导入、
+Graph 捕获及相关 Host 支持使用清单版本 9，当前消费者读取版本 1–17。函数内前端导入、
 `ti.sync()` 和 Runtime program 身份查询均投影到现有 Runtime，不导入编译器。
 逻辑 `types.vector/matrix` 工厂接受 Host 维度/dtype，不分配设备存储。
 `NdArray.from_numpy/to_numpy` 复用原生传输并检查形状，包括 Dense 成员视图；Struct
@@ -302,6 +302,11 @@ JIT 对照、无源码消费、新尺寸、分配前/后异常回收、正常树
 被遮蔽的 setattr、模型驱动的名字列表及额外循环体操作拒绝。不会执行模型循环，也不会
 复制数值方法。局部检查对照原生布局、数值和 Host 状态；原 GeoPhys 辅助函数的该声明形式
 也通过 CPU/CUDA/Vulkan 无源码消费检查。
+
+`from taichi_forge.lang._ndarray import Ndarray`（含 Taichi 兼容路径、别名和函数内导入）
+可保留为 Host 类型检查，使用版本 17。`isinstance` 接受普通标量/张量/记录 ndarray；
+Dense Field 成员即使复用 ndarray ABI 也不属于该类型，普通 Python/NumPy 对象同样不属于。
+这是类型判断和标注投影；直接构造该基类、定义子类或检查资源实现类的继承关系仍明确拒绝。
 
 ## 仍需补齐的共同机制
 

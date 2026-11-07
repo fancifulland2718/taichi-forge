@@ -18,7 +18,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
-from ._runtime import Scalar
+from ._runtime import NdArray, Scalar
 from ._package_values import StructField, capture_value
 from .._dimensions import Extent, evaluate_extent
 from .._static_values import read_static_key, static_key
@@ -44,6 +44,26 @@ class _NdarrayAnnotation:
     ndim: int
     needs_grad: object
     boundary: str
+
+
+class _NdarrayType(type):
+    def __instancecheck__(cls, value):
+        # Dense Field member views use the ndarray ABI, but remain Fields in
+        # ordinary Host dispatch. ABI compatibility is not nominal subtyping.
+        return isinstance(value, NdArray) and not hasattr(value, "_group_owner")
+
+    def __subclasscheck__(cls, value):
+        if value is cls:
+            return True
+        raise TypeError("Host Ndarray projection supports instance checks, not resource subclass inspection")
+
+
+class _HostNdarray(metaclass=_NdarrayType):
+    def __new__(cls, *args, **kwargs):
+        raise TypeError("Host Ndarray type is not an allocation API; use the retained ndarray constructor")
+
+    def __init_subclass__(cls, **kwargs):
+        raise TypeError("Host Ndarray subclasses require further projection support")
 
 
 @dataclass(frozen=True)
@@ -122,6 +142,11 @@ class _ModuleBinding:
 
     def producer_type(self, name):
         return _ProducerType(name)
+
+    def resource_type(self, name):
+        if name != "ndarray":
+            raise ValueError(f"Unsupported Host resource type: {name}")
+        return _HostNdarray
 
     @property
     def program(self):
@@ -597,7 +622,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

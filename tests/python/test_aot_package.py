@@ -293,6 +293,128 @@ def _source_package(tmp_path, monkeypatch, source=SOURCE, *, initializer="from .
     return importlib.import_module("definition_fixture")
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_host_ndarray_checks_distinguish_field_views(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+from taichi_forge.lang._ndarray import Ndarray as Array
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        self.values = ti.ndarray(ti.f32, shape=n)
+        self.vectors = ti.ndarray(ti.types.vector(2, ti.f32), shape=n)
+        scope = ti.experimental.ResourceScope(self)
+        count = scope.dim('n')
+        scope.field_values = scope.field(ti.f32, shape=count)
+
+    @ti.kernel
+    def fill(self, values: ti.types.ndarray(dtype=ti.f32, ndim=1), gain: ti.f32):
+        for i in values:
+            values[i] = gain * i
+
+    def classify(self, value: Array):
+        from taichi_forge.lang._ndarray import Ndarray
+        return isinstance(value, Array), isinstance(value, Ndarray), Array is Ndarray
+
+    def bind_arrays(self, graph, arguments):
+        from taichi_forge.lang._ndarray import Ndarray
+        if not all(isinstance(value, Ndarray) or type(value) in (bool, int, float)
+                   for value in arguments.values()):
+            return None
+        return graph.bind(arguments)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 17
+    original = package.Model(3)
+    for value, expected in (
+        (original.values, True),
+        (original.vectors, True),
+        (original.field_values, False),
+        (3, False),
+    ):
+        assert original.classify(value) == (expected, expected, True)
+    original.fill(original.values, 2.0)
+    probe = tmp_path / "consume_resource_types.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        class Graph:
+            def bind(self, values):
+                return values
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as loaded:
+            a, b = loaded.host.Model(3), loaded.host.Model(7)
+            for model in (a, b):
+                for value, expected in ((model.values, True), (model.vectors, True),
+                                        (model.field_values, False), (3, False), (np.ones(3), False)):
+                    assert model.classify(value) == (expected, expected, True)
+                arguments = {'array': model.values, 'vector': model.vectors, 'n': 2}
+                assert model.bind_arrays(Graph(), arguments) is arguments
+                assert model.bind_arrays(Graph(), {'field': model.field_values}) is None
+                assert model.bind_arrays(Graph(), {'array': np.ones(3)}) is None
+            external = runtime.ndarray('f32', (3,))
+            assert a.classify(external) == (True, True, True)
+            array_type = loaded.module('definition_fixture.model').Array
+            for unsupported in (lambda: array_type(), lambda: issubclass(type(external), array_type),
+                                lambda: type('Derived', (array_type,), {})):
+                try:
+                    unsupported()
+                except TypeError:
+                    pass
+                else:
+                    raise AssertionError('Unqualified resource implementation API was accepted')
+            a.fill(a.values, 2.0)
+            b.fill(b.values, -1.0)
+            np.testing.assert_array_equal(a.values.to_numpy(), [0, 2, 4])
+            np.testing.assert_array_equal(b.values.to_numpy(), -np.arange(7))
+        print('HOST_RESOURCE_TYPES_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "HOST_RESOURCE_TYPES_OK" in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_host_resource_import_keeps_unprojected_types_rejected(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
+@ti.data_oriented
+class Model:
+    pass
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="frontend submodule imports"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize("helper_kind", ["func", "real_func", "pyfunc"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_compiles_definitions_without_constructor_or_test_trace(tmp_path, monkeypatch, helper_kind):

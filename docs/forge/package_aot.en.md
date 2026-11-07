@@ -228,7 +228,7 @@ decorated definitions continue through the original compiler. Focused three-back
 checks cover captures, typed compound arguments, state isolation and source-free use.
 
 Graph capture projection and related Host support use manifest version 9; the
-consumer reads versions 1–16. Local frontend imports, `ti.sync()` and the Runtime
+consumer reads versions 1–17. Local frontend imports, `ti.sync()` and the Runtime
 program identity query are projected without importing the compiler. Logical
 `types.vector/matrix` factories accept Host dimensions/dtypes; they do not allocate
 device storage. `NdArray.from_numpy/to_numpy` use existing native transfers with
@@ -442,6 +442,14 @@ CPU/CUDA/Vulkan consumption with this declaration form.
 Complex SNode/Field layouts, the inheritance restrictions above, template/other conditional-resource domains,
 untyped or Python-specific `pyfunc`, gradients, arbitrary Python resource factories,
 complete Host array access, full Graph/ExecutionPlan and provider references are not integrated.
+`from taichi_forge.lang._ndarray import Ndarray`, including the Taichi compatibility
+path, aliases and function-local imports, supports Host instance checks using
+version 17. Scalar, tensor and record ndarrays match; Dense Field member views
+remain Fields despite sharing the ndarray ABI. Ordinary Python and NumPy objects
+do not match. This projects annotations and instance checks; direct base-class
+allocation, subclass definitions and resource implementation subclass inspection
+remain explicitly unsupported.
+
 Recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.
