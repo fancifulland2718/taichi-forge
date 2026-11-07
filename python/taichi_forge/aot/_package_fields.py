@@ -12,7 +12,7 @@ def field_type_shape(call, role, module, fail):
         "Matrix.field": ("n", "m", "dtype", "shape"),
         "Struct.field": ("members", "shape"),
     }[role]
-    if len(call.args) > len(names) or any(k.arg not in names for k in call.keywords):
+    if len(call.args) > len(names) or any(k.arg not in (*names, "order") for k in call.keywords):
         fail(module, call, "Package Field declarations currently require plain default AOS layout")
     args = dict(zip(names, call.args))
     for keyword in call.keywords:
@@ -27,6 +27,27 @@ def field_type_shape(call, role, module, fail):
         dimensions = [args["n"]] + ([args["m"]] if role == "Matrix.field" else [])
         dtype = ast.Call(ast.Name(factory, ast.Load()), [*dimensions, dtype], [])
     return dtype, args["shape"]
+
+
+def field_order(call, rank, module, fail):
+    """Only a fixed factory order; model-selected layouts need a separate contract."""
+    from taichi_forge.lang.impl import _field_layout_axes
+
+    orders = [keyword.value for keyword in call.keywords if keyword.arg == "order"]
+    if not orders:
+        return None
+    value = orders[0]
+    if (
+        len(orders) != 1
+        or not isinstance(value, ast.Constant)
+        or (value.value is not None and type(value.value) is not str)
+    ):
+        fail(module, value, "Field order requires a literal axis permutation or None")
+    try:
+        _field_layout_axes((1,) * rank, value.value)
+    except (TypeError, ValueError, SyntaxError) as error:
+        fail(module, value, str(error))
+    return value.value
 
 
 def field_declarations(module, constructor, kind, fail):
@@ -102,6 +123,7 @@ def field_declarations(module, constructor, kind, fail):
             fail(module, node, "Field allocation requires one unconditional owner attribute")
         dtype, shape = field_type_shape(node.value, role, module, fail)
         shape = shape.elts if isinstance(shape, (ast.List, ast.Tuple)) else [shape]
+        order = field_order(node.value, len(shape), module, fail)
         sources = {}
 
         def model_axis(axis):
@@ -120,6 +142,7 @@ def field_declarations(module, constructor, kind, fail):
             shape=[extent(n, sources) for n in shape],
             dimension_sources=sources,
             allocation=[node.lineno, node.col_offset],
+            **({"order": order} if order is not None else {}),
         )
     return fields
 
@@ -261,6 +284,11 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             placements[position[:2]] = builder.dense(axes, tuple(concrete))
             continue
         value = ti.Struct.field(dtype.members) if item.get("struct_field") else ti.field(dtype)
+        axis_seq, shape_seq, same_level = ti.lang.impl._field_layout_axes(concrete, item.get("order"))
+
+        def ordinary_placement():
+            return ti.lang.impl._create_snode(axis_seq, shape_seq, same_level, root_node=builder)
+
         # This is the documented default field(shape=...) placement through the
         # ordinary builder. Native capture verifies the complete group below.
         # Even shape=() uses the ordinary factory's empty-axis Dense node.
@@ -269,7 +297,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         parent = (
             placements[tuple(item["placement"]["declaration"])]
             if "placement" in item
-            else None if item.get("layout") == "SOA" else builder.dense(axes, tuple(concrete))
+            else None if item.get("layout") == "SOA" else ordinary_placement()
         )
         if item.get("layout") == "SOA":
             if item.get("struct_field"):
@@ -280,7 +308,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             else:
                 members = (value,)
             for member in members:
-                builder.dense(axes, tuple(concrete)).place(member)
+                ordinary_placement().place(member)
         else:
             parent.place(value)
         setattr(owner, name, value)

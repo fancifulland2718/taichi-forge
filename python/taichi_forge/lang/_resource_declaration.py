@@ -615,9 +615,13 @@ class ResourceScope:
                 or kwargs.get("layout", Layout.AOS) != Layout.AOS
             ):
                 raise ValueError("ResourceScope explicit groups currently require plain AOS Fields")
+            order = kwargs.pop("order", None)
+            if placement is not None and order is not None:
+                raise ValueError("Explicit placement already determines the Field index order")
+            axis_seq, shape_seq, same_level = impl._field_layout_axes(concrete, order)
             field = factory(*args, **{**kwargs, "shape": None})
             if placement is None:
-                self._builder.dense(impl.index_nd(len(concrete)), concrete).place(field)
+                impl._create_snode(axis_seq, shape_seq, same_level, root_node=self._builder).place(field)
             else:
                 placement.place(field)
         caller = inspect.currentframe().f_back.f_back

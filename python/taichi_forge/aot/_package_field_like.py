@@ -81,6 +81,7 @@ def resolve_field_likes(sources):
             "placement_alias",
             "placement",
             "group_builder",
+            "order",
         ):
             field.pop(key, None)
         for node in ast.walk(field["type_node"]):

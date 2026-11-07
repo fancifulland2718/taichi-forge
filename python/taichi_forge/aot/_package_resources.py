@@ -6,8 +6,7 @@ import hashlib
 
 from taichi_forge_runtime._dimensions import Extent, extent_dependencies, evaluate_extent
 from ._package_types import qualified_kind, project_tensor_axes, expand_local_type
-from ._package_fields import field_type_shape
-
+from ._package_fields import field_type_shape, field_order
 
 def _normalize_field_loops(module, constructor, kind, fail, namespace):
     """Expand literal member declarations, never iterate model data or numerical code."""
@@ -1373,12 +1372,15 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                 shape = (shape,)
             if not isinstance(shape, tuple):
                 fail(module, shape_node, "ResourceScope Field shape requires declared dimensions and their algebra")
+            order = field_order(call, len(shape), module, fail)
             group = scope_groups[scope]
             if group in builders and statement.lineno >= builders[group]["finalization"][0]:
                 fail(module, statement, "Resource declaration follows FieldsBuilder finalization")
             placement_node = original_args.get("placement")
             placement = None
             if placement_node is not None:
+                if order is not None:
+                    fail(module, placement_node, "Explicit placement already determines the Field index order")
                 placement = placements.get(placement_node.id) if isinstance(placement_node, ast.Name) else None
                 if (
                     placement is None
@@ -1428,6 +1430,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                         else {}
                     ),
                     shape=extents,
+                    **({"order": order} if order is not None else {}),
                     dimension_sources=sources,
                     dimension_expressions=expressions,
                     **({"dimension_alias_checks": dict(alias_checks)} if alias_checks else {}),

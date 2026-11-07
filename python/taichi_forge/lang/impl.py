@@ -1298,10 +1298,28 @@ Example::
 """
 
 
-def _create_snode(axis_seq: Sequence[int], shape_seq: Sequence[numbers.Number], same_level: bool):
+def _field_layout_axes(shape, order):
+    """The ordinary Field factory's index ordering, shared with AOT witnesses."""
+    dim = len(shape)
+    if order is None:
+        return list(range(dim)), list(shape), True
+    if dim != len(order):
+        raise TaichiSyntaxError(f"The dimensionality of shape and order must be the same ({dim} != {len(order)})")
+    if dim != len(set(order)):
+        raise TaichiSyntaxError("The axes in order must be different")
+    axis_seq = []
+    for ch in order:
+        axis = ord(ch) - ord("i")
+        if axis < 0 or axis >= dim:
+            raise TaichiSyntaxError(f"Invalid axis {ch}")
+        axis_seq.append(axis)
+    return axis_seq, [shape[axis] for axis in axis_seq], False
+
+
+def _create_snode(axis_seq: Sequence[int], shape_seq: Sequence[numbers.Number], same_level: bool, *, root_node=None):
     dim = len(axis_seq)
     assert dim == len(shape_seq)
-    snode = root
+    snode = root if root_node is None else root_node
     if same_level:
         snode = snode.dense(axes(*axis_seq), shape_seq)
     else:
@@ -1401,25 +1419,7 @@ def _field(
         dim = len(shape)
         if offset is not None and dim != len(offset):
             raise TaichiSyntaxError(f"The dimensionality of shape and offset must be the same ({dim} != {len(offset)})")
-        axis_seq = []
-        shape_seq = []
-        if order is not None:
-            if dim != len(order):
-                raise TaichiSyntaxError(
-                    f"The dimensionality of shape and order must be the same ({dim} != {len(order)})"
-                )
-            if dim != len(set(order)):
-                raise TaichiSyntaxError("The axes in order must be different")
-            for ch in order:
-                axis = ord(ch) - ord("i")
-                if axis < 0 or axis >= dim:
-                    raise TaichiSyntaxError(f"Invalid axis {ch}")
-                axis_seq.append(axis)
-                shape_seq.append(shape[axis])
-        else:
-            axis_seq = list(range(dim))
-            shape_seq = list(shape)
-        same_level = order is None
+        axis_seq, shape_seq, same_level = _field_layout_axes(shape, order)
         _create_snode(axis_seq, shape_seq, same_level).place(x, offset=offset)
         if needs_grad:
             _create_snode(axis_seq, shape_seq, same_level).place(x_grad, offset=offset)

@@ -116,7 +116,7 @@ independent object retirement is not implemented.
 - Typed numerical `pyfunc` definitions become callable AOT entries for Host use and retain ordinary function lowering inside kernels. Their numerical Python source is removed. Untyped public parameters reject instead of learning a signature from prior calls. This covers the declared numerical domain, not arbitrary Python objects, side effects, or scope-dependent implementations; explicit scope queries reject. Original JIT/Python decorators remain unchanged.
 - Single-module exports resolve relative device-helper imports against the original module namespace. Such helpers compile as dependencies and are removed from Host imports; the private parent package is not required for these imports.
 - Absolute imports within the selected package, including lazy imports inside functions, resolve in that loaded package's independent namespace. Ordinary imports, aliases and named imports preserve their bindings without changing global source-package names. Without `source_root`, unaliased absolute imports of a nested package remain unsupported. Wildcard imports and builtin `__import__` have explicit restrictions; external dependencies follow the source boundary above.
-- Direct constructor `field`, `Vector.field` and `Matrix.field` allocations with plain default AOS layout form one complete native SNode group per owner. Extents may be positive constants, constructor parameters or their unconditional single-assignment owner aliases. A compile-only ordinary FieldsBuilder supplies the native schema; the consumer instantiates that schema through the same native layout compiler. No application constructor runs during export and Fields are not split into separately allocated ndarrays. Conditional/ambiguous extents, offsets, custom order, gradients and explicit user-built trees require further support.
+- Direct constructor `field`, `Vector.field` and `Matrix.field` allocations with AOS layout form one complete native SNode group per owner. Extents may be positive constants, constructor parameters or their unconditional single-assignment owner aliases. A compile-only ordinary FieldsBuilder supplies the native schema; the consumer instantiates that schema through the same native layout compiler. No application constructor runs during export and Fields are not split into separately allocated ndarrays. Conditional/ambiguous extents, offsets, model-selected order, gradients and explicit user-built trees require further support.
 
 For entries in the same package, retained Host recorders can use
 `ti.graph.Arg`, `ArgKind`, `GraphBuilder.dispatch`, sequential nodes and `append`.
@@ -246,6 +246,15 @@ shape metadata, and only values read by a kernel enter that kernel's capture
 contract. Unused declarations do not add arguments. Original Host value assignments
 and later changes remain normal Python. Focused CPU/CUDA/Vulkan checks cover
 source-free tensor captures, two independent instances and original JIT behavior.
+
+A literal `order="ji"` (or another valid index permutation) uses the same axis
+validation and Dense construction routine as ordinary scalar/Vector/Matrix Field
+factories. Direct allocations and ResourceScope allocations, including explicit
+FieldsBuilder groups, retain the original nested SNode layout. Native schemas
+remain authoritative for byte offsets and strides. Focused CPU/CUDA tests compare
+original node layouts, new sizes, independent instances and a source-free
+consumer. Model-dependent order choices still require further layout selection
+support; they are not sampled from a producer model.
 
 Default AOS ResourceScope `field/vector_field/matrix_field` declarations also export
 through `dim('name')`, single-assignment local aliases and the existing dimension
