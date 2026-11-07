@@ -2559,6 +2559,156 @@ class Reader:
 """
 
 
+MODEL_STATIC_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, dof: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.dof = dof
+        self.vector = ti.Vector.field(self.dof, ti.i32, shape=self.n)
+        self.result = ti.field(ti.i32, shape=self.n)
+
+    @ti.func
+    def evaluate(self):
+        count = ti.static(self.dof * (self.dof + 1) // 2)
+        extra = ti.static(5 if self.dof == 1 else 7)
+        extra_check = ti.static((self.dof == 1 and 5) or 7)
+        result = extra
+        if extra != extra_check:
+            result += 10000
+        for j in ti.static(range(count)):
+            result += 1
+        for j, k in ti.static(ti.ndrange(self.dof, 2)):
+            result += j + k
+        for j in ti.static(range(3)):
+            result += (1, 3, 5)[j]
+        if ti.static(self.dof > 32 and self.dof < 128):
+            result += 2
+        else:
+            result += 3
+        if ti.static(self.dof and False and self.missing):
+            result += 999
+        return result
+
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.result[i] = self.evaluate()
+
+    @ti.kernel
+    def ordered(self):
+        self.result[0] = 0
+        for j in ti.static(range(self.dof)):
+            self.result[0] = (self.result[0] * 5 + j) % 97
+        for j in ti.static(range(self.dof, self.dof - 1)):
+            self.result[0] = -1
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+"""
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_model_static_control_uses_one_implementation(tmp_path, monkeypatch, grouped):
+    source = MODEL_STATIC_SOURCE
+    if grouped:
+        source = source.replace("for j, k in ti.static(ti.ndrange(self.dof, 2)):\n            result += j + k",
+                                "for I in ti.static(ti.grouped(ti.ndrange(self.vector.n, 2))):\n"
+                                "            result += I[0] + I[1]")
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    for name in ("step", "ordered"):
+        entries = [entry for entry in manifest["entries"].values()
+                   if entry["definition"].endswith("Model." + name)]
+        assert len(entries) == 1
+    expected = package.Model(2, 17)
+    expected.step()
+    np.testing.assert_array_equal(expected.result.to_numpy(), 461)
+    probe = tmp_path / "consume_control.py"
+    probe.write_text(textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            models = [code.host.Model(2, dof) for dof in (1, 17, 65, 129)]
+            graphs = [model.graph() for model in models]
+            calls = [graph.bind({}) for graph in graphs]
+            for model in reversed(models):
+                model.step()
+                n = model.dof
+                expected = n*(n+1)//2 + n*n + 9 + (5 if n == 1 else 7) + (2 if 32 < n < 128 else 3)
+                np.testing.assert_array_equal(model.result.to_numpy(), expected)
+                model.ordered()
+                ordered = 0
+                for j in range(n):
+                    ordered = (ordered * 5 + j) % 97
+                assert model.result.to_numpy()[0] == ordered
+            for call in reversed(calls):
+                call.run()
+            calls[0].close()
+            for model, call in zip(models[1:], calls[1:]):
+                call.run()
+                n = model.dof
+                expected = n*(n+1)//2 + n*n + 16 + (2 if 32 < n < 128 else 3)
+                np.testing.assert_array_equal(model.result.to_numpy(), expected)
+                call.close()
+            # The final triangular count fits i32 at 50000, but its multiply
+            # does not. Check the exact submission snapshot before any work.
+            from taichi_forge_runtime.aot import _package, _package_graph
+            for bindings, action in ((_package, models[1].step),
+                                     (_package_graph, lambda: graphs[1].bind({}))):
+                original = bindings.capture_value
+                def changed(owner, spec):
+                    value = original(owner, spec)
+                    return 50000 if spec['name'] == 'dof' else value
+                bindings.capture_value = changed
+                try:
+                    action()
+                except ValueError as error:
+                    assert 'i32 intermediate range' in str(error), str(error)
+                else:
+                    raise AssertionError('overflowing static loop expression submitted')
+                finally:
+                    bindings.capture_value = original
+            models[1].step()
+            np.testing.assert_array_equal(models[1].result.to_numpy(), 461)
+        print('MODEL_STATIC_CONTROL_OK')
+    """), encoding="utf8")
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+               PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+               TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+               TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    backend = {ti.cpu: "cpu", ti.cuda: "cuda", ti.vulkan: "vulkan"}[ti.cfg.arch]
+    result = subprocess.run([sys.executable, "-B", str(probe), str(tmp_path / "sdk"), backend],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "MODEL_STATIC_CONTROL_OK" in result.stdout
+
+
+@pytest.mark.parametrize("condition", ["self.result[0] > 0", "self.dof + self.result[0] > 0", "mutable > 0"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_model_static_control_rejects_device_or_mutable_values(tmp_path, monkeypatch, condition):
+    source = MODEL_STATIC_SOURCE.replace("        count = ti.static", "        mutable = self.dof\n        count = ti.static")
+    source = source.replace("self.dof > 32 and self.dof < 128", condition)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(Exception, match="Input to ti.static must be compile-time"):
+        ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cpu)
+
+
 MODEL_SHARED_SOURCE = """
 import taichi_forge as ti
 constructors = 0

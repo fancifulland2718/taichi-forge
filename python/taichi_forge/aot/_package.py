@@ -1334,6 +1334,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         captures=capture,
                         dependencies=dict(methods=code.contract["methods"], functions=code.contract["functions"]),
                     )
+                    if code.contract.get("model_static_ranges"):
+                        manifest["version"] = max(28, manifest["version"])
+                        entry_manifest["model_static_ranges"] = code.contract["model_static_ranges"]
                     manifest["entries"][symbol] = entry_manifest
                     shared_entries[identity] = entry_manifest
                 if admission:

@@ -75,6 +75,8 @@ def cast(obj, dtype):
         # TODO: unify with element_wise_unary
         return obj.cast(dtype)
     result = expr.Expr(_ti_core.value_cast(expr.Expr(obj).ptr, dtype))
+    if getattr(obj, "_model_uniform", False):
+        result._model_uniform = True
     if dtype == primitive_types.i32 and isinstance(obj, expr.Expr) and obj.ptr.get_rvalue_type() == dtype:
         if hasattr(obj, "_uniform_extent"):
             result._uniform_extent = obj._uniform_extent
@@ -118,7 +120,9 @@ def _unary_operation(taichi_op, python_op, a):
     if isinstance(a, Field):
         return NotImplemented
     if is_taichi_expr(a):
-        return expr.Expr(taichi_op(a.ptr), dbg_info=_ti_core.DebugInfo(stack_info()))
+        from taichi_forge.lang._local_tensor import model_expression
+
+        return model_expression(expr.Expr(taichi_op(a.ptr), dbg_info=_ti_core.DebugInfo(stack_info())), a)
     from taichi_forge.lang.matrix import Matrix  # pylint: disable-msg=C0415
 
     if isinstance(a, Matrix):
@@ -130,8 +134,12 @@ def _binary_operation(taichi_op, python_op, a, b):
     if isinstance(a, Field) or isinstance(b, Field):
         return NotImplemented
     if is_taichi_expr(a) or is_taichi_expr(b):
+        from taichi_forge.lang._local_tensor import model_expression
+
+        original = a, b
         a, b = wrap_if_not_expr(a), wrap_if_not_expr(b)
         result = expr.Expr(taichi_op(a.ptr, b.ptr), dbg_info=_ti_core.DebugInfo(stack_info()))
+        model_expression(result, *original)
         if result.ptr.get_rvalue_type() == primitive_types.i32:
             from taichi_forge.lang._local_tensor import binary_extent
 
@@ -148,8 +156,12 @@ def _ternary_operation(taichi_op, python_op, a, b, c):
     if isinstance(a, Field) or isinstance(b, Field) or isinstance(c, Field):
         return NotImplemented
     if is_taichi_expr(a) or is_taichi_expr(b) or is_taichi_expr(c):
+        from taichi_forge.lang._local_tensor import model_expression
+
+        original = a, b, c
         a, b, c = wrap_if_not_expr(a), wrap_if_not_expr(b), wrap_if_not_expr(c)
-        return expr.Expr(taichi_op(a.ptr, b.ptr, c.ptr), dbg_info=_ti_core.DebugInfo(stack_info()))
+        return model_expression(
+            expr.Expr(taichi_op(a.ptr, b.ptr, c.ptr), dbg_info=_ti_core.DebugInfo(stack_info())), *original)
     from taichi_forge.lang.matrix import Matrix  # pylint: disable-msg=C0415
 
     if isinstance(a, Matrix) or isinstance(b, Matrix) or isinstance(c, Matrix):

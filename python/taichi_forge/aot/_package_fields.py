@@ -140,6 +140,26 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
     declarations = {}
     from types import SimpleNamespace
 
+    # Direct fields retain the Host expression used at allocation. When a
+    # model axis comes from an owner scalar, connect that scalar to the same
+    # authoritative Dimension relation instead of treating it as an unrelated
+    # runtime value (or specializing its construction witness).
+    for item in fields.values():
+        for node in ast.walk(item["type_node"]):
+            axis = getattr(node, "_package_model_extent", None)
+            source = item.get("dimension_sources", {}).get(axis)
+            if source is None or axis in item.get("dimension_expressions", {}):
+                continue
+            expression = ast.parse(source, mode="eval").body
+            if (isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name)
+                    and expression.value.id == "self"):
+                name = expression.attr
+                scalar = schema.get(name, {})
+                if scalar.get("kind") == "value" and scalar.get("dtype") == "i32":
+                    schema[name] = {**scalar, "kind": "dimension"}
+                if schema.get(name, {}).get("kind") == "dimension":
+                    item.setdefault("dimension_expressions", {})[axis] = ("dim", name)
+
     for name, item in schema.items():
         if item["kind"] == "record":
             write_member(owner, name, SimpleNamespace(), schema)

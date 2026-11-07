@@ -42,7 +42,7 @@ def freeze_extent(expression):
     return freeze(expression)
 
 
-def evaluate_extent(expression, resolve, *, max_value=2**63 - 1):
+def evaluate_extent(expression, resolve, *, max_value=2**63 - 1, min_value=0):
     validate_extent(expression)
 
     def evaluate(node):
@@ -58,9 +58,10 @@ def evaluate_extent(expression, resolve, *, max_value=2**63 - 1):
             result = 1 << (max(1, minimum) - 1).bit_length()
         else:
             result = evaluate_binary(op, *(evaluate(arg) for arg in args))
-        if not 0 <= result <= max_value:
+        if not min_value <= result <= max_value:
             width = "i64" if max_value == 2**63 - 1 else "i32"
-            raise ValueError(f"Dimension expression exceeds its nonnegative {width} intermediate range")
+            domain = "nonnegative" if min_value == 0 else "signed"
+            raise ValueError(f"Dimension expression exceeds its {domain} {width} intermediate range")
         return result
 
     def evaluate_binary(op, left, right):
@@ -81,6 +82,12 @@ def evaluate_extent(expression, resolve, *, max_value=2**63 - 1):
         return result
 
     return evaluate(expression)
+
+
+def check_model_static_ranges(expressions, resolve):
+    """Preserve static iteration counts within the existing i32 loop ABI."""
+    for expression in expressions:
+        evaluate_extent(expression, resolve, min_value=-(2**31), max_value=2**31 - 1)
 
 
 def local_workspace_shape(expressions, resolve):

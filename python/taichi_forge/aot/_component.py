@@ -1648,6 +1648,17 @@ class _Capture:
     def __init__(self, component, owner, kernel, call_signature, entry_path=()):
         self.component = component
         self.declarations = dict(component.declarations)
+        self.model_dimensions = {
+            axis for declaration in self.declarations.values() if isinstance(declaration, _ModelTensorField)
+            for axis in declaration.element_shape if isinstance(axis, str)
+        }
+        pending = list(self.model_dimensions)
+        while pending:
+            declaration = self.declarations.get(pending.pop())
+            if isinstance(declaration, Dimension) and declaration.expression:
+                dependencies = extent_dependencies(declaration.expression) - self.model_dimensions
+                self.model_dimensions.update(dependencies)
+                pending.extend(dependencies)
         self.owner = owner
         self.kernel = kernel
         self.call_signature = call_signature
@@ -1689,7 +1700,21 @@ class _Capture:
         self._current_real_function = None
         self.workspaces = {}
         self.shared_arrays = {}
+        self.model_static_ranges = set()
         self.local_tensor_scope = None
+
+    def model_static_range(self, ctx, value):
+        from taichi_forge.lang._local_tensor import extent
+
+        for bound in [*(bound for bounds in value.bounds for bound in bounds), *value.acc_dimensions]:
+            expression = extent(bound)
+            if expression is None:
+                raise TaichiCompilationError("Model-sized static range requires a declared integer extent expression")
+            expression = freeze_extent(expression)
+            for name in extent_dependencies(expression):
+                path = self.component._paths[name]
+                self.attribute(ctx, path[-1], prefix=path[:-1])
+            self.model_static_ranges.add(expression)
 
     def shared_array(self, dtype, shape):
         from taichi_forge._lib import core
@@ -1907,9 +1932,12 @@ class _Capture:
             return self.static_objects[name]
         # A resource reference can be selected/aliased at compile time while
         # its storage, shape and contents remain runtime inputs. This matches
-        # ordinary ti.static(Field/AnyArray); scalar values still cannot escape
-        # their declared runtime role through a static selection.
-        if ctx is not None and ctx.is_in_static_scope() and not isinstance(declaration, (Array, DenseField, FixedSNodeField)):
+        # ordinary ti.static(Field/AnyArray). Proven model axes are lowered as
+        # runtime control, never read from the construction witness. Other
+        # scalar values cannot escape their declared runtime role.
+        if (ctx is not None and ctx.is_in_static_scope()
+                and not isinstance(declaration, (Array, DenseField, FixedSNodeField))
+                and name not in self.model_dimensions):
             raise TaichiCompilationError(
                 f"Component entry {self.kernel.func.__qualname__}: runtime capture self.{name} "
                 "cannot be used in ti.static; its declaration is dynamic"
@@ -1969,6 +1997,8 @@ class _Capture:
                 isinstance(declaration, RuntimeValue) and declaration.dtype == primitive_types.i32
             ):
                 self.expressions[name]._uniform_extent = ("dim", name)
+            if name in self.model_dimensions:
+                self.expressions[name]._model_uniform = True
         return self.expressions[name]
 
     def static_operand(self, ctx, value):
@@ -2189,6 +2219,8 @@ class _Capture:
             self.contract["local_tensor_workspaces"] = self.workspaces
         if self.shared_arrays:
             self.contract["model_shared_arrays"] = self.shared_arrays
+        if self.model_static_ranges:
+            self.contract["model_static_ranges"] = sorted(self.model_static_ranges, key=repr)
         if self.objects:
             self.contract.update(
                 objects=sorted(self.objects.items()),
@@ -2367,6 +2399,7 @@ class _ComponentCode:
         self.fixed_dependencies = dict(context.fixed_dependencies)
         self.dynamic = tuple(context.dynamic)
         self.workspaces = dict(context.workspaces)
+        self.model_static_ranges = tuple(context.model_static_ranges)
         self.resource_templates = dict(context.resource_templates)
         self._contract = json.dumps(context.contract)
         self.explicit_arguments = tuple(
@@ -2452,9 +2485,10 @@ class _ComponentCode:
         if len(args) != len(self.explicit_arguments):
             raise TypeError("Wrong number of explicit component arguments")
         from taichi_forge.lang._storage_view import ndarray_view, _scalarized_ndarray_view
-        from taichi_forge_runtime._dimensions import local_workspace_shape
+        from taichi_forge_runtime._dimensions import check_model_static_ranges, local_workspace_shape
 
         captured = {name: component.read(owner, name) for name in self.dynamic if name not in self.workspaces}
+        check_model_static_ranges(self.model_static_ranges, captured.__getitem__)
         workspaces = {
             name: impl.ndarray(getattr(primitive_types, spec["dtype"]), local_workspace_shape(
                 spec["shape"], captured.__getitem__))

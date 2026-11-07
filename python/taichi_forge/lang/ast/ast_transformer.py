@@ -14,7 +14,7 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import _ndarray, any_array, expr, impl, kernel_arguments, matrix, mesh
 from taichi_forge.lang import ops as ti_ops
 from taichi_forge.lang._ndrange import _Ndrange, ndrange
-from taichi_forge.lang._local_tensor import LocalTensor, iteration_scope
+from taichi_forge.lang._local_tensor import LocalTensor, is_model_value, iteration_scope
 from taichi_forge.lang.argpack import ArgPackType
 from taichi_forge.lang.ast.ast_transformer_utils import Builder, LoopStatus, ReturnStatus
 from taichi_forge.lang.ast.symbol_resolver import ASTResolver
@@ -589,6 +589,16 @@ class ASTTransformer(Builder):
         if ctx.deployment is not None:
             if func is impl.static:
                 args = [ctx.deployment.static_operand(ctx, arg) for arg in args]
+                if len(args) == 1 and not keywords and is_model_value(args[0]):
+                    node.ptr = args[0]
+                    return node.ptr
+            if func is range and ctx.is_in_static_scope() and any(is_model_value(arg) for arg in args):
+                if keywords or len(args) not in (1, 2) or not all(
+                    isinstance(arg, (int, np.integer)) or is_model_value(arg) for arg in args
+                ):
+                    raise TaichiCompilationError("Model-sized static range requires immutable integer begin/end")
+                node.ptr = _Ndrange((0, args[0]) if len(args) == 1 else tuple(args))
+                return node.ptr
             if func is getattr or func is hasattr:
                 node.ptr = ctx.deployment.named_attribute(ctx, args, keywords, presence=func is hasattr)
                 return node.ptr
@@ -1207,11 +1217,23 @@ class ASTTransformer(Builder):
             # An unreachable attribute/call must not execute or become a
             # deployment capture (including a dynamic value in a dead arm).
             is_and = isinstance(node.op, ast.And)
+            accumulated = None
             for index, value in enumerate(node.values):
                 build_stmt(ctx, value)
-                node.ptr = value.ptr
+                if accumulated is not None:
+                    # Python and/or select an operand, not a boolean result.
+                    node.ptr = (ti_ops.ifte(accumulated, value.ptr, accumulated) if is_and
+                                else ti_ops.ifte(accumulated, accumulated, value.ptr))
+                    if (isinstance(value.ptr, (bool, int, float, np.bool_, np.integer, np.floating))
+                            and bool(value.ptr) != is_and):
+                        break  # this constant makes every remaining operand dead
+                else:
+                    node.ptr = value.ptr
                 if index == len(node.values) - 1:
                     break
+                if is_model_value(node.ptr):
+                    accumulated = node.ptr
+                    continue
                 if bool(node.ptr) != is_and:
                     break
             return node.ptr
@@ -1345,6 +1367,8 @@ class ASTTransformer(Builder):
             ndrange_arg = build_stmt(ctx, node.iter.args[0].args[0])
             if not isinstance(ndrange_arg, _Ndrange):
                 raise TaichiSyntaxError("Only 'ti.ndrange' is allowed in 'ti.static(ti.grouped(...))'.")
+            if ASTTransformer.build_model_static_for(ctx, node, ndrange_arg, grouped=True):
+                return None
             targets = ASTTransformer.get_for_loop_targets(node)
             if len(targets) != 1:
                 raise TaichiSyntaxError(f"Group for should have 1 loop target, found {len(targets)}")
@@ -1366,6 +1390,8 @@ class ASTTransformer(Builder):
                         ctx.set_loop_status(LoopStatus.Normal)
         else:
             build_stmt(ctx, node.iter)
+            if ASTTransformer.build_model_static_for(ctx, node, node.iter.ptr):
+                return None
             targets = ASTTransformer.get_for_loop_targets(node)
 
             iter_time = 0
@@ -1387,6 +1413,28 @@ class ASTTransformer(Builder):
                     elif status == LoopStatus.Continue:
                         ctx.set_loop_status(LoopStatus.Normal)
         return None
+
+    @staticmethod
+    def build_model_static_for(ctx, node, value, *, grouped=False):
+        if ctx.deployment is None or not isinstance(value, _Ndrange):
+            return False
+        if not any(is_model_value(bound) for bounds in value.bounds for bound in bounds):
+            return False
+        if not all(isinstance(bound, (int, np.integer)) or is_model_value(bound)
+                   for bounds in value.bounds for bound in bounds):
+            raise TaichiCompilationError("Model-sized static iteration requires immutable model bounds")
+        # Static unrolling executes iterations in order. Preserve that order
+        # even at kernel top level, where an ordinary range would be parallel.
+        from taichi_forge.lang.misc import loop_config
+
+        ctx.deployment.model_static_range(ctx, value)
+        loop_config(serialize=True)
+        with ctx.loop_scope_guard():
+            if grouped:
+                ASTTransformer.build_grouped_ndrange_for(ctx, node, value)
+            else:
+                ASTTransformer.build_ndrange_for(ctx, node, value)
+        return True
 
     @staticmethod
     def build_range_for(ctx, node):
@@ -1717,7 +1765,7 @@ class ASTTransformer(Builder):
         build_stmt(ctx, node.test)
         is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
 
-        if is_static_if:
+        if is_static_if and not is_model_value(node.test.ptr):
             if node.test.ptr:
                 build_stmts(ctx, node.body)
             else:
@@ -1754,7 +1802,7 @@ class ASTTransformer(Builder):
         build_stmt(ctx, node.test)
         is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
 
-        if is_static_if:
+        if is_static_if and not is_model_value(node.test.ptr):
             if node.test.ptr:
                 node.ptr = build_stmt(ctx, node.body)
             else:

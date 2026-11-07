@@ -11,7 +11,7 @@ import itertools
 from ._plan import ExecutionPlan
 from ._runtime import Scalar
 from ._package_values import capture_value, check_admission
-from .._dimensions import extent_dependencies, local_workspace_shape
+from .._dimensions import extent_dependencies, local_workspace_shape, check_model_static_ranges
 
 
 class ArgKind(Enum):
@@ -80,6 +80,7 @@ class GraphBuilder:
         self._private_names = private_names if private_names is not None else set()
         self._captures, self._constants = {}, {}
         self._admissions = []
+        self._range_checks = []
 
     def dispatch(self, kernel, *args, template_args=None):
         from ._package import entry, _BoundEntry
@@ -142,6 +143,9 @@ class GraphBuilder:
         self._captures, self._constants = captures, constants
         if kernel.contract.get("admission"):
             self._admissions.append((owner, kernel.contract))
+        if kernel.contract.get("model_static_ranges"):
+            self._range_checks.append((kernel.contract["model_static_ranges"],
+                                       {key: binding[0] for key, binding in captured.items()}))
         return self
 
     def private_scalar(self, name, dtype, value):
@@ -176,6 +180,7 @@ class GraphBuilder:
         self._captures.update(sequence._captures)
         self._constants.update(sequence._constants)
         self._admissions.extend(sequence._admissions)
+        self._range_checks.extend(sequence._range_checks)
         return self
 
     def compile(self):
@@ -186,14 +191,16 @@ class GraphBuilder:
             dict(self.arguments),
             dict(self._captures),
             list(self._admissions),
+            list(self._range_checks),
         )
 
 
 class Graph:
-    def __init__(self, package, plan, arguments, captures=None, admissions=None):
+    def __init__(self, package, plan, arguments, captures=None, admissions=None, range_checks=None):
         self.package, self.plan, self.arguments = package, plan, arguments
         self.captures = captures or {}
         self.admissions = admissions or []
+        self.range_checks = range_checks or []
 
     def bind(self, arguments):
         self.package._check()
@@ -214,6 +221,8 @@ class Graph:
             for name, (owner, schema) in self.captures.items()
             if schema["kind"] != "local_tensor_workspace"
         }
+        for expressions, inputs in self.range_checks:
+            check_model_static_ranges(expressions, lambda name: captured[inputs[name]])
         resources = []
         for name, (owner, schema) in self.captures.items():
             if schema["kind"] == "local_tensor_workspace":

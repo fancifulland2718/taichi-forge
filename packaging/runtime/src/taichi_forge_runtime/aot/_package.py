@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 from ._runtime import NdArray, Scalar
 from ._package_values import StructField, capture_value, path_value, dimension_value, check_admission
-from .._dimensions import Extent, evaluate_extent, local_workspace_shape
+from .._dimensions import Extent, evaluate_extent, local_workspace_shape, check_model_static_ranges
 from .._static_values import read_static_key, static_key
 
 _construction = ContextVar("forge_definition_owner", default=None)
@@ -754,6 +754,7 @@ class entry:
             item["name"]: capture_value(owner, item)
             for item in contract["captures"] if item["kind"] != "local_tensor_workspace"
         }
+        check_model_static_ranges(contract.get("model_static_ranges", ()), captured.__getitem__)
         workspaces = []
         try:
             for item in contract["captures"]:
@@ -843,7 +844,7 @@ class LoadedPackage:
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
             self.manifest.get("version")
-            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27)
+            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

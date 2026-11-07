@@ -701,6 +701,34 @@ build artifacts must be rebuilt; there is no legacy task-record compatibility la
 Ordinary fixed-size SharedArray JIT semantics remain unchanged. These checks do not
 qualify the complete EFC solver or engine export.
 
+### Static control depending on model dimensions
+
+Version 28 lowers integer `ti.static` expressions, conditions and
+`range/ndrange/grouped(ndrange)` iterations proven to depend on model element
+axes through existing runtime control flow. Ordinary JIT, fixed mathematical
+dimensions and genuine static configuration retain their original paths. DOF
+values do not enumerate code copies. Iteration order is preserved, including
+top-level loops which must not become parallel. Direct Field `self` size
+aliases connect to the same dimension relation.
+
+Device data and mutable locals cannot thereby enter `ti.static`. Loop bodies
+requiring Python object selection, type construction or compile-time indexing
+still need a valid runtime implementation. Loop bounds require proven integer
+extent expressions. Direct calls and Graph preparation validate intermediate
+operations against the existing i32 loop ABI using the actual argument snapshot;
+overflow must not silently shorten iteration. This is not a DOF or performance
+quota, and prepared replay does not repeat the checks. Legacy explicit Component
+Graphs reject these loops until they can preserve the
+snapshot checks. The Graph evidence here applies to definition packages; raw
+kernel callers remain responsible for exported argument/range contracts.
+Model-dependent CUDA block sizes, conditional factories and conditional model layouts remain open;
+this does not establish whole-class EFC export. Focused CPU/CUDA/Vulkan
+source-free checks cover new sizes, instance isolation, ordering and Graphs.
+
+Dynamic control can reduce compile-time expansion while adding runtime loops,
+address calculations or branches. Record costs for the actual device and call
+path; significant costs may warn but do not reject otherwise executable models.
+
 ## Kernel factories in original definitions
 
 Version 25 supports straight-line kernel factories bound unconditionally in ordinary

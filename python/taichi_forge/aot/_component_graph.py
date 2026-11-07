@@ -196,6 +196,8 @@ class _GraphCapture:
             self.explicit_argument(arg)
         if code.workspaces:
             raise TaichiCompilationError("Model local tensors in component Graphs require invocation workspace binding")
+        if code.model_static_ranges:
+            raise TaichiCompilationError("Model-sized static iteration in component Graphs requires snapshot guards; use a definition package")
         contract = code.contract
         for group, schema in code.fixed_groups.items():
             if self.fixed_groups.setdefault(group, schema) != schema or (

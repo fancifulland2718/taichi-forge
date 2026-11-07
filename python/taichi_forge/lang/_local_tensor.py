@@ -5,6 +5,7 @@ provenance. Mutable locals and device data cannot size Host allocations.
 """
 
 from contextlib import contextmanager, nullcontext
+from numbers import Integral, Real
 
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiCompilationError, TaichiIndexError
@@ -12,9 +13,26 @@ from taichi_forge.lang.expr import Expr
 
 
 def extent(value):
-    if type(value) is int and 0 <= value <= 2**31 - 1:
-        return ("const", value)
+    if isinstance(value, Integral) and not isinstance(value, bool) and 0 <= value <= 2**31 - 1:
+        return ("const", int(value))
     return getattr(value, "_uniform_extent", None) if isinstance(value, Expr) else None
+
+
+def is_model_value(value):
+    """An immutable scalar expression depending on a declared model axis."""
+    return isinstance(value, Expr) and getattr(value, "_model_uniform", False)
+
+
+def model_expression(result, *inputs):
+    # Device loads and mutable locals never inherit this proof. Constants can
+    # participate, but cannot on their own relax an explicit static operation.
+    if any(is_model_value(value) for value in inputs) and all(
+        is_model_value(value) or isinstance(value, Real)
+        or (isinstance(value, Expr) and (extent(value) or (None,))[0] == "const")
+        for value in inputs
+    ):
+        result._model_uniform = True
+    return result
 
 
 def binary_extent(result, operation, left, right):

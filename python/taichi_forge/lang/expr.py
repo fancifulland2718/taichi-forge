@@ -25,6 +25,8 @@ class Expr(TaichiOperations):
                 self.dbg_info = args[0].dbg_info
                 if hasattr(args[0], "_uniform_extent"):
                     self._uniform_extent = args[0]._uniform_extent
+                if getattr(args[0], "_model_uniform", False):
+                    self._model_uniform = True
             elif is_matrix_class(args[0]):
                 self.ptr = make_matrix(args[0].to_list()).ptr
             elif isinstance(args[0], (list, tuple)):

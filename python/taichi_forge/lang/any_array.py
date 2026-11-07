@@ -91,7 +91,12 @@ class ModelTensorArray(AnyArray):
 
     def _element_extent(self, axis):
         extent = self.element_extents[axis]
-        return self.scalar_array.shape[self.index_rank + axis] if isinstance(extent, str) else extent
+        if isinstance(extent, str):
+            value = self.scalar_array.shape[self.index_rank + axis]
+            value._model_uniform = True
+            value._uniform_extent = ("dim", extent)
+            return value
+        return extent
 
     @property
     def n(self):
