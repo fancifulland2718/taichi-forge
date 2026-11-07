@@ -668,10 +668,16 @@ Focused CPU/CUDA/Vulkan tests cover new DOF 129 without the frontend, independen
 instances, copies, repeated initialization and retirement. GeoPhys's original exact
 EFC assembly also passes compiler-layer checks at DOF 3/17/65 with shared code, against
 ordinary JIT and an independent mass-response calculation. That test supplies the
-model declaration projection; it is not whole-class package qualification. Dynamic
-locals inside `real_func`, SharedArray, and general whole-tensor algebra still reject
-or require further implementation. Local workspace is not yet integrated with the
-older explicit Component Graph path.
+model declaration projection; it is not whole-class package qualification.
+
+On CPU/CUDA, `real_func` uses this local workspace mechanism through hidden array
+and work-item index arguments, including nested calls. Different call sites share
+the function implementation; storage covers their maximum required range. Loops
+inside the function reuse the current work item's slice. Recursive hidden captures
+still reject, and explicit function arguments are not inferred as allocation sizes.
+The Vulkan real_func restriction is unchanged. SharedArray, general whole-tensor
+algebra, and local workspace in the older explicit Component Graph path remain
+unimplemented.
 
 ## Kernel factories in original definitions
 

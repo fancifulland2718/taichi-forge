@@ -1641,6 +1641,9 @@ class Component:
         return compile_component_graph(self, record, *args, **kwargs)
 
 
+_LOCAL_TENSOR_INDEX = object()
+
+
 class _Capture:
     def __init__(self, component, owner, kernel, call_signature, entry_path=()):
         self.component = component
@@ -1683,20 +1686,48 @@ class _Capture:
         # Functions retain real call boundaries. Each callable has its own
         # parameter expressions while dependency facts remain in this capture.
         self._real_functions = {}
+        self._current_real_function = None
         self.workspaces = {}
         self.local_tensor_scope = None
+
+    def _local_tensor_slot(self):
+        state = self._current_real_function
+        if state is not None:
+            if state["local_index"] is None:
+                state["local_index"] = RuntimeValue(primitive_types.i32).declare("__local_tensor_index")
+                self.dynamic.append(_LOCAL_TENSOR_INDEX)
+            # Function loops are serial within the caller's logical work item.
+            # Its allocation range is propagated at actual kernel call sites.
+            return state["local_index"], ("const", 0)
+        index, count = (0, ("const", 1)) if self.local_tensor_scope is None else self.local_tensor_scope
+        if count is None:
+            raise TaichiCompilationError("Model local tensors require a declared range/ndrange iteration domain")
+        return index, count
+
+    def _workspace_operand(self, name):
+        if name not in self.expressions:
+            self.expressions[name] = self.declarations[name].declare(name)
+            self.dynamic.append(name)
+        return self.expressions[name]
+
+    def _workspace_range(self, name, count):
+        count = freeze_extent(count)
+        spec = self.workspaces[name]
+        previous = spec["shape"][0]
+        if previous == count or count == ("const", 0):
+            return
+        # Sequential call sites share the implementation and its workspace.
+        # Only the allocation bound grows, not the real_func code identity.
+        bound = count if previous == ("const", 0) else ("max", previous, count)
+        spec["shape"] = (bound, *spec["shape"][1:])
 
     def local_tensor(self, dtype, shape):
         from taichi_forge.lang._local_tensor import LocalTensor, extent
 
-        if any(state["compiling"] for state in self._real_functions.values()):
-            raise TaichiCompilationError("Model local tensors inside real_func require invocation workspace forwarding")
         expressions = tuple(extent(size) for size in shape)
         if any(item is None for item in expressions):
             raise TaichiCompilationError("Model local tensor extents must be immutable declared dimensions or i32 captures")
-        index, count = (0, ("const", 1)) if self.local_tensor_scope is None else self.local_tensor_scope
-        if count is None:
-            raise TaichiCompilationError("Model local tensors require a declared range/ndrange iteration domain")
+        index, count = self._local_tensor_slot()
         dtype = cook_dtype(dtype)
         if id(dtype) not in primitive_types.type_ids or dtype == primitive_types.u1:
             raise TaichiCompilationError("Model local tensors require a primitive scalar element type")
@@ -1711,9 +1742,7 @@ class _Capture:
         declaration = Array(dtype, len(shapes))
         self.declarations[name] = declaration
         self.workspaces[name] = dict(dtype=str(dtype), shape=shapes)
-        self.dynamic.append(name)
-        array = declaration.declare(name)
-        return LocalTensor(self, array, index, shape, dtype)
+        return LocalTensor(self, self._workspace_operand(name), index, shape, dtype)
 
     def call_real_function(self, function, args):
         from taichi_forge._lib import core
@@ -1728,10 +1757,12 @@ class _Capture:
             variant = function._next_real_function_variant_id
             function._next_real_function_variant_id += 1
             key = core.FunctionKey(function.func.__name__, function.func_id, variant)
-            state = dict(key=key, compiling=True, recursive=False, captures=())
+            state = dict(key=key, compiling=True, recursive=False, captures=(), local_index=None)
             self._real_functions[identity] = state
-            previous = self.expressions, self.dynamic, self.resource_aliases
+            previous = (self.expressions, self.dynamic, self.resource_aliases,
+                        self.local_tensor_scope, self._current_real_function)
             self.expressions, self.dynamic, self.resource_aliases = {}, [], {}
+            self.local_tensor_scope, self._current_real_function = (None, ("const", 0)), state
             try:
                 function.do_compile(key, args, features)
                 state["captures"] = tuple(self.dynamic)
@@ -1744,14 +1775,23 @@ class _Capture:
                 self._real_functions.pop(identity, None)
                 raise
             finally:
-                self.expressions, self.dynamic, self.resource_aliases = previous
+                (self.expressions, self.dynamic, self.resource_aliases,
+                 self.local_tensor_scope, self._current_real_function) = previous
                 state["compiling"] = False
         elif state["compiling"]:
             state["recursive"] = True
         values, arguments = [], []
         for name in state["captures"]:
-            path = self.component._paths[name]
-            values.append(self.attribute(None, path[-1], prefix=path[:-1]))
+            if name is _LOCAL_TENSOR_INDEX:
+                values.append(self._local_tensor_slot()[0])
+                arguments.append(kernel_arguments.KernelArgument(primitive_types.i32, "__local_tensor_index"))
+                continue
+            if name in self.workspaces:
+                self._workspace_range(name, self._local_tensor_slot()[1])
+                values.append(self._workspace_operand(name))
+            else:
+                path = self.component._paths[name]
+                values.append(self.attribute(None, path[-1], prefix=path[:-1]))
             arguments.append(kernel_arguments.KernelArgument(self.declarations[name].annotation, "__capture_" + name))
         return function.func_call_rvalue(state["key"], args, capture_arguments=arguments, capture_values=values)
 

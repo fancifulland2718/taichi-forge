@@ -2613,9 +2613,22 @@ class Model:
 
 
 @pytest.mark.parametrize("ndrange", [False, True])
+@pytest.mark.parametrize("helper_kind", ["func", "real_func", "nested_real_func"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypatch, ndrange):
+def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypatch, ndrange, helper_kind):
     source = MODEL_LOCAL_TENSOR_SOURCE
+    if helper_kind != "func":
+        if ti.cfg.arch == ti.vulkan:
+            pytest.skip("Vulkan does not support real functions")
+        source = source.replace("@ti.func\n    def solve(self, i, gain):",
+                                "@ti.real_func\n    def solve(self, i: ti.i32, gain: ti.f32) -> ti.f32:")
+        if helper_kind == "nested_real_func":
+            source = source.replace("def solve(self,", "def inner(self,")
+            source += """
+    @ti.real_func
+    def solve(self, i: ti.i32, gain: ti.f32) -> ti.f32:
+        return self.inner(i, gain)
+"""
     if ndrange:
         source = source.replace("for i in range(1, self.n):", "for i, unused in ti.ndrange((1, self.n), 1):")
     package = _source_package(tmp_path, monkeypatch, source)
@@ -2765,7 +2778,41 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
     assert "MODEL_LOCAL_TENSOR_SOURCE_FREE_OK" in result.stdout
 
 
-@pytest.mark.parametrize("failure", ["device_extent", "mutable_alias", "device_range", "real_func"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_real_local_workspaces_share_code_across_call_ranges(tmp_path, monkeypatch):
+    source = MODEL_LOCAL_TENSOR_SOURCE.replace(
+        "@ti.func\n    def solve(self, i, gain):",
+        "@ti.real_func\n    def solve(self, i: ti.i32, gain: ti.f32) -> ti.f32:",
+    )
+    begin = source.index("    @ti.kernel\n    def step")
+    end = source.index("    @ti.kernel\n    def accumulate")
+    source = source[:begin] + """
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in range(self.n):
+            self.result[i] = self.solve(i, gain)
+        for i in range(1, self.n):
+            self.result[i] += self.solve(i, gain)
+        self.result[0] += self.solve(0, gain)
+
+""" + source[end:]
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    entry = next(item for item in manifest["entries"].values() if item["definition"].endswith("Model.step"))
+    assert len([item for item in entry["captures"] if item["kind"] == "local_tensor_workspace"]) == 3
+    expected = package.Model(7, 3)
+    expected.step(2.0)
+    np.testing.assert_array_equal(expected.result.to_numpy(), (np.arange(7) + 1) * 16)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for n, dof in ((1, 3), (19, 65), (11, 129)):
+            model = code.host.Model(n, dof)
+            with model.graph().bind({"gain": 3.0}) as prepared:
+                assert prepared.info["resource_bytes"] == n * dof * 4 * 4
+                prepared.run()
+                np.testing.assert_array_equal(model.result.to_numpy(), (np.arange(n) + 1) * 6 * (dof + 1))
+
+
+@pytest.mark.parametrize("failure", ["device_extent", "mutable_alias", "device_range", "real_device_range", "recursive_real_func"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_rejects_unproven_model_local_workspaces(tmp_path, monkeypatch, failure):
     source = MODEL_LOCAL_TENSOR_SOURCE
@@ -2776,13 +2823,18 @@ def test_package_rejects_unproven_model_local_workspaces(tmp_path, monkeypatch, 
         source = source.replace("forward = ti.Vector.zero(ti.f32, self.dof)",
                                 "size = self.dof\n        forward = ti.Vector.zero(ti.f32, size)")
         message = "immutable declared dimensions"
-    elif failure == "device_range":
-        source = source.replace("range(1, self.n)", "range(1, ti.cast(self.result[0], ti.i32))")
+    elif failure in ("device_range", "real_device_range"):
+        source = source.replace("range(1, self.n)", "range(1, ti.cast(self.result[0], ti.i32))", 1)
+        if failure == "real_device_range":
+            source = source.replace("@ti.func\n    def solve(self, i, gain):",
+                                    "@ti.real_func\n    def solve(self, i: ti.i32, gain: ti.f32) -> ti.f32:")
         message = "declared range/ndrange iteration domain"
     else:
         source = source.replace("@ti.func\n    def solve(self, i, gain):",
                                 "@ti.real_func\n    def solve(self, i: ti.i32, gain: ti.f32) -> ti.f32:")
-        message = "real_func require invocation workspace forwarding"
+        source = source.replace("forward = ti.Vector.zero(ti.f32, self.dof)",
+                                "if i > 0:\n            return self.solve(i - 1, gain)\n        forward = ti.Vector.zero(ti.f32, self.dof)")
+        message = "Recursive real_func captures"
     package = _source_package(tmp_path, monkeypatch, source)
     with pytest.raises(ti.aot.PackageExportError, match=message):
         ti.aot.export_package(package, tmp_path / "sdk")
