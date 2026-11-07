@@ -502,7 +502,7 @@ CPU/Vulkan 动态 SharedArray、real_func 内部
 溢出后少执行迭代。此检查不是 DOF 数量或性能额度，prepared replay 不重复检查。
 旧显式 Component Graph 尚未接入这些快照检查，遇到此类循环明确拒绝；上述 Graph
 证据限定义包路径。底层裸 Kernel 调用者仍须遵守导出的参数及范围合同。
-模板 owner 的条件工厂及模型条件布局仍待处理；模型控制 CUDA block 大小走下述 prepare 绑定路径，不能据此宣称整个 EFC
+生成式工厂调用域及模型条件布局仍待处理；模型控制 CUDA block 大小走下述 prepare 绑定路径，不能据此宣称整个 EFC
 类可导出。CPU/CUDA/Vulkan 的局部无源码检查覆盖新尺寸、实例隔离、顺序语义和 Graph。
 
 动态控制可能减少编译展开，同时增加运行时循环、寻址或分支成本。性能结果按实际
@@ -530,9 +530,19 @@ GeoPhys 检查使用未改写的原工厂源码和最小资源声明，不代表
 
 不同 Host 标签选中同一定义时共享实现；`opt_level` 作为实际编译选项进入导出身份及消费
 匹配，不混同于词法捕获。包中未构建的选项拒绝消费。只在装饰器用到的选项不会误加为
-Kernel 运行参数。此版本复用已有 Dense Field 来源与实例快照；模板 owner、生成式工厂
-调用和模型决定的工厂类型仍待支持。局部 CPU/CUDA/Vulkan 无源码消费已验证，原 Newton
+Kernel 运行参数。此版本复用已有 Dense Field 来源与实例快照。局部 CPU/CUDA/Vulkan 无源码消费已验证，原 Newton
 仅通过工厂定义发现，不能据此声明完整 Newton 可导出。
+
+版本 32 支持工厂返回的 Kernel 以首个 `self: ti.template()` 接收已声明 owner，复用
+已有 Component 模板捕获及 entry 实例绑定。消费者可显式传入 `self`、通过 `__get__`
+绑定，或用原 `GraphBuilder.dispatch(..., template_args={'self': owner})` 记录。
+缓存对象共享代码选择，不保存可变的“当前实例”指针；普通调用读取所传实例，prepare
+固定各自参数/资源快照，重放不重新选择 owner。复用入口描述符，未在每次调用重建选择表。
+
+此路径支持固定字面量工厂参数和原构造中的直接绑定，不同时混入词法 Field 所有者；
+额外模板参数、未知接收类、跨 package 实例及退休资源拒绝。生成式调用域和模型决定
+的工厂类型仍待补齐。局部三后端检查及原 GeoPhys `_cooperative_kernel` 工厂源码的
+CPU/CUDA 无源码消费通过；后者使用最小数值宿主验证绑定，尚非完整 Newton 算法验收。
 
 ## 模型决定的 CUDA 线程块
 
@@ -568,7 +578,7 @@ Kernel 运行参数。此版本复用已有 Dense Field 来源与实例快照；
 CPU/CUDA/Vulkan 局部检查覆盖共享代码、继承覆盖、混合有限配置、实例状态、无源码消费
 和 prepare 快照。GeoPhys 检查复用原 `declare_constant` 与布局 helper，以当前 EFC 的
 固定 group size 值验证 DOF 17/129 使用一个入口；这不是整类 Newton 或全引擎资格。
-原 Newton 后续仍受模板 owner 工厂、配置声明及构造闭包限制。此切片只改变 Python
+原 Newton 后续仍受生成式工厂调用域、配置声明及构造闭包限制。此切片只改变 Python
 Producer/Runtime 合同，不改变原生 AOT 格式，也没有新的整包体积或性能测量结果。
 
 ## 仍需补齐的共同机制

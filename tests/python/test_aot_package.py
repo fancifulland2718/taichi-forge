@@ -1714,6 +1714,160 @@ def test_package_cached_conditional_factory_shares_definitions_and_checks_option
     assert "CACHED_FACTORY_OK" in result.stdout
 
 
+TEMPLATE_FACTORY_SOURCE = """
+import taichi_forge as ti
+from functools import lru_cache
+
+@lru_cache(maxsize=8)
+def make_update(stage, tier):
+    if stage == 'positive':
+        @ti.kernel(opt_level=tier)
+        def positive(self: ti.template(), gain: ti.f32):
+            self._write(gain)
+        return positive
+    @ti.kernel(opt_level=tier)
+    def negative(self: ti.template(), gain: ti.f32):
+        self._write(-gain)
+    return negative
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, offset: float):
+        self.n, self.offset = n, offset
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        scope.value('offset', ti.f32)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+        self.tree = builder.finalize()
+        self.fast = make_update('positive', 'fast')
+        self.full = make_update('positive', 'full')
+        self.negative = make_update('negative', 'fast')
+    @ti.func
+    def _write(self, gain):
+        for i in self.values:
+            self.values[i] = gain + i + self.offset
+    def graph(self):
+        graph = ti.graph.GraphBuilder()
+        graph.dispatch(self.fast, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32), template_args={'self': self})
+        return graph.compile()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_template_factory_keeps_shared_code_and_instance_bindings(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, TEMPLATE_FACTORY_SOURCE)
+    original = sys.modules["definition_fixture.model"]
+    forbidden = {original.make_update.__wrapped__.__code__, original.Model.__init__.__code__}
+    previous = sys.getprofile()
+
+    def no_sample(frame, event, arg):
+        if event == "call" and frame.f_code in forbidden:
+            raise AssertionError("export executed an application constructor/factory")
+
+    sys.setprofile(no_sample)
+    try:
+        manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    finally:
+        sys.setprofile(previous)
+    assert original.make_update.cache_info().currsize == 0
+    assert manifest["version"] == 32 and len(manifest["entries"]) == 4
+    for candidates in manifest["closure_entries"].values():
+        assert all(candidate["template_owner"] and not candidate["bindings"] for candidate in candidates)
+    a = original.Model(3, 2.0)
+    a.fast(a, 4.0)
+    np.testing.assert_array_equal(a.values.to_numpy(), np.arange(3) + 6)
+    probe = tmp_path / "consume_template_factory.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3, 2.0), code.host.Model(9, 7.0)
+            assert a.fast is b.fast
+            a.fast(self=a, gain=4.0)
+            b.full.__get__(b, type(b))(5.0)
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(3) + 6)
+            np.testing.assert_array_equal(b.values.to_numpy(), np.arange(9) + 12)
+            for operation in (lambda: a.fast(None, 1.0), lambda: a.fast(a, self=b, gain=1.0)):
+                try:
+                    operation()
+                except (ValueError, TypeError):
+                    pass
+                else:
+                    raise AssertionError('invalid receiver accepted')
+            ga, gb = a.graph(), b.graph()
+            with ga.bind({'gain': 11.0}) as pa, gb.bind({'gain': 17.0}) as pb:
+                a.offset, b.offset = -99.0, -101.0
+                pb.run()
+                pa.run()
+                pb.run()
+                np.testing.assert_array_equal(a.values.to_numpy(), np.arange(3) + 13)
+                np.testing.assert_array_equal(b.values.to_numpy(), np.arange(9) + 24)
+                a.negative(a, 1.0)
+                np.testing.assert_array_equal(a.values.to_numpy(), np.arange(3) - 100)
+                pa.run()
+                np.testing.assert_array_equal(a.values.to_numpy(), np.arange(3) + 13)
+            with load_package(runtime, sys.argv[1]) as other:
+                foreign = other.host.Model(2, 1.0)
+                try:
+                    a.fast(foreign, 1.0)
+                except ValueError as error:
+                    assert 'same package' in str(error)
+                else:
+                    raise AssertionError('foreign package receiver accepted')
+            a.tree.destroy()
+            try:
+                a.fast(a, 0.0)
+            except (ValueError, RuntimeError) as error:
+                assert 'closed' in str(error) or 'retired' in str(error)
+            else:
+                raise AssertionError('retired receiver accepted')
+            b.fast(b, 2.0)
+            np.testing.assert_array_equal(b.values.to_numpy(), np.arange(9) - 99)
+        print('TEMPLATE_FACTORY_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "TEMPLATE_FACTORY_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["extra_template", "mixed_lexical"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_template_factory_rejects_ambiguous_receiver_sources(tmp_path, monkeypatch, change):
+    source = TEMPLATE_FACTORY_SOURCE
+    if change == "extra_template":
+        source = source.replace("self: ti.template(), gain", "self: ti.template(), other: ti.template(), gain")
+    else:
+        source = CACHED_FACTORY_SOURCE.replace("(gain: ti.f32)", "(self: ti.template(), gain: ti.f32)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="template receiver"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize("change", ["wrapper", "cache_argument", "condition", "side_effect"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_cached_factory_rejects_unproven_control(tmp_path, monkeypatch, change):

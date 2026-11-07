@@ -8,7 +8,7 @@ from ._package_values import path_value
 
 def bind_closure(package, identity, values, *, options=None):
     package._check()
-    matches = []
+    matches, templates = [], []
     options = {} if options is None else options
     option_keys = {name: static_key(value) for name, value in options.items()}
     for candidate in package.manifest.get("closure_entries", {}).get(identity, ()):
@@ -54,6 +54,11 @@ def bind_closure(package, identity, values, *, options=None):
             matches_value(values[name], spec) for name, spec in bindings.items()
         ):
             continue
+        if candidate.get("template_owner"):
+            if owners:
+                raise ValueError("Template factory cannot implicitly bind lexical Field owners")
+            templates.append(candidate)
+            continue
         if not owners or any(owner is not owners[0] for owner in owners):
             continue
         # A lexical closure retains the objects present at construction. Later
@@ -69,9 +74,52 @@ def bind_closure(package, identity, values, *, options=None):
                     copied.add(prefix)
                 current = getattr(current, part)
         matches.append((candidate["symbol"], snapshot))
+    if templates:
+        if matches:
+            raise ValueError("Cold factory has ambiguous receiver binding modes")
+        return _TemplateEntry(package, templates)
     if not matches or len({symbol for symbol, _ in matches}) != 1:
         raise ValueError("Cold factory inputs have no unambiguous declared source/type binding")
     from ._package import entry
 
     symbol, owner = matches[0]
     return entry(package, symbol).__get__(owner)
+
+
+class _TemplateEntry:
+    """Share immutable code selection; bind each receiver at the invocation."""
+
+    def __init__(self, package, candidates):
+        self.package = package
+        by_type = {}
+        for candidate in candidates:
+            previous = by_type.setdefault(candidate["owner_type"], candidate["symbol"])
+            if previous != candidate["symbol"]:
+                raise ValueError("Cold template factory has ambiguous code for its receiver")
+        from ._package import entry
+
+        self._entries = {identity: entry(package, symbol) for identity, symbol in by_type.items()}
+
+    def __get__(self, owner, cls=None):
+        self.package._check()
+        if owner is None:
+            return self
+        return self._bind(owner)
+
+    def _bind(self, owner):
+        self.package._check()
+        identity = getattr(type(owner), "_forge_package_type", None)
+        if getattr(owner, "_forge_package_owner", None) is not self.package or identity not in self._entries:
+            raise ValueError("Cold template factory requires its declared receiver in the same package")
+        return self._entries[identity].__get__(owner)
+
+    def __call__(descriptor, *args, **kwargs):
+        if args:
+            if "self" in kwargs:
+                raise TypeError("Cold template factory received its receiver twice")
+            owner, args = args[0], args[1:]
+        elif "self" in kwargs:
+            owner = kwargs.pop("self")
+        else:
+            raise TypeError("Cold template factory requires its explicit self receiver")
+        return descriptor._bind(owner)(*args, **kwargs)

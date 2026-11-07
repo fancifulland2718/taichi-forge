@@ -888,6 +888,7 @@ class LoadedPackage:
                 29,
                 30,
                 31,
+                32,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

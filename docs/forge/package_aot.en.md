@@ -772,7 +772,7 @@ quota, and prepared replay does not repeat the checks. Legacy explicit Component
 Graphs reject these loops until they can preserve the
 snapshot checks. The Graph evidence here applies to definition packages; raw
 kernel callers remain responsible for exported argument/range contracts.
-Template-owner conditional factories and conditional model layouts remain open. Model-dependent
+Comprehension-based factory input domains and conditional model layouts remain open. Model-dependent
 CUDA block sizes use the preparation path documented above; this does not
 establish whole-class EFC export. Focused CPU/CUDA/Vulkan
 source-free checks cover new sizes, instance isolation, ordering and Graphs.
@@ -816,10 +816,26 @@ Different Host labels selecting the same definition share its implementation.
 `opt_level` participates in export identity and consumer matching as a compilation
 option, separately from lexical captures. Unbuilt options reject consumption; an
 option used only by a decorator does not become a kernel runtime argument. This path
-reuses the existing Dense Field provenance and instance snapshots. Template owners,
-comprehension-based factory calls and model-dependent factory types remain pending.
+reuses the existing Dense Field provenance and instance snapshots.
 Focused CPU/CUDA/Vulkan source-free consumers pass; the original Newton factory has
 only passed definition discovery, not complete Newton export.
+
+Version 32 accepts returned kernels whose first argument is `self: ti.template()`,
+using existing Component template capture and entry instance binding. Consumers may
+pass `self` explicitly, bind with `__get__`, or record the existing
+`GraphBuilder.dispatch(..., template_args={'self': owner})` form. Cached objects share
+code selection without a mutable current-instance pointer. Direct calls use the
+provided instance; preparation snapshots each invocation's parameters/resources,
+and replay does not select a receiver again. Entry descriptors are reused rather
+than rebuilding selection tables on every call.
+
+This path accepts fixed literal factory inputs and direct constructor bindings,
+without mixing lexical Field owners. Additional template arguments, unknown receiver
+types, foreign-package instances and retired resources reject. Comprehension-based
+input domains and model-dependent factory types remain pending. Focused checks pass
+on three backends, alongside CPU/CUDA source-free consumption of GeoPhys's original
+`_cooperative_kernel` factory source. That probe uses a minimal numerical owner to
+test binding; it does not qualify the complete Newton algorithm.
 
 ## Definition constants
 
@@ -842,7 +858,7 @@ Focused CPU/CUDA/Vulkan checks cover code sharing, inheritance, mixed finite
 configuration, independent state, source-free consumption and prepare snapshots.
 A GeoPhys check reuses its original constant/layout helpers and current EFC group
 size value with DOF 17/129 through one entry. This is not complete Newton or engine
-qualification; template-owner kernel factories and construction closure remain.
+qualification; comprehension-based factory domains, configuration declarations and construction closure remain.
 This changes the Python Producer/Runtime contract only, not the native AOT format.
 It provides no new whole-wheel size or performance measurement.
 

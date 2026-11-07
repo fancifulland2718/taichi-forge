@@ -238,6 +238,8 @@ def materialize(recipe, call, owner, environment, kernels):
                 if any(k.arg is None for k in expr.keywords):
                     raise ValueError("Cold factory types require explicit keyword arguments")
                 return target(*args, **{k.arg: value(k.value) for k in expr.keywords})
+            if target is ti.template and not args and not expr.keywords:
+                return ti.template()
         if isinstance(expr, ast.BinOp):
             left, right = value(expr.left), value(expr.right)
             if type(left) is int and type(right) is int:
@@ -315,8 +317,9 @@ def materialize(recipe, call, owner, environment, kernels):
 
     code = _code(function, node)
     bindings = {name: syntax_binding(local[name]) for name in code.co_freevars}
-    if not any(isinstance(item, FieldPath) for item in _leaves(tuple(local[name] for name in code.co_freevars))):
-        raise ValueError("Cold factory requires at least one declared allocation source")
+    lexical_fields = any(
+        isinstance(item, FieldPath) for item in _leaves(tuple(local[name] for name in code.co_freevars))
+    )
     cell = lambda item: (lambda: item).__closure__[0]
     numerical = FunctionType(
         code, function.__globals__, node.name, closure=tuple(cell(actual(local[name])) for name in code.co_freevars)
@@ -326,13 +329,19 @@ def materialize(recipe, call, owner, environment, kernels):
     annotations = {arg.arg: value(arg.annotation) for arg in node.args.args if arg.annotation is not None}
     if node.returns is not None:
         annotations["return"] = value(node.returns)
+    templates = [name for name, dtype in annotations.items() if isinstance(dtype, ti.template)]
+    template_owner = bool(templates)
+    if template_owner and (templates != ["self"] or node.args.args[0].arg != "self" or lexical_fields):
+        raise ValueError("Cold factory template receiver requires one explicit self without lexical Field bindings")
+    if not template_owner and not lexical_fields:
+        raise ValueError("Cold factory requires a declared allocation source or template receiver")
     original = copy.deepcopy(node)
     original.decorator_list = []
     bind(
         lambda: ast.Module(body=[copy.deepcopy(original)], type_ignores=[]),
         globals_getter=lambda: function.__globals__,
         closure_getter=lambda: {
-            name: cell.cell_contents for name, cell in zip(code.co_freevars, numerical.__closure__)
+            name: cell.cell_contents for name, cell in zip(code.co_freevars, numerical.__closure__ or ())
         },
         is_class=False,
         filename=function.__code__.co_filename,
@@ -349,7 +358,12 @@ def materialize(recipe, call, owner, environment, kernels):
     key = (
         function,
         node.name,
-        tuple(sorted((name, describe_element_type(dtype).structural_key()) for name, dtype in annotations.items())),
+        tuple(
+            sorted(
+                (name, ("owner",) if isinstance(dtype, ti.template) else describe_element_type(dtype).structural_key())
+                for name, dtype in annotations.items()
+            )
+        ),
         tuple(sorted(options.items())),
     )
     kernel = kernels.get(key)
@@ -359,7 +373,12 @@ def materialize(recipe, call, owner, environment, kernels):
     environment._lexical_bindings = MappingProxyType(
         {**environment._lexical_bindings, **{(numerical, name): binding for name, binding in bindings.items()}}
     )
-    selected = dict(node=node, identity=recipe["module"] + "." + factory.name + "." + node.name, options=options)
+    selected = dict(
+        node=node,
+        identity=recipe["module"] + "." + factory.name + "." + node.name,
+        options=options,
+        template_owner=template_owner,
+    )
     return kernel, bindings, selected
 
 

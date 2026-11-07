@@ -1201,6 +1201,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         closure_bindings=bindings,
                         closure_identity=selected["identity"],
                         closure_options=selected["options"],
+                        closure_template_owner=selected["template_owner"],
                         closure_environment=closure_environment,
                     )
                 )
@@ -1218,6 +1219,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 if "closure_kernel" in definition
                 else getattr(owner if owner is not None else imported, node.name)
             )
+            if definition.get("closure_template_owner"):
+                # Reuse Component's explicit template receiver. No generated
+                # numerical wrapper or per-model template object is compiled.
+                entry = SimpleNamespace(_primal=entry._primal, _kernel_owner=owner)
             if definition["kind"] == "pyfunc":
                 from taichi_forge.lang.kernel_impl import Kernel, AutodiffMode
 
@@ -1235,7 +1240,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             if kernel is None:
                 _fail(name, node, "decorated definition did not resolve to a Forge kernel")
             arguments = (
-                kernel.arguments[1:] if owner is not None and "closure_kernel" not in definition else kernel.arguments
+                kernel.arguments[1:]
+                if owner is not None
+                and ("closure_kernel" not in definition or definition.get("closure_template_owner"))
+                else kernel.arguments
             )
             values, argument_schema = [], []
             for argument in arguments:
@@ -1425,11 +1433,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 entries[definition["name"]] = entry_manifest
             if "closure_kernel" in definition:
                 manifest["version"] = max(manifest["version"], 25)
+                if definition["closure_template_owner"]:
+                    manifest["version"] = max(manifest["version"], 32)
                 manifest["closure_entries"].setdefault(definition["closure_identity"], []).append(
                     dict(
                         symbol=entries[definition["name"]]["symbol"],
                         owner_type=name + "." + owner_name,
                         bindings=definition["closure_bindings"],
+                        **({"template_owner": True} if definition["closure_template_owner"] else {}),
                         **(
                             {
                                 "options": {

@@ -84,8 +84,13 @@ class GraphBuilder:
 
     def dispatch(self, kernel, *args, template_args=None):
         from ._package import entry, _BoundEntry
+        from ._package_closures import _TemplateEntry
 
         self.package._check()
+        if isinstance(kernel, _TemplateEntry):
+            if not template_args or set(template_args) != {"self"}:
+                raise ValueError("Package factory Graph requires its explicit template receiver")
+            kernel = kernel.__get__(template_args["self"])
         owner = None
         if isinstance(kernel, _BoundEntry):
             owner, kernel = kernel.owner, kernel.entry
