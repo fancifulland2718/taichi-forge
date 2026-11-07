@@ -382,6 +382,21 @@ CPU/CUDA/Vulkan 局部验证包含两层子对象路径、独立实例、无源�
 参数映射、引用对象下尚未解析的数值子对象、相容但不同来源类的统一 ABI、直接未标注 Field 参数
 仍需补齐。对象输入通过不等于 EFC 的 qvel/mass_factor 或 DOF 类型域已合格。
 
+版本 23 继续支持必选 Field 构造参数的 `scope.borrow('values', values, source_scope=True)`，
+可附已有 `dimensions` 关系。来源取自已扫描构造调用中的分配成员路径，也可沿已声明的参数/别名
+转发；所有调用必须证明同一来源定义和成员，不从测试样本推测类型。当前接受无条件 ScalarField、
+Vector/MatrixField 以及 StructField 的数值成员，不将整个 StructField 当作独立数组。
+
+编译器通过内部来源引用复用原 Component 的完整 SNode 组和符号布局；消费者从 Field 的真实分配
+记录绑定该来源，不创建新的组，也不替换成独立 Ndarray。兄弟字段及其布局尺寸保留，运行期仍检查
+维度关系、来源类/包归属和成员身份，禁止仅凭相同 dtype/shape 接受另一个来源。现有快照与退休检查
+继续生效。Host 转发没有增加数值入口，原来源中未使用的静态项不产生变体。
+
+直接 Field 输入的 CPU/CUDA/Vulkan 局部无源码消费和 GeoPhys 原 resource_scope 工厂检查通过，
+向量及 StructField 成员另有 CPU 数值/组归属检查。可选 Field、不同来源定义的相容性归一化和
+依赖 Field 元数据进行条件分派的普通声明 helper 仍未接通；原 EFC 的 declare_source_borrow
+及 DOF 类型域仍是后续缺口，这不是完整 EFC 或整引擎资格。
+
 ## 仍需补齐的共同机制
 
 复杂 SNode/Field 布局、上述继承限制、模板参数域/其余条件资源域、无类型或 Python 专用 `pyfunc`、梯度、任意 Python

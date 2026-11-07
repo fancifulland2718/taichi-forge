@@ -75,6 +75,181 @@ class Model:
 """
 
 
+FIELD_INPUT_SOURCE = (
+    OWNER_INPUT_SOURCE.replace("scope.reader = Reader(self)", "scope.reader = Reader(self.values, n)")
+    .replace("def __init__(self, source):", "def __init__(self, values, n):")
+    .replace(
+        "scope.owner_reference('source', source)",
+        "self.n = n\n        extent = scope.dim('n')",
+    )
+    .replace(
+        "scope.borrow('alias', self.source.values, source_scope=True)",
+        "scope.borrow('alias', values, dimensions={'n': extent}, source_scope=True)",
+    )
+    .replace("gain * i + self.source.bias()", "gain * i")
+    .replace(
+        "scope.reader = Reader(source)",
+        "scope.borrow('alias', values, dimensions={'n': extent}, source_scope=True)\n"
+        "        scope.reader = Reader(values, n)",
+    )
+    .replace("Forward(self.storage)", "Forward(self.storage.values, n)")
+    .replace("self.n, self.first = n, first", "self.n, self.first = n, first\n        self.m = n + 2")
+    .replace(
+        "self.tree = fields.finalize()",
+        "scope.spare = scope.field(ti.f32, shape=scope.dim('m'))\n        self.tree = fields.finalize()",
+    )
+)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_field_inputs_retain_source_group_without_host_combination_code(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, FIELD_INPUT_SOURCE)
+    original = package.Model(7, True)
+    original.step(3.0)
+    expected = original.storage.values.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 23
+    assert sys.modules["definition_fixture.model"].constructors == 1
+    assert len(manifest["entries"]) == 3
+    assert not manifest.get("entry_families")
+    assert len(manifest["field_groups"]) == 1
+    assert len(next(iter(manifest["field_groups"].values()))["dimensions"]) == 2
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([n for n in archive.namelist() if n.endswith((".ll", ".bc", ".spv"))]) == 3
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, True), code.host.Model(19, False)
+        reader = a.reader.reader
+        assert reader.alias is a.storage.values
+        assert reader._forge_package_field_groups == {}
+        a.step(3.0)
+        np.testing.assert_array_equal(a.storage.values.to_numpy(), expected)
+        b.step(-2.0)
+        np.testing.assert_array_equal(b.storage.values.to_numpy(), -2 * np.arange(19))
+        with pytest.raises(ValueError, match="constraint"):
+            type(reader)(a.storage.values, 6)
+        with pytest.raises(ValueError, match="allocation member"):
+            type(reader)(a.storage.spare, 9)
+        with load_package(runtime, tmp_path / "sdk") as foreign:
+            source = foreign.host.Model(7, True).storage
+            with pytest.raises(ValueError, match="child owner"):
+                type(reader)(source.values, 7)
+        prepared = reader.graph().bind(dict(gain=4.0))
+        reader.alias = b.storage.values
+        with pytest.raises(ValueError, match="Borrowed Field"):
+            reader.step(1.0)
+        prepared.run()
+        np.testing.assert_array_equal(a.storage.values.to_numpy(), 4 * np.arange(7))
+        reader.alias = a.storage.values
+        a.storage.tree.destroy()
+        with pytest.raises((ValueError, RuntimeError)):
+            reader.step(1.0)
+        b.step(1.0)
+        np.testing.assert_array_equal(b.storage.values.to_numpy(), np.arange(19))
+        prepared.close()
+    probe = tmp_path / "consume_fields.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3, True), code.host.Model(13, False)
+            assert a.storage.values is a.reader.reader.alias
+            assert a.reader.reader._forge_package_field_groups == {}
+            a.step(4.0)
+            b.step(-2.0)
+            np.testing.assert_array_equal(a.storage.values.to_numpy(), 4 * np.arange(3))
+            np.testing.assert_array_equal(b.storage.values.to_numpy(), -2 * np.arange(13))
+        print('FIELD_INPUT_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FIELD_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("kind", ["vector", "matrix", "struct_member"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_input_uses_original_tensor_member_layout(tmp_path, monkeypatch, kind):
+    source = FIELD_INPUT_SOURCE
+    if kind == "vector":
+        source = source.replace("scope.values = scope.field(ti.f32,", "scope.values = scope.vector_field(2, ti.f32,")
+    elif kind == "matrix":
+        source = source.replace("scope.values = scope.field(ti.f32,", "scope.values = scope.matrix_field(2, 2, ti.f32,")
+    else:
+        source = (
+            source.replace(
+                "scope.values = scope.field(ti.f32,",
+                "scope.values = scope.struct_field({'x': ti.f32, 'v': ti.types.vector(2, ti.f32)},",
+            )
+            .replace("self.values", "self.values.x")
+            .replace("self.storage.values", "self.storage.values.x")
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = package.Model(7, False)
+    original.step(3.0)
+    original_values = original.storage.values.x if kind == "struct_member" else original.storage.values
+    expected = original_values.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert len(manifest["entries"]) == 3
+    assert len(manifest["field_groups"]) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        owner = code.host.Model(7, True)
+        owner.step(3.0)
+        values = owner.storage.values.x if kind == "struct_member" else owner.storage.values
+        assert owner.reader.reader.alias is values
+        assert values._group_owner is owner.storage.spare._group_owner
+        np.testing.assert_array_equal(values.to_numpy(), expected)
+
+
+@pytest.mark.parametrize(
+    "change, diagnostic",
+    [
+        (("Reader(self.values, n)", "Reader(None, n)"), "proven source"),
+        (("Reader(self.values, n)", "Reader(self.spare, self.m)"), "incompatible source"),
+        (
+            (
+                "scope = ti.experimental.ResourceScope(self)\n        self.n = n",
+                "values = None\n        scope = ti.experimental.ResourceScope(self)\n        self.n = n",
+            ),
+            "unmodified constructor parameter",
+        ),
+        (
+            ("class Model:", "def unproven(values):\n    return Reader(values, 7)\n\nclass Model:"),
+            "Unscoped constructor input",
+        ),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_input_rejects_missing_or_conflicting_source(tmp_path, monkeypatch, change, diagnostic):
+    package = _source_package(tmp_path, monkeypatch, FIELD_INPUT_SOURCE.replace(*change))
+    with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk/package.json").exists()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_constructor_inputs_share_source_allocation_without_combination_code(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, OWNER_INPUT_SOURCE)
@@ -603,7 +778,7 @@ def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(tmp
 @pytest.mark.parametrize(
     "before,after,diagnostic",
     [
-        ("self.values, source_scope", "unknown, source_scope", "definition-proven"),
+        ("self.values, source_scope", "unknown, source_scope", "unmodified constructor parameter"),
         ("source_scope=True", "source_scope=False", "source_scope=True"),
         ("source_scope=True", "source_scope=True, external=True", "source_scope=True"),
         ("{'n': cols}", "{'unknown': cols}", "allocation namespace"),

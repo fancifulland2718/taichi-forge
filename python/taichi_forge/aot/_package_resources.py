@@ -787,6 +787,9 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             name, spec = declaration(
                 call, scope_paths[scope], declarations, dimension, lambda node, message: fail(module, node, message)
             )
+            parameter = spec.get("input_parameter")
+            if parameter is not None and (parameter not in parameter_names or stores[parameter] != 1):
+                fail(module, call, "Borrowed input requires an unmodified constructor parameter")
             if member_stores.get(name, 0):
                 fail(module, call, "Borrowed Field cannot replace an existing owner attribute")
             spec["scope_allocation"] = origin(scope)

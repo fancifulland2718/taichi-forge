@@ -1029,6 +1029,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(21, manifest["version"])
             if any(item["kind"] == "owner_input" for item in schema.values()):
                 manifest["version"] = max(22, manifest["version"])
+            if any(item["kind"] == "borrowed_field" and "input_parameter" in item for item in schema.values()):
+                manifest["version"] = max(23, manifest["version"])
             if any(item["kind"] == "static" for item in schema.values()):
                 manifest["version"] = max(11, manifest["version"])
             if any("presence_parameter" in item for item in schema.values()):

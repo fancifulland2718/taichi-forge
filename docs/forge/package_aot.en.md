@@ -565,6 +565,30 @@ child access through inputs, compatible but different source classes, and direct
 untyped Field arguments still need support. Object inputs do not establish EFC
 qvel/mass_factor or DOF type-domain qualification.
 
+Version 23 also supports mandatory Field constructor parameters declared with
+`scope.borrow('values', values, source_scope=True)`, optionally with existing
+`dimensions` relations. Scanned construction calls must prove one source
+definition and allocation member, including forwarding through declared inputs
+or aliases. Tests and concrete model execution do not infer the type. This slice
+accepts unconditional scalar/vector/matrix Fields and numerical StructField
+members, rather than treating a whole StructField as an independent array.
+
+An internal provenance reference reuses Component's complete native SNode group
+and symbolic layout. Consumers bind it from the Field's actual allocation record,
+without allocating another group or substituting an independent ndarray. Sibling
+members and layout dimensions remain present. Dimension relations, source class,
+package and member identity are checked; equal dtype/shape alone cannot admit a
+different source. Existing prepared snapshots and retirement checks still apply.
+Host forwarding adds no numerical entry, and unused source static facts add no
+variants.
+
+Focused CPU/CUDA/Vulkan source-free consumers and GeoPhys's original resource
+factory pass, with additional CPU tensor/StructField member checks. Optional
+Fields, normalization across different compatible source definitions and ordinary
+declaration helpers that branch on Field metadata remain unsupported. EFC's
+`declare_source_borrow` and DOF type domains still require work; this is not whole
+EFC or engine qualification.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

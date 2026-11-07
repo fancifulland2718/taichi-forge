@@ -25,13 +25,18 @@ def declaration(call, scope_path, schema, dimension, fail):
     while isinstance(node, ast.Attribute):
         path.insert(0, node.attr)
         node = node.value
-    if not isinstance(node, ast.Name) or node.id != "self" or not path:
+    parameter = node.id if isinstance(node, ast.Name) and node.id != "self" and not path else None
+    if parameter is None and (not isinstance(node, ast.Name) or node.id != "self" or not path):
         fail(call, "Borrowed Field requires a definition-proven self allocation path; untyped inputs are not sampled")
-    source = schema.get(path[0], {})
-    if source.get("kind") not in ("owner", "owner_input") and (
-        source.get("kind") != "dense_field"
-        or source.get("conditions")
-        or bool(source.get("struct_field")) != (len(path) == 2)
+    source = schema.get(path[0], {}) if path else {}
+    if (
+        parameter is None
+        and source.get("kind") not in ("owner", "owner_input")
+        and (
+            source.get("kind") != "dense_field"
+            or source.get("conditions")
+            or bool(source.get("struct_field")) != (len(path) == 2)
+        )
     ):
         fail(call, "Borrowed Field requires an earlier unconditional declared allocation or Struct Field member")
     mapping = keywords.get("dimensions", ast.Dict([], []))
@@ -43,8 +48,10 @@ def declaration(call, scope_path, schema, dimension, fail):
     for key, value in zip(mapping.keys, mapping.values):
         if not isinstance(key, ast.Constant) or type(key.value) is not str or key.value in relations:
             fail(call, "Borrowed dimensions require unique literal source names")
-        if source.get("kind") not in ("owner", "owner_input") and (
-            schema.get(key.value, {}).get("kind") != "dimension" or schema[key.value].get("path")
+        if (
+            parameter is None
+            and source.get("kind") not in ("owner", "owner_input")
+            and (schema.get(key.value, {}).get("kind") != "dimension" or schema[key.value].get("path"))
         ):
             fail(call, "Borrowed dimension is absent from the original allocation namespace")
         target = dimension(value)
@@ -57,6 +64,7 @@ def declaration(call, scope_path, schema, dimension, fail):
     return name, dict(
         kind="borrowed_field",
         source_path=path,
+        **({"input_parameter": parameter} if parameter is not None else {}),
         dimensions=relations,
         borrow_declaration=[call.lineno, call.col_offset],
     )

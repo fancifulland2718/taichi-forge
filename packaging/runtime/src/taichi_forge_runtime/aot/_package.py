@@ -302,6 +302,7 @@ class _ModuleBinding:
             value = group.member(
                 contract["members"][identity], element["dtype"], element_shape=element["element_shape"]
             )
+            value._forge_package_field_source = (owner, (name, attribute) if member.get("struct_field") else (name,))
             self.package._arrays.append(value)
             allocated.append(value)
             values[attribute] = value
@@ -342,6 +343,17 @@ class _ModuleBinding:
         ):
             raise ValueError("Borrowed Field requires its managed source-scope construction")
         contract = self.package.manifest["owners"][owner_key].get(name, {})
+        if "input_parameter" in contract:
+            from ._package_values import check_owner_bindings
+
+            source = getattr(field, "_forge_package_field_source", None)
+            if source is None or tuple(contract["source_member"]) != source[1]:
+                raise ValueError("Borrowed input differs from its declared allocation member")
+            setattr(scope._root, contract["source_path"][0], source[0])
+            check_owner_bindings(
+                scope._root,
+                (dict(path=contract["source_path"][:1], owner_type=contract["source_type"]),),
+            )
         if contract.get("kind") != "borrowed_field" or path_value(scope._root, contract["source_path"]) is not field:
             raise ValueError("Borrowed Field differs from its declared allocation")
         from .._dimensions import freeze_extent, check_constraints
@@ -779,7 +791,7 @@ class LoadedPackage:
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
             self.manifest.get("version")
-            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22)
+            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")
