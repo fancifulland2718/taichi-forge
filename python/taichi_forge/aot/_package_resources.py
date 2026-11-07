@@ -1185,7 +1185,10 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             }[method]
             dtype, shape_node = field_type_shape(normalized, role, module, fail)
             source_type = copy.deepcopy(dtype)
-            local_type = any(isinstance(n, ast.Name) and n.id in local_types for n in ast.walk(dtype))
+            local_type = any(
+                isinstance(n, ast.Name) and (n.id in local_types or hasattr(n, "_package_forwarded_argument"))
+                for n in ast.walk(dtype)
+            )
             try:
                 dtype = expand_local_type(dtype, local_types, kind)
             except ValueError as error:

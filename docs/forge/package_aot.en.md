@@ -365,6 +365,15 @@ conditional-layout and optional-member contracts. Disabled branches do not
 evaluate Field types or extents. These forms have local CPU/CUDA source-free
 checks; independent flags still specialize only dependent numerical entries.
 
+A local cold-construction helper may directly return its scope's Field or
+Field/None under a declared flag. It must have explicit parameters, a single
+return, and no decorators or defaults. Arguments retain their original evaluation
+order before the condition. Ordinary owner or inherited methods may forward the
+allocator and scope through pure resource declarations, with source hashes retained.
+Reassignment, escape, side effects, and overriding the forwarded method are rejected.
+Allocation retains the original native group and instance ownership, without new
+numerical variants or executing construction methods during discovery.
+
 The original compiler records presence dependencies when a conditional field is
 actually read, including `ti.static(field is not None)`. Common methods that do
 not read that field retain shared code. An instance's

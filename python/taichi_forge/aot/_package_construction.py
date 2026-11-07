@@ -9,6 +9,20 @@ from ._package_contexts import prove_context
 from ._package_types import qualified_kind
 
 
+def ordinary_owner_lookup(owner):
+    from taichi_forge.lang.kernel_impl import data_oriented
+
+    def ordinary(base):
+        lookup = vars(base).get("__getattribute__", object.__getattribute__)
+        return lookup is object.__getattribute__ or (
+            inspect.isfunction(lookup) and lookup.__code__ in data_oriented.__code__.co_consts
+        )
+
+    return inspect.isclass(owner) and all(ordinary(base) for base in owner.__mro__) and (
+        inspect.getattr_static(owner, "__setattr__") is object.__setattr__
+    )
+
+
 def construction_functions(node):
     functions = [
         child
@@ -133,18 +147,8 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                 ):
                     fail(module, node, "Construction method cannot be replaced on the owner")
             owner = namespace.get(cls.name)
-            from taichi_forge.lang.kernel_impl import data_oriented
-
-            def ordinary_lookup(base):
-                lookup = vars(base).get("__getattribute__", object.__getattribute__)
-                return lookup is object.__getattribute__ or (
-                    inspect.isfunction(lookup) and lookup.__code__ in data_oriented.__code__.co_consts
-                )
-
             if inspect.isclass(owner) and (
-                not all(ordinary_lookup(base) for base in owner.__mro__)
-                or "__getattribute__" in methods
-                or inspect.getattr_static(owner, "__setattr__") is not object.__setattr__
+                not ordinary_owner_lookup(owner) or "__getattribute__" in methods
             ):
                 fail(module, methods[name], "Construction methods require ordinary owner attribute lookup")
     return facts

@@ -29,6 +29,9 @@ def resolve_owners(sources, imported, owner_schema, fail):
             name, node, _, _ = classes[cls]
             fail(name, node, "inherited constructor is outside the scanned source boundary")
         name, node, kind, schemas = classes[base]
+        for method, original in getattr(node, "_package_allocation_methods", {}).items():
+            if inspect.getattr_static(cls, method) is not original:
+                fail(name, node, "Overridden allocation forwarding requires an explicit construction contract")
         for method in node.body:
             if getattr(method, "_package_construction_method", False) and (
                 inspect.getattr_static(cls, method.name) is not inspect.getattr_static(base, method.name)

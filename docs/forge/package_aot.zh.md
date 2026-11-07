@@ -344,6 +344,12 @@ JIT 对照、无源码消费、新尺寸、分配前/后异常回收、正常树
 禁用分支不求值 Field 的类型和尺寸。循环不展开数值代码，独立开关仍按实际依赖生成变体。
 这两种形式已做 CPU/CUDA 局部无源码检查，未据此扩展其他后端的资格。
 
+冷构造中的局部分配 helper 可直接返回原 scope 的 Field，或按已声明开关返回 Field/None。
+只接受显式参数、单个 return、无装饰器/默认值的转发；参数仍按原顺序在判断开关前求值。
+普通同类/继承方法可将该 allocator 和 scope 转发到纯资源声明中，保留源方法摘要，
+不执行方法来发现资源。赋值替换、逃逸、未知副作用及改变该方法的继承覆盖拒绝。
+实际 Field 继续进入原组布局和独立实例；这种构造整理不增加数值变体。
+
 `from taichi_forge.lang._ndarray import Ndarray`（含 Taichi 兼容路径、别名和函数内导入）
 可保留为 Host 类型检查，使用版本 17。`isinstance` 接受普通标量/张量/记录 ndarray；
 Dense Field 成员即使复用 ndarray ABI 也不属于该类型，普通 Python/NumPy 对象同样不属于。

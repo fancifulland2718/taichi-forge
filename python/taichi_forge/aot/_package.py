@@ -132,6 +132,9 @@ def _analyze(module, source, namespace, target):
 
     tree._package_resource_contexts = discover_contexts(tree, namespace, module, _fail)
     tree._package_factory_declarations = construction + normalize_factories(tree, namespace, module, _fail, kind)
+    from ._package_allocations import normalize_allocation_helpers
+
+    tree._package_factory_declarations.extend(normalize_allocation_helpers(tree, namespace, kind, module, _fail))
     definitions, owners = [], {}
     supported = set()
     from ._package_closures import discover
@@ -218,7 +221,7 @@ def _analyze(module, source, namespace, target):
             and id(node) not in supported
         ):
             _fail(module, node, "nested, inherited, or asynchronous numerical definitions require further support")
-    return tree, kind, owners, definitions
+    return ast.fix_missing_locations(tree), kind, owners, definitions
 
 
 def _host_projection(

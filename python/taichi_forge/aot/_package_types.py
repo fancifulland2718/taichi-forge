@@ -48,6 +48,8 @@ def expand_local_type(node, bindings, kind):
 
     class Expand(ast.NodeTransformer):
         def visit_Name(self, node):
+            if hasattr(node, "_package_forwarded_argument"):
+                return self.visit(copy.deepcopy(node._package_forwarded_argument))
             return self.visit(copy.deepcopy(bindings[node.id])) if node.id in bindings else node
 
         def visit_Attribute(self, node):

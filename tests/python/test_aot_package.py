@@ -6628,7 +6628,48 @@ class Model:
 """
 
 
-@pytest.mark.parametrize("placement", ["implicit", "conditional", "declarations", "expression"])
+def _allocation_helper_source(method=False):
+    source = CONDITIONAL_LAYOUT_SOURCE.replace(
+        "        if self.second:\n            scope.other = scope.field(ti.f32, shape=scope.dim('m'))",
+        "        def optional_field(dtype, shape):\n"
+        "            return scope.field(dtype, shape=shape) if self.second else None\n"
+        "        scope.other = optional_field(shape=scope.dim('m'), dtype=ti.f32)",
+    )
+    if method:
+        source = source.replace("@ti.data_oriented\nclass Model:", """class ResourceMixin:
+    def allocate(self, field, resources):
+        extent = resources.dim('m')
+        resources.other = field(ti.f32, extent)
+@ti.data_oriented
+class Model(ResourceMixin):""").replace(
+            "scope.other = optional_field(shape=scope.dim('m'), dtype=ti.f32)",
+            "self.allocate(optional_field, scope)",
+        )
+    return source
+
+
+@pytest.mark.parametrize("change", ["escape", "rebound", "side_effect", "override", "receiver"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_allocation_helpers_reject_unproven_forwarding(tmp_path, monkeypatch, change):
+    source = _allocation_helper_source(method=True)
+    if change == "escape":
+        source = source.replace("        self.allocate(", "        self.saved = optional_field\n        self.allocate(")
+    elif change == "rebound":
+        source = source.replace("        self.allocate(", "        optional_field = None\n        self.allocate(")
+    elif change == "side_effect":
+        source = source.replace("        extent = resources.dim", "        self.changed = 1\n        extent = resources.dim")
+    elif change == "override":
+        source += "\nclass Derived(Model):\n    def allocate(self, field, resources):\n        pass\n"
+    elif change == "receiver":
+        source = source.replace("        self.allocate(", "        self.allocate = None\n        self.allocate(")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="[Aa]llocation|reassigned"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@pytest.mark.parametrize("placement", ["implicit", "conditional", "declarations", "expression", "helper", "methodhelper"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path, monkeypatch, placement):
     import itertools
@@ -6659,9 +6700,11 @@ def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path,
             "        if self.second:\n            scope.other = scope.field(ti.f32, shape=scope.dim('m'))",
             "        scope.other = scope.field(ti.f32, shape=scope.dim('m')) if self.second else None",
         )
+    if placement in ("helper", "methodhelper"):
+        source = _allocation_helper_source(method=placement == "methodhelper")
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == (13 if placement == "expression" else 12)
+    assert manifest["version"] == (35 if placement.endswith("helper") else 13 if placement == "expression" else 12)
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert len(manifest["field_groups"]) == 1  # one conditional topology, not four layout products
     assert sorted(len(family["variants"]) for family in manifest["entry_families"].values()) == [2, 2]
@@ -6673,7 +6716,7 @@ def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path,
         instances = []
         for first, second in itertools.product((False, True), repeat=2):
             # A disabled branch must not evaluate its invalid, unused extent.
-            m = 5 if second else -3
+            m = 5 if second or placement.endswith("helper") else -3
             original, current = package.Model(7, m, first, second), loaded.host.Model(7, m, first, second)
             if placement == "declarations":
                 assert original.last_declared == current.last_declared == "second"
@@ -6708,6 +6751,11 @@ def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path,
         resources = set(runtime._resources)
         with pytest.raises((ValueError, RuntimeError)):
             loaded.host.Model(7, -3, False, True)
+        if placement.endswith("helper"):
+            # The call's argument is evaluated before entering its disabled
+            # helper body, unlike a direct conditional Field expression.
+            with pytest.raises((ValueError, RuntimeError)):
+                loaded.host.Model(7, -3, False, False)
         assert set(runtime._resources) == resources
     probe = tmp_path / "consume_conditional.py"
     probe.write_text(
@@ -6733,7 +6781,7 @@ def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path,
             a.tree.destroy()
             b.common(4.0)
         print('CONDITIONAL_LAYOUT_OK')
-    """),
+    """).replace("Model(3,-1", "Model(3,1" if placement.endswith("helper") else "Model(3,-1"),
         encoding="utf8",
     )
     env = dict(
