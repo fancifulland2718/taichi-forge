@@ -2940,6 +2940,150 @@ class Model:
 """
 
 
+MODEL_TENSOR_COPY_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, dof: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.dof = dof
+        self.values = ti.Vector.field(self.dof, ti.f32, shape=self.n)
+        self.output = ti.Vector.field(self.dof, ti.f32, shape=self.n)
+        self.result = ti.field(ti.f32, shape=self.n)
+
+    @ti.func
+    def copy(self, i, gain):
+        self.output[i] = ti.Vector.zero(ti.f32, self.dof)
+        self.values[i] = gain
+        for j in range(self.dof):
+            self.values[i][j] += i + 2 * j
+        left = right = self.values[i]
+        left[0] += 2.0
+        self.values[i] = 0.0
+        self.output[i] = right
+        # Both RHS elements must be read before either destination changes.
+        self.values[i], self.output[i] = self.output[i], self.values[i]
+        right = self.output[i]
+        return left[0] + right[0]
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in range(self.n):
+            self.result[i] = self.copy(i, gain)
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        return builder.compile()
+"""
+
+
+@pytest.mark.parametrize("matrix", [False, True])
+@pytest.mark.parametrize("helper_kind", ["func", "real_func"])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_model_tensor_value_copies(tmp_path, monkeypatch, matrix, helper_kind):
+    if helper_kind == "real_func" and ti.cfg.arch == ti.vulkan:
+        pytest.skip("Vulkan does not support real functions")
+    source = MODEL_TENSOR_COPY_SOURCE
+    if matrix:
+        source = source.replace("ti.Vector.field(self.dof,", "ti.Matrix.field(self.dof, 2,")
+        source = source.replace("ti.Vector.zero(ti.f32, self.dof)", "ti.Matrix.zero(ti.f32, self.dof, 2)")
+        source = source.replace("for j in range(self.dof):\n            self.values[i][j] += i + 2 * j",
+                                "for j, k in ti.ndrange(self.dof, 2):\n            self.values[i][j, k] += i + 2 * j + 3 * k")
+        source = source.replace("left[0]", "left[0, 1]").replace("right[0]", "right[0, 1]")
+    if helper_kind == "real_func":
+        source = source.replace("@ti.func\n    def copy(self, i, gain):",
+                                "@ti.real_func\n    def copy(self, i: ti.i32, gain: ti.f32) -> ti.f32:")
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    entries = [entry for entry in manifest["entries"].values() if entry["definition"].endswith("Model.step")]
+    assert len(entries) == 1
+    # One constructor, chained local copies, two swap snapshots, reassignment.
+    assert sum(item["kind"] == "local_tensor_workspace" for item in entries[0]["captures"]) == 6
+    expected = package.Model(7, 3)
+    expected.step(4.0)
+    values = 4.0 + np.arange(7)[:, None] + 2 * np.arange(3)[None, :]
+    if matrix:
+        values = values[:, :, None] + 3 * np.arange(2)
+    np.testing.assert_array_equal(expected.values.to_numpy(), values)
+    np.testing.assert_array_equal(expected.output.to_numpy(), 0.0)
+    np.testing.assert_array_equal(expected.result.to_numpy(), 6.0 + np.arange(7) + (3 if matrix else 0))
+    probe = tmp_path / "consume_copies.py"
+    probe.write_text(textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        def check(model, gain):
+            values = gain + np.arange(model.n)[:, None] + 2 * np.arange(model.dof)[None, :]
+            if sys.argv[3] == '2':
+                values = values[:, :, None] + 3 * np.arange(2)
+            np.testing.assert_array_equal(model.values.to_numpy(), values)
+            np.testing.assert_array_equal(model.output.to_numpy(), 0.)
+            np.testing.assert_array_equal(model.result.to_numpy(),
+                gain + 2. + np.arange(model.n) + (3 if sys.argv[3] == '2' else 0))
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            models = [code.host.Model(7, 3), code.host.Model(19, 65)]
+            calls = []
+            for model, gain in zip(models, (4., 7.)):
+                model.step(gain)
+                check(model, gain)
+                call = model.graph().bind({'gain': gain + 1.})
+                assert call.info['resource_bytes'] == model.n * model.dof * int(sys.argv[3]) * 4 * 6
+                calls.append(call)
+            original_array, original_wait = runtime.ndarray, runtime.wait
+            def forbidden(*args, **kwargs):
+                raise AssertionError('prepared copy allocated or waited on the Host')
+            runtime.ndarray = runtime.wait = forbidden
+            try:
+                for unused in range(2):
+                    for call in reversed(calls):
+                        call.run()
+            finally:
+                runtime.ndarray, runtime.wait = original_array, original_wait
+            calls[0].close()
+            calls[1].run()
+            for model, gain in zip(models, (5., 8.)):
+                check(model, gain)
+            calls[1].close()
+        print('MODEL_TENSOR_COPIES_SOURCE_FREE_OK')
+    """), encoding="utf8")
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+               PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+               TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+               TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    result = subprocess.run([sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"],
+                             "2" if matrix else "1"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "MODEL_TENSOR_COPIES_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("mismatch", ["extent", "dtype", "rank"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_model_tensor_copy_rejects_incompatible_values(tmp_path, monkeypatch, mismatch):
+    source = MODEL_TENSOR_COPY_SOURCE
+    replacement = {
+        "extent": "ti.Vector.field(self.n, ti.f32, shape=self.n)",
+        "dtype": "ti.Vector.field(self.dof, ti.i32, shape=self.n)",
+        "rank": "ti.Matrix.field(self.dof, 2, ti.f32, shape=self.n)",
+    }[mismatch]
+    source = source.replace("self.output = ti.Vector.field(self.dof, ti.f32, shape=self.n)",
+                            "self.output = " + replacement)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="matching element type and extent relations"):
+        ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    assert not (tmp_path / "sdk" / "package.json").exists()
+
+
 @pytest.mark.parametrize("ndrange", [False, True])
 @pytest.mark.parametrize("helper_kind", ["func", "real_func", "nested_real_func"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

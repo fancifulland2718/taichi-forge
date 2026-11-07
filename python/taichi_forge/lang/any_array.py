@@ -1,5 +1,6 @@
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
+from taichi_forge.lang._local_tensor import ModelTensor
 from taichi_forge.lang.enums import Layout
 from taichi_forge.lang.expr import Expr, make_expr_group
 from taichi_forge.lang.util import taichi_scope
@@ -117,9 +118,13 @@ class ModelTensorArray(AnyArray):
         return _ModelTensorElement(self, indices)
 
 
-class _ModelTensorElement:
+class _ModelTensorElement(ModelTensor):
     def __init__(self, array, indices):
         self.array, self.indices = array, indices
+        self.shape = tuple(array._element_extent(axis) for axis in range(array.ndim))
+        self.dtype, self.ndim = array.dtype, array.ndim
+        self.n = self.shape[0]
+        self.m = self.shape[1] if self.ndim == 2 else 1
 
     def __getitem__(self, indices):
         from taichi_forge.lang.exception import TaichiIndexError
@@ -134,9 +139,7 @@ class _ModelTensorElement:
         return impl.subscript(None, self.array.scalar_array, *self.indices, *indices)
 
     def _ti_expr_init(self):
-        from taichi_forge.lang.exception import TaichiCompilationError
-
-        raise TaichiCompilationError("Model tensor value copies require dynamic local workspace lowering")
+        return self._copy()
 
     def __bool__(self):
         from taichi_forge.lang.exception import TaichiTypeError

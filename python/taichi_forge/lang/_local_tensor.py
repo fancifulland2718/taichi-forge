@@ -80,21 +80,38 @@ def iteration_scope(ctx, index=None, begin=None, end=None):
     return _scope(ctx.deployment, index, count)
 
 
-class LocalTensor:
-    def __init__(self, deployment, array, index, shape, dtype):
-        self.deployment, self.array, self.index = deployment, array, index
-        self.shape, self.dtype = tuple(shape), dtype
-        self.ndim = len(shape)
-        self.n = shape[0]
-        self.m = shape[1] if self.ndim == 2 else 1
-        self._temporary = True
+class ModelTensor:
+    """A scalar-indexed model tensor, either a Field element or local value.
 
-    def __getitem__(self, indices):
-        if not isinstance(indices, tuple):
-            indices = (indices,)
-        if len(indices) != self.ndim or any(isinstance(i, slice) for i in indices):
-            raise TaichiIndexError("Model local tensor requires one scalar index per axis")
-        return impl.subscript(None, self.array, self.index, *indices)
+    Whole-value copies use the same invocation workspace as local constructors.
+    Field references are materialized before assignment, including chained and
+    overlapping assignments, so later writes cannot change an earlier value.
+    """
+
+    def _copy(self):
+        deployment = getattr(impl.get_runtime().current_kernel, "_deployment_context", None)
+        if deployment is None:
+            raise TaichiCompilationError("Model tensor copies require an AOT capture context")
+        copied = deployment.local_tensor(self.dtype, self.shape)
+        copied._visit(lambda indices: self[indices])
+        return copied
+
+    def _shape_key(self):
+        from taichi_forge.aot._component import Dimension
+
+        deployment = impl.get_runtime().current_kernel._deployment_context
+
+        def resolve(expression, visiting=()):
+            op, *args = expression
+            if op == "dim":
+                declaration = deployment.declarations.get(args[0])
+                if isinstance(declaration, Dimension) and declaration.expression:
+                    if args[0] in visiting:
+                        raise TaichiCompilationError("Cyclic model tensor dimension relation")
+                    return resolve(declaration.expression, (*visiting, args[0]))
+            return (op, *args) if op in ("dim", "const") else (op, *(resolve(arg, visiting) for arg in args))
+
+        return tuple(resolve(extent(size)) for size in self.shape)
 
     def _visit(self, value):
         from taichi_forge._lib import core
@@ -112,26 +129,47 @@ class LocalTensor:
         self[indices]._assign(value(indices) if callable(value) else value)
         builder.end_frontend_range_for()
 
+    def _assign(self, other):
+        if isinstance(other, ModelTensor):
+            if self.dtype != other.dtype or self._shape_key() != other._shape_key():
+                raise TaichiCompilationError(
+                    "Model tensor assignment requires matching element type and extent relations"
+                )
+            # Ordinary AST assignments already snapshot the RHS. Also retain
+            # value semantics when a compiler helper passes a Field reference.
+            if not isinstance(other, LocalTensor):
+                other = other._copy()
+            self._visit(lambda indices: other[indices])
+        elif isinstance(other, Real) or (isinstance(other, Expr) and not other.ptr.is_tensor()):
+            self._visit(other)
+        else:
+            raise TaichiCompilationError("Model tensor assignment requires a compatible tensor or scalar")
+        return self
+
+
+class LocalTensor(ModelTensor):
+    def __init__(self, deployment, array, index, shape, dtype):
+        self.deployment, self.array, self.index = deployment, array, index
+        self.shape, self.dtype = tuple(shape), dtype
+        self.ndim = len(shape)
+        self.n = shape[0]
+        self.m = shape[1] if self.ndim == 2 else 1
+        self._temporary = True
+
+    def __getitem__(self, indices):
+        if not isinstance(indices, tuple):
+            indices = (indices,)
+        if len(indices) != self.ndim or any(isinstance(i, slice) for i in indices):
+            raise TaichiIndexError("Model local tensor requires one scalar index per axis")
+        return impl.subscript(None, self.array, self.index, *indices)
+
     def _ti_expr_init(self):
         if self._temporary:
             self._temporary = False
             return self
-        copied = self.deployment.local_tensor(self.dtype, self.shape)
-        copied._visit(lambda indices: self[indices])
+        copied = self._copy()
         copied._temporary = False
         return copied
-
-    def _assign(self, other):
-        if (
-            not isinstance(other, LocalTensor)
-            or self.dtype != other.dtype
-            or (tuple(map(extent, self.shape)) != tuple(map(extent, other.shape)))
-        ):
-            raise TaichiCompilationError(
-                "Model local tensor assignment requires matching element type and extent relations"
-            )
-        self._visit(lambda indices: other[indices])
-        return self
 
     def __bool__(self):
         raise TaichiCompilationError("A model local tensor is not a scalar condition")

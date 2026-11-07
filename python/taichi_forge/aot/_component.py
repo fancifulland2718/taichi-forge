@@ -1781,6 +1781,13 @@ class _Capture:
             for name in extent_dependencies(expression):
                 if isinstance(self.declarations[name], Dimension):
                     self.dimension_dependency(name)
+                    # A Field element gets its extent from the array descriptor,
+                    # so the dimension may have no numerical scalar read. The
+                    # invocation still needs it to prepare a matching workspace.
+                    operand = self._workspace_operand(name)
+                    operand._uniform_extent = ("dim", name)
+                    if name in self.model_dimensions:
+                        operand._model_uniform = True
         name = f"__local_tensor_{len(self.workspaces)}"
         if name in self.declarations:
             raise TaichiCompilationError("Component declaration uses a reserved local tensor name")

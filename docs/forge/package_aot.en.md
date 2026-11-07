@@ -662,8 +662,8 @@ Focused CPU/CUDA/Vulkan checks cover direct Vector/Matrix and Struct Fields,
 independent instances and frontend-blocked consumption at a new size of 129.
 CPU/CUDA also cover `real_func`. GeoPhys's unchanged `declare_batch_layout` helper
 passes source-free layout consumers on all three backends. This is not complete EFC:
-whole Field-element copies/arithmetic, shared workspaces and conditional layouts
-in a group containing model tensors still require support.
+general whole-tensor arithmetic and conditional layouts in a group containing
+model tensors still require support.
 Fixed-element Ndarray and explicit value-argument type contracts are unchanged.
 
 Version 27 additionally lowers model-sized `Vector.zero` and `Matrix.zero` locals
@@ -701,6 +701,25 @@ inside the function reuse the current work item's slice. Recursive hidden captur
 still reject, and explicit function arguments are not inferred as allocation sizes.
 The Vulkan real_func restriction is unchanged. General whole-tensor algebra and
 local workspace in the older explicit Component Graph path remain unimplemented.
+
+Model Vector/Matrix Fields support whole-element reads, writes and scalar fills.
+`value = field[i]` creates an independent local value. Chained local assignments
+own separate values; swap assignments snapshot every RHS before writing either
+destination. Field and local-constructor shapes are compared through existing
+declared dimension relations, never equal witness lengths. Different element types,
+ranks or dimensions without a proven equality reject. Fixed mathematical tensors
+and ordinary JIT keep their existing behavior.
+
+Snapshots reuse invocation-owned workspace and the scalar-array ABI. Even when
+numerical code reads a dimension only through a Field descriptor, dimensions used
+to prepare workspace enter the invocation snapshot. Sizes and instances do not
+create code variants. Focused CPU/CUDA/Vulkan checks cover new sizes 3/65,
+nonuniform values, copy isolation, swaps, frontend-blocked consumption and separate
+prepared calls; CPU/CUDA also cover `real_func`. These checks do not qualify general
+dynamic tensor algebra or whole-class EFC export. Ordinary calls still allocate and
+copy; stable state should reuse prepared calls. A whole-element snapshot can use
+more temporary memory than a direct scalar copy. Graph-internal time alone does not
+represent preparation or normal Host-call costs.
 
 Model-sized `ti.simt.block.SharedArray` uses native block-owned shared memory in
 inlined CUDA parallel ranges. Scalar elements and multidimensional extents use
