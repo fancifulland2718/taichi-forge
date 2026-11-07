@@ -2125,6 +2125,141 @@ def test_package_explicit_placement_keeps_its_construction_snapshot(tmp_path, mo
         assert set(runtime._resources) == registered
 
 
+CONTEXT_FIELDS_SOURCE = """
+import taichi_forge as ti
+from resource_contexts import resource_group, read_events
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, fail=0):
+        global constructors
+        constructors += 1
+        self.n = n
+        with resource_group(self, 'state', initialization='zero') as scope:
+            if fail == 1:
+                raise ValueError('before allocation')
+            cells = scope.dense(ti.i, scope.dim('n'))
+            scope.values = scope.field(ti.i32, shape=scope.dim('n'), placement=cells)
+            if fail == 2:
+                raise ValueError('after allocation')
+            scope.weights = scope.field(ti.f32, shape=scope.dim('n'), placement=cells)
+    @ti.kernel
+    def step(self):
+        for i in self.values:
+            self.values[i] += 1
+"""
+
+RESOURCE_CONTEXT_SOURCE = """
+from contextlib import contextmanager
+import taichi_forge as ti
+events = []
+def read_events():
+    return list(events)
+@contextmanager
+def resource_group(owner, name, *, initialization='consumer_explicit'):
+    events.append(('enter', name))
+    builder = ti.FieldsBuilder()
+    scope = ti.experimental.ResourceScope(owner, builder=builder, initialization=initialization)
+    try:
+        yield scope
+    except BaseException:
+        events.append(('failure', name))
+        owner.failed_tree = builder.finalize()
+        raise
+    owner.tree = builder.finalize()
+    events.append(('exit', name))
+"""
+
+
+def _resource_context_fixture(tmp_path, monkeypatch, *, helper=RESOURCE_CONTEXT_SOURCE, model=CONTEXT_FIELDS_SOURCE):
+    (tmp_path / "resource_contexts.py").write_text(textwrap.dedent(helper), encoding="utf8")
+    monkeypatch.delitem(sys.modules, "resource_contexts", raising=False)
+    package = _source_package(tmp_path, monkeypatch, model)
+    source = Path(sys.modules["definition_fixture.model"].__file__)
+    return package, source
+
+
+@pytest.mark.parametrize("inline", [False, True])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_discovers_context_group_without_discarding_host_lifecycle(tmp_path, monkeypatch, inline):
+    from taichi_forge.aot._package import _analyze
+
+    model = (
+        RESOURCE_CONTEXT_SOURCE
+        + CONTEXT_FIELDS_SOURCE.replace("from resource_contexts import resource_group, read_events\n", "")
+        if inline
+        else CONTEXT_FIELDS_SOURCE
+    )
+    package, source = _resource_context_fixture(tmp_path, monkeypatch, model=model)
+    module = sys.modules["definition_fixture.model"]
+    helper = module if inline else sys.modules["resource_contexts"]
+    tree, _, owners, _ = _analyze(module.__name__, source.read_text(), vars(module), "x64")
+    schema = owners["Model"]
+    assert schema["n"]["kind"] == "dimension"
+    assert schema["values"]["group"] == schema["weights"]["group"]
+    assert schema["values"]["placement"] == schema["weights"]["placement"]
+    assert len(tree._package_resource_contexts) == 1
+    recipe = tree._package_resource_contexts[0]
+    assert recipe["lifecycle"] == "original_host_generator_required"
+    assert len(recipe["finalization_lines"]) == 2  # Success and failure stay distinct.
+    assert module.constructors == 0 and helper.events == []
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 16
+    original = package.Model(5)
+    original.step()
+    np.testing.assert_array_equal(original.values.to_numpy(), 1)
+    assert helper.events == [("enter", "state"), ("exit", "state")]
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(3), code.host.Model(19)
+        a.step()
+        b.step()
+        np.testing.assert_array_equal(a.values.to_numpy(), 1)
+        np.testing.assert_array_equal(b.values.to_numpy(), 1)
+        assert a.values._group_owner is a.weights._group_owner
+        registered = set(runtime._resources)
+        for fail in (1, 2):
+            with pytest.raises(ValueError, match="allocation"):
+                code.host.Model(7, fail=fail)
+            assert set(runtime._resources) == registered
+        assert code.module("definition_fixture.model").read_events() == [
+            ("enter", "state"),
+            ("exit", "state"),
+            ("enter", "state"),
+            ("exit", "state"),
+            ("enter", "state"),
+            ("failure", "state"),
+            ("enter", "state"),
+            ("failure", "state"),
+        ]
+        a.tree.destroy()
+        b.step()
+        np.testing.assert_array_equal(b.values.to_numpy(), 2)
+
+
+@pytest.mark.parametrize("change", ["conditional", "escape", "hidden", "multiple", "shadow", "dynamic"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_context_rejects_unproven_group_boundaries(tmp_path, monkeypatch, change):
+    helper, model = RESOURCE_CONTEXT_SOURCE, CONTEXT_FIELDS_SOURCE
+    if change == "conditional":
+        helper = helper.replace("        yield scope", "        if owner.n:\n            yield scope")
+    elif change == "escape":
+        helper = helper.replace("    try:", "    owner.builder = builder\n    try:")
+    elif change == "hidden":
+        helper = helper.replace("    try:", "    scope.hidden = scope.field(ti.i32, shape=())\n    try:")
+    elif change == "multiple":
+        helper = helper.replace("    owner.tree =", "    yield scope\n    owner.tree =")
+    elif change == "dynamic":
+        helper = helper.replace("    try:", "    locals()\n    try:")
+    else:
+        model = model.replace("n: int, fail=0):", "n: int, fail=0, resource_group=None):")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, helper=helper, model=model)
+    with pytest.raises(ti.aot.PackageExportError, match="Resource context"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert sys.modules["resource_contexts"].events == []
+    assert not (tmp_path / "sdk").exists()
+
+
 DERIVED_FIELDS_SOURCE = """
 import taichi_forge as ti
 from resource_factories import declare_extent

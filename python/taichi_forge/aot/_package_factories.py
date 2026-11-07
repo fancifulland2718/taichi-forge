@@ -317,7 +317,16 @@ def normalize_factories(tree, namespace, module, fail, kind):
             if not isinstance(function, ast.FunctionDef) or function.name != "__init__":
                 continue
             scopes = set()
-            for statement in function.body:
+
+            def statements(body):
+                for statement in body:
+                    if getattr(statement, "_package_resource_context", None) is not None:
+                        scopes.add(statement.items[0].optional_vars.id)
+                        yield from statements(statement.body)
+                    else:
+                        yield statement
+
+            for statement in statements(function.body):
                 if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Expr)) or not isinstance(
                     statement.value, ast.Call
                 ):

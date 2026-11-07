@@ -112,7 +112,9 @@ def _analyze(module, source, namespace, target):
     kind = decorator_resolver(tree)
     tree._package_target_selections = select_target_branches(tree, kind, target, module, _fail)
     from ._package_factories import normalize_factories
+    from ._package_contexts import discover_contexts
 
+    tree._package_resource_contexts = discover_contexts(tree, namespace, module, _fail)
     tree._package_factory_declarations = normalize_factories(tree, namespace, module, _fail, kind)
     definitions, owners = [], {}
     supported = set()
@@ -202,6 +204,7 @@ def _host_projection(
     builder,
     application_modules=None,
     error_interfaces=frozenset(),
+    host_contexts=None,
 ):
     numerical = {item["name"]: item for item in definitions}
     definitions_at = {
@@ -325,6 +328,30 @@ def _host_projection(
 
         def visit_ImportFrom(self, node):
             origin = import_origin(node)
+            if host_contexts is not None:
+                selected, remaining = [], []
+                for alias in node.names:
+                    value = namespace.get(alias.asname or alias.name)
+                    if host_contexts.contains(value):
+                        helper_module, helper_name = host_contexts.select(value)
+                        selected.append(
+                            ast.Assign(
+                                [ast.Name(alias.asname or alias.name, ast.Store())],
+                                ast.Call(
+                                    ast.Attribute(
+                                        ast.Name(_PREFIX + "runtime", ast.Load()), "context_function", ast.Load()
+                                    ),
+                                    [ast.Constant(helper_module), ast.Constant(helper_name)],
+                                    [],
+                                ),
+                            )
+                        )
+                    else:
+                        remaining.append(alias)
+                if selected:
+                    node.names = remaining
+                    rest = self.visit_ImportFrom(node) if remaining else None
+                    return [*selected, *(rest if isinstance(rest, list) else [rest] if rest else [])]
             node.names = [a for a in node.names if not device_import(a, origin)]
             if not node.names:
                 return None
@@ -391,6 +418,23 @@ def _host_projection(
                 ]
             return node
 
+        def visit_With(self, node):
+            recipe = getattr(node, "_package_resource_context", None)
+            if recipe is not None:
+                call = node.items[0].context_expr
+                group = module + "." + self.owner + f":context_{node.lineno}_{node.col_offset}"
+                helper_module, helper_name = recipe["definition"].rsplit(".", 1)
+                node.items[0].context_expr = ast.copy_location(
+                    ast.Call(
+                        ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "resource_context", ast.Load()),
+                        [ast.Constant(helper_module), ast.Constant(helper_name), *call.args],
+                        [*call.keywords, ast.keyword("_forge_package_group", ast.Constant(group))],
+                    ),
+                    call,
+                )
+                self.minimum_version = max(self.minimum_version, 16)
+            return self.generic_visit(node)
+
         def visit_ClassDef(self, node):
             if [kind(d) for d in node.decorator_list] == ["dataclass"]:
                 return ast.copy_location(
@@ -434,6 +478,8 @@ def _host_projection(
             nonlocal kind
             definition = definitions_at.get((node.lineno, node.col_offset))
             if definition is None:
+                if host_contexts is not None and self.owner is None:
+                    node = host_contexts.project_definition(module, node)
                 previous = kind
                 local = decorator_resolver(node)
                 kind = lambda expression: local(expression) or previous(expression)
@@ -742,6 +788,16 @@ def export_package(package, output, *, arch=None, source_root=None):
         sources.append((name, path, relative, text, tree, kind, owners, definitions))
     if failures:
         raise PackageExportError("Package declaration preflight failed:\n" + "\n".join(failures))
+    from ._package_contexts import HostContexts
+    from ._package_factories import _source_value
+
+    host_contexts = HostContexts(imported_modules)
+    for name, _, _, _, tree, *_ in sources:
+        for node in ast.walk(tree):
+            recipe = getattr(node, "_package_resource_context", None)
+            if recipe is not None:
+                function = _source_value(node.items[0].context_expr.func, vars(imported_modules[name]))
+                host_contexts.add(function, recipe)
     resolve_owners(sources, imported_modules, _owner_schema, _fail)
     module = Module()
     manifest = dict(
@@ -1089,11 +1145,14 @@ def export_package(package, output, *, arch=None, source_root=None):
             module,
             application_modules,
             frozenset(manifest["error_interfaces"]),
+            host_contexts,
         )
         payloads["host/" + relative.as_posix()] = host_source.encode("utf8")
         manifest["version"] = max(manifest["version"], minimum_version)
         manifest["producer_only"].extend(producer_only)
         manifest["sources"][name] = hashlib.sha256(text.encode("utf8")).hexdigest()
+    context_payloads, manifest["host_contexts"] = host_contexts.render()
+    payloads.update(context_payloads)
     if not manifest["entries"]:
         raise PackageExportError("Package contains no supported decorated kernels")
     output.parent.mkdir(parents=True, exist_ok=True)

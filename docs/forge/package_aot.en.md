@@ -228,7 +228,7 @@ decorated definitions continue through the original compiler. Focused three-back
 checks cover captures, typed compound arguments, state isolation and source-free use.
 
 Graph capture projection and related Host support use manifest version 9; the
-consumer reads versions 1–15. Local frontend imports, `ti.sync()` and the Runtime
+consumer reads versions 1–16. Local frontend imports, `ti.sync()` and the Runtime
 program identity query are projected without importing the compiler. Logical
 `types.vector/matrix` factories accept Host dimensions/dtypes; they do not allocate
 device storage. `NdArray.from_numpy/to_numpy` use existing native transfers with
@@ -377,12 +377,37 @@ are checked by the declaration analyzer. Model predicates, side effects, dropped
 nonliteral inputs, unknown algebra and cyclic relations reject export. No new
 decorator, function-name registry or model pre-run is required. This slice needs
 unconditional constructor statements and local aliases without reassignment;
-`resource_group` contexts and arbitrary multi-statement declaration helpers are
-still pending. Direct calls and Graph preparation validate the used dimension
+arbitrary multi-statement declaration helpers are still pending. Direct calls and Graph preparation validate the used dimension
 relations, while prepared calls retain their original snapshots. Focused
 CPU/CUDA/Vulkan checks cover direct declarations, helpers, new sizes, invalid
 relations and GeoPhys's original `declare_derived`. They qualify this shared
 declaration path, not complete solvers or a new full-engine wheel.
+
+Version 16 recognizes ordinary `contextlib.contextmanager` allocation scopes:
+an unconditional constructor context creates one FieldsBuilder and ResourceScope,
+then yields only that scope. Fields, dimensions and shared placements inside the
+block use the existing declaration analysis, without executing the generator or
+model. Allocation, yield, finalization locations and source hashes are retained.
+Escaping builders, hidden declarations and multiple or conditional yields reject.
+
+The original generator's try/except/finally, tree collection and ownership checks
+remain ordinary Host Python. Only its builder and scope creation calls change.
+Required ordinary Host globals share one namespace: modules already in the source
+boundary keep their projected namespace; external declaration helpers retain one
+necessary Host `.py` closure. Numerical definitions cannot enter this closure, and
+dynamic namespace operations cannot infer its dependencies. Calls and instances
+do not produce additional numerical assets. Consumers reuse native groups,
+construction rollback and instance leases. Empty failure handles own no native
+resource when an exception precedes allocation.
+
+Focused CPU/CUDA/Vulkan checks with GeoPhys's original `resource_group` and
+`collect_resource_trees` cover JIT comparison, source-free consumption, new sizes,
+failure before/after allocation, tree ownership, independent instance retirement
+and loaded-package namespaces. GeoPhys production code is unchanged. Conditional
+groups, reused scope aliases across groups, field-name loops and the complete
+engine Host closure remain pending; Candidate Storage uses these unsupported
+forms and is not yet qualified. Context allocation currently runs only inside
+managed constructors, without in-flight growth or rebinding.
 
 ## Remaining shared mechanisms
 

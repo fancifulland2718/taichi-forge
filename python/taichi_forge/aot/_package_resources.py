@@ -14,6 +14,33 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         return {}
     scopes, declarations, allowed = {}, {}, set()
     scope_groups, builders = {}, {}
+    contexts = {}
+    for statement in constructor.body:
+        recipe = getattr(statement, "_package_resource_context", None)
+        if recipe is None:
+            continue
+        scope = statement.items[0].optional_vars.id
+        call = copy.deepcopy(recipe["call"])
+        # The declared group belongs to this lexical scope. Its Host generator
+        # still owns finalization, exception handling and external bookkeeping.
+        call.lineno, call.col_offset = statement.lineno, statement.col_offset
+        allocation = ast.copy_location(ast.Assign([statement.items[0].optional_vars], call), statement)
+        group = f"context_{statement.lineno}_{statement.col_offset}"
+        scopes[scope], scope_groups[scope] = allocation, group
+        builders[group] = dict(
+            allocation=[statement.lineno, statement.col_offset],
+            finalization=[statement.end_lineno + 1, statement.col_offset],
+            context={k: v for k, v in recipe.items() if k != "call"},
+        )
+        contexts[id(statement)] = scope
+        if (
+            sum(
+                isinstance(n, ast.Name) and n.id == scope and isinstance(n.ctx, (ast.Store, ast.Del))
+                for n in ast.walk(constructor)
+            )
+            != 1
+        ):
+            fail(module, statement, "Package ResourceScope aliases must not be reassigned")
     for statement in ast.walk(constructor):
         if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
             continue
@@ -365,7 +392,9 @@ def scope_declarations(module, constructor, kind, fail, namespace):
     def statements(body, conditions=None):
         conditions = conditions or {}
         for statement in body:
-            if isinstance(statement, ast.If) and any(operation(n)[0] for n in ast.walk(statement)):
+            if id(statement) in contexts:
+                yield from statements(statement.body, conditions)
+            elif isinstance(statement, ast.If) and any(operation(n)[0] for n in ast.walk(statement)):
                 test, expected = statement.test, True
                 if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
                     test, expected = test.operand, False

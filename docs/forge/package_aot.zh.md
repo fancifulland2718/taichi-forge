@@ -169,7 +169,7 @@ Host 的 `ti.Vector`/`ti.Matrix` 构造（含 import 别名）、固定张量类
 装饰器内的数值矩阵运算继续由原编译器处理。三后端局部检查覆盖捕获、复合参数、
 独立状态及无源码消费。
 
-Graph 捕获及相关 Host 支持使用清单版本 9，当前消费者读取版本 1–15。函数内前端导入、
+Graph 捕获及相关 Host 支持使用清单版本 9，当前消费者读取版本 1–16。函数内前端导入、
 `ti.sync()` 和 Runtime program 身份查询均投影到现有 Runtime，不导入编译器。
 逻辑 `types.vector/matrix` 工厂接受 Host 维度/dtype，不分配设备存储。
 `NdArray.from_numpy/to_numpy` 复用原生传输并检查形状，包括 Dense 成员视图；Struct
@@ -266,10 +266,27 @@ Host 记录提供成员属性、shape 和字典式 `to_numpy/from_numpy`，委�
 受支持声明调用及固定前端能力选择，例如 `getattr(type(scope), 'derived_dim', None)`。
 辅助函数和模型均不执行；原参数表达式由声明分析器检查。模型条件、副作用、丢弃非字面量
 参数、未知维度代数和循环关系拒绝导出，不新增装饰器、函数名称白名单或模型预运行。
-此切片要求无条件构造语句和不重赋值的局部别名；`resource_group` 上下文及任意多语句声明
-辅助函数还未接入。独立调用/Graph 准备检查实际使用维度的关系，已准备调用保留原快照。
+此切片要求无条件构造语句和不重赋值的局部别名；任意多语句声明辅助函数仍未接入。
+独立调用/Graph 准备检查实际使用维度的关系，已准备调用保留原快照。
 局部 CPU/CUDA/Vulkan 检查覆盖直接声明、辅助函数、新尺寸、错误关系及 GeoPhys 原
 `declare_derived`，这只证明公共声明路径，未资格完整求解器或新的全引擎 wheel。
+
+版本 16 可识别普通 `contextlib.contextmanager` 资源组：构造器无条件进入一个上下文，
+原生成器创建一个 FieldsBuilder 和 ResourceScope，并且只 yield 该 scope。组内的字段、
+维度、共享 placement 沿原声明路径分析，不执行生成器或模型。上下文中的分配、yield、
+完成位置和源码 hash 都保留；未知的 builder 逃逸、隐藏资源声明或多个/条件 yield 拒绝。
+
+生成器的 try/except/finally、树收集、归属检查等仍是普通 Host Python，只替换 builder 和
+scope 两处创建调用。所需普通 Host 全局定义共享一个命名空间；已经纳入源边界的模块
+继续使用原投影模块，外部声明辅助模块的必要 Host 闭包只保留一份 `.py`。数值定义不进入
+这个 Host 闭包，闭包不能通过动态名字空间操作猜测依赖。没有按调用或实例新增数值产物。
+消费时复用原生组、现有构造回滚和实例租约；分配前失败的空组句柄不持有原生资源。
+
+原 GeoPhys `resource_group` / `collect_resource_trees` 的 CPU/CUDA/Vulkan 局部检查覆盖原
+JIT 对照、无源码消费、新尺寸、分配前/后异常回收、正常树归属、两实例独立退休和加载包
+命名空间隔离；GeoPhys 生产代码无修改。这仍不覆盖条件组、跨组重复局部别名、字段名
+循环及完整引擎 Host 闭包。已发现的 Candidate Storage 正使用这些形式，不能据此宣称其
+完整封装完成。上下文资源创建目前仅在受管理的构造器中执行，不代表在途扩容/重新绑定。
 
 ## 仍需补齐的共同机制
 

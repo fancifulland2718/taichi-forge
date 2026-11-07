@@ -264,6 +264,34 @@ class _ModuleBinding:
             raise ValueError("Resource builder belongs to another loaded package")
         return _GroupBuilder(owner, owner_key + ":" + group)
 
+    def context_builder(self, owner, key):
+        self.package._check()
+        construction = _construction.get()
+        if (
+            getattr(owner, "_forge_package_owner", None) is not self.package
+            or key not in self.package.manifest["field_groups"]
+            or construction is None
+            or construction[0] is not self.package
+            or construction[2] is not owner
+        ):
+            raise ValueError("Context builder requires its declared owner and resource group")
+        return _GroupBuilder(owner, key, allow_empty=True)
+
+    def context_function(self, module, name):
+        self.package._check()
+        spec = self.package.manifest.get("host_contexts", {}).get(module)
+        if spec is None or name not in spec["definitions"]:
+            raise ValueError("Unknown retained Host context definition")
+        module = (
+            self.import_module(spec["module"])
+            if spec.get("application_module")
+            else importlib.import_module(self.package._name + "." + spec["module"])
+        )
+        return getattr(module, name)
+
+    def resource_context(self, module, name, *args, **kwargs):
+        return self.context_function(module, name)(*args, **kwargs)
+
     def type(self, spec):
         if spec["kind"] == "ndarray_annotation":
             element = spec["element"]
@@ -298,17 +326,18 @@ class _ModuleBinding:
 
 
 class _GroupBuilder:
-    def __init__(self, owner, key):
+    def __init__(self, owner, key, *, allow_empty=False):
         self.owner, self.key, self.finalized = owner, key, False
+        self.allow_empty = allow_empty
 
     def finalize(self):
         if self.finalized:
             raise RuntimeError("FieldsBuilder already finalized")
         allocation = self.owner._forge_package_field_groups.get(self.key)
-        if allocation is None:
+        if allocation is None and not self.allow_empty:
             raise ValueError("Declared group finalized without its resource allocation")
         self.finalized = True
-        return _FieldTree(allocation[0])
+        return _FieldTree(allocation[0] if allocation is not None else None)
 
 
 @dataclass(frozen=True)
@@ -317,7 +346,8 @@ class _FieldTree:
 
     def destroy(self):
         # The existing native family retirement revokes all member views.
-        self.group.close()
+        if self.group is not None:
+            self.group.close()
 
 
 class _ResourceScope:
@@ -567,7 +597,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")
