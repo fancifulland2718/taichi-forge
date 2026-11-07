@@ -126,10 +126,21 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         )
     )
     declarations = {}
+
+    def witness(name, visiting=()):
+        if name in visiting:
+            raise ValueError(f"Cyclic derived dimension {name!r}")
+        expression = schema[name].get("expression")
+        value = evaluate_extent(expression, lambda key: witness(key, (*visiting, name))) if expression else 1
+        if not 0 <= value <= 2**31 - 1:
+            raise ValueError("Declared dimension needs a legal symbolic construction witness")
+        setattr(owner, name, value)
+        return value
+
     for name, item in schema.items():
         if item["kind"] == "dimension":
-            declarations[name] = Dimension(kind="active")
-            setattr(owner, name, 1)
+            declarations[name] = Dimension(kind="active", expression=item.get("expression", ()))
+            witness(name)
     if not fields:
         return declarations
     typed = []
@@ -239,6 +250,9 @@ def field_environment(declarations, schema):
                 original = flattened[identity]
                 flattened[identity] = DenseField(original.dtype, tuple(item["shape"]), original.group)
     environment._set_declarations(flattened)
+    environment._derived_attributes = frozenset(
+        name for name, item in schema.items() if item["kind"] == "dimension" and item.get("expression")
+    )
     return environment
 
 

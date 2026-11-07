@@ -22,9 +22,25 @@ class _Input:
 
 
 @dataclass(frozen=True)
+class _ScopeInput(_Input):
+    pass
+
+
+@dataclass(frozen=True)
+class _Method:
+    receiver: _ScopeInput
+    name: str
+
+
+@dataclass(frozen=True)
 class _Scope:
     arguments: tuple
     keywords: dict
+
+
+@dataclass(frozen=True)
+class _Invocation(_Scope):
+    method: _Method
 
 
 def _literal(value):
@@ -57,8 +73,8 @@ def _source_value(node, namespace):
     return None
 
 
-def prove_factory(function, call):
-    """Return a trusted ResourceScope call, or None for unrelated functions."""
+def prove_factory(function, call, scopes=frozenset()):
+    """Prove a scope constructor or dimension-method forwarding call."""
     from taichi_forge.lang._resource_declaration import ResourceScope
 
     if not inspect.isfunction(function) or "__wrapped__" in vars(function) or "__signature__" in vars(function):
@@ -72,15 +88,24 @@ def prove_factory(function, call):
         return None
     definition = tree.body[0]
     # A candidate must mention the actual trusted declaration class, directly
-    # or through a literal capability lookup. Other Host calls remain untouched.
-    if not any(_source_value(n, function.__globals__) is ResourceScope for n in ast.walk(definition)) and not any(
-        isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
-        and n.func.id == "getattr"
-        and len(n.args) >= 2
-        and isinstance(n.args[1], ast.Constant)
-        and n.args[1].value == "ResourceScope"
-        for n in ast.walk(definition)
+    # or through a literal capability lookup, or receive an already proved
+    # scope. Other Host calls remain untouched. Argument ASTs are forwarded;
+    # the resource analyzer, not this proof, admits their dimension algebra.
+    forwards_scope = any(
+        isinstance(n, ast.Name) and n.id in scopes for n in (*call.args, *(k.value for k in call.keywords))
+    )
+    if (
+        not forwards_scope
+        and not any(_source_value(n, function.__globals__) is ResourceScope for n in ast.walk(definition))
+        and not any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "getattr"
+            and len(n.args) >= 2
+            and isinstance(n.args[1], ast.Constant)
+            and n.args[1].value == "ResourceScope"
+            for n in ast.walk(definition)
+        )
     ):
         return None
     environment = {}
@@ -89,10 +114,12 @@ def prove_factory(function, call):
         raise _Unproven("factory forwarding requires explicit parameters")
 
     def input_value(node):
+        if isinstance(node, ast.Name) and node.id in scopes:
+            return _ScopeInput(node)
         try:
             value = ast.literal_eval(node)
         except (ValueError, TypeError, SyntaxError):
-            if isinstance(node, ast.Name):
+            if isinstance(node, ast.Name) or forwards_scope:
                 return _Input(node)
             raise _Unproven("factory arguments require literal values or forwarded local names") from None
         if not _literal(value):
@@ -107,7 +134,8 @@ def prove_factory(function, call):
         if not isinstance(value, _Input) and not _literal(value):
             raise _Unproven("factory defaults require immutable literal values")
         environment[name] = value
-    trusted_builtins = dict(getattr=getattr, hasattr=hasattr, all=all)
+    trusted_builtins = dict(getattr=getattr, hasattr=hasattr, all=all, type=type)
+    declaration_methods = {name: vars(ResourceScope)[name] for name in ("dim", "derived_dim", "power_of_two_dim")}
     constructions = []
     builtin_namespace = function.__builtins__
     for name, value in trusted_builtins.items():
@@ -137,6 +165,8 @@ def prove_factory(function, call):
                 return vars(parent)[node.attr]
             if isinstance(parent, frozenset) and node.attr == "parameters":
                 return parent
+            if isinstance(parent, _ScopeInput) and node.attr in declaration_methods:
+                return _Method(parent, node.attr)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
             return not _truth(expression(node.operand, local))
         if isinstance(node, ast.BoolOp):
@@ -180,6 +210,8 @@ def prove_factory(function, call):
                     raise _Unproven("factory capability checks require literal names")
                 return all(_truth(expression(generator.elt, {**local, loop.target.id: item})) for item in values)
             args = [expression(arg, local) for arg in node.args]
+            if function_value is type and len(args) == 1 and isinstance(args[0], _ScopeInput):
+                return ResourceScope
             if (function_value is getattr or function_value is hasattr) and len(args) in (2, 3):
                 if function_value is hasattr and len(args) != 2:
                     raise _Unproven("hasattr capability checks require two arguments")
@@ -195,6 +227,18 @@ def prove_factory(function, call):
                 return args[2] if value is sentinel else value
             if function_value is inspect.signature and len(args) == 1 and args[0] is ResourceScope:
                 return frozenset(inspect.signature(ResourceScope).parameters)
+        if isinstance(node, ast.Call):
+            target = expression(node.func, local)
+            args = tuple(expression(arg, local) for arg in node.args)
+            method = next((name for name, value in declaration_methods.items() if target is value), None)
+            if method is not None and args and isinstance(args[0], _ScopeInput):
+                target, args = _Method(args[0], method), args[1:]
+            if isinstance(target, _Method):
+                if any(k.arg is None for k in node.keywords):
+                    raise _Unproven("declaration forwarding requires explicit keywords")
+                invocation = _Invocation(args, {k.arg: expression(k.value, local) for k in node.keywords}, target)
+                constructions.append(invocation)
+                return invocation
         if isinstance(node, ast.Call) and expression(node.func, local) is ResourceScope:
             if any(k.arg is None for k in node.keywords):
                 raise _Unproven("resource constructor forwarding requires explicit keywords")
@@ -228,8 +272,10 @@ def prove_factory(function, call):
 
     result = statements(definition.body)
     if not isinstance(result, _Scope) or len(constructions) != 1 or result is not constructions[0]:
-        raise _Unproven("factory does not return the supported ResourceScope on this capability path")
+        raise _Unproven("factory must return its single supported resource declaration on this capability path")
     forwarded = (*result.arguments, *result.keywords.values())
+    if isinstance(result, _Invocation):
+        forwarded = (*forwarded, result.method.receiver)
     if any(
         isinstance(value, _Input) and not any(item is value for item in forwarded) for value in bound.arguments.values()
     ):
@@ -243,33 +289,43 @@ def prove_factory(function, call):
         raise _Unproven("factory forwards an unproven resource argument")
 
     normalized = ast.Call(
-        call.func,
+        (
+            ast.Attribute(result.method.receiver.node, result.method.name, ast.Load())
+            if isinstance(result, _Invocation)
+            else call.func
+        ),
         [syntax(v) for v in result.arguments],
         [ast.keyword(k, syntax(v)) for k, v in result.keywords.items() if not (k == "builder" and v is None)],
     )
-    normalized._package_role = "experimental.ResourceScope"
+    if not isinstance(result, _Invocation):
+        normalized._package_role = "experimental.ResourceScope"
     normalized._package_factory = dict(
         definition=function.__module__ + "." + function.__qualname__, sha256=hashlib.sha256(source.encode()).hexdigest()
     )
     return ast.copy_location(normalized, call)
 
 
-def normalize_factories(tree, namespace, module, fail):
+def normalize_factories(tree, namespace, module, fail, kind):
     """Normalize proved allocation declarations in constructors, not Host calls."""
     declarations = []
+    from ._package_types import qualified_kind
+
     for cls in tree.body:
         if not isinstance(cls, ast.ClassDef):
             continue
         for function in cls.body:
             if not isinstance(function, ast.FunctionDef) or function.name != "__init__":
                 continue
+            scopes = set()
             for statement in function.body:
-                if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
+                if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Expr)) or not isinstance(
+                    statement.value, ast.Call
+                ):
                     continue
                 call = statement.value
                 target = _source_value(call.func, namespace)
                 try:
-                    normalized = prove_factory(target, call)
+                    normalized = prove_factory(target, call, scopes)
                 except (TypeError, _Unproven) as error:
                     fail(module, call, f"Resource factory forwarding is unproven: {error}")
                 if normalized is not None:
@@ -290,4 +346,11 @@ def normalize_factories(tree, namespace, module, fail):
                         fail(module, call, "Resource factory binding is shadowed or reassigned in the constructor")
                     statement.value = normalized
                     declarations.append({**normalized._package_factory, "module": module, "line": call.lineno})
+                if (
+                    qualified_kind(statement.value, kind) == "experimental.ResourceScope"
+                    and isinstance(statement, ast.Assign)
+                    and len(statement.targets) == 1
+                    and isinstance(statement.targets[0], ast.Name)
+                ):
+                    scopes.add(statement.targets[0].id)
     return declarations

@@ -169,7 +169,7 @@ Host 的 `ti.Vector`/`ti.Matrix` 构造（含 import 别名）、固定张量类
 装饰器内的数值矩阵运算继续由原编译器处理。三后端局部检查覆盖捕获、复合参数、
 独立状态及无源码消费。
 
-Graph 捕获及相关 Host 支持使用清单版本 9，当前消费者读取版本 1–14。函数内前端导入、
+Graph 捕获及相关 Host 支持使用清单版本 9，当前消费者读取版本 1–15。函数内前端导入、
 `ti.sync()` 和 Runtime program 身份查询均投影到现有 Runtime，不导入编译器。
 逻辑 `types.vector/matrix` 工厂接受 Host 维度/dtype，不分配设备存储。
 `NdArray.from_numpy/to_numpy` 复用原生传输并检查形状，包括 Dense 成员视图；Struct
@@ -256,6 +256,20 @@ Host 记录提供成员属性、shape 和字典式 `to_numpy/from_numpy`，委�
 原 JIT 节点与数值，并验证无源码进程、新尺寸和独立退休；GeoPhys 原 `resource_scope`
 工厂的显式共享 placement 同样通过三后端检查。这不表示 EFC/MPM 的完整资源闭包已接入。
 嵌套记录、条件 StructField、逐成员初始化覆盖及完整 Host 元素访问仍待接入。
+
+版本 15 接入已有 `scope.derived_dim` 和 `scope.power_of_two_dim`，表达式沿用已声明维度的
+有界代数。普通 Host 仍计算整数属性，构造时校验该属性与声明关系一致；数值代码使用动态
+维度 ABI，不按模型尺寸增添代码。生产端只生成结构见证，不执行应用构造器；派生关系进入
+原 Component 维度合同，Field 仍通过原生组布局实例化。重复调用已有 `dim` 不会丢掉派生关系。
+
+已有普通 Python 辅助函数可转发这三种维度方法：证明过程复用资源工厂检查，仅接受一次
+受支持声明调用及固定前端能力选择，例如 `getattr(type(scope), 'derived_dim', None)`。
+辅助函数和模型均不执行；原参数表达式由声明分析器检查。模型条件、副作用、丢弃非字面量
+参数、未知维度代数和循环关系拒绝导出，不新增装饰器、函数名称白名单或模型预运行。
+此切片要求无条件构造语句和不重赋值的局部别名；`resource_group` 上下文及任意多语句声明
+辅助函数还未接入。独立调用/Graph 准备检查实际使用维度的关系，已准备调用保留原快照。
+局部 CPU/CUDA/Vulkan 检查覆盖直接声明、辅助函数、新尺寸、错误关系及 GeoPhys 原
+`declare_derived`，这只证明公共声明路径，未资格完整求解器或新的全引擎 wheel。
 
 ## 仍需补齐的共同机制
 

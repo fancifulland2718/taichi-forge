@@ -2125,6 +2125,161 @@ def test_package_explicit_placement_keeps_its_construction_snapshot(tmp_path, mo
         assert set(runtime._resources) == registered
 
 
+DERIVED_FIELDS_SOURCE = """
+import taichi_forge as ti
+from resource_factories import declare_extent
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, wrong=False):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.work = 2 * n + 1 + int(wrong)
+        self.capacity = 1 << (self.work - 1).bit_length()
+        scope = ti.experimental.ResourceScope(self)
+        work = declare_extent(scope, 'work', 2 * scope.dim('n') + 1)
+        scope.dim('work')
+        capacity = scope.power_of_two_dim('capacity', work)
+        scope.values = scope.field(ti.i32, shape=capacity)
+
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.values:
+            self.values[i] = i + bias if i < self.work else -1
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'bias', ti.i32),
+                         template_args={'self': self})
+        return builder.compile()
+"""
+
+DERIVED_HELPER_SOURCE = """
+effects = []
+def declare_extent(scope, name, expression):
+    method = getattr(type(scope), 'derived_dim', None)
+    return method(scope, name, expression) if method is not None else scope.dim(name)
+"""
+
+
+@pytest.mark.parametrize("forwarded", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_derived_dimensions_preserve_relations_without_model_execution(tmp_path, monkeypatch, forwarded):
+    (tmp_path / "resource_factories.py").write_text(textwrap.dedent(DERIVED_HELPER_SOURCE), encoding="utf8")
+    monkeypatch.delitem(sys.modules, "resource_factories", raising=False)
+    source = DERIVED_FIELDS_SOURCE
+    if not forwarded:
+        source = source.replace("declare_extent(scope, 'work',", "scope.derived_dim('work',").replace(
+            "from resource_factories import declare_extent\n", ""
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 15
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["entries"]) == 2  # One implementation plus the unimported public entry.
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]) == 2
+    assert len(manifest["declaration_factories"]) == int(forwarded)
+    assert "from resource_factories import" not in (tmp_path / "sdk/host/model.py").read_text()
+    original = package.Model(7)
+    original.step(5)
+    np.testing.assert_array_equal(original.values.to_numpy(), [*range(5, 20), -1])
+    with pytest.raises(ValueError, match="does not match"):
+        package.Model(7, wrong=True)
+    probe = tmp_path / "consume_derived.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_factories'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3), code.host.Model(19)
+            empty = code.host.Model(0)
+            empty.step(9)
+            np.testing.assert_array_equal(empty.values.to_numpy(), [9])
+            a.step(5)
+            b.step(-2)
+            np.testing.assert_array_equal(a.values.to_numpy(), [*range(5, 12), -1])
+            np.testing.assert_array_equal(b.values.to_numpy(), [*range(-2, 37), *([-1] * 25)])
+            registered = set(runtime._resources)
+            try:
+                code.host.Model(7, wrong=True)
+            except ValueError as error:
+                assert 'does not match' in str(error)
+            else:
+                raise AssertionError('Incorrect Host dimension relation accepted')
+            assert set(runtime._resources) == registered
+            graph = a.graph()
+            call = graph.bind({'bias': 11})
+            a.work += 1
+            for operation in (lambda: a.step(2), lambda: graph.bind({'bias': 2})):
+                try:
+                    operation()
+                except ValueError as error:
+                    assert 'does not match' in str(error)
+                else:
+                    raise AssertionError('Mutated derived count accepted')
+            call.run()
+            np.testing.assert_array_equal(a.values.to_numpy(), [*range(11, 18), -1])
+            call.close()
+            b.step(4)
+            np.testing.assert_array_equal(b.values.to_numpy()[:39], np.arange(39) + 4)
+        print('DERIVED_PACKAGE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "DERIVED_PACKAGE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["cycle", "effect", "model", "drop", "literal"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_derived_dimension_proof_rejects_unsafe_helpers(tmp_path, monkeypatch, change):
+    helper, source = DERIVED_HELPER_SOURCE, DERIVED_FIELDS_SOURCE
+    if change == "cycle":
+        source = source.replace("2 * scope.dim('n') + 1", "scope.dim('work') + 1")
+    elif change == "literal":
+        source = source.replace("2 * scope.dim('n') + 1", "3")
+    elif change == "effect":
+        helper = helper.replace("    method =", "    effects.append(1)\n    method =")
+    elif change == "model":
+        helper = helper.replace("    method =", "    if scope.n:\n        return scope.dim(name)\n    method =")
+    else:
+        helper = helper.replace("method(scope, name, expression)", "scope.dim(name)")
+    (tmp_path / "resource_factories.py").write_text(textwrap.dedent(helper), encoding="utf8")
+    monkeypatch.delitem(sys.modules, "resource_factories", raising=False)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(
+        ti.aot.PackageExportError, match="Cyclic derived|factory forwarding is unproven|declared dimension algebra"
+    ):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["resource_factories"].effects == []
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 RESOURCE_FACTORY_SOURCE = """
 import taichi_forge as ti
 effects = []

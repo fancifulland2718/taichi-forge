@@ -6,9 +6,34 @@ native members. Neither interprets numerical definitions or computes layouts.
 
 from collections.abc import Sequence
 import numbers
+import operator
+
+from .._dimensions import evaluate_extent
 
 
 def capture_value(owner, spec):
+    relations = spec.get("dimension_relations")
+    if relations:
+
+        def resolve(name, visiting=()):
+            if name in visiting or name not in relations:
+                raise ValueError("Invalid or cyclic package dimension relation")
+            declaration = relations[name]
+            actual = owner
+            for part in declaration["path"]:
+                actual = getattr(actual, part)
+            actual = operator.index(actual)
+            expression = declaration["expression"]
+            value = (
+                evaluate_extent(expression, lambda child: resolve(child, (*visiting, name))) if expression else actual
+            )
+            if not (1 if declaration["kind"] == "extent" else 0) <= value <= 2**31 - 1:
+                raise ValueError(f"Dimension {name!r} is outside its declared i32 range")
+            if value != actual:
+                raise ValueError(f"Derived dimension {name!r} does not match its normal attribute")
+            return value
+
+        return resolve(spec["name"])
     for name in spec.get("path", (spec["name"],)):
         owner = getattr(owner, name)
     return owner

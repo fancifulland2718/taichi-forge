@@ -113,7 +113,7 @@ def _analyze(module, source, namespace, target):
     tree._package_target_selections = select_target_branches(tree, kind, target, module, _fail)
     from ._package_factories import normalize_factories
 
-    tree._package_factory_declarations = normalize_factories(tree, namespace, module, _fail)
+    tree._package_factory_declarations = normalize_factories(tree, namespace, module, _fail, kind)
     definitions, owners = [], {}
     supported = set()
     for node in tree.body:
@@ -867,6 +867,8 @@ def export_package(package, output, *, arch=None, source_root=None):
                     value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
                 setattr(owner, attribute, value)
             owners[class_name], environments[class_name] = owner, field_environment(declarations, schema)
+            if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):
+                manifest["version"] = max(15, manifest["version"])
             if any(item.get("struct_field") for item in schema.values()):
                 manifest["version"] = max(14, manifest["version"])
             if any(item.get("optional_presence") for item in schema.values()):
@@ -1027,6 +1029,28 @@ def export_package(package, output, *, arch=None, source_root=None):
                     for item in capture:
                         if item["kind"] in ("ndarray", "dense_field"):
                             item.pop("dtype")
+                        if item["kind"] == "dimension" and environment.declarations[item["name"]].expression:
+                            from taichi_forge_runtime._dimensions import extent_dependencies
+
+                            relations = {}
+
+                            def relation(key):
+                                if key in relations:
+                                    return
+                                declaration = environment.declarations[key]
+                                relations[key] = dict(
+                                    path=list(environment._paths[key]),
+                                    kind=declaration.kind,
+                                    expression=declaration.expression,
+                                )
+                                for child in (
+                                    extent_dependencies(declaration.expression) if declaration.expression else ()
+                                ):
+                                    relation(child)
+
+                            relation(item["name"])
+                            if environment._derived_attributes.intersection(relations):
+                                item["dimension_relations"] = relations
                     entry_manifest = dict(
                         symbol=symbol,
                         definition=name + "." + definition["name"],

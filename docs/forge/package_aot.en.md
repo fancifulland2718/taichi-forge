@@ -228,7 +228,7 @@ decorated definitions continue through the original compiler. Focused three-back
 checks cover captures, typed compound arguments, state isolation and source-free use.
 
 Graph capture projection and related Host support use manifest version 9; the
-consumer reads versions 1–14. Local frontend imports, `ti.sync()` and the Runtime
+consumer reads versions 1–15. Local frontend imports, `ti.sync()` and the Runtime
 program identity query are projected without importing the compiler. Logical
 `types.vector/matrix` factories accept Host dimensions/dtypes; they do not allocate
 device storage. `NdArray.from_numpy/to_numpy` use existing native transfers with
@@ -360,6 +360,29 @@ retirement. The original GeoPhys `resource_scope` factory also passes three-back
 checks with explicit shared placement. This does not qualify the complete EFC/MPM
 resource closure. Nested records, conditional StructFields, member initialization
 overrides and complete Host element access remain pending.
+
+Version 15 accepts existing `scope.derived_dim` and `scope.power_of_two_dim`
+declarations using the shared bounded dimension algebra. Ordinary Host code
+still computes integer attributes; construction checks them against the declared
+relations. Numerical code uses the dynamic dimension ABI, without copies for
+each model size. The producer builds only structural witnesses and never calls
+application constructors. Relations enter the original Component dimension
+contract and native group layout; later `dim` calls retain those relations.
+
+Ordinary imported Python helpers may forward these dimension methods. The
+existing resource-factory proof accepts one supported declaration call and fixed
+frontend capability selection, such as `getattr(type(scope), 'derived_dim', None)`.
+Neither helper nor model executes during export; forwarded argument expressions
+are checked by the declaration analyzer. Model predicates, side effects, dropped
+nonliteral inputs, unknown algebra and cyclic relations reject export. No new
+decorator, function-name registry or model pre-run is required. This slice needs
+unconditional constructor statements and local aliases without reassignment;
+`resource_group` contexts and arbitrary multi-statement declaration helpers are
+still pending. Direct calls and Graph preparation validate the used dimension
+relations, while prepared calls retain their original snapshots. Focused
+CPU/CUDA/Vulkan checks cover direct declarations, helpers, new sizes, invalid
+relations and GeoPhys's original `declare_derived`. They qualify this shared
+declaration path, not complete solvers or a new full-engine wheel.
 
 ## Remaining shared mechanisms
 

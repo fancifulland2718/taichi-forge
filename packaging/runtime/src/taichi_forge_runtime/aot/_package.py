@@ -347,6 +347,20 @@ class _ResourceScope:
             raise ValueError(f"Dimension {name!r} is outside the i32 count range")
         return Extent(("dim", name))
 
+    def derived_dim(self, name, expression):
+        if not isinstance(expression, Extent):
+            raise TypeError("A derived dimension requires an Extent expression")
+        result = self.dim(name)
+        value = evaluate_extent(expression.expression, lambda key: operator.index(getattr(self._owner, key)))
+        if value != operator.index(getattr(self._owner, name)):
+            raise ValueError(f"Derived dimension {name!r} does not match its normal attribute")
+        return result
+
+    def power_of_two_dim(self, name, minimum):
+        if not isinstance(minimum, Extent):
+            raise TypeError("A power-of-two dimension requires an Extent minimum")
+        return self.derived_dim(name, Extent(("ceil_pow2", minimum.expression)))
+
     def record(self, name, value, *, optional=False):
         if type(name) is not str or not name.isidentifier() or value is not None or optional is not True:
             raise ValueError("Package record projection requires its declared absent optional resource")
@@ -553,7 +567,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

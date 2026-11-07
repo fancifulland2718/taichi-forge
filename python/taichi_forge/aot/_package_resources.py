@@ -116,6 +116,10 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         if existing is not None and existing["kind"] == spec["kind"] == "dimension":
             # Two explicit groups may use the same owner count. Provenance of
             # its declaration does not create a different dimension value.
+            if spec.get("expression"):
+                if existing.get("expression") not in (None, spec["expression"]):
+                    fail(module, node, f"Conflicting derived dimension {name!r}")
+                existing["expression"] = spec["expression"]
             return
         if existing is not None and existing != spec:
             fail(module, node, f"Conflicting or repeated ResourceScope role for {name!r}")
@@ -157,6 +161,41 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             values = tuple(dimension(item, bindings) for item in node.elts)
             return values if all(isinstance(v, Extent) for v in values) else None
         scope, method = operation(node)
+        if method in ("derived_dim", "power_of_two_dim"):
+            if (
+                len(node.args) != 2
+                or node.keywords
+                or not isinstance(node.args[0], ast.Constant)
+                or type(node.args[0].value) is not str
+                or not node.args[0].value.isidentifier()
+                or current_conditions
+                or node.lineno < scopes[scope].lineno
+            ):
+                fail(module, node, "Derived dimensions require an unconditional literal name and declared expression")
+            name = node.args[0].value
+            value = dimension(node.args[1], bindings)
+            if not isinstance(value, Extent) or not extent_dependencies(value.expression):
+                fail(module, node, "Derived dimension requires the existing declared dimension algebra")
+            expression = value.expression
+            if method == "power_of_two_dim":
+                expression = ("ceil_pow2", expression)
+
+            # Dependencies are declared in source order. Check the new edge
+            # against existing relations; do not infer an independent count.
+            def check(key, visiting):
+                if key in visiting:
+                    fail(module, node, f"Cyclic derived dimension {key!r}")
+                declaration = declarations.get(key, {})
+                if declaration.get("kind") != "dimension":
+                    fail(module, node, f"Undeclared dimension {key!r}")
+                for child in extent_dependencies(declaration.get("expression", ("const", 0))):
+                    check(child, (*visiting, key))
+
+            for dependency in extent_dependencies(expression):
+                check(dependency, (name,))
+            allowed.add(id(node.func.value))
+            add(name, dict(kind="dimension", dtype="i32", expression=expression, scope_allocation=origin(scope)), node)
+            return Extent(("dim", name))
         if method == "dim":
             name = (
                 (
@@ -600,6 +639,8 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             )
             if conditions:
                 conditional_fields.add(target.attr)
+        elif isinstance(statement, ast.Expr) and method in ("dim", "derived_dim", "power_of_two_dim"):
+            dimension(call)
         elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
             targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
             if len(targets) == 1 and isinstance(targets[0], (ast.Name, ast.Tuple, ast.List)):
