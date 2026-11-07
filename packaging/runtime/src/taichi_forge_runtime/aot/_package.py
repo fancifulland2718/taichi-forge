@@ -309,6 +309,37 @@ class _ModuleBinding:
             owner._forge_package_member_layouts[attribute] = selection
         return StructField(values) if member.get("struct_field") else values[name]
 
+    def borrow(self, owner_key, scope, name, field, *, dimensions=None, source_scope=False, external=False):
+        self.package._check()
+        construction = _construction.get()
+        if (
+            not isinstance(scope, _ResourceScope)
+            or scope._parent is not None
+            or construction is None
+            or construction[0] is not self.package
+            or construction[2] is not scope._root
+            or source_scope is not True
+            or external is not False
+        ):
+            raise ValueError("Borrowed Field requires its managed source-scope construction")
+        contract = self.package.manifest["owners"][owner_key].get(name, {})
+        if contract.get("kind") != "borrowed_field" or path_value(scope._root, contract["source_path"]) is not field:
+            raise ValueError("Borrowed Field differs from its declared allocation")
+        from .._dimensions import freeze_extent, check_constraints
+
+        dimensions = {} if dimensions is None else dimensions
+        if not isinstance(dimensions, dict) or dimensions.keys() != contract["dimensions"].keys():
+            raise ValueError("Borrowed dimensions differ from their source declaration")
+        for key, value in dimensions.items():
+            if not isinstance(value, Extent) or value.expression != freeze_extent(contract["dimensions"][key]):
+                raise ValueError("Borrowed target relation differs from its declared expression")
+        check_constraints(
+            {key: value["spec"] for key, value in contract.get("constraints", {}).items()},
+            lambda key: dimension_value(scope._root, key),
+        )
+        setattr(scope._owner, name, field)
+        return field
+
     def placement(self, owner, shape):
         shape = shape if isinstance(shape, tuple) else (shape,)
         dimensions = tuple(
@@ -706,7 +737,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

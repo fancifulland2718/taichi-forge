@@ -670,6 +670,21 @@ def _host_projection(
 
         def visit_Call(self, node):
             for item in owners.get(self.owner, {}).values():
+                if item.get("borrow_declaration") == [getattr(node, "lineno", None), getattr(node, "col_offset", None)]:
+                    self.minimum_version = max(self.minimum_version, 20)
+                    return ast.copy_location(
+                        ast.Call(
+                            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "borrow", ast.Load()),
+                            [
+                                ast.Constant(module + "." + self.owner),
+                                self.visit(node.func.value),
+                                *(self.visit(arg) for arg in node.args),
+                            ],
+                            [ast.keyword(k.arg, self.visit(k.value)) for k in node.keywords],
+                        ),
+                        node,
+                    )
+            for item in owners.get(self.owner, {}).values():
                 if item.get("group_builder", {}).get("allocation") == [
                     getattr(node, "lineno", None),
                     getattr(node, "col_offset", None),
@@ -973,7 +988,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             owner = object.__new__(cls)  # Deliberately never call application __init__.
             declarations = construct_fields(owner, schema, vars(imported), module, imported_modules=imported_modules)
             for attribute, item in schema.items():
-                if item["kind"] in ("dense_field", "dimension"):
+                if item["kind"] in ("dense_field", "dimension", "borrowed_field"):
                     continue
                 elif item["kind"] == "record":
                     from ._component import Record
@@ -1011,7 +1026,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     declarations[attribute] = RuntimeValue(dtype)
                     value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
                 write_member(owner, attribute, value, schema)
-            owners[class_name], environments[class_name] = owner, field_environment(declarations, schema)
+            from ._package_borrows import project as project_borrows
+
+            owners[class_name], environments[class_name] = owner, project_borrows(
+                owner, field_environment(declarations, schema), schema
+            )
             if any(item["kind"] == "record" or item.get("constraints") for item in schema.values()):
                 manifest["version"] = max(19, manifest["version"])
             if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):
@@ -1036,6 +1055,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "group_builder",
                         "placement",
                         "placement_alias",
+                        "borrow_declaration",
                     )
                 }
                 for attribute, item in schema.items()
@@ -1051,7 +1071,12 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     key = owner_key if group == "fields" else owner_key + ":" + group
                     manifest["field_groups"][key] = dict(schema=layout, members=members, dimensions=sorted(dimensions))
                     member_schemas = {
-                        attribute: schema[environments[class_name]._paths[attribute][0]] for attribute in members
+                        attribute: schema[
+                            environments[class_name]._source_scope_paths.get(
+                                attribute, environments[class_name]._paths[attribute]
+                            )[0]
+                        ]
+                        for attribute in members
                     }
                     conditions = {
                         attribute: member_schemas[attribute]["conditions"]
@@ -1152,9 +1177,18 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 # Sharing is decided by the compiler object/key and its actual
                 # ABI/dependency guards, never by a semantic hash alone.
                 constraints, dimensions, _ = environment.constraint_facts(owner, code.used)
+                source_bindings = {
+                    key: dict(path=list(environment._paths[key]), source_path=item["source_path"])
+                    for key, item in schemas.get(owner_name, {}).items()
+                    if key in code.used and item["kind"] == "borrowed_field"
+                }
                 admission = (
-                    dict(constraints=constraints, dimensions=dimension_relations(environment, dimensions))
-                    if constraints
+                    dict(
+                        constraints=constraints,
+                        dimensions=dimension_relations(environment, dimensions),
+                        **({"source_bindings": source_bindings} if source_bindings else {}),
+                    )
+                    if constraints or source_bindings
                     else None
                 )
                 identity = (code.kernel, code.key)

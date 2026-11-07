@@ -499,8 +499,23 @@ arguments still evaluate once in their original order. Unknown calls, effects,
 model-driven loops/conditions and shadowed helper bindings reject. Focused
 CPU/CUDA/Vulkan source-free checks pass. The original EFC declare_batch_layout
 passes this expansion, but its class still needs borrowed-input and type-domain
-support. Arbitrary declaration helpers, populated optional records, borrowed Fields and model-driven
+support. Arbitrary declaration helpers, populated optional records, borrowed Fields with unresolved cross-object provenance and model-driven
 local tensor type domains remain unfinished; this is not full EFC qualification.
+
+Version 20 supports constructor declarations of
+`scope.borrow('alias', self.field, source_scope=True, ...)` from an earlier,
+unconditional Field or StructField member on the same owner. It reuses
+Component source-scope aliases, native group layouts and dimension constraints,
+without allocating another Field or generating combination entries. Direct
+calls and Graph binding validate every used source relation even when aliases
+share one ABI parameter. Unused aliases add no entry admission; prepared calls
+retain their instance snapshots. This path currently requires direct,
+unconditional declarations. Untyped constructor inputs, cross-object sources
+and external read-only inputs are not inferred as such bindings. Ordinary JIT
+is unchanged. Focused checks cover native layout, independent instances,
+invalid relations, replaced aliases and source-group retirement. GeoPhys
+verification reuses its original `resource_scope` factory without production
+adapters or new application decorators.
 
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute

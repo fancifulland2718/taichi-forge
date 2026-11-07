@@ -695,6 +695,15 @@ def _dense_group(component, owner, group):
     )
 
 
+def _source_scope_alias(declarations, paths, source_paths, name, path, source_name):
+    """Retain a visible allocation's authoritative layout and initialization path."""
+    source = declarations[source_name]
+    if not isinstance(source, DenseField):
+        raise ValueError("source-scope borrowing currently requires a Dense Field")
+    declarations[name], paths[name] = source, path
+    source_paths[name] = paths[source_name]
+
+
 class _DenseLayoutValidation:
     """Reuse native projections within one synchronous validation operation.
 
@@ -1331,15 +1340,12 @@ class Component:
                     # group, shape expressions and native layout validation.
                     # This also covers declared default-root Dense Fields;
                     # no inferred group membership or parallel recipe is needed.
-                    source = declarations[source_name]
-                    if not isinstance(source, DenseField):
-                        raise ValueError("source-scope borrowing currently requires a Dense Field")
                     name = _capture_id(path)
-                    declarations[name], paths[name], sources[name] = source, path, binding["source"]
+                    _source_scope_alias(declarations, paths, source_scope_paths, name, path, source_name)
+                    sources[name] = binding["source"]
                     # Keep numerical access through the borrower, but expose
                     # initialization at the visible allocation site even when
                     # no kernel directly captures that site's attribute.
-                    source_scope_paths[name] = paths[source_name]
                     continue
                 if root_id in mappings and mappings[root_id] != mapping:
                     raise ValueError("aliases of one source group have conflicting dimension relations")

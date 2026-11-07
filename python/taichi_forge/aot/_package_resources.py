@@ -754,6 +754,19 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 ),
                 statement,
             )
+        elif method == "borrow" and isinstance(statement, ast.Expr):
+            from ._package_borrows import declaration
+
+            if conditions:
+                fail(module, call, "Conditional borrowed Field bindings require further package support")
+            name, spec = declaration(
+                call, scope_paths[scope], declarations, dimension, lambda node, message: fail(module, node, message)
+            )
+            if member_stores.get(name, 0):
+                fail(module, call, "Borrowed Field cannot replace an existing owner attribute")
+            spec["scope_allocation"] = origin(scope)
+            add(name, spec, call)
+            allowed.add(id(call.func.value))
         elif method == "require_le" and isinstance(statement, ast.Expr):
             from taichi_forge_runtime._dimensions import validate_constraints
 

@@ -16,6 +16,168 @@ from taichi_forge._lib import utils
 from tests import test_utils
 from taichi_forge_runtime.aot import Runtime, load_package
 
+BORROWED_FIELDS_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, m: int):
+        global constructors
+        constructors += 1
+        self.n, self.m = n, m
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        rows, cols = scope.dim('n'), scope.dim('m')
+        scope.values = scope.field(ti.f32, shape=rows)
+        scope.sibling = scope.vector_field(3, ti.f32, shape=cols + 1)
+        self.tree = builder.finalize()
+        scope.borrow('alias', self.values, source_scope=True, dimensions={'n': cols})
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.values:
+            self.values[i] = gain * i
+            self.alias[i] += 2
+
+    @ti.kernel
+    def clear(self):
+        for i in self.values:
+            self.values[i] = 0
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+        builder.dispatch(self.step, gain)
+        return builder.compile()
+"""
+
+
+@pytest.mark.parametrize("struct_member", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_borrowed_fields_preserve_source_layout_and_instance_binding(tmp_path, monkeypatch, struct_member):
+    from tests.python.test_aot_dense_snode_group import _compiled_nodes
+
+    source = BORROWED_FIELDS_SOURCE
+    if struct_member:
+        source = source.replace(
+            "scope.values = scope.field(ti.f32, shape=rows)",
+            "scope.values = scope.struct_field({'x': ti.f32, 'v': ti.types.vector(2, ti.f32)}, shape=rows)",
+        )
+        source = source.replace("self.values, source_scope", "self.values.x, source_scope")
+        source = source.replace("self.values[i]", "self.values.x[i]")
+        source = source.replace("in self.values:", "in self.values.x:")
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = package.Model(7, 7)
+    original.step(3.0)
+    original_field = original.values.x if struct_member else original.values
+    expected = original_field.to_numpy()
+    root = ti.lang.impl.get_runtime().prog.get_snode_root(original_field.snode.ptr.get_snode_tree_id())
+    layout = _compiled_nodes(root)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 20
+    assert sys.modules["definition_fixture.model"].constructors == 1
+    assert len(manifest["field_groups"]) == 1
+    assert len(manifest["entries"]) == 3  # step, clear and the unimported public definition
+    clear = next(item for item in manifest["entries"].values() if item["definition"].endswith("Model.clear"))
+    assert "admission" not in clear  # Unused aliases cannot add per-entry guards or code.
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, 7), code.host.Model(19, 19)
+        assert a.alias is (a.values.x if struct_member else a.values)
+        assert a.alias._group_owner.layout["nodes"] == layout
+        assert a.alias._group_owner is a.sibling._group_owner
+        assert a.alias._group_owner is not b.alias._group_owner
+        a.step(3.0)
+        np.testing.assert_array_equal(a.alias.to_numpy(), expected)
+        b.step(-2.0)
+        np.testing.assert_array_equal(b.alias.to_numpy(), -2 * np.arange(19) + 2)
+        registered = set(runtime._resources)
+        with pytest.raises(ValueError, match="constraint|Constraint"):
+            code.host.Model(5, 6)
+        assert runtime._resources == registered
+        a.m = 6
+        with pytest.raises(ValueError, match="constraint|Constraint"):
+            a.step(3.0)
+        a.clear()
+        a.m = 7
+        plan = a.graph()
+        prepared = plan.bind(dict(gain=4.0))
+        saved = a.alias
+        a.alias = b.alias
+        with pytest.raises(ValueError, match="Borrowed Field"):
+            a.step(1.0)
+        with pytest.raises(ValueError, match="Borrowed Field"):
+            plan.bind(dict(gain=1.0))
+        prepared.run()
+        np.testing.assert_array_equal(saved.to_numpy(), 4 * np.arange(7) + 2)
+        np.testing.assert_array_equal(b.alias.to_numpy(), -2 * np.arange(19) + 2)
+        a.alias = saved
+        a.tree.destroy()
+        with pytest.raises((ValueError, RuntimeError)):
+            a.step(1.0)
+        b.step(1.0)
+        np.testing.assert_array_equal(b.alias.to_numpy(), np.arange(19) + 2)
+        prepared.close()
+    probe = tmp_path / "consume_borrows.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3, 3), code.host.Model(13, 13)
+            a.step(7.0)
+            b.step(-1.0)
+            np.testing.assert_array_equal(a.alias.to_numpy(), 7 * np.arange(3) + 2)
+            np.testing.assert_array_equal(b.alias.to_numpy(), -np.arange(13) + 2)
+            assert a.alias._group_owner is not b.alias._group_owner
+        print('BORROW_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "BORROW_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "before,after,diagnostic",
+    [
+        ("self.values, source_scope", "unknown, source_scope", "definition-proven"),
+        ("source_scope=True", "source_scope=False", "source_scope=True"),
+        ("source_scope=True", "source_scope=True, external=True", "source_scope=True"),
+        ("{'n': cols}", "{'unknown': cols}", "allocation namespace"),
+        ("{'n': cols}", "{'n': m}", "declaration namespace"),
+        ("scope.borrow('alias'", "scope.borrow('values'", "replace an existing"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_borrowed_fields_reject_unproven_sources(tmp_path, monkeypatch, before, after, diagnostic):
+    package = _source_package(tmp_path, monkeypatch, BORROWED_FIELDS_SOURCE.replace(before, after))
+    with pytest.raises((ti.aot.PackageExportError, ValueError), match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 RECORD_RESOURCES_SOURCE = """
 from dataclasses import dataclass
 import taichi_forge as ti
@@ -2244,7 +2406,7 @@ def test_package_resource_scope_values_preserve_compound_captures(tmp_path, monk
 @pytest.mark.parametrize(
     "replacement,diagnostic",
     [
-        ("if gain > 0:\n            scope.value('gain', ti.f32)", "unconditional supported resource declaration"),
+        ("if gain > 0:\n            scope.value('gain', ti.f32)", "unconditional declared boolean owner static"),
         ("alias = scope\n        scope.value('gain', ti.f32)", "unconditional supported resource declaration"),
         ("scope = ti.experimental.ResourceScope(self)\n        scope.value('gain', ti.f32)", "must not be reassigned"),
         ("scope.array = scope.field(ti.f32, shape=2, placement=None)", "placement must retain"),

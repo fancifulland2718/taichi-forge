@@ -24,6 +24,9 @@ def dimension_value(owner, name):
 def check_admission(owner, contract):
     admission = contract.get("admission")
     if admission:
+        for binding in admission.get("source_bindings", {}).values():
+            if path_value(owner, binding["path"]) is not path_value(owner, binding["source_path"]):
+                raise ValueError("Borrowed Field no longer refers to its declared allocation")
         constraints, dimensions = admission["constraints"], admission["dimensions"]
         validate_constraints(constraints, dimensions.keys(), {spec["when"] for spec in constraints.values()})
         check_constraints(
