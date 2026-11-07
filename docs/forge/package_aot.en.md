@@ -210,6 +210,16 @@ This projection uses manifest version 7 (older versions remain readable). Rank a
 element type must be fixed, gradients are not supported. CPU/CUDA/Vulkan source-free
 checks cover module aliases, Host function annotations and independent instances.
 
+Host `ti.Vector`/`ti.Matrix` construction (including import aliases), fixed tensor
+type construction, integer indexing, `x/y/z/w`, shape and `to_list/to_numpy`
+preserve CPU values for native argument encoding. This uses manifest version 8
+and NumPy when constructing values, with no application extension or new code
+asset. The values are independent of device allocation. Full Host tensor algebra,
+swizzles and slicing are not implemented by this projection; unsupported operations
+raise instead of performing list arithmetic. Numerical matrix operations inside
+decorated definitions continue through the original compiler. Focused three-backend
+checks cover captures, typed compound arguments, state isolation and source-free use.
+
 ## Remaining shared mechanisms
 
 Complex SNode/Field layouts, the inheritance restrictions above, template/static configuration domains,

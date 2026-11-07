@@ -318,6 +318,10 @@ def _host_projection(
                 ]
             if not node.level and node.module in ("taichi", "taichi_forge"):
                 names = [a for a in node.names if a.name not in _DECORATORS]
+                tensors = [a for a in names if a.name in ("Vector", "Matrix")]
+                names = [a for a in names if a not in tensors]
+                if tensors:
+                    self.minimum_version = max(self.minimum_version, 8)
                 if any(a.name not in _DTYPES | _HOST_OPS | BACKEND_NAMES for a in names):
                     _fail(module, node, "unsupported frontend dependency in Host code")
                 return [
@@ -338,6 +342,12 @@ def _host_projection(
                         ),
                     )
                     for a in names
+                ] + [
+                    ast.Assign(
+                        [ast.Name(a.asname or a.name, ast.Store())],
+                        ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "tensor", ast.Load()),
+                    )
+                    for a in tensors
                 ]
             if not node.level and (node.module or "").startswith(("taichi.", "taichi_forge.")):
                 _fail(module, node, "frontend submodule imports require further Host projection support")
@@ -463,6 +473,7 @@ def _host_projection(
                 "math.uvec3",
                 "math.uvec4",
             ):
+                self.minimum_version = max(self.minimum_version, 8)
                 return ast.copy_location(type_expression(type_spec(resolve_type(node, namespace), builder)), node)
             if role is not None and role not in _DTYPES | _HOST_OPS:
                 _fail(module, node, f"Host frontend operation {role!r} needs a Runtime projection")
@@ -480,6 +491,10 @@ def _host_projection(
             return node
 
         def visit_Call(self, node):
+            if qualified_kind(node, kind) in ("Vector", "Matrix"):
+                self.minimum_version = max(self.minimum_version, 8)
+                node.func = ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "tensor", ast.Load())
+                return self.generic_visit(node)
             if qualified_kind(node, kind) == "experimental.ResourceScope":
                 if (
                     len(node.args) == 1
@@ -519,6 +534,8 @@ def _host_projection(
                     _fail(module, node, f"Host type declaration requires fixed types: {error}")
                 if spec["kind"] == "ndarray_annotation":
                     self.minimum_version = max(self.minimum_version, 7)
+                elif spec["kind"] == "tensor":
+                    self.minimum_version = max(self.minimum_version, 8)
                 return ast.copy_location(type_expression(spec), node)
             if kind(node) in _DTYPES:
                 _fail(module, node, "Host scalar casts require further Runtime projection support")

@@ -49,26 +49,20 @@ class _ElementType:
         self.package, self.spec = package, spec
 
     def __call__(self, *args, **kwargs):
+        from ._package_values import HostTensor, typed_tensor
+
         if self.spec["kind"] == "struct":
             result = {}
             for index, (name, member) in enumerate(self.spec["members"].items()):
                 value = args[index] if index < len(args) else kwargs.get(name, 0)
-                if member["kind"] != "scalar" and not isinstance(value, (dict, list, tuple)):
+                if member["kind"] != "scalar" and not isinstance(value, (dict, list, tuple, HostTensor)):
                     value = _ElementType(self.package, member)(value)
                 result[name] = value
             return result
         shape = self.spec["element_shape"]
         if kwargs:
             raise TypeError("Host tensor values require positional components")
-        if len(args) == 1 and isinstance(args[0], (list, tuple)):
-            return args[0]
-        if len(args) == 1:
-
-            def fill(dimensions):
-                return [fill(dimensions[1:]) for _ in range(dimensions[0])] if dimensions else args[0]
-
-            return fill(shape)
-        return list(args)
+        return typed_tensor(shape, self.spec["dtype"], args)
 
 
 class _ModuleBinding:
@@ -103,6 +97,11 @@ class _ModuleBinding:
 
     def arch(self, name):
         return _BACKENDS[name]
+
+    def tensor(self, values, dt=None):
+        from ._package_values import HostTensor
+
+        return HostTensor(values, dt)
 
     def check_target_branch(self, condition, expected, location):
         self.package._check()
@@ -353,7 +352,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

@@ -334,7 +334,7 @@ def test_package_preserves_host_ndarray_annotations_without_frontend(tmp_path, m
     source += "\ndef accept_array(value: VecArray) -> VecArray:\n    return value\n"
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 7
+    assert manifest["version"] == 8  # Host Vec/Mat constructors also require tensor-value projection.
     original = package.Model(7)
     original.step()
     np.testing.assert_array_equal(original.output.to_numpy(), np.arange(7) + 27)
@@ -1363,19 +1363,29 @@ class Model:
 """
 
 
+@pytest.mark.parametrize("host_tensor", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_package_resource_scope_values_preserve_compound_captures(tmp_path, monkeypatch):
-    package = _source_package(tmp_path, monkeypatch, SCOPE_VALUES_SOURCE)
+def test_package_resource_scope_values_preserve_compound_captures(tmp_path, monkeypatch, host_tensor):
+    source = SCOPE_VALUES_SOURCE
+    if host_tensor:
+        source = "from taichi_forge import Matrix as MatrixValue\n" + source.replace(
+            "self.gain, self.shift, self.transform = gain, shift, transform",
+            "self.gain = gain\n        self.shift = ti.Vector(shift, dt=ti.f32)\n        self.transform = MatrixValue(transform, ti.f32)",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     original = sys.modules["definition_fixture.model"]
-    assert manifest["version"] == 5 and original.constructors == 0
+    assert manifest["version"] == (8 if host_tensor else 5) and original.constructors == 0
     entries = {entry["definition"].rsplit(".", 1)[-1]: entry for entry in manifest["entries"].values()}
     captures = {item["name"]: item for item in entries["compute"]["captures"]}
     assert set(captures) == {"gain", "shift", "transform"}
     assert captures["shift"]["element_shape"] == [2]
     assert captures["transform"]["element_shape"] == [2, 2]
     assert not entries["independent"]["captures"]
-    reference = original.Model(2.0, ti.Vector([1.0, 3.0]), ti.Matrix([[2.0, 1.0], [0.0, 4.0]]))
+    shift, transform = [1.0, 3.0], [[2.0, 1.0], [0.0, 4.0]]
+    reference = original.Model(
+        2.0, shift if host_tensor else ti.Vector(shift), transform if host_tensor else ti.Matrix(transform)
+    )
     assert reference.compute(3.0) == 20.0
     probe = tmp_path / "consume_scope_values.py"
     probe.write_text(
@@ -1392,6 +1402,20 @@ def test_package_resource_scope_values_preserve_compound_captures(tmp_path, monk
             a = code.host.Model(2.0, [1.0, 3.0], [[2.0, 1.0], [0.0, 4.0]])
             b = code.host.Model(-1.0, [0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]])
             assert a.compute(3.0) == 20.0 and b.compute(3.0) == 2.0
+            if sys.argv[3] == 'True':
+                assert a.shift.get_shape() == (2,) and a.transform.get_shape() == (2, 2)
+                assert a.shift.x == 1 and a.shift.y == 3
+                assert a.transform[0, 1] == 1
+                assert a.shift.to_numpy().dtype.name == 'float32'
+                assert a.transform.to_list() == [[2, 1], [0, 4]]
+                a.shift.x = 2
+                assert a.compute(3.0) == 21.0 and b.compute(3.0) == 2.0
+                try:
+                    a.shift + 1
+                except TypeError:
+                    pass
+                else:
+                    raise AssertionError('Unimplemented Host algebra must not silently change semantics')
             a.shift = [10.0, -3.0]
             assert a.compute(3.0) == 23.0 and b.compute(3.0) == 2.0
             assert a.independent(7) == 12
@@ -1407,7 +1431,7 @@ def test_package_resource_scope_values_preserve_compound_captures(tmp_path, monk
         TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
     )
     result = subprocess.run(
-        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"], str(host_tensor)],
         cwd=tmp_path,
         env=env,
         capture_output=True,
