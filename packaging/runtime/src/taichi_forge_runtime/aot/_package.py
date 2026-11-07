@@ -210,10 +210,10 @@ class _ModuleBinding:
     def entry(self, symbol):
         return entry(self.package, symbol)
 
-    def closure_entry(self, identity, values):
+    def closure_entry(self, identity, values, *, options=None):
         from ._package_closures import bind_closure
 
-        return bind_closure(self.package, identity, values)
+        return bind_closure(self.package, identity, values, options=options)
 
     def import_module(self, name):
         self.package._check()
@@ -887,6 +887,7 @@ class LoadedPackage:
                 28,
                 29,
                 30,
+                31,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

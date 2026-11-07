@@ -772,7 +772,7 @@ quota, and prepared replay does not repeat the checks. Legacy explicit Component
 Graphs reject these loops until they can preserve the
 snapshot checks. The Graph evidence here applies to definition packages; raw
 kernel callers remain responsible for exported argument/range contracts.
-Conditional factories and conditional model layouts remain open. Model-dependent
+Template-owner conditional factories and conditional model layouts remain open. Model-dependent
 CUDA block sizes use the preparation path documented above; this does not
 establish whole-class EFC export. Focused CPU/CUDA/Vulkan
 source-free checks cover new sizes, instance isolation, ordering and Graphs.
@@ -802,8 +802,24 @@ instances and incompatible bindings reject export or consumption.
 
 Focused CPU/CUDA/Vulkan checks and source-free consumers of GeoPhys's original camera
 upload factory pass. The latter uses unchanged factory source with minimal resource
-declarations, not a complete camera/rendering package export. Cached or conditional
-multi-kernel factories, template owners and model-driven tensor lengths remain pending.
+declarations, not a complete camera/rendering package export.
+
+Version 31 also accepts the original `functools.lru_cache` / `cache` decorators and
+conditional returns selected from proven fixed inputs. Numerical definitions must
+have distinct names and return immediately within their branch. Export still calls
+neither factories, cache wrappers nor model constructors. Host keeps the original
+cache and branch control. Cache capacity comes from the application definition; it
+does not limit model sizes or distribution code counts. Arbitrary wrappers, dynamic
+cache arguments, unproven model/device-dependent conditions and effects are rejected.
+
+Different Host labels selecting the same definition share its implementation.
+`opt_level` participates in export identity and consumer matching as a compilation
+option, separately from lexical captures. Unbuilt options reject consumption; an
+option used only by a decorator does not become a kernel runtime argument. This path
+reuses the existing Dense Field provenance and instance snapshots. Template owners,
+comprehension-based factory calls and model-dependent factory types remain pending.
+Focused CPU/CUDA/Vulkan source-free consumers pass; the original Newton factory has
+only passed definition discovery, not complete Newton export.
 
 ## Definition constants
 
@@ -826,7 +842,7 @@ Focused CPU/CUDA/Vulkan checks cover code sharing, inheritance, mixed finite
 configuration, independent state, source-free consumption and prepare snapshots.
 A GeoPhys check reuses its original constant/layout helpers and current EFC group
 size value with DOF 17/129 through one entry. This is not complete Newton or engine
-qualification; cached/conditional kernel factories and construction closure remain.
+qualification; template-owner kernel factories and construction closure remain.
 This changes the Python Producer/Runtime contract only, not the native AOT format.
 It provides no new whole-wheel size or performance measurement.
 

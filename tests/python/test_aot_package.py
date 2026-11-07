@@ -1586,6 +1586,164 @@ def _source_package(tmp_path, monkeypatch, source=SOURCE, *, initializer="from .
     return importlib.import_module("definition_fixture")
 
 
+CACHED_FACTORY_SOURCE = """
+import taichi_forge as ti
+from functools import lru_cache, cache
+
+@lru_cache(maxsize=8)
+def make_update(field, stage, tier):
+    if stage == 'positive':
+        @ti.kernel(opt_level=tier)
+        def positive(gain: ti.f32):
+            for i in field:
+                field[i] = gain + i
+        return positive
+    @ti.kernel(opt_level=tier)
+    def negative(gain: ti.f32):
+        for i in field:
+            field[i] = -gain - i
+    return negative
+
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+        self.tree = builder.finalize()
+        self.fast = make_update(self.values, 'positive', 'fast')
+        self.full = make_update(self.values, 'positive', 'full')
+        self.negative = make_update(self.values, 'negative', 'fast')
+        self.same_negative = make_update(self.values, 'another_label', 'fast')
+"""
+
+
+@pytest.mark.parametrize("cache", ["lru_cache(maxsize=8)", "cache"])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_cached_conditional_factory_shares_definitions_and_checks_options(tmp_path, monkeypatch, cache):
+    package = _source_package(tmp_path, monkeypatch, CACHED_FACTORY_SOURCE.replace("lru_cache(maxsize=8)", cache))
+    original = sys.modules["definition_fixture.model"]
+    forbidden = {original.Model.__init__.__code__, original.make_update.__wrapped__.__code__}
+    previous = sys.getprofile()
+
+    def no_sample(frame, event, arg):
+        if event == "call" and frame.f_code in forbidden:
+            raise AssertionError("export executed a cached factory or model")
+
+    sys.setprofile(no_sample)
+    try:
+        manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    finally:
+        sys.setprofile(previous)
+    assert original.make_update.cache_info().currsize == 0
+    assert manifest["version"] == 31
+    assert len(manifest["entries"]) == 4  # 3 numerical definitions/options plus the fixture's unrelated kernel.
+    assert len(manifest["closure_entries"]) == 2
+    negative = manifest["closure_entries"]["definition_fixture.model.make_update.negative"]
+    assert len({entry["symbol"] for entry in negative}) == 1
+    positive = manifest["closure_entries"]["definition_fixture.model.make_update.positive"]
+    assert len({entry["symbol"] for entry in positive}) == 2
+    assert all(set(entry["bindings"]) == {"field"} and set(entry["options"]) == {"opt_level"} for entry in positive)
+    host = (tmp_path / "sdk/host/model.py").read_text(encoding="utf8")
+    assert "if stage == 'positive'" in host and "field[i] =" not in host
+    reference = original.Model(5)
+    reference.full(7.0)
+    np.testing.assert_array_equal(reference.values.to_numpy(), np.arange(5) + 7)
+    probe = tmp_path / "consume_cached_factory.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3), code.host.Model(7)
+            factory = code.host.model.make_update
+            assert a.fast is factory(a.values, 'positive', 'fast')
+            a.fast(2.0)
+            b.full(5.0)
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(3) + 2)
+            np.testing.assert_array_equal(b.values.to_numpy(), np.arange(7) + 5)
+            a.same_negative(9.0)
+            np.testing.assert_array_equal(a.values.to_numpy(), -np.arange(3) - 9)
+            try:
+                factory(a.values, 'positive', 'balanced')
+            except ValueError as error:
+                assert 'unambiguous declared source/type binding' in str(error)
+            else:
+                raise AssertionError('unbuilt compile option accepted')
+            old = a.values
+            a.values = b.values
+            a.full(11.0)
+            np.testing.assert_array_equal(old.to_numpy(), np.arange(3) + 11)
+            np.testing.assert_array_equal(b.values.to_numpy(), np.arange(7) + 5)
+            a.tree.destroy()
+            try:
+                a.fast(0.0)
+            except (ValueError, RuntimeError) as error:
+                assert 'closed' in str(error) or 'retired' in str(error)
+            else:
+                raise AssertionError('cached retired resource accepted')
+            b.negative(4.0)
+            np.testing.assert_array_equal(b.values.to_numpy(), -np.arange(7) - 4)
+        print('CACHED_FACTORY_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CACHED_FACTORY_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["wrapper", "cache_argument", "condition", "side_effect"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_cached_factory_rejects_unproven_control(tmp_path, monkeypatch, change):
+    source = CACHED_FACTORY_SOURCE
+    if change == "wrapper":
+        source = source.replace("@lru_cache(maxsize=8)", "def identity(f):\n    return f\n\n@identity")
+    elif change == "cache_argument":
+        source = source.replace("@lru_cache(maxsize=8)", "limit = 8\n@lru_cache(maxsize=limit)")
+    elif change == "condition":
+        source = source.replace("stage == 'positive'", "len(field) > 1")
+    else:
+        source = source.replace("    if stage ==", "    print('factory side effect')\n    if stage ==")
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = sys.modules["definition_fixture.model"]
+    factory = getattr(original.make_update, "__wrapped__", original.make_update)
+    previous = sys.getprofile()
+
+    def no_sample(frame, event, arg):
+        if event == "call" and frame.f_code in (factory.__code__, original.Model.__init__.__code__):
+            raise AssertionError("export executed an unproven factory")
+
+    sys.setprofile(no_sample)
+    try:
+        with pytest.raises(ti.aot.PackageExportError, match="factory|Cold"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+    finally:
+        sys.setprofile(previous)
+    assert not (tmp_path / "sdk").exists()
+
+
 COLD_FACTORY_SOURCE = """
 import taichi_forge as ti
 def make_upload(fields):

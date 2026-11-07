@@ -563,6 +563,9 @@ def _host_projection(
                 return self.generic_visit(project_error_interface(node, module + "." + definition["name"]))
             if definition.get("closure_definition"):
                 self.minimum_version = max(self.minimum_version, 25)
+                options = definition.get("closure_options", {})
+                if options or definition.get("conditional_factory"):
+                    self.minimum_version = max(self.minimum_version, 31)
                 names = definition["closure_names"]
                 descriptor = ast.Call(
                     ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "closure_entry", ast.Load()),
@@ -572,7 +575,18 @@ def _host_projection(
                             [ast.Constant(name) for name in names], [ast.Name(name, ast.Load()) for name in names]
                         ),
                     ],
-                    [],
+                    (
+                        [
+                            ast.keyword(
+                                "options",
+                                ast.Dict(
+                                    [ast.Constant(key) for key in options], [copy.deepcopy(v) for v in options.values()]
+                                ),
+                            )
+                        ]
+                        if options
+                        else []
+                    ),
                 )
                 return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
             if definition["kind"] in ("func", "real_func"):
@@ -1172,7 +1186,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             for attribute, call, recipe in factory_calls.get(name + "." + class_name, ()):
                 closure_environment = copy.copy(environments[class_name])
                 try:
-                    kernel, bindings = materialize_closure(
+                    kernel, bindings, selected = materialize_closure(
                         recipe, call, owners[class_name], closure_environment, closure_kernels
                     )
                 except (KeyError, TypeError, ValueError) as error:
@@ -1180,12 +1194,13 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 compiled_definitions.append(
                     dict(
                         owner=class_name,
-                        node=recipe["node"],
+                        node=selected["node"],
                         kind="kernel",
                         name=class_name + "." + attribute,
                         closure_kernel=kernel,
                         closure_bindings=bindings,
-                        closure_identity=recipe["identity"],
+                        closure_identity=selected["identity"],
+                        closure_options=selected["options"],
                         closure_environment=closure_environment,
                     )
                 )
@@ -1324,7 +1339,12 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     if name + "." + definition["name"] not in entry_manifest["definitions"]:
                         entry_manifest["definitions"].append(name + "." + definition["name"])
                 else:
-                    symbol = "definition_" + code.semantic_key
+                    # Semantic capture identity alone does not describe the
+                    # per-kernel compilation policy. Target and module options
+                    # are common to this export; the decorator override is not.
+                    compile_options = {"opt_level": code.kernel.opt_level}
+                    code_identity = json.dumps([code.semantic_key, compile_options], sort_keys=True).encode("utf8")
+                    symbol = "definition_" + hashlib.sha256(code_identity).hexdigest()
                     code.export(module, symbol)
                     capture = [
                         {
@@ -1367,6 +1387,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         arguments=argument_schema,
                         captures=capture,
                         dependencies=dict(methods=code.contract["methods"], functions=code.contract["functions"]),
+                        compile_options=compile_options,
                     )
                     if code.contract.get("model_static_ranges"):
                         manifest["version"] = max(28, manifest["version"])
@@ -1409,6 +1430,15 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         symbol=entries[definition["name"]]["symbol"],
                         owner_type=name + "." + owner_name,
                         bindings=definition["closure_bindings"],
+                        **(
+                            {
+                                "options": {
+                                    key: static_key(value) for key, value in definition["closure_options"].items()
+                                }
+                            }
+                            if definition["closure_options"]
+                            else {}
+                        ),
                     )
                 )
         host_source, minimum_version, producer_only = _host_projection(

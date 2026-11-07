@@ -6,10 +6,17 @@ from .._static_values import read_static_key, static_key
 from ._package_values import path_value
 
 
-def bind_closure(package, identity, values):
+def bind_closure(package, identity, values, *, options=None):
     package._check()
     matches = []
+    options = {} if options is None else options
+    option_keys = {name: static_key(value) for name, value in options.items()}
     for candidate in package.manifest.get("closure_entries", {}).get(identity, ()):
+        expected_options = {
+            name: static_key(read_static_key(value)) for name, value in candidate.get("options", {}).items()
+        }
+        if option_keys != expected_options:
+            continue
         owners, paths = [], []
 
         def matches_value(value, binding):

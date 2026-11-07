@@ -2,6 +2,7 @@
 
 import ast
 import copy
+import functools
 import inspect
 from dataclasses import dataclass
 from types import CodeType, FunctionType, MappingProxyType
@@ -12,6 +13,46 @@ from ._package_factories import _frontend_module, _source_value
 @dataclass(frozen=True)
 class FieldPath:
     path: tuple
+
+
+def _factory_function(factory, namespace):
+    """Unwrap only the standard cache, never call an application wrapper."""
+    function = namespace.get(factory.name)
+    if not factory.decorator_list:
+        return function if inspect.isfunction(function) else None
+    if len(factory.decorator_list) != 1 or type(function) is not functools._lru_cache_wrapper:
+        return None
+    decorator = factory.decorator_list[0]
+    target = decorator.func if isinstance(decorator, ast.Call) else decorator
+    target = _source_value(target, namespace)
+    if target is not functools.lru_cache and target is not functools.cache:
+        return None
+    if isinstance(decorator, ast.Call):
+        if (
+            target is functools.cache
+            or len(decorator.args) > 2
+            or any(k.arg not in ("maxsize", "typed") for k in decorator.keywords)
+        ):
+            return None
+        try:
+            options = inspect.signature(functools.lru_cache).bind(
+                *(ast.literal_eval(arg) for arg in decorator.args),
+                **{k.arg: ast.literal_eval(k.value) for k in decorator.keywords},
+            )
+        except (ValueError, TypeError, SyntaxError):
+            return None
+        if any(
+            (name == "maxsize" and value is not None and type(value) is not int)
+            or (name == "typed" and type(value) is not bool)
+            for name, value in options.arguments.items()
+        ):
+            return None
+    original = vars(function).get("__wrapped__")
+    return original if inspect.isfunction(original) and "__wrapped__" not in vars(original) else None
+
+
+def _callable(value):
+    return inspect.isfunction(value) or type(value) is functools._lru_cache_wrapper
 
 
 def discover(module, tree, kind, namespace, fail):
@@ -26,39 +67,53 @@ def discover(module, tree, kind, namespace, fail):
         ]
         if not nested:
             continue
-        function = namespace.get(factory.name)
-        if (
-            not inspect.isfunction(function)
-            or factory.decorator_list
-            or len(nested) != 1
-            or nested[0] not in factory.body
-        ):
-            fail(module, factory, "Cold kernel factories require a proven straight-line definition and return")
-        node = nested[0]
-        if len(node.decorator_list) != 1:
-            fail(module, node, "Cold kernel factory decorator combinations require further support")
-        tail = factory.body[factory.body.index(node) + 1 :]
-        if not (
-            len(tail) == 1
-            and isinstance(tail[0], ast.Return)
-            and isinstance(tail[0].value, ast.Name)
-            and tail[0].value.id == node.name
-        ):
-            fail(module, node, "Cold kernel factory must return its numerical definition")
-        identity = module + "." + factory.name + "." + node.name
-        factories[function] = dict(module=module, function=function, factory=factory, node=node, identity=identity)
-        definitions.append(
-            dict(
-                owner=None,
-                node=node,
-                kind="kernel",
-                name=factory.name + "." + node.name,
-                requires_owner=True,
-                error_interface=False,
-                closure_definition=True,
-                closure_names=list(_code(function, node).co_freevars),
+        function = _factory_function(factory, namespace)
+        if function is None:
+            fail(
+                module, factory, "Cold kernel factory requires an undecorated function or the standard functools cache"
             )
-        )
+        if len({node.name for node in nested}) != len(nested):
+            fail(module, factory, "Cold factory numerical branches require distinct definition names")
+        parents = {id(child): parent for parent in ast.walk(factory) for child in ast.iter_child_nodes(parent)}
+        for node in nested:
+            if len(node.decorator_list) != 1:
+                fail(module, node, "Cold kernel factory decorator combinations require further support")
+            parent = parents[id(node)]
+            while isinstance(parent, ast.If):
+                parent = parents[id(parent)]
+            if parent is not factory:
+                fail(module, node, "Cold numerical definitions require direct conditional factory branches")
+            block_parent = parents[id(node)]
+            block = block_parent.body if node in block_parent.body else block_parent.orelse
+            tail = block[block.index(node) + 1 :]
+            if not (
+                len(tail) == 1
+                and isinstance(tail[0], ast.Return)
+                and isinstance(tail[0].value, ast.Name)
+                and tail[0].value.id == node.name
+            ):
+                fail(module, node, "Cold kernel factory must return its numerical definition")
+            decorator = node.decorator_list[0]
+            if isinstance(decorator, ast.Call) and (
+                decorator.args or any(k.arg != "opt_level" for k in decorator.keywords)
+            ):
+                fail(module, node, "Cold kernel decorator requires existing explicit compile options")
+            options = dict((k.arg, k.value) for k in decorator.keywords) if isinstance(decorator, ast.Call) else {}
+            definitions.append(
+                dict(
+                    owner=None,
+                    node=node,
+                    kind="kernel",
+                    name=factory.name + "." + node.name,
+                    requires_owner=True,
+                    error_interface=False,
+                    closure_definition=True,
+                    closure_names=list(_code(function, node).co_freevars),
+                    closure_options=options,
+                    conditional_factory=len(nested) > 1 or bool(factory.decorator_list),
+                )
+            )
+        factories[namespace[factory.name]] = dict(module=module, function=function, factory=factory, nodes=nested)
     return factories, definitions
 
 
@@ -95,7 +150,7 @@ def calls(sources, imported, fail):
                     continue
                 call = statement.value
                 target = _source_value(call.func, vars(imported[module]))
-                recipe = factories.get(target) if inspect.isfunction(target) else None
+                recipe = factories.get(target) if _callable(target) else None
                 if recipe is not None:
                     key = module + "." + owner.name
                     result.setdefault(key, []).append((statement.targets[0].attr, call, recipe))
@@ -103,11 +158,12 @@ def calls(sources, imported, fail):
         for call in ast.walk(tree):
             if isinstance(call, ast.Call) and id(call) not in covered:
                 target = _source_value(call.func, vars(imported[module]))
-                if inspect.isfunction(target) and target in factories:
+                if _callable(target) and target in factories:
                     fail(module, call, "Cold kernel factory requires declared constructor resource inputs")
-    used = {recipe["function"] for items in result.values() for _, _, recipe in items}
-    for function in factories.keys() - used:
-        recipe = factories[function]
+    used = {id(recipe) for items in result.values() for _, _, recipe in items}
+    for recipe in factories.values():
+        if id(recipe) in used:
+            continue
         fail(recipe["module"], recipe["factory"], "Cold kernel factory has no declared input domain")
     return result
 
@@ -120,7 +176,7 @@ def materialize(recipe, call, owner, environment, kernels):
     from ._component import DenseField, _capture_id
     from taichi_forge_runtime._static_values import static_key
 
-    function, factory, node = recipe["function"], recipe["factory"], recipe["node"]
+    function, factory = recipe["function"], recipe["factory"]
     builtins = dict(tuple=tuple, len=len)
     for name, value in builtins.items():
         if function.__globals__.get(name, value) is not value or function.__builtins__.get(name) is not value:
@@ -191,9 +247,13 @@ def materialize(recipe, call, owner, environment, kernels):
                     return left - right
                 if isinstance(expr.op, ast.Mult):
                     return left * right
+        if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+            result = value(expr.operand)
+            if type(result) is bool:
+                return not result
         if isinstance(expr, ast.Compare) and len(expr.ops) == 1:
             left, right = value(expr.left), value(expr.comparators[0])
-            if type(left) is int and type(right) is int:
+            if type(left) is type(right) and type(left) in (int, str, bool):
                 operations = {
                     ast.Lt: lambda: left < right,
                     ast.LtE: lambda: left <= right,
@@ -206,30 +266,40 @@ def materialize(recipe, call, owner, environment, kernels):
                     return operations[type(expr.ops[0])]()
         raise ValueError("Unproven cold factory declaration expression: " + ast.unparse(expr))
 
-    for statement in factory.body[: factory.body.index(node)]:
-        if (
-            isinstance(statement, ast.Expr)
-            and isinstance(statement.value, ast.Constant)
-            and type(statement.value.value) is str
-        ):
-            continue
-        if (
-            isinstance(statement, ast.Assign)
-            and len(statement.targets) == 1
-            and isinstance(statement.targets[0], ast.Name)
-        ):
-            local[statement.targets[0].id] = value(statement.value)
-        elif (
-            isinstance(statement, ast.If)
-            and not statement.orelse
-            and len(statement.body) == 1
-            and isinstance(statement.body[0], ast.Raise)
-        ):
-            guard = value(statement.test)
-            if type(guard) is not bool or guard:
+    def select(statements):
+        # Only declaration/control syntax is evaluated here. The selected
+        # numerical body is always compiled by the normal Forge AST pipeline.
+        for statement in statements:
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Constant)
+                and type(statement.value.value) is str
+            ):
+                continue
+            if isinstance(statement, ast.FunctionDef) and statement in recipe["nodes"]:
+                return statement  # discover proved its immediate return.
+            if (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+            ):
+                local[statement.targets[0].id] = value(statement.value)
+            elif isinstance(statement, ast.If):
+                guard = value(statement.test)
+                if type(guard) is not bool:
+                    raise ValueError("Cold factory condition requires a proven fixed boolean")
+                selected = select(statement.body if guard else statement.orelse)
+                if selected is not None:
+                    return selected
+            elif isinstance(statement, ast.Raise):
                 raise ValueError("Cold factory declaration violates its input guard")
-        else:
-            raise ValueError("Cold factory has an unproven declaration or side effect")
+            else:
+                raise ValueError("Cold factory has an unproven declaration or side effect")
+        return None
+
+    node = select(factory.body)
+    if node is None:
+        raise ValueError("Cold factory has no numerical return for its declared inputs")
 
     def syntax_binding(item):
         if isinstance(item, FieldPath):
@@ -289,7 +359,8 @@ def materialize(recipe, call, owner, environment, kernels):
     environment._lexical_bindings = MappingProxyType(
         {**environment._lexical_bindings, **{(numerical, name): binding for name, binding in bindings.items()}}
     )
-    return kernel, bindings
+    selected = dict(node=node, identity=recipe["module"] + "." + factory.name + "." + node.name, options=options)
+    return kernel, bindings, selected
 
 
 def _leaves(value):
