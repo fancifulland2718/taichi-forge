@@ -6628,7 +6628,7 @@ class Model:
 """
 
 
-@pytest.mark.parametrize("placement", ["implicit", "conditional"])
+@pytest.mark.parametrize("placement", ["implicit", "conditional", "declarations", "expression"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path, monkeypatch, placement):
     import itertools
@@ -6639,15 +6639,29 @@ def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path,
         source = source.replace(
             "if self.second:", "if self.second:\n            other_cells = scope.dense(ti.i, scope.dim('m'))"
         )
-    if placement != "implicit":
+    if placement == "conditional":
         source = source.replace("shape=scope.dim('m'))", "shape=scope.dim('m'), placement=other_cells)")
         source = source.replace(
             "other_cells = scope.dense(ti.i, scope.dim('m'))",
             "other_count, = (scope.dim(name) for name in ('m',))\n            other_cells = scope.dense(ti.i, other_count)",
         )
+    if placement == "declarations":
+        source = source.replace(
+            "        scope.static('first', choices=(False, True))\n        scope.static('second', choices=(False, True))",
+            "        for name in ('first', 'second'):\n            scope.static(name, choices=(False, True))\n"
+            "        self.last_declared = name",
+        )
+    if placement == "expression":
+        source = source.replace(
+            "        if self.first:\n            scope.extra = scope.vector_field(3, ti.f32, shape=scope.dim('n'), placement=cells)",
+            "        scope.extra = scope.vector_field(3, ti.f32, shape=scope.dim('n'), placement=cells) if self.first else None",
+        ).replace(
+            "        if self.second:\n            scope.other = scope.field(ti.f32, shape=scope.dim('m'))",
+            "        scope.other = scope.field(ti.f32, shape=scope.dim('m')) if self.second else None",
+        )
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 12
+    assert manifest["version"] == (13 if placement == "expression" else 12)
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert len(manifest["field_groups"]) == 1  # one conditional topology, not four layout products
     assert sorted(len(family["variants"]) for family in manifest["entry_families"].values()) == [2, 2]
@@ -6661,6 +6675,8 @@ def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path,
             # A disabled branch must not evaluate its invalid, unused extent.
             m = 5 if second else -3
             original, current = package.Model(7, m, first, second), loaded.host.Model(7, m, first, second)
+            if placement == "declarations":
+                assert original.last_declared == current.last_declared == "second"
             instances.append(current)
             for instance in (original, current):
                 instance.first_step()
@@ -6771,6 +6787,20 @@ def test_package_conditional_layouts_reject_unproven_guards(tmp_path, monkeypatc
         source = source.replace("if ti.static(self.first):", "if ti.static(True):")
     package = _source_package(tmp_path, monkeypatch, source)
     with pytest.raises(ti.aot.PackageExportError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@pytest.mark.parametrize("names", ["('first', 'first')", "tuple(('first', 'second'))", "('first', n)"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_declaration_loops_require_fixed_distinct_names(tmp_path, monkeypatch, names):
+    source = CONDITIONAL_LAYOUT_SOURCE.replace(
+        "        scope.static('first', choices=(False, True))\n        scope.static('second', choices=(False, True))",
+        f"        for name in {names}:\n            scope.static(name, choices=(False, True))",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="fixed literal names"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk").exists()

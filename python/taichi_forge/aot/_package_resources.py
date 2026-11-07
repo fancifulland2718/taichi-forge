@@ -34,7 +34,73 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
     )
 
     class Declarations(ast.NodeTransformer):
+        def visit_Assign(self, node):
+            if not (len(node.targets) == 1 and isinstance(node.value, ast.IfExp)):
+                return self.generic_visit(node)
+            target, choice = node.targets[0], node.value
+            if not (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id in scope_names
+                and isinstance(choice.body, ast.Call)
+                and isinstance(choice.body.func, ast.Attribute)
+                and isinstance(choice.body.func.value, ast.Name)
+                and choice.body.func.value.id == target.value.id
+                and choice.body.func.attr in ("field", "vector_field", "matrix_field", "struct_field")
+                and isinstance(choice.orelse, ast.Constant)
+                and choice.orelse.value is None
+            ):
+                return self.generic_visit(node)
+            present = ast.copy_location(ast.Assign([copy.deepcopy(target)], choice.body), node)
+            absent = ast.copy_location(
+                ast.Expr(
+                    ast.Call(
+                        ast.Attribute(copy.deepcopy(target.value), "record", ast.Load()),
+                        [ast.Constant(target.attr), ast.Constant(None)],
+                        [ast.keyword("optional", ast.Constant(True))],
+                    )
+                ),
+                node,
+            )
+            return ast.copy_location(ast.If(choice.test, [present], [absent]), node)
+
         def visit_For(self, node):
+            declaration_calls = [
+                statement.value
+                for statement in node.body
+                if isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Call)
+                and isinstance(statement.value.func, ast.Attribute)
+                and isinstance(statement.value.func.value, ast.Name)
+                and statement.value.func.value.id in scope_names
+                and statement.value.func.attr in ("static", "constant", "value", "dim")
+            ]
+            if declaration_calls and len(declaration_calls) == len(node.body):
+                if node.orelse or not isinstance(node.target, ast.Name) or node.target.id in scope_names:
+                    fail(module, node, "Declaration-name loop requires a single literal-name binding")
+                try:
+                    names = ast.literal_eval(node.iter)
+                except (ValueError, TypeError):
+                    names = None
+                if (
+                    not isinstance(names, (tuple, list))
+                    or not names
+                    or any(type(name) is not str or not name.isidentifier() for name in names)
+                    or len(set(names)) != len(names)
+                ):
+                    fail(module, node, "Declaration-name loop requires distinct fixed literal names")
+
+                class Bind(ast.NodeTransformer):
+                    def visit_Name(self, value):
+                        return ast.copy_location(ast.Constant(member), value) if value.id == node.target.id else value
+
+                result = []
+                for member in names:
+                    result.append(
+                        ast.copy_location(ast.Assign([copy.deepcopy(node.target)], ast.Constant(member)), node)
+                    )
+                    result.extend(Bind().visit(copy.deepcopy(statement)) for statement in node.body)
+                return result
             if (
                 len(node.body) != 1
                 or not isinstance(node.body[0], ast.Expr)

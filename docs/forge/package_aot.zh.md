@@ -339,6 +339,11 @@ JIT 对照、无源码消费、新尺寸、分配前/后异常回收、正常树
 复制数值方法。局部检查对照原生布局、数值和 Host 状态；原 GeoPhys 辅助函数的该声明形式
 也通过 CPU/CUDA/Vulkan 无源码消费检查。
 
+固定名字循环也可以调用 `scope.static/constant/value/dim`，保留原声明顺序和循环变量末值。
+`scope.member = scope.field(...) if self.flag else None` 复用同一条件布局及可选成员合同；
+禁用分支不求值 Field 的类型和尺寸。循环不展开数值代码，独立开关仍按实际依赖生成变体。
+这两种形式已做 CPU/CUDA 局部无源码检查，未据此扩展其他后端的资格。
+
 `from taichi_forge.lang._ndarray import Ndarray`（含 Taichi 兼容路径、别名和函数内导入）
 可保留为 Host 类型检查，使用版本 17。`isinstance` 接受普通标量/张量/记录 ndarray；
 Dense Field 成员即使复用 ndarray ABI 也不属于该类型，普通 Python/NumPy 对象同样不属于。

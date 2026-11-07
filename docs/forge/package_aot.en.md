@@ -358,6 +358,13 @@ StructCompiler rules. They neither store a layout product for every combination,
 calculate independent byte offsets nor allocate fields in disabled branches.
 Direct tuple unpacking of a literal dimension-name generator uses the same extent algebra.
 
+Fixed literal-name loops may call `scope.static/constant/value/dim`, preserving
+declaration order and the loop variable's final value. Conditional expressions
+such as `scope.member = scope.field(...) if self.flag else None` reuse the
+conditional-layout and optional-member contracts. Disabled branches do not
+evaluate Field types or extents. These forms have local CPU/CUDA source-free
+checks; independent flags still specialize only dependent numerical entries.
+
 The original compiler records presence dependencies when a conditional field is
 actually read, including `ti.static(field is not None)`. Common methods that do
 not read that field retain shared code. An instance's
