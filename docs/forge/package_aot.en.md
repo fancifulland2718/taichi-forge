@@ -409,10 +409,21 @@ Host names and native group ownership remain unchanged. Ordinary reassignment
 or use of the scope outside its block rejects export. Two-group checks verify
 that retiring one tree preserves the other tree and other instances.
 GeoPhys production code is unchanged. Conditional
-groups, field-name loops and the complete
+groups, model-dependent field-name loops and the complete
 engine Host closure remain pending; Candidate Storage uses these unsupported
 forms and is not yet qualified. Context allocation currently runs only inside
 managed constructors, without in-flight growth or rebinding.
+
+Fixed field-name tuples/lists used in `setattr(scope, name, scope.field(...))`
+(also vector/matrix/struct factories) expand to ordinary resource declarations.
+The original allocation order and final loop-variable value are retained; native
+layout construction distinguishes multiple members from the same source call.
+The allocation expression must be independent of the loop variable. Duplicate
+or mangled names, shadowed `setattr`, model-driven lists and additional loop-body
+operations reject export. No model loop executes during export, and no numerical
+method is cloned by this normalization. Focused checks compare original native
+layout, values and Host state; GeoPhys's original helper also passes source-free
+CPU/CUDA/Vulkan consumption with this declaration form.
 
 ## Remaining shared mechanisms
 

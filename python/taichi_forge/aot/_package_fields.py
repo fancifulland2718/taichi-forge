@@ -188,19 +188,21 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
     # Expected type/rank/extent rejection must not leave an unfinalized
     # FieldsBuilder behind and poison the caller's otherwise valid JIT.
     builders, placements, events = {}, {}, {}
-    for name, item, dtype, concrete, axes in typed:
+    for ordinal, (name, item, dtype, concrete, axes) in enumerate(typed):
         group = item.get("group", "fields")
         if group not in builders:
             builders[group] = ti.FieldsBuilder()
-        events[tuple(item["allocation"])] = ("field", name, item, dtype, concrete, axes)
+        # Several literal member declarations can originate at one source call.
+        # Preserve their declaration order instead of replacing earlier members.
+        events[(*item["allocation"], ordinal)] = ("field", name, item, dtype, concrete, axes)
         if "placement" in item:
             event = item["placement"]
-            events[tuple(event["declaration"])] = ("placement", name, item, dtype, concrete, axes)
+            events[(*event["declaration"], -1)] = ("placement", name, item, dtype, concrete, axes)
     for position, (kind, name, item, dtype, concrete, axes) in sorted(events.items()):
         group = item.get("group", "fields")
         builder = builders[group]
         if kind == "placement":
-            placements[position] = builder.dense(axes, tuple(concrete))
+            placements[position[:2]] = builder.dense(axes, tuple(concrete))
             continue
         value = ti.Struct.field(dtype.members) if item.get("struct_field") else ti.field(dtype)
         # This is the documented default field(shape=...) placement through the

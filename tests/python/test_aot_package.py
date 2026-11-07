@@ -2311,6 +2311,90 @@ def test_package_context_alias_rejects_ambiguous_rebinding(tmp_path, monkeypatch
     assert not (tmp_path / "sdk").exists()
 
 
+FIELD_LOOP_SOURCE = """
+import taichi_forge as ti
+from resource_contexts import resource_group, read_events
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        with resource_group(self, 'state', initialization='zero') as scope:
+            cells = scope.dense(ti.i, scope.dim('n'))
+            for name in ('values', 'weights'):
+                setattr(scope, name, scope.field(ti.i32, shape=scope.dim('n'), placement=cells))
+            self.last_member = name
+            for name in ('vectors', 'unused_vectors'):
+                setattr(scope, name, scope.vector_field(3, ti.f32, shape=scope.dim('n'), placement=cells))
+            self.last_vector = name
+    @ti.kernel
+    def step(self):
+        for i in self.values:
+            self.values[i] += 1
+            self.vectors[i] = ti.Vector([i, 2 * i, 3 * i])
+"""
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_path, monkeypatch):
+    from tests.python.test_aot_dense_snode_group import _compiled_nodes
+
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=FIELD_LOOP_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["entries"]) == 2
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([n for n in archive.namelist() if n.endswith((".ll", ".bc", ".spv"))]) == 2
+    original = package.Model(7)
+    original.step()
+    root = ti.lang.impl.get_runtime().prog.get_snode_root(original.values.snode.ptr.get_snode_tree_id())
+    nodes = _compiled_nodes(root)
+    expected = np.arange(7)[:, None] * np.arange(1, 4)[None, :]
+    np.testing.assert_array_equal(original.vectors.to_numpy(), expected)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7), code.host.Model(19)
+        assert a.values._group_owner.layout["nodes"] == nodes
+        assert a.last_member == original.last_member == "weights"
+        assert a.last_vector == original.last_vector == "unused_vectors"
+        assert a.values._group_owner is a.vectors._group_owner
+        a.step()
+        b.step()
+        np.testing.assert_array_equal(a.vectors.to_numpy(), expected)
+        np.testing.assert_array_equal(a.weights.to_numpy(), 0)
+        np.testing.assert_array_equal(a.unused_vectors.to_numpy(), 0)
+        a.tree.destroy()
+        b.step()
+        np.testing.assert_array_equal(b.values.to_numpy(), 2)
+
+
+@pytest.mark.parametrize("change", ["dynamic", "duplicate", "name_use", "mangled", "shadow", "effect"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_name_loops_reject_unproven_declarations(tmp_path, monkeypatch, change):
+    model = FIELD_LOOP_SOURCE
+    if change == "dynamic":
+        model = model.replace("('values', 'weights')", "self.names")
+    elif change == "duplicate":
+        model = model.replace("('values', 'weights')", "('values', 'values')")
+    elif change == "name_use":
+        model = model.replace("shape=scope.dim('n'), placement=cells", "shape=name, placement=cells")
+    elif change == "mangled":
+        model = model.replace("('values', 'weights')", "('__values', 'weights')")
+    elif change == "shadow":
+        model = model.replace("self, n: int):", "self, n: int, setattr=None):")
+    else:
+        model = model.replace(
+            "                setattr(scope, name, scope.field",
+            "                print(name)\n                setattr(scope, name, scope.field",
+        )
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=model)
+    with pytest.raises(ti.aot.PackageExportError, match="Field-name loop|ResourceScope"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 DERIVED_FIELDS_SOURCE = """
 import taichi_forge as ti
 from resource_factories import declare_extent

@@ -9,9 +9,98 @@ from ._package_types import qualified_kind
 from ._package_fields import field_type_shape
 
 
+def _normalize_field_loops(module, constructor, kind, fail, namespace):
+    """Expand literal member declarations, never iterate model data or numerical code."""
+    scope_names = set()
+    for node in ast.walk(constructor):
+        if getattr(node, "_package_resource_context", None) is not None:
+            scope_names.add(node.items[0].optional_vars.id)
+        if (
+            isinstance(node, ast.Assign)
+            and qualified_kind(node.value, kind) == "experimental.ResourceScope"
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            scope_names.add(node.targets[0].id)
+    shadowed = namespace.get("setattr", setattr) is not setattr or any(
+        isinstance(n, ast.Name)
+        and n.id == "setattr"
+        and not isinstance(n.ctx, ast.Load)
+        or isinstance(n, ast.arg)
+        and n.arg == "setattr"
+        or isinstance(n, ast.alias)
+        and (n.asname or n.name.split(".")[0]) == "setattr"
+        for n in ast.walk(constructor)
+    )
+
+    class Declarations(ast.NodeTransformer):
+        def visit_For(self, node):
+            if (
+                len(node.body) != 1
+                or not isinstance(node.body[0], ast.Expr)
+                or not isinstance(node.body[0].value, ast.Call)
+            ):
+                return self.generic_visit(node)
+            call = node.body[0].value
+            if not (
+                isinstance(call.func, ast.Name)
+                and call.func.id == "setattr"
+                and len(call.args) == 3
+                and isinstance(call.args[0], ast.Name)
+                and call.args[0].id in scope_names
+            ):
+                return self.generic_visit(node)
+            receiver, name, allocation = call.args
+            if (
+                shadowed
+                or call.keywords
+                or node.orelse
+                or not isinstance(node.target, ast.Name)
+                or not isinstance(name, ast.Name)
+                or name.id != node.target.id
+                or not isinstance(allocation, ast.Call)
+                or not isinstance(allocation.func, ast.Attribute)
+                or not isinstance(allocation.func.value, ast.Name)
+                or allocation.func.value.id != receiver.id
+                or allocation.func.attr not in ("field", "vector_field", "matrix_field", "struct_field")
+                or any(isinstance(n, ast.Name) and n.id == name.id for n in ast.walk(allocation))
+            ):
+                fail(module, node, "Field-name loop requires an unshadowed literal member declaration")
+            if not isinstance(node.iter, (ast.Tuple, ast.List)) or not node.iter.elts:
+                fail(module, node.iter, "Field-name loop requires an explicit nonempty literal tuple/list")
+            names = []
+            for item in node.iter.elts:
+                if not (
+                    isinstance(item, ast.Constant)
+                    and type(item.value) is str
+                    and item.value.isidentifier()
+                    and not item.value.startswith("__")
+                    and item.value not in names
+                ):
+                    fail(module, item, "Field-name loop requires distinct non-mangled literal member names")
+                names.append(item.value)
+            result = []
+            for member in names:
+                # Retain the ordinary loop variable's last value and original
+                # allocation order. Only fixed declarations expand, not kernels.
+                result.append(ast.copy_location(ast.Assign([copy.deepcopy(node.target)], ast.Constant(member)), node))
+                result.append(
+                    ast.copy_location(
+                        ast.Assign(
+                            [ast.Attribute(copy.deepcopy(receiver), member, ast.Store())], copy.deepcopy(allocation)
+                        ),
+                        node.body[0],
+                    )
+                )
+            return result
+
+    Declarations().visit(constructor)
+
+
 def scope_declarations(module, constructor, kind, fail, namespace):
     if constructor is None:
         return {}
+    _normalize_field_loops(module, constructor, kind, fail, namespace)
     scopes, declarations, allowed = {}, {}, set()
     scope_groups, builders = {}, {}
     contexts, context_bindings, context_stores = {}, {}, {}
