@@ -2081,6 +2081,171 @@ def test_package_rejects_shadowed_resource_factory(tmp_path, monkeypatch, bindin
     assert not (tmp_path / "sdk").exists()
 
 
+STATIC_DOMAIN_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, first: bool, second: bool, third: bool, unused: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.first, self.second, self.third, self.unused = first, second, third, unused
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('first', choices=(False, True))
+        scope.static('second', choices=(False, True), kernel_only=True)
+        scope.static('third', choices=(False, True), kernel_only=True)
+        scope.static('unused', choices=(0, 1, 2, 3, 4, 5, 6, 7))
+        self.values = ti.field(ti.i32, shape=n)
+
+    @ti.func
+    def mode(self):
+        result = 0
+        if ti.static(self.first):
+            if ti.static(self.second):
+                result = 10
+            else:
+                result = 20
+        else:
+            if ti.static(self.third):
+                result = 30
+            else:
+                result = 40
+        return result
+
+    @ti.kernel
+    def compute(self):
+        for i in range(self.n):
+            self.values[i] = self.mode() + i
+
+    @ti.kernel
+    def other(self):
+        for i in range(self.n):
+            if ti.static(self.second):
+                self.values[i] = 5
+            else:
+                self.values[i] = -5
+
+    @ti.kernel
+    def plain(self):
+        for i in range(self.n):
+            self.values[i] = i
+
+class Equivalent(Model):
+    pass
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_specializes_only_observed_static_dependencies(tmp_path, monkeypatch):
+    import itertools
+
+    package = _source_package(
+        tmp_path, monkeypatch, STATIC_DOMAIN_SOURCE, initializer="from .model import Model, Equivalent\n"
+    )
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert manifest["version"] == 11
+    families = manifest["entry_families"]
+    assert sorted(len(f["variants"]) for f in families.values()) == [2, 2, 4, 4]
+    assert len(manifest["entries"]) == 8  # 4 compute + 2 other + plain + unused public function
+    assert all("unused" not in f["domain"] for f in families.values())
+    branching = next(f for f in families.values() if len(f["variants"]) == 4)
+    assert {tuple(sorted(v["selection"])) for v in branching["variants"]} == {("first", "second"), ("first", "third")}
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        code = [item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]
+        assert len(code) == 8
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        a, b = loaded.host.Model(7, False, False, False, 1), loaded.host.Equivalent(19, True, True, True, 7)
+        bound = a.compute
+        for first, second, third in itertools.product((False, True), repeat=3):
+            original = package.Model(7, first, second, third, 0)
+            a.first, a.second, a.third = first, second, third
+            original.compute()
+            bound()
+            np.testing.assert_array_equal(a.values.to_numpy(), original.values.to_numpy())
+        b.compute()
+        np.testing.assert_array_equal(b.values.to_numpy(), np.arange(19) + 10)
+        a.first, a.second = True, False
+        builder = loaded.module("definition_fixture.model").ti.graph.GraphBuilder()
+        builder.dispatch(a.compute)
+        graph = builder.compile()
+        with graph.bind({}) as prepared:
+            a.first = False
+            prepared.run()
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(7) + 20)
+        a.first = 1  # bool and int are distinct static identities
+        with pytest.raises(ValueError, match="outside.*domain"):
+            bound()
+        resources = set(runtime._resources)
+        with pytest.raises(ValueError, match="outside.*domain"):
+            loaded.host.Model(3, False, False, False, 99)
+        assert set(runtime._resources) == resources
+    probe = tmp_path / "consume_static.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in {'definition_fixture','taichi','taichi_forge'}:
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a,b=code.host.Model(3,False,True,False,0),code.host.Model(19,True,True,False,6)
+            a.compute()
+            b.compute()
+            np.testing.assert_array_equal(a.values.to_numpy(),np.arange(3)+40)
+            np.testing.assert_array_equal(b.values.to_numpy(),np.arange(19)+10)
+            a.second=False
+            a.other()
+            np.testing.assert_array_equal(a.values.to_numpy(),-5)
+        print('STATIC_DOMAINS_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "STATIC_DOMAINS_OK" in result.stdout
+
+
+@pytest.mark.parametrize("choices", ["()", "(False, False)", "(self.first,)", "(object(),)"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unproven_static_domains(tmp_path, monkeypatch, choices):
+    source = STATIC_DOMAIN_SOURCE.replace("'first', choices=(False, True)", f"'first', choices={choices}")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="Static domain"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_an_uncompiled_declared_static_branch(tmp_path, monkeypatch):
+    source = STATIC_DOMAIN_SOURCE.replace("result = 10", "result = self.unqualified_parameter")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="undeclared capture self.unqualified_parameter"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 TARGET_FIELDS_SOURCE = """
 import taichi_forge as ti
 constructors = 0

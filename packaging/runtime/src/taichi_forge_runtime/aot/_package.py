@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 from ._runtime import Scalar
 from .._dimensions import Extent, evaluate_extent
+from .._static_values import read_static_key, static_key
 
 _construction = ContextVar("forge_definition_owner", default=None)
 _ids = itertools.count()
@@ -306,6 +307,13 @@ class _ResourceScope:
     def __setattr__(self, name, value):
         setattr(self._owner, name, value)
 
+    def static(self, name, *, choices, kernel_only=False):
+        if type(name) is not str or not name.isidentifier() or type(kernel_only) is not bool:
+            raise ValueError("Invalid static resource declaration")
+        keys = tuple(static_key(value) for value in choices)
+        if not keys or len(set(keys)) != len(keys) or static_key(getattr(self._owner, name)) not in keys:
+            raise ValueError(f"Static configuration {name!r} is outside its declared domain")
+
     def dim(self, name):
         if not isinstance(name, str) or not name.isidentifier():
             raise ValueError("A dimension requires an explicit owner attribute name")
@@ -377,7 +385,23 @@ class entry:
     def __init__(self, package, symbol):
         self.symbol = symbol
         self.package = package
-        self.contract = package.manifest["entries"][symbol]
+        self.family = package.manifest.get("entry_families", {}).get(symbol)
+        self.contract = self.family if self.family is not None else package.manifest["entries"][symbol]
+        self._variants = []
+        self._domain = {}
+        self._selected = {}
+        if self.family is not None:
+            self._domain = {
+                name: {static_key(read_static_key(key)) for key in values}
+                for name, values in self.family["domain"].items()
+            }
+            for variant in self.family["variants"]:
+                if variant["symbol"] not in package.manifest["entries"]:
+                    raise ValueError("Static entry family references missing numerical code")
+                selection = {name: static_key(read_static_key(key)) for name, key in variant["selection"].items()}
+                if not selection.keys() <= self._domain.keys():
+                    raise ValueError("Static entry selection differs from its declared domain")
+                self._variants.append((selection, variant["symbol"]))
         self.signature = inspect.Signature(
             [
                 inspect.Parameter(item["name"], inspect.Parameter.POSITIONAL_OR_KEYWORD)
@@ -397,6 +421,9 @@ class entry:
 
     def _call(self, package, owner, *args, **kwargs):
         package._check()
+        selected = self._select(owner)
+        if selected is not self:
+            return selected._call(package, owner, *args, **kwargs)
         contract = self.contract
         bound = self.signature.bind(*args, **kwargs)
         arguments = [
@@ -422,6 +449,26 @@ class entry:
         with HostBuffers(package.runtime, contract["arguments"], arguments) as prepared:
             return kernel.run(*prepared)
 
+    def _select(self, owner):
+        if self.family is None:
+            return self
+        if owner is None:
+            raise ValueError("Static package entries require their bound instance")
+        values = {name: static_key(getattr(owner, name)) for name in self._domain}
+        if any(value not in self._domain[name] for name, value in values.items()):
+            raise ValueError("Static configuration is outside its declared package domain")
+        matches = {
+            symbol
+            for selection, symbol in self._variants
+            if all(values[name] == value for name, value in selection.items())
+        }
+        if len(matches) != 1:
+            raise ValueError("Static configuration has missing or ambiguous package code")
+        symbol = matches.pop()
+        if symbol not in self._selected:
+            self._selected[symbol] = entry(self.package, symbol)
+        return self._selected[symbol]
+
 
 @dataclass(frozen=True)
 class _BoundEntry:
@@ -444,7 +491,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

@@ -216,7 +216,46 @@ def scope_declarations(module, constructor, kind, fail, namespace):
     for statement in constructor.body:
         call = statement.value if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)) else None
         scope, method = operation(call)
-        if method == "value" and isinstance(statement, ast.Expr):
+        if method == "static" and isinstance(statement, ast.Expr):
+            from ._component import StaticValue
+            from taichi_forge_runtime._static_values import static_key
+
+            if (
+                len(call.args) != 1
+                or not isinstance(call.args[0], ast.Constant)
+                or type(call.args[0].value) is not str
+                or not call.args[0].value.isidentifier()
+                or statement.lineno < scopes[scope].lineno
+            ):
+                fail(module, call, "Static declaration requires one literal owner attribute name")
+            keywords = {k.arg: k.value for k in call.keywords}
+            if (
+                len(keywords) != len(call.keywords)
+                or "choices" not in keywords
+                or set(keywords) - {"choices", "kernel_only"}
+            ):
+                fail(module, call, "Static declaration requires explicit finite choices")
+            try:
+                choices = ast.literal_eval(keywords["choices"])
+                kernel_only = ast.literal_eval(keywords.get("kernel_only", ast.Constant(False)))
+                if not isinstance(choices, (tuple, list)):
+                    raise ValueError("choices must be a tuple or list")
+                declaration = StaticValue(choices=choices, kernel_only=kernel_only)
+            except (TypeError, ValueError) as error:
+                fail(module, call, f"Static domain must contain distinct immutable literal choices: {error}")
+            allowed.add(id(call.func.value))
+            add(
+                call.args[0].value,
+                dict(
+                    kind="static",
+                    choices=[static_key(v) for v in declaration.choices],
+                    kernel_only=kernel_only,
+                    static_declaration=[statement.lineno, statement.col_offset],
+                    scope_allocation=origin(scope),
+                ),
+                statement,
+            )
+        elif method == "value" and isinstance(statement, ast.Expr):
             if statement.lineno < scopes[scope].lineno:
                 fail(module, statement, "Value declaration precedes its resource scope")
             args = dict(zip(("name", "dtype"), call.args))

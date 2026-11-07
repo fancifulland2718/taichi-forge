@@ -687,7 +687,9 @@ def export_package(package, output, *, arch=None, source_root=None):
     scalar owner attributes form the current supported scope.
     """
     import taichi_forge as ti
-    from taichi_forge.aot._component import Array, Component, RuntimeValue
+    from taichi_forge.aot._component import Array, Component, RuntimeValue, StaticValue
+    from taichi_forge_runtime._static_values import read_static_key
+    from ._package_variants import compile_static_variants
     from taichi_forge.aot.module import Module
     from taichi_forge.types.ndarray_type import NdarrayType
     from taichi_forge.types._argument_descriptor import describe_annotation
@@ -755,6 +757,7 @@ def export_package(package, output, *, arch=None, source_root=None):
         module_root=package.__name__,
         discovery="all_decorated_definitions",
         entries={},
+        entry_families={},
         files={},
         sources={},
         owners={},
@@ -832,6 +835,11 @@ def export_package(package, output, *, arch=None, source_root=None):
             for attribute, item in schema.items():
                 if item["kind"] in ("dense_field", "dimension"):
                     continue
+                elif item["kind"] == "static":
+                    choices = tuple(read_static_key(key) for key in item["choices"])
+                    declarations[attribute] = StaticValue(choices=choices, kernel_only=item["kernel_only"])
+                    value = choices[0]
+                    manifest["version"] = max(11, manifest["version"])
                 elif item["kind"] == "ndarray":
                     dtype = resolve_type(
                         item.pop("type_node"), vars(imported_modules[item.get("declaration_module", name)])
@@ -866,6 +874,7 @@ def export_package(package, output, *, arch=None, source_root=None):
                         "declaration_module",
                         "declaration_owner",
                         "value_declaration",
+                        "static_declaration",
                         "scope_allocation",
                         "group_builder",
                         "placement",
@@ -947,47 +956,57 @@ def export_package(package, output, *, arch=None, source_root=None):
                     _fail(name, node, "kernel default arguments are not yet supported")
             environment = environments[owner_name] if owner_name is not None else Component()
             try:
-                code = environment.compile(entry, *values)
+                codes = compile_static_variants(environment, entry, values, owner, schemas.get(owner_name, {}))
             except Exception as error:
                 raise PackageExportError(f"{name}.{definition['name']}: {error}") from error
-            # Reuse only the identical result admitted by Component.compile's
-            # actual dependency/ABI guards in this compilation context. Neither
-            # the class name nor a semantic hash alone proves equivalence.
-            identity = (code.kernel, code.key)
-            if identity in shared_entries:
-                entry_manifest = shared_entries[identity]
-                entry_manifest["definitions"].append(name + "." + definition["name"])
+            variants = []
+            for code in codes:
+                # Sharing is decided by the compiler object/key and its actual
+                # ABI/dependency guards, never by a semantic hash alone.
+                identity = (code.kernel, code.key)
+                if identity in shared_entries:
+                    entry_manifest = shared_entries[identity]
+                    if name + "." + definition["name"] not in entry_manifest["definitions"]:
+                        entry_manifest["definitions"].append(name + "." + definition["name"])
+                else:
+                    symbol = "definition_" + code.semantic_key
+                    code.export(module, symbol)
+                    capture = [
+                        {
+                            "name": capture_name,
+                            "kind": schema[0],
+                            "dtype": schema[1],
+                            **({"element_shape": list(schema[2])} if schema[0] == "value" and schema[2] else {}),
+                        }
+                        for capture_name, schema in code.contract["captures"]
+                    ]
+                    for item in capture:
+                        if item["kind"] in ("ndarray", "dense_field"):
+                            item.pop("dtype")
+                    entry_manifest = dict(
+                        symbol=symbol,
+                        definition=name + "." + definition["name"],
+                        definitions=[name + "." + definition["name"]],
+                        arguments=argument_schema,
+                        captures=capture,
+                        dependencies=dict(methods=code.contract["methods"], functions=code.contract["functions"]),
+                    )
+                    manifest["entries"][symbol] = entry_manifest
+                    shared_entries[identity] = entry_manifest
+                variants.append(dict(selection=code.static, symbol=entry_manifest["symbol"]))
+            if any(variant["selection"] for variant in variants):
+                # Logical method identity is separate from its shared numerical
+                # entries. Unread owner options are absent from this family.
+                symbol = "family_" + hashlib.sha256((name + "." + definition["name"]).encode()).hexdigest()
+                used = {key for variant in variants for key in variant["selection"]}
+                manifest["entry_families"][symbol] = dict(
+                    arguments=argument_schema,
+                    variants=variants,
+                    domain={key: schemas[owner_name][key]["choices"] for key in sorted(used)},
+                )
+                entries[definition["name"]] = dict(symbol=symbol)
+            else:
                 entries[definition["name"]] = entry_manifest
-                continue
-            # Stable naming uses the actual dependency contract, not whichever
-            # subclass happens to be visited first. Sharing itself was decided
-            # above by the compiler object/key, never by this hash alone.
-            symbol = "definition_" + code.semantic_key
-            code.export(module, symbol)
-            capture = [
-                {
-                    "name": capture_name,
-                    "kind": schema[0],
-                    "dtype": schema[1],
-                    **({"element_shape": list(schema[2])} if schema[0] == "value" and schema[2] else {}),
-                }
-                for capture_name, schema in code.contract["captures"]
-            ]
-            # Ndarray descriptors are passed unchanged, not encoded as scalar arguments.
-            for item in capture:
-                if item["kind"] in ("ndarray", "dense_field"):
-                    item.pop("dtype")
-            entry_manifest = dict(
-                symbol=symbol,
-                definition=name + "." + definition["name"],
-                definitions=[name + "." + definition["name"]],
-                arguments=argument_schema,
-                captures=capture,
-                dependencies=dict(methods=code.contract["methods"], functions=code.contract["functions"]),
-            )
-            entries[definition["name"]] = entry_manifest
-            manifest["entries"][symbol] = entry_manifest
-            shared_entries[identity] = entry_manifest
         host_source, minimum_version, producer_only = _host_projection(
             name,
             tree,

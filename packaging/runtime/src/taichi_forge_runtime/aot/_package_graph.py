@@ -85,6 +85,7 @@ class GraphBuilder:
             owner, kernel = kernel.owner, kernel.entry
         if not isinstance(kernel, entry) or kernel.package is not self.package:
             raise ValueError("Package Graph dispatch requires an entry in the same loaded package")
+        kernel = kernel._select(owner)
         if template_args:
             if owner is None or set(template_args) != {"self"} or template_args["self"] is not owner:
                 raise ValueError("Package Graph template receiver must match its bound entry")

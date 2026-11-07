@@ -227,7 +227,7 @@ decorated definitions continue through the original compiler. Focused three-back
 checks cover captures, typed compound arguments, state isolation and source-free use.
 
 Graph capture projection and related Host support use manifest version 9; the
-consumer reads versions 1–10. Local frontend imports, `ti.sync()` and the Runtime
+consumer reads versions 1–11. Local frontend imports, `ti.sync()` and the Runtime
 program identity query are projected without importing the compiler. Logical
 `types.vector/matrix` factories accept Host dimensions/dtypes; they do not allocate
 device storage. `NdArray.from_numpy/to_numpy` use existing native transfers with
@@ -274,9 +274,29 @@ GeoPhys `resource_scope` forwarding path has focused three-backend coverage;
 application models, static domains and other Host dependencies need their own
 qualification.
 
+### Exporting actual static dependencies
+
+Unconditional `scope.static(name, choices=..., kernel_only=...)` declarations can
+use an explicit finite domain of immutable literals, with manifest version 11.
+Compilation starts at one legal assignment, then explores alternatives only for
+static values actually read by that kernel. A newly reached branch can reveal
+further dependencies through the existing compiler. Unread options create no
+numerical copies; the exporter does not enumerate whole-owner combinations or
+impose a universal variant-count limit. A declared branch that cannot compile
+fails the entire export.
+
+Logical methods can reference the same compatible compiled result. Consumers
+select existing code from each instance's current legal static values. Graphs
+select code at recording and retain invocation snapshots through existing
+bindings, without new combination code or module-wide pointer switching.
+Focused three-backend tests cover branch-dependent captures, irrelevant options,
+inherited sharing, independent instances, source-free consumption and original
+JIT results. Static-dependent resource presence/layout is still unsupported;
+code specialization support does not establish conditional layout qualification.
+
 ## Remaining shared mechanisms
 
-Complex SNode/Field layouts, the inheritance restrictions above, template/static configuration domains,
+Complex SNode/Field layouts, the inheritance restrictions above, template/conditional-resource domains,
 untyped or Python-specific `pyfunc`, gradients, arbitrary Python resource factories,
 complete Host array access, full Graph/ExecutionPlan and provider references are not integrated.
 Recognized unsupported declarations or Host frontend operations reject export;
