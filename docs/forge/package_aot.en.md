@@ -156,6 +156,15 @@ overrides are rejected. Subsequent Host initialization and context exception cle
 retain their original order. Repeated declarations of the same resource role across
 methods require explicit source cleanup, rather than inferred reallocation contracts.
 
+Version 35 supports single-assignment local vector/matrix/Struct type aliases in
+construction paths, including member widths derived from declared model dimensions.
+Types come from the original builtin factories. Before Field allocation, the consumer
+checks member order, dtype, and actual widths against the exported layout. Struct
+`member_initialization` accepts fixed-name maps or single-generator comprehensions
+with literal membership filters, retaining `zero/consumer_explicit` policies. It does
+not evaluate model-driven maps or introduce snapshot policies. Native group clearing
+satisfies zero initialization; explicit Host initialization retains its original position.
+
 Version 33 adds `scope.value('iterations', ti.i32, affects_plan=True)` to separate
 a numerical runtime input from a Host plan dependency. Numerical code keeps an
 ordinary ABI parameter, without iteration-count specializations. Graph recording

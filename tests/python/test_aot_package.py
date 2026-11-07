@@ -4183,12 +4183,60 @@ def test_package_rejects_unproven_model_local_workspaces(tmp_path, monkeypatch, 
     assert not (tmp_path / "sdk").exists()
 
 
-@pytest.mark.parametrize("real_helper", [False, True])
+def _local_struct_source():
+    return MODEL_TENSOR_SOURCE.replace(
+        "        scope.rows = scope.struct_field({\n            'J': ti.types.vector(self.layout.dof, ti.f32),\n"
+        "            'fixed': ti.types.vector(3, ti.f32),\n            'result': ti.f32,\n"
+        "        }, shape=scope.dim('n'))",
+        "        Row = ti.types.struct(result=ti.f32, J=ti.types.vector(self.layout.dof, ti.f32),\n"
+        "                              fixed=ti.types.vector(3, ti.f32))\n"
+        "        scope.rows = scope.struct_field(Row.members, shape=scope.dim('n'),\n"
+        "            member_initialization={name: 'zero' for name in Row.members if name not in ('fixed',)})",
+    )
+
+
+@pytest.mark.parametrize("change", ["unknown", "policy", "model", "rebound"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_local_struct_rejects_unproven_member_policies(tmp_path, monkeypatch, change):
+    source = _local_struct_source()
+    policy = "{name: 'zero' for name in Row.members if name not in ('fixed',)}"
+    replacement = {
+        "unknown": "{'missing': 'zero'}",
+        "policy": "{'J': 'snapshot'}",
+        "model": "{name: 'zero' for name in range(n)}",
+    }.get(change)
+    if change == "rebound":
+        source = source.replace("        scope.rows =", "        Row = ti.types.struct(J=ti.i32)\n        scope.rows =")
+    else:
+        source = source.replace(policy, replacement)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises((ValueError, KeyError), match="[Mm]ember|Row|type|model tensor axis"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@pytest.mark.parametrize("change", ["extent", "member", "order"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_local_struct_checks_actual_type_before_allocation(tmp_path, monkeypatch, change):
+    statement = {"extent": "self.layout.dof += 1", "member": "Row.members['result'] = ti.i32",
+                 "order": "Row.members['result'] = Row.members.pop('result')"}[change]
+    source = _local_struct_source().replace("        scope.rows =", f"        {statement}\n        scope.rows =")
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model, Rows, Reader\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        before = set(runtime._resources)
+        with pytest.raises(ValueError, match="Local element type"):
+            code.host.Rows(2, 3)
+        assert set(runtime._resources) == before
+
+
+@pytest.mark.parametrize("real_helper,local_struct", [(False, False), (True, False), (False, True)])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_package_infers_model_tensor_axes_without_constructor_samples(tmp_path, monkeypatch, real_helper):
+def test_package_infers_model_tensor_axes_without_constructor_samples(tmp_path, monkeypatch, real_helper, local_struct):
     if real_helper and ti.cfg.arch == ti.vulkan:
         pytest.skip("Vulkan does not support real functions")
-    source = MODEL_TENSOR_SOURCE
+    source = _local_struct_source() if local_struct else MODEL_TENSOR_SOURCE
     if real_helper:
         source = source.replace(
             "@ti.func\n    def touch(self, i, j, gain):",
@@ -4197,7 +4245,12 @@ def test_package_infers_model_tensor_axes_without_constructor_samples(tmp_path, 
     package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model, Rows, Reader\n")
     manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
     assert sys.modules["definition_fixture.model"].constructors == 0
-    assert manifest["version"] == 26
+    assert manifest["version"] == (35 if local_struct else 26)
+    if local_struct:
+        assert manifest["owners"]["definition_fixture.model.Rows"]["rows"]["member_initialization"] == {
+            "J": "zero",
+            "result": "zero",
+        }
     model_entries = [
         entry for entry in manifest["entries"].values() if entry["definition"].endswith(("Model.step", "Rows.step"))
     ]

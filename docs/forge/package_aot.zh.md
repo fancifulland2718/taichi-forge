@@ -109,6 +109,13 @@ call，可反复 `run()`；`graph.run(arguments)` 是每次重新 prepare 的单
 分配之后的普通 Host 初始化及 context 的异常清理仍按原顺序执行。不同方法重复声明同一
 资源角色仍需整理来源，不推断隐式重分配合同。
 
+版本 35 支持构造路径中单次赋值的局部 vector/matrix/Struct 类型别名，包括由已声明模型
+尺寸决定的成员宽度。类型来自原内置工厂；消费端在 Field 分配前检查成员顺序、dtype 和
+实际宽度，类型构造后的改写不能静默改变导出布局。Struct 的 `member_initialization`
+支持固定成员名的字典或单层生成式及字面量成员过滤，保留 `zero/consumer_explicit`
+策略；不执行模型数据驱动的字典生成或新增快照策略。原生组的初始清零满足 zero 要求，
+普通 Host 的显式初始化保持原调用位置。
+
 版本 33 的 `scope.value('iterations', ti.i32, affects_plan=True)` 将“数值运行参数”与
 “Host 计划依赖”分开：数值代码仍读取普通 ABI 输入，不按次数生成特化；Graph 记录时
 保存该参数，编译及重新 bind 检查它没有改变。改变后重新运行正常 Host 构图，再 prepare。

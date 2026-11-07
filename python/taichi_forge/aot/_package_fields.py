@@ -2,7 +2,7 @@
 
 import ast
 
-from ._package_types import qualified_kind, resolve_type, type_spec, project_tensor_axes
+from ._package_types import qualified_kind, resolve_type, type_spec, project_tensor_axes, member_initialization
 
 
 def field_type_shape(call, role, module, fail):
@@ -210,6 +210,14 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             witness=field_extent,
         )
         item["element"] = type_spec(dtype, module, model_tensors=model_tensors)
+        if "local_type_source" in item and item["element"]["kind"] == "struct":
+            item["local_type_order"] = list(item["element"]["members"])
+        if "member_initialization_node" in item:
+            item["member_initialization"] = member_initialization(
+                item.pop("member_initialization_node"),
+                item["element"].get("members", {}),
+                item.pop("member_initialization_source"),
+            )
         if model_tensors and item.get("conditions"):
             raise ValueError("Conditional model tensor Fields require projected layout selection")
         if item.get("struct_field"):
@@ -324,6 +332,8 @@ def field_allocation(owner_key, name, schema):
     sources = {key: expression for item in fields for key, expression in item["dimension_sources"].items()}
     dimensions = sorted(sources)
     keywords = []
+    if "local_type_source" in schema[name]:
+        keywords.append(ast.keyword("declared_type", schema[name]["local_type_source"]))
     if "placement_alias" in schema[name]:
         keywords.append(ast.keyword("placement", ast.Name(schema[name]["placement_alias"], ast.Load())))
     checks = schema[name].get("dimension_alias_checks", {})

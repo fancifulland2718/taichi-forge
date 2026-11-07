@@ -113,6 +113,17 @@ class _ProducerType:
 class _ElementType:
     def __init__(self, package, spec):
         self.package, self.spec = package, spec
+        if spec["kind"] == "struct":
+            self._members = {
+                name: member["dtype"] if member["kind"] == "scalar" else _ElementType(package, member)
+                for name, member in spec["members"].items()
+            }
+
+    @property
+    def members(self):
+        if self.spec["kind"] != "struct":
+            raise AttributeError("members")
+        return self._members
 
     def __call__(self, *args, **kwargs):
         from ._package_values import HostTensor, typed_tensor
@@ -225,6 +236,21 @@ class _ModuleBinding:
     def vector_type(self, n, dtype):
         return self.matrix_type(n, None, dtype)
 
+    def struct_type(self, **members):
+        self.package._check()
+        return self.type(
+            dict(kind="struct", members={name: self.element_spec(value) for name, value in members.items()})
+        )
+
+    def element_spec(self, value):
+        if isinstance(value, _ElementType) and value.package is self.package:
+            return value.spec
+        if type(value) is str and value in _DTYPES:
+            return dict(kind="scalar", dtype=value, element_shape=[])
+        if type(value) is dict:
+            return dict(kind="struct", members={name: self.element_spec(member) for name, member in value.items()})
+        raise TypeError("Host element type must use this package's scalar/tensor/struct declarations")
+
     def matrix_type(self, n, m, dtype):
         dimensions = [operator.index(n)] + ([] if m is None else [operator.index(m)])
         if any(n <= 0 for n in dimensions) or dtype not in _DTYPES:
@@ -284,7 +310,7 @@ class _ModuleBinding:
             raise ImportError("Definition packages cannot dynamically import the numerical frontend")
         return importlib.import_module(resolved)
 
-    def field(self, owner_key, name, dimensions, *, placement=None, dimension_aliases=()):
+    def field(self, owner_key, name, dimensions, *, placement=None, dimension_aliases=(), declared_type=None):
         self.package._check()
         construction = _construction.get()
         if construction is None or construction[0] is not self.package:
@@ -295,6 +321,21 @@ class _ModuleBinding:
             if actual != self.extent(expression, owner):
                 raise ValueError(f"Dimension alias {alias!r} changed before its Field allocation")
         member = self.package.manifest["owners"][owner_key][name]
+        if declared_type is not None:
+
+            def structural(spec, model=False, order=None):
+                if spec["kind"] == "struct":
+                    return (
+                        "struct",
+                        tuple((key, structural(spec["members"][key], model)) for key in (order or spec["members"])),
+                    )
+                shape = tuple(dimensions[n] if model and isinstance(n, str) else n for n in spec["element_shape"])
+                return spec["kind"], spec["dtype"], shape
+
+            if structural(self.element_spec(declared_type)) != structural(
+                member["element"], True, member.get("local_type_order")
+            ):
+                raise ValueError("Local element type changed before its Field allocation")
         group_key = member.get("field_group", owner_key)
         contract = self.package.manifest["field_groups"][group_key]
         if dimensions.keys() != set(contract["dimensions"]):
@@ -924,6 +965,7 @@ class LoadedPackage:
                 32,
                 33,
                 34,
+                35,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

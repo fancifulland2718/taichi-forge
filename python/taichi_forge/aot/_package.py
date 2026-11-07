@@ -781,6 +781,10 @@ def _host_projection(
                     ast.Name(_PREFIX + "runtime", ast.Load()), role.split(".")[-1] + "_type", ast.Load()
                 )
                 return self.generic_visit(node)
+            if role == "types.struct" and self.host_functions:
+                self.minimum_version = max(self.minimum_version, 35)
+                node.func = ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "struct_type", ast.Load())
+                return self.generic_visit(node)
             if qualified_kind(node, kind) in ("Vector", "Matrix"):
                 self.minimum_version = max(self.minimum_version, 8)
                 node.func = ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "tensor", ast.Load())
@@ -1110,6 +1114,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(33, manifest["version"])
             if any(item.get("dimension_alias_checks") for item in schema.values()):
                 manifest["version"] = max(34, manifest["version"])
+            if any(item.get("local_type_source") is not None or "member_initialization" in item for item in schema.values()):
+                manifest["version"] = max(35, manifest["version"])
             if any("presence_parameter" in item for item in schema.values()):
                 manifest["version"] = max(13, manifest["version"])
             if any(item["kind"] == "record" or item.get("constraints") for item in schema.values()):
@@ -1128,6 +1134,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     not in (
                         "allocation",
                         "dimension_sources",
+                        "local_type_source",
                         "dimension_alias_checks",
                         "declaration_module",
                         "declaration_owner",

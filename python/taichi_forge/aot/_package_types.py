@@ -42,6 +42,82 @@ def project_tensor_axes(node, kind, dimension):
                     arguments[axis]._package_model_extent = projected
 
 
+def expand_local_type(node, bindings, kind):
+    """Substitute single-assignment builtin type declarations, never call Host code."""
+    import copy
+
+    class Expand(ast.NodeTransformer):
+        def visit_Name(self, node):
+            return self.visit(copy.deepcopy(bindings[node.id])) if node.id in bindings else node
+
+        def visit_Attribute(self, node):
+            node = self.generic_visit(node)
+            if node.attr == "members" and qualified_kind(node.value, kind) == "types.struct":
+                call = node.value
+                if call.args or any(k.arg is None for k in call.keywords):
+                    raise ValueError("Local Struct type requires explicit named members")
+                return ast.Dict([ast.Constant(k.arg) for k in call.keywords], [k.value for k in call.keywords])
+            return node
+
+    return Expand().visit(copy.deepcopy(node))
+
+
+def member_initialization(node, members, source_members):
+    """Resolve literal policies over fixed member names, not model-dependent maps."""
+    if node is None:
+        return {}
+
+    def literal(value):
+        try:
+            return ast.literal_eval(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Member initialization requires literal names, policies and filters") from error
+
+    if isinstance(node, ast.Dict) and all(k is not None for k in node.keys):
+        pairs = [(literal(k), literal(v)) for k, v in zip(node.keys, node.values)]
+    elif isinstance(node, ast.DictComp) and len(node.generators) == 1:
+        loop = node.generators[0]
+        if (
+            loop.is_async
+            or not isinstance(loop.target, ast.Name)
+            or not isinstance(node.key, ast.Name)
+            or node.key.id != loop.target.id
+        ):
+            raise ValueError("Member initialization requires one fixed member-name iteration")
+        sequence = list(members) if ast.dump(loop.iter) == ast.dump(source_members) else literal(loop.iter)
+        if not isinstance(sequence, (tuple, list)) or any(type(name) is not str for name in sequence):
+            raise ValueError("Member initialization requires fixed member names")
+        selected = list(sequence)
+        for condition in loop.ifs:
+            if not (
+                isinstance(condition, ast.Compare)
+                and isinstance(condition.left, ast.Name)
+                and condition.left.id == loop.target.id
+                and len(condition.ops) == 1
+                and isinstance(condition.ops[0], (ast.In, ast.NotIn))
+            ):
+                raise ValueError("Member initialization filters require literal membership")
+            choices = literal(condition.comparators[0])
+            if not isinstance(choices, (tuple, list)) or any(type(name) is not str for name in choices):
+                raise ValueError("Member initialization filters require literal member names")
+            selected = [name for name in selected if (name in choices) == isinstance(condition.ops[0], ast.In)]
+        policy = literal(node.value)
+        pairs = [(name, policy) for name in selected]
+    else:
+        raise ValueError("Member initialization requires a literal map or fixed member-name comprehension")
+    result = {}
+    for name, policy in pairs:
+        if (
+            type(name) is not str
+            or name not in members
+            or name in result
+            or policy not in ("zero", "consumer_explicit")
+        ):
+            raise ValueError("Member initialization requires unique declared members and existing policies")
+        result[name] = policy
+    return result
+
+
 def resolve_type(node, namespace, *, allow_ndarray=False, allow_members=False, model_tensors=None, witness=None):
     """Resolve only fixed type declarations; do not execute application factories."""
     import taichi_forge as ti

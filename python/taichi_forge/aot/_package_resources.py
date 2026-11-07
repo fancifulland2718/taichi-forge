@@ -5,7 +5,7 @@ import copy
 import hashlib
 
 from taichi_forge_runtime._dimensions import Extent, extent_dependencies, evaluate_extent
-from ._package_types import qualified_kind, project_tensor_axes
+from ._package_types import qualified_kind, project_tensor_axes, expand_local_type
 from ._package_fields import field_type_shape
 
 
@@ -348,6 +348,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
     model_candidates, used_model_dimensions = {}, set()
 
     aliases, alias_conditions, placements = {}, {}, {}
+    local_types = {}
     deferred_aliases, resolving_aliases, alias_checks = {}, set(), {}
     allow_member_dimensions = True
     extent_namespaces = {}
@@ -1085,7 +1086,11 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 allowed.add(id(target.value))
             allowed.add(id(call.func.value))
             normalized = copy.deepcopy(call)
-            normalized.keywords = [k for k in call.keywords if k.arg not in ("initialization", "placement", "layout")]
+            normalized.keywords = [
+                k
+                for k in call.keywords
+                if k.arg not in ("initialization", "placement", "layout", "member_initialization")
+            ]
             layout = "AOS"
             if method == "struct_field":
                 if conditions:
@@ -1099,6 +1104,8 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     fail(module, call, "Explicit ResourceScope groups require the original AOS Struct Field layout")
             elif any(k.arg == "layout" for k in call.keywords):
                 fail(module, call, "Package Field declarations currently require plain default AOS layout")
+            if method != "struct_field" and any(k.arg == "member_initialization" for k in call.keywords):
+                fail(module, call, "Member initialization requires a Struct Field")
             for keyword in call.keywords:
                 if keyword.arg == "initialization" and not (
                     isinstance(keyword.value, ast.Constant) and keyword.value.value in ("zero", "consumer_explicit")
@@ -1111,6 +1118,12 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 "struct_field": "Struct.field",
             }[method]
             dtype, shape_node = field_type_shape(normalized, role, module, fail)
+            source_type = copy.deepcopy(dtype)
+            local_type = any(isinstance(n, ast.Name) and n.id in local_types for n in ast.walk(dtype))
+            try:
+                dtype = expand_local_type(dtype, local_types, kind)
+            except ValueError as error:
+                fail(module, call, str(error))
             # Use original shape nodes for declaration provenance.
             original_args = dict(
                 zip(
@@ -1176,6 +1189,15 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 dict(
                     kind="dense_field",
                     type_node=dtype,
+                    **({"local_type_source": source_type} if local_type else {}),
+                    **(
+                        {
+                            "member_initialization_node": original_args["member_initialization"],
+                            "member_initialization_source": source_type,
+                        }
+                        if "member_initialization" in original_args
+                        else {}
+                    ),
                     shape=extents,
                     dimension_sources=sources,
                     dimension_expressions=expressions,
@@ -1234,6 +1256,16 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             if len(targets) == 1 and isinstance(targets[0], (ast.Name, ast.Tuple, ast.List)):
                 target = targets[0]
                 expression = statement.value
+                if (
+                    isinstance(target, ast.Name)
+                    and not conditions
+                    and stores[target.id] == 1
+                    and target.id not in deleted
+                ):
+                    if qualified_kind(expression, kind) in ("types.vector", "types.matrix", "types.struct") or (
+                        isinstance(expression, ast.Name) and expression.id in local_types
+                    ):
+                        local_types[target.id] = expand_local_type(expression, local_types, kind)
                 if isinstance(target, (ast.Tuple, ast.List)) and isinstance(expression, ast.GeneratorExp):
                     # Tuple unpacking consumes the same literal-name generator
                     # once. Reuse the existing proof; do not run the generator.
