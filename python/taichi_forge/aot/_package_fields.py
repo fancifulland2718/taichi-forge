@@ -108,7 +108,7 @@ def field_declarations(module, constructor, kind, fail):
     return fields
 
 
-def construct_fields(owner, schema, namespace, module):
+def construct_fields(owner, schema, namespace, module, *, imported_modules=None):
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
     from ._component import DenseField, Dimension
@@ -119,9 +119,18 @@ def construct_fields(owner, schema, namespace, module):
     declarations = {}
     typed = []
     for name, item in fields.items():
+        declaration_namespace = (
+            vars(imported_modules[item["declaration_module"]])
+            if imported_modules is not None and "declaration_module" in item
+            else namespace
+        )
         dtype = resolve_type(
             item.pop("type_node"),
-            {**namespace, "_forge_package_vector": ti.types.vector, "_forge_package_matrix": ti.types.matrix},
+            {
+                **declaration_namespace,
+                "_forge_package_vector": ti.types.vector,
+                "_forge_package_matrix": ti.types.matrix,
+            },
         )
         item["element"] = type_spec(dtype, module)
         if item["element"]["kind"] not in ("scalar", "tensor"):

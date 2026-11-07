@@ -21,6 +21,7 @@ from taichi_forge.tools._compiled_host import decorator_resolver
 from ._package_types import qualified_kind, resolve_type, type_expression, type_spec
 from ._package_fields import field_declarations, construct_fields, field_allocation
 from ._package_sources import collect_sources
+from ._package_owners import resolve_owners
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
@@ -38,8 +39,8 @@ def _fail(module, node, message):
 
 def _owner_schema(module, node, kind):
     """Infer types from syntax, never run __init__ or select a model branch."""
-    if node.bases or node.keywords:
-        _fail(module, node, "inherited owners are not yet supported")
+    if node.keywords:
+        _fail(module, node, "custom owner metaclasses require further support")
     constructor = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
     if constructor is None:
         return {}
@@ -89,7 +90,7 @@ def _owner_schema(module, node, kind):
     return schema
 
 
-def _analyze(module, source):
+def _analyze(module, source, namespace):
     tree = ast.parse(source)
     if any(
         (isinstance(n, ast.Name) and n.id.startswith(_PREFIX))
@@ -105,14 +106,27 @@ def _analyze(module, source):
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             decorators = [kind(d) for d in node.decorator_list]
-            if "data_oriented" not in decorators and "dataclass" not in decorators:
+            inherited_owner = getattr(namespace.get(node.name), "_data_oriented", False)
+            device_mixin = any(
+                isinstance(n, ast.FunctionDef)
+                and any(kind(d) in ("kernel", "func", "real_func", "pyfunc") for d in n.decorator_list)
+                for n in node.body
+            )
+            if (
+                "data_oriented" not in decorators
+                and "dataclass" not in decorators
+                and not inherited_owner
+                and not device_mixin
+            ):
                 continue
-            if decorators not in (["data_oriented"], ["dataclass"]):
+            if decorators not in ([], ["data_oriented"], ["dataclass"]):
                 _fail(module, node, "owner decorator combinations are not yet supported")
-            if decorators == ["data_oriented"]:
+            if decorators == ["data_oriented"] or inherited_owner:
                 owners[node.name] = _owner_schema(module, node, kind)
+            dataclass_owner = decorators == ["dataclass"]
             members = [(node.name, n) for n in node.body]
         else:
+            dataclass_owner = False
             members = [(None, node)]
         for owner, entry in members:
             if not isinstance(entry, ast.FunctionDef):
@@ -121,7 +135,7 @@ def _analyze(module, source):
             dsl = next((d for d in decorators if d in _DECORATORS), None)
             if dsl is None:
                 continue
-            if owner is not None and owner not in owners and dsl in ("kernel", "pyfunc"):
+            if owner is not None and dataclass_owner and dsl in ("kernel", "pyfunc"):
                 _fail(
                     module, entry, "dataclass Host entries are not yet supported; device methods must be func/real_func"
                 )
@@ -141,7 +155,13 @@ def _analyze(module, source):
                     _fail(module, entry, "scope-dependent pyfunc requires separate Host and numerical definitions")
             supported.add(id(entry))
             definitions.append(
-                dict(owner=owner, node=entry, kind=dsl, name=".".join(p for p in (owner, entry.name) if p))
+                dict(
+                    owner=owner,
+                    node=entry,
+                    kind=dsl,
+                    name=".".join(p for p in (owner, entry.name) if p),
+                    requires_owner=owner is not None and owner not in owners and not dataclass_owner,
+                )
             )
     for node in ast.walk(tree):
         if (
@@ -168,7 +188,9 @@ def _host_projection(
     application_modules=None,
 ):
     numerical = {item["name"]: item for item in definitions}
-    definitions_at = {(item["node"].lineno, item["node"].col_offset): item for item in definitions}
+    definitions_at = {
+        (item["node"].lineno, item["node"].col_offset): item for item in definitions if not item.get("inherited")
+    }
     owners_at = {
         (node.lineno, node.col_offset) for node in tree.body if isinstance(node, ast.ClassDef) and node.name in owners
     }
@@ -334,6 +356,22 @@ def _host_projection(
                 node.decorator_list = [
                     ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "managed_class", ast.Load())
                 ]
+                for definition in definitions:
+                    if (
+                        definition["owner"] == node.name
+                        and definition.get("inherited")
+                        and definition["kind"] in ("kernel", "pyfunc")
+                    ):
+                        node.body.append(
+                            ast.Assign(
+                                [ast.Name(definition["node"].name, ast.Store())],
+                                ast.Call(
+                                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "entry", ast.Load()),
+                                    [ast.Constant(entries[definition["name"]]["symbol"])],
+                                    [],
+                                ),
+                            )
+                        )
             return node
 
         def visit_FunctionDef(self, node):
@@ -342,6 +380,13 @@ def _host_projection(
                 return self.generic_visit(node)
             if definition["kind"] in ("func", "real_func"):
                 return None
+            if definition.get("requires_owner"):
+                descriptor = ast.Call(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "unbound_entry", ast.Load()),
+                    [ast.Constant(module + "." + definition["name"])],
+                    [],
+                )
+                return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
             descriptor = ast.Call(
                 ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "entry", ast.Load()),
                 [ast.Constant(entries[definition["name"]]["symbol"])],
@@ -350,6 +395,12 @@ def _host_projection(
             return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
 
         def visit_Attribute(self, node):
+            if isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name):
+                cls = namespace.get(node.value.id)
+                if inspect.isclass(cls):
+                    value = next((vars(base)[node.attr] for base in cls.__mro__ if node.attr in vars(base)), None)
+                    if getattr(value, "_is_wrapped_kernel", False) or getattr(value, "_is_taichi_function", False):
+                        _fail(module, node, "unbound numerical references require a qualified receiver binding")
             if (
                 isinstance(node.ctx, ast.Load)
                 and isinstance(node.value, ast.Name)
@@ -385,6 +436,14 @@ def _host_projection(
             return node
 
         def visit_Call(self, node):
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Call)
+                and isinstance(node.func.value.func, ast.Name)
+                and node.func.value.func.id == "super"
+                and numerical.get(f"{self.owner}.{node.func.attr}", {}).get("kind") in _DECORATORS
+            ):
+                _fail(module, node, "explicit super numerical calls require a qualified receiver binding")
             if isinstance(node.func, ast.Name) and node.func.id == "__import__":
                 _fail(module, node, "builtin dynamic import requires an explicit importlib boundary")
             if qualified_kind(node, kind) in ("types.vector", "types.matrix", "types.struct"):
@@ -451,20 +510,33 @@ def export_package(package, output, *, arch=None, source_root=None):
         raise ValueError("Package output must be outside its application source root")
     paths, namespaces, dependency_report = collect_sources(package, source_root)
     application_modules = set(paths) | set(namespaces) if source_root is not None else None
-    sources, failures = [], []
+    sources, failures, imported_modules = [], [], {}
     for name, (path, relative) in paths.items():
         text = path.read_text(encoding="utf8")
+        imported = package if name == package.__name__ else importlib.import_module(name)
+        if Path(imported.__file__).resolve() != path:
+            raise PackageExportError(f"Module origin differs from scanned source: {name}")
+        imported_modules[name] = imported
         try:
-            tree, kind, owners, definitions = _analyze(name, text)
+            tree, kind, owners, definitions = _analyze(name, text, vars(imported))
         except PackageExportError as error:
             failures.append(str(error))
             continue
         sources.append((name, path, relative, text, tree, kind, owners, definitions))
     if failures:
         raise PackageExportError("Package declaration preflight failed:\n" + "\n".join(failures))
+    resolve_owners(sources, imported_modules, _owner_schema, _fail)
     module = Module()
     manifest = dict(
-        version=1,
+        version=(
+            3
+            if any(
+                definition.get("inherited") or definition.get("requires_owner")
+                for _, _, _, _, _, _, _, definitions in sources
+                for definition in definitions
+            )
+            else 1
+        ),
         kind="forge_definition_package_prototype",
         target=module._arch.name,
         module_root=package.__name__,
@@ -474,11 +546,17 @@ def export_package(package, output, *, arch=None, source_root=None):
         sources={},
         owners={},
         field_groups={},
+        owner_templates=[
+            name + "." + definition["name"]
+            for name, _, _, _, _, _, _, definitions in sources
+            for definition in definitions
+            if definition.get("requires_owner") and definition["kind"] in ("kernel", "pyfunc")
+        ],
     )
     payloads = {}
     if source_root is not None:
         manifest.update(
-            version=2,
+            version=max(2, manifest["version"]),
             application_modules=sorted(application_modules),
             entry_module=package.__name__,
             dependencies=dependency_report,
@@ -492,21 +570,22 @@ def export_package(package, output, *, arch=None, source_root=None):
         for definition in definitions
         if definition["kind"] in ("func", "real_func")
     }
+    shared_entries, pyfunc_kernels = {}, {}
     for name, path, relative, text, tree, kind, schemas, definitions in sources:
-        imported = package if name == package.__name__ else importlib.import_module(name)
-        if Path(imported.__file__).resolve() != path:
-            raise PackageExportError(f"Module origin differs from scanned source: {name}")
+        imported = imported_modules[name]
         owners = {}
         environments = {}
         for class_name, schema in schemas.items():
             cls = getattr(imported, class_name)
             owner = object.__new__(cls)  # Deliberately never call application __init__.
-            declarations = construct_fields(owner, schema, vars(imported), module)
+            declarations = construct_fields(owner, schema, vars(imported), module, imported_modules=imported_modules)
             for attribute, item in schema.items():
                 if item["kind"] == "dense_field":
                     continue
                 elif item["kind"] == "ndarray":
-                    dtype = resolve_type(item.pop("type_node"), vars(imported))
+                    dtype = resolve_type(
+                        item.pop("type_node"), vars(imported_modules[item.get("declaration_module", name)])
+                    )
                     item["element"] = type_spec(dtype, module)
                     declarations[attribute] = Array(dtype, item["ndim"])
                     # Structural ABI witness only: every extent remains a runtime parameter.
@@ -518,7 +597,11 @@ def export_package(package, output, *, arch=None, source_root=None):
                 setattr(owner, attribute, value)
             owners[class_name], environments[class_name] = owner, Component(**declarations)
             manifest["owners"][name + "." + class_name] = {
-                attribute: {key: value for key, value in item.items() if key not in ("allocation", "dimension_sources")}
+                attribute: {
+                    key: value
+                    for key, value in item.items()
+                    if key not in ("allocation", "dimension_sources", "declaration_module", "declaration_owner")
+                }
                 for attribute, item in schema.items()
             }
             if any(item["kind"] == "dense_field" for item in schema.values()):
@@ -530,7 +613,7 @@ def export_package(package, output, *, arch=None, source_root=None):
                 )
         entries = {}
         for definition in definitions:
-            if definition["kind"] not in ("kernel", "pyfunc"):
+            if definition["kind"] not in ("kernel", "pyfunc") or definition.get("requires_owner"):
                 continue
             owner_name, node = definition["owner"], definition["node"]
             owner = owners.get(owner_name)
@@ -541,7 +624,12 @@ def export_package(package, output, *, arch=None, source_root=None):
                 # Compile the original function definition with its declared
                 # entry signature. In-kernel calls still use the normal Func;
                 # no application decorator or alternate numerical body exists.
-                kernel = Kernel(entry.func.func, AutodiffMode.NONE, _classkernel=owner is not None)
+                identity = (entry.func.func, owner is not None)
+                if identity not in pyfunc_kernels:
+                    pyfunc_kernels[identity] = Kernel(
+                        entry.func.func, AutodiffMode.NONE, _classkernel=owner is not None
+                    )
+                kernel = pyfunc_kernels[identity]
                 entry = SimpleNamespace(_primal=kernel, _kernel_owner=owner)
             kernel = getattr(entry, "_primal", None)
             if kernel is None:
@@ -583,7 +671,19 @@ def export_package(package, output, *, arch=None, source_root=None):
                 code = environment.compile(entry, *values)
             except Exception as error:
                 raise PackageExportError(f"{name}.{definition['name']}: {error}") from error
-            symbol = "definition_" + hashlib.sha256((name + "." + definition["name"]).encode()).hexdigest()
+            # Reuse only the identical result admitted by Component.compile's
+            # actual dependency/ABI guards in this compilation context. Neither
+            # the class name nor a semantic hash alone proves equivalence.
+            identity = (code.kernel, code.key)
+            if identity in shared_entries:
+                entry_manifest = shared_entries[identity]
+                entry_manifest["definitions"].append(name + "." + definition["name"])
+                entries[definition["name"]] = entry_manifest
+                continue
+            # Stable naming uses the actual dependency contract, not whichever
+            # subclass happens to be visited first. Sharing itself was decided
+            # above by the compiler object/key, never by this hash alone.
+            symbol = "definition_" + code.semantic_key
             code.export(module, symbol)
             capture = [
                 {"name": capture_name, "kind": schema[0], "dtype": schema[1]}
@@ -596,12 +696,14 @@ def export_package(package, output, *, arch=None, source_root=None):
             entry_manifest = dict(
                 symbol=symbol,
                 definition=name + "." + definition["name"],
+                definitions=[name + "." + definition["name"]],
                 arguments=argument_schema,
                 captures=capture,
                 dependencies=dict(methods=code.contract["methods"], functions=code.contract["functions"]),
             )
             entries[definition["name"]] = entry_manifest
             manifest["entries"][symbol] = entry_manifest
+            shared_entries[identity] = entry_manifest
         payloads["host/" + relative.as_posix()] = _host_projection(
             name,
             tree,

@@ -155,6 +155,9 @@ class _ModuleBinding:
     def managed_class(self, cls):
         return managed_class(self.package, cls)
 
+    def unbound_entry(self, definition):
+        return _UnboundEntry(definition)
+
 
 class _Importlib:
     """Local importlib binding; never install a process-global import hook."""
@@ -180,6 +183,11 @@ def managed_class(package, cls):
     @functools.wraps(original)
     def initialize(self, *args, **kwargs):
         package._check()
+        construction = _construction.get()
+        if construction is not None and construction[0] is package and construction[2] is self:
+            # Cooperative base construction belongs to this same invocation.
+            # Do not reset groups or lose allocations needed for failure rollback.
+            return original(self, *args, **kwargs)
         self._forge_package_owner = package
         self._forge_package_field_groups = {}
         allocated = []
@@ -196,6 +204,17 @@ def managed_class(package, cls):
 
     cls.__init__ = initialize
     return cls
+
+
+class _UnboundEntry:
+    def __init__(self, definition):
+        self.definition = definition
+
+    def __get__(self, owner, cls=None):
+        raise TypeError("Numerical mixin entry requires its exported concrete receiver: " + self.definition)
+
+    def __call__(self, *args, **kwargs):
+        raise TypeError("Numerical mixin entry requires its exported concrete receiver: " + self.definition)
 
 
 class entry:
@@ -256,14 +275,12 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2)
+            self.manifest.get("version") not in (1, 2, 3)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")
-        if (
-            self.manifest["version"] == 2
-            and not {"application_modules", "entry_module", "dependencies"} <= self.manifest.keys()
-        ):
+        boundary = {"application_modules", "entry_module", "dependencies"}
+        if (self.manifest["version"] == 2 or boundary & self.manifest.keys()) and not boundary <= self.manifest.keys():
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")

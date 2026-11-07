@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import textwrap
+import zipfile
 
 import numpy as np
 import pytest
@@ -895,3 +896,212 @@ def relative_late(x):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "LOCAL_DEPENDENCIES_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("storage", ["field", "ndarray"])
+@pytest.mark.parametrize("helper_kind", ["func", "real_func", "pyfunc"])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_inheritance_uses_actual_method_dependencies_and_shared_code(
+    tmp_path, monkeypatch, storage, helper_kind
+):
+    if helper_kind == "real_func" and ti.cfg.arch == ti.vulkan:
+        pytest.skip("Vulkan does not support real functions")
+    source = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, gain: float):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.gain = gain
+        self.values = ti.field(ti.f32, shape=n)
+        self.step(1.0)
+
+    @ti.func
+    def affine(self, x: ti.f32) -> ti.f32:
+        return x * self.gain
+
+    @ti.kernel
+    def step(self, amount: ti.f32):
+        for i in self.values:
+            self.values[i] = self.affine(i) + amount
+
+    @ti.kernel
+    def size(self) -> ti.i32:
+        return self.n
+"""
+    if storage == "ndarray":
+        source = source.replace("ti.field(ti.f32, shape=n)", "ti.ndarray(ti.f32, shape=n)")
+        source = source.replace("self.step(1.0)", "self.step(self.values, 1.0)")
+        source = source.replace(
+            "def step(self, amount:", "def step(self, values: ti.types.ndarray(dtype=ti.f32, ndim=1), amount:"
+        )
+        source = source.replace("for i in self.values:", "for i in values:").replace("self.values[i] =", "values[i] =")
+    methods = source[source.index("    @ti.kernel\n    def step") :]
+    source = source[: source.index("    @ti.kernel\n    def step")]
+    constructor = source[source.index("    def __init__") : source.index("    @ti.func")]
+    source = source.replace(constructor, "")
+    source = source.replace(
+        "@ti.data_oriented\nclass Model:",
+        "class Storage:\n"
+        + constructor
+        + "\nclass KernelMethods:\n"
+        + methods
+        + "\n@ti.data_oriented\nclass Model(Storage, KernelMethods):",
+    )
+    source = source.replace("@ti.func", "@ti." + helper_kind)
+    package = _source_package(tmp_path, monkeypatch, source)
+    derived = tmp_path / "definition_fixture/derived.py"
+    derived.write_text(
+        textwrap.dedent("""
+        import taichi_forge as ti
+        from .model import Model
+
+        class Unchanged(Model):
+            pass
+
+        class Offset:
+            @ti.func
+            def affine(self, x: ti.f32) -> ti.f32:
+                return x * self.gain + 10.0
+
+        class Changed(Offset, Model):
+            def __init__(self, n: int, gain: float):
+                super().__init__(n, gain)
+                self.host_only = 23
+
+        class Fails(Model):
+            def __init__(self, n: int, gain: float):
+                super().__init__(n, gain)
+                raise ValueError('after base allocation')
+        """).replace("@ti.func", "@ti." + helper_kind),
+        encoding="utf8",
+    )
+    monkeypatch.delitem(sys.modules, "definition_fixture.derived", raising=False)
+    assert "definition_fixture.derived" not in sys.modules
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    base = sys.modules["definition_fixture.model"]
+    assert manifest["version"] == 3
+    classes = sys.modules["definition_fixture.derived"]
+    assert base.constructors == 0
+    # A new class/Host field does not create another compiled numerical unit.
+    by_name = {name: entry for entry in manifest["entries"].values() for name in entry["definitions"]}
+    original = by_name["definition_fixture.model.Model.step"]
+    assert by_name["definition_fixture.derived.Unchanged.step"] is original
+    assert by_name["definition_fixture.derived.Fails.step"] is original
+    assert by_name["definition_fixture.derived.Changed.step"] is not original
+    assert by_name["definition_fixture.derived.Changed.size"] is by_name["definition_fixture.model.Model.size"]
+    if ti.cfg.arch == ti.cpu and helper_kind == "func" and storage == "field":
+        base_manifest = ti.aot.export_package(base, tmp_path / "base_sdk")
+        base_symbols = {item["definition"]: item["symbol"] for item in base_manifest["entries"].values()}
+        assert base_symbols["definition_fixture.model.Model.step"] == original["symbol"]
+        assert base.constructors == 0
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        code = [item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]
+        code_count = len(code)
+        assert sum(item.file_size for item in code) > 0
+    expected = classes.Changed(7, 2.0).values.to_numpy()
+    np.testing.assert_array_equal(expected, np.arange(7, dtype=np.float32) * 2 + 11)
+    probe = tmp_path / "consume_inheritance.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoPrivateSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoPrivateSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            derived = importlib.import_module(code.host.__name__ + '.derived')
+            a, b = derived.Changed(7, 2.0), derived.Unchanged(19, -3.0)
+            read = lambda owner: np.frombuffer(owner.values.read(), np.float32)
+            np.testing.assert_array_equal(read(a), np.arange(7, dtype=np.float32) * 2 + 11)
+            np.testing.assert_array_equal(read(b), np.arange(19, dtype=np.float32) * -3 + 1)
+            assert a.size() == 7 and b.size() == 19 and a.host_only == 23
+            if sys.argv[3] == 'field':
+                assert a.values._group_owner is not b.values._group_owner
+                a.step(4.0)
+            else:
+                a.step(a.values, 4.0)
+            np.testing.assert_array_equal(read(a), np.arange(7, dtype=np.float32) * 2 + 14)
+            np.testing.assert_array_equal(read(b), np.arange(19, dtype=np.float32) * -3 + 1)
+            registered = set(runtime._resources)
+            try:
+                derived.Fails(3, 2.0)
+            except ValueError as error:
+                assert str(error) == 'after base allocation'
+            else:
+                raise AssertionError('Original constructor failure disappeared')
+            assert runtime._resources == registered
+        print('INHERITANCE_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"], storage],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "INHERITANCE_SOURCE_FREE_OK" in result.stdout
+    assert code_count == (6 if helper_kind == "pyfunc" else 4)  # changed helper affects only step and public pyfunc
+
+
+@pytest.mark.parametrize(
+    "constructor,diagnostic",
+    [
+        ("if n > 0:\n            super().__init__(n, m)", "one unconditional"),
+        ("super().__init__(n, m)\n        self.other = ti.field(ti.f32, shape=n)", "multiple constructors"),
+        ("super().__init__(n, m)\n        self.a = ti.ndarray(ti.f32, shape=n)", "inherited resource/type replacement"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unproven_inherited_resource_construction(tmp_path, monkeypatch, constructor, diagnostic):
+    source = (
+        FIELD_SOURCE + "\nclass Derived(Model):\n    def __init__(self, n: int, m: int):\n        " + constructor + "\n"
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
+@pytest.mark.parametrize(
+    "host,diagnostic",
+    [
+        ("super().step(1.0)", "explicit super numerical calls"),
+        ("Model.step(self, 1.0)", "unbound numerical references"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unbound_inherited_numerical_calls(tmp_path, monkeypatch, host, diagnostic):
+    source = FIELD_SOURCE + "\nclass Derived(Model):\n    def drive(self):\n        " + host + "\n"
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_numerical_mixin_without_concrete_receiver(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, FIELD_SOURCE.replace("@ti.data_oriented\n", ""))
+    with pytest.raises(ti.aot.PackageExportError, match="no exported concrete"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()

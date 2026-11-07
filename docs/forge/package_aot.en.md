@@ -50,6 +50,24 @@ closure: requesting an unexported local module fails instead of importing privat
 source. Ordinary external Python dependencies retain normal imports. This does
 not provide general native-extension or arbitrary dynamic-loader projection.
 
+Packages containing inherited numerical methods use manifest version 3; the
+consumer accepts versions 1–3. Python MRO selects the effective methods, including
+ordinary undecorated subclasses and kernel/helper mixins. Mixins need a concrete
+`data_oriented` receiver within the scanned sources, not a new decorator.
+Only identical results admitted by the compiler's existing dependency/ABI checks
+share an exported entry; overriding a used helper preserves its distinct code.
+The entry's `definitions` list records these logical aliases. Class names and
+unrelated Host attributes do not create additional code assets.
+
+Inherited constructors and a single unconditional cooperative `super().__init__`
+are supported for the existing typed owner declarations. Their original Host
+argument expressions execute only in the consumer. Base and derived construction
+share one allocation transaction so failure releases the entire instance's
+resources. Resource replacement, Fields allocated by multiple constructors,
+conditional base construction, unbound class-method references and explicit
+`super()` numerical calls currently reject rather than guessing a receiver or
+layout. Error-only numerical interface stubs still require further projection.
+
 | Artifact | Contents |
 | --- | --- |
 | `code.tcm` | Original numerical definitions compiled by the existing compiler, with actual ABI contracts |
@@ -128,14 +146,21 @@ analytic/original-JIT comparisons and temporary-resource release checks.
 
 The source-boundary mode is also exercised with the original winding module.
 The larger original sampling closure reaches resource owners such as `MeshSDF`
-and currently rejects during declaration preflight because inheritance and complex
-resources are not yet projected. No dependency was deleted to obtain a pass;
-correct rejection does not qualify sampling. Preflight aggregates declaration
-failures across modules before numerical compilation or publication.
+and currently rejects at the error-only `ImplicitField.clear` base interface.
+ResourceScope and complex resources remain pending. No dependency was deleted
+to obtain a pass; correct rejection does not qualify sampling. Declaration
+preflight aggregates syntax/schema failures across modules; compiler dependency
+failures are diagnosed when compiling the affected entry.
+
+Inheritance checks cover source-free Field/Ndarray instances, helper overrides,
+cooperative construction failure and the actual TCM code entries on CPU/CUDA/Vulkan;
+Vulkan `real_func` remains excluded. A native regression found and repaired missing
+real-function bodies in code identity when disk caching was disabled. This fix
+requires an updated native Runtime; updating only the Python package is insufficient.
 
 ## Remaining shared mechanisms
 
-Complex SNode/Field layouts, inheritance, template/static configuration domains,
+Complex SNode/Field layouts, the inheritance restrictions above, template/static configuration domains,
 untyped or Python-specific `pyfunc`, gradients, arbitrary Python resource factories,
 complete Host array access, full Graph/ExecutionPlan and provider references are not integrated.
 Recognized unsupported declarations or Host frontend operations reject export;
