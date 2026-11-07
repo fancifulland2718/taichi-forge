@@ -256,6 +256,24 @@ or numerical step runs to discover these declarations. Focused CPU/CUDA/Vulkan
 checks compare every layout node with JIT and consume independent source-free
 instances; the current Vulkan AOT target uses f32 here because it rejects f64.
 
+### Ordinary declaration factories
+
+An unconditional constructor call to an ordinary Python factory can use the same
+declaration projection when its fixed frontend capability path provably forwards
+to `ResourceScope`. No new decorator is required. The proof supports explicit
+parameters, immutable literals, forwarded local names, frontend `getattr/hasattr`
+checks and the ResourceScope signature. Application factories and constructors
+are never executed. Side effects, model-dependent conditions, unknown globals,
+argument call expressions and shadowed factory names reject export.
+`declaration_factories` records each proven source and its digest.
+
+Unused imports of projected factories are removed from retained Host code. Other
+Host calls and dependencies are preserved. This does not qualify arbitrary
+factories, context managers or the entire factory module's closure. The original
+GeoPhys `resource_scope` forwarding path has focused three-backend coverage;
+application models, static domains and other Host dependencies need their own
+qualification.
+
 ## Remaining shared mechanisms
 
 Complex SNode/Field layouts, the inheritance restrictions above, template/static configuration domains,

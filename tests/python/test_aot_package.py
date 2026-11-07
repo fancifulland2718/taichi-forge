@@ -1934,6 +1934,153 @@ def test_package_explicit_placement_keeps_its_construction_snapshot(tmp_path, mo
         assert set(runtime._resources) == registered
 
 
+RESOURCE_FACTORY_SOURCE = """
+import taichi_forge as ti
+effects = []
+def resource_scope(owner, *, builder=None, requires=(), initialization='consumer_explicit'):
+    if initialization not in ('consumer_explicit', 'zero'):
+        raise ValueError('Unknown resource initialization')
+    factory = getattr(getattr(ti, 'experimental', None), 'ResourceScope', None)
+    qualified = factory is not None and all(hasattr(factory, name) for name in requires)
+    if qualified and initialization != 'consumer_explicit':
+        import inspect
+        qualified = 'initialization' in inspect.signature(factory).parameters
+        if qualified:
+            return factory(owner, builder=builder, initialization=initialization)
+    return factory(owner, builder=builder) if qualified else object()
+"""
+
+
+def _resource_factory_fixture(
+    tmp_path,
+    monkeypatch,
+    factory_source=RESOURCE_FACTORY_SOURCE,
+    *,
+    requires="dense",
+    extra_argument="",
+    model_source=EXPLICIT_GROUP_SOURCE,
+):
+    (tmp_path / "resource_factories.py").write_text(textwrap.dedent(factory_source), encoding="utf8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "resource_factories", raising=False)
+    source = model_source.replace(
+        "import taichi_forge as ti", "import taichi_forge as ti\nfrom resource_factories import resource_scope"
+    )
+    source = source.replace(
+        "ti.experimental.ResourceScope(self, builder=fields, initialization='zero')",
+        f"resource_scope(self, {extra_argument}builder=fields, requires=('{requires}',), initialization='zero')",
+    )
+    source = source.replace(
+        "ti.experimental.ResourceScope(self, builder=separate)", "resource_scope(self, builder=separate)"
+    )
+    if ti.cfg.arch == ti.vulkan:
+        source = source.replace("ti.f64", "ti.f32")
+    return _source_package(tmp_path, monkeypatch, source)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_proves_imported_resource_factory_without_running_it(tmp_path, monkeypatch):
+    package = _resource_factory_fixture(tmp_path, monkeypatch)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["declaration_factories"]) == 2
+    assert {d["definition"] for d in manifest["declaration_factories"]} == {"resource_factories.resource_scope"}
+    host = (tmp_path / "sdk/host/model.py").read_text()
+    assert "from resource_factories import" not in host
+    original = package.Model(7, 3)
+    original.step(2.0)
+    probe = tmp_path / "consume_factory.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi','taichi_forge','definition_fixture','resource_factories'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a,b = code.host.Model(7,3),code.host.Model(19,2)
+            a.step(2.)
+            b.step(-1.)
+            np.testing.assert_array_equal(a.a.to_numpy(), 2*np.arange(7))
+            np.testing.assert_array_equal(b.a.to_numpy(), -np.arange(19))
+        print('RESOURCE_FACTORY_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RESOURCE_FACTORY_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["effect", "model", "global", "missing", "argument", "dropped", "early_return"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unproven_resource_factory_paths(tmp_path, monkeypatch, change):
+    source = RESOURCE_FACTORY_SOURCE
+    if change == "effect":
+        source = source.replace("    if initialization", "    effects.append(1)\n    if initialization", 1)
+    if change == "model":
+        source = source.replace("    factory =", "    if owner.n > 3:\n        effects.append(1)\n    factory =", 1)
+    if change == "global":
+        source = "runtime_choice = True\n" + source.replace(
+            "    factory =", "    if runtime_choice:\n        effects.append(1)\n    factory =", 1
+        )
+    if change == "early_return":
+        source = source.replace(
+            "    factory =", "    if initialization == 'zero':\n        return None\n    factory =", 1
+        )
+    extra_argument = ""
+    if change in ("argument", "dropped"):
+        source = source.replace("requires=(),", "requires=(), ignored=None,")
+        extra_argument = "ignored=self.observe(), " if change == "argument" else "ignored=self, "
+    package = _resource_factory_fixture(
+        tmp_path,
+        monkeypatch,
+        source,
+        requires="missing" if change == "missing" else "dense",
+        extra_argument=extra_argument,
+    )
+    with pytest.raises(ti.aot.PackageExportError, match="factory forwarding is unproven"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["resource_factories"].effects == []
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@pytest.mark.parametrize("binding", ["parameter", "assignment"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_shadowed_resource_factory(tmp_path, monkeypatch, binding):
+    source = EXPLICIT_GROUP_SOURCE
+    if binding == "parameter":
+        source = source.replace("n: int, m: int):", "n: int, m: int, resource_scope=None):")
+    else:
+        source = source.replace(
+            "fields = ti.FieldsBuilder()", "resource_scope = None\n        fields = ti.FieldsBuilder()"
+        )
+    package = _resource_factory_fixture(tmp_path, monkeypatch, model_source=source)
+    with pytest.raises(ti.aot.PackageExportError, match="factory binding is shadowed"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 TARGET_FIELDS_SOURCE = """
 import taichi_forge as ti
 constructors = 0

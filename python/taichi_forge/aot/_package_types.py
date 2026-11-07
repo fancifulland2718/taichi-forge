@@ -10,6 +10,8 @@ from taichi_forge.types._argument_descriptor import describe_element_type
 
 
 def qualified_kind(node, kind):
+    if getattr(node, "_package_role", None) is not None:
+        return node._package_role
     if isinstance(node, ast.Call):
         node = node.func
     result = kind(node)

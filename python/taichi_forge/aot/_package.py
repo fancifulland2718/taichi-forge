@@ -109,6 +109,9 @@ def _analyze(module, source, namespace, target):
         _fail(module, tree, "reserved package-export identifier")
     kind = decorator_resolver(tree)
     tree._package_target_selections = select_target_branches(tree, kind, target, module, _fail)
+    from ._package_factories import normalize_factories
+
+    tree._package_factory_declarations = normalize_factories(tree, namespace, module, _fail)
     definitions, owners = [], {}
     supported = set()
     for node in tree.body:
@@ -641,6 +644,22 @@ def _host_projection(
 
     projector = Project()
     projected = projector.visit(copy.deepcopy(tree))
+    factory_definitions = {fact["definition"] for fact in tree._package_factory_declarations}
+    loaded_names = {n.id for n in ast.walk(projected) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+
+    class DeclarationImports(ast.NodeTransformer):
+        def visit_ImportFrom(self, node):
+            retained = []
+            for alias in node.names:
+                local = alias.asname or alias.name
+                value = namespace.get(local)
+                definition = (value.__module__ + "." + value.__qualname__) if inspect.isfunction(value) else None
+                if local in loaded_names or definition not in factory_definitions:
+                    retained.append(alias)
+            node.names = retained
+            return node if retained else None
+
+    projected = DeclarationImports().visit(projected)
     # Preserve future-import placement and the original module docstring.
     position = 0
     for node in projected.body:
@@ -741,6 +760,9 @@ def export_package(package, output, *, arch=None, source_root=None):
         owners={},
         field_groups={},
         producer_only=[],
+        declaration_factories=[
+            fact for _, _, _, _, tree, _, _, _ in sources for fact in tree._package_factory_declarations
+        ],
         target_selections={
             name: tree._package_target_selections
             for name, _, _, _, tree, _, _, _ in sources
