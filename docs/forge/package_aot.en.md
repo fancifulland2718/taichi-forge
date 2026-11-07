@@ -51,7 +51,7 @@ source. Ordinary external Python dependencies retain normal imports. This does
 not provide general native-extension or arbitrary dynamic-loader projection.
 
 Packages containing inherited numerical methods use manifest version 3; the
-consumer accepts versions 1–3. Python MRO selects the effective methods, including
+current consumer also reads newer versions described below. Python MRO selects the effective methods, including
 ordinary undecorated subclasses and kernel/helper mixins. Mixins need a concrete
 `data_oriented` receiver within the scanned sources, not a new decorator.
 Only identical results admitted by the compiler's existing dependency/ABI checks
@@ -66,7 +66,7 @@ share one allocation transaction so failure releases the entire instance's
 resources. Resource replacement, Fields allocated by multiple constructors,
 conditional base construction, unbound class-method references and explicit
 `super()` numerical calls currently reject rather than guessing a receiver or
-layout. Error-only numerical interface stubs still require further projection.
+layout. Error-only numerical interface stubs use the limited contract described below.
 
 | Artifact | Contents |
 | --- | --- |
