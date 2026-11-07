@@ -137,6 +137,7 @@ def resolve_owners(sources, imported, owner_schema, fail):
             if (
                 entry.get("requires_owner")
                 and entry["kind"] in ("kernel", "pyfunc")
+                and not entry.get("error_interface")
                 and id(entry["node"]) not in bound_nodes
             ):
                 fail(name, entry["node"], "numerical mixin has no exported concrete data_oriented receiver")

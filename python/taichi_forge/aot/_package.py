@@ -22,6 +22,7 @@ from ._package_types import qualified_kind, resolve_type, type_expression, type_
 from ._package_fields import field_declarations, construct_fields, field_allocation
 from ._package_sources import collect_sources
 from ._package_owners import resolve_owners
+from ._package_errors import is_error_interface, project_error_interface
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
@@ -141,7 +142,8 @@ def _analyze(module, source, namespace):
                 )
             if dsl not in ("kernel", "func", "real_func", "pyfunc") or decorators != [dsl]:
                 _fail(module, entry, "unsupported numerical decorator combination")
-            if dsl == "pyfunc":
+            error_interface = is_error_interface(entry, namespace)
+            if dsl == "pyfunc" and not error_interface:
                 # Its Python body is numerical too: exporting it requires a
                 # declared value domain, never a signature learned from calls.
                 arguments = entry.args.args[1:] if owner is not None else entry.args.args
@@ -161,6 +163,7 @@ def _analyze(module, source, namespace):
                     kind=dsl,
                     name=".".join(p for p in (owner, entry.name) if p),
                     requires_owner=owner is not None and owner not in owners and not dataclass_owner,
+                    error_interface=error_interface,
                 )
             )
     for node in ast.walk(tree):
@@ -186,6 +189,7 @@ def _host_projection(
     namespace,
     builder,
     application_modules=None,
+    error_interfaces=frozenset(),
 ):
     numerical = {item["name"]: item for item in definitions}
     definitions_at = {
@@ -209,6 +213,8 @@ def _host_projection(
         )
 
     def device_import(alias, origin):
+        if f"{origin}.{alias.name}" in error_interfaces:
+            return False
         value = namespace.get(alias.asname or alias.name)
         return f"{origin}.{alias.name}" in device_functions or (
             getattr(value, "_is_taichi_function", False) and not value.func.pyfunc
@@ -361,6 +367,7 @@ def _host_projection(
                         definition["owner"] == node.name
                         and definition.get("inherited")
                         and definition["kind"] in ("kernel", "pyfunc")
+                        and not definition.get("error_interface")
                     ):
                         node.body.append(
                             ast.Assign(
@@ -378,6 +385,8 @@ def _host_projection(
             definition = definitions_at.get((node.lineno, node.col_offset))
             if definition is None:
                 return self.generic_visit(node)
+            if definition.get("error_interface"):
+                return self.generic_visit(project_error_interface(node, module + "." + definition["name"]))
             if definition["kind"] in ("func", "real_func"):
                 return None
             if definition.get("requires_owner"):
@@ -406,6 +415,7 @@ def _host_projection(
                 and isinstance(node.value, ast.Name)
                 and node.value.id == "self"
                 and numerical.get(f"{self.owner}.{node.attr}", {}).get("kind") in ("func", "real_func")
+                and not numerical[f"{self.owner}.{node.attr}"].get("error_interface")
             ):
                 _fail(module, node, "Host references a device-only helper")
             role = kind(node)
@@ -430,7 +440,11 @@ def _host_projection(
 
         def visit_Name(self, node):
             if isinstance(node.ctx, ast.Load) and (
-                numerical.get(node.id, {}).get("kind") in ("func", "real_func") or node.id in imported_helpers
+                (
+                    numerical.get(node.id, {}).get("kind") in ("func", "real_func")
+                    and not numerical[node.id].get("error_interface")
+                )
+                or node.id in imported_helpers
             ):
                 _fail(module, node, "Host references a device-only helper")
             return node
@@ -550,7 +564,15 @@ def export_package(package, output, *, arch=None, source_root=None):
             name + "." + definition["name"]
             for name, _, _, _, _, _, _, definitions in sources
             for definition in definitions
-            if definition.get("requires_owner") and definition["kind"] in ("kernel", "pyfunc")
+            if definition.get("requires_owner")
+            and definition["kind"] in ("kernel", "pyfunc")
+            and not definition.get("error_interface")
+        ],
+        error_interfaces=[
+            name + "." + definition["name"]
+            for name, _, _, _, _, _, _, definitions in sources
+            for definition in definitions
+            if definition.get("error_interface")
         ],
     )
     payloads = {}
@@ -568,7 +590,7 @@ def export_package(package, output, *, arch=None, source_root=None):
         name + "." + definition["name"]
         for name, _, _, _, _, _, _, definitions in sources
         for definition in definitions
-        if definition["kind"] in ("func", "real_func")
+        if definition["kind"] in ("func", "real_func") and not definition.get("error_interface")
     }
     shared_entries, pyfunc_kernels = {}, {}
     for name, path, relative, text, tree, kind, schemas, definitions in sources:
@@ -613,7 +635,11 @@ def export_package(package, output, *, arch=None, source_root=None):
                 )
         entries = {}
         for definition in definitions:
-            if definition["kind"] not in ("kernel", "pyfunc") or definition.get("requires_owner"):
+            if (
+                definition["kind"] not in ("kernel", "pyfunc")
+                or definition.get("requires_owner")
+                or definition.get("error_interface")
+            ):
                 continue
             owner_name, node = definition["owner"], definition["node"]
             owner = owners.get(owner_name)
@@ -717,6 +743,7 @@ def export_package(package, output, *, arch=None, source_root=None):
             vars(imported),
             module,
             application_modules,
+            frozenset(manifest["error_interfaces"]),
         ).encode("utf8")
         manifest["sources"][name] = hashlib.sha256(text.encode("utf8")).hexdigest()
     if not manifest["entries"]:

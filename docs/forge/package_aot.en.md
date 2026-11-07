@@ -146,8 +146,8 @@ analytic/original-JIT comparisons and temporary-resource release checks.
 
 The source-boundary mode is also exercised with the original winding module.
 The larger original sampling closure reaches resource owners such as `MeshSDF`
-and currently rejects at the error-only `ImplicitField.clear` base interface.
-ResourceScope and complex resources remain pending. No dependency was deleted
+and currently rejects at its undeclared `res` capture. ResourceScope and complex
+resources remain pending. No dependency was deleted
 to obtain a pass; correct rejection does not qualify sampling. Declaration
 preflight aggregates syntax/schema failures across modules; compiler dependency
 failures are diagnosed when compiling the affected entry.
@@ -157,6 +157,16 @@ cooperative construction failure and the actual TCM code entries on CPU/CUDA/Vul
 Vulkan `real_func` remains excluded. A native regression found and repaired missing
 real-function bodies in code identity when disk caching was disabled. This fix
 requires an updated native Runtime; updating only the Python package is insufficient.
+
+Error-only interface methods with a single literal-argument call to an ordinary
+Python helper explicitly annotated `typing.NoReturn`/`Never` retain their Host
+failure behavior and add no numerical code asset. Annotation aliases and postponed
+annotations resolve without evaluating annotation code. Classification never uses
+the helper's name. Computation, additional statements and unproven annotations
+still use normal numerical compilation and diagnostics. The helper must not return;
+a violated contract raises at consumption. This also preserves inherited interface
+failures and concrete overrides. Calls from numerical code still need a compilable
+implementation; an error interface is not a device implementation.
 
 ## Remaining shared mechanisms
 

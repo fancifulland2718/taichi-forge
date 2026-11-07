@@ -1105,3 +1105,158 @@ def test_package_rejects_numerical_mixin_without_concrete_receiver(tmp_path, mon
     with pytest.raises(ti.aot.PackageExportError, match="no exported concrete"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_preserves_nonreturning_interfaces_without_numerical_payload(tmp_path, monkeypatch):
+    source = """
+from __future__ import annotations
+import taichi_forge as ti
+from typing import NoReturn as NeverReturns
+calls = 0
+
+def unsupported(message: str) -> NeverReturns:
+    global calls
+    calls += 1
+    raise NotImplementedError(message)
+
+def broken_contract() -> 'NeverReturns':
+    return None
+
+@ti.data_oriented
+class Model:
+    @ti.kernel
+    def clear(self):
+        unsupported('implement clear')
+
+    @ti.func
+    def missing(self, x):
+        unsupported('implement missing')
+
+    @ti.pyfunc
+    def alternative(self, x):
+        unsupported('implement alternative')
+
+    def drive(self):
+        self.missing(3)
+
+class Inherited(Model):
+    pass
+
+class Concrete(Model):
+    @ti.kernel
+    def clear(self) -> ti.i32:
+        return 17
+
+@ti.func
+def unavailable():
+    unsupported('unavailable')
+
+@ti.kernel
+def invalid_contract():
+    broken_contract()
+"""
+    # Forge annotations on typed numerical entries are evaluated normally;
+    # postpone only the ordinary Host helpers' NoReturn annotations.
+    source = source.replace("from __future__ import annotations\n", "").replace(
+        "-> NeverReturns:", "-> 'NeverReturns':"
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    (tmp_path / "definition_fixture/caller.py").write_text(
+        "from .model import unavailable\ndef call():\n    unavailable()\n", encoding="utf8"
+    )
+    monkeypatch.delitem(sys.modules, "definition_fixture.caller", raising=False)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    original = sys.modules["definition_fixture.model"]
+    assert original.calls == 0
+    assert original.Concrete().clear() == 17
+    assert len(manifest["entries"]) == 2  # concrete implementation and unimported typed kernel
+    assert "definition_fixture.model.Model.clear" in manifest["error_interfaces"]
+    assert "definition_fixture.model.Inherited.clear" in manifest["error_interfaces"]
+    host = (tmp_path / "sdk/host/model.py").read_text(encoding="utf8")
+    assert "implement clear" in host and "return 17" not in host
+    probe = tmp_path / "consume_errors.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib
+        import importlib.abc
+        import sys
+        class NoPrivateSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoPrivateSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime('cpu') as runtime, load_package(runtime, sys.argv[1]) as code:
+            model = importlib.import_module(code.host.__name__ + '.model')
+            caller = importlib.import_module(code.host.__name__ + '.caller')
+            for operation, message in [
+                (model.Model().clear, 'implement clear'),
+                (model.Inherited().clear, 'implement clear'),
+                (model.Inherited().drive, 'implement missing'),
+                (lambda: model.Concrete().alternative(1), 'implement alternative'),
+                (caller.call, 'unavailable'),
+            ]:
+                try:
+                    operation()
+                except NotImplementedError as error:
+                    assert str(error) == message
+                else:
+                    raise AssertionError('Error interface silently succeeded')
+            assert model.calls == 5 and model.Concrete().clear() == 17
+            try:
+                model.invalid_contract()
+            except RuntimeError as error:
+                assert 'returned unexpectedly' in str(error)
+            else:
+                raise AssertionError('NoReturn contract silently returned')
+        print('ERROR_INTERFACES_SOURCE_FREE_OK')
+        """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ERROR_INTERFACES_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "body,annotation",
+    [
+        ("unsupported(1 + 2)", "NoReturn"),
+        ("value = 3\n        unsupported('missing')", "NoReturn"),
+        ("unsupported('missing')", "None"),
+        ("unsupported('missing')", "invented_NoReturn"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_does_not_misclassify_computation_or_unproven_error_names(tmp_path, monkeypatch, body, annotation):
+    source = f"""
+import taichi_forge as ti
+from typing import NoReturn
+invented_NoReturn = object()
+def unsupported(value) -> '{annotation}':
+    raise NotImplementedError(value)
+@ti.data_oriented
+class Model:
+    @ti.kernel
+    def clear(self):
+        {body}
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="undeclared global/closure capture 'unsupported'"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
