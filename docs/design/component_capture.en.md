@@ -344,8 +344,8 @@ backend layout rules. Fixed mathematical extents remain constants; version 1
 recipes are unchanged. Focused checks cover mixed types and fixed vec3 siblings,
 model extents above 64, independent instances and invalid dimensions. This is a
 persistent-storage capability; the scalar numerical ABI below builds on it.
-Local vectors and shared workspaces remain separate requirements, and
-definition packages do not yet select this recipe automatically.
+Definition packages can select this recipe from proven model element dimensions.
+Local vectors and shared workspaces remain separate requirements.
 
 An internal scalar-axis projection appends element axes to the runtime index
 axes while preserving native byte strides, offsets and ownership. It reuses
@@ -378,9 +378,10 @@ capability and instantiate these views using native recipe selectors. Focused
 CPU/CUDA/Vulkan checks cover one compiled definition across different widths,
 unchanged ordinary JIT, independent prepared instances and a frontend-blocked
 consumer at a new width of 129. Whole-element value copies are explicitly
-rejected until dynamic local workspace lowering is available. Definition-based
-model-dimension inference, local tensor arithmetic and shared GPU workspaces
-are still pending; this internal declaration adds no application decorator.
+rejected until dynamic local workspace lowering is available. Definition packages
+infer model axes from constructor parameters and existing declarations within
+the [documented package scope](../forge/package_aot.en.md). Local tensor arithmetic
+and shared GPU workspaces remain pending; no application decorator is added.
 
 Original `self.field` captures now retain the complete root schema and member
 paths. Sibling blocks require declared dimension provenance; logical groups

@@ -399,9 +399,9 @@ Vector/MatrixField 以及 StructField 的数值成员，不将整个 StructField
 非 None 判断、StructField 命名空间判断和 `_logical_resource_declaration` 存在性检查。每个据此选择
 的分支都产生来源义务，只有结果确实是对同一输入的 `source_scope=True` 借用，且后续定义来源检查
 通过，才能导出；不能仅假设参数是 Field、吞掉副作用、丢弃返回值或退化为 external 绑定。
-原 GeoPhys `declare_source_borrow` 的必选数值 Field 路径已通过三后端无源码消费；原 EFC 类的声明
-预检查越过 helper 转发后，仍在 `dof_count` 的非字面量静态类型域拒绝。不同来源定义的
-相容性归一化及完整 EFC 类型域仍需处理，这不是完整 EFC 或整引擎资格。
+原 GeoPhys `declare_source_borrow` 的必选数值 Field 路径已通过三后端无源码消费；
+`dof_count` 的模型元素尺寸在下述版本 26 中接入。不同来源定义的相容性归一化、
+动态局部向量及完整 EFC 路径仍需处理，这不是完整 EFC 或整引擎资格。
 
 版本 24 接入已有 `input is None` / `is not None` 选择的 Field 输入声明：存在分支借用同一参数，
 缺席分支为 `scope.record(name, None, optional=True)`。普通 helper 必须分别证明两条路径，
@@ -412,6 +412,28 @@ Vector/MatrixField 以及 StructField 的数值成员，不将整个 StructField
 两个独立输入不会让各自的 Kernel 展开成组合副本。直接调用和重新绑定检查输入存在性及原来源，
 已准备调用保留原快照。CPU/CUDA/Vulkan 局部无源码消费及原 GeoPhys helper 检查覆盖这些路径；
 可选对象引用、模型决定的张量元素/局部向量长度仍未因此获得支持。
+
+## 从定义推导模型张量元素尺寸
+
+版本 26 可从 `Vector.field` / `Matrix.field` 构造参数及已证明的单次赋值别名，
+以及 ResourceScope 的已声明维度，自动推导模型元素轴。平坦 Struct Field 的 vector/matrix
+成员采用相同规则，保留原 AOS/SOA 布局；固定 `3`、`2×2` 等数学维度仍是固定类型。
+不运行模型构造、不枚举 DOF、不新增应用装饰器或手工 ABI。
+
+已有 `record.static('dof_count', choices=(layout.dof_count,))` 只有在唯一取值来自该记录
+同一成员、且定义中确实用于张量元素轴时，才投影为模型维度。字面量有限静态域不变；
+其他计算域、错来源及无元素轴用途拒绝。原 JIT 声明继续使用正常类型特化。
+
+编译代码通过零复制标量轴访问原 Field；Host 仍看到正常逻辑 `shape`、张量 `element_shape`
+及 `n/m/ndim`。SNode 配方、固定兄弟成员和实际字节布局由原生编译器统一实例化，
+不发布构造见证尺寸的 StructNdarray ABI。调用和 Graph 重新绑定验证元素尺寸关系；
+模型尺寸改变须创建/准备新的状态，不能原地修改尺寸后继续使用旧分配。
+
+局部检查覆盖 CPU/CUDA/Vulkan 的直接 Vector/Matrix 和 Struct Field、独立实例、
+屏蔽前端后的新尺寸 129 消费；CPU/CUDA 另覆盖 `real_func`。GeoPhys 原
+`declare_batch_layout` helper 也通过三后端无源码布局消费检查，未改写生产 helper。
+这不等于完整 EFC：整元素局部值拷贝/运算、动态局部向量、共享工作区，以及同组条件布局
+与模型张量的组合仍待接入。固定元素 Ndarray 和显式值参数的类型合同保持原范围。
 
 ## 原定义中的 Kernel 工厂
 

@@ -5,7 +5,7 @@ import copy
 import hashlib
 
 from taichi_forge_runtime._dimensions import Extent, extent_dependencies, evaluate_extent
-from ._package_types import qualified_kind
+from ._package_types import qualified_kind, project_tensor_axes
 from ._package_fields import field_type_shape
 
 
@@ -324,6 +324,20 @@ def scope_declarations(module, constructor, kind, fail, namespace):
     def member_spec(scope, name, **spec):
         return {**spec, **({"path": list((*scope_paths[scope], name))} if scope_paths[scope] else {})}
 
+    def source_expression(node):
+        class Forwarded(ast.NodeTransformer):
+            def visit_Name(self, value):
+                forwarded = getattr(value, "_package_forwarded_argument", None)
+                return self.visit(copy.deepcopy(forwarded)) if forwarded is not None else value
+
+        return ast.dump(Forwarded().visit(copy.deepcopy(node)), include_attributes=False)
+
+    def dimension_source(scope, name):
+        base = scopes[scope].value.args[1] if scope_paths[scope] else ast.Name("self", ast.Load())
+        return source_expression(ast.Attribute(copy.deepcopy(base), name, ast.Load()))
+
+    model_candidates, used_model_dimensions = {}, set()
+
     aliases, alias_conditions, placements = {}, {}, {}
     extent_namespaces = {}
     constraint_declarations = {}
@@ -356,6 +370,13 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             ):
                 fail(module, node, "Dimension alias must remain within its declaration branch")
             return aliases.get(node.id)
+        if isinstance(node, ast.Attribute):
+            for scope in scopes:
+                name = member(scope, node.attr)
+                if declarations.get(name, {}).get("kind") == "dimension" and source_expression(
+                    node
+                ) == dimension_source(scope, node.attr):
+                    return scoped_extent(scope, name)
         if isinstance(node, (ast.Tuple, ast.List)):
             values = tuple(dimension(item, bindings) for item in node.elts)
             return values if all(isinstance(v, Extent) for v in values) else None
@@ -648,7 +669,28 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 raise ValueError("choices must be a tuple or list")
             declaration = StaticValue(choices=choices, kernel_only=kernel_only)
         except (TypeError, ValueError) as error:
-            fail(module, call, f"Static domain must contain distinct immutable literal choices: {error}")
+            choices = keywords["choices"]
+            name = call.args[0].value
+            # An existing singleton type declaration can describe the model's
+            # tensor extent. Require identical declared provenance and later
+            # prove a tensor-axis use; arbitrary computed static domains fail.
+            if not (
+                isinstance(choices, (ast.Tuple, ast.List))
+                and len(choices.elts) == 1
+                and source_expression(choices.elts[0]) == dimension_source(scope, name)
+                and isinstance(keywords.get("kernel_only", ast.Constant(False)), ast.Constant)
+                and keywords.get("kernel_only", ast.Constant(False)).value is False
+            ):
+                fail(module, call, f"Static domain must contain distinct immutable literal choices: {error}")
+            identity = member(scope, name)
+            model_candidates[identity] = call
+            allowed.add(id(call.func.value))
+            add(
+                identity,
+                member_spec(scope, name, kind="dimension", dtype="i32", scope_allocation=origin(scope)),
+                statement,
+            )
+            return
         allowed.add(id(call.func.value))
         add(
             member(scope, call.args[0].value),
@@ -1019,18 +1061,29 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                     fail(module, placement_node, "Field placement must retain its declared group and extent relations")
                 allowed.add(id(placement_node))
             extents, expressions, sources = [], {}, {}
-            for extent in shape:
+
+            def project_extent(extent, node):
                 expression = extent.expression
                 if not extent_dependencies(expression):
                     value = evaluate_extent(expression, lambda _: None)
                     if value <= 0:
-                        fail(module, shape_node, "Field extents must be positive")
-                    extents.append(value)
-                    continue
+                        fail(module, node, "Field extents must be positive")
+                    return value
                 key = "_forge_package_extent_" + hashlib.sha256(repr(expression).encode()).hexdigest()
-                extents.append(key)
                 expressions[key] = expression
                 sources[key] = f"_forge_package_runtime.extent({expression!r}, self)"
+                return key
+
+            extents = [project_extent(extent, shape_node) for extent in shape]
+
+            def model_axis(node):
+                extent = dimension(node)
+                if isinstance(extent, Extent):
+                    used_model_dimensions.update(extent_dependencies(extent.expression))
+                    return project_extent(extent, node)
+                return None
+
+            project_tensor_axes(dtype, kind, model_axis)
             add(
                 target.attr,
                 dict(
@@ -1150,4 +1203,11 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             fail(module, constructor, "Conditional Dense groups currently require an unconditional member")
     for name in optional_members:
         declarations[name]["optional_presence"] = True
+    for name, call in model_candidates.items():
+        if name not in used_model_dimensions:
+            fail(
+                module,
+                call,
+                "Computed static domain requires a proven model tensor axis; otherwise use literal choices",
+            )
     return declarations

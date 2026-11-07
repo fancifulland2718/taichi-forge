@@ -2,7 +2,7 @@
 
 import ast
 
-from ._package_types import qualified_kind, resolve_type, type_spec
+from ._package_types import qualified_kind, resolve_type, type_spec, project_tensor_axes
 
 
 def field_type_shape(call, role, module, fail):
@@ -103,6 +103,17 @@ def field_declarations(module, constructor, kind, fail):
         dtype, shape = field_type_shape(node.value, role, module, fail)
         shape = shape.elts if isinstance(shape, (ast.List, ast.Tuple)) else [shape]
         sources = {}
+
+        def model_axis(axis):
+            if (
+                isinstance(axis, ast.Name)
+                and axis.id in parameters
+                or (isinstance(axis, ast.Attribute) and isinstance(axis.value, ast.Name) and axis.value.id == "self")
+            ):
+                return extent(axis, sources)
+            return None
+
+        project_tensor_axes(dtype, kind, model_axis)
         fields[target.attr] = dict(
             kind="dense_field",
             type_node=dtype,
@@ -116,7 +127,7 @@ def field_declarations(module, constructor, kind, fail):
 def construct_fields(owner, schema, namespace, module, *, imported_modules=None):
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
-    from ._component import DenseField, Dimension, Record, _ConditionalDenseField
+    from ._component import DenseField, Dimension, Record, _ConditionalDenseField, _ModelTensorField
     from taichi_forge_runtime._dimensions import evaluate_extent
     from ._package_records import read_member, write_member
 
@@ -151,6 +162,17 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         return declarations
     typed = []
     for name, item in fields.items():
+
+        def field_extent(extent):
+            expression = item.get("dimension_expressions", {}).get(extent, ())
+            declarations[extent] = Dimension(expression=expression)
+            value = evaluate_extent(expression, lambda key: read_member(owner, key, schema)) if expression else 1
+            if not 0 < value <= 2**31 - 1:
+                raise ValueError("Declared extent needs a legal symbolic construction witness")
+            setattr(owner, extent, value)
+            return value
+
+        model_tensors = {}
         declaration_namespace = (
             vars(imported_modules[item["declaration_module"]])
             if imported_modules is not None and "declaration_module" in item
@@ -164,8 +186,12 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
                 "_forge_package_matrix": ti.types.matrix,
             },
             allow_members=item.get("struct_field", False),
+            model_tensors=model_tensors,
+            witness=field_extent,
         )
-        item["element"] = type_spec(dtype, module)
+        item["element"] = type_spec(dtype, module, model_tensors=model_tensors)
+        if model_tensors and item.get("conditions"):
+            raise ValueError("Conditional model tensor Fields require projected layout selection")
         if item.get("struct_field"):
             if (
                 item["element"]["kind"] != "struct"
@@ -178,13 +204,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         concrete = []
         for extent in item["shape"]:
             if isinstance(extent, str):
-                expression = item.get("dimension_expressions", {}).get(extent, ())
-                declarations[extent] = Dimension(expression=expression)
-                value = evaluate_extent(expression, lambda key: read_member(owner, key, schema)) if expression else 1
-                if not 0 < value <= 2**31 - 1:
-                    raise ValueError("Declared extent needs a legal symbolic construction witness")
-                setattr(owner, extent, value)
-                concrete.append(value)
+                concrete.append(field_extent(extent))
             else:
                 if not 0 < extent <= 2**31 - 1:
                     raise ValueError("Field extents must fit the existing positive i32 dimension contract")
@@ -227,10 +247,16 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         else:
             parent.place(value)
         setattr(owner, name, value)
+
+        def field_declaration(element, spec):
+            if spec.get("model_tensor"):
+                return _ModelTensorField(element.dtype, tuple(item["shape"]), group, tuple(spec["element_shape"]))
+            return DenseField(element, tuple(item["shape"]), group)
+
         declarations[name] = (
             Record(
                 **{
-                    member: DenseField(element, tuple(item["shape"]), group)
+                    member: field_declaration(element, item["element"]["members"][member])
                     for member, element in dtype.members.items()
                 }
             )
@@ -238,7 +264,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             else (
                 _ConditionalDenseField(dtype, tuple(item["shape"]), group, tuple(sorted(item["conditions"].items())))
                 if item.get("conditions")
-                else DenseField(dtype, tuple(item["shape"]), group)
+                else field_declaration(dtype, item["element"])
             )
         )
     owner._forge_package_field_trees = [builder._finalize_for_aot() for builder in builders.values()]
@@ -247,7 +273,8 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
 
 def field_environment(declarations, schema):
     """Retain the allocation scope of record dimensions, as from_owner does."""
-    from ._component import DenseField, _capture_id
+    from dataclasses import replace
+    from ._component import _ModelTensorField, _capture_id
     from ._package_records import record_environment
 
     environment = record_environment(declarations, schema)
@@ -257,7 +284,10 @@ def field_environment(declarations, schema):
             for member in item["element"]["members"]:
                 identity = _capture_id((name, member))
                 original = flattened[identity]
-                flattened[identity] = DenseField(original.dtype, tuple(item["shape"]), original.group)
+                changes = dict(shape=tuple(item["shape"]))
+                if isinstance(original, _ModelTensorField):
+                    changes["element_shape"] = tuple(item["element"]["members"][member]["element_shape"])
+                flattened[identity] = replace(original, **changes)
     environment._set_declarations(flattened)
     environment._derived_attributes = frozenset(
         name for name, item in schema.items() if item["kind"] == "dimension" and item.get("expression")

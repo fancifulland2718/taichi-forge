@@ -1100,6 +1100,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     {item.get("group", "fields") for item in schema.values() if item["kind"] == "dense_field"}
                 ):
                     layout, members, dimensions, _ = _dense_group(environments[class_name], owner, group)
+                    if any(paths[0] == "schema_nodes" for paths in members.values()):
+                        manifest["version"] = max(26, manifest["version"])
                     key = owner_key if group == "fields" else owner_key + ":" + group
                     manifest["field_groups"][key] = dict(schema=layout, members=members, dimensions=sorted(dimensions))
                     member_schemas = {
@@ -1116,6 +1118,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         if member_schemas[attribute].get("conditions")
                     }
                     if conditions:
+                        if any(paths[0] == "schema_nodes" for paths in members.values()):
+                            raise PackageExportError(
+                                "Conditional model tensor groups require projected layout selection"
+                            )
                         manifest["field_groups"][key]["conditions"] = conditions
                         containers = {
                             tuple(members[attribute][0][:-1]): member_schemas[attribute]["placement"]["conditions"]
@@ -1301,11 +1307,17 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         for capture_name, schema in code.contract["captures"]
                     ]
                     for item in capture:
-                        if item["kind"] == "dense_field":
+                        if item["kind"] == "model_tensor_field":
+                            shape = environment.declarations[item["name"]].element_shape
+                            item["model_element_shape"] = list(shape)
+                            item["model_dimension_relations"] = dimension_relations(
+                                environment, (n for n in shape if isinstance(n, str))
+                            )
+                        if item["kind"] in ("dense_field", "model_tensor_field"):
                             item.update(
                                 layout_owner(environment, compilation_schemas.get(owner_name, {}), item["name"])
                             )
-                        if item["kind"] in ("ndarray", "dense_field"):
+                        if item["kind"] in ("ndarray", "dense_field", "model_tensor_field"):
                             item.pop("dtype")
                         if item["kind"] == "dimension" and environment.declarations[item["name"]].expression:
                             relations = dimension_relations(environment, (item["name"],))

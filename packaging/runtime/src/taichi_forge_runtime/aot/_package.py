@@ -304,10 +304,28 @@ class _ModuleBinding:
         values = {}
         for attribute, identity in member_ids.items():
             element = member["element"]["members"][attribute] if member.get("struct_field") else member["element"]
-            value = group.member(
-                contract["members"][identity], element["dtype"], element_shape=element["element_shape"]
-            )
+            selector = contract["members"][identity]
+            element_shape = tuple(dimensions[n] if isinstance(n, str) else n for n in element["element_shape"])
+            if selector[0] == "schema_nodes":
+                value = group.schema_member(selector[1], element["dtype"], element_shape=element_shape)
+                if element.get("model_tensor"):
+                    scalar = group.schema_member(
+                        selector[1], element["dtype"], element_shape=element_shape, scalar_axes=True
+                    )
+                    value._forge_package_model_scalar_view = scalar
+                    self.package._arrays.append(scalar)
+                    allocated.append(scalar)
+            else:
+                if element.get("model_tensor"):
+                    raise ValueError("Model tensor Field requires its native recipe member")
+                value = group.member(selector, element["dtype"], element_shape=element_shape)
             value._forge_package_field_source = (owner, (name, attribute) if member.get("struct_field") else (name,))
+            if element_shape:
+                value.n, value.m, value.ndim = (
+                    element_shape[0],
+                    element_shape[1] if len(element_shape) == 2 else 1,
+                    len(element_shape),
+                )
             self.package._arrays.append(value)
             allocated.append(value)
             values[attribute] = value
@@ -521,6 +539,7 @@ class _ResourceScope:
         keys = tuple(static_key(value) for value in choices)
         if not keys or len(set(keys)) != len(keys) or static_key(getattr(self._owner, name)) not in keys:
             raise ValueError(f"Static configuration {name!r} is outside its declared domain")
+        self._identity(name)
 
     def dim(self, name):
         if not isinstance(name, str) or not name.isidentifier():
@@ -803,7 +822,7 @@ class LoadedPackage:
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
             self.manifest.get("version")
-            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)
+            not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

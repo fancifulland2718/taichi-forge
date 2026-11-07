@@ -50,6 +50,7 @@ def check_owner_bindings(owner, bindings):
 
 
 def capture_value(owner, spec):
+    root = owner
     relations = spec.get("dimension_relations")
     if relations:
 
@@ -74,6 +75,21 @@ def capture_value(owner, spec):
         return resolve(spec["name"])
     for name in spec.get("path", (spec["name"],)):
         owner = getattr(owner, name)
+    if spec.get("kind") == "model_tensor_field":
+        expected = tuple(
+            (
+                capture_value(root, dict(name=axis, dimension_relations=spec["model_dimension_relations"]))
+                if isinstance(axis, str)
+                else axis
+            )
+            for axis in spec["model_element_shape"]
+        )
+        if owner.element_shape != expected:
+            raise ValueError("Model tensor shape differs from its allocated Field")
+        view = getattr(owner, "_forge_package_model_scalar_view", None)
+        if view is None:
+            raise ValueError("Model tensor capture requires its native scalar-axis Field view")
+        return view
     return owner
 
 

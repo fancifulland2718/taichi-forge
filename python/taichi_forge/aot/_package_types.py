@@ -22,7 +22,27 @@ def qualified_kind(node, kind):
     return result
 
 
-def resolve_type(node, namespace, *, allow_ndarray=False, allow_members=False):
+def project_tensor_axes(node, kind, dimension):
+    """Mark definition-proven model axes on builtin type calls only."""
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        role = qualified_kind(call, kind)
+        if isinstance(call.func, ast.Name) and call.func.id in ("_forge_package_vector", "_forge_package_matrix"):
+            role = "types." + call.func.id.removeprefix("_forge_package_")
+        axes = {"types.vector": ("n",), "types.matrix": ("n", "m")}.get(role)
+        if axes is None:
+            continue
+        arguments = dict(zip((*axes, "dtype"), call.args))
+        arguments.update((k.arg, k.value) for k in call.keywords)
+        for axis in axes:
+            if axis in arguments:
+                projected = dimension(arguments[axis])
+                if isinstance(projected, str):
+                    arguments[axis]._package_model_extent = projected
+
+
+def resolve_type(node, namespace, *, allow_ndarray=False, allow_members=False, model_tensors=None, witness=None):
     """Resolve only fixed type declarations; do not execute application factories."""
     import taichi_forge as ti
 
@@ -58,7 +78,27 @@ def resolve_type(node, namespace, *, allow_ndarray=False, allow_members=False):
                 raise ValueError("Type construction requires a builtin vector/matrix/struct factory")
             if any(k.arg is None for k in expression.keywords):
                 raise ValueError("Expanded type arguments are unsupported")
-            return factory(*[value(a) for a in expression.args], **{k.arg: value(k.value) for k in expression.keywords})
+            axes = ("n",) if factory is ti.types.vector else ("n", "m") if factory is ti.types.matrix else ()
+            arguments = dict(zip((*axes, "dtype"), expression.args)) if axes else {}
+            arguments.update((k.arg, k.value) for k in expression.keywords)
+            model_axes = {axis: getattr(arguments.get(axis), "_package_model_extent", None) for axis in axes}
+
+            def argument(item):
+                extent = getattr(item, "_package_model_extent", None)
+                if extent is not None:
+                    if model_tensors is None or witness is None:
+                        raise ValueError("Model tensor type requires its Field dimension projection")
+                    return witness(extent)
+                return value(item)
+
+            result = factory(
+                *[argument(a) for a in expression.args], **{k.arg: argument(k.value) for k in expression.keywords}
+            )
+            if any(model_axes.values()):
+                model_tensors[id(result)] = tuple(
+                    model_axes[axis] or size for axis, size in zip(axes, result.get_shape())
+                )
+            return result
         raise ValueError("Type declarations require fixed names, constants or builtin factories")
 
     result = value(node)
@@ -70,7 +110,7 @@ def resolve_type(node, namespace, *, allow_ndarray=False, allow_members=False):
     return result
 
 
-def type_spec(dtype, module):
+def type_spec(dtype, module, *, model_tensors=None):
     """Publish struct ABI through Module; tensor/scalar metadata is logical only."""
     from taichi_forge.lang.struct import StructType
     from taichi_forge.types.ndarray_type import NdarrayType
@@ -93,11 +133,25 @@ def type_spec(dtype, module):
         if not isinstance(dtype, StructType):
             raise ValueError("Structure exports require their original frontend type")
         name = "type_" + hashlib.sha256(json.dumps(description.structural_key(), sort_keys=True).encode()).hexdigest()
-        module.add_ndarray_layout(name, dtype)
+        members = {
+            member: type_spec(element, module, model_tensors=model_tensors) for member, element in dtype.members.items()
+        }
+        # A model-sized Field is a native SNode recipe, not a witness-sized
+        # StructNdarray ABI. Fixed Struct types keep the existing type export.
+        dynamic = any(part.get("model_tensor") for part in members.values())
+        if not dynamic:
+            module.add_ndarray_layout(name, dtype)
         return dict(
             kind="struct",
-            layout=name,
-            members={member: type_spec(element, module) for member, element in dtype.members.items()},
+            **({} if dynamic else {"layout": name}),
+            members=members,
+        )
+    if model_tensors and id(dtype) in model_tensors:
+        return dict(
+            kind="tensor",
+            dtype=str(description.scalar_type),
+            element_shape=list(model_tensors[id(dtype)]),
+            model_tensor=True,
         )
     return dict(kind=description.category, dtype=str(description.scalar_type), element_shape=list(description.shape))
 

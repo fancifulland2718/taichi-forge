@@ -2486,6 +2486,210 @@ def test_package_graph_captures_are_instance_snapshots_without_new_code(tmp_path
     assert "OWNER_GRAPH_SOURCE_FREE_OK" in result.stdout
 
 
+MODEL_TENSOR_SOURCE = """
+import taichi_forge as ti
+from types import SimpleNamespace
+constructors = 0
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, dof: int):
+        global constructors
+        constructors += 1
+        self.dof = dof
+        self.v = ti.Vector.field(self.dof, ti.f32, shape=n)
+        self.matrix = ti.Matrix.field(dof, 2, ti.f32, shape=n)
+        self.fixed = ti.Vector.field(3, ti.f32, shape=n)
+
+    @ti.func
+    def touch(self, i, j, gain):
+        self.v[i][j] += gain * (i + j)
+        self.matrix[i][j, 1] = self.v[i][j] + 2
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.v:
+            for j in range(self.v.n):
+                self.touch(i, j, gain)
+            self.fixed[i] = ti.Vector([gain, i, 3])
+
+@ti.data_oriented
+class Rows:
+    def __init__(self, n: int, dof: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.layout = SimpleNamespace(dof=dof)
+        scope = ti.experimental.ResourceScope(self)
+        layout = scope.record('layout', self.layout)
+        layout.static('dof', choices=(self.layout.dof,))
+        scope.rows = scope.struct_field({
+            'J': ti.types.vector(self.layout.dof, ti.f32),
+            'fixed': ti.types.vector(3, ti.f32),
+            'result': ti.f32,
+        }, shape=scope.dim('n'))
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.rows.J:
+            total = 0.0
+            for j in range(self.layout.dof):
+                self.rows.J[i][j] += gain * (i + j)
+                total += self.rows.J[i][j]
+            self.rows.result[i] = total
+            self.rows.fixed[i] = ti.Vector([gain, i, 3])
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        return builder.compile()
+
+@ti.data_oriented
+class Reader:
+    def __init__(self, n: int, dof: int):
+        scope = ti.experimental.ResourceScope(self)
+        scope.source = Model(n, dof)
+        scope.borrow('alias', self.source.v, source_scope=True)
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.alias:
+            for j in range(self.alias.n):
+                self.alias[i][j] = gain * (i + j)
+"""
+
+
+@pytest.mark.parametrize("real_helper", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_infers_model_tensor_axes_without_constructor_samples(tmp_path, monkeypatch, real_helper):
+    if real_helper and ti.cfg.arch == ti.vulkan:
+        pytest.skip("Vulkan does not support real functions")
+    source = MODEL_TENSOR_SOURCE
+    if real_helper:
+        source = source.replace(
+            "@ti.func\n    def touch(self, i, j, gain):",
+            "@ti.real_func\n    def touch(self, i: ti.i32, j: ti.i32, gain: ti.f32):",
+        )
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model, Rows, Reader\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert manifest["version"] == 26
+    model_entries = [
+        entry for entry in manifest["entries"].values() if entry["definition"].endswith(("Model.step", "Rows.step"))
+    ]
+    assert len(model_entries) == 2 and not manifest["entry_families"]
+    assert any(
+        item["kind"] == "model_tensor_field" for entry in manifest["entries"].values() for item in entry["captures"]
+    )
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        for name in ("Model", "Rows"):
+            a = getattr(library.host, name)(2, 3)
+            b = getattr(library.host, name)(3, 65)
+            original = getattr(package, name)(2, 3)
+            original.step(2.0)
+            a.step(2.0)
+            b.step(-1.0)
+            arrays = ("v", "matrix", "fixed") if name == "Model" else ("J", "fixed", "result")
+            left = a if name == "Model" else a.rows
+            right = b if name == "Model" else b.rows
+            reference = original if name == "Model" else original.rows
+            for attribute in arrays:
+                expected = getattr(reference, attribute).to_numpy()
+                np.testing.assert_array_equal(
+                    np.frombuffer(getattr(left, attribute).read(), np.float32).reshape(expected.shape), expected
+                )
+            field = right.v if name == "Model" else right.J
+            assert field.shape == (3,) and field.element_shape == (65,) and field.n == 65
+            np.testing.assert_array_equal(
+                np.frombuffer(field.read(), np.float32).reshape(3, 65), -(np.arange(3)[:, None] + np.arange(65))
+            )
+            assert field._group_owner is not (left.v if name == "Model" else left.J)._group_owner
+            if name == "Rows":
+                graph = b.graph()
+                with graph.bind({"gain": 0.5}) as prepared:
+                    b.layout.dof = 66
+                    for operation in (lambda: b.step(1.0), lambda: graph.bind({"gain": 1.0})):
+                        with pytest.raises(ValueError, match="Derived dimension"):
+                            operation()
+                    prepared.run()
+                np.testing.assert_array_equal(
+                    np.frombuffer(field.read(), np.float32).reshape(3, 65),
+                    -0.5 * (np.arange(3)[:, None] + np.arange(65)),
+                )
+        registered = set(runtime._resources)
+        with pytest.raises((ValueError, RuntimeError)):
+            library.host.Model(2, 0)
+        assert runtime._resources == registered
+        reader = library.host.Reader(2, 17)
+        reader.step(3.0)
+        assert reader.alias is reader.source.v
+        assert reader._forge_package_field_groups == {}
+        np.testing.assert_array_equal(reader.source.v.to_numpy(), 3 * (np.arange(2)[:, None] + np.arange(17)))
+    probe = tmp_path / "consume_model_tensor.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as library:
+            for name in ('Model', 'Rows'):
+                model = getattr(library.host, name)(2, 129)
+                model.step(3.0)
+                field = model.v if name == 'Model' else model.rows.J
+                np.testing.assert_array_equal(np.frombuffer(field.read(), np.float32).reshape(2, 129), 3 * (np.arange(2)[:, None] + np.arange(129)))
+            reader = library.host.Reader(2, 129)
+            reader.step(-2.0)
+            assert reader.alias is reader.source.v and reader._forge_package_field_groups == {}
+            np.testing.assert_array_equal(reader.alias.to_numpy(), -2 * (np.arange(2)[:, None] + np.arange(129)))
+        print('MODEL_TENSOR_PACKAGE_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    consumer = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert consumer.returncode == 0, consumer.stdout + consumer.stderr
+    assert "MODEL_TENSOR_PACKAGE_SOURCE_FREE_OK" in consumer.stdout
+
+
+@pytest.mark.parametrize("replacement", ["choices=(self.layout.dof + 1,)", "choices=(self.n,)"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unproven_model_tensor_static_domains(tmp_path, monkeypatch, replacement):
+    source = MODEL_TENSOR_SOURCE.replace("choices=(self.layout.dof,)", replacement)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="Static domain"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_keeps_computed_statics_without_tensor_axis_use_rejected(tmp_path, monkeypatch):
+    source = MODEL_TENSOR_SOURCE.replace("ti.types.vector(self.layout.dof, ti.f32)", "ti.types.vector(3, ti.f32)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="proven model tensor axis"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 FIELD_SOURCE = """
 import taichi_forge as ti
 constructors = 0

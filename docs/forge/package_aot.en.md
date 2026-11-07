@@ -593,10 +593,9 @@ a provenance obligation: the result must borrow that exact input with
 Unknown parameters are not simply assumed to be Fields; side effects, dropped
 return values or substitution with external bindings remain rejected.
 GeoPhys's original `declare_source_borrow` passes source-free consumers on all
-three backends for this mandatory numerical Field path. Original EFC declaration
-preflight passes helper forwarding but still rejects its nonliteral `dof_count`
-static type domain. Normalization across different compatible
-source definitions and the full EFC type domain remain work to do. This is not
+three backends for this mandatory numerical Field path. Model element dimensions
+such as `dof_count` are supported by version 26 below. Normalization across
+compatible source definitions, dynamic local vectors and the full EFC path remain work to do. This is not
 whole EFC or engine qualification.
 
 Version 24 supports Field inputs selected by existing `input is None` / `is not None`
@@ -614,6 +613,36 @@ presence and source identity, while prepared calls retain their snapshots. Focus
 CPU/CUDA/Vulkan source-free consumers and the original GeoPhys helper cover these
 paths. Optional object references and model-driven tensor element or local-vector
 lengths are not thereby supported.
+
+## Inferring model tensor element dimensions
+
+Version 26 infers model element axes from `Vector.field` / `Matrix.field` constructor
+parameters and proven single-assignment aliases, and from existing ResourceScope
+dimensions. Flat Struct Field vector/matrix members use the same rules and retain
+normal AOS/SOA placement. Mathematical dimensions such as `3` and `2 x 2` stay fixed.
+No model constructor, DOF enumeration, application decorator or manual ABI is required.
+
+An existing `record.static('dof_count', choices=(layout.dof_count,))` projects to a
+model dimension only when its singleton comes from that exact declared record member
+and has a proven tensor-axis use. Literal finite static domains remain unchanged.
+Other computed domains, mismatched sources and declarations without an element-axis
+use reject. Ordinary JIT keeps its normal type specialization.
+
+Numerical code uses zero-copy scalar axes over the original Field. Host retains
+logical `shape`, tensor `element_shape` and `n/m/ndim`. The native compiler owns the
+recipe, fixed siblings and actual byte layout; no witness-sized StructNdarray ABI is
+published. Calls and Graph rebinding validate element-dimension relations. Changing
+model dimensions requires new state/preparation, not mutating dimensions of an old allocation.
+
+Focused CPU/CUDA/Vulkan checks cover direct Vector/Matrix and Struct Fields,
+independent instances and frontend-blocked consumption at a new size of 129.
+CPU/CUDA also cover `real_func`. GeoPhys's unchanged `declare_batch_layout` helper
+passes source-free layout consumers on all three backends. This is not complete EFC:
+whole-element local copies/arithmetic, dynamic local vectors, shared workspaces and
+conditional layouts in a group containing model tensors still require support.
+Fixed-element Ndarray and explicit value-argument type contracts are unchanged.
+
+## Kernel factories in original definitions
 
 Version 25 supports straight-line kernel factories bound unconditionally in ordinary
 constructors: one original nested `@ti.kernel`, followed by returning that definition.
