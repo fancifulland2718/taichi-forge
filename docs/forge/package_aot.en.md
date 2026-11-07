@@ -661,6 +661,14 @@ invalid relations, replaced aliases and source-group retirement. GeoPhys
 verification reuses its original `resource_scope` factory without production
 adapters or new application decorators.
 
+Declared boolean guards also support optional `scope.child = KnownClass(...)`
+construction, with an earlier `self.child = None` or an explicit absent-branch
+record. Child resources retain their original allocation groups. Parent entries
+must guard reads of the child, including child static options; entry selection
+reads those options only when the child is present. CPU/CUDA local checks cover
+source-free construction, independent state and retained prepared bindings.
+Unrelated entries do not specialize on the optional child configuration.
+
 Version 21 resolves unconditional existing `scope.child = KnownClass(...)`
 construction through the scanned class definitions. Plain Host classes with an
 existing resource scope need no additional decorator. The exporter builds type

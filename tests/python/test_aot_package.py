@@ -978,6 +978,139 @@ def test_package_declared_owner_graph_shares_children_and_keeps_instance_binding
     assert "CHILD_DEFINITIONS_SOURCE_FREE_OK" in result.stdout
 
 
+CONDITIONAL_CHILD_SOURCE = DECLARED_CHILD_SOURCE[: DECLARED_CHILD_SOURCE.index("@ti.data_oriented\nclass Model:")] + """
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool, first: bool = False):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+        self.child = None
+        if self.enabled:
+            scope.child = Group(n, n + 1, first, False)
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.values:
+            if ti.static(self.enabled):
+                self.values[i] = self.child.left.values[i] + gain * self.child.left.bias()
+            else:
+                self.values[i] = -gain * i
+
+    @ti.kernel
+    def common(self):
+        for i in self.values:
+            self.values[i] = 2 * i
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+        builder.dispatch(self.step, gain)
+        return builder.compile()
+"""
+
+
+@pytest.mark.parametrize("absence", ["initial", "record"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_conditional_children_keep_local_state_and_code_domains(tmp_path, monkeypatch, absence):
+    source = CONDITIONAL_CHILD_SOURCE
+    if absence == "record":
+        source = source.replace("        self.child = None\n", "").replace(
+            "            scope.child = Group(n, n + 1, first, False)",
+            "            scope.child = Group(n, n + 1, first, False)\n"
+            "        else:\n            scope.record('child', None, optional=True)",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = package.Model(7, True, True)
+    original.child.fill(3.0)
+    original.step(2.0)
+    expected = original.values.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 37
+    assert sys.modules["definition_fixture.model"].constructors == 2
+    assert len(manifest["entries"]) == 6  # Three step paths, fill, common, unimported entry.
+    (family,) = manifest["entry_families"].values()
+    assert len(family["variants"]) == 3
+    assert list(family["conditions"].values()) == [{"enabled": True}]
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b, c = code.host.Model(7, True, True), code.host.Model(19, True), code.host.Model(5, False)
+        assert c.child is None
+        a.child.fill(3.0)
+        b.child.fill(-2.0)
+        a.step(2.0)
+        b.step(4.0)
+        c.step(2.0)
+        np.testing.assert_array_equal(a.values.to_numpy(), expected)
+        np.testing.assert_array_equal(b.values.to_numpy(), -2 * np.arange(19) + 8)
+        np.testing.assert_array_equal(c.values.to_numpy(), -2 * np.arange(5))
+        assert a.child.left.values._group_owner is not b.child.left.values._group_owner
+        prepared = a.graph().bind(dict(gain=2.0))
+        saved = a.child
+        a.child, a.enabled = None, False
+        prepared.run()
+        np.testing.assert_array_equal(a.values.to_numpy(), expected)
+        a.step(2.0)
+        np.testing.assert_array_equal(a.values.to_numpy(), -2 * np.arange(7))
+        a.enabled = True
+        with pytest.raises((ValueError, AttributeError)):
+            a.step(2.0)
+        a.common()
+        np.testing.assert_array_equal(a.values.to_numpy(), 2 * np.arange(7))
+        a.child = saved
+        prepared.close()
+    probe = tmp_path / "consume_conditional_child.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(17, True, True), code.host.Model(33, False)
+            a.child.fill(3.0)
+            a.step(2.0)
+            b.step(2.0)
+            np.testing.assert_array_equal(a.values.to_numpy(), 3 * np.arange(17) + 14)
+            np.testing.assert_array_equal(b.values.to_numpy(), -2 * np.arange(33))
+            assert b.child is None
+        print('CONDITIONAL_CHILD_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CONDITIONAL_CHILD_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("expression", ["self.child.left.values[i]", "self.child.left.bias()"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_conditional_child_capture_requires_parent_guard(tmp_path, monkeypatch, expression):
+    source = CONDITIONAL_CHILD_SOURCE.replace("self.values[i] = 2 * i", f"self.values[i] = {expression}")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="requires its declared static guard"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
 @pytest.mark.parametrize(
     "before,after,diagnostic",
     [

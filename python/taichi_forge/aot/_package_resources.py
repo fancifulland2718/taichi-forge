@@ -745,6 +745,14 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                 if len(call.args) != 2 or not isinstance(call.args[0], ast.Constant):
                     return None
                 fields.add(call.args[0].value)
+            elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(call, ast.Call):
+                target = node.targets[0]
+                if isinstance(target, ast.Attribute) and scope_binding(target.value) in scopes:
+                    from ._package_factories import _source_value
+                    import inspect
+
+                    if inspect.isclass(_source_value(call.func, namespace)):
+                        fields.add(target.attr)
         return fields, records
 
     def paired_records(statement):
@@ -852,7 +860,13 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                 group = scope_groups[contexts[id(statement)]]
                 builders[group]["conditions"] = dict(conditions)
                 yield from statements(statement.body, conditions)
-            elif isinstance(statement, ast.If) and any(operation(n)[0] for n in ast.walk(statement)):
+            elif isinstance(statement, ast.If) and any(
+                operation(n)[0]
+                or isinstance(n, ast.Attribute)
+                and isinstance(n.ctx, ast.Store)
+                and scope_binding(n.value) in scopes
+                for n in ast.walk(statement)
+            ):
                 test, expected = statement.test, True
                 if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
                     test, expected = test.operand, False
@@ -1351,8 +1365,28 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                                 root = root.value
                             if not isinstance(root, ast.Name) or root.id in stores:
                                 fail(module, statement, "Declared child owner requires an unshadowed class definition")
-                            if conditions or member_stores[target.attr] != 1:
-                                fail(module, statement, "Declared child owner requires one unconditional construction")
+                            initial_none = (
+                                conditions
+                                and member_stores[target.attr] == 2
+                                and any(
+                                    isinstance(prior, ast.Assign)
+                                    and len(prior.targets) == 1
+                                    and isinstance(prior.targets[0], ast.Attribute)
+                                    and isinstance(prior.targets[0].value, ast.Name)
+                                    and prior.targets[0].value.id == "self"
+                                    and prior.targets[0].attr == target.attr
+                                    and isinstance(prior.value, ast.Constant)
+                                    and prior.value.value is None
+                                    and prior.lineno < statement.lineno
+                                    for prior in constructor.body
+                                )
+                            )
+                            if member_stores[target.attr] != 1 and not initial_none:
+                                fail(
+                                    module,
+                                    statement,
+                                    "Declared child owner requires one construction and optional None default",
+                                )
                             add(
                                 target.attr,
                                 dict(
@@ -1360,6 +1394,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                                     owner_type=cls.__module__ + "." + cls.__qualname__,
                                     constructor_call=copy.deepcopy(statement.value),
                                     scope_allocation=origin(receiver),
+                                    **({"conditions": dict(conditions)} if conditions else {}),
                                 ),
                                 statement,
                             )

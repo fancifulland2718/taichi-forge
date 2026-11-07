@@ -79,7 +79,7 @@ class OwnerGraph:
                 value, _, child, expanded = self.construct(
                     item["owner_type"], resource_only=item["kind"] == "owner_input", references=references
                 )
-                declarations[attribute] = Record()
+                declarations[attribute] = Record(optional=bool(item.get("conditions")))
                 children[attribute] = (child, expanded)
             elif item["kind"] == "static":
                 choices = tuple(read_static_key(key) for key in item["choices"])
@@ -121,6 +121,7 @@ def _compose(environment, schema, children):
     derived, expanded = set(environment._derived_attributes), dict(schema)
     for attribute, (child, child_schema) in children.items():
         names = {key: _capture_id((attribute, *path)) for key, path in child._paths.items()}
+        owner_conditions = schema[attribute].get("conditions", {})
 
         def expression(value):
             op, *args = value
@@ -180,6 +181,8 @@ def _compose(environment, schema, children):
                 transformed["source_path"] = [attribute, *item["source_path"]]
             if "conditions" in item:
                 transformed["conditions"] = {names[n]: expected for n, expected in item["conditions"].items()}
+            if owner_conditions:
+                transformed["conditions"] = {**transformed.get("conditions", {}), **owner_conditions}
             expanded[names[key]] = transformed
     environment._set_declarations(declarations)
     environment._paths = MappingProxyType(paths)
