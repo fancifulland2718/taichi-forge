@@ -50,9 +50,15 @@ def resolve_inputs(sources, imported):
         (owner, key): item
         for owner, (schema, _) in owners.items()
         for key, item in schema.items()
-        if item["kind"] == "owner_input" or item["kind"] == "borrowed_field" and "input_parameter" in item
+        if item["kind"] in ("owner_input", "borrowed_field") and "input_parameter" in item
     }
-    if not inputs:
+    aliases = {
+        (owner, key): item
+        for owner, (schema, _) in owners.items()
+        for key, item in schema.items()
+        if item["kind"] == "owner_input" and "reference_path" in item
+    }
+    if not inputs and not aliases:
         return
     classes = {cls: name for name, (_, cls) in owners.items()}
     annotated = set()
@@ -191,6 +197,16 @@ def resolve_inputs(sources, imported):
 
     while True:
         changed = False
+        for (owner, name), item in aliases.items():
+            resolved = member_type(owner, item["reference_path"])
+            if resolved is None:
+                continue
+            source_type, source_member = resolved
+            if source_member:
+                raise ValueError(f"Owner reference {owner}.{name} requires an object source")
+            if item.get("owner_type") != source_type:
+                item["owner_type"] = source_type
+                changed = True
         for (owner, name), item in inputs.items():
             observed_all = {
                 identity
@@ -218,6 +234,9 @@ def resolve_inputs(sources, imported):
                 changed = True
         if not changed:
             break
+    for (owner, name), item in aliases.items():
+        if "owner_type" not in item:
+            raise ValueError(f"Owner reference {owner}.{name} requires a resolved declared owner path")
     for (owner, name), item in inputs.items():
         if (owner, name) in annotated:
             continue

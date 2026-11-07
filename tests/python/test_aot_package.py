@@ -626,7 +626,7 @@ def test_package_fixed_alias_mapping_rejects_unproven_inputs(tmp_path, monkeypat
         (
             "scope.owner_reference('source', source)",
             "scope.owner_reference('source', source, optional=True)",
-            "unconditional named constructor parameter",
+            "named constructor parameter or declared owner path",
         ),
         ("scope.reader = Reader(source)", "scope.reader = Reader(*[source])", "explicit arguments"),
         (
@@ -783,9 +783,9 @@ def test_package_owner_input_default_reuses_the_same_numerical_definition(tmp_pa
 @pytest.mark.parametrize(
     "change,diagnostic",
     [
-        ("condition", "unconditional named constructor parameter"),
-        ("rebind", "unconditional named constructor parameter"),
-        ("delete", "unconditional named constructor parameter"),
+        ("condition", "named constructor parameter or declared owner path"),
+        ("rebind", "named constructor parameter or declared owner path"),
+        ("delete", "named constructor parameter or declared owner path"),
         ("shadow", "unshadowed source name"),
         ("factory", "declared owner constructor"),
         ("type", "contradicts its declared source type"),
@@ -1012,8 +1012,9 @@ class Model:
 
 
 @pytest.mark.parametrize("absence", ["initial", "record"])
+@pytest.mark.parametrize("reference", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_conditional_children_keep_local_state_and_code_domains(tmp_path, monkeypatch, absence):
+def test_package_conditional_children_keep_local_state_and_code_domains(tmp_path, monkeypatch, absence, reference):
     source = CONDITIONAL_CHILD_SOURCE
     if absence == "record":
         source = source.replace("        self.child = None\n", "").replace(
@@ -1021,13 +1022,21 @@ def test_package_conditional_children_keep_local_state_and_code_domains(tmp_path
             "            scope.child = Group(n, n + 1, first, False)\n"
             "        else:\n            scope.record('child', None, optional=True)",
         )
+    if reference:
+        source = source.replace("self.child.left.values[i] + gain * self.child.left.bias()",
+                                "self.selected.values[i] + gain * self.selected.bias()")
+        source = source.replace(
+            "            scope.child = Group(n, n + 1, first, False)",
+            "            scope.child = Group(n, n + 1, first, False)\n"
+            "            scope.owner_reference('selected', self.child.left)",
+        )
     package = _source_package(tmp_path, monkeypatch, source)
     original = package.Model(7, True, True)
     original.child.fill(3.0)
     original.step(2.0)
     expected = original.values.to_numpy()
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 37
+    assert manifest["version"] == (38 if reference else 37)
     assert sys.modules["definition_fixture.model"].constructors == 2
     assert len(manifest["entries"]) == 6  # Three step paths, fill, common, unimported entry.
     (family,) = manifest["entry_families"].values()
@@ -1045,6 +1054,12 @@ def test_package_conditional_children_keep_local_state_and_code_domains(tmp_path
         np.testing.assert_array_equal(b.values.to_numpy(), -2 * np.arange(19) + 8)
         np.testing.assert_array_equal(c.values.to_numpy(), -2 * np.arange(5))
         assert a.child.left.values._group_owner is not b.child.left.values._group_owner
+        if reference:
+            saved_reference = a.selected
+            a.selected = b.selected
+            with pytest.raises(ValueError, match="Owner reference"):
+                a.step(2.0)
+            a.selected = saved_reference
         prepared = a.graph().bind(dict(gain=2.0))
         saved = a.child
         a.child, a.enabled = None, False
@@ -1107,6 +1122,27 @@ def test_package_conditional_child_capture_requires_parent_guard(tmp_path, monke
     source = CONDITIONAL_CHILD_SOURCE.replace("self.values[i] = 2 * i", f"self.values[i] = {expression}")
     package = _source_package(tmp_path, monkeypatch, source)
     with pytest.raises(ti.aot.PackageExportError, match="requires its declared static guard"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
+@pytest.mark.parametrize(
+    "reference,diagnostic",
+    [
+        ("self.child.missing", "resolved declared owner path"),
+        ("self.child.left.values", "object source"),
+        ("self.unknown", "named constructor parameter or declared owner path"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_owner_alias_rejects_unproven_sources(tmp_path, monkeypatch, reference, diagnostic):
+    source = CONDITIONAL_CHILD_SOURCE.replace(
+        "            scope.child = Group(n, n + 1, first, False)",
+        "            scope.child = Group(n, n + 1, first, False)\n"
+        f"            scope.owner_reference('selected', {reference})",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match=diagnostic):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
 

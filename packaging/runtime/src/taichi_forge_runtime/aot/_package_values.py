@@ -50,6 +50,8 @@ def check_constant(owner, path, value):
 def check_owner_bindings(owner, bindings):
     for binding in bindings:
         child = path_value(owner, binding["path"])
+        if "reference_path" in binding and child is not path_value(owner, binding["reference_path"]):
+            raise ValueError("Owner reference no longer refers to its declared source")
         if (
             getattr(child, "_forge_package_owner", None) is not owner._forge_package_owner
             or getattr(type(child), "_forge_package_type", None) != binding["owner_type"]

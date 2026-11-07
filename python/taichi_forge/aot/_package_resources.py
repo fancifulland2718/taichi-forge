@@ -999,6 +999,18 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
             from ._package_inputs import default_owner_call
 
             parameter = call.args[1].id if len(call.args) == 2 and isinstance(call.args[1], ast.Name) else None
+            reference = call.args[1] if len(call.args) == 2 else None
+            reference_path = []
+            while isinstance(reference, ast.Attribute):
+                reference_path.insert(0, reference.attr)
+                reference = reference.value
+            declared_path = (
+                reference_path
+                and isinstance(reference, ast.Name)
+                and reference.id == "self"
+                and {**(earlier or {}), **declarations}.get(reference_path[0], {}).get("kind")
+                in ("owner", "owner_input")
+            )
             fallback = None
             if parameter in parameter_names and stores[parameter] == 2 and parameter not in deleted:
                 fallback = default_owner_call(constructor, parameter, call.lineno)
@@ -1009,25 +1021,27 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                     if not isinstance(root, ast.Name) or root.id in stores:
                         fail(module, fallback, "Default owner constructor must resolve from an unshadowed source name")
             if (
-                conditions
-                or scope_paths[scope]
+                scope_paths[scope]
                 or len(call.args) != 2
                 or call.keywords
                 or not isinstance(call.args[0], ast.Constant)
                 or type(call.args[0].value) is not str
                 or not call.args[0].value.isidentifier()
-                or not isinstance(call.args[1], ast.Name)
-                or call.args[1].id not in parameter_names
-                or parameter in deleted
-                or stores[call.args[1].id] != 1
-                and fallback is None
+                or not declared_path
+                and (
+                    parameter not in parameter_names
+                    or parameter in deleted
+                    or stores[parameter] != 1
+                    and fallback is None
+                )
             ):
-                fail(module, call, "Owner input requires an unconditional named constructor parameter")
+                fail(module, call, "Owner input requires a named constructor parameter or declared owner path")
             add(
                 call.args[0].value,
                 dict(
                     kind="owner_input",
-                    input_parameter=call.args[1].id,
+                    **({"reference_path": reference_path} if declared_path else {"input_parameter": parameter}),
+                    **({"conditions": dict(conditions)} if conditions else {}),
                     reference_declaration=[call.lineno, call.col_offset],
                     scope_allocation=origin(scope),
                     **({"default_constructor_call": fallback} if fallback is not None else {}),

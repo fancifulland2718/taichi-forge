@@ -8,7 +8,11 @@ def owner_bindings(environment, schema, used):
     paths = [environment._paths[key] for key in used if key in environment._paths]
     paths.extend(environment._source_scope_paths[key] for key in used if key in environment._source_scope_paths)
     return {
-        key: dict(path=item.get("path", [key]), owner_type=item["owner_type"])
+        key: dict(
+            path=item.get("path", [key]),
+            owner_type=item["owner_type"],
+            **({"reference_path": item["reference_path"]} if "reference_path" in item else {}),
+        )
         for key, item in schema.items()
         if item["kind"] in ("owner", "owner_input")
         and any(tuple(path[: len(item.get("path", [key]))]) == tuple(item.get("path", [key])) for path in paths)
@@ -179,6 +183,8 @@ def _compose(environment, schema, children):
             transformed = {**item, "path": [attribute, *item.get("path", (key,))]}
             if "source_path" in item:
                 transformed["source_path"] = [attribute, *item["source_path"]]
+            if "reference_path" in item:
+                transformed["reference_path"] = [attribute, *item["reference_path"]]
             if "conditions" in item:
                 transformed["conditions"] = {names[n]: expected for n, expected in item["conditions"].items()}
             if owner_conditions:

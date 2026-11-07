@@ -424,7 +424,16 @@ class _ModuleBinding:
         from ._package_values import check_owner_bindings
 
         setattr(scope._root, name, value)
-        check_owner_bindings(scope._root, (dict(path=[name], owner_type=declaration["owner_type"]),))
+        check_owner_bindings(
+            scope._root,
+            (
+                dict(
+                    path=[name],
+                    owner_type=declaration["owner_type"],
+                    **({"reference_path": declaration["reference_path"]} if "reference_path" in declaration else {}),
+                ),
+            ),
+        )
 
     def check_alias_mapping(self, actual, expected):
         from types import MappingProxyType
@@ -1008,6 +1017,7 @@ class LoadedPackage:
                 35,
                 36,
                 37,
+                38,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

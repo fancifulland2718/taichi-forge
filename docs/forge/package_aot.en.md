@@ -678,7 +678,8 @@ and method scheduling in `.py`. Merely nesting Host objects adds no numerical
 entry. A parent numerical entry can use declared child resources/functions;
 only its actual static dependencies generate variants. Source-scope borrowing
 can follow those proven child allocation paths, preserving native group layouts.
-Unknown, shadowed, conditional or cyclic construction types reject export.
+Unknown, shadowed or cyclic construction types reject export; optional construction
+requires the declared guards described above.
 
 Calls and Graph bindings validate the used child definitions, loaded package,
 source aliases, dimensions and original conditional layouts. Prepared calls
@@ -698,6 +699,13 @@ to discover signatures. Every declared call to an unannotated input must prove
 one consistent source type; extra unscoped calls, unknown or conflicting sources
 reject instead of selecting one successful path. Host wrapping and different
 instances of that type reuse the same numerical entry.
+
+Version 38 also resolves `owner_reference` from an already declared owner path,
+such as `self.storage.child`, including guarded optional references. Its source
+type is proven from definitions. Constructor binding and numerical admission
+check both the package/type and identity with that source path; replacing only
+the alias rejects. CPU/CUDA local source-free checks retain independent state
+and prepared snapshots. This does not admit arbitrary reflected object graphs.
 
 The consumer borrows the existing instance without allocating another state.
 Compilation retains the source allocation's fields, dimensions and static facts,
