@@ -203,7 +203,10 @@ class entry:
         kernel = package._kernels.get(self.symbol)
         if kernel is None:
             kernel = package._kernels[self.symbol] = package._module.kernel(self.symbol)
-        return kernel.run(*arguments)
+        from ._package_buffers import HostBuffers
+
+        with HostBuffers(package.runtime, contract["arguments"], arguments) as prepared:
+            return kernel.run(*prepared)
 
 
 class LoadedPackage:

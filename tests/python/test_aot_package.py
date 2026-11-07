@@ -67,10 +67,10 @@ def unused_public_function(x: ti.i32) -> ti.i32:
 """
 
 
-def _source_package(tmp_path, monkeypatch, source=SOURCE):
+def _source_package(tmp_path, monkeypatch, source=SOURCE, *, initializer="from .model import Model\n"):
     root = tmp_path / "definition_fixture"
     root.mkdir()
-    (root / "__init__.py").write_text("from .model import Model\n", encoding="utf8")
+    (root / "__init__.py").write_text(initializer, encoding="utf8")
     (root / "model.py").write_text(textwrap.dedent(source), encoding="utf8")
     (root / "device_helpers.py").write_text(
         textwrap.dedent("""
@@ -734,3 +734,58 @@ def imports(x):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PACKAGE_IMPORT_ISOLATION_OK" in result.stdout
+
+
+HOST_BUFFER_SOURCE = """
+import taichi_forge as ti
+
+@ti.kernel
+def update(source: ti.types.ndarray(ti.f32, 1), output: ti.types.ndarray(ti.f32, 1), offset: ti.f32):
+    for i in source:
+        output[i] = source[i] + offset
+        source[i] += 1
+
+@ti.kernel
+def transform(values: ti.types.ndarray(ti.types.vector(3, ti.f32), 1)):
+    for i in values:
+        values[i] += ti.Vector([1, 2, 3])
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_host_buffers_preserve_types_and_reject_unproved_aliases(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, HOST_BUFFER_SOURCE, initializer="from . import model\n")
+    original = sys.modules["definition_fixture.model"]
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        resources = set(runtime._resources)
+        for count in (7, 19):
+            expected = np.arange(count, dtype=np.float32)
+            expected_output = np.zeros(count, dtype=np.float32)
+            original.update(expected, expected_output, 2.0)
+            actual = np.arange(count, dtype=np.float32)
+            output = np.zeros(count, dtype=np.float32)
+            library.host.model.update(actual, output, 2.0)
+            np.testing.assert_array_equal(actual, expected)
+            np.testing.assert_array_equal(output, expected_output)
+            separate = np.zeros(count, dtype=np.float32)
+            library.host.model.update(actual, separate, -4.0)
+            np.testing.assert_array_equal(separate, expected - 4)
+            np.testing.assert_array_equal(actual, expected + 1)
+            vectors = np.zeros((count, 3), dtype=np.float32)
+            library.host.model.transform(vectors)
+            np.testing.assert_array_equal(vectors, [[1, 2, 3]] * count)
+            assert runtime._resources == resources
+
+        original_data = np.arange(9, dtype=np.float32)
+        for a, b in ((original_data, original_data.view()), (original_data[:-1], original_data[1:])):
+            with pytest.raises(ValueError, match="Aliased or overlapping Host arrays"):
+                library.host.model.update(a, b, 3.0)
+        np.testing.assert_array_equal(original_data, np.arange(9, dtype=np.float32))
+        with pytest.raises(ValueError, match="dtype"):
+            library.host.model.update(np.zeros(7, dtype=np.float64), np.zeros(7, dtype=np.float32), 1.0)
+        with pytest.raises(ValueError, match="C-contiguous"):
+            library.host.model.update(original_data[::2], original_data[::2], 1.0)
+        with pytest.raises(ValueError, match="element shape"):
+            library.host.model.transform(np.zeros((7, 2), dtype=np.float32))
+        assert runtime._resources == resources

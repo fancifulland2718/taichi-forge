@@ -68,6 +68,7 @@ independent object retirement is not implemented.
 
 - Top-level kernels, ordinary `data_oriented` instance kernels and their `func` helpers; ordinary import aliases are recognized.
 - Explicit scalar, vector, matrix and struct values; scalar/tensor/struct Ndarrays with fixed element type/rank, without gradient arguments.
+- Ordinary entries also accept writable, C-contiguous Host buffers with matching type/rank, such as NumPy scalar/tensor arrays. Existing native transfers upload and read back their contents before returning, then release temporary resources. Device Ndarrays retain their original call path without extra copies. This convenience path incurs transfer and synchronization costs; steady device bindings remain preferable. Aliased/overlapping, read-only, non-contiguous and structured Host buffers reject explicitly. Prepared Graph bindings still use device resources.
 - Typed Ndarrays directly allocated in constructors, and `self` attributes assigned scalar constants or constructor parameters annotated with `int/float/bool` or Forge scalar types.
 - `types.vector/matrix/struct`, math vector/matrix aliases and `dataclass` type declarations retain their existing logical types. Struct storage uses `Module.add_ndarray_layout` and the native consumer layout query, without a second packing rule. Host type projection currently supplies argument construction, not the full Python Matrix/Struct manipulation API.
 - LLVM `real_func` calls retain real function boundaries. Nested helpers can capture scalar values and ndarrays through typed hidden parameters. Explicit-parameter shallow recursion is checked; recursive functions with implicit captures reject with a diagnostic. Vulkan real functions remain unsupported and reject before publication.
@@ -106,6 +107,8 @@ The original GeoPhys winding module has separate CPU/CUDA/Vulkan source-free
 checks: export never invokes its recorder; the retained recorder binds two
 different point/triangle counts to the same compiled entry and existing native
 Plan. This qualifies that module, not whole-engine package export.
+The same winding entry also passes three-backend NumPy Host buffer consumption,
+analytic/original-JIT comparisons and temporary-resource release checks.
 
 ## Remaining shared mechanisms
 
