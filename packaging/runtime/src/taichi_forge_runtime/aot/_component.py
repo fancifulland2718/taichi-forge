@@ -118,6 +118,8 @@ class Component:
             host_resource_capability = "component_host_resources_v1" in contract["required_capabilities"]
             private_shape_capability = "component_private_array_extents_v1" in contract["required_capabilities"]
             capabilities = {"dense_snode_group_v1", "component_root_v1"}
+            if any("schema_nodes" in resource for resource in contract["resources"].values()):
+                capabilities.add("component_model_tensor_members_v1")
             if "component_owner_sequence_sources_v1" in contract["required_capabilities"]:
                 capabilities.add("component_owner_sequence_sources_v1")
             if private_shape_capability:
@@ -359,6 +361,28 @@ class Component:
                 array = resource.get("kind") == "ndarray"
                 external = resource.get("ownership") == "external"
                 fixed = resource.get("kind") == "fixed_snode"
+                if "schema_nodes" in resource or "model_element_shape" in resource:
+                    nodes = resource.get("schema_nodes")
+                    if (array or fixed or "paths" in resource or not isinstance(nodes, list) or not nodes
+                            or any(type(index) is not int or index < 0 for index in nodes)
+                            or len(set(nodes)) != len(nodes) or resource.get("group") not in contract["groups"]):
+                        raise ValueError("Invalid component model tensor member selector")
+                    schema = json.loads(contract["groups"][resource["group"]])
+                    if schema["version"] != 2:
+                        raise ValueError("Model tensor members require a symbolic tensor layout recipe")
+                    model_shape = resource.get("model_element_shape", [])
+                    if "model_element_shape" in resource and (
+                            not isinstance(model_shape, list) or not 1 <= len(model_shape) <= 2
+                            or resource["element_shape"] or resource["shape"][-len(model_shape):] != model_shape):
+                        raise ValueError("Invalid component model tensor scalar-axis ABI")
+                    for extent in resource["shape"]:
+                        if isinstance(extent, str):
+                            depend(extent)
+                        elif type(extent) is not int or extent <= 0:
+                            raise ValueError("Invalid component model tensor extent")
+                    from ._runtime import _dtype, _shape
+                    _dtype(resource["dtype"])
+                    _shape(resource["element_shape"])
                 if fixed:
                     if (set(resource) != {"kind", "group", "paths", "dtype", "element_shape", "shape", "aliases",
                                           "access", "effects_precision", "initialization"}
@@ -797,9 +821,15 @@ class ComponentInstance:
                         view = runtime.ndarray(component._array_layouts.get(name, resource["dtype"]), shape,
                                                element_shape=resource["element_shape"])
                     else:
-                        view = self._groups[resource["group"]].member(
-                            resource["paths"], resource["dtype"], element_shape=resource["element_shape"]
-                        )
+                        group = self._groups[resource["group"]]
+                        if "schema_nodes" in resource:
+                            element_shape = tuple(self._dimensions[item] if isinstance(item, str) else item
+                                                  for item in resource.get("model_element_shape", resource["element_shape"]))
+                            view = group.schema_member(resource["schema_nodes"], resource["dtype"],
+                                                       element_shape=element_shape,
+                                                       scalar_axes="model_element_shape" in resource)
+                        else:
+                            view = group.member(resource["paths"], resource["dtype"], element_shape=resource["element_shape"])
                     self._resources[name] = view
                     if view.shape != shape:
                         raise ValueError("Native SNode layout differs from the component extent declaration")

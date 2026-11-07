@@ -70,6 +70,75 @@ class AnyArray:
         return self.ptr
 
 
+class ModelTensorArray(AnyArray):
+    """Logical Field indices over a scalar ABI with trailing model axes.
+
+    This is a compiler reference, not a dynamically sized native TensorType.
+    Component access uses the ordinary scalar external-tensor lowering.
+    """
+
+    def __init__(self, scalar_array, index_rank, element_extents, dtype):
+        super().__init__(scalar_array.ptr)
+        self.scalar_array = scalar_array
+        self.index_rank = index_rank
+        self.element_extents = element_extents
+        self.dtype = dtype
+        self.ndim = len(element_extents)
+
+    @property
+    def shape(self):
+        return self.scalar_array.shape[:self.index_rank]
+
+    def _element_extent(self, axis):
+        extent = self.element_extents[axis]
+        return self.scalar_array.shape[self.index_rank + axis] if isinstance(extent, str) else extent
+
+    @property
+    def n(self):
+        return self._element_extent(0)
+
+    @property
+    def m(self):
+        return self._element_extent(1) if self.ndim == 2 else 1
+
+    def _ti_expr_init(self):
+        return self  # A Field alias retains reference semantics.
+
+    def subscript(self, indices):
+        from taichi_forge.lang.exception import TaichiIndexError
+
+        if len(indices) != self.index_rank:
+            raise TaichiIndexError("Model tensor Field index rank differs from its declaration")
+        return _ModelTensorElement(self, indices)
+
+
+class _ModelTensorElement:
+    def __init__(self, array, indices):
+        self.array, self.indices = array, indices
+
+    def __getitem__(self, indices):
+        from taichi_forge.lang.exception import TaichiIndexError
+        from taichi_forge.lang.matrix import Matrix
+
+        if isinstance(indices, Matrix):
+            indices = tuple(indices.to_list())
+        elif not isinstance(indices, tuple):
+            indices = (indices,)
+        if len(indices) != self.array.ndim or any(isinstance(index, slice) for index in indices):
+            raise TaichiIndexError("Model tensor element requires one scalar index per element axis")
+        return impl.subscript(None, self.array.scalar_array, *self.indices, *indices)
+
+    def _ti_expr_init(self):
+        from taichi_forge.lang.exception import TaichiCompilationError
+
+        raise TaichiCompilationError("Model tensor value copies require dynamic local workspace lowering")
+
+    def __bool__(self):
+        from taichi_forge.lang.exception import TaichiTypeError
+
+        raise TaichiTypeError("A model tensor element is not a scalar condition")
+
+
 class AnyArrayAccess:
     """Class for first-level access to AnyArray with Vector/Matrix elements in Python AST.
 

@@ -17,7 +17,7 @@ from taichi_forge._snode.fields_builder import FieldsBuilder
 from taichi_forge.lang._ndarray import ScalarNdarray, StructNdarray
 from taichi_forge.lang._ndrange import GroupedNDRange, _Ndrange
 from taichi_forge.lang._texture import RWTextureAccessor
-from taichi_forge.lang.any_array import AnyArray
+from taichi_forge.lang.any_array import AnyArray, ModelTensorArray
 from taichi_forge.lang.enums import SNodeGradType
 from taichi_forge.lang.exception import (
     TaichiCompilationError,
@@ -446,6 +446,8 @@ def subscript(ast_builder, value, *_indices, skip_reordered=False):
             entries["__struct_methods"] = value.struct_methods
             return _IntermediateStruct(entries)
         return Expr(ast_builder.expr_subscript(_var, indices_expr_group, dbg_info))
+    if isinstance(value, ModelTensorArray):
+        return value.subscript(indices)
     if isinstance(value, AnyArray):
         if isinstance(value.element_type_hint, StructType):
             return _make_struct_ndarray_element_proxy(

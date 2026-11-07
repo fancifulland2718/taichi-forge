@@ -11,6 +11,7 @@ from taichi_forge.aot._component import (
     Array,
     _ExternalField,
     DenseField,
+    _ModelTensorField,
     Dimension,
     RuntimeValue,
     RootOption,
@@ -27,6 +28,21 @@ from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang.exception import TaichiCompilationError
 from taichi_forge.lang.matrix import MatrixType
 from taichi_forge.types._argument_descriptor import describe_symbolic_arg, describe_element_type
+
+
+def _dense_resource_projection(declaration, member):
+    """Resource and argument views of the same native member declaration."""
+    model = isinstance(declaration, _ModelTensorField)
+    result = dict(dtype=declaration.schema[1][1], element_shape=declaration.schema[1][2],
+                  shape=declaration.shape)
+    if member and member[0] == "schema_nodes":
+        result["schema_nodes"] = member[1]
+    else:
+        result["paths"] = member
+    if model:
+        result["model_element_shape"] = declaration.element_shape
+        result["shape"] += declaration.element_shape
+    return result
 
 
 class _GraphCapture:
@@ -226,10 +242,7 @@ class _GraphCapture:
                     self._members[member_key] = identity
                     self.resources[identity] = dict(
                         group=group,
-                        paths=paths,
-                        dtype=schema[1][1],
-                        element_shape=schema[1][2],
-                        shape=schema[2],
+                        **_dense_resource_projection(declaration, paths),
                         aliases=[],
                         access="read_write",
                         effects_precision="conservative",
@@ -243,7 +256,7 @@ class _GraphCapture:
                         self.resources[identity]["aliases"].append(alias)
                 symbol_name = "__component_resource_" + _digest((group, paths))
                 binding = dict(kind="resource", name=identity)
-                symbol = Arg(ArgKind.NDARRAY, symbol_name, declaration.dtype, ndim=len(declaration.shape))
+                symbol = Arg(ArgKind.NDARRAY, symbol_name, declaration.dtype, ndim=declaration.annotation.ndim)
             elif isinstance(declaration, (RuntimeValue, Dimension)):
                 kind = "dimension" if isinstance(declaration, Dimension) else "value"
                 symbol_name = "__component_" + kind + "_" + name
@@ -520,9 +533,8 @@ class _GraphCapture:
                 if identity in self.resources:
                     raise TaichiCompilationError("Host-visible resource identity collision")
                 self._members[key] = identity
-                self.resources[identity] = dict(group=group, paths=paths,
-                    dtype=declaration.schema[1][1], element_shape=declaration.schema[1][2],
-                    shape=declaration.shape, aliases=[], access="read_write",
+                self.resources[identity] = dict(group=group, **_dense_resource_projection(declaration, paths),
+                    aliases=[], access="read_write",
                     effects_precision="conservative",
                     initialization=(normal or {}).get("initialization", "consumer_explicit"))
             resource = self.resources[identity]
@@ -534,7 +546,7 @@ class _GraphCapture:
                 symbol_name = "__component_resource_" + _digest((group, paths))
                 self.bindings[symbol_name] = dict(kind="resource", name=identity)
                 self.symbols.setdefault(symbol_name, Arg(ArgKind.NDARRAY, symbol_name,
-                                                         declaration.dtype, ndim=len(declaration.shape)))
+                                                         declaration.dtype, ndim=declaration.annotation.ndim))
                 symbols.append(symbol_name)
         return symbols
 
@@ -595,6 +607,8 @@ class _GraphCapture:
             facts["required_capabilities"].append("component_array_storage_v1")
         if self.fixed_groups:
             facts["fixed_groups"] = self.fixed_groups
+        if any("schema_nodes" in resource for resource in self.resources.values()):
+            facts["required_capabilities"].append("component_model_tensor_members_v1")
         if self.host_resources:
             facts["host_resources"] = sorted(self.host_resources)
             facts["required_capabilities"].append("component_host_resources_v1")

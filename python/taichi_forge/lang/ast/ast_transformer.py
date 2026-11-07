@@ -1423,9 +1423,10 @@ class ASTTransformer(Builder):
         return None
 
     @staticmethod
-    def build_ndrange_for(ctx, node):
+    def build_ndrange_for(ctx, node, ndrange_var=None):
         with ctx.variable_scope_guard():
-            ndrange_var = impl.expr_init(build_stmt(ctx, node.iter))
+            if ndrange_var is None:
+                ndrange_var = impl.expr_init(build_stmt(ctx, node.iter))
             ndrange_begin = ti_ops.cast(expr.Expr(0), primitive_types.i32)
             ndrange_end = ti_ops.cast(
                 expr.Expr(impl.subscript(ctx.ast_builder, ndrange_var.acc_dimensions, 0)),
@@ -1468,9 +1469,10 @@ class ASTTransformer(Builder):
         return None
 
     @staticmethod
-    def build_grouped_ndrange_for(ctx, node):
+    def build_grouped_ndrange_for(ctx, node, ndrange_var=None):
         with ctx.variable_scope_guard():
-            ndrange_var = impl.expr_init(build_stmt(ctx, node.iter.args[0]))
+            if ndrange_var is None:
+                ndrange_var = impl.expr_init(build_stmt(ctx, node.iter.args[0]))
             ndrange_begin = ti_ops.cast(expr.Expr(0), primitive_types.i32)
             ndrange_end = ti_ops.cast(
                 expr.Expr(impl.subscript(ctx.ast_builder, ndrange_var.acc_dimensions, 0)),
@@ -1519,6 +1521,8 @@ class ASTTransformer(Builder):
                 loop_var = build_stmt(ctx, node.iter)
                 if ctx.deployment is not None:
                     loop_var = ctx.deployment.field_operand(ctx, loop_var, for_loop=True)
+                if isinstance(loop_var, any_array.ModelTensorArray):
+                    return ASTTransformer.build_grouped_ndrange_for(ctx, node, _Ndrange(*loop_var.shape))
                 loop_indices = expr.make_var_list(size=len(loop_var.shape), ast_builder=ctx.ast_builder)
                 expr_group = expr.make_expr_group(loop_indices)
                 impl.begin_frontend_struct_for(ctx.ast_builder, expr_group, loop_var)
@@ -1526,14 +1530,18 @@ class ASTTransformer(Builder):
                 build_stmts(ctx, node.body)
                 ctx.ast_builder.end_frontend_struct_for()
             else:
+                loop_var = node.iter.ptr
+                if ctx.deployment is not None:
+                    loop_var = ctx.deployment.field_operand(ctx, loop_var, for_loop=True)
+                if isinstance(loop_var, any_array.ModelTensorArray):
+                    # Only logical Field axes participate in the iteration.
+                    # Component axes remain inside the original loop body.
+                    return ASTTransformer.build_ndrange_for(ctx, node, _Ndrange(*loop_var.shape))
                 _vars = []
                 for name in targets:
                     var = expr.Expr(ctx.ast_builder.make_id_expr(""))
                     _vars.append(var)
                     ctx.create_variable(name, var)
-                loop_var = node.iter.ptr
-                if ctx.deployment is not None:
-                    loop_var = ctx.deployment.field_operand(ctx, loop_var, for_loop=True)
                 expr_group = expr.make_expr_group(*_vars)
                 impl.begin_frontend_struct_for(ctx.ast_builder, expr_group, loop_var)
                 build_stmts(ctx, node.body)

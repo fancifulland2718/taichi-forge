@@ -6,6 +6,154 @@ from taichi_forge.aot._component import Component, DenseField, Dimension, Runtim
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_model_tensor_field_indices_share_code_across_element_extents(tmp_path):
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+    import textwrap
+    from taichi_forge.aot._component import _ModelTensorField
+    from taichi_forge_runtime.aot import Runtime
+
+    @ti.data_oriented
+    class Model:
+        def __init__(self, rows, dofs):
+            self.rows, self.dofs = rows, dofs
+            self.j = ti.Vector.field(dofs, ti.f32)
+            self.alias = self.j
+            self.fixed = ti.Vector.field(3, ti.f32)
+            self.h = ti.Matrix.field(2, dofs, ti.f32)
+            builder = ti.FieldsBuilder()
+            builder.dense(ti.i, rows).place(self.j, self.fixed)
+            builder.dense(ti.i, rows).place(self.h)
+            self.tree = builder.finalize()
+
+        @ti.func
+        def read(self, field: ti.template(), row, column):
+            return field[row][column]
+
+        @ti.kernel
+        def update(self, scale: ti.f32):
+            for i in self.j:
+                for d in range(self.j.n):
+                    self.j[i][d] += scale + i * 100 + d
+                self.fixed[i] += ti.Vector([1.0, 2.0, 3.0])
+            for I in ti.grouped(self.h):
+                for a in ti.static(range(self.h.n)):
+                    for d in range(getattr(self.h, "m")):
+                        self.h[I][a, d] = self.read(self.alias, I[0], d) + a * 10
+
+        @ti.kernel
+        def local_copy(self):
+            for i in self.j:
+                local = self.j[i]
+                local[0] = 42.0
+
+        def record(self, builder):
+            builder.dispatch(self.update, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scale", ti.f32))
+
+    env = Component(rows=Dimension(), dofs=Dimension(),
+                    j=_ModelTensorField(ti.f32, ("rows",), "state", ("dofs",)),
+                    alias=_ModelTensorField(ti.f32, ("rows",), "state", ("dofs",)),
+                    fixed=DenseField(ti.types.vector(3, ti.f32), ("rows",), "state"),
+                    h=_ModelTensorField(ti.f32, ("rows",), "state", (2, "dofs")))
+    first, second = Model(2, 5), Model(3, 65)
+    try:
+        code = env.compile(first.update, 1.0)
+        assert env.compile(second.update, 3.0) is code
+        assert set(dict(code.contract["dense_access"]).values()) == {"affine"}
+        assert code.contract["members"]["j"] == code.contract["members"]["alias"]
+        assert sum(name in ("j", "alias") for name in code.dynamic) == 1
+        conflict = Component(**{**env.declarations, "alias": DenseField(ti.types.vector(5, ti.f32), ("rows",), "state")})
+        with pytest.raises(ti.TaichiCompilationError, match="conflicting tensor dimensions"):
+            conflict.compile(first.update, 1.0)
+        with pytest.raises(ti.TaichiCompilationError, match="dynamic local workspace"):
+            env.compile(first.local_copy)
+        code.run(env, second, 3.0)
+        expected = 3 + np.arange(3)[:, None] * 100 + np.arange(65)
+        np.testing.assert_array_equal(second.j.to_numpy(), expected)
+        np.testing.assert_array_equal(second.h.to_numpy(), expected[:, None, :] + np.arange(2)[None, :, None] * 10)
+        np.testing.assert_array_equal(second.fixed.to_numpy(), np.tile([1, 2, 3], (3, 1)))
+        np.testing.assert_array_equal(first.j.to_numpy(), np.zeros((2, 5)))
+        # Deployment lowering leaves ordinary JIT and its fixed tensor types intact.
+        first.update(2.0)
+        np.testing.assert_array_equal(first.j.to_numpy(), 2 + np.arange(2)[:, None] * 100 + np.arange(5))
+        module = ti.aot.Module()
+        code.export(module, "update")
+        graph = env.compile_graph(first.record)
+        graph.export(module, "step")
+        archive = tmp_path / "model_tensor.tcm"
+        module.archive(str(archive))
+        with Runtime(ti.cfg.arch.name) as runtime, runtime.load_module(archive) as loaded:
+            with runtime.dense_snode_group(code.contract["groups"]["state"], {"rows": 4, "dofs": 19}) as group:
+                views = {}
+                for name in code.dynamic:
+                    declaration = env.declarations[name]
+                    if isinstance(declaration, DenseField):
+                        _, selector = code.contract["members"][name]
+                        element = ((19,) if name in ("j", "alias") else (2, 19) if name == "h" else (3,))
+                        views[name] = group.schema_member(selector[1], "f32", element_shape=element,
+                                                         scalar_axes=isinstance(declaration, _ModelTensorField))
+                loaded.kernel("update")(4.0, *(views[name] for name in code.dynamic))
+                expected = 4 + np.arange(4)[:, None] * 100 + np.arange(19)
+                np.testing.assert_array_equal(views["j"].to_numpy(), expected)
+                np.testing.assert_array_equal(views["h"].to_numpy(), expected[:, None, :] + np.arange(2)[None, :, None] * 10)
+                np.testing.assert_array_equal(views["fixed"].to_numpy(), np.tile([1, 2, 3], (4, 1)))
+                for view in views.values():
+                    view.close()
+            component = loaded.component("step")
+            instances = [component.instantiate(dict(rows=n, dofs=d)) for n, d in ((2, 19), (3, 65))]
+            calls = []
+            try:
+                for instance in instances:
+                    instance.initialize(zero=component.contract["resources"])
+                    calls.append(instance.prepare(arguments=dict(scale=7.0)))
+                calls[0]()
+                calls[1]()
+                calls[0]()
+                for instance, n, d, times in zip(instances, (2, 3), (19, 65), (2, 1)):
+                    expected = times * (7 + np.arange(n)[:, None] * 100 + np.arange(d))
+                    np.testing.assert_array_equal(instance.resource("j").to_numpy(), expected)
+                    np.testing.assert_array_equal(instance.resource("fixed").to_numpy(), np.tile([1, 2, 3], (n, 1)) * times)
+            finally:
+                for call in calls:
+                    call.close()
+                for instance in instances:
+                    instance.close()
+        graph._graph.close()
+        consumer = textwrap.dedent("""
+            import importlib.abc, sys
+            class NoFrontend(importlib.abc.MetaPathFinder):
+                def find_spec(self, name, *args):
+                    if name.split('.')[0] in ('taichi', 'taichi_forge', 'tests'):
+                        raise AssertionError('consumer attempted frontend import: ' + name)
+            sys.meta_path.insert(0, NoFrontend())
+            import numpy as np
+            from taichi_forge_runtime.aot import Runtime
+            with Runtime(sys.argv[1]) as runtime, runtime.load_module(sys.argv[2]) as module:
+                component = module.component('step')
+                with component.instantiate(dict(rows=3, dofs=129)) as instance:
+                    instance.initialize(zero=component.contract['resources'])
+                    with instance.prepare(arguments=dict(scale=9.0)) as call:
+                        call()
+                    expected = 9 + np.arange(3)[:, None] * 100 + np.arange(129)
+                    np.testing.assert_array_equal(instance.resource('j').to_numpy(), expected)
+                    np.testing.assert_array_equal(instance.resource('h').to_numpy(),
+                        expected[:, None, :] + np.arange(2)[None, :, None] * 10)
+                    np.testing.assert_array_equal(instance.resource('fixed').to_numpy(), np.tile([1, 2, 3], (3, 1)))
+            print('MODEL_TENSOR_COMPONENT_SOURCE_FREE_OK')
+        """)
+        result = subprocess.run([sys.executable, "-B", "-c", consumer, ti.cfg.arch.name, str(archive)],
+                                cwd=tmp_path, capture_output=True, text=True, timeout=60,
+                                env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "packaging/runtime/src")})
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "MODEL_TENSOR_COMPONENT_SOURCE_FREE_OK" in result.stdout
+    finally:
+        first.tree.destroy()
+        second.tree.destroy()
+
+
 @ti.data_oriented
 class _DenseModel:
     def __init__(self, capacity, active, gravity=(2, 3, 4)):

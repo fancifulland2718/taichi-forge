@@ -343,9 +343,9 @@ shared dimensions. Consumers expand it into ordinary SNodes and use the same
 backend layout rules. Fixed mathematical extents remain constants; version 1
 recipes are unchanged. Focused checks cover mixed types and fixed vec3 siblings,
 model extents above 64, independent instances and invalid dimensions. This is a
-persistent-storage capability: it does not yet support dynamic tensor numerical
-ABIs, local vectors or shared workspaces, and definition packages do not yet
-select this recipe automatically.
+persistent-storage capability; the scalar numerical ABI below builds on it.
+Local vectors and shared workspaces remain separate requirements, and
+definition packages do not yet select this recipe automatically.
 
 An internal scalar-axis projection appends element axes to the runtime index
 axes while preserving native byte strides, offsets and ownership. It reuses
@@ -355,9 +355,7 @@ Standalone `group.member(..., scalar_axes=True)` uses the same native projection
 Host transfers coalesce contiguous inner axes and retain the existing bulk
 transfer paths. Focused CPU/CUDA/Vulkan checks cover interleaved members, two
 instances, rejected tensor ABI mismatches and a frontend-blocked consumer with
-a new extent of 129. Automatic lowering of original `field[i][j]` syntax,
-dynamic local tensor values and package model-dimension inference still need
-integration; this foundation is not complete dynamic TensorType support.
+a new extent of 129. This foundation is not complete dynamic TensorType support.
 
 `capture_tensor_members` also returns producer SNode IDs mapped to persistent
 recipe nodes. `group.schema_member(nodes, ..., scalar_axes=True)` resolves these
@@ -366,6 +364,23 @@ lanes. Fixed siblings keep the same selector when preceding model tensors grow;
 no producer IDs or expanded lane paths enter the persistent selector. Legacy
 path-based members remain supported. Invalid, repeated and non-place recipe
 selectors are rejected before a view is published.
+
+The internal model-tensor declaration now lowers original `field[i][j]` and
+matrix component accesses through that scalar ABI. Field traversal uses only
+the logical index axes through existing ndrange lowering; fixed mathematical
+element axes retain static metadata. Model axes read runtime shapes. All
+members of an affected group use runtime strides, including fixed siblings
+whose cell stride changes with the model tensor. Aliases with conflicting
+element-dimension provenance are rejected.
+
+Component Graphs carry the versioned `component_model_tensor_members_v1`
+capability and instantiate these views using native recipe selectors. Focused
+CPU/CUDA/Vulkan checks cover one compiled definition across different widths,
+unchanged ordinary JIT, independent prepared instances and a frontend-blocked
+consumer at a new width of 129. Whole-element value copies are explicitly
+rejected until dynamic local workspace lowering is available. Definition-based
+model-dimension inference, local tensor arithmetic and shared GPU workspaces
+are still pending; this internal declaration adds no application decorator.
 
 Original `self.field` captures now retain the complete root schema and member
 paths. Sibling blocks require declared dimension provenance; logical groups

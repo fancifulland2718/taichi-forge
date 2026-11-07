@@ -12,7 +12,7 @@ import inspect
 import json
 import operator
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import prod
 from types import CodeType, MappingProxyType, MemberDescriptorType, ModuleType
 from typing import Final, get_origin
@@ -409,6 +409,37 @@ class DenseField:
 
 
 @dataclass(frozen=True)
+class _ModelTensorField(DenseField):
+    """Definition-derived model axes; fixed mathematical axes stay constants."""
+
+    element_shape: tuple
+
+    @property
+    def schema(self):
+        base = super().schema
+        if isinstance(self.dtype, MatrixType) or not isinstance(self.element_shape, tuple) or not 1 <= len(self.element_shape) <= 2:
+            raise ValueError("Model tensor Field requires a scalar dtype and one or two element axes")
+        if any(not (isinstance(x, str) and x) and not (type(x) is int and x > 0) for x in self.element_shape):
+            raise ValueError("Model tensor axes require dimension IDs or positive static integers")
+        return ("model_tensor_field", *base[1:], self.element_shape)
+
+    def declare(self, name, *, runtime_affine=True):
+        from taichi_forge._lib import core
+        from taichi_forge.lang.any_array import ModelTensorArray
+
+        scalar = cook_dtype(self.dtype)
+        reference = kernel_arguments.decl_ndarray_arg(
+            scalar, len(self.shape) + len(self.element_shape), name, False,
+            core.BoundaryMode.UNSAFE, runtime_affine=True,
+        )
+        return ModelTensorArray(reference, len(self.shape), self.element_shape, scalar)
+
+    @property
+    def annotation(self):
+        return NdarrayType(dtype=self.dtype, ndim=len(self.shape) + len(self.element_shape))
+
+
+@dataclass(frozen=True)
 class _ConditionalDenseField(DenseField):
     """A declaration-derived presence predicate with a complete layout witness.
 
@@ -617,6 +648,18 @@ def _dense_group(component, owner, group):
     root = None
     axes = {}
     dimensions = {}
+    tensors = {}
+    tensor_roles = {}
+
+    def resolve_extent(extent):
+        if not isinstance(extent, str):
+            return extent
+        dim = component.declarations.get(extent)
+        if not isinstance(dim, Dimension) or dim.kind != "extent":
+            raise TaichiCompilationError(f"Dense group {group!r} requires extent declaration {extent!r}")
+        dimensions[extent] = dim.schema
+        return _dimension_value(component, owner, extent)
+
     for name, declaration in component._dense_members.get(group, ()):
         field = component.read(owner, name)
         if not isinstance(field, Field):
@@ -625,23 +668,26 @@ def _dense_group(component, owner, group):
             declaration.dtype.dtype if isinstance(declaration.dtype, MatrixType) else cook_dtype(declaration.dtype)
         )
         element_shape = tuple(declaration.dtype.get_shape()) if isinstance(declaration.dtype, MatrixType) else ()
+        if isinstance(declaration, _ModelTensorField):
+            element_shape = tuple(resolve_extent(extent) for extent in declaration.element_shape)
         actual_element = ((field.n,) if field.ndim == 1 else (field.n, field.m)) if hasattr(field, "n") else ()
         if field.dtype != scalar_dtype or actual_element != element_shape:
             raise TaichiCompilationError(f"Dense resource {name!r} element type differs from its declaration")
-        expected_shape = []
-        for extent in declaration.shape:
-            if isinstance(extent, str):
-                dim = component.declarations.get(extent)
-                if not isinstance(dim, Dimension) or dim.kind != "extent":
-                    raise TaichiCompilationError(f"Dense resource {name!r} requires extent declaration {extent!r}")
-                dimensions[extent] = dim.schema
-                expected_shape.append(_dimension_value(component, owner, extent))
-            else:
-                expected_shape.append(extent)
+        expected_shape = [resolve_extent(extent) for extent in declaration.shape]
         if tuple(field.shape) != tuple(expected_shape):
             raise TaichiCompilationError(f"Dense resource {name!r} shape differs from its declared extent relation")
         nodes = tuple(var.ptr.snode() for var in field._get_field_members())
         members[name] = nodes
+        key = tuple(node.id for node in nodes)
+        role = declaration.element_shape if isinstance(declaration, _ModelTensorField) else element_shape
+        if tensor_roles.setdefault(key, role) != role:
+            raise TaichiCompilationError(f"Aliased Dense members have conflicting tensor dimensions in group {group!r}")
+        if isinstance(declaration, _ModelTensorField):
+            names = tuple(extent if isinstance(extent, str) else "" for extent in declaration.element_shape)
+            tensor = (nodes, element_shape, names)
+            previous = tensors.setdefault(key, tensor)
+            if previous[1:] != tensor[1:]:
+                raise TaichiCompilationError(f"Conflicting tensor dimension provenance in group {group!r}")
         for node in nodes:
             current_root = impl.get_runtime().prog.get_snode_root(node.get_snode_tree_id())
             if root is None:
@@ -686,10 +732,18 @@ def _dense_group(component, owner, group):
 
     visit(root, ())
     parameters = [(node, axis, extent) for (_, axis), (node, extent) in axes.items() if isinstance(extent, str)]
-    schema = core.DenseSNodeSchema.capture(root, parameters).to_json()
+    if tensors:
+        schema, selectors = core.DenseSNodeSchema.capture_tensor_members(root, parameters, list(tensors.values()))
+        member_paths = {
+            name: ("schema_nodes", tuple(dict.fromkeys(selectors[node.id] for node in nodes)))
+            for name, nodes in members.items()
+        }
+    else:
+        schema = core.DenseSNodeSchema.capture(root, parameters)
+        member_paths = {name: tuple(paths[node.id] for node in nodes) for name, nodes in members.items()}
     return (
-        schema,
-        {name: tuple(paths[node.id] for node in nodes) for name, nodes in members.items()},
+        schema.to_json(),
+        member_paths,
         dimensions,
         root.id,
     )
@@ -813,14 +867,15 @@ class Component:
                             qualify(declaration.expression, prefix) if declaration.expression else (),
                         )
                     elif isinstance(declaration, DenseField):
-                        declaration = DenseField(
-                            declaration.dtype,
-                            tuple(
+                        changes = dict(shape=tuple(
                                 _capture_id((*prefix, value)) if isinstance(value, str) else value
                                 for value in declaration.shape
-                            ),
-                            declaration.group,
-                        )
+                            ))
+                        if isinstance(declaration, _ModelTensorField):
+                            changes["element_shape"] = tuple(
+                                _capture_id((*prefix, value)) if isinstance(value, str) else value
+                                for value in declaration.element_shape)
+                        declaration = replace(declaration, **changes)
                     elif isinstance(declaration, Array):
                         declaration = Array(declaration.dtype, declaration.ndim,
                             None if declaration.shape is None else tuple(
@@ -1813,7 +1868,9 @@ class _Capture:
                     return self.expressions[name]
             self.dynamic.append(name)
             if isinstance(declaration, DenseField):
-                compact = _extent_invariant_compact_member(value, dense_description)
+                # A model tensor can change the cell stride of fixed siblings
+                # too. No member of that group may retain a producer stride.
+                compact = json.loads(schema)["version"] == 1 and _extent_invariant_compact_member(value, dense_description)
                 self.dense_access[name] = "compact" if compact else "affine"
                 self.expressions[name] = declaration.declare("__capture_" + name, runtime_affine=not compact)
             else:
@@ -1906,7 +1963,12 @@ class _Capture:
         # can be hidden by a fallback. Optional absence is not implicit static
         # configuration; applications must declare that role explicitly.
         owner, name = args[:2]
-        from taichi_forge.lang.any_array import AnyArray
+        from taichi_forge.lang.any_array import AnyArray, ModelTensorArray
+
+        if isinstance(owner, ModelTensorArray):
+            if name not in ("dtype", "n", "m", "ndim"):
+                raise TaichiCompilationError("Component Field introspection requires declared element metadata")
+            return True if presence else getattr(owner, name)
 
         if type(owner) is AnyArray and "_component_field_metadata" in vars(owner):
             if name not in ("dtype", "n", "m", "ndim"):
@@ -2287,11 +2349,13 @@ class _ComponentCode:
         self.validate_bindings(component, owner)
         if len(args) != len(self.explicit_arguments):
             raise TypeError("Wrong number of explicit component arguments")
-        from taichi_forge.lang._storage_view import ndarray_view
+        from taichi_forge.lang._storage_view import ndarray_view, _scalarized_ndarray_view
 
         values = tuple(
             (
-                ndarray_view(component.read(owner, name))
+                _scalarized_ndarray_view(component.read(owner, name))
+                if isinstance(component.declarations[name], _ModelTensorField)
+                else ndarray_view(component.read(owner, name))
                 if isinstance(component.declarations[name], (DenseField, _ExternalField))
                 else component.read(owner, name)
             )
