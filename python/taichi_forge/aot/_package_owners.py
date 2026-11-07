@@ -23,6 +23,8 @@ def resolve_owners(sources, imported, owner_schema, fail):
         mro = cls.__mro__
         index = next(i for i in range(start, len(mro)) if "__init__" in vars(mro[i]))
         base = mro[index]
+        if start == 0 and cls in classes and getattr(classes[cls][1], "_package_inherited_constructor", False):
+            base, index = cls, 0
         if base is object:
             return {}
         if base not in classes:
@@ -32,6 +34,9 @@ def resolve_owners(sources, imported, owner_schema, fail):
         for method, original in getattr(node, "_package_allocation_methods", {}).items():
             if inspect.getattr_static(cls, method) is not original:
                 fail(name, node, "Overridden allocation forwarding requires an explicit construction contract")
+        for method, original in getattr(node, "_package_type_methods", {}).items():
+            if inspect.getattr_static(cls, method) is not original:
+                fail(name, node, "Overridden type construction requires a concrete constructor contract")
         for method in node.body:
             if getattr(method, "_package_construction_method", False) and (
                 inspect.getattr_static(cls, method.name) is not inspect.getattr_static(base, method.name)

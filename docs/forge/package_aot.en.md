@@ -152,16 +152,29 @@ the same class. Forge reuses its resource and context-manager analysis without
 executing constructors or flattening/removing consumer Host methods. Currently a
 method accepts only `self`, has one standalone call site, and may forward to another
 construction method. Conditional calls, returns/yields, replacement, and inherited
-overrides are rejected. Subsequent Host initialization and context exception cleanup
-retain their original order. Repeated declarations of the same resource role across
-methods require explicit source cleanup, rather than inferred reallocation contracts.
+overrides of existing allocation methods are rejected. Subsequent Host initialization
+and context exception cleanup retain their original order. Identical dimension
+declarations may recur across construction methods; conflicting dimensions and
+repeated resource allocations remain errors.
+
+A same-module subclass inheriting its constructor may add ordinary construction
+hooks and fixed Struct member methods. Forge projects the inherited Host methods
+in that concrete class's context, retaining its actual layout and allocation order.
+Type member methods must return a single fixed-name dictionary of builtin types
+from plain inputs; model widths use the existing dimension projection. No constructor
+or type method executes during discovery. Side effects, instance method replacement,
+lexical `super`/private class state in copied methods, and unknown factories reject.
+This does not support arbitrary cross-module construction overrides. CPU/CUDA
+focused consumers cover different widths, separate states, zero initialization and
+shared unaffected numerical entries. GeoPhys's geometry/row declaration check keeps
+their original three/six resource groups; complete rigid export remains pending.
 
 Version 35 supports single-assignment local vector/matrix/Struct type aliases in
 construction paths, including member widths derived from declared model dimensions.
 Types come from the original builtin factories. Before Field allocation, the consumer
 checks member order, dtype, and actual widths against the exported layout. Struct
 `member_initialization` accepts fixed-name maps or single-generator comprehensions
-with literal membership filters, retaining `zero/consumer_explicit` policies. It does
+with literal membership/equality filters, retaining `zero/consumer_explicit` policies. It does
 not evaluate model-driven maps or introduce snapshot policies. Native group clearing
 satisfies zero initialization; explicit Host initialization retains its original position.
 

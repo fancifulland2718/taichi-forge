@@ -5628,6 +5628,168 @@ def test_package_scope_fields_share_dimension_and_native_layout_rules(tmp_path, 
     assert "SCOPE_FIELDS_SOURCE_FREE_OK" in result.stdout
 
 
+INHERITED_CONSTRUCTION_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        self._allocate()
+    def _allocate(self):
+        scope = ti.experimental.ResourceScope(self)
+        count = scope.dim('n')
+        nd = self.n
+        element = ti.types.struct(x=ti.f32, **self._members(nd))
+        scope.values = scope.struct_field(element.members, shape=count,
+            member_initialization={name: 'zero' for name in element.members if name == 'vector'})
+        self._extra()
+    def _members(self, nd):
+        return {}
+    def _extra(self):
+        pass
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.values:
+            self.values.x[i] = gain * i
+    @ti.kernel
+    def size(self) -> ti.i32:
+        return self.n
+class Extended(Model):
+    def _members(self, nd):
+        return {'vector': ti.types.vector(nd, ti.f32)}
+    def _extra(self):
+        scope = ti.experimental.ResourceScope(self)
+        count = scope.dim('n')
+        scope.total = scope.field(ti.f32, shape=count)
+    @ti.kernel
+    def extended_step(self):
+        for i in range(self.n):
+            total = 0.0
+            for j in range(self.n):
+                self.values.vector[i][j] = i + j
+                total += self.values.vector[i][j]
+            self.total[i] = total
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_inherited_construction_retains_concrete_layout_and_shared_code(tmp_path, monkeypatch):
+    package = _source_package(
+        tmp_path, monkeypatch, INHERITED_CONSTRUCTION_SOURCE, initializer="from .model import Model, Extended\n"
+    )
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    by_name = {name: entry for entry in manifest["entries"].values() for name in entry["definitions"]}
+    assert by_name["definition_fixture.model.Model.size"] is by_name["definition_fixture.model.Extended.size"]
+    original = package.Extended(7)
+    original.step(3.0)
+    original.extended_step()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        base, a, b = code.host.Model(4), code.host.Extended(7), code.host.Extended(65)
+        assert set(base.values.to_numpy()) == {"x"}
+        assert not hasattr(base, "total")
+        a.step(3.0)
+        a.extended_step()
+        np.testing.assert_array_equal(a.values.x.to_numpy(), original.values.x.to_numpy())
+        np.testing.assert_array_equal(a.total.to_numpy(), original.total.to_numpy())
+        b.extended_step()
+        np.testing.assert_array_equal(b.total.to_numpy(), 65 * np.arange(65) + sum(range(65)))
+        base.step(-2.0)
+        np.testing.assert_array_equal(base.values.x.to_numpy(), -2 * np.arange(4))
+        np.testing.assert_array_equal(a.total.to_numpy(), original.total.to_numpy())
+        assert (base.size(), a.size(), b.size()) == (4, 7, 65)
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([name for name in archive.namelist() if name.endswith((".ll", ".bc"))]) == len(manifest["entries"])
+    probe = tmp_path / "consume_construction.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            base, a, b = code.host.Model(3), code.host.Extended(17), code.host.Extended(33)
+            assert not hasattr(base, 'total')
+            np.testing.assert_array_equal(a.values.vector.to_numpy(), 0)
+            a.extended_step()
+            b.extended_step()
+            base.step(2.0)
+            np.testing.assert_array_equal(base.values.x.to_numpy(), 2 * np.arange(3))
+            np.testing.assert_array_equal(a.total.to_numpy(), 17 * np.arange(17) + sum(range(17)))
+            np.testing.assert_array_equal(b.total.to_numpy(), 33 * np.arange(33) + sum(range(33)))
+        print('INHERITED_CONSTRUCTION_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "INHERITED_CONSTRUCTION_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change,diagnostic",
+    [
+        ("side_effect", "one fixed dictionary"),
+        ("model", "cannot read model state"),
+        ("replace", "cannot be replaced"),
+        ("duplicate", "unique valid member names"),
+        ("call", "builtin numerical types"),
+        ("dimension", "Repeated construction resource declaration"),
+        ("super", "lexical class state"),
+        ("private", "lexical class state"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_inherited_type_members_reject_unproven_contracts(tmp_path, monkeypatch, change, diagnostic):
+    source = INHERITED_CONSTRUCTION_SOURCE
+    if change == "side_effect":
+        source = source.replace("return {'vector'", "self.changed = 1\n        return {'vector'")
+    elif change == "model":
+        source = source.replace("ti.types.vector(nd, ti.f32)", "ti.types.vector(self.n, ti.f32)")
+    elif change == "replace":
+        source = source.replace("self._allocate()", "self._members = lambda n: {}\n        self._allocate()")
+    elif change == "duplicate":
+        source = source.replace("{'vector':", "{'x':")
+    elif change == "call":
+        source = source.replace("ti.types.vector(nd, ti.f32)", "dict()")
+    elif change == "super":
+        source = source.replace("self._allocate()", "super().__init__()\n        self._allocate()")
+    elif change == "private":
+        source = source.replace("self._allocate()", "self.__secret = 2\n        self._allocate()")
+    else:
+        source = source.replace(
+            "count = scope.dim('n')\n        scope.total",
+            "count = scope.derived_dim('n', scope.dim('m'))\n        scope.total",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize(
     "change", ["conditional", "argument", "repeated", "replace", "return", "override", "recursive"]
 )

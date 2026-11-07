@@ -27,7 +27,11 @@ from ._package_resources import scope_declarations
 from ._package_targets import BACKEND_NAMES, backend_constant, backend_query, select_target_branches
 from ._package_records import dimension_relations
 from ._package_constants import resolve_constants
-from ._package_construction import construction_functions, discover_construction_methods
+from ._package_construction import (
+    construction_functions,
+    discover_construction_methods,
+    materialize_inherited_construction,
+)
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
@@ -55,6 +59,17 @@ def _owner_schema(module, node, kind, namespace):
     for function in construction_functions(node):
         for name, declaration in _construction_schema(module, node, function, kind, namespace, schema).items():
             if name in schema and schema[name]["kind"] != "value":
+                previous = schema[name]
+                origins = ("scope_allocation", "scope_allocations")
+                if declaration["kind"] == previous["kind"] == "dimension" and (
+                    {k: v for k, v in declaration.items() if k not in origins}
+                    == {k: v for k, v in previous.items() if k not in origins}
+                ):
+                    previous["scope_allocations"] = [
+                        *previous.get("scope_allocations", [previous["scope_allocation"]]),
+                        declaration["scope_allocation"],
+                    ]
+                    continue
                 _fail(module, function, f"Repeated construction resource declaration {name!r}")
             schema[name] = declaration
     return schema
@@ -125,7 +140,8 @@ def _analyze(module, source, namespace, target):
     ):
         _fail(module, tree, "reserved package-export identifier")
     kind = decorator_resolver(tree)
-    construction = discover_construction_methods(tree, namespace, module, _fail, kind)
+    construction = materialize_inherited_construction(tree, namespace, module, _fail, kind)
+    construction.extend(discover_construction_methods(tree, namespace, module, _fail, kind))
     tree._package_target_selections = select_target_branches(tree, kind, target, module, _fail)
     from ._package_factories import normalize_factories
     from ._package_contexts import discover_contexts
@@ -135,6 +151,9 @@ def _analyze(module, source, namespace, target):
     from ._package_allocations import normalize_allocation_helpers
 
     tree._package_factory_declarations.extend(normalize_allocation_helpers(tree, namespace, kind, module, _fail))
+    from ._package_type_factories import normalize_type_member_factories
+
+    tree._package_factory_declarations.extend(normalize_type_member_factories(tree, namespace, kind, module, _fail))
     definitions, owners = [], {}
     supported = set()
     from ._package_closures import discover
@@ -798,7 +817,7 @@ def _host_projection(
                     and isinstance(node.args[0], ast.Name)
                     and node.args[0].id == "self"
                     and any(
-                        item.get("scope_allocation") == [node.lineno, node.col_offset]
+                        [node.lineno, node.col_offset] in item.get("scope_allocations", [item.get("scope_allocation")])
                         for item in owners.get(self.owner, {}).values()
                     )
                 ):
@@ -1154,6 +1173,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "constant_declaration",
                         "constant_from_class",
                         "scope_allocation",
+                        "scope_allocations",
                         "group_builder",
                         "placement",
                         "placement_alias",

@@ -96,13 +96,19 @@ def member_initialization(node, members, source_members):
                 and isinstance(condition.left, ast.Name)
                 and condition.left.id == loop.target.id
                 and len(condition.ops) == 1
-                and isinstance(condition.ops[0], (ast.In, ast.NotIn))
+                and isinstance(condition.ops[0], (ast.In, ast.NotIn, ast.Eq, ast.NotEq))
             ):
-                raise ValueError("Member initialization filters require literal membership")
+                raise ValueError("Member initialization filters require literal member comparison")
             choices = literal(condition.comparators[0])
+            if isinstance(condition.ops[0], (ast.Eq, ast.NotEq)):
+                if type(choices) is not str:
+                    raise ValueError("Member initialization equality requires a literal member name")
+                choices = (choices,)
             if not isinstance(choices, (tuple, list)) or any(type(name) is not str for name in choices):
                 raise ValueError("Member initialization filters require literal member names")
-            selected = [name for name in selected if (name in choices) == isinstance(condition.ops[0], ast.In)]
+            selected = [
+                name for name in selected if (name in choices) == isinstance(condition.ops[0], (ast.In, ast.Eq))
+            ]
         policy = literal(node.value)
         pairs = [(name, policy) for name in selected]
     else:
