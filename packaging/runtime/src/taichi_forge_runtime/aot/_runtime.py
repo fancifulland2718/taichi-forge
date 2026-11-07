@@ -888,6 +888,27 @@ class NdArray:
         self.read_into(result)
         return bytes(result)
 
+    def from_numpy(self, array):
+        """Upload scalar/tensor values through the existing native array transfer."""
+        import numpy as np
+
+        if isinstance(self.dtype, StructLayout):
+            raise TypeError("Struct arrays require their explicit layout transfer interface")
+        _, format, _ = _dtype(self.dtype)
+        source = np.asarray(array)
+        if source.shape != self.shape + self.element_shape:
+            raise ValueError("NumPy source shape differs from the native array")
+        self.write(np.ascontiguousarray(source, dtype=np.dtype(format)))
+
+    def to_numpy(self):
+        """Return an independent writable Host copy; no frontend or copy kernel."""
+        import numpy as np
+
+        if isinstance(self.dtype, StructLayout):
+            raise TypeError("Struct arrays require their explicit layout transfer interface")
+        _, format, _ = _dtype(self.dtype)
+        return np.frombuffer(self.read(), dtype=np.dtype(format)).reshape(self.shape + self.element_shape).copy()
+
     def close(self):
         self._memory.close()
 

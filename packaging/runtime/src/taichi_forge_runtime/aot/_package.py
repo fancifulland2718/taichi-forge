@@ -44,6 +44,20 @@ class _NdarrayAnnotation:
     boundary: str
 
 
+@dataclass(frozen=True)
+class _ProducerType:
+    name: str
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(
+            f"{self.name} is a producer-only API; build from numerical source before installing the package. "
+            "Use retained Graph recordings with loaded entries for runtime scheduling."
+        )
+
+    def from_owner(self, *args, **kwargs):
+        return self(*args, **kwargs)
+
+
 class _ElementType:
     def __init__(self, package, spec):
         self.package, self.spec = package, spec
@@ -74,6 +88,7 @@ class _ModuleBinding:
         self.importlib = _Importlib(self)
         self.host = SimpleNamespace(
             ndarray=self.ndarray,
+            sync=package.runtime.wait,
             graph=SimpleNamespace(Arg=Arg, ArgKind=ArgKind, GraphBuilder=lambda: GraphBuilder(package)),
             **{dtype: dtype for dtype in _DTYPES},
         )
@@ -102,6 +117,23 @@ class _ModuleBinding:
         from ._package_values import HostTensor
 
         return HostTensor(values, dt)
+
+    def producer_type(self, name):
+        return _ProducerType(name)
+
+    @property
+    def program(self):
+        self.package._check()
+        return self.package.runtime
+
+    def vector_type(self, n, dtype):
+        return self.matrix_type(n, None, dtype)
+
+    def matrix_type(self, n, m, dtype):
+        dimensions = [operator.index(n)] + ([] if m is None else [operator.index(m)])
+        if any(n <= 0 for n in dimensions) or dtype not in _DTYPES:
+            raise ValueError("Host tensor type requires positive dimensions and a supported scalar dtype")
+        return self.type(dict(kind="tensor", dtype=dtype, element_shape=dimensions))
 
     def check_target_branch(self, condition, expected, location):
         self.package._check()
@@ -307,7 +339,7 @@ class entry:
             return self
         if owner._forge_package_owner is not self.package:
             raise ValueError("Numerical method belongs to a different loaded package")
-        return functools.partial(self._call, owner._forge_package_owner, owner)
+        return _BoundEntry(self, owner)
 
     def __call__(self, *args, **kwargs):
         return self._call(self.package, None, *args, **kwargs)
@@ -340,6 +372,15 @@ class entry:
             return kernel.run(*prepared)
 
 
+@dataclass(frozen=True)
+class _BoundEntry:
+    entry: entry
+    owner: object
+
+    def __call__(self, *args, **kwargs):
+        return self.entry._call(self.entry.package, self.owner, *args, **kwargs)
+
+
 class LoadedPackage:
     """Own code and allocations while preserving independent Host instances.
 
@@ -352,7 +393,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")
@@ -373,6 +414,7 @@ class LoadedPackage:
             raise ValueError("Host source inventory differs from package manifest")
         self._module = runtime.load_module(self.directory / "code.tcm")
         self._arrays, self._kernels = [], {}
+        self._graph_ids = itertools.count()
         self._closed, self._entered = False, False
         self._name = "_forge_package_loaded_" + str(next(_ids))
         self.host = None
@@ -380,6 +422,13 @@ class LoadedPackage:
     def _check(self):
         if self._closed:
             raise RuntimeError("Loaded package is closed")
+
+    def module(self, name):
+        """Resolve a retained module inside this package's declared source boundary."""
+        self._check()
+        if not self._entered:
+            raise RuntimeError("Enter the package context before resolving Host modules")
+        return _ModuleBinding(self).import_module(name)
 
     def __enter__(self):
         self._check()

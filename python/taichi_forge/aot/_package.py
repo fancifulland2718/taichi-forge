@@ -29,7 +29,7 @@ from ._package_targets import BACKEND_NAMES, backend_constant, backend_query, se
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
 _PREFIX = "_forge_package_"
-_HOST_OPS = frozenset(("ndarray", "graph"))
+_HOST_OPS = frozenset(("ndarray", "graph", "sync"))
 
 
 class PackageExportError(ValueError):
@@ -242,6 +242,9 @@ def _host_projection(
         owner = None
         minimum_version = 1
 
+        def __init__(self):
+            self.producer_only = []
+
         def visit_Assign(self, node):
             return self._allocation(node)
 
@@ -407,9 +410,16 @@ def _host_projection(
             return node
 
         def visit_FunctionDef(self, node):
+            nonlocal kind
             definition = definitions_at.get((node.lineno, node.col_offset))
             if definition is None:
-                return self.generic_visit(node)
+                previous = kind
+                local = decorator_resolver(node)
+                kind = lambda expression: local(expression) or previous(expression)
+                try:
+                    return self.generic_visit(node)
+                finally:
+                    kind = previous
             if definition.get("error_interface"):
                 return self.generic_visit(project_error_interface(node, module + "." + definition["name"]))
             if definition["kind"] in ("func", "real_func"):
@@ -429,6 +439,27 @@ def _host_projection(
             return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
 
         def visit_Attribute(self, node):
+            role = qualified_kind(node, kind)
+            if role == "lang.impl.get_runtime.prog" and isinstance(node.ctx, ast.Load):
+                if not isinstance(node.value, ast.Call) or node.value.args or node.value.keywords:
+                    _fail(module, node, "Runtime identity query takes no arguments")
+                self.minimum_version = max(self.minimum_version, 9)
+                return ast.copy_location(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "program", ast.Load()), node
+                )
+            if role in ("graph", "sync"):
+                self.minimum_version = max(self.minimum_version, 9)
+            if role in ("aot.Component", "aot.Module") and isinstance(node.ctx, ast.Load):
+                self.minimum_version = max(self.minimum_version, 9)
+                self.producer_only.append(dict(module=module, operation=role, line=node.lineno))
+                return ast.copy_location(
+                    ast.Call(
+                        ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "producer_type", ast.Load()),
+                        [ast.Constant("ti." + role)],
+                        [],
+                    ),
+                    node,
+                )
             if isinstance(node.ctx, ast.Load):
                 if backend_query(node, kind):
                     return ast.copy_location(
@@ -491,6 +522,13 @@ def _host_projection(
             return node
 
         def visit_Call(self, node):
+            role = qualified_kind(node, kind)
+            if role in ("types.vector", "types.matrix"):
+                self.minimum_version = max(self.minimum_version, 9)
+                node.func = ast.Attribute(
+                    ast.Name(_PREFIX + "runtime", ast.Load()), role.split(".")[-1] + "_type", ast.Load()
+                )
+                return self.generic_visit(node)
             if qualified_kind(node, kind) in ("Vector", "Matrix"):
                 self.minimum_version = max(self.minimum_version, 8)
                 node.func = ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "tensor", ast.Load())
@@ -585,7 +623,7 @@ def _host_projection(
     ).body
     ast.fix_missing_locations(projected)
     compile(projected, f"<projected-host:{module}>", "exec")
-    return ast.unparse(projected) + "\n", projector.minimum_version
+    return ast.unparse(projected) + "\n", projector.minimum_version, projector.producer_only
 
 
 def export_package(package, output, *, arch=None, source_root=None):
@@ -669,6 +707,7 @@ def export_package(package, output, *, arch=None, source_root=None):
         sources={},
         owners={},
         field_groups={},
+        producer_only=[],
         target_selections={
             name: tree._package_target_selections
             for name, _, _, _, tree, _, _, _ in sources
@@ -886,7 +925,7 @@ def export_package(package, output, *, arch=None, source_root=None):
             entries[definition["name"]] = entry_manifest
             manifest["entries"][symbol] = entry_manifest
             shared_entries[identity] = entry_manifest
-        host_source, minimum_version = _host_projection(
+        host_source, minimum_version, producer_only = _host_projection(
             name,
             tree,
             kind,
@@ -903,6 +942,7 @@ def export_package(package, output, *, arch=None, source_root=None):
         )
         payloads["host/" + relative.as_posix()] = host_source.encode("utf8")
         manifest["version"] = max(manifest["version"], minimum_version)
+        manifest["producer_only"].extend(producer_only)
         manifest["sources"][name] = hashlib.sha256(text.encode("utf8")).hexdigest()
     if not manifest["entries"]:
         raise PackageExportError("Package contains no supported decorated kernels")

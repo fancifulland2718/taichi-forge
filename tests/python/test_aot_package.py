@@ -334,7 +334,7 @@ def test_package_preserves_host_ndarray_annotations_without_frontend(tmp_path, m
     source += "\ndef accept_array(value: VecArray) -> VecArray:\n    return value\n"
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 8  # Host Vec/Mat constructors also require tensor-value projection.
+    assert manifest["version"] == 9  # Host tensor type factories need only logical Runtime metadata.
     original = package.Model(7)
     original.step()
     np.testing.assert_array_equal(original.output.to_numpy(), np.arange(7) + 27)
@@ -568,6 +568,168 @@ def record(builder):
         # Host recording references the same compiled definition; it never
         # creates another artifact for this sequence or argument value.
         assert len(library.manifest["entries"]) == 4
+
+
+OWNER_GRAPH_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, gain: float):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.gain = gain
+        self.bias = ti.Vector([1.0, 2.0], ti.f32)
+        scope = ti.experimental.ResourceScope(self)
+        scope.value('bias', ti.types.vector(2, ti.f32))
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+
+    @ti.kernel
+    def reset(self):
+        for i in self.values:
+            self.values[i] = 0
+
+    @ti.kernel
+    def step(self, increment: ti.i32, extra: ti.types.vector(2, ti.f32)):
+        for i in range(self.n):
+            self.values[i] += self.gain * (i + increment) + self.bias[0] + extra[1]
+
+    def record(self, builder):
+        def vector(name, dtype):
+            return ti.graph.Arg(ti.graph.ArgKind.MATRIX, name, ti.types.vector(2, dtype))
+        extra = vector('extra', ti.f32)
+        one = builder.private_scalar('one', ti.i32, 1)
+        builder.dispatch(self.step, one, extra, template_args={'self': self})
+        child = builder.create_sequential()
+        child.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'increment', ti.i32), extra,
+                       template_args={'self': self})
+        builder.append(child)
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.reset, template_args={'self': self})
+        self.record(builder)
+        return builder.compile()
+
+    def compile_component(self):
+        return ti.aot.Component.from_owner(self).compile_graph(self.record)
+
+    def wait(self):
+        import taichi_forge as ti
+        assert ti.lang.impl.get_runtime().prog is not None
+        ti.sync()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_graph_captures_are_instance_snapshots_without_new_code(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, OWNER_GRAPH_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 9
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert [item["operation"] for item in manifest["producer_only"]] == ["aot.Component"]
+    reference = package.Model(7, 2.0)
+    reference.reset()
+    for increment in (1, 3):
+        reference.step(increment, ti.Vector([0.0, 0.0]))
+    np.testing.assert_array_equal(reference.values.to_numpy(), np.arange(7) * 4 + 10)
+    probe = tmp_path / "consume_owner_graph.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import hashlib
+        import sys
+        from pathlib import Path
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        root = Path(sys.argv[1])
+        before = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file()}
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, root) as code:
+            a, b = code.host.Model(7, 2.0), code.host.Model(19, -1.0)
+            ga, gb = a.graph(), b.graph()
+            assert len(ga.plan.argument_names) > len(ga.arguments)  # private captures, not public arguments
+            assert ga.arguments.keys() == {'increment', 'extra'}
+            pa = ga.bind(dict(increment=3, extra=(0.0, 0.0)))
+            pb = gb.bind(dict(increment=5, extra=(0.0, 0.0)))
+            a.gain = 9.0
+            a.bias.x = 7.0
+            pb.run()
+            pa.run()
+            pb.run()
+            a.wait()
+            np.testing.assert_array_equal(np.frombuffer(a.values.read(), np.float32), np.arange(7) * 4 + 10)
+            np.testing.assert_array_equal(np.frombuffer(b.values.read(), np.float32), np.arange(19) * -2 - 4)
+            with ga.bind(dict(increment=3, extra=(0.0, 0.0))) as fresh:
+                fresh.run()
+            np.testing.assert_array_equal(np.frombuffer(a.values.read(), np.float32), np.arange(7) * 18 + 50)
+            pa.run()  # the earlier snapshot remains independent
+            np.testing.assert_array_equal(np.frombuffer(a.values.read(), np.float32), np.arange(7) * 4 + 10)
+            pa.close()
+            pb.close()
+            # Transfers use the native member view, including strided Host input.
+            source = np.arange(14, dtype=np.float64)[::2]
+            a.values.from_numpy(source)
+            copy = a.values.to_numpy()
+            np.testing.assert_array_equal(copy, source)
+            copy[:] = -1
+            np.testing.assert_array_equal(a.values.to_numpy(), source)
+            try:
+                a.values.from_numpy(np.zeros((7, 1), np.float32))
+            except ValueError as error:
+                assert 'shape' in str(error)
+            else:
+                raise AssertionError('Wrong transfer shape accepted')
+            try:
+                a.compile_component()
+            except RuntimeError as error:
+                assert 'producer-only' in str(error)
+            else:
+                raise AssertionError('Installed package attempted producer compilation')
+            builder = code.host.model.ti.graph.GraphBuilder()
+            builder.private_scalar('one', 'i32', 1)
+            try:
+                builder.private_scalar('one', 'i32', 2)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('Repeated private scalar accepted')
+            with load_package(runtime, root) as other:
+                foreign = other.host.Model(3, 1.0)
+                try:
+                    builder.dispatch(foreign.reset)
+                except ValueError as error:
+                    assert 'same loaded package' in str(error)
+                else:
+                    raise AssertionError('Foreign code owner accepted')
+        after = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file()}
+        assert before == after
+        print('OWNER_GRAPH_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OWNER_GRAPH_SOURCE_FREE_OK" in result.stdout
 
 
 FIELD_SOURCE = """

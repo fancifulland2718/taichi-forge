@@ -78,12 +78,14 @@ with Runtime("cuda") as runtime:
 - 包内绝对导入（含函数内延迟导入）映射到本次加载的独立命名空间。普通 `import`、别名及 `from ... import ...` 保留绑定方式；不修改全局原包名，也不回到私有源码。没有 `source_root` 时，嵌套包的无别名绝对导入尚不支持；通配符与 builtin `__import__` 仍有明确限制。包外依赖按上述源码边界处理。
 - 构造函数直接调用 `field`、`Vector.field`、`Matrix.field` 的默认 AOS 分配保留为每个 owner 的完整原生 SNode 组。extent 支持正整数常量、构造参数及其无条件单次赋值的 owner 别名。普通 FieldsBuilder 仅编译结构并提供原生 schema；消费者由同一原生布局编译器实例化。导出不执行应用构造函数，也不把 Field 拆成分别分配的 Ndarray。条件/歧义 extent、offset、自定义 order、梯度及用户显式构建的树仍待接入。
 
-同包无状态入口的 Host recorder 可使用 `ti.graph.Arg`、`ArgKind`、
+同包入口的 Host recorder 可使用 `ti.graph.Arg`、`ArgKind`、
 `GraphBuilder.dispatch`、顺序节点和 `append`。`compile()` 生成引用已导出符号的
 既有 `ExecutionPlan`，不生成组合 TCM。`graph.bind(arguments)` 返回原生 prepared
 call，可反复 `run()`；`graph.run(arguments)` 是每次重新 prepare 的单次便利调用，
-不推荐作为稳态路径。这层初始构图接口尚未接入 owner 隐式捕获、原生 provider 节点和
-Graph 控制流节点。
+不推荐作为稳态路径。绑定方法保留 owner 捕获；prepare 对每个实例的标量/张量值及原生
+资源绑定取快照，后续 Host 修改不改变旧调用。`template_args={'self': owner}` 必须与
+绑定接收者一致。`private_scalar` 复用已有 Plan 的不可变标量资源，支持顺序节点的独立
+名称作用域。原生 provider 和 Graph 控制流节点仍未接入。
 - 数组尺寸、普通标量属性按运行时数据传递。内部复用 Component lowering 的类型合同，不要求用户注册 Component；extent 为 1 的临时数组只提供类型/维数见证，不选择模型或静态分支。
 - 正常 JIT 装饰器与调用路径不变；包扫描和 Host 投影仅在显式导出时执行。
 
@@ -113,9 +115,10 @@ recorder 在消费端把两种点数/面数绑定到同一已编译入口及现�
 实例资源。资源替换、多个构造函数分别分配 Field、条件基类构造、未绑定的类方法引用及
 显式 `super()` 数值调用暂时拒绝，不猜测接收者或布局。
 
-源码边界模式也已用于原 winding 模块。原采样模块的更大依赖闭包会到达
-`MeshSDF` 等资源 owner，现可直接选取 CPU 的 Dense 声明，无须运行模型构造；
-必要 Host 前端投影及显式 Sparse 布局仍待接入。没有删除该依赖或把“拒绝正确”算成采样支持。
+源码边界模式也已用于原 winding 模块。原采样依赖闭包现已在 CPU/Vulkan 导出并独立
+无源码消费：原 Host 记录立方体/球体、Morton、Poisson 操作；两个 MeshSDF 实例的查询及
+初始化/查询 Graph 对照原 JIT。未新增应用生产适配器。CUDA 仍在显式 Sparse 树处拒绝且
+不发布半包；这项拒绝不是 CUDA 采样资格。
 
 只含一次字面量参数调用、且所调用的普通 Python helper 明确标注 `typing.NoReturn`/`Never`
 的报错接口，保留 Host 报错行为，不生成数值代码资产。标注别名和延迟标注只解析引用，
@@ -146,8 +149,7 @@ extent 仍须合法；当前结构见证不能满足的表达式明确拒绝，�
 构造失败并释放已分配资源。后端名称/相等比较采用不可变 Runtime 标记，不引入数值前端。
 此能力使用清单版本 6，继续读取版本 1–5。固定维度名元组，例如
 `tuple(scope.dim(n) for n in ('x', 'y'))`，复用同一维度代数；前端名或 builtin 被遮蔽时拒绝。
-CPU/CUDA/Vulkan 定向检查对照原 JIT 及无源码独立实例；这不等于 MeshSDF Sparse 构造或
-完整采样闭包已经通过。
+CPU/CUDA/Vulkan 定向检查对照原 JIT 及无源码独立实例；这不等于 MeshSDF Sparse 构造通过。
 
 声明预检查汇总不同模块的语法/schema 错误；编译依赖错误在对应入口编译时诊断。
 
@@ -166,6 +168,18 @@ Host 的 `ti.Vector`/`ti.Matrix` 构造（含 import 别名）、固定张量类
 完整 Host 张量代数、swizzle 和切片尚未接入，不支持的运算明确报错，不执行列表算术。
 装饰器内的数值矩阵运算继续由原编译器处理。三后端局部检查覆盖捕获、复合参数、
 独立状态及无源码消费。
+
+Graph 捕获及相关 Host 支持使用清单版本 9，消费者读取版本 1–9。函数内前端导入、
+`ti.sync()` 和 Runtime program 身份查询均投影到现有 Runtime，不导入编译器。
+逻辑 `types.vector/matrix` 工厂接受 Host 维度/dtype，不分配设备存储。
+`NdArray.from_numpy/to_numpy` 复用原生传输并检查形状，包括 Dense 成员视图；Struct
+数组仍要求显式布局传输接口。`library.module(name)` 在加载包的独立命名空间解析已声明模块。
+
+保留 Host 中旧 `ti.aot.Component`/`ti.aot.Module` 引用时，清单明确记录 `producer_only`；
+调用会报“仅生产端”错误，安装包不能编译新的数值定义。它们的存在不阻止导出数值定义，
+也不阻止原 Graph recorder 引用已加载入口。其他未投影前端 API 继续拒绝。
+三后端局部检查覆盖两实例交错 Graph、绑定快照、私有标量作用域、外来 owner 拒绝，
+以及记录/重放前后代码资产不变。
 
 ## 仍需补齐的共同机制
 

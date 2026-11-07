@@ -111,14 +111,18 @@ independent object retirement is not implemented.
 - Absolute imports within the selected package, including lazy imports inside functions, resolve in that loaded package's independent namespace. Ordinary imports, aliases and named imports preserve their bindings without changing global source-package names. Without `source_root`, unaliased absolute imports of a nested package remain unsupported. Wildcard imports and builtin `__import__` have explicit restrictions; external dependencies follow the source boundary above.
 - Direct constructor `field`, `Vector.field` and `Matrix.field` allocations with plain default AOS layout form one complete native SNode group per owner. Extents may be positive constants, constructor parameters or their unconditional single-assignment owner aliases. A compile-only ordinary FieldsBuilder supplies the native schema; the consumer instantiates that schema through the same native layout compiler. No application constructor runs during export and Fields are not split into separately allocated ndarrays. Conditional/ambiguous extents, offsets, custom order, gradients and explicit user-built trees require further support.
 
-For stateless entries in the same package, retained Host recorders can use
+For entries in the same package, retained Host recorders can use
 `ti.graph.Arg`, `ArgKind`, `GraphBuilder.dispatch`, sequential nodes and `append`.
 `compile()` builds an existing `ExecutionPlan` referencing exported symbols;
 it creates no combination TCM. `graph.bind(arguments)` returns the native
 prepared call for repeated `run()` replay. `graph.run(arguments)` is a single-use
 convenience that prepares anew; it is not the preferred steady-state path.
-Implicit owner captures, native provider nodes and control-flow Graph nodes are
-not yet projected by this small recording facade.
+Bound methods retain owner captures. Preparation snapshots scalar/tensor values
+and native resource bindings for each instance; later Host changes do not mutate
+an earlier prepared call. `template_args={'self': owner}` must match the bound
+receiver. `private_scalar` uses existing immutable scalar Plan resources, including
+sequential private scopes. Native provider and control-flow Graph nodes remain
+outside this recording facade.
 - Array extents and ordinary scalar attributes remain runtime data. Existing Component lowering supplies the internal type contract without user Component registration. Extent-one temporary arrays provide type/rank witnesses, not sample models or static-branch choices.
 - Normal JIT decorators and invocation remain unchanged. Scanning and Host projection run only on explicit export.
 
@@ -145,10 +149,12 @@ The same winding entry also passes three-backend NumPy Host buffer consumption,
 analytic/original-JIT comparisons and temporary-resource release checks.
 
 The source-boundary mode is also exercised with the original winding module.
-The larger original sampling closure reaches resource owners such as `MeshSDF`
-and now selects its CPU Dense declarations without constructing a model. Host frontend
-projections and explicit Sparse placements remain pending. No dependency was deleted
-to obtain a pass; correct rejection does not qualify sampling. Declaration
+The larger original sampling closure now exports and consumes on CPU/Vulkan:
+the original Host records cube/sphere, Morton and Poisson operations, while two
+MeshSDF instances exercise queries and initialization/query Graph recordings
+against original JIT. No application production adapter was added. CUDA still
+rejects the explicit Sparse tree before publishing; that rejection is not CUDA
+sampling qualification. Declaration
 preflight aggregates syntax/schema failures across modules; compiler dependency
 failures are diagnosed when compiling the affected entry.
 
@@ -201,7 +207,7 @@ frontend. This capability uses manifest version 6; versions 1–5 remain readabl
 Literal dimension-name tuples such as `tuple(scope.dim(n) for n in ('x', 'y'))`
 reuse the same dimension algebra. Shadowed frontend/builtin names are rejected.
 CPU/CUDA/Vulkan focused checks compare original JIT and source-free instances;
-they do not qualify MeshSDF Sparse construction or the full sampling closure.
+they do not qualify MeshSDF Sparse construction.
 
 Fixed `ti.types.ndarray` aliases retained by Host code are projected to lightweight
 logical annotations, including scalar/tensor/Struct element descriptors. They do
@@ -219,6 +225,24 @@ swizzles and slicing are not implemented by this projection; unsupported operati
 raise instead of performing list arithmetic. Numerical matrix operations inside
 decorated definitions continue through the original compiler. Focused three-backend
 checks cover captures, typed compound arguments, state isolation and source-free use.
+
+Graph capture projection and related Host support use manifest version 9; the
+consumer reads versions 1–9. Local frontend imports, `ti.sync()` and the Runtime
+program identity query are projected without importing the compiler. Logical
+`types.vector/matrix` factories accept Host dimensions/dtypes; they do not allocate
+device storage. `NdArray.from_numpy/to_numpy` use existing native transfers with
+shape validation, including Dense member views. Struct arrays still require their
+explicit layout transfer interface. `library.module(name)` resolves a declared
+Host module within the loaded package's private namespace.
+
+Legacy `ti.aot.Component` and `ti.aot.Module` references in retained Host code are
+recorded as `producer_only` manifest entries. Calling them raises an explicit
+producer-only error; installed packages cannot compile new numerical definitions.
+Their presence does not block exporting the numerical definitions or using the
+original Graph recorders with loaded entries. Other unprojected frontend APIs
+continue to reject. Focused three-backend checks cover interleaved instance Graphs,
+binding snapshots, scalar scopes, rejection of foreign owners and unchanged code
+assets after recording/replay.
 
 ## Remaining shared mechanisms
 
