@@ -133,7 +133,7 @@ class OwnerGraph:
 def _compose(environment, schema, children):
     """Qualify existing Component declarations; native layouts remain authoritative."""
     from dataclasses import replace
-    from ._component import Array, DenseField, Dimension, Record, _ModelTensorField, _capture_id
+    from ._component import Array, DenseField, Dimension, Record, _ConditionalRecord, _ModelTensorField, _capture_id
 
     declarations, paths = dict(environment.declarations), dict(environment._paths)
     constraints, source_paths = dict(environment._constraints), dict(environment._source_scope_paths)
@@ -172,6 +172,8 @@ def _compose(environment, schema, children):
                     None if value.shape is None else tuple(names[n] if isinstance(n, str) else n for n in value.shape),
                     names[value.resource_id] if value.resource_id else "",
                 )
+            elif isinstance(value, _ConditionalRecord):
+                value = _ConditionalRecord(tuple((names[n], expected) for n, expected in value.conditions))
             elif isinstance(value, Record):
                 value = Record(optional=value.optional)
             declarations[names[key]], paths[names[key]] = value, (attribute, *child._paths[key])

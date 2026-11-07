@@ -150,7 +150,7 @@ def field_declarations(module, constructor, kind, fail):
 def construct_fields(owner, schema, namespace, module, *, imported_modules=None):
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
-    from ._component import DenseField, Dimension, Record, _ConditionalDenseField, _ModelTensorField
+    from ._component import DenseField, Dimension, Record, _ConditionalDenseField, _ConditionalRecord, _ModelTensorField
     from taichi_forge_runtime._dimensions import evaluate_extent
     from ._package_records import read_member, write_member
 
@@ -321,10 +321,21 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         def field_declaration(element, spec):
             if spec.get("model_tensor"):
                 return _ModelTensorField(element.dtype, tuple(item["shape"]), group, tuple(spec["element_shape"]))
+            if item.get("conditions"):
+                return _ConditionalDenseField(
+                    element, tuple(item["shape"]), group, tuple(sorted(item["conditions"].items()))
+                )
             return DenseField(element, tuple(item["shape"]), group)
 
+        def record_declaration(**members):
+            return (
+                _ConditionalRecord(sorted(item["conditions"].items()), **members)
+                if item.get("conditions")
+                else Record(**members)
+            )
+
         declarations[name] = (
-            Record(
+            record_declaration(
                 **{
                     member: field_declaration(element, item["element"]["members"][member])
                     for member, element in dtype.members.items()

@@ -470,8 +470,11 @@ code. Focused CPU/CUDA/Vulkan checks compare original AOS/SOA nodes and numerica
 results, including source-free consumers, new dimensions and independent
 retirement. The original GeoPhys `resource_scope` factory also passes three-backend
 checks with explicit shared placement. This does not qualify the complete EFC/MPM
-resource closure. Nested records, conditional StructFields, member initialization
-overrides and complete Host element access remain pending.
+resource closure. Declared boolean presence now also supports flat StructFields
+with fixed scalar/vector/matrix members in AOS or SOA layout. CPU/CUDA checks
+cover original native layouts, independent flags and instances, prepared snapshots
+and source-free consumption; common code stays shared. Conditional model tensor
+members, nested records and complete Host element access remain pending.
 
 Version 15 accepts existing `scope.derived_dim` and `scope.power_of_two_dim`
 declarations using the shared bounded dimension algebra. Ordinary Host code

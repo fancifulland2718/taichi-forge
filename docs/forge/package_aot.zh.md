@@ -308,7 +308,9 @@ Host 记录提供成员属性、shape 和字典式 `to_numpy/from_numpy`，委�
 编译依赖检查，成员类型变化不能误用旧代码。CPU/CUDA/Vulkan 局部检查对照 AOS/SOA 的
 原 JIT 节点与数值，并验证无源码进程、新尺寸和独立退休；GeoPhys 原 `resource_scope`
 工厂的显式共享 placement 同样通过三后端检查。这不表示 EFC/MPM 的完整资源闭包已接入。
-嵌套记录、条件 StructField、逐成员初始化覆盖及完整 Host 元素访问仍待接入。
+声明的布尔存在条件也支持扁平 StructField 的固定标量/向量/矩阵成员，保留原 AOS/SOA
+布局。CPU/CUDA 局部检查覆盖原生布局、独立条件和实例、已准备快照及无源码消费，
+公共数值代码继续共享。条件模型张量成员、嵌套记录及完整 Host 元素访问仍待接入。
 
 版本 15 接入已有 `scope.derived_dim` 和 `scope.power_of_two_dim`，表达式沿用已声明维度的
 有界代数。普通 Host 仍计算整数属性，构造时校验该属性与声明关系一致；数值代码使用动态

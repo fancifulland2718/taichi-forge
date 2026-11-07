@@ -1389,8 +1389,6 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
             ]
             layout = "AOS"
             if method == "struct_field":
-                if conditions:
-                    fail(module, call, "Conditional Struct Field presence requires further package support")
                 layouts = [k.value for k in call.keywords if k.arg == "layout"]
                 if layouts:
                     layout = {"Layout.AOS": "AOS", "Layout.SOA": "SOA"}.get(qualified_kind(layouts[0], kind))

@@ -607,6 +607,14 @@ class _OwnerReference:
         return component.read(owner, name) is target
 
 
+class _ConditionalRecord(Record):
+    """A declared optional StructField namespace with a complete type witness."""
+
+    def __init__(self, conditions, **members):
+        super().__init__(optional=True, **members)
+        object.__setattr__(self, "conditions", tuple(conditions))
+
+
 class _OwnerSequence(Record):
     """A fixed Host composition of declared owners; no device subscript ABI."""
 
@@ -1965,7 +1973,7 @@ class _Capture:
                 "declare it as a runtime value, resource or static configuration"
             )
         self.used[name] = declaration.schema
-        if isinstance(declaration, (_ConditionalDenseField, _ConditionalModelTensorField)):
+        if isinstance(declaration, (_ConditionalDenseField, _ConditionalModelTensorField, _ConditionalRecord)):
             self.resource_conditions[name] = declaration.conditions
             present = True
             for condition, expected in declaration.conditions:
@@ -2451,8 +2459,9 @@ class _Capture:
             declaration = component.declarations.get(name)
             if declaration is None or declaration.schema != schema:
                 return f"declaration {name!r}"
-            if (isinstance(declaration, DenseField)
-                    and getattr(declaration, "conditions", ()) != self.resource_conditions.get(name, ())):
+            if isinstance(declaration, (DenseField, Record)) and getattr(
+                declaration, "conditions", ()
+            ) != self.resource_conditions.get(name, ()):
                 return f"resource presence declaration {name!r}"
         for name, length in self.owner_sequence_lengths.items():
             declaration = component.declarations.get(name)
