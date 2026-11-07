@@ -19,7 +19,7 @@ import sys
 from types import SimpleNamespace
 
 from ._runtime import NdArray, Scalar
-from ._package_values import StructField, capture_value
+from ._package_values import StructField, capture_value, path_value, dimension_value, check_admission
 from .._dimensions import Extent, evaluate_extent
 from .._static_values import read_static_key, static_key
 
@@ -313,7 +313,7 @@ class _ModuleBinding:
         shape = shape if isinstance(shape, tuple) else (shape,)
         dimensions = tuple(
             (
-                evaluate_extent(n.expression, lambda key: getattr(owner, key))
+                evaluate_extent(n.expression, lambda key: dimension_value(owner, key))
                 if isinstance(n, Extent)
                 else operator.index(n)
             )
@@ -365,7 +365,7 @@ class _ModuleBinding:
         return _ElementType(self.package, spec)
 
     def extent(self, expression, owner):
-        return evaluate_extent(expression, lambda key: getattr(owner, key))
+        return evaluate_extent(expression, lambda key: dimension_value(owner, key))
 
     def resource_scope(self, owner):
         self.package._check()
@@ -373,13 +373,13 @@ class _ModuleBinding:
             raise ValueError("Resource scope belongs to another loaded package")
         return _ResourceScope(owner)
 
-    def declare_value(self, owner, name, spec):
+    def declare_value(self, owner, name, spec, path=None):
         self.package._check()
         if getattr(owner, "_forge_package_owner", None) is not self.package:
             raise ValueError("Value declaration belongs to another loaded package")
         # Match ResourceScope.value's presence/type-role check. Packing and
         # per-call ABI validation remain in the native Kernel API.
-        getattr(owner, name)
+        path_value(owner, path or (name,))
         if spec["kind"] not in ("scalar", "tensor"):
             raise ValueError("Runtime value requires a scalar/vector/matrix type")
 
@@ -418,13 +418,26 @@ class _FieldTree:
 class _ResourceScope:
     """Forward original Host attributes and reuse the shared dimension algebra."""
 
-    def __init__(self, owner):
+    def __init__(self, owner, *, parent=None, path=()):
         object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "_parent", parent)
+        object.__setattr__(self, "_path", path)
+        object.__setattr__(self, "_root", parent._root if parent is not None else owner)
+        if parent is None and not hasattr(owner, "_forge_package_dimension_paths"):
+            owner._forge_package_dimension_paths = {}
+
+    def _identity(self, name):
+        path = (*self._path, name)
+        identity = name if len(path) == 1 else "__record_" + "_".join(f"{len(part)}_{part}" for part in path)
+        self._root._forge_package_dimension_paths[identity] = path
+        return identity
 
     def __getattr__(self, name):
         return getattr(self._owner, name)
 
     def __setattr__(self, name, value):
+        if self._parent is not None:
+            raise TypeError("A resource record describes existing members and is read-only")
         setattr(self._owner, name, value)
 
     def static(self, name, *, choices, kernel_only=False):
@@ -440,13 +453,18 @@ class _ResourceScope:
         value = operator.index(getattr(self._owner, name))
         if not 0 <= value <= 2**31 - 1:
             raise ValueError(f"Dimension {name!r} is outside the i32 count range")
-        return Extent(("dim", name))
+        return Extent(("dim", self._identity(name)))
+
+    def parent_dim(self, name):
+        if self._parent is None:
+            raise ValueError("parent_dim requires a declared record scope")
+        return self._parent.dim(name)
 
     def derived_dim(self, name, expression):
         if not isinstance(expression, Extent):
             raise TypeError("A derived dimension requires an Extent expression")
         result = self.dim(name)
-        value = evaluate_extent(expression.expression, lambda key: operator.index(getattr(self._owner, key)))
+        value = evaluate_extent(expression.expression, lambda key: operator.index(dimension_value(self._root, key)))
         if value != operator.index(getattr(self._owner, name)):
             raise ValueError(f"Derived dimension {name!r} does not match its normal attribute")
         return result
@@ -457,9 +475,31 @@ class _ResourceScope:
         return self.derived_dim(name, Extent(("ceil_pow2", minimum.expression)))
 
     def record(self, name, value, *, optional=False):
-        if type(name) is not str or not name.isidentifier() or value is not None or optional is not True:
-            raise ValueError("Package record projection requires its declared absent optional resource")
-        setattr(self._owner, name, None)
+        if (
+            type(name) is not str
+            or not name.isidentifier()
+            or type(optional) is not bool
+            or (value is None and not optional)
+        ):
+            raise ValueError("Resource record requires a named existing value or an explicit optional absence")
+        if self._parent is not None:
+            if getattr(self._owner, name) is not value:
+                raise ValueError("A record declaration must refer to its existing member")
+        else:
+            setattr(self._owner, name, value)
+        return _ResourceScope(value, parent=self, path=(*self._path, name))
+
+    def require_le(self, name, left, right, *, when):
+        from .._dimensions import check_constraints, freeze_extent
+
+        if type(name) is not str or not name.isidentifier() or type(when) is not str or not when.isidentifier():
+            raise ValueError("Dimension constraint requires a name and declared trigger")
+        spec = dict(
+            left=left.expression if isinstance(left, Extent) else freeze_extent(("const", left)),
+            right=right.expression if isinstance(right, Extent) else freeze_extent(("const", right)),
+            when=self._identity(when),
+        )
+        check_constraints({self._identity(name): spec}, lambda key: dimension_value(self._root, key))
 
 
 class _Importlib:
@@ -588,6 +628,7 @@ class entry:
             return selected._call(package, owner, *args, **kwargs)
         self._check_layout(owner)
         contract = self.contract
+        check_admission(owner, contract)
         bound = self.signature.bind(*args, **kwargs)
         arguments = [
             (
@@ -625,7 +666,10 @@ class entry:
             return self
         if owner is None:
             raise ValueError("Static package entries require their bound instance")
-        values = {name: static_key(getattr(owner, name)) for name in self._domain}
+        values = {
+            name: static_key(path_value(owner, self.family.get("paths", {}).get(name, (name,))))
+            for name in self._domain
+        }
         if any(value not in self._domain[name] for name, value in values.items()):
             raise ValueError("Static configuration is outside its declared package domain")
         matches = {
@@ -662,7 +706,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

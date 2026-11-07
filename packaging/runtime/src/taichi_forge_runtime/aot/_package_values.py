@@ -8,7 +8,28 @@ from collections.abc import Sequence
 import numbers
 import operator
 
-from .._dimensions import evaluate_extent
+from .._dimensions import evaluate_extent, check_constraints, validate_constraints
+
+
+def path_value(owner, path):
+    for part in path:
+        owner = getattr(owner, part)
+    return owner
+
+
+def dimension_value(owner, name):
+    return path_value(owner, getattr(owner, "_forge_package_dimension_paths", {}).get(name, (name,)))
+
+
+def check_admission(owner, contract):
+    admission = contract.get("admission")
+    if admission:
+        constraints, dimensions = admission["constraints"], admission["dimensions"]
+        validate_constraints(constraints, dimensions.keys(), {spec["when"] for spec in constraints.values()})
+        check_constraints(
+            constraints,
+            lambda name: capture_value(owner, dict(name=name, dimension_relations=dimensions)),
+        )
 
 
 def capture_value(owner, spec):

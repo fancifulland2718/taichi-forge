@@ -118,6 +118,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
     import taichi_forge as ti
     from ._component import DenseField, Dimension, Record, _ConditionalDenseField
     from taichi_forge_runtime._dimensions import evaluate_extent
+    from ._package_records import read_member, write_member
 
     fields = dict(
         sorted(
@@ -126,6 +127,11 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         )
     )
     declarations = {}
+    from types import SimpleNamespace
+
+    for name, item in schema.items():
+        if item["kind"] == "record":
+            write_member(owner, name, SimpleNamespace(), schema)
 
     def witness(name, visiting=()):
         if name in visiting:
@@ -134,7 +140,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         value = evaluate_extent(expression, lambda key: witness(key, (*visiting, name))) if expression else 1
         if not 0 <= value <= 2**31 - 1:
             raise ValueError("Declared dimension needs a legal symbolic construction witness")
-        setattr(owner, name, value)
+        write_member(owner, name, value, schema)
         return value
 
     for name, item in schema.items():
@@ -174,7 +180,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             if isinstance(extent, str):
                 expression = item.get("dimension_expressions", {}).get(extent, ())
                 declarations[extent] = Dimension(expression=expression)
-                value = evaluate_extent(expression, lambda key: getattr(owner, key)) if expression else 1
+                value = evaluate_extent(expression, lambda key: read_member(owner, key, schema)) if expression else 1
                 if not 0 < value <= 2**31 - 1:
                     raise ValueError("Declared extent needs a legal symbolic construction witness")
                 setattr(owner, extent, value)
@@ -241,9 +247,10 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
 
 def field_environment(declarations, schema):
     """Retain the allocation scope of record dimensions, as from_owner does."""
-    from ._component import Component, DenseField, _capture_id
+    from ._component import DenseField, _capture_id
+    from ._package_records import record_environment
 
-    environment = Component(**declarations)
+    environment = record_environment(declarations, schema)
     flattened = dict(environment.declarations)
     for name, item in schema.items():
         if item.get("struct_field"):

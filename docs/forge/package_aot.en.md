@@ -479,6 +479,21 @@ Other unknown frontend operations still reject export. Qualification must cover
 the actual public runtime paths; exporting a package with Producer boundaries
 does not establish complete support.
 
+Version 19 supports unconditional declarations of existing read-only
+`ResourceScope.record` values in constructors. Scalar values, finite literal
+static domains and `dim/derived_dim/parent_dim` reuse Component paths and the
+existing dimension algebra. Ordinary records, including frozen dataclasses,
+retain their objects; export does not invoke their constructors to discover ABI.
+`require_le` reuses existing constraint validation and retains admission only for
+entries using its trigger. Direct calls and Graph rebinding validate current
+records; prepared calls keep their previous snapshots. Unread record static
+members create no code copies. Record-local extents cannot escape into parent
+Field allocations, and record scopes cannot allocate new Fields. Focused
+CPU/CUDA/Vulkan checks cover record values, static projection, parent capacity
+constraints and independent source-free consumption. Arbitrary multi-statement
+declaration helpers, populated optional records, borrowed Fields and model-driven
+local tensor type domains remain unfinished; this is not full EFC qualification.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

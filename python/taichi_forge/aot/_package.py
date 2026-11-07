@@ -25,6 +25,7 @@ from ._package_owners import resolve_owners
 from ._package_errors import is_error_interface, project_error_interface
 from ._package_resources import scope_declarations
 from ._package_targets import BACKEND_NAMES, backend_constant, backend_query, select_target_branches
+from ._package_records import write_member, dimension_relations
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
@@ -761,6 +762,7 @@ def _host_projection(
                                 ast.Name("self", ast.Load()),
                                 ast.Constant(name),
                                 ast.parse(repr(item["element"]), mode="eval").body,
+                                ast.parse(repr(item.get("path", [name])), mode="eval").body,
                             ],
                             [],
                         )
@@ -973,6 +975,13 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             for attribute, item in schema.items():
                 if item["kind"] in ("dense_field", "dimension"):
                     continue
+                elif item["kind"] == "record":
+                    from ._component import Record
+
+                    declarations[attribute] = Record()
+                    # Earlier dimension witnesses may already populate this
+                    # namespace. Never replace it or construct a user record.
+                    continue
                 elif item["kind"] == "static":
                     choices = tuple(read_static_key(key) for key in item["choices"])
                     declarations[attribute] = StaticValue(choices=choices, kernel_only=item["kernel_only"])
@@ -1001,8 +1010,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         dtype = getattr(ti, item["dtype"])
                     declarations[attribute] = RuntimeValue(dtype)
                     value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
-                setattr(owner, attribute, value)
+                write_member(owner, attribute, value, schema)
             owners[class_name], environments[class_name] = owner, field_environment(declarations, schema)
+            if any(item["kind"] == "record" or item.get("constraints") for item in schema.values()):
+                manifest["version"] = max(19, manifest["version"])
             if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):
                 manifest["version"] = max(15, manifest["version"])
             if any(item.get("struct_field") for item in schema.values()):
@@ -1140,9 +1151,17 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         )
                 # Sharing is decided by the compiler object/key and its actual
                 # ABI/dependency guards, never by a semantic hash alone.
+                constraints, dimensions, _ = environment.constraint_facts(owner, code.used)
+                admission = (
+                    dict(constraints=constraints, dimensions=dimension_relations(environment, dimensions))
+                    if constraints
+                    else None
+                )
                 identity = (code.kernel, code.key)
                 if identity in shared_entries:
                     entry_manifest = shared_entries[identity]
+                    if entry_manifest.get("admission") != admission:
+                        raise PackageExportError("Shared package code requires compatible dimension admission")
                     if name + "." + definition["name"] not in entry_manifest["definitions"]:
                         entry_manifest["definitions"].append(name + "." + definition["name"])
                 else:
@@ -1166,25 +1185,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         if item["kind"] in ("ndarray", "dense_field"):
                             item.pop("dtype")
                         if item["kind"] == "dimension" and environment.declarations[item["name"]].expression:
-                            from taichi_forge_runtime._dimensions import extent_dependencies
-
-                            relations = {}
-
-                            def relation(key):
-                                if key in relations:
-                                    return
-                                declaration = environment.declarations[key]
-                                relations[key] = dict(
-                                    path=list(environment._paths[key]),
-                                    kind=declaration.kind,
-                                    expression=declaration.expression,
-                                )
-                                for child in (
-                                    extent_dependencies(declaration.expression) if declaration.expression else ()
-                                ):
-                                    relation(child)
-
-                            relation(item["name"])
+                            relations = dimension_relations(environment, (item["name"],))
                             if environment._derived_attributes.intersection(relations):
                                 item["dimension_relations"] = relations
                     entry_manifest = dict(
@@ -1197,6 +1198,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     )
                     manifest["entries"][symbol] = entry_manifest
                     shared_entries[identity] = entry_manifest
+                if admission:
+                    entry_manifest["admission"] = admission
                 variants.append(dict(selection=code.static, symbol=entry_manifest["symbol"]))
             if any(variant["selection"] for variant in variants):
                 # Logical method identity is separate from its shared numerical
@@ -1207,6 +1210,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     arguments=argument_schema,
                     variants=variants,
                     domain={key: schemas[owner_name][key]["choices"] for key in sorted(used)},
+                    **(
+                        {"paths": {key: list(environment._paths[key]) for key in used}}
+                        if any(len(environment._paths[key]) > 1 for key in used)
+                        else {}
+                    ),
                 )
                 entries[definition["name"]] = dict(symbol=symbol)
             else:

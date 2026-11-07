@@ -223,6 +223,66 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         scope_groups[scope] = "builder_" + builder.id if builder is not None else "fields"
     if not scopes:
         return {}
+    from ._component import _capture_id
+
+    scope_paths = {key: () for key in scopes}
+    record_calls = set()
+    # Records describe existing plain values, including frozen dataclasses.
+    # Their constructors are never evaluated to discover numerical inputs.
+    for statement in constructor.body:
+        if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
+            continue
+        call = statement.value
+        if not (
+            isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id in scopes
+            and call.func.attr == "record"
+        ):
+            continue
+        parent = call.func.value.id
+        if not (
+            len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id not in scopes
+            and len(call.args) == 2
+            and (
+                not call.keywords
+                or len(call.keywords) == 1
+                and call.keywords[0].arg == "optional"
+                and isinstance(call.keywords[0].value, ast.Constant)
+                and call.keywords[0].value.value is False
+            )
+            and isinstance(call.args[0], ast.Constant)
+            and type(call.args[0].value) is str
+            and call.args[0].value.isidentifier()
+            and not call.args[0].value.startswith("__")
+            and statement.lineno > scopes[parent].lineno
+            and sum(
+                isinstance(n, ast.Name)
+                and n.id == statement.targets[0].id
+                and isinstance(n.ctx, ast.Store)
+                or isinstance(n, ast.arg)
+                and n.arg == statement.targets[0].id
+                for n in ast.walk(constructor)
+            )
+            == 1
+        ):
+            fail(module, statement, "Record declaration requires an unconditional unique alias and literal member name")
+        alias = statement.targets[0].id
+        path = (*scope_paths[parent], call.args[0].value)
+        identity = _capture_id(path)
+        if identity in declarations:
+            fail(module, statement, "Record declaration cannot replace an existing member")
+        declarations[identity] = dict(
+            kind="record",
+            path=list(path),
+            scope_allocation=[scopes[parent].value.lineno, scopes[parent].value.col_offset],
+        )
+        scopes[alias], scope_paths[alias] = statement, path
+        scope_groups[alias] = scope_groups[parent]
+        record_calls.add(id(call))
+        allowed.add(id(call.func.value))
     scope_names = {key[0] if isinstance(key, tuple) else key for key in scopes}
 
     def scope_binding(node):
@@ -258,7 +318,15 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         call = scopes[scope].value
         return [call.lineno, call.col_offset]
 
+    def member(scope, name):
+        return _capture_id((*scope_paths[scope], name))
+
+    def member_spec(scope, name, **spec):
+        return {**spec, **({"path": list((*scope_paths[scope], name))} if scope_paths[scope] else {})}
+
     aliases, alias_conditions, placements = {}, {}, {}
+    extent_namespaces = {}
+    constraint_declarations = {}
     current_conditions = {}
     stores = {n.arg: 1 for n in ast.walk(constructor.args) if isinstance(n, ast.arg)}
     parameter_names = frozenset(stores)
@@ -302,11 +370,13 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 or node.lineno < scopes[scope].lineno
             ):
                 fail(module, node, "Derived dimensions require an unconditional literal name and declared expression")
-            name = node.args[0].value
+            local_name = node.args[0].value
+            name = member(scope, local_name)
             value = dimension(node.args[1], bindings)
             if not isinstance(value, Extent) or not extent_dependencies(value.expression):
                 fail(module, node, "Derived dimension requires the existing declared dimension algebra")
             expression = value.expression
+            namespace_check(scope, value, node)
             if method == "power_of_two_dim":
                 expression = ("ceil_pow2", expression)
 
@@ -324,9 +394,20 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             for dependency in extent_dependencies(expression):
                 check(dependency, (name,))
             allowed.add(id(node.func.value))
-            add(name, dict(kind="dimension", dtype="i32", expression=expression, scope_allocation=origin(scope)), node)
-            return Extent(("dim", name))
-        if method == "dim":
+            add(
+                name,
+                member_spec(
+                    scope,
+                    local_name,
+                    kind="dimension",
+                    dtype="i32",
+                    expression=expression,
+                    scope_allocation=origin(scope),
+                ),
+                node,
+            )
+            return scoped_extent(scope, name)
+        if method in ("dim", "parent_dim"):
             name = (
                 (
                     node.args[0].value
@@ -341,8 +422,23 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             if node.lineno < scopes[scope].lineno:
                 fail(module, node, "Dimension declaration precedes its resource scope")
             allowed.add(id(node.func.value))
-            add(name, dict(kind="dimension", dtype="i32", scope_allocation=origin(scope)), node)
-            return Extent(("dim", name))
+            path = scope_paths[scope]
+            if method == "parent_dim":
+                if not path:
+                    fail(module, node, "parent_dim requires a declared record scope")
+                path = path[:-1]
+            identity = _capture_id((*path, name))
+            add(
+                identity,
+                dict(
+                    kind="dimension",
+                    dtype="i32",
+                    scope_allocation=origin(scope),
+                    **({"path": list((*path, name))} if path else {}),
+                ),
+                node,
+            )
+            return scoped_extent(scope, identity)
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -374,7 +470,12 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             method = methods.get(type(node.op))
             left, right = dimension(node.left, bindings), dimension(node.right, bindings)
             if method is not None and isinstance(left, Extent) and isinstance(right, Extent):
-                return getattr(left, method)(right)
+                result = getattr(left, method)(right)
+                extent_objects.append(result)
+                extent_namespaces[id(result)] = extent_namespaces.get(id(left), set()) | extent_namespaces.get(
+                    id(right), set()
+                )
+                return result
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -384,8 +485,31 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         ):
             left, right = dimension(node.func.value, bindings), dimension(node.args[0], bindings)
             if isinstance(left, Extent) and isinstance(right, Extent):
-                return getattr(left, node.func.attr)(right)
+                result = getattr(left, node.func.attr)(right)
+                extent_objects.append(result)
+                extent_namespaces[id(result)] = extent_namespaces.get(id(left), set()) | extent_namespaces.get(
+                    id(right), set()
+                )
+                return result
         return None
+
+    def scoped_extent(scope, name):
+        result = Extent(("dim", name))
+        # Hold the Extent too: temporary-expression IDs cannot be reused.
+        extent_objects.append(result)
+        extent_namespaces[id(result)] = {scope_paths[scope]}
+        return result
+
+    extent_objects = []
+
+    def namespace_check(scope, value, node):
+        for extent in value if isinstance(value, tuple) else (value,):
+            if extent_namespaces.get(id(extent), set()) - {scope_paths[scope]}:
+                fail(
+                    module,
+                    node,
+                    "Dimension expressions cannot escape their ResourceScope record namespace; use parent_dim",
+                )
 
     parameters = (*constructor.args.posonlyargs, *constructor.args.args, *constructor.args.kwonlyargs)
     defaults = (
@@ -521,8 +645,10 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             fail(module, call, f"Static domain must contain distinct immutable literal choices: {error}")
         allowed.add(id(call.func.value))
         add(
-            call.args[0].value,
-            dict(
+            member(scope, call.args[0].value),
+            member_spec(
+                scope,
+                call.args[0].value,
                 kind="static",
                 choices=[static_key(v) for v in declaration.choices],
                 kernel_only=kernel_only,
@@ -592,6 +718,8 @@ def scope_declarations(module, constructor, kind, fail, namespace):
         scope, method = operation(call)
         if conditions and method in ("static", "value"):
             fail(module, statement, "Value/static declarations must remain unconditional")
+        if method == "record" and id(call) in record_calls:
+            continue
         if method == "record" and isinstance(statement, ast.Expr) and id(call) in optional_records:
             allowed.add(id(call.func.value))
             optional_members.add(absent_record(call))
@@ -614,8 +742,10 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 fail(module, statement, "ResourceScope.value requires a literal attribute name and fixed type")
             allowed.add(id(call.func.value))
             add(
-                name.value,
-                dict(
+                member(scope, name.value),
+                member_spec(
+                    scope,
+                    name.value,
                     kind="value",
                     type_node=args["dtype"],
                     value_declaration=[statement.lineno, statement.col_offset],
@@ -623,7 +753,46 @@ def scope_declarations(module, constructor, kind, fail, namespace):
                 ),
                 statement,
             )
+        elif method == "require_le" and isinstance(statement, ast.Expr):
+            from taichi_forge_runtime._dimensions import validate_constraints
+
+            if not (
+                not conditions
+                and len(call.args) == 3
+                and len(call.keywords) == 1
+                and call.keywords[0].arg == "when"
+                and isinstance(call.args[0], ast.Constant)
+                and type(call.args[0].value) is str
+                and call.args[0].value.isidentifier()
+                and isinstance(call.keywords[0].value, ast.Constant)
+                and type(call.keywords[0].value.value) is str
+                and call.keywords[0].value.value.isidentifier()
+            ):
+                fail(module, call, "Dimension constraint requires a literal name, declared expressions and trigger")
+            left, right = dimension(call.args[1]), dimension(call.args[2])
+            if not isinstance(left, Extent) or not isinstance(right, Extent):
+                fail(module, call, "Dimension constraint requires the declared dimension algebra")
+            namespace_check(scope, (left, right), call)
+            trigger = member(scope, call.keywords[0].value.value)
+            name = member(scope, call.args[0].value)
+            spec = dict(left=left.expression, right=right.expression, when=trigger)
+            dimensions = {k for k, v in declarations.items() if v["kind"] == "dimension"}
+            roles = {
+                k for k, v in declarations.items() if v["kind"] in ("dimension", "value", "dense_field", "ndarray")
+            }
+            try:
+                validate_constraints({name: spec}, dimensions, roles)
+            except ValueError as error:
+                fail(module, call, str(error))
+            constraints = declarations[trigger].setdefault("constraints", {})
+            if name in constraint_declarations and constraint_declarations[name] != spec:
+                fail(module, call, "Dimension constraint already has another declaration")
+            constraint_declarations[name] = spec
+            constraints[name] = dict(spec=spec, source=[module, statement.lineno])
+            allowed.add(id(call.func.value))
         elif method == "dense":
+            if scope_paths[scope]:
+                fail(module, call, "A record describes existing members and cannot allocate a Dense group")
             if not (
                 isinstance(statement, ast.Assign)
                 and len(statement.targets) == 1
@@ -642,6 +811,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             if axes not in ("i", "ij", "ijk", "ijkl"):
                 fail(module, call.args[0], "Declared Dense placement requires canonical ordered axes")
             shape = dimension(call.args[1])
+            namespace_check(scope, shape, call)
             shape = (shape,) if isinstance(shape, Extent) else shape
             if not isinstance(shape, tuple) or len(shape) != len(axes):
                 fail(module, call, "Declared Dense placement rank differs from its declared axes")
@@ -656,6 +826,8 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             )
             allowed.add(id(call.func.value))
         elif method in ("field", "vector_field", "matrix_field", "struct_field"):
+            if scope_paths[scope]:
+                fail(module, call, "A record describes existing members and cannot allocate Fields")
             targets = (
                 statement.targets
                 if isinstance(statement, ast.Assign)
@@ -735,6 +907,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             original_args.update((k.arg, k.value) for k in call.keywords)
             shape_node = original_args["shape"]
             shape = dimension(shape_node)
+            namespace_check(scope, shape, shape_node)
             if isinstance(shape, Extent):
                 shape = (shape,)
             if not isinstance(shape, tuple):
@@ -795,7 +968,7 @@ def scope_declarations(module, constructor, kind, fail, namespace):
             )
             if conditions:
                 conditional_fields.add(target.attr)
-        elif isinstance(statement, ast.Expr) and method in ("dim", "derived_dim", "power_of_two_dim"):
+        elif isinstance(statement, ast.Expr) and method in ("dim", "parent_dim", "derived_dim", "power_of_two_dim"):
             dimension(call)
         elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
             targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]

@@ -10,7 +10,7 @@ import itertools
 
 from ._plan import ExecutionPlan
 from ._runtime import Scalar
-from ._package_values import capture_value
+from ._package_values import capture_value, check_admission
 
 
 class ArgKind(Enum):
@@ -76,6 +76,7 @@ class GraphBuilder:
         self._bindings = bindings or _Bindings(package)
         self._private_names = private_names if private_names is not None else set()
         self._captures, self._constants = {}, {}
+        self._admissions = []
 
     def dispatch(self, kernel, *args, template_args=None):
         from ._package import entry, _BoundEntry
@@ -88,6 +89,7 @@ class GraphBuilder:
             raise ValueError("Package Graph dispatch requires an entry in the same loaded package")
         kernel = kernel._select(owner)
         kernel._check_layout(owner)
+        check_admission(owner, kernel.contract)
         if template_args:
             if owner is None or set(template_args) != {"self"} or template_args["self"] is not owner:
                 raise ValueError("Package Graph template receiver must match its bound entry")
@@ -125,6 +127,8 @@ class GraphBuilder:
         self.operations.append(dict(kind="kernel", entry=kernel.symbol, arguments=names))
         self.arguments = arguments
         self._captures, self._constants = captures, constants
+        if kernel.contract.get("admission"):
+            self._admissions.append((owner, kernel.contract))
         return self
 
     def private_scalar(self, name, dtype, value):
@@ -158,6 +162,7 @@ class GraphBuilder:
         self.arguments = combined
         self._captures.update(sequence._captures)
         self._constants.update(sequence._constants)
+        self._admissions.extend(sequence._admissions)
         return self
 
     def compile(self):
@@ -167,18 +172,22 @@ class GraphBuilder:
             ExecutionPlan(self.operations, resources=self._constants.values()),
             dict(self.arguments),
             dict(self._captures),
+            list(self._admissions),
         )
 
 
 class Graph:
-    def __init__(self, package, plan, arguments, captures=None):
+    def __init__(self, package, plan, arguments, captures=None, admissions=None):
         self.package, self.plan, self.arguments = package, plan, arguments
         self.captures = captures or {}
+        self.admissions = admissions or []
 
     def bind(self, arguments):
         self.package._check()
         if arguments.keys() != self.arguments.keys():
             raise ValueError("Graph binding must supply exactly its declared arguments")
+        for owner, contract in self.admissions:
+            check_admission(owner, contract)
         values = {}
         for name, schema in self.arguments.items():
             value = arguments[name]

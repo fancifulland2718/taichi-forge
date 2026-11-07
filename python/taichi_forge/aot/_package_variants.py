@@ -3,6 +3,7 @@
 from collections import deque
 
 from taichi_forge_runtime._static_values import read_static_key, static_key
+from ._package_records import read_member, write_member
 
 
 def compile_static_variants(environment, entry, arguments, owner, schema):
@@ -21,7 +22,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema):
     if not domains:
         return [environment.compile(entry, *arguments)]
     initial = {name: values[0] for name, values in domains.items()}
-    previous = {name: getattr(owner, name) for name in domains}
+    previous = {name: read_member(owner, name, schema) for name in domains}
     pending, visited, codes = deque([initial]), set(), []
     try:
         while pending:
@@ -34,7 +35,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema):
             if any(all(keys[name] == value for name, value in code.static.items()) for code in codes):
                 continue
             for name, value in selection.items():
-                setattr(owner, name, value)
+                write_member(owner, name, value, schema)
             code = environment.compile(entry, *arguments)
             if not code.static.keys() <= domains.keys():
                 raise ValueError("Kernel static dependencies are outside the declared package domain")
@@ -48,5 +49,5 @@ def compile_static_variants(environment, entry, arguments, owner, schema):
                         pending.append({**selected, name: value})
     finally:
         for name, value in previous.items():
-            setattr(owner, name, value)
+            write_member(owner, name, value, schema)
     return codes

@@ -16,6 +16,169 @@ from taichi_forge._lib import utils
 from tests import test_utils
 from taichi_forge_runtime.aot import Runtime, load_package
 
+RECORD_RESOURCES_SOURCE = """
+from dataclasses import dataclass
+import taichi_forge as ti
+constructors = 0
+@dataclass(frozen=True)
+class Layout:
+    n: int
+    gain: float
+    mode: bool = False
+    ignored: bool = False
+@ti.data_oriented
+class Model:
+    def __init__(self, capacity: int, layout):
+        global constructors
+        constructors += 1
+        self.capacity = capacity
+        scope = ti.experimental.ResourceScope(self)
+        parent = scope.dim('capacity')
+        record = scope.record('layout', layout)
+        count = record.dim('n')
+        outer = record.parent_dim('capacity')
+        record.require_le('fits', count, outer, when='n')
+        record.value('gain', ti.f32)
+        record.static('mode', choices=(False, True))
+        record.static('ignored', choices=(False, True))
+        scope.values = scope.field(ti.f32, shape=parent)
+
+    @ti.kernel
+    def step(self):
+        for i in range(self.layout.n):
+            gain = self.layout.gain
+            if ti.static(self.layout.mode):
+                gain *= 2
+            self.values[i] = i + gain
+
+    @ti.kernel
+    def clear(self):
+        for i in self.values:
+            self.values[i] = -1
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_records_preserve_paths_static_projection_and_parent_constraints(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, RECORD_RESOURCES_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 19
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["entries"]) == 4  # two step variants, common clear, unimported public entry
+    family = next(iter(manifest["entry_families"].values()))
+    assert list(family["paths"].values()) == [["layout", "mode"]]
+    original = package.Model(7, sys.modules["definition_fixture.model"].Layout(5, 2.5, True))
+    original.clear()
+    original.step()
+    np.testing.assert_array_equal(original.values.to_numpy(), [5, 6, 7, 8, 9, -1, -1])
+    consumer = tmp_path / "consume_records.py"
+    consumer.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as library:
+            Model = library.host.Model
+            Layout = sys.modules[Model.__module__].Layout
+            layout = Layout(5, 2.5, True)
+            a = Model(7, layout)
+            b = Model(23, Layout(23, 1.5, False, True))
+            assert a.layout is layout
+            a.clear(); b.clear()
+            a.step(); b.step()
+            np.testing.assert_array_equal(a.values.to_numpy(), [5,6,7,8,9,-1,-1])
+            np.testing.assert_array_equal(b.values.to_numpy(), np.arange(23) + 1.5)
+            graph = a.graph()
+            prepared = graph.bind({})
+            a.layout = Layout(8, 99., True)
+            for operation in (a.step, lambda: graph.bind({})):
+                try:
+                    operation()
+                except ValueError as error:
+                    assert 'Dimension constraint' in str(error)
+                else:
+                    raise AssertionError('Out of bounds record dimension accepted')
+            a.clear()  # This entry does not use layout.n or its constraint.
+            prepared.run()
+            np.testing.assert_array_equal(a.values.to_numpy(), [5,6,7,8,9,-1,-1])
+            prepared.close()
+            existing = set(runtime._resources)
+            try:
+                Model(3, Layout(4, 1.))
+            except ValueError as error:
+                assert 'Dimension constraint' in str(error)
+            else:
+                raise AssertionError('Invalid constructor relation accepted')
+            assert set(runtime._resources) == existing
+            a.layout = Layout(2, 4., False, True)
+            a.step()
+            np.testing.assert_array_equal(a.values.to_numpy()[:2], [4, 5])
+            np.testing.assert_array_equal(b.values.to_numpy(), np.arange(23) + 1.5)
+        print('PACKAGE_RECORDS_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(consumer), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PACKAGE_RECORDS_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        ("alias", "Record declaration requires"),
+        ("allocation", "cannot allocate Fields"),
+        ("unknown", "requires declared dimensions|declared dimension algebra"),
+        ("parent", "parent_dim requires"),
+        ("scope", "cannot escape their ResourceScope"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_records_reject_unsafe_declaration_paths(tmp_path, monkeypatch, change, message):
+    source = RECORD_RESOURCES_SOURCE
+    if change == "alias":
+        source = source.replace("        count =", "        record = layout\n        count =")
+    elif change == "allocation":
+        source = source.replace(
+            "        count =", "        record.extra = record.field(ti.i32, shape=())\n        count ="
+        )
+    elif change == "unknown":
+        source = source.replace("count, outer, when=", "count, layout.n, when=")
+    elif change == "scope":
+        source = source.replace("shape=parent", "shape=outer")
+    else:
+        source = source.replace("scope.dim('capacity')", "scope.parent_dim('capacity')")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match=message):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
 STRUCT_FIELDS_SOURCE = """
 import taichi_forge as ti
 constructors = 0
