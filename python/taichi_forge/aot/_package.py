@@ -240,6 +240,7 @@ def _host_projection(
 
     class Project(ast.NodeTransformer):
         owner = None
+        minimum_version = 1
 
         def visit_Assign(self, node):
             return self._allocation(node)
@@ -511,8 +512,14 @@ def _host_projection(
                 _fail(module, node, "explicit super numerical calls require a qualified receiver binding")
             if isinstance(node.func, ast.Name) and node.func.id == "__import__":
                 _fail(module, node, "builtin dynamic import requires an explicit importlib boundary")
-            if qualified_kind(node, kind) in ("types.vector", "types.matrix", "types.struct"):
-                return ast.copy_location(type_expression(type_spec(resolve_type(node, namespace), builder)), node)
+            if qualified_kind(node, kind) in ("types.vector", "types.matrix", "types.struct", "types.ndarray"):
+                try:
+                    spec = type_spec(resolve_type(node, namespace, allow_ndarray=True), builder)
+                except (KeyError, TypeError, ValueError) as error:
+                    _fail(module, node, f"Host type declaration requires fixed types: {error}")
+                if spec["kind"] == "ndarray_annotation":
+                    self.minimum_version = max(self.minimum_version, 7)
+                return ast.copy_location(type_expression(spec), node)
             if kind(node) in _DTYPES:
                 _fail(module, node, "Host scalar casts require further Runtime projection support")
             return self.generic_visit(node)
@@ -544,7 +551,8 @@ def _host_projection(
                 )
             return self.generic_visit(node)
 
-    projected = Project().visit(copy.deepcopy(tree))
+    projector = Project()
+    projected = projector.visit(copy.deepcopy(tree))
     # Preserve future-import placement and the original module docstring.
     position = 0
     for node in projected.body:
@@ -560,7 +568,7 @@ def _host_projection(
     ).body
     ast.fix_missing_locations(projected)
     compile(projected, f"<projected-host:{module}>", "exec")
-    return ast.unparse(projected) + "\n"
+    return ast.unparse(projected) + "\n", projector.minimum_version
 
 
 def export_package(package, output, *, arch=None, source_root=None):
@@ -861,7 +869,7 @@ def export_package(package, output, *, arch=None, source_root=None):
             entries[definition["name"]] = entry_manifest
             manifest["entries"][symbol] = entry_manifest
             shared_entries[identity] = entry_manifest
-        payloads["host/" + relative.as_posix()] = _host_projection(
+        host_source, minimum_version = _host_projection(
             name,
             tree,
             kind,
@@ -875,7 +883,9 @@ def export_package(package, output, *, arch=None, source_root=None):
             module,
             application_modules,
             frozenset(manifest["error_interfaces"]),
-        ).encode("utf8")
+        )
+        payloads["host/" + relative.as_posix()] = host_source.encode("utf8")
+        manifest["version"] = max(manifest["version"], minimum_version)
         manifest["sources"][name] = hashlib.sha256(text.encode("utf8")).hexdigest()
     if not manifest["entries"]:
         raise PackageExportError("Package contains no supported decorated kernels")

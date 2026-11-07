@@ -319,6 +319,80 @@ def test_package_uses_native_struct_layout_and_compound_values(tmp_path, monkeyp
         )
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_preserves_host_ndarray_annotations_without_frontend(tmp_path, monkeypatch):
+    source = COMPOUND_SOURCE
+    aliases = {}
+    for element in ("Record", "Vec", "Mat", "ti.f32"):
+        alias = element.replace(".", "_") + "Array"
+        annotation = f"ti.types.ndarray({element}, 1)"
+        source = source.replace(annotation, alias)
+        aliases[alias] = annotation
+    source = source.replace(
+        "@ti.data_oriented", "\n".join(f"{k} = {v}" for k, v in aliases.items()) + "\n@ti.data_oriented"
+    )
+    source += "\ndef accept_array(value: VecArray) -> VecArray:\n    return value\n"
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 7
+    original = package.Model(7)
+    original.step()
+    np.testing.assert_array_equal(original.output.to_numpy(), np.arange(7) + 27)
+    script = tmp_path / "consume_annotations.py"
+    script.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            module = code.host.model
+            assert module.VecArray.ndim == 1
+            assert module.VecArray.dtype.spec['element_shape'] == [3]
+            assert module.ti_f32Array.dtype == 'f32'
+            assert module.VecArray.boundary == 'UNSAFE'
+            assert module.accept_array.__annotations__['value'] is module.VecArray
+            for n in (7, 19):
+                model = code.host.Model(n)
+                model.step()
+                assert module.accept_array(model.vectors) is model.vectors
+                np.testing.assert_array_equal(np.frombuffer(model.output.read(), np.float32), np.arange(n) + 27)
+                np.testing.assert_array_equal(np.frombuffer(model.vectors.read(), np.float32).reshape(n, 3), [[4, 6, 8]] * n)
+            assert not any(name.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture') for name in sys.modules)
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(script), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_incomplete_host_ndarray_annotations(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, SOURCE + "\nUnknown = ti.types.ndarray(ti.f32)\n")
+    with pytest.raises(ti.aot.PackageExportError, match="fixed rank"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 REAL_SOURCE = """
 import taichi_forge as ti
 

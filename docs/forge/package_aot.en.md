@@ -203,6 +203,13 @@ reuse the same dimension algebra. Shadowed frontend/builtin names are rejected.
 CPU/CUDA/Vulkan focused checks compare original JIT and source-free instances;
 they do not qualify MeshSDF Sparse construction or the full sampling closure.
 
+Fixed `ti.types.ndarray` aliases retained by Host code are projected to lightweight
+logical annotations, including scalar/tensor/Struct element descriptors. They do
+not allocate arrays or import the compiler; calls retain native ABI validation.
+This projection uses manifest version 7 (older versions remain readable). Rank and
+element type must be fixed, gradients are not supported. CPU/CUDA/Vulkan source-free
+checks cover module aliases, Host function annotations and independent instances.
+
 ## Remaining shared mechanisms
 
 Complex SNode/Field layouts, the inheritance restrictions above, template/static configuration domains,

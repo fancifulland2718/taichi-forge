@@ -155,6 +155,11 @@ CPU/CUDA/Vulkan 定向检查对照原 JIT 及无源码独立实例；这不等�
 失败释放和 TCM 实际代码条目；Vulkan `real_func` 仍排除。反例还发现并修复了关闭磁盘缓存时
 原生代码身份遗漏 real function 函数体的问题；该修复需要更新原生 Runtime，仅更新 Python 包不足。
 
+Host 保留的固定 `ti.types.ndarray` 别名现投影为轻量逻辑标注，包含标量/张量/Struct
+元素描述；它不分配数组、不导入编译器，调用仍由原生 ABI 校验。此投影使用清单版本 7，
+旧版本继续可读。元素类型和 rank 必须固定，梯度尚不支持。CPU/CUDA/Vulkan 无源码
+检查覆盖模块别名、Host 函数标注及独立实例。
+
 ## 仍需补齐的共同机制
 
 复杂 SNode/Field 布局、上述继承限制、模板/静态合法域、无类型或 Python 专用 `pyfunc`、梯度、任意 Python

@@ -20,13 +20,15 @@ def qualified_kind(node, kind):
     return result
 
 
-def resolve_type(node, namespace):
+def resolve_type(node, namespace, *, allow_ndarray=False):
     """Resolve only fixed type declarations; do not execute application factories."""
     import taichi_forge as ti
 
     def value(expression):
         if isinstance(expression, ast.Constant):
             return expression.value
+        if isinstance(expression, (ast.Tuple, ast.List)):
+            return tuple(value(item) for item in expression.elts)
         if isinstance(expression, ast.Name):
             defaults = dict(int=ti.i32, float=ti.f32, bool=ti.i32)
             if expression.id in defaults and expression.id not in namespace:
@@ -39,7 +41,10 @@ def resolve_type(node, namespace):
             return inspect.getattr_static(parent, expression.attr)
         if isinstance(expression, ast.Call):
             factory = value(expression.func)
-            if factory not in (ti.types.vector, ti.types.matrix, ti.types.struct):
+            factories = (ti.types.vector, ti.types.matrix, ti.types.struct)
+            if allow_ndarray:
+                factories += (ti.types.ndarray,)
+            if factory not in factories:
                 raise ValueError("Type construction requires a builtin vector/matrix/struct factory")
             if any(k.arg is None for k in expression.keywords):
                 raise ValueError("Expanded type arguments are unsupported")
@@ -47,6 +52,8 @@ def resolve_type(node, namespace):
         raise ValueError("Type declarations require fixed names, constants or builtin factories")
 
     result = value(node)
+    if allow_ndarray and isinstance(result, ti.types.ndarray):
+        return result
     describe_element_type(result)  # Reject arbitrary Host objects.
     return result
 
@@ -54,6 +61,18 @@ def resolve_type(node, namespace):
 def type_spec(dtype, module):
     """Publish struct ABI through Module; tensor/scalar metadata is logical only."""
     from taichi_forge.lang.struct import StructType
+    from taichi_forge.types.ndarray_type import NdarrayType
+
+    if isinstance(dtype, NdarrayType):
+        if type(dtype.ndim) is not int or dtype.ndim < 0 or dtype.needs_grad:
+            raise ValueError("Package ndarray annotations require a fixed rank and no gradients")
+        return dict(
+            kind="ndarray_annotation",
+            element=type_spec(dtype.dtype, module),
+            ndim=dtype.ndim,
+            needs_grad=dtype.needs_grad,
+            boundary=dtype.boundary.name,
+        )
 
     description = describe_element_type(dtype)
     if not description.is_complete:

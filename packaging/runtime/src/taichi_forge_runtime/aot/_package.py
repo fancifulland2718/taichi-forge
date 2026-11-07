@@ -34,6 +34,16 @@ class _Backend:
 _BACKENDS = {name: _Backend(name) for name in ("x64", "arm64", "cuda", "vulkan")}
 
 
+@dataclass(frozen=True)
+class _NdarrayAnnotation:
+    """Logical Host annotation; allocation and call validation stay in Runtime."""
+
+    dtype: object
+    ndim: int
+    needs_grad: object
+    boundary: str
+
+
 class _ElementType:
     def __init__(self, package, spec):
         self.package, self.spec = package, spec
@@ -170,6 +180,10 @@ class _ModuleBinding:
         return value
 
     def type(self, spec):
+        if spec["kind"] == "ndarray_annotation":
+            element = spec["element"]
+            dtype = element["dtype"] if element["kind"] == "scalar" else self.type(element)
+            return _NdarrayAnnotation(dtype, spec["ndim"], spec["needs_grad"], spec["boundary"])
         return _ElementType(self.package, spec)
 
     def extent(self, expression, owner):
@@ -339,7 +353,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")
