@@ -1112,6 +1112,8 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 spec["optional_capable"] = True
             if parameter is not None and getattr(call, "_package_field_obligation", False):
                 spec["field_obligation"] = True
+            if getattr(call, "_package_nonstruct_borrow", False):
+                spec["nonstruct_input"] = True
             if conditions:
                 if parameter is None:
                     spec["conditions"] = dict(conditions)

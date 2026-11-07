@@ -59,7 +59,11 @@ class AnyArray:
         """
         dim = _ti_core.get_external_tensor_dim(self.ptr)
         dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
-        return [Expr(_ti_core.get_external_tensor_shape_along_axis(self.ptr, i, dbg_info)) for i in range(dim)]
+        values = [Expr(_ti_core.get_external_tensor_shape_along_axis(self.ptr, i, dbg_info)) for i in range(dim)]
+        for value, extent in zip(values, getattr(self, "_component_index_extents", ())):
+            value._uniform_extent = ("dim", extent) if isinstance(extent, str) else ("const", extent)
+            value._model_uniform = isinstance(extent, str)
+        return values
 
     @taichi_scope
     def _loop_range(self):
@@ -118,6 +122,11 @@ class ModelTensorArray(AnyArray):
     def subscript(self, indices):
         from taichi_forge.lang.exception import TaichiIndexError
 
+        if len(indices) == 1 and isinstance(indices[0], Expr) and indices[0].is_tensor():
+            grouped = indices[0]
+            if grouped.get_shape() != (self.index_rank,):
+                raise TaichiIndexError("Grouped model tensor Field index has an incompatible shape")
+            indices = tuple(impl.subscript(None, grouped, axis) for axis in range(self.index_rank))
         if len(indices) != self.index_rank:
             raise TaichiIndexError("Model tensor Field index rank differs from its declaration")
         return _ModelTensorElement(self, indices)

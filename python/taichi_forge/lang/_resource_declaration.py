@@ -49,6 +49,7 @@ class ResourceScope:
 
     struct_member_initialization = True
     optional_owner_references = True
+    whole_struct_borrows = True
 
     def __init__(self, owner, *, builder=None, initialization="consumer_explicit"):
         if initialization not in ("consumer_explicit", "zero"):
@@ -469,9 +470,24 @@ class ResourceScope:
         supplying component. The native member-view ABI still qualifies access.
         """
         from taichi_forge.lang.field import Field
+        from taichi_forge.lang.struct import StructField
 
         if not isinstance(name, str) or not name.isidentifier() or not isinstance(field, Field):
             raise TypeError("Resource borrow requires an attribute name and a Field")
+        if isinstance(field, StructField):
+            if source_scope is not True or external is not False or dimensions:
+                raise ValueError("Whole StructField borrowing retains its original source namespace")
+            members = field.field_dict
+            if not members or any(
+                isinstance(value, StructField)
+                or getattr(value, "_logical_resource_declaration", {}).get("identity") is None
+                for value in members.values()
+            ):
+                raise ValueError("Whole StructField borrowing requires declared flat members")
+            record = self.record(name, field)
+            for key, value in members.items():
+                record.borrow(key, value, source_scope=True)
+            return field
         if type(external) is not bool or external and source_scope:
             raise TypeError("External Field inputs cannot also require a source scope")
         if type(source_scope) is not bool or (dimensions is None and not source_scope):

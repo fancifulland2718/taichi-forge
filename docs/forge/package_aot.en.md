@@ -739,6 +739,16 @@ and independent instances, including a source-free vector consumer. Conditional
 sources and heterogeneous checkpoint input families remain open.
 This is not qualification of an entire engine checkpoint or EFC export.
 
+Version 41 also admits borrowing an entire declared flat StructField through
+`scope.borrow(..., source_scope=True)`. Member bindings retain the original
+allocation namespace and native layout; the record is not an independent array.
+Such an input can feed `field_like`, including SOA backups with model-sized
+vector members. Dense traversal supplies its declared logical iteration domain
+to per-invocation local tensor workspaces; sparse activation is not inferred.
+Local CPU/CUDA checks cover two-dimensional copies, new model sizes, exact source
+identity, and a source-free consumer. A helper that explicitly excludes records
+still rejects them. This does not yet resolve heterogeneous input families.
+
 Fields within optional children can be borrowed under the same presence guards,
 retaining their source path, dimension relations and native allocation group.
 Guarded model-length vectors keep dynamic element axes rather than a fixed

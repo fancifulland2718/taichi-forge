@@ -14,7 +14,7 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import _ndarray, any_array, expr, impl, kernel_arguments, matrix, mesh
 from taichi_forge.lang import ops as ti_ops
 from taichi_forge.lang._ndrange import _Ndrange, ndrange
-from taichi_forge.lang._local_tensor import LocalTensor, is_model_value, iteration_scope
+from taichi_forge.lang._local_tensor import LocalTensor, field_iteration_scope, is_model_value, iteration_scope
 from taichi_forge.lang.argpack import ArgPackType
 from taichi_forge.lang.ast.ast_transformer_utils import Builder, LoopStatus, ReturnStatus
 from taichi_forge.lang.ast.symbol_resolver import ASTResolver
@@ -1579,7 +1579,7 @@ class ASTTransformer(Builder):
                 expr_group = expr.make_expr_group(loop_indices)
                 impl.begin_frontend_struct_for(ctx.ast_builder, expr_group, loop_var)
                 ctx.create_variable(target, matrix.make_matrix(loop_indices, dt=primitive_types.i32))
-                with iteration_scope(ctx):
+                with field_iteration_scope(ctx, loop_indices, loop_var):
                     build_stmts(ctx, node.body)
                 ctx.ast_builder.end_frontend_struct_for()
             else:
@@ -1597,7 +1597,7 @@ class ASTTransformer(Builder):
                     ctx.create_variable(name, var)
                 expr_group = expr.make_expr_group(*_vars)
                 impl.begin_frontend_struct_for(ctx.ast_builder, expr_group, loop_var)
-                with iteration_scope(ctx):
+                with field_iteration_scope(ctx, _vars, loop_var):
                     build_stmts(ctx, node.body)
                 ctx.ast_builder.end_frontend_struct_for()
         return None

@@ -1169,10 +1169,9 @@ def test_package_field_like_rejects_unproved_layouts(tmp_path, monkeypatch, fail
     assert not (tmp_path / "sdk").exists()
 
 
+@pytest.mark.parametrize("kind", ["vector", "struct", "struct_helper", "struct_rejected_helper"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_field_like_borrowed_input_preserves_source_dimensions(
-    tmp_path, monkeypatch
-):
+def test_package_field_like_borrowed_input_preserves_source_dimensions(tmp_path, monkeypatch, kind):
     source = FIELD_LIKE_SOURCE.replace(
         "scope.backup = scope.field_like(self.storage.values, layout=ti.Layout.AOS, initialization='zero')",
         "scope.checkpoint = Checkpoint(self.storage.values)",
@@ -1199,8 +1198,47 @@ class Checkpoint:
         for i in range(self.source.shape[0]):
             self.source[i] = self.backup[i]
 """
-    package = _source_package(tmp_path, monkeypatch, source)
+    if kind.startswith("struct"):
+        source = source.replace(
+            "scope.vector_field(self.n, ti.f32,",
+            "scope.struct_field({'x': ti.f32, 'v': ti.types.vector(self.n, ti.f32)},",
+        )
+        source = source.replace("shape=scope.dim('n')", "shape=(scope.dim('n'), 2)")
+        source = source.replace("for i in self.storage.values:", "for i in ti.grouped(self.storage.values):")
+        source = source.replace(
+            "self.storage.values[i][j] = gain * i + j",
+            "self.storage.values.v[i][j] = gain * i[0] + i[1] + j\n            self.storage.values.x[i] = gain * i[0] + i[1]",
+        )
+        source = source.replace(
+            "scope.field_like(self.source, initialization='zero')",
+            "scope.field_like(self.source, layout=ti.Layout.SOA, initialization='zero')",
+        )
+        source = source.replace("range(self.source.shape[0])", "ti.grouped(self.source)")
+        if kind.endswith("helper"):
+            helper = FIELD_HELPER_SOURCE
+            if kind == "struct_helper":
+                helper = helper.replace(
+                    "    if isinstance(field, ti.StructField):",
+                    "    if getattr(type(scope), 'whole_struct_borrows', False):\n        borrow(scope, name, field, dimensions=dimensions, source_scope=True)\n        return\n    if isinstance(field, ti.StructField):",
+                )
+            source += helper
+            source = source.replace(
+                "scope.borrow('source', values, source_scope=True)", "declare_source(scope, 'source', values)"
+            )
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model, Checkpoint\n")
+    if kind == "struct_rejected_helper":
+        with pytest.raises(ValueError, match="helper excludes whole StructField"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        assert sys.modules["definition_fixture.model"].constructors == 0
+        assert not (tmp_path / "sdk").exists()
+        return
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    original = package.Model(6)
+    original.fill(4.0)
+    original.save()
+    original.fill(-2.0)
+    original.restore()
     with (
         Runtime(manifest["target"]) as runtime,
         load_package(runtime, tmp_path / "sdk") as code,
@@ -1210,9 +1248,68 @@ class Checkpoint:
         model.save()
         model.fill(-2.0)
         model.restore()
-        np.testing.assert_array_equal(
-            model.storage.values.to_numpy(), 4 * np.arange(6)[:, None] + np.arange(6)
+        actual = model.storage.values.to_numpy()
+        reference = original.storage.values.to_numpy()
+        if kind.startswith("struct"):
+            assert manifest["version"] == 41
+            for name in actual:
+                np.testing.assert_array_equal(actual[name], reference[name])
+            other = code.host.Model(9)
+            other.fill(-3.0)
+            other.save()
+            other.fill(7.0)
+            other.restore()
+            expected = -3 * np.arange(9)[:, None] + np.arange(2)
+            np.testing.assert_array_equal(other.storage.values.x.to_numpy(), expected)
+            np.testing.assert_array_equal(other.storage.values.v.to_numpy(), expected[:, :, None] + np.arange(9))
+            np.testing.assert_array_equal(model.storage.values.x.to_numpy(), actual["x"])
+            with pytest.raises(ValueError, match="declared allocation member"):
+                code.host.Checkpoint(model.storage.values.v)
+        else:
+            np.testing.assert_array_equal(actual, reference)
+    if kind == "struct":
+        probe = tmp_path / "consume_struct_checkpoint.py"
+        probe.write_text(
+            """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError('Numerical source is not available: ' + fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(5), code.host.Model(11)
+    for model, n, gain in ((a, 5, 2), (b, 11, -3)):
+        model.fill(gain)
+        model.save()
+        model.fill(9)
+        model.restore()
+        expected = gain * np.arange(n)[:, None] + np.arange(2)
+        np.testing.assert_array_equal(model.storage.values.x.to_numpy(), expected)
+        np.testing.assert_array_equal(model.storage.values.v.to_numpy(), expected[:, :, None] + np.arange(n))
+    np.testing.assert_array_equal(a.storage.values.x.to_numpy(), 2 * np.arange(5)[:, None] + np.arange(2))
+print('STRUCT_CHECKPOINT_SOURCE_FREE_OK')
+""",
+            encoding="utf8",
         )
+        env = dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        )
+        result = subprocess.run(
+            [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "STRUCT_CHECKPOINT_SOURCE_FREE_OK" in result.stdout
 
 
 CONDITIONAL_CHILD_SOURCE = (

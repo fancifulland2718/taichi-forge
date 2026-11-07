@@ -150,6 +150,7 @@ def prove_factory(function, call, scopes=frozenset(), *, allow_void=False, absen
     }
     constructions = []
     field_obligations = {}
+    nonstruct_obligations = {}
     builtin_namespace = function.__builtins__
     for name, value in trusted_builtins.items():
         if function.__globals__.get(name, value) is not value or builtin_namespace.get(name) is not value:
@@ -235,7 +236,8 @@ def prove_factory(function, call, scopes=frozenset(), *, allow_void=False, absen
 
                 if args[1] is StructField:
                     field_obligations[id(args[0])] = args[0]
-                    return False  # borrow admits a numerical Field member, not a StructField namespace.
+                    nonstruct_obligations[id(args[0])] = args[0]
+                    return False  # This helper branch explicitly excludes StructField inputs.
             if (function_value is getattr or function_value is hasattr) and len(args) in (2, 3):
                 if function_value is hasattr and len(args) != 2:
                     raise _Unproven("hasattr capability checks require two arguments")
@@ -350,6 +352,7 @@ def prove_factory(function, call, scopes=frozenset(), *, allow_void=False, absen
     )
     if field_obligations and allow_void and absent_parameter is None:
         normalized._package_field_obligation = True
+        normalized._package_nonstruct_borrow = bool(nonstruct_obligations)
         parameter = next(name for name, value in bound.arguments.items() if value is result.arguments[1])
         try:
             absence = prove_factory(function, call, scopes, allow_void=True, absent_parameter=parameter)

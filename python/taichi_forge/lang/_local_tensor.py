@@ -80,6 +80,19 @@ def iteration_scope(ctx, index=None, begin=None, end=None):
     return _scope(ctx.deployment, index, count)
 
 
+def field_iteration_scope(ctx, indices, field):
+    """Use declared Dense logical axes, never sparse activation or sample sizes."""
+    if ctx.deployment is None or ctx.deployment.local_tensor_scope is not None:
+        return nullcontext()
+    if not hasattr(field, "_component_index_extents"):
+        return iteration_scope(ctx)
+    linear, count = 0, 1
+    for index, size in zip(indices, field.shape):
+        linear = linear * size + index
+        count = count * size
+    return iteration_scope(ctx, linear, 0, count)
+
+
 class ModelTensor:
     """A scalar-indexed model tensor, either a Field element or local value.
 

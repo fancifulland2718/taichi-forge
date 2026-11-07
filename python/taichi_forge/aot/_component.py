@@ -386,6 +386,7 @@ class DenseField:
         # matrix Fields) on its lowered reference. The declaration/ABI already
         # guards this static metadata; shape and storage stay runtime inputs.
         reference.dtype = cook_dtype(self.dtype.dtype if isinstance(self.dtype, MatrixType) else self.dtype)
+        reference._component_index_extents = self.shape
         reference._component_field_metadata = {"dtype": reference.dtype}
         if isinstance(self.dtype, MatrixType):
             shape = self.dtype.get_shape()

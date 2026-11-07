@@ -35,7 +35,7 @@ def declaration(call, scope_path, schema, dimension, fail):
         and (
             source.get("kind") != "dense_field"
             or source.get("conditions")
-            or bool(source.get("struct_field")) != (len(path) == 2)
+            or len(path) not in ((1, 2) if source.get("struct_field") else (1,))
         )
     ):
         fail(call, "Borrowed Field requires an earlier unconditional declared allocation or Struct Field member")
@@ -85,6 +85,7 @@ def project(owner, environment, schema):
     """Use the same source declaration and Component alias paths, without allocation."""
     from ._component import (
         Dimension,
+        Record,
         _ConditionalDenseField,
         _ConditionalModelTensorField,
         _ModelTensorField,
@@ -124,7 +125,12 @@ def project(owner, environment, schema):
             for key, expected in source.get("conditions", {}).items()
         ):
             raise ValueError("Borrowed Field requires its original allocation presence guards")
-        namespace = path[:-2] if source.get("struct_field") else path[:-1]
+        whole_struct = source.get("struct_field") and isinstance(declarations[source_name], Record)
+        if whole_struct and item.get("nonstruct_input"):
+            raise ValueError("Source declaration helper excludes whole StructField inputs")
+        if whole_struct and item["dimensions"]:
+            raise ValueError("Whole StructField borrowing retains its original source namespace")
+        namespace = path[:-2] if source.get("struct_field") and not whole_struct else path[:-1]
         checks = {}
         for dimension, expression in item["dimensions"].items():
             original = _capture_id((*namespace, dimension))
@@ -146,17 +152,26 @@ def project(owner, environment, schema):
                 for key in extent_dependencies(expression)
             }
             constraints.update(checks)
-        _source_scope_alias(declarations, paths, source_paths, name, tuple(item.get("path", (name,))), source_name)
-        if item.get("conditions"):
-            original = declarations[name]
-            conditions = tuple(sorted(item["conditions"].items()))
-            declarations[name] = (
-                _ConditionalModelTensorField(
-                    original.dtype, original.shape, original.group, original.element_shape, conditions
+        target_path = tuple(item.get("path", (name,)))
+        members = source["element"]["members"] if whole_struct else (None,)
+        if whole_struct:
+            item["struct_borrow"] = True
+            declarations[name], paths[name] = Record(optional=bool(item.get("conditions"))), target_path
+        for member in members:
+            alias_name = name if member is None else _capture_id((*target_path, member))
+            alias_path = target_path if member is None else (*target_path, member)
+            original_name = source_name if member is None else _capture_id((*path, member))
+            _source_scope_alias(declarations, paths, source_paths, alias_name, alias_path, original_name)
+            if item.get("conditions"):
+                original = declarations[alias_name]
+                conditions = tuple(sorted(item["conditions"].items()))
+                declarations[alias_name] = (
+                    _ConditionalModelTensorField(
+                        original.dtype, original.shape, original.group, original.element_shape, conditions
+                    )
+                    if isinstance(original, _ModelTensorField)
+                    else _ConditionalDenseField(original.dtype, original.shape, original.group, conditions)
                 )
-                if isinstance(original, _ModelTensorField)
-                else _ConditionalDenseField(original.dtype, original.shape, original.group, conditions)
-            )
         value = owner
         for part in path:
             value = getattr(value, part)

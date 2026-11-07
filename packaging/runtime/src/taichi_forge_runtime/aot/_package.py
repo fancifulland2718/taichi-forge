@@ -455,7 +455,11 @@ class _ModuleBinding:
             values[attribute] = value
         for attribute in declared_members:
             owner._forge_package_member_layouts[attribute] = selection
-        return StructField(values) if member.get("struct_field") else values[name]
+        if member.get("struct_field"):
+            result = StructField(values)
+            result._forge_package_field_source = (owner, (name,))
+            return result
+        return values[name]
 
     def owner_reference(self, owner_key, scope, name, value):
         self.package._check()
@@ -1070,6 +1074,7 @@ class LoadedPackage:
                 38,
                 39,
                 40,
+                41,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

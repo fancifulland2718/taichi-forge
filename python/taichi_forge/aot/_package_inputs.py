@@ -145,7 +145,7 @@ def resolve_inputs(sources, imported):
         if kind in ("owner", "owner_input"):
             return member_type(item["owner_type"], rest, visited) if "owner_type" in item else None
         if kind == "dense_field" and not item.get("conditions"):
-            if (item.get("struct_field") and len(rest) == 1) or (not item.get("struct_field") and not rest):
+            if not rest or (item.get("struct_field") and len(rest) == 1):
                 return owner, tuple(path)
         if kind == "borrowed_field" and not rest and (owner, key) not in visited:
             if "input_parameter" in item:
