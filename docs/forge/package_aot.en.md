@@ -146,8 +146,8 @@ analytic/original-JIT comparisons and temporary-resource release checks.
 
 The source-boundary mode is also exercised with the original winding module.
 The larger original sampling closure reaches resource owners such as `MeshSDF`
-and currently rejects its target-dependent ResourceScope construction. Its conditional
-construction and explicit Sparse placements remain pending. No dependency was deleted
+and now selects its CPU Dense declarations without constructing a model. Host frontend
+projections and explicit Sparse placements remain pending. No dependency was deleted
 to obtain a pass; correct rejection does not qualify sampling. Declaration
 preflight aggregates syntax/schema failures across modules; compiler dependency
 failures are diagnosed when compiling the affected entry.
@@ -190,6 +190,18 @@ must remain legal. Expressions not satisfied by the current structural witness r
 rather than executing a model to obtain sample values. Explicit FieldsBuilder/Sparse
 layouts, conditional/reassigned scopes, dynamic attribute names, scope escapes and
 static domains remain unsupported and reject before publishing a package.
+
+Constructor conditions proved by the selected backend (`ti.cfg.arch` or
+`ti.lang.impl.current_cfg().arch`, optionally through a single-assignment alias)
+select only that target's declarations. Model-dependent conditions still reject.
+The projected Host code keeps the original condition as a guard: if later Host
+code changes the selected branch, construction fails and releases its resources.
+Backend name/equality checks use immutable Runtime tokens, not the numerical
+frontend. This capability uses manifest version 6; versions 1–5 remain readable.
+Literal dimension-name tuples such as `tuple(scope.dim(n) for n in ('x', 'y'))`
+reuse the same dimension algebra. Shadowed frontend/builtin names are rejected.
+CPU/CUDA/Vulkan focused checks compare original JIT and source-free instances;
+they do not qualify MeshSDF Sparse construction or the full sampling closure.
 
 ## Remaining shared mechanisms
 

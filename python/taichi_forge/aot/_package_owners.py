@@ -32,7 +32,7 @@ def resolve_owners(sources, imported, owner_schema, fail):
         constructor = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
         if constructor is None:
             fail(name, node, "constructor replacement requires an explicit resource contract")
-        own = owner_schema(name, node, kind)
+        own = owner_schema(name, node, kind, vars(imported[name]))
         for item in own.values():
             item["declaration_module"] = name
             item["declaration_owner"] = node.name

@@ -5,6 +5,7 @@ Bindings use the ordinary Runtime Kernel API and its per-call resource leases.
 """
 
 from contextvars import ContextVar
+from dataclasses import dataclass
 import functools
 import hashlib
 import importlib
@@ -23,6 +24,14 @@ from .._dimensions import Extent, evaluate_extent
 _construction = ContextVar("forge_definition_owner", default=None)
 _ids = itertools.count()
 _DTYPES = ("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
+
+
+@dataclass(frozen=True)
+class _Backend:
+    name: str
+
+
+_BACKENDS = {name: _Backend(name) for name in ("x64", "arm64", "cuda", "vulkan")}
 
 
 class _ElementType:
@@ -57,6 +66,7 @@ class _ModuleBinding:
         from ._package_graph import Arg, ArgKind, GraphBuilder
 
         self.package = package
+        self.target = _BACKENDS[package.runtime.arch]
         self.importlib = _Importlib(self)
         self.host = SimpleNamespace(
             ndarray=self.ndarray,
@@ -80,6 +90,14 @@ class _ModuleBinding:
         if construction is not None and construction[0] is self.package:
             construction[1].append(value)
         return value
+
+    def arch(self, name):
+        return _BACKENDS[name]
+
+    def check_target_branch(self, condition, expected, location):
+        self.package._check()
+        if bool(condition) != expected:
+            raise ValueError(f"Host backend condition changed after export at {location}; layout selection rejected")
 
     def entry(self, symbol):
         return entry(self.package, symbol)
@@ -321,7 +339,7 @@ class LoadedPackage:
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
-            self.manifest.get("version") not in (1, 2, 3, 4, 5)
+            self.manifest.get("version") not in (1, 2, 3, 4, 5, 6)
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")

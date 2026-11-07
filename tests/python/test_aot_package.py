@@ -1499,3 +1499,137 @@ def test_package_scope_fields_reject_unproven_dimensions_and_replacements(
         ti.aot.export_package(package, tmp_path / "sdk")
     assert not (tmp_path / "sdk").exists()
     assert sys.modules["definition_fixture.model"].constructors == 0
+
+
+TARGET_FIELDS_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, redirect=False):
+        global constructors
+        constructors += 1
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        self.arch = ti.lang.impl.current_cfg().arch
+        if redirect:
+            self.redirect()
+        if self.arch == ti.cuda:
+            extent = scope.dim('n') * 2
+            scope.a = scope.field(ti.f32, shape=extent)
+        else:
+            extent = tuple(scope.dim(name) + 1 for name in ('n',))
+            scope.a = scope.field(ti.f32, shape=extent)
+
+    def redirect(self):
+        self.arch = ti.cpu if self.arch == ti.cuda else ti.cuda
+
+    def backend_name(self):
+        return self.arch.name
+
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.a:
+            self.a[i] = gain * (i + self.n)
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_selects_backend_resource_branches_with_runtime_guards(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, TARGET_FIELDS_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    assert manifest["version"] == 6
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    selections = manifest["target_selections"]["definition_fixture.model"]
+    assert len(selections) == 1 and selections[0]["taken"] == (ti.cfg.arch == ti.cuda)
+    expected = package.Model(7)
+    expected.step(2.0)
+    probe = tmp_path / "consume_target.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoPrivateSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoPrivateSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(7), code.host.Model(19)
+            for model in (a, b):
+                model.step(2.0)
+                count = model.n * 2 if runtime.arch == 'cuda' else model.n + 1
+                assert model.a.shape == (count,)
+                assert model.backend_name() == runtime.arch
+                np.testing.assert_array_equal(np.frombuffer(model.a.read(), np.float32), 2 * (np.arange(count) + model.n))
+            registered = set(runtime._resources)
+            try:
+                code.host.Model(3, redirect=True)
+            except ValueError as error:
+                assert 'Host backend condition changed after export' in str(error)
+            else:
+                raise AssertionError('Changed backend branch silently selected another layout')
+            assert runtime._resources == registered
+        print('TARGET_FIELDS_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "TARGET_FIELDS_SOURCE_FREE_OK" in result.stdout
+    count = 14 if ti.cfg.arch == ti.cuda else 8
+    np.testing.assert_array_equal(expected.a.to_numpy(), 2 * (np.arange(count) + 7))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_does_not_compile_other_backend_resources_or_select_model_branches(tmp_path, monkeypatch):
+    source = TARGET_FIELDS_SOURCE.replace(
+        "scope.a = scope.field(ti.f32, shape=extent)",
+        "scope.a = scope.field(ti.f32, shape=extent, placement=None)",
+        1,
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    ti.aot.export_package(package, tmp_path / "sdk")  # CUDA-only unsupported placement is absent.
+    module = tmp_path / "definition_fixture/model.py"
+    module.write_text(source.replace("if self.arch == ti.cuda:", "if n > 4:"), encoding="utf8")
+    monkeypatch.delitem(sys.modules, "definition_fixture.model")
+    importlib.import_module("definition_fixture.model")
+    with pytest.raises(ti.aot.PackageExportError, match="unconditional supported resource declaration"):
+        ti.aot.export_package(package, tmp_path / "model_branch")
+    assert not (tmp_path / "model_branch").exists()
+
+
+@pytest.mark.parametrize("shadow", ["frontend", "tuple_argument", "tuple_global"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_shadowed_backend_and_dimension_names(tmp_path, monkeypatch, shadow):
+    source = TARGET_FIELDS_SOURCE
+    if shadow == "frontend":
+        source = source.replace("redirect=False):", "redirect=False, ti=None):")
+        message = "shadowed frontend name"
+    else:
+        source = (
+            source.replace("redirect=False):", "redirect=False, tuple=None):")
+            if shadow == "tuple_argument"
+            else "tuple = list\n" + source
+        )
+        message = "Field shape requires declared dimensions"
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match=message):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()

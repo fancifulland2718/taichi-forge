@@ -24,6 +24,7 @@ from ._package_sources import collect_sources
 from ._package_owners import resolve_owners
 from ._package_errors import is_error_interface, project_error_interface
 from ._package_resources import scope_declarations
+from ._package_targets import BACKEND_NAMES, backend_constant, backend_query, select_target_branches
 
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
@@ -39,7 +40,7 @@ def _fail(module, node, message):
     raise PackageExportError(f"{module}:{getattr(node, 'lineno', 1)}: {message}")
 
 
-def _owner_schema(module, node, kind):
+def _owner_schema(module, node, kind, namespace):
     """Infer types from syntax, never run __init__ or select a model branch."""
     if node.keywords:
         _fail(module, node, "custom owner metaclasses require further support")
@@ -89,14 +90,14 @@ def _owner_schema(module, node, kind):
             if target.attr in schema and schema[target.attr] != spec:
                 _fail(module, statement, f"attribute {target.attr!r} has conflicting types")
             schema[target.attr] = spec
-    for name, declaration in scope_declarations(module, constructor, kind, _fail).items():
+    for name, declaration in scope_declarations(module, constructor, kind, _fail, namespace).items():
         if name in schema and schema[name]["kind"] != "value":
             _fail(module, constructor, f"ResourceScope role {name!r} conflicts with a resource allocation")
         schema[name] = declaration
     return schema
 
 
-def _analyze(module, source, namespace):
+def _analyze(module, source, namespace, target):
     tree = ast.parse(source)
     if any(
         (isinstance(n, ast.Name) and n.id.startswith(_PREFIX))
@@ -107,6 +108,7 @@ def _analyze(module, source, namespace):
     ):
         _fail(module, tree, "reserved package-export identifier")
     kind = decorator_resolver(tree)
+    tree._package_target_selections = select_target_branches(tree, kind, target, module, _fail)
     definitions, owners = [], {}
     supported = set()
     for node in tree.body:
@@ -128,7 +130,7 @@ def _analyze(module, source, namespace):
             if decorators not in ([], ["data_oriented"], ["dataclass"]):
                 _fail(module, node, "owner decorator combinations are not yet supported")
             if decorators == ["data_oriented"] or inherited_owner:
-                owners[node.name] = _owner_schema(module, node, kind)
+                owners[node.name] = _owner_schema(module, node, kind, namespace)
             dataclass_owner = decorators == ["dataclass"]
             members = [(node.name, n) for n in node.body]
         else:
@@ -315,15 +317,23 @@ def _host_projection(
                 ]
             if not node.level and node.module in ("taichi", "taichi_forge"):
                 names = [a for a in node.names if a.name not in _DECORATORS]
-                if any(a.name not in _DTYPES | _HOST_OPS for a in names):
+                if any(a.name not in _DTYPES | _HOST_OPS | BACKEND_NAMES for a in names):
                     _fail(module, node, "unsupported frontend dependency in Host code")
                 return [
                     ast.Assign(
                         [ast.Name(a.asname or a.name, ast.Store())],
-                        ast.Attribute(
-                            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "host", ast.Load()),
-                            a.name,
-                            ast.Load(),
+                        (
+                            ast.Call(
+                                ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "arch", ast.Load()),
+                                [ast.Constant(backend_constant(ast.Name(a.asname or a.name, ast.Load()), kind))],
+                                [],
+                            )
+                            if a.name in BACKEND_NAMES
+                            else ast.Attribute(
+                                ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "host", ast.Load()),
+                                a.name,
+                                ast.Load(),
+                            )
                         ),
                     )
                     for a in names
@@ -408,6 +418,21 @@ def _host_projection(
             return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
 
         def visit_Attribute(self, node):
+            if isinstance(node.ctx, ast.Load):
+                if backend_query(node, kind):
+                    return ast.copy_location(
+                        ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "target", ast.Load()), node
+                    )
+                backend = backend_constant(node, kind)
+                if backend is not None:
+                    return ast.copy_location(
+                        ast.Call(
+                            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "arch", ast.Load()),
+                            [ast.Constant(backend)],
+                            [],
+                        ),
+                        node,
+                    )
             if isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name):
                 cls = namespace.get(node.value.id)
                 if inspect.isclass(cls):
@@ -576,16 +601,22 @@ def export_package(package, output, *, arch=None, source_root=None):
     if source_root is not None and output.is_relative_to(Path(source_root).resolve()):
         raise ValueError("Package output must be outside its application source root")
     paths, namespaces, dependency_report = collect_sources(package, source_root)
+    program = ti.lang.impl.get_runtime().prog
+    if program is None:
+        raise PackageExportError("Initialize the Runtime or select an export backend")
+    target_arch = ti.lang.impl.current_cfg().arch
     application_modules = set(paths) | set(namespaces) if source_root is not None else None
     sources, failures, imported_modules = [], [], {}
     for name, (path, relative) in paths.items():
         text = path.read_text(encoding="utf8")
         imported = package if name == package.__name__ else importlib.import_module(name)
+        if ti.lang.impl.get_runtime().prog is not program or ti.lang.impl.current_cfg().arch != target_arch:
+            raise PackageExportError(f"Module import changed the selected export Runtime: {name}")
         if Path(imported.__file__).resolve() != path:
             raise PackageExportError(f"Module origin differs from scanned source: {name}")
         imported_modules[name] = imported
         try:
-            tree, kind, owners, definitions = _analyze(name, text, vars(imported))
+            tree, kind, owners, definitions = _analyze(name, text, vars(imported), target_arch.name)
         except PackageExportError as error:
             failures.append(str(error))
             continue
@@ -613,6 +644,11 @@ def export_package(package, output, *, arch=None, source_root=None):
         sources={},
         owners={},
         field_groups={},
+        target_selections={
+            name: tree._package_target_selections
+            for name, _, _, _, tree, _, _, _ in sources
+            if tree._package_target_selections
+        },
         owner_templates=[
             name + "." + definition["name"]
             for name, _, _, _, _, _, _, definitions in sources
@@ -629,20 +665,26 @@ def export_package(package, output, *, arch=None, source_root=None):
         ],
     )
     payloads = {}
+    if manifest["target_selections"] or any(
+        backend_query(node, kind) or backend_constant(node, kind) is not None
+        for _, _, _, _, tree, kind, _, _ in sources
+        for node in ast.walk(tree)
+    ):
+        manifest["version"] = 6
     if any(
         "value_declaration" in item
         for _, _, _, _, _, _, schemas, _ in sources
         for schema in schemas.values()
         for item in schema.values()
     ):
-        manifest["version"] = 5
+        manifest["version"] = max(5, manifest["version"])
     if any(
         "scope_allocation" in item and item["kind"] != "value"
         for _, _, _, _, _, _, schemas, _ in sources
         for schema in schemas.values()
         for item in schema.values()
     ):
-        manifest["version"] = 5
+        manifest["version"] = max(5, manifest["version"])
     if source_root is not None:
         manifest.update(
             version=max(2, manifest["version"]),
