@@ -6836,6 +6836,59 @@ class Model:
 """
 
 
+@pytest.mark.parametrize("before", [True, False])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_resource_loop_normalization_starts_at_scope_binding(tmp_path, monkeypatch, before):
+    source = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, labels=None):
+        global constructors
+        constructors += 1
+        self.n = n
+        for name, value in (labels or {}).items():
+            setattr(self, name, value)
+        self = ti.experimental.ResourceScope(self, initialization='zero')
+        for name in ('values', 'weights'):
+            setattr(self, name, self.field(ti.i32, shape=self.dim('n')))
+    @ti.kernel
+    def step(self):
+        for i in self.values:
+            self.values[i] += i + 1
+"""
+    if not before:
+        binding = "        self = ti.experimental.ResourceScope(self, initialization='zero')\n"
+        source = source.replace(binding, "").replace("        for name, value", binding + "        for name, value")
+    package = _source_package(tmp_path, monkeypatch, source)
+    if not before:
+        with pytest.raises(ti.aot.PackageExportError, match="Field-name loop|ResourceScope"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        assert sys.modules["definition_fixture.model"].constructors == 0
+        return
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    original = package.Model(7, {"label": "jit"})
+    original.step()
+    assert original.label == "jit"
+    host = (tmp_path / "sdk/host/model.py").read_text()
+    assert "setattr(self, name, value)" in host
+    assert "labels" in host
+    with (
+        Runtime(manifest["target"]) as runtime,
+        load_package(runtime, tmp_path / "sdk") as code,
+    ):
+        a = code.host.Model(7, {"label": "aot", "other": 19})
+        b = code.host.Model(19, {"label": "independent"})
+        assert (a.label, a.other, b.label) == ("aot", 19, "independent")
+        a.step()
+        np.testing.assert_array_equal(a.values.to_numpy(), original.values.to_numpy())
+        np.testing.assert_array_equal(b.values.to_numpy(), 0)
+        b.step()
+        np.testing.assert_array_equal(b.values.to_numpy(), np.arange(1, 20))
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_path, monkeypatch):
     from tests.python.test_aot_dense_snode_group import _compiled_nodes

@@ -11,17 +11,27 @@ from ._package_fields import field_type_shape
 
 def _normalize_field_loops(module, constructor, kind, fail, namespace):
     """Expand literal member declarations, never iterate model data or numerical code."""
-    scope_names = set()
+    scope_bindings, context_bindings = [], []
     for node in ast.walk(constructor):
         if getattr(node, "_package_resource_context", None) is not None:
-            scope_names.add(node.items[0].optional_vars.id)
+            context_bindings.append((node.items[0].optional_vars.id, {id(part) for part in ast.walk(node)}))
         if (
             isinstance(node, ast.Assign)
             and qualified_kind(node.value, kind) == "experimental.ResourceScope"
             and len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
         ):
-            scope_names.add(node.targets[0].id)
+            scope_bindings.append((node.targets[0].id, (node.lineno, node.col_offset)))
+
+    def scope_names_at(node):
+        # A normal Host object may acquire a ResourceScope alias later in its
+        # constructor. Only declarations after that binding (or within the
+        # declaring resource context) belong to the resource projection.
+        position = node.lineno, node.col_offset
+        return {name for name, start in scope_bindings if start <= position} | {
+            name for name, members in context_bindings if id(node) in members
+        }
+
     shadowed = namespace.get("setattr", setattr) is not setattr or any(
         isinstance(n, ast.Name)
         and n.id == "setattr"
@@ -35,6 +45,7 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
 
     class Declarations(ast.NodeTransformer):
         def visit_Assign(self, node):
+            scope_names = scope_names_at(node)
             if not (len(node.targets) == 1 and isinstance(node.value, ast.IfExp)):
                 return self.generic_visit(node)
             target, choice = node.targets[0], node.value
@@ -67,6 +78,7 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
         def visit_For(self, node):
             from ._package_aliases import expand_alias_loop
 
+            scope_names = scope_names_at(node)
             aliases = expand_alias_loop(
                 node, scope_names, constructor, namespace, lambda n, message: fail(module, n, message)
             )
@@ -350,18 +362,32 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
         declarations[identity] = dict(
             kind="record",
             path=list(path),
-            scope_allocation=[scopes[parent].value.lineno, scopes[parent].value.col_offset],
+            scope_allocation=[
+                scopes[parent].value.lineno,
+                scopes[parent].value.col_offset,
+            ],
         )
         scopes[alias], scope_paths[alias] = statement, path
         scope_groups[alias] = scope_groups[parent]
         record_calls.add(id(call))
         allowed.add(id(call.func.value))
     scope_names = {key[0] if isinstance(key, tuple) else key for key in scopes}
+    binding_inputs = {id(node) for statement in scopes.values() for node in ast.walk(statement.value)}
 
     def scope_binding(node):
         # Context variables retain Python's original names in emitted Host code.
         # Only declaration lookup distinguishes their lexical allocation sites.
-        return context_bindings.get(id(node), node.id) if isinstance(node, ast.Name) else None
+        if not isinstance(node, ast.Name) or id(node) in binding_inputs:
+            return None
+        if id(node) in context_bindings:
+            return context_bindings[id(node)]
+        declaration = scopes.get(node.id)
+        if declaration is not None and (node.lineno, node.col_offset) >= (
+            declaration.lineno,
+            declaration.col_offset,
+        ):
+            return node.id
+        return None
 
     def operation(node):
         if (
@@ -1542,14 +1568,22 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
             and node.id in placements
             and id(node) not in allowed
         ):
-            fail(module, node, "Declared Dense placement may only be used by its scoped Field allocations")
+            fail(
+                module,
+                node,
+                "Declared Dense placement may only be used by its scoped Field allocations",
+            )
         if (
             isinstance(node, ast.Name)
             and isinstance(node.ctx, ast.Load)
-            and node.id in scope_names
+            and (scope_binding(node) in scopes or node.id in context_stores and id(node) not in context_bindings)
             and id(node) not in allowed
         ):
-            fail(module, node, "ResourceScope use requires an unconditional supported resource declaration")
+            fail(
+                module,
+                node,
+                "ResourceScope use requires an unconditional supported resource declaration",
+            )
     for name, placement in placements.items():
         members = [item for item in declarations.values() if item.get("placement_alias") == name]
         if not members:
