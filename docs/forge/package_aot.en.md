@@ -583,11 +583,21 @@ Host forwarding adds no numerical entry, and unused source static facts add no
 variants.
 
 Focused CPU/CUDA/Vulkan source-free consumers and GeoPhys's original resource
-factory pass, with additional CPU tensor/StructField member checks. Optional
-Fields, normalization across different compatible source definitions and ordinary
-declaration helpers that branch on Field metadata remain unsupported. EFC's
-`declare_source_borrow` and DOF type domains still require work; this is not whole
-EFC or engine qualification.
+factory pass, with additional CPU vector/matrix/StructField member checks.
+
+Ordinary declaration helpers can also prove mandatory Field paths using fixed
+ResourceScope method capability checks, non-None tests, StructField namespace
+tests and `_logical_resource_declaration` presence. Each such branch introduces
+a provenance obligation: the result must borrow that exact input with
+`source_scope=True`, and subsequent definition-source validation must pass.
+Unknown parameters are not simply assumed to be Fields; side effects, dropped
+return values or substitution with external bindings remain rejected.
+GeoPhys's original `declare_source_borrow` passes source-free consumers on all
+three backends for this mandatory numerical Field path. Original EFC declaration
+preflight passes helper forwarding but still rejects its nonliteral `dof_count`
+static type domain. Optional Fields, normalization across different compatible
+source definitions and the full EFC type domain remain work to do. This is not
+whole EFC or engine qualification.
 
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute

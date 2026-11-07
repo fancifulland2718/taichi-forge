@@ -40,6 +40,8 @@ def declaration(call, scope_path, schema, dimension, fail):
     ):
         fail(call, "Borrowed Field requires an earlier unconditional declared allocation or Struct Field member")
     mapping = keywords.get("dimensions", ast.Dict([], []))
+    if isinstance(mapping, ast.Constant) and mapping.value is None:
+        mapping = ast.Dict([], [])
     if not isinstance(mapping, ast.Dict):
         fail(call, "Borrowed dimensions require a literal mapping of source names to declared target extents")
     relations = {}

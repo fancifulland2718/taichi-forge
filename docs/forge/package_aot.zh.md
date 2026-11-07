@@ -393,9 +393,15 @@ Vector/MatrixField 以及 StructField 的数值成员，不将整个 StructField
 继续生效。Host 转发没有增加数值入口，原来源中未使用的静态项不产生变体。
 
 直接 Field 输入的 CPU/CUDA/Vulkan 局部无源码消费和 GeoPhys 原 resource_scope 工厂检查通过，
-向量及 StructField 成员另有 CPU 数值/组归属检查。可选 Field、不同来源定义的相容性归一化和
-依赖 Field 元数据进行条件分派的普通声明 helper 仍未接通；原 EFC 的 declare_source_borrow
-及 DOF 类型域仍是后续缺口，这不是完整 EFC 或整引擎资格。
+向量、矩阵及 StructField 成员另有 CPU 数值/组归属检查。
+
+普通声明 helper 的必选 Field 路径也可复用现有工厂证明：允许固定的 ResourceScope 方法能力检查、
+非 None 判断、StructField 命名空间判断和 `_logical_resource_declaration` 存在性检查。每个据此选择
+的分支都产生来源义务，只有结果确实是对同一输入的 `source_scope=True` 借用，且后续定义来源检查
+通过，才能导出；不能仅假设参数是 Field、吞掉副作用、丢弃返回值或退化为 external 绑定。
+原 GeoPhys `declare_source_borrow` 的必选数值 Field 路径已通过三后端无源码消费；原 EFC 类的声明
+预检查越过 helper 转发后，仍在 `dof_count` 的非字面量静态类型域拒绝。可选 Field、不同来源定义的
+相容性归一化及完整 EFC 类型域仍需处理，这不是完整 EFC 或整引擎资格。
 
 ## 仍需补齐的共同机制
 

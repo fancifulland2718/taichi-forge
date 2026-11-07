@@ -101,6 +101,60 @@ FIELD_INPUT_SOURCE = (
 )
 
 
+FIELD_HELPER_SOURCE = """
+def declare_source(scope, name, field, *, dimensions=None):
+    import inspect
+    borrow = getattr(type(scope), 'borrow', None)
+    if field is None:
+        scope.record(name, None, optional=True)
+        return
+    if isinstance(field, ti.StructField):
+        raise ValueError('member required')
+    if (borrow is not None and 'source_scope' in inspect.signature(borrow).parameters
+            and getattr(field, '_logical_resource_declaration', None) is not None):
+        borrow(scope, name, field, dimensions=dimensions, source_scope=True)
+"""
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_metadata_helpers_require_proven_allocation_inputs(tmp_path, monkeypatch):
+    source = FIELD_INPUT_SOURCE.replace("scope.borrow('alias', values,", "declare_source(scope, 'alias', values,")
+    source = source.replace(", source_scope=True)", ")") + FIELD_HELPER_SOURCE
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["entries"]) == 3
+    facts = manifest["declaration_factories"]
+    assert len(facts) == 2 and {item["definition"] for item in facts} == {"definition_fixture.model.declare_source"}
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, True), code.host.Model(13, False)
+        a.step(3.0)
+        b.step(-2.0)
+        np.testing.assert_array_equal(a.storage.values.to_numpy(), 3 * np.arange(7))
+        np.testing.assert_array_equal(b.storage.values.to_numpy(), -2 * np.arange(13))
+
+
+@pytest.mark.parametrize(
+    "before, after",
+    [
+        ("borrow(scope, name, field, dimensions=dimensions, source_scope=True)", "return"),
+        ("source_scope=True)", "external=True)"),
+        ("borrow(scope, name, field,", "borrow(scope, name, dimensions,"),
+        ("import inspect", "import inspect\n    application_side_effect(field)"),
+        ("declare_source(scope, 'alias', values,", "result = declare_source(scope, 'alias', values,"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_metadata_helpers_cannot_drop_obligations_or_side_effects(tmp_path, monkeypatch, before, after):
+    source = FIELD_INPUT_SOURCE.replace("scope.borrow('alias', values,", "declare_source(scope, 'alias', values,")
+    source = source.replace(", source_scope=True)", ")") + FIELD_HELPER_SOURCE
+    package = _source_package(tmp_path, monkeypatch, source.replace(before, after))
+    with pytest.raises(ValueError, match="unproven"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk/package.json").exists()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_field_inputs_retain_source_group_without_host_combination_code(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, FIELD_INPUT_SOURCE)

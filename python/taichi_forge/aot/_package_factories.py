@@ -43,6 +43,13 @@ class _Invocation(_Scope):
     method: _Method
 
 
+@dataclass(frozen=True)
+class _FieldMetadata:
+    """A source-contract obligation, never a concrete Field/model sample."""
+
+    source: _Input
+
+
 def _literal(value):
     return (
         value is None
@@ -73,7 +80,7 @@ def _source_value(node, namespace):
     return None
 
 
-def prove_factory(function, call, scopes=frozenset()):
+def prove_factory(function, call, scopes=frozenset(), *, allow_void=False):
     """Prove a scope constructor or dimension-method forwarding call."""
     from taichi_forge.lang._resource_declaration import ResourceScope
 
@@ -134,9 +141,13 @@ def prove_factory(function, call, scopes=frozenset()):
         if not isinstance(value, _Input) and not _literal(value):
             raise _Unproven("factory defaults require immutable literal values")
         environment[name] = value
-    trusted_builtins = dict(getattr=getattr, hasattr=hasattr, all=all, type=type)
-    declaration_methods = {name: vars(ResourceScope)[name] for name in ("dim", "derived_dim", "power_of_two_dim")}
+    trusted_builtins = dict(getattr=getattr, hasattr=hasattr, all=all, type=type, isinstance=isinstance)
+    declaration_methods = {
+        name: vars(ResourceScope)[name]
+        for name in ("dim", "derived_dim", "power_of_two_dim", "borrow", "record", "owner_reference")
+    }
     constructions = []
+    field_obligations = {}
     builtin_namespace = function.__builtins__
     for name, value in trusted_builtins.items():
         if function.__globals__.get(name, value) is not value or builtin_namespace.get(name) is not value:
@@ -180,6 +191,11 @@ def prove_factory(function, call, scopes=frozenset()):
         if isinstance(node, ast.Compare) and len(node.ops) == 1:
             left, right = expression(node.left, local), expression(node.comparators[0], local)
             op = node.ops[0]
+            if isinstance(op, (ast.Is, ast.IsNot)) and right is None and type(left) is _Input:
+                # This conditional proof is valid only if the resulting borrow
+                # requires this exact input's declared Field provenance below.
+                field_obligations[id(left)] = left
+                return isinstance(op, ast.IsNot)
             if isinstance(op, (ast.Is, ast.IsNot)) and right is None and not isinstance(left, _Input):
                 return (left is None) if isinstance(op, ast.Is) else (left is not None)
             if _literal(left) and (_literal(right) or isinstance(right, frozenset)):
@@ -212,10 +228,19 @@ def prove_factory(function, call, scopes=frozenset()):
             args = [expression(arg, local) for arg in node.args]
             if function_value is type and len(args) == 1 and isinstance(args[0], _ScopeInput):
                 return ResourceScope
+            if function_value is isinstance and len(args) == 2 and type(args[0]) is _Input:
+                from taichi_forge.lang.struct import StructField
+
+                if args[1] is StructField:
+                    field_obligations[id(args[0])] = args[0]
+                    return False  # borrow admits a numerical Field member, not a StructField namespace.
             if (function_value is getattr or function_value is hasattr) and len(args) in (2, 3):
                 if function_value is hasattr and len(args) != 2:
                     raise _Unproven("hasattr capability checks require two arguments")
                 target, name = args[:2]
+                if type(target) is _Input and name == "_logical_resource_declaration":
+                    field_obligations[id(target)] = target
+                    return True if function_value is hasattr else _FieldMetadata(target)
                 if type(name) is not str or not (_frontend_module(target) or target is ResourceScope):
                     raise _Unproven("factory attribute checks require frontend modules or ResourceScope")
                 sentinel = object()
@@ -225,8 +250,12 @@ def prove_factory(function, call, scopes=frozenset()):
                 if value is sentinel and len(args) == 2:
                     raise _Unproven("factory capability is unavailable")
                 return args[2] if value is sentinel else value
-            if function_value is inspect.signature and len(args) == 1 and args[0] is ResourceScope:
-                return frozenset(inspect.signature(ResourceScope).parameters)
+            if (
+                function_value is inspect.signature
+                and len(args) == 1
+                and (args[0] is ResourceScope or any(args[0] is method for method in declaration_methods.values()))
+            ):
+                return frozenset(inspect.signature(args[0]).parameters)
         if isinstance(node, ast.Call):
             target = expression(node.func, local)
             args = tuple(expression(arg, local) for arg in node.args)
@@ -265,17 +294,32 @@ def prove_factory(function, call, scopes=frozenset()):
                 if result is not fallthrough:
                     return result
             elif isinstance(node, ast.Return):
-                return expression(node.value)
+                return expression(node.value) if node.value is not None else None
+            elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                if not isinstance(expression(node.value), _Invocation):
+                    raise _Unproven("factory statements may only invoke declarations")
             else:
                 raise _Unproven(f"factory has an unproven statement or side effect at line {node.lineno}")
         return fallthrough
 
     result = statements(definition.body)
+    if allow_void and (result is fallthrough or result is None) and len(constructions) == 1:
+        result = constructions[0]
     if not isinstance(result, _Scope) or len(constructions) != 1 or result is not constructions[0]:
         raise _Unproven("factory must return its single supported resource declaration on this capability path")
     forwarded = (*result.arguments, *result.keywords.values())
     if isinstance(result, _Invocation):
         forwarded = (*forwarded, result.method.receiver)
+    if field_obligations:
+        if (
+            not isinstance(result, _Invocation)
+            or result.method.name != "borrow"
+            or len(result.arguments) != 2
+            or result.keywords.get("source_scope") is not True
+            or result.keywords.get("external", False) is not False
+            or any(value is not result.arguments[1] for value in field_obligations.values())
+        ):
+            raise _Unproven("Field metadata branches require the same input's proven source-scope borrow")
     if any(
         isinstance(value, _Input) and not any(item is value for item in forwarded) for value in bound.arguments.values()
     ):
@@ -341,7 +385,7 @@ def normalize_factories(tree, namespace, module, fail, kind):
                 target = _source_value(call.func, namespace)
                 expanded = None
                 try:
-                    normalized = prove_factory(target, call, scopes)
+                    normalized = prove_factory(target, call, scopes, allow_void=isinstance(statement, ast.Expr))
                 except (TypeError, _Unproven) as error:
                     try:
                         expanded = expand_declarations(target, statement, scopes)
