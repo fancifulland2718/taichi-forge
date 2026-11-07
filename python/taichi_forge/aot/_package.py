@@ -1160,6 +1160,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "borrow_declaration",
                         "reference_declaration",
                         "constructor_call",
+                        "default_constructor_call",
                     )
                 }
                 for attribute, item in schema.items()

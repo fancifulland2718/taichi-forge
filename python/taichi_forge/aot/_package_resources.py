@@ -967,6 +967,18 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                 statement,
             )
         elif method == "owner_reference" and isinstance(statement, ast.Expr):
+            from ._package_inputs import default_owner_call
+
+            parameter = call.args[1].id if len(call.args) == 2 and isinstance(call.args[1], ast.Name) else None
+            fallback = None
+            if parameter in parameter_names and stores[parameter] == 2 and parameter not in deleted:
+                fallback = default_owner_call(constructor, parameter, call.lineno)
+                if fallback is not None:
+                    root = fallback.func
+                    while isinstance(root, ast.Attribute):
+                        root = root.value
+                    if not isinstance(root, ast.Name) or root.id in stores:
+                        fail(module, fallback, "Default owner constructor must resolve from an unshadowed source name")
             if (
                 conditions
                 or scope_paths[scope]
@@ -977,7 +989,9 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                 or not call.args[0].value.isidentifier()
                 or not isinstance(call.args[1], ast.Name)
                 or call.args[1].id not in parameter_names
+                or parameter in deleted
                 or stores[call.args[1].id] != 1
+                and fallback is None
             ):
                 fail(module, call, "Owner input requires an unconditional named constructor parameter")
             add(
@@ -987,6 +1001,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
                     input_parameter=call.args[1].id,
                     reference_declaration=[call.lineno, call.col_offset],
                     scope_allocation=origin(scope),
+                    **({"default_constructor_call": fallback} if fallback is not None else {}),
                 ),
                 call,
             )
@@ -995,8 +1010,11 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None)
             from ._package_borrows import declaration
 
             name, spec = declaration(
-                call, scope_paths[scope], {**(earlier or {}), **declarations}, dimension,
-                lambda node, message: fail(module, node, message)
+                call,
+                scope_paths[scope],
+                {**(earlier or {}), **declarations},
+                dimension,
+                lambda node, message: fail(module, node, message),
             )
             parameter = spec.get("input_parameter")
             if parameter is not None and (parameter not in parameter_names or stores[parameter] != 1):

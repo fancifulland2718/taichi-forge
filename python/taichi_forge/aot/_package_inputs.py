@@ -4,6 +4,40 @@ import ast
 import inspect
 
 
+def default_owner_call(constructor, parameter, before):
+    """Prove the ordinary ``if input is None: input = Owner(...)`` fallback.
+
+    The caller checks that this is the parameter's only assignment. No Host
+    branch or factory is executed to discover the resource type.
+    """
+    for statement in constructor.body:
+        if statement.lineno >= before or not isinstance(statement, ast.If):
+            continue
+        test = statement.test
+        if not (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == parameter
+            and len(test.ops) == len(test.comparators) == 1
+            and isinstance(test.ops[0], ast.Is)
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value is None
+            and not statement.orelse
+            and len(statement.body) == 1
+        ):
+            continue
+        assignment = statement.body[0]
+        if (
+            isinstance(assignment, ast.Assign)
+            and len(assignment.targets) == 1
+            and isinstance(assignment.targets[0], ast.Name)
+            and assignment.targets[0].id == parameter
+            and isinstance(assignment.value, ast.Call)
+        ):
+            return assignment.value
+    return None
+
+
 def resolve_inputs(sources, imported):
     from ._package_factories import _source_value
 
@@ -44,14 +78,28 @@ def resolve_inputs(sources, imported):
         if inspect.isclass(annotation) and annotation in classes:
             item["owner_type"] = classes[annotation]
             annotated.add(key)
+        fallback = item.get("default_constructor_call")
+        if fallback is not None:
+            default_type = _source_value(fallback.func, constructor.__globals__)
+            if parameter.default is not None or not inspect.isclass(default_type) or default_type not in classes:
+                raise ValueError("Default owner input requires None and a declared owner constructor: " + key[0])
+            if key in annotated and annotation is not default_type:
+                raise ValueError("Default owner input contradicts its declared source type: " + key[0])
+            item["owner_type"] = classes[default_type]
+            annotated.add(key)
     targets = {owner for owner, _ in inputs}
     calls = {}
     declared_sites = set()
     for caller, (schema, _) in owners.items():
         for item in schema.values():
-            if item["kind"] != "owner" or item["owner_type"] not in targets:
+            if item["kind"] == "owner":
+                call = item["constructor_call"]
+            elif "default_constructor_call" in item:
+                call = item["default_constructor_call"]
+            else:
                 continue
-            call = item["constructor_call"]
+            if item["owner_type"] not in targets:
+                continue
             declared_sites.add(
                 (item.get("declaration_module", caller.rpartition(".")[0]), call.lineno, call.col_offset)
             )

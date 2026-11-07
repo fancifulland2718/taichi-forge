@@ -675,11 +675,23 @@ pyd or new registration requirement.
 
 Focused CPU/CUDA/Vulkan source-free tests and GeoPhys's original resource factory
 pass; StructField input provenance has a focused CPU numerical/group check.
-This slice requires mandatory object parameters and proven class definitions.
-Optional inputs, renamed inherited constructor parameters, unresolved numerical
+Object types require proven class definitions. Nullable object references,
+renamed inherited constructor parameters, unresolved numerical
 child access through inputs, compatible but different source classes, and direct
 untyped Field arguments still need support. Object inputs do not establish EFC
 qvel/mass_factor or DOF type-domain qualification.
+
+An object parameter may use `source=None` with a top-level
+`if source is None: source = Storage(...)` before its reference declaration.
+Forge proves the single parameter reassignment and fixed source class without
+executing constructors or unknown factories. The ordinary Host branch remains;
+the bound reference is non-null. Default construction and external borrowing
+share numerical code. An existing annotation must match the default class.
+Model conditions, additional assignments, deletion, shadowed constructors and
+unknown factories reject. The default constructor's own resource inputs use the
+existing provenance checks. Focused CPU/CUDA numerical and instance checks pass;
+the CUDA package also passes in a process blocking frontend and original-package
+imports. This does not qualify the complete EFC path.
 
 Version 23 also supports mandatory Field constructor parameters declared with
 `scope.borrow('values', values, source_scope=True)`, optionally with existing

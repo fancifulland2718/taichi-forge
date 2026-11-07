@@ -691,6 +691,131 @@ def test_package_typed_owner_input_needs_no_constructor_call_sample(tmp_path, mo
         np.testing.assert_array_equal(storage.values.to_numpy(), 3 * np.arange(7) + 7)
 
 
+def _default_owner_source(annotation=""):
+    source = OWNER_INPUT_SOURCE[: OWNER_INPUT_SOURCE.index("class Forward:")]
+    source = source.replace("        scope.reader = Reader(self)\n", "").replace(
+        "def __init__(self, source):",
+        f"def __init__(self, n, first, source{annotation}=None):\n"
+        "        if source is None:\n"
+        "            source = Storage(n, first)",
+    )
+    return source + """
+class Model:
+    def __init__(self, n, first):
+        scope = ti.experimental.ResourceScope(self)
+        scope.reader = Reader(n, first)
+"""
+
+
+@pytest.mark.parametrize("annotation", ["", ": Storage"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_owner_input_default_reuses_the_same_numerical_definition(tmp_path, monkeypatch, annotation):
+    source = _default_owner_source(annotation)
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model, Reader, Storage\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["entries"]) == 4 and len(manifest["field_groups"]) == 1
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([name for name in archive.namelist() if name.endswith((".ll", ".bc"))]) == 4
+    original = package.Model(7, True)
+    original.reader.step(3.0)
+    expected = original.reader.source.values.to_numpy()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, True), code.host.Reader(19, False)
+        shared = code.host.Reader(7, True, a.reader.source)
+        assert shared.source is a.reader.source
+        assert shared.alias is a.reader.alias
+        a.reader.step(3.0)
+        np.testing.assert_array_equal(shared.alias.to_numpy(), expected)
+        b.step(-2.0)
+        np.testing.assert_array_equal(b.alias.to_numpy(), -2 * np.arange(19) + 2)
+        shared.step(4.0)
+        np.testing.assert_array_equal(a.reader.alias.to_numpy(), 4 * np.arange(7) + 7)
+        np.testing.assert_array_equal(b.alias.to_numpy(), -2 * np.arange(19) + 2)
+        # Loaded Host constructors and the numerical dependency use only the
+        # projected package, including the default constructor's allocation.
+        assert type(a.reader.source).__module__ != type(original.reader.source).__module__
+        assert "@ti.kernel" not in (tmp_path / "sdk/host/model.py").read_text(encoding="utf8")
+    if not annotation:
+        probe = tmp_path / "consume_default_owner.py"
+        probe.write_text(
+            textwrap.dedent("""
+            import importlib.abc
+            import sys
+            import numpy as np
+            class NoFrontend(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                        raise AssertionError(fullname)
+            sys.meta_path.insert(0, NoFrontend())
+            from taichi_forge_runtime.aot import Runtime, load_package
+            with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+                a, b = code.host.Model(3, True), code.host.Reader(13, False)
+                alias = code.host.Reader(3, True, a.reader.source)
+                alias.step(2.0)
+                b.step(4.0)
+                np.testing.assert_array_equal(a.reader.alias.to_numpy(), 2 * np.arange(3) + 7)
+                np.testing.assert_array_equal(b.alias.to_numpy(), 4 * np.arange(13) + 2)
+                assert alias.source is a.reader.source
+            print('DEFAULT_OWNER_SOURCE_FREE_OK')
+        """),
+            encoding="utf8",
+        )
+        env = dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        )
+        result = subprocess.run(
+            [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "DEFAULT_OWNER_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change,diagnostic",
+    [
+        ("condition", "unconditional named constructor parameter"),
+        ("rebind", "unconditional named constructor parameter"),
+        ("delete", "unconditional named constructor parameter"),
+        ("shadow", "unshadowed source name"),
+        ("factory", "declared owner constructor"),
+        ("type", "contradicts its declared source type"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_owner_input_default_rejects_unproven_factories(tmp_path, monkeypatch, change, diagnostic):
+    source = _default_owner_source(": Storage")
+    if change == "condition":
+        source = source.replace("if source is None:", "if first:")
+    elif change == "rebind":
+        source = source.replace("source = Storage(n, first)", "source = Storage(n, first)\n        source = None")
+    elif change == "delete":
+        source = source.replace(
+            "scope.owner_reference('source', source)", "del source\n        scope.owner_reference('source', source)"
+        )
+    elif change == "shadow":
+        source = source.replace("if source is None:", "Storage = type(self)\n        if source is None:")
+    elif change == "factory":
+        source = source.replace("constructors = 0", "constructors = 0\ndef create(n, first): return Storage(n, first)")
+        source = source.replace("source = Storage(n, first)", "source = create(n, first)")
+    else:
+        source = source.replace("source: Storage", "source: 'Reader'")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 DECLARED_CHILD_SOURCE = """
 import taichi_forge as ti
 constructors = 0
