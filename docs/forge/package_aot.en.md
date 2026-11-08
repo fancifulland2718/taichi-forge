@@ -1692,7 +1692,12 @@ for an owner proven by normal source calls. They use the existing group contract
 replacement transactions and invocation leases; export executes neither the
 function nor a sample model. The retained function stays Python, including its
 failure handling. Multiple receiver classes may reuse the same declaration;
-unknown calls, reassigned receivers and incompatible declaration contracts reject.
+reassigned preparation receivers and incompatible declaration contracts reject.
+An ordinary Host wrapper may forward an unchanged input parameter directly to an
+already proven resource-group preparation function. This adds no receiver type or
+code variant: the existing preparation transaction checks the loaded owner contract
+before the function body executes. Unproven factories, rebound wrapper parameters
+and value-only preparations without that allocation boundary remain unsupported.
 This does not yet support changing one resource attribute between unrelated
 element types during preparation.
 Preparation may use a boolean domain already declared by its owner, including

@@ -634,6 +634,11 @@ def discover(sources, imported, *, preparation_receivers=None):
                         binding_covered.add((function, call_site, owner, name))
         if preparation_receivers is not None and function in preparation_receivers:
             receivers = [(key, item.identity) for key, item in arguments.items() if isinstance(item, _Owner)]
+            if not receivers:
+                # An ordinary Host wrapper can forward an external owner to an
+                # already declared allocation entry. Check that boundary below;
+                # an unknown caller never establishes a new receiver contract.
+                continue
             if len(receivers) != 1:
                 raise ValueError(f"{module}:{functions[function][1].lineno}: preparation requires one proven owner")
             else:
@@ -754,6 +759,33 @@ def discover(sources, imported, *, preparation_receivers=None):
                     pending.append((callee, inputs, (*chain, callee), id(call)))
 
     if preparation_receivers is not None:
+        from ._package_preparations import _declares_group
+
+        def guarded_forward(function, node, callee, call):
+            receivers = {name for name, _ in preparation_receivers[callee]}
+            if len(receivers) != 1 or not _declares_group(functions[callee][1], callee.__globals__):
+                return False
+            # The projected allocation entry wraps its entire body in the
+            # existing preparation_groups owner/lease transaction. Only admit
+            # direct, unchanged Host parameter forwarding to that checked entry.
+            if any(isinstance(arg, ast.Starred) for arg in call.args) or any(k.arg is None for k in call.keywords):
+                return False
+            try:
+                arguments = inspect.signature(callee).bind(*call.args, **{k.arg: k.value for k in call.keywords})
+            except TypeError:
+                return False
+            actual = arguments.arguments.get(next(iter(receivers)))
+            if not isinstance(actual, ast.Name) or actual.id not in inspect.signature(function).parameters:
+                return False
+            return not any(
+                isinstance(part, ast.Name)
+                and part.id == actual.id
+                and not isinstance(part.ctx, ast.Load)
+                or isinstance(part, (ast.Global, ast.Nonlocal))
+                and actual.id in part.names
+                for part in ast.walk(node)
+            )
+
         # Use the same source flow as free Kernels, before new preparation
         # declarations exist. Numerical/input validation runs after this pass.
         for function, (module, node) in functions.items():
@@ -762,6 +794,8 @@ def discover(sources, imported, *, preparation_receivers=None):
                     continue
                 callee = source_callable(call.func, function.__globals__)
                 if inspect.isfunction(callee) and callee in preparation_receivers:
+                    if guarded_forward(function, node, callee, call):
+                        continue
                     raise ValueError(f"{module}:{call.lineno}: preparation call has no proven owner receiver")
         return {}, []
 

@@ -12574,13 +12574,19 @@ def prepare(owner, n: int, wide: bool):
         call.close()
 
 
-@pytest.mark.parametrize("inherited", [False, True, "free", "free_external"])
+@pytest.mark.parametrize("inherited", [False, True, "free", "free_external", "free_forwarding"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_late_resource_context_preserves_generations(tmp_path, monkeypatch, inherited):
     model = PREPARATION_FIELDS_SOURCE
     extra_modules = {}
-    if inherited in ("free", "free_external"):
+    if inherited in ("free", "free_external", "free_forwarding"):
         model = _free_preparation_source()
+        if inherited == "free_forwarding":
+            model += "\ndef forward(owner, n, fail=False):\n    prepare(owner, n, fail=fail)\n"
+            model = model.replace(
+                "    def prepare_again(self, n):",
+                "    def prepare_external(self, other):\n        forward(other, 3)\n    def prepare_again(self, n):",
+            )
         if inherited == "free_external":
             start, end = model.index("def prepare(owner,"), model.index("class Alternate")
             extra_modules["preparation"] = (
@@ -12608,9 +12614,20 @@ def test_package_late_resource_context_preserves_generations(tmp_path, monkeypat
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         registered = set(runtime._resources)
         a, b = code.host.Model(), code.host.Model()
-        if inherited in ("free", "free_external"):
+        if inherited in ("free", "free_external", "free_forwarding"):
             b = sys.modules[code.host.Model.__module__].Alternate()
         assert set(runtime._resources) == registered
+        if inherited == "free_forwarding":
+            host = sys.modules[code.host.Model.__module__]
+            before = host.preparations
+            with pytest.raises(ValueError, match="declared receiver contract"):
+                host.forward(object(), 7)
+            assert host.preparations == before
+            assert set(runtime._resources) == registered
+            a.prepare_external(b)
+            host.forward(a, 3)
+            a.step(5)
+            np.testing.assert_array_equal(a.values.to_numpy(), original.values.to_numpy())
         a.prepare(7)
         b.prepare(29)
         a.step(2)
@@ -12652,6 +12669,18 @@ def test_package_late_resource_context_preserves_generations(tmp_path, monkeypat
             baseline = set(runtime._resources)
             a, b = code.host.Model(), code.host.Model()
             assert set(runtime._resources) == baseline
+            host = sys.modules[code.host.Model.__module__]
+            if hasattr(host, 'forward'):
+                host.forward(a, 5)
+                a.prepare_external(b)
+                before = host.preparations
+                try:
+                    host.forward(object(), 7)
+                except ValueError as error:
+                    assert 'declared receiver contract' in str(error)
+                else:
+                    raise AssertionError('invalid forwarding owner accepted')
+                assert host.preparations == before
             a.prepare(13)
             b.prepare(67)
             old = a.values
@@ -12690,6 +12719,7 @@ def test_package_late_resource_context_preserves_generations(tmp_path, monkeypat
     "change,diagnostic",
     [
         ("unknown", "no proven owner receiver"),
+        ("forward_rebind", "no proven owner receiver"),
         ("rebind", "unchanged synchronous owner"),
         ("yield", "unchanged synchronous owner"),
     ],
@@ -12698,7 +12728,9 @@ def test_package_late_resource_context_preserves_generations(tmp_path, monkeypat
 def test_package_free_preparation_rejects_unproven_receiver(tmp_path, monkeypatch, change, diagnostic):
     model = _free_preparation_source()
     if change == "unknown":
-        model += "\ndef unknown(value):\n    prepare(value, 3)\n"
+        model += "\ndef unknown(value):\n    prepare(value(), 3)\n"
+    elif change == "forward_rebind":
+        model += "\ndef unknown(value):\n    value = None\n    prepare(value, 3)\n"
     elif change == "rebind":
         model = model.replace(
             "def prepare(owner, n: int, fail=False):", "def prepare(owner, n: int, fail=False):\n    owner = None"
