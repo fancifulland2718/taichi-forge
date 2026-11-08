@@ -6,6 +6,7 @@
 
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/IRBuilder.h"
 #include "taichi/program/launch_context_builder.h"
 #include "taichi/ir/type_factory.h"
 #include "taichi/ir/type_utils.h"
@@ -431,6 +432,67 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
   std::string key = code;
   for (const auto &[offset, value] : constants)
     key += fmt::format("|{}:{}:{}", offset, value.bits, value.value);
+
+  // Recover only relations proven by the already-bound allocation owners.
+  // Two wrappers or nearby addresses do not prove a common allocation. The
+  // cache records ABI slots and relative offsets, never allocation IDs or
+  // device addresses, so identical layouts can share code across instances.
+  struct PointerRelation {
+    int base_slot;
+    int64_t displacement;
+  };
+  std::map<int, PointerRelation> pointers;
+  std::map<std::pair<Device *, DeviceAllocationId>, std::pair<int, uint64_t>> roots;
+  for (const auto &[path, parameter] : kernel.nested_parameters) {
+    if (parameter.ptype != ParameterType::kNdarray)
+      continue;
+    const auto kind = context.device_allocation_type.find(path);
+    if (kind == context.device_allocation_type.end())
+      continue;
+    for (int member : {TypeFactory::DATA_PTR_POS_IN_NDARRAY,
+                       TypeFactory::GRAD_PTR_POS_IN_NDARRAY}) {
+      if (member == TypeFactory::GRAD_PTR_POS_IN_NDARRAY && !parameter.needs_grad)
+        continue;
+      auto pointer_path = path;
+      pointer_path.push_back(member);
+      DeviceAllocation allocation{kDeviceNullAllocation};
+      uint64_t byte_offset = 0;
+      if (kind->second == LaunchContextBuilder::DevAllocType::kDenseStorage) {
+        const auto *resolved = context.find_resolved_dense_storage_buffer(pointer_path);
+        if (!resolved || !resolved->valid)
+          continue;
+        allocation = resolved->allocation;
+        byte_offset = resolved->byte_offset;
+      } else if (kind->second == LaunchContextBuilder::DevAllocType::kNdarray) {
+        const auto found = context.array_ptrs.find(pointer_path);
+        if (found == context.array_ptrs.end() || !found->second)
+          continue;
+        allocation = *static_cast<const DeviceAllocation *>(found->second);
+      } else {
+        continue;
+      }
+      if (!allocation.device)
+        continue;
+      const int slot = kernel.args_type->get_element_offset(pointer_path);
+      const auto [root, inserted] = roots.emplace(
+          std::make_pair(allocation.device, allocation.alloc_id),
+          std::make_pair(slot, byte_offset));
+      if (inserted)
+        continue;
+      const auto base_offset = root->second.second;
+      const auto distance = byte_offset >= base_offset ? byte_offset - base_offset
+                                                     : base_offset - byte_offset;
+      // No new input limit: an unrepresentable relation keeps its original
+      // pointer load. Signed offsets also support reversed and aliased views.
+      if (distance > static_cast<uint64_t>(INT64_MAX))
+        continue;
+      const auto displacement = byte_offset >= base_offset
+          ? static_cast<int64_t>(distance) : -static_cast<int64_t>(distance);
+      pointers.emplace(slot, PointerRelation{root->second.first, displacement});
+    }
+  }
+  for (const auto &[slot, relation] : pointers)
+    key += fmt::format("|p:{}:{}:{}", slot, relation.base_slot, relation.displacement);
   const auto cached = specialized_kernels_.find(key);
   if (cached != specialized_kernels_.end())
     return cached->second.get();
@@ -488,12 +550,13 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
       }
     }
   }
-  size_t replacements = 0;
+  size_t replacements = 0, pointer_replacements = 0;
   for (auto *entry : contexts) {
     for (auto &block : *entry) {
       for (auto it = block.begin(); it != block.end();) {
         auto *load = llvm::dyn_cast<llvm::LoadInst>(&*it++);
-        if (!load || load->isVolatile() || load->isAtomic() || !load->getType()->isIntegerTy())
+        if (!load || load->isVolatile() || load->isAtomic() ||
+            (!load->getType()->isIntegerTy() && !load->getType()->isPointerTy()))
           continue;
         int64_t offset = 0;
         auto *base = llvm::GetPointerBaseWithConstantOffset(load->getPointerOperand(), offset, layout);
@@ -507,8 +570,28 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
         // loads merely because they happen to carry compiler-generated names.
         if (context_base != entry->getArg(0) || context_offset != 0)
           continue;
+        if (offset < 0 || offset > INT_MAX)
+          continue;
+        if (load->getType()->isPointerTy()) {
+          const auto relation = pointers.find(static_cast<int>(offset));
+          if (relation == pointers.end())
+            continue;
+          llvm::IRBuilder<> builder(load);
+          auto *bytes = builder.getInt8Ty();
+          auto *slot = builder.CreateGEP(bytes, buffer,
+                                         builder.getInt64(relation->second.base_slot));
+          auto *base_pointer = builder.CreateLoad(load->getType(), slot);
+          // Non-inbounds GEP: the representative is a field/view pointer,
+          // not necessarily the beginning of the retained allocation.
+          auto *pointer = builder.CreateGEP(bytes, base_pointer,
+              builder.getInt64(relation->second.displacement));
+          load->replaceAllUsesWith(pointer);
+          load->eraseFromParent();
+          ++pointer_replacements;
+          continue;
+        }
         const auto value = constants.find(static_cast<int>(offset));
-        if (offset < 0 || offset > INT_MAX || value == constants.end() ||
+        if (value == constants.end() ||
             load->getType()->getIntegerBitWidth() != value->second.bits)
           continue;
         load->replaceAllUsesWith(llvm::ConstantInt::get(load->getType(), value->second.value));
@@ -517,7 +600,8 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
       }
     }
   }
-  TI_DEBUG("Prepared specialization {} folded {} ABI loads", code, replacements);
+  TI_DEBUG("Prepared specialization {} folded {} ABI loads and {} storage relations",
+           code, replacements, pointer_replacements);
   CompiledKernelData compiled{arch(), std::move(data).take_llvm_ckd_data()};
   KernelRegistrationState registration;
   auto handle = kernel_launcher_->register_llvm_kernel(compiled, registration);

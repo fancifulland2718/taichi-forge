@@ -746,6 +746,12 @@ For CUDA bitcode, low-level `BoundCall.prepare(specialize=True, constant_args=(.
 offers experimental preparation-time backend specialization. It folds ABI reads
 of bound ndarray shapes/strides and explicitly selected integer scalar argument
 indices in packaged LLVM IR, then uses the existing CUDA backend compiler.
+For fields/views in the same proven allocation, it also recovers a common base
+and relative byte offsets from the bound storage owners. Cache keys contain ABI
+slots and relative relations, never allocation identities or device addresses.
+Negative offsets and overlapping views retain their semantics; independent or
+unproven allocations keep their original addressing, without a blanket no-alias
+assumption.
 Addresses, array contents and other scalars remain instance-bound; changed shapes
 or selected constants require a new preparation. Internal callbacks participate
 only when their RuntimeContext provenance is proven; a `real_func`'s separate

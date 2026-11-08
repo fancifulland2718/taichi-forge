@@ -65,6 +65,71 @@ def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(
             bound.prepare(constant_args=(1,))
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize("field_storage", [False, True])
+def test_prepared_specialization_preserves_storage_relations_and_aliases(tmp_path, field_storage):
+    @ti.kernel
+    def update(x: ti.types.ndarray(ti.i32, 1), y: ti.types.ndarray(ti.i32, 1)):
+        # Deliberately ordered accesses exercise partial and exact aliases.
+        for _ in range(1):
+            for i in range(x.shape[0]):
+                x[i] += 1
+                y[i] += x[i] * 3
+
+    exemplar = ti.ndarray(ti.i32, 16)
+    view = ti.experimental.ndarray_view(exemplar, slices=slice(0, 8, 2))
+    exported = ti.aot.Module()
+    exported.add_kernel(update, template_args={"x": view, "y": view})
+    artifact = tmp_path / "storage-relations.tcm"
+    exported.archive(str(artifact))
+    with ti.aot.borrow_runtime() as runtime, ExitStack() as stack:
+        loaded = stack.enter_context(runtime.load_module(artifact))
+        records = []
+
+        def make_storage():
+            if not field_storage:
+                return ti.ndarray(ti.i32, 16), None
+            fields = ti.FieldsBuilder()
+            values, sentinel = ti.field(ti.i32), ti.field(ti.i32)
+            fields.dense(ti.i, 16).place(values, sentinel)
+            tree = fields.finalize()
+            stack.callback(tree.destroy)
+            sentinel.fill(71)
+            return values, sentinel
+
+        # Equal layouts on separate allocations, negative offsets, exact and
+        # partial aliases, then independent allocations with the same ABI.
+        for index, (left, right) in enumerate(((0, 6), (0, 6), (6, 0), (0, 0), (0, 2), (0, None))):
+            source, sentinel = make_storage()
+            other, other_sentinel = make_storage() if right is None else (source, sentinel)
+            initial = np.arange(16, dtype=np.int32) + 100 * index
+            source.from_numpy(initial)
+            if other is not source:
+                other.from_numpy(initial + 50)
+            x = stack.enter_context(closing(runtime.import_dense_view(
+                ti.experimental.ndarray_view(source, slices=slice(left, left + 4)))))
+            begin = 0 if right is None else right
+            y = stack.enter_context(closing(runtime.import_dense_view(
+                ti.experimental.ndarray_view(other, slices=slice(begin, begin + 4)))))
+            ready = stack.enter_context(closing(loaded.kernel("update").bind(x, y).prepare(specialize=True)))
+            records.append((source, other, sentinel, other_sentinel, left, begin, ready))
+
+        for _ in range(2):
+            for source, other, sentinel, other_sentinel, left, right, ready in reversed(records):
+                expected = source.to_numpy()
+                expected_other = expected if source is other else other.to_numpy()
+                for i in range(4):
+                    expected[left + i] += 1
+                    expected_other[right + i] += expected[left + i] * 3
+                ready.run()
+                runtime.wait()
+                np.testing.assert_array_equal(source.to_numpy(), expected)
+                np.testing.assert_array_equal(other.to_numpy(), expected_other)
+                for guard in (sentinel, other_sentinel):
+                    if guard is not None:
+                        np.testing.assert_array_equal(guard.to_numpy(), np.full(16, 71))
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_value_arguments_forward_adjoint_and_prepared_retirement(tmp_path):
     arch = "cpu" if ti.cfg.arch == ti.cpu else ti.cfg.arch.name

@@ -80,7 +80,8 @@ class LlvmAotModule final : public aot::Module {
       const std::string &name) override;
 
   // Optional backend-only specialization of an immutable prepared invocation.
-  // Never captures storage addresses or contents; the module owns shared code.
+  // Includes proven relative storage offsets, never addresses or contents;
+  // the module owns shared code while each invocation retains its bindings.
   aot::Kernel *specialize_kernel(aot::Kernel &kernel,
                                 LaunchContextBuilder &context,
                                 const std::vector<uint32_t> &constant_args);
