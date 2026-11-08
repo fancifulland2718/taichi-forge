@@ -1712,6 +1712,11 @@ entries remain shared. A singleton storage dtype can define a Field, while choic
 changing its ABI reject. Export executes no type factory, and Host consumption uses
 type names without numerical-source imports. Local CPU/CUDA checks cover numerical
 choices, fixed storage types, independent instances and source-free subprocesses.
+Declaration helpers preserve `if`/`else` over declared boolean domains, including
+negation. Resource roles retain their branch guards. Branch-local names cannot
+escape or overwrite existing helper bindings. Undeclared guards, `kernel_only`
+resource conditions and conditional return/continue reject; sample values never
+prune these branches.
 Normal Host computation stays Python; declarations come from the actual
 ResourceScope or a proven scope factory and shared declaration helpers. Export
 does not extract contracts from a sample model's role list. Full admission still

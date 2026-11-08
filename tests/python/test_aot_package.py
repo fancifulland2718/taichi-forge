@@ -14635,6 +14635,83 @@ def test_package_optional_fields_reuse_explicit_and_negated_presence(tmp_path, m
         np.testing.assert_array_equal(a.extra.to_numpy(), np.arange(3)[:, None] + np.arange(3)[None, :])
 
 
+CONDITIONAL_DECLARATION_SOURCE = """
+import taichi_forge as ti
+preparations = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, active: bool):
+        self.n = n
+        prepare(self, active)
+        self.values = ti.field(ti.i32, shape=n)
+    @ti.kernel
+    def compute(self):
+        for i in range(self.n):
+            if ti.static(self.active):
+                self.values[i] = self.gain * i
+            else:
+                self.values[i] = self.bias + i
+def prepare(owner, active):
+    global preparations
+    preparations += 1
+    owner.active = active
+    if active:
+        owner.gain = 3
+    else:
+        owner.bias = 7
+    scope = ti.experimental.ResourceScope(owner)
+    declare_roles(scope, owner)
+def declare_roles(scope, owner):
+    scope.static('active', choices=(False, True))
+    if not owner.active:
+        scope.value('bias', ti.i32)
+    else:
+        scope.value('gain', ti.i32)
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_preserves_declaration_helper_conditions(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, CONDITIONAL_DECLARATION_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].preparations == 0
+    family = next(iter(manifest["entry_families"].values()))
+    assert family["domain"] == {"active": [("bool", False), ("bool", True)]}
+    assert len(family["variants"]) == 2
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for n, active in ((7, True), (19, False)):
+            original, consumed = package.Model(n, active), code.host.Model(n, active)
+            original.compute()
+            consumed.compute()
+            np.testing.assert_array_equal(consumed.values.to_numpy(), original.values.to_numpy())
+            assert hasattr(consumed, "gain") == active
+            assert hasattr(consumed, "bias") != active
+
+
+@pytest.mark.parametrize("invalid", ["undeclared", "kernel_only", "return", "escape", "overwrite"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unproven_declaration_helper_conditions(tmp_path, monkeypatch, invalid):
+    source = CONDITIONAL_DECLARATION_SOURCE
+    if invalid == "undeclared":
+        source = source.replace("    scope.static('active', choices=(False, True))", "")
+    elif invalid == "kernel_only":
+        source = source.replace("choices=(False, True)", "choices=(False, True), kernel_only=True")
+    elif invalid == "return":
+        source = source.replace("scope.value('bias', ti.i32)", "return None")
+    elif invalid == "overwrite":
+        source = source.replace("    if not owner.active:", "    dtype = ti.i32\n    if not owner.active:")
+        source = source.replace("scope.value('bias', ti.i32)", "dtype = ti.f32\n        scope.value('bias', dtype)")
+    else:
+        source = source.replace(
+            "scope.value('bias', ti.i32)", "selected = 'bias'\n        scope.value(selected, ti.i32)"
+        )
+        source += "    scope.value(selected, ti.i32)\n"
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match="condition|declaration|forwarding|conditional"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].preparations == 0
+
+
 STATIC_DTYPE_SOURCE = """
 import taichi_forge as ti
 preparations = 0

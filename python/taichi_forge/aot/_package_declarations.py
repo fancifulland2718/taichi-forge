@@ -214,7 +214,11 @@ def expand_declarations(function, statement, scopes, *, namespace, shadowed=(), 
                 return ast.Constant(left.value + right.value)
             return ast.BinOp(left, node.op, right)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            return ast.Constant(not bool(literal(expression(node.operand))))
+            operand = expression(node.operand)
+            try:
+                return ast.Constant(not bool(literal(operand)))
+            except _Unproven:
+                return ast.UnaryOp(ast.Not(), operand)
         if isinstance(node, ast.BoolOp):
             for term in node.values:
                 value = expression(term)
@@ -378,6 +382,25 @@ def expand_declarations(function, statement, scopes, *, namespace, shadowed=(), 
 
     fallthrough, continued = object(), object()
 
+    def conditional_body(body, *, in_loop):
+        # A resource condition stays in the original Host control flow. Local
+        # declarations may be expanded within it, but their aliases cannot
+        # escape the branch or overwrite a helper binding used afterwards.
+        saved = dict(environment), set(known_scopes), set(extent_names)
+        start = len(emitted)
+        try:
+            result = statements(body, in_loop=in_loop)
+            if result is not fallthrough:
+                raise _Unproven("conditional declaration helpers cannot return or continue")
+            if any(ast.dump(environment[name]) != ast.dump(value) for name, value in saved[0].items()):
+                raise _Unproven("conditional declaration helpers cannot overwrite existing local bindings")
+            return emitted[start:]
+        finally:
+            del emitted[start:]
+            for target, previous in zip((environment, known_scopes, extent_names), saved):
+                target.clear()
+                target.update(previous)
+
     def statements(body, *, in_loop=False):
         for node in body:
             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and type(node.value.value) is str:
@@ -387,9 +410,17 @@ def expand_declarations(function, statement, scopes, *, namespace, shadowed=(), 
             elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
                 emit(ast.Expr(expression(node.value, allow_helper=True, void=True)))
             elif isinstance(node, ast.If):
-                result = statements(node.body if bool(literal(expression(node.test))) else node.orelse, in_loop=in_loop)
-                if result is not fallthrough:
-                    return result
+                condition = expression(node.test)
+                try:
+                    selected = bool(literal(condition))
+                except _Unproven:
+                    body = conditional_body(node.body, in_loop=in_loop)
+                    otherwise = conditional_body(node.orelse, in_loop=in_loop)
+                    emit(ast.If(condition, body or [ast.Pass()], otherwise))
+                else:
+                    result = statements(node.body if selected else node.orelse, in_loop=in_loop)
+                    if result is not fallthrough:
+                        return result
             elif isinstance(node, ast.For) and not node.orelse:
                 values = expression(node.iter)
                 if not isinstance(values, (ast.Tuple, ast.List)):

@@ -1174,7 +1174,7 @@ def scope_declarations(
                 and isinstance(keywords.get("kernel_only", ast.Constant(False)), ast.Constant)
                 and keywords.get("kernel_only", ast.Constant(False)).value is False
             ):
-                fail(module, call, f"Static domain must contain distinct immutable literal choices: {error}")
+                fail(module, call, f"Static domain for {name!r} must contain distinct immutable literal choices: {error}")
             identity = member(scope, name)
             model_candidates[identity] = call
             allowed.add(id(call.func.value))
@@ -1332,7 +1332,12 @@ def scope_declarations(
                                 call._package_optional_borrow = True
                             yield from statements(present, conditions)
                             continue
-                test, expected = statement.test, True
+                # Shared declaration helpers retain a one-evaluation Host alias
+                # for their owner argument. Admission follows its proven source,
+                # while emitted Host code keeps the alias and original condition.
+                from ._package_types import expand_local_type
+
+                test, expected = expand_local_type(statement.test, {}, kind), True
                 if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
                     test, expected = test.operand, False
                 name = (
