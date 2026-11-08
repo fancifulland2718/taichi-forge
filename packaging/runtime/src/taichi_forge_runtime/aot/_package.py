@@ -732,6 +732,30 @@ class _ResourceScope:
             raise ValueError("parent_dim requires a declared record scope")
         return self._parent.dim(name)
 
+    def owner_sequence(self, name, values):
+        from ._package_values import owner_type
+
+        package = self._root._forge_package_owner
+        package._check()
+        construction = _construction.get()
+        if (
+            self._parent is not None
+            or construction is None
+            or construction[0] is not package
+            or construction[2] is not self._root
+            or not isinstance(values, (tuple, list))
+            or getattr(self._root, name, None) is not values
+        ):
+            raise ValueError("Host owner sequence requires its declared managed construction")
+        declaration = package.manifest["owners"][owner_type(self._root)].get(name, {})
+        if declaration.get("kind") != "host_owner_sequence" or any(
+            getattr(value, "_forge_package_owner", None) is not package
+            or owner_type(value) not in declaration["owner_types"]
+            for value in values
+        ):
+            raise ValueError("Host owner sequence differs from its declared input types")
+        return values
+
     def owner_dim(self, reference, name):
         if self._parent is not None or any(
             type(value) is not str or not value.isidentifier() for value in (reference, name)
@@ -897,6 +921,9 @@ def managed_class(package, cls):
                     and all(getattr(self, flag) is expected for flag, expected in item.get("conditions", {}).items())
                 ),
             )
+            for name, item in package.manifest["owners"].get(selected_key, {}).items():
+                if item["kind"] == "host_owner_sequence":
+                    _ResourceScope(self).owner_sequence(name, getattr(self, name))
         except BaseException:
             for value in reversed(allocated):
                 value.close()
@@ -1172,6 +1199,7 @@ class LoadedPackage:
                 41,
                 42,
                 43,
+                44,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

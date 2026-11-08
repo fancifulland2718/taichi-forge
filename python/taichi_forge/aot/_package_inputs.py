@@ -41,6 +41,7 @@ def default_owner_call(constructor, parameter, before):
 def resolve_inputs(sources, imported):
     from ._package_factories import _source_value
     from ._package_input_families import source_class, split_field_inputs
+    from ._package_owner_sequences import constructor_items
 
     owners = {
         name + "." + owner: (schema, getattr(imported[name], source_class(tree, owner)))
@@ -98,7 +99,7 @@ def resolve_inputs(sources, imported):
     calls = {}
     declared_sites = set()
     for caller, (schema, _) in owners.items():
-        for item in schema.values():
+        for item in constructor_items(schema):
             if item["kind"] == "owner":
                 call = item["constructor_call"]
             elif "default_constructor_call" in item:

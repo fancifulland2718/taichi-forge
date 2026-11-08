@@ -86,7 +86,7 @@ class OwnerGraph:
                 write_member(owner, attribute, value, schema)
         declarations = construct_fields(owner, schema, vars(imported), self.module, imported_modules=self.imported)
         for attribute, item in schema.items():
-            if item["kind"] in ("dense_field", "dimension", "borrowed_field"):
+            if item["kind"] in ("dense_field", "dimension", "borrowed_field", "host_owner_sequence"):
                 continue
             if item["kind"] == "record":
                 declarations[attribute] = Record()

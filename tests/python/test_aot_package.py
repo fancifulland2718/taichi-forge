@@ -1154,12 +1154,22 @@ class Model:
 """
 
 
+@pytest.mark.parametrize("collection", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_typed_field_inputs_share_host_and_keep_dynamic_models(tmp_path, monkeypatch):
-    package = _source_package(tmp_path, monkeypatch, TYPED_FIELD_INPUT_SOURCE)
+def test_package_typed_field_inputs_share_host_and_keep_dynamic_models(tmp_path, monkeypatch, collection):
+    source = TYPED_FIELD_INPUT_SOURCE
+    if collection:
+        source = source.replace(
+            "scope.first = Checkpoint(self.storage.scalar)\n        scope.second = Checkpoint(self.storage.record)",
+            "sources = (self.storage.scalar, self.storage.record)\n"
+            "        self.groups = tuple(Checkpoint(value) for value in sources)\n"
+            "        scope.owner_sequence('groups', self.groups)\n"
+            "        self.first, self.second = self.groups",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
-    assert manifest["version"] == 43
+    assert manifest["version"] == (44 if collection else 43)
     assert len(manifest["input_families"]["definition_fixture.model.Checkpoint"]) == 2
     common = [item for item in manifest["entries"].values() if item["definition"].endswith(".common")]
     assert len(common) == 1
@@ -1279,6 +1289,96 @@ def test_package_typed_inputs_reject_unproven_host_selection(tmp_path, monkeypat
     )
     package = _source_package(tmp_path, monkeypatch, source)
     with pytest.raises(ValueError, match="one proven source"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_host_owner_sequences_reuse_independent_typed_entries(tmp_path, monkeypatch, reverse):
+    source = TYPED_FIELD_INPUT_SOURCE.replace(
+        "scope.first = Checkpoint(self.storage.scalar)\n        scope.second = Checkpoint(self.storage.record)",
+        "sources = (self.storage.scalar, self.storage.record)\n"
+        "        self.groups = tuple(Checkpoint(value) for value in sources)\n"
+        "        scope.owner_sequence('groups', self.groups)\n"
+        "        self.first, self.second = self.groups",
+    )
+    if reverse:
+        source = source.replace(
+            "(self.storage.scalar, self.storage.record)", "(self.storage.record, self.storage.scalar)"
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 44
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["input_families"]["definition_fixture.model.Checkpoint"]) == 2
+    assert len([item for item in manifest["entries"].values() if item["definition"].endswith(".common")]) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(5, 3), code.host.Model(13, 7)
+        for model, n in ((a, 5), (b, 13)):
+            expected = np.arange(n, dtype=np.float32)
+            model.storage.scalar.from_numpy(expected)
+            model.graph().run({})
+            model.storage.scalar.from_numpy(expected * 0)
+            for group in reversed(model.groups):
+                group.restore()
+            np.testing.assert_array_equal(model.storage.scalar.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_host_owner_sequence_presence_does_not_specialize_code(tmp_path, monkeypatch):
+    source = TYPED_FIELD_INPUT_SOURCE[: TYPED_FIELD_INPUT_SOURCE.index("@ti.data_oriented\nclass Model:")]
+    source += """
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, width: int):
+        scope = ti.experimental.ResourceScope(self)
+        scope.storage = Storage(n, width)
+        self.groups = (Checkpoint(self.storage.scalar), Checkpoint(self.storage.record)) if n > width else ()
+        scope.owner_sequence('groups', self.groups)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert len(manifest["input_families"]["definition_fixture.model.Checkpoint"]) == 2
+    assert not any("domain" in item for item in manifest["entry_families"].values())
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        empty, full = code.host.Model(3, 7), code.host.Model(9, 5)
+        assert empty.groups == ()
+        assert len(full.groups) == 2
+        assert len(empty._forge_package_field_groups) == 0
+        for group in full.groups:
+            assert group.common() == 7
+
+
+@pytest.mark.parametrize(
+    "change, diagnostic",
+    [
+        (("sources = (self.storage.scalar, self.storage.record)", "sources = unknown(self.storage)"), "fixed tuple"),
+        (
+            ("scope.owner_sequence('groups', self.groups)", "scope.owner_sequence('elsewhere', self.groups)"),
+            "one named",
+        ),
+        (
+            (
+                "scope.owner_sequence('groups', self.groups)",
+                "self.groups = ()\n        scope.owner_sequence('groups', self.groups)",
+            ),
+            "one named",
+        ),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_host_owner_sequences_reject_unproven_sources(tmp_path, monkeypatch, change, diagnostic):
+    source = TYPED_FIELD_INPUT_SOURCE.replace(
+        "scope.first = Checkpoint(self.storage.scalar)\n        scope.second = Checkpoint(self.storage.record)",
+        "sources = (self.storage.scalar, self.storage.record)\n"
+        "        self.groups = tuple(Checkpoint(value) for value in sources)\n"
+        "        scope.owner_sequence('groups', self.groups)\n"
+        "        self.first, self.second = self.groups",
+    )
+    package = _source_package(tmp_path, monkeypatch, source.replace(*change))
+    with pytest.raises(ValueError, match=diagnostic):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk").exists()

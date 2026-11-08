@@ -1089,6 +1089,32 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 ),
                 statement,
             )
+        elif method == "owner_sequence" and isinstance(statement, ast.Expr):
+            if (
+                scope_paths[scope]
+                or conditions
+                or len(call.args) != 2
+                or call.keywords
+                or not isinstance(call.args[0], ast.Constant)
+                or type(call.args[0].value) is not str
+                or not call.args[0].value.isidentifier()
+                or not isinstance(call.args[1], ast.Attribute)
+                or not isinstance(call.args[1].value, ast.Name)
+                or call.args[1].value.id != "self"
+                or call.args[1].attr != call.args[0].value
+                or member_stores[call.args[0].value] != 1
+            ):
+                fail(module, call, "Host owner sequence requires one named constructor assignment")
+            add(
+                call.args[0].value,
+                dict(
+                    kind="host_owner_sequence",
+                    sequence_declaration=[call.lineno, call.col_offset],
+                    scope_allocation=origin(scope),
+                ),
+                call,
+            )
+            allowed.add(id(call.func.value))
         elif method == "owner_reference" and isinstance(statement, ast.Expr):
             from ._package_inputs import default_owner_call
 

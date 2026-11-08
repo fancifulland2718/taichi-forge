@@ -1055,6 +1055,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 function = _source_value(node.items[0].context_expr.func, vars(imported_modules[name]))
                 host_contexts.add(function, recipe)
     resolve_owners(sources, imported_modules, _owner_schema, _fail)
+    from ._package_owner_sequences import resolve_sequences
+
+    resolve_sequences(sources, imported_modules)
     from ._package_inputs import resolve_inputs
 
     resolve_inputs(sources, imported_modules)
@@ -1182,6 +1185,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(41, manifest["version"])
             if any(item.get("owner_dimension") for item in schema.values()):
                 manifest["version"] = max(42, manifest["version"])
+            if any(item["kind"] == "host_owner_sequence" for item in schema.values()):
+                manifest["version"] = max(44, manifest["version"])
             if any(item["kind"] == "borrowed_field" and "input_parameter" in item for item in schema.values()):
                 manifest["version"] = max(23, manifest["version"])
             if any(item.get("optional_input") for item in schema.values()):
@@ -1232,10 +1237,17 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "constructor_call",
                         "default_constructor_call",
                         "order_source",
+                        "sequence_declaration",
+                        "constructors",
                     )
                 }
                 for attribute, item in schema.items()
             }
+            for attribute, item in schema.items():
+                if item["kind"] == "host_owner_sequence":
+                    manifest["owners"][name + "." + class_name][attribute]["owner_types"] = sorted(
+                        {child["owner_type"] for child in item["constructors"]}
+                    )
             if any(item["kind"] == "dense_field" for item in schema.values()):
                 from ._component import _dense_group
 

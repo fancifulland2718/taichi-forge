@@ -13,7 +13,7 @@ from taichi_forge_runtime._static_values import read_static_key
 from ._package_factories import _source_value
 
 
-def constructor_calls(constructor, schema, namespace, recipe_for):
+def constructor_calls(constructor, schema, namespace, recipe_for, *, attributes=None, host_sequence=False):
     domains = {
         tuple(item.get("path", [name])): tuple(read_static_key(v) for v in item["choices"])
         for name, item in schema.items()
@@ -186,6 +186,13 @@ def constructor_calls(constructor, schema, namespace, recipe_for):
     def uses(node, attribute, selected=None):
         selected = {} if selected is None else selected
         if isinstance(node, ast.IfExp):
+            if host_sequence:
+                # Host decides whether to construct these independent objects.
+                # Only their possible input contracts matter to numerical code.
+                # Neither the condition nor the whole collection is specialized.
+                yield from uses(node.body, attribute, selected)
+                yield from uses(node.orelse, attribute, selected)
+                return
             for selection in selections(node.test, selected):
                 chosen = node.body if predicate(rewrite(node.test, selected=selection)) else node.orelse
                 yield from uses(chosen, attribute, selection)
@@ -229,6 +236,8 @@ def constructor_calls(constructor, schema, namespace, recipe_for):
             aliases[target.id] = expression
             continue
         if not (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self"):
+            continue
+        if attributes is not None and target.attr not in attributes:
             continue
         call_nodes = [
             n

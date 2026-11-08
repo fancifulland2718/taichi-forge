@@ -1348,6 +1348,15 @@ currently have one proved source; dynamic source selection, heterogeneous owner
 collection discovery, optional/type-domain combinations and cold Kernel factories
 inside these objects are not qualified by this slice.
 
+Format 44 projects the existing `owner_sequence` declaration into Host
+construction. It reuses finite tuple/list/zip and single-comprehension call
+proofs; each algorithm instance keeps its own input contract. Host conditions
+may select an empty collection or existing call branches. Collection order,
+length and presence do not create combined code identities; prepared calls retain
+their actual owners and resource snapshots. Unproved source factories, rewritten
+collection declarations and numerical Kernel iteration over these collections
+still reject. This does not qualify arbitrary application state-inventory inference.
+
 
 Declared resource records and non-owning owner references can pass through
 unannotated `ti.func` arguments and local aliases. The frontend retains their
