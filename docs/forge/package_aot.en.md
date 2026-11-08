@@ -1115,7 +1115,7 @@ function forwarding. Export does not invoke those methods for model samples and
 requires no new decorator or per-kernel registration. It records actual argument
 tuples, not a Cartesian product of separate parameter domains. Static origins
 currently cover literals, immutable tuples and ordinary forwarding. Model runtime
-values, Field templates, dynamic factory returns and unproven forwarding reject.
+values in static slots, dynamic factory returns and unproven forwarding reject.
 Earlier format-49 free-kernel packages must be exported again.
 
 The original Component compiler handles the numerical definition, resource layout
@@ -1144,9 +1144,15 @@ input tuples to methods and inherited numerical mixins. The Host descriptor keep
 the original bound or explicit class-call syntax; Graph preparation chooses the
 code and binds its receiver once. CPU/CUDA checks include saved bound methods,
 independent instances, mismatched Graph receivers and unknown runtime templates.
-Nested local dispatch, model-dependent method lookup, Field/multiple-owner inputs
-and model-dependent sort preparation remain further work; the real EFC factor
-dispatcher still needs its numerical flags and resource sources resolved.
+Version 52 also proves Field template arguments reached through declared paths of
+the same receiver. Direct calls and Graph use the original resource ABI and instance
+binding. Consumer validation checks the paths against the compiled resource contract;
+unknown paths, cross-instance fields and unproven aliases reject. Focused CPU/CUDA
+checks cover dynamic sizes, inherited owners, independent instances and source-free
+Graph consumption. Swapping source and destination still distinguishes existing
+resource-slot ABIs; this slice does not establish slot-normalized code sharing.
+Nested local dispatch, model-dependent method lookup, multiple-owner inputs and
+model-dependent sort preparation remain further work.
 There is no new whole-engine wheel or size measurement from this slice.
 
 Other recognized unsupported declarations or Host frontend operations reject export;

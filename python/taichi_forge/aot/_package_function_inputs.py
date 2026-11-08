@@ -18,6 +18,14 @@ from ._package_input_families import source_class
 @dataclass(frozen=True)
 class _Owner:
     identity: str
+    root: str = ""
+    path: tuple = ()
+
+
+@dataclass(frozen=True)
+class _Resource:
+    owner: _Owner
+    path: tuple
 
 
 @dataclass(frozen=True)
@@ -118,7 +126,9 @@ def discover(sources, imported):
             return None
         item = owners[owner.identity].get(name, {})
         if item.get("kind") in ("owner", "owner_input") and item.get("owner_type") in owners:
-            return _Owner(item["owner_type"])
+            return _Owner(item["owner_type"], owner.root or owner.identity, (*owner.path, name))
+        if item.get("kind") in ("dense_field", "model_tensor_field", "borrowed_field", "fixed_snode_field"):
+            return _Resource(owner, tuple(item.get("path", (name,))))
         return None
 
     while pending:
@@ -389,15 +399,29 @@ def discover(sources, imported):
                 invalid.add(callee)
                 return
             receiver = receivers[0]
+            owner = inputs[receiver]
             try:
-                values = tuple((key, _literal_key(inputs.get(key))) for key in parameters if key != receiver)
+                values, resources = [], []
+                for key in parameters:
+                    if key == receiver:
+                        continue
+                    item = inputs.get(key)
+                    if isinstance(item, _Resource):
+                        path = (*item.owner.path, *item.path)
+                        if (item.owner.root or item.owner.identity) != (owner.root or owner.identity) or path[
+                            : len(owner.path)
+                        ] != owner.path:
+                            raise ValueError("Resource is outside its template receiver")
+                        resources.append((key, path[len(owner.path) :]))
+                    else:
+                        values.append((key, _literal_key(item)))
             except ValueError:
                 failures.append(
                     f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} has an unproven template input"
                 )
                 invalid.add(callee)
                 return
-            domains.setdefault(callee, set()).add((inputs[receiver].identity, receiver, values))
+            domains.setdefault(callee, set()).add((owner.identity, receiver, tuple(values), tuple(resources)))
             covered.add(id(call))
 
         for call in (part for part in nodes if isinstance(part, ast.Call)):
@@ -481,7 +505,7 @@ def discover(sources, imported):
         if kernel in invalid:
             continue
         module, definition, parameters = kernels[kernel]
-        receivers = {receiver for _, receiver, _ in identities}
+        receivers = {receiver for _, receiver, _, _ in identities}
         if len(receivers) != 1:
             failures.append(f"{module}.{definition['name']}: template receiver position changes between definitions")
             continue
@@ -491,13 +515,14 @@ def discover(sources, imported):
             item["free_template"] = receiver
             item["function_templates"] = parameters
             item["function_identity"] = public_identity
-        for identity, _, values in sorted(identities, key=repr):
+        for identity, _, values, resources in sorted(identities, key=repr):
             result.setdefault(identity, []).append(
                 dict(
                     kernel=kernel,
                     definition=public_identity,
                     receiver=receiver,
                     templates=dict(values),
+                    resources=dict(resources),
                     node=definition["node"],
                 )
             )

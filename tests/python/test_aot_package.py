@@ -10826,6 +10826,156 @@ class Model:
     assert not (tmp_path / "sdk").exists()
 
 
+RESOURCE_INPUT_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.kernel
+def transfer(gain: ti.f32, solver: ti.template(), source: ti.template(), target: ti.template()):
+    for i in source:
+        target[i] = source[i] * gain + solver.n
+
+def forward(owner, source, target, gain):
+    transfer(gain, owner, source, target)
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.left = scope.field(ti.f32, shape=scope.dim('n'))
+        scope.right = scope.field(ti.f32, shape=scope.dim('n'))
+    def update(self, gain):
+        forward(self, self.left, self.right, gain)
+    def reverse(self, gain):
+        forward(self, self.right, self.left, gain)
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+        builder.dispatch(transfer, gain, template_args={'solver': self, 'source': self.left, 'target': self.right})
+        return builder.compile()
+class Derived(Model):
+    pass
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_resource_template_inputs_bind_actual_owner_paths(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, RESOURCE_INPUT_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 52
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    function = manifest["function_entries"]["definition_fixture.model.transfer"]
+    assert len(function["owners"]["definition_fixture.model.Model"]) == 2
+    # Existing compiler resource-slot contracts still distinguish a path swap.
+    # Inheritance and sizes do not add numerical copies to those two ABIs.
+    assert len([e for e in manifest["entries"].values() if e["definition"].endswith(".transfer")]) == 2
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(11), code.host.model.Derived(29)
+        a.left.from_numpy(np.arange(11, dtype=np.float32))
+        b.right.from_numpy(np.arange(29, dtype=np.float32))
+        prepared = a.graph().bind(dict(gain=3))
+        b.reverse(2)
+        prepared.run()
+        prepared.close()
+        np.testing.assert_array_equal(a.right.to_numpy(), np.arange(11) * 3 + 11)
+        np.testing.assert_array_equal(b.left.to_numpy(), np.arange(29) * 2 + 29)
+        with pytest.raises(ValueError, match="definition-proven domain"):
+            code.host.model.transfer(3, a, b.left, a.right)
+        with pytest.raises(ValueError, match="definition-proven domain"):
+            code.host.model.transfer(3, a, a.left, a.left)
+    probe = tmp_path / "resource_input_consume.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class NoSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, NoSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(17), code.host.model.Derived(65)
+    a.left.from_numpy(np.arange(17, dtype=np.float32))
+    b.right.from_numpy(np.arange(65, dtype=np.float32))
+    call = a.graph().bind(dict(gain=5))
+    b.reverse(7)
+    call.run()
+    call.close()
+    np.testing.assert_array_equal(a.right.to_numpy(), np.arange(17) * 5 + 17)
+    np.testing.assert_array_equal(b.left.to_numpy(), np.arange(65) * 7 + 65)
+print('RESOURCE_INPUT_SOURCE_FREE_OK')
+""",
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RESOURCE_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["unknown", "foreign_path", "undeclared", "swapped_abi"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_resource_template_inputs_reject_unproven_or_wrong_paths(tmp_path, monkeypatch, change):
+    source = RESOURCE_INPUT_SOURCE
+    if change == "unknown":
+        source = source.replace(
+            "    def update(self, gain):",
+            "    def unknown(self, source, gain):\n"
+            "        forward(self, source, self.right, gain)\n"
+            "    def update(self, gain):",
+        )
+    if change == "foreign_path":
+        source = source[: source.index("@ti.data_oriented")] + """
+class Child:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.left = scope.field(ti.f32, shape=scope.dim('n'))
+        scope.right = scope.field(ti.f32, shape=scope.dim('n'))
+class Model:
+    def __init__(self, n: int):
+        scope = ti.experimental.ResourceScope(self)
+        scope.a = Child(n)
+        scope.b = Child(n)
+    def update(self, gain):
+        transfer(gain, self.a, self.b.left, self.a.right)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    if change in ("unknown", "foreign_path"):
+        with pytest.raises(ti.aot.PackageExportError, match="unproven template input"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        assert not (tmp_path / "sdk").exists()
+        return
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    case = manifest["function_entries"]["definition_fixture.model.transfer"]["owners"][
+        "definition_fixture.model.Model"
+    ][0]
+    case["resources"]["source"] = ["missing"] if change == "undeclared" else case["resources"]["target"]
+    (tmp_path / "sdk/package.json").write_text(json.dumps(manifest), encoding="utf8")
+    with Runtime(manifest["target"]) as runtime:
+
+        def must_not_load(*args, **kwargs):
+            raise AssertionError("Invalid resource binding reached native loading")
+
+        monkeypatch.setattr(runtime, "load_module", must_not_load)
+        with pytest.raises(ValueError, match="resource path"):
+            load_package(runtime, tmp_path / "sdk")
+
+
 @pytest.mark.parametrize("change", ["dynamic", "duplicate_case", "template_signature", "invalid_value"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_static_input_domains_reject_unknown_and_malformed_sources(tmp_path, monkeypatch, change):

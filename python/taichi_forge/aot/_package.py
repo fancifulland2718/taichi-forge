@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import inspect
 import json
+from functools import reduce
 from pathlib import Path
 import shutil
 import tempfile
@@ -1459,12 +1460,15 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         name=class_name
                         + ".__function_"
                         + hashlib.sha256(
-                            json.dumps([call["definition"], call["templates"]], sort_keys=True).encode()
+                            json.dumps(
+                                [call["definition"], call["templates"], call["resources"]], sort_keys=True
+                            ).encode()
                         ).hexdigest(),
                         function_kernel=call["kernel"],
                         function_identity=call["definition"],
                         function_receiver=call["receiver"],
                         function_templates=call["templates"],
+                        function_resources=call["resources"],
                     )
                 )
         for class_name in schemas:
@@ -1533,7 +1537,12 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 [
                     argument
                     for argument in kernel.arguments
-                    if argument.name not in {definition["function_receiver"], *definition["function_templates"]}
+                    if argument.name
+                    not in {
+                        definition["function_receiver"],
+                        *definition["function_templates"],
+                        *definition["function_resources"],
+                    }
                 ]
                 if "function_kernel" in definition
                 else (
@@ -1587,6 +1596,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         {
                             definition["function_receiver"]: owner,
                             **{key: read_static_key(value) for key, value in definition["function_templates"].items()},
+                            **{
+                                key: reduce(getattr, path, owner)
+                                for key, path in definition["function_resources"].items()
+                            },
                         }
                         if "function_kernel" in definition
                         else None
@@ -1726,6 +1739,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     from ._resource_effects import package_effects
 
                     entry_manifest["resource_effects"] = package_effects(code, argument_schema, capture)
+                    if "function_kernel" in definition and code.resource_templates:
+                        entry_manifest["template_resources"] = {
+                            kernel.arguments[slot[0]].name: list(environment._paths[binding])
+                            for slot, binding in code.resource_templates.items()
+                        }
                     if code.contract.get("model_static_ranges"):
                         manifest["version"] = max(28, manifest["version"])
                         entry_manifest["model_static_ranges"] = code.contract["model_static_ranges"]
@@ -1781,12 +1799,20 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         templates=[
                             argument.name
                             for argument in kernel.arguments
-                            if argument.name in {definition["function_receiver"], *definition["function_templates"]}
+                            if argument.name
+                            in {
+                                definition["function_receiver"],
+                                *definition["function_templates"],
+                                *definition["function_resources"],
+                            }
                         ],
                         owners={},
                     ),
                 )
                 case = dict(symbol=entries[definition["name"]]["symbol"], values=definition["function_templates"])
+                if definition["function_resources"]:
+                    manifest["version"] = max(manifest["version"], 52)
+                    case["resources"] = definition["function_resources"]
                 cases = descriptor["owners"].setdefault(name + "." + owner_name, [])
                 if case not in cases:
                     cases.append(case)

@@ -6,6 +6,18 @@ import inspect
 from .._static_values import read_static_key, static_key
 from ._package_values import path_value, owner_type
 
+
+def _declared_field_path(package, owner, path):
+    schema = package.manifest["owners"].get(owner, {})
+    for name, item in schema.items():
+        prefix = item.get("path", [name])
+        if prefix == path:
+            return item["kind"] in ("dense_field", "model_tensor_field", "borrowed_field", "fixed_snode_field")
+        if item["kind"] in ("owner", "owner_input") and path[: len(prefix)] == prefix and len(prefix) < len(path):
+            return _declared_field_path(package, item["owner_type"], path[len(prefix) :])
+    return False
+
+
 def bind_closure(package, identity, values, *, options=None):
     package._check()
     matches, templates = [], []
@@ -129,7 +141,7 @@ class _FunctionEntry:
     """An original free Kernel with an instance-bound template receiver."""
 
     def __init__(self, package, identity):
-        from ._package import entry
+        from ._package import entry, _entry_contract
 
         self.package = package
         spec = package.manifest.get("function_entries", {}).get(identity)
@@ -157,29 +169,69 @@ class _FunctionEntry:
             [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in parameters]
         )
         self._entries = {}
+        self._resource_entries = {}
         for owner, cases in owners.items():
             if owner not in package.manifest["owners"] or not isinstance(cases, list) or not cases:
                 raise ValueError("Free Kernel receiver is outside the declared package")
-            choices = {}
+            choices, resource_choices, seen = {}, [], set()
             for case in cases:
                 if (
                     not isinstance(case, dict)
-                    or set(case) != {"symbol", "values"}
+                    or set(case) not in ({"symbol", "values"}, {"symbol", "values", "resources"})
                     or not isinstance(case["symbol"], str)
                     or not isinstance(case["values"], dict)
-                    or set(case["values"]) != set(self.static_parameters)
+                    or not isinstance(case.get("resources", {}), dict)
                 ):
                     raise ValueError("Free Kernel has an invalid template input case")
-                key = tuple(static_key(read_static_key(case["values"][name])) for name in self.static_parameters)
-                if key in choices:
+                resources = case.get("resources", {})
+                if set(resources) & case["values"].keys() or set(resources) | case["values"].keys() != set(
+                    self.static_parameters
+                ):
+                    raise ValueError("Free Kernel has an invalid template input case")
+                if (
+                    resources
+                    and package.manifest["version"] < 52
+                    or any(
+                        not isinstance(path, list)
+                        or not path
+                        or any(not isinstance(part, str) or not part.isidentifier() for part in path)
+                        for path in resources.values()
+                    )
+                ):
+                    raise ValueError("Free Kernel has invalid template resource paths")
+                if any(not _declared_field_path(package, owner, path) for path in resources.values()):
+                    raise ValueError("Template resource path is outside its declared owner")
+                values = {name: static_key(read_static_key(value)) for name, value in case["values"].items()}
+                key = tuple(
+                    ("path", tuple(resources[name])) if name in resources else ("static", values[name])
+                    for name in self.static_parameters
+                )
+                if key in seen:
                     raise ValueError("Free Kernel has duplicate template input cases")
+                seen.add(key)
                 bound = entry(package, case["symbol"])
                 if [item["name"] for item in bound.contract["arguments"]] != [
                     n for n in parameters if n not in templates
                 ]:
                     raise ValueError("Free Kernel receiver binding differs from its numerical ABI")
-                choices[key] = bound
+                if resources:
+                    contracts = (
+                        [bound.contract]
+                        if bound.family is None
+                        else [
+                            _entry_contract(package.manifest, variant["symbol"]) for variant in bound.family["variants"]
+                        ]
+                    )
+                    for contract in contracts:
+                        if any(
+                            resources.get(name) != path for name, path in contract.get("template_resources", {}).items()
+                        ):
+                            raise ValueError("Template resource paths differ from the compiled resource ABI")
+                    resource_choices.append((values, resources, bound))
+                else:
+                    choices[tuple(values[name] for name in self.static_parameters)] = bound
             self._entries[owner] = choices
+            self._resource_entries[owner] = resource_choices
 
     def _bind(self, inputs):
         self.package._check()
@@ -187,11 +239,24 @@ class _FunctionEntry:
         identity = owner_type(owner)
         if getattr(owner, "_forge_package_owner", None) is not self.package or identity not in self._entries:
             raise ValueError("Free Kernel requires its declared receiver in the same package")
-        key = tuple(static_key(inputs[name]) for name in self.static_parameters)
-        entry = self._entries[identity].get(key)
-        if entry is None:
+        try:
+            key = tuple(static_key(inputs[name]) for name in self.static_parameters)
+        except ValueError:
+            key = None
+        selected = self._entries[identity].get(key)
+        matches = [] if selected is None else [selected]
+        for values, paths, candidate in self._resource_entries[identity]:
+            try:
+                valid = all(static_key(inputs[name]) == value for name, value in values.items()) and all(
+                    path_value(owner, path) is inputs[name] for name, path in paths.items()
+                )
+            except (AttributeError, ValueError):
+                valid = False
+            if valid:
+                matches.append(candidate)
+        if len({candidate.symbol for candidate in matches}) != 1:
             raise ValueError("Free Kernel template inputs are outside their definition-proven domain")
-        return entry.__get__(owner)
+        return matches[0].__get__(owner)
 
     def __call__(self, *args, **kwargs):
         bound = self.signature.bind(*args, **kwargs)
