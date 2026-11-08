@@ -1255,10 +1255,11 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 ):
                     name = presence_parameter(statement, test.left.id, nonnull=True)
                     expected = isinstance(test.ops[0], ast.IsNot) == expected
-                declaration = declarations.get(name, {})
+                declaration = declarations.get(name, (earlier or {}).get(name, {}))
                 if not (
                     declaration.get("kind") == "static"
-                    and {tuple(v) for v in declaration["choices"]} == {("bool", False), ("bool", True)}
+                    and bool(declaration["choices"])
+                    and {tuple(v) for v in declaration["choices"]} <= {("bool", False), ("bool", True)}
                     and not declaration["kernel_only"]
                     and name not in conditions
                     and all(conditions.get(key) is value for key, value in declaration.get("conditions", {}).items())

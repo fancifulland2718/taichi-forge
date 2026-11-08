@@ -1407,6 +1407,10 @@ failure handling. Multiple receiver classes may reuse the same declaration;
 unknown calls, reassigned receivers and incompatible declaration contracts reject.
 This does not yet support changing one resource attribute between unrelated
 element types during preparation.
+Preparation may use a boolean domain already declared by its owner, including
+a single backend-qualified choice. A flag controlling resource layout must not
+be declared `kernel_only`; distinct typed resources retain their original
+conditional group layout and old prepared-call leases.
 
 Dynamic local vectors/matrices also support
 `range(begin, ti.min(device_count, model_bound))`, with `begin` and `model_bound`

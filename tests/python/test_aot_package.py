@@ -10680,6 +10680,64 @@ def _free_preparation_source():
     return model[:start] + body + model[end:] + "\n" + prepare + "\nclass Alternate(Model):\n    pass\n"
 
 
+@pytest.mark.parametrize("single_choice", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_preparation_reuses_declared_type_branch(tmp_path, monkeypatch, single_choice):
+    source = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        self.n = 0
+        self.wide = False
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('wide', choices=(False, True))
+    def prepare(self, n: int, wide: bool):
+        prepare(self, n, wide)
+    @ti.kernel
+    def step(self, delta: ti.i32):
+        if ti.static(self.wide):
+            for i in self.wide_values:
+                self.wide_values[i] += ti.u64(delta) + ti.u64(1 << 33)
+        else:
+            for i in self.narrow_values:
+                self.narrow_values[i] += ti.u32(delta)
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'delta', ti.i32))
+        return builder.compile()
+def prepare(owner, n: int, wide: bool):
+    owner.n, owner.wide = n, wide
+    with resource_group(owner, 'keys', initialization='zero') as fields:
+        fields.order = fields.field(ti.i32, shape=fields.dim('n'))
+        if owner.wide:
+            fields.wide_values = fields.field(ti.u64, shape=fields.dim('n'))
+        else:
+            fields.narrow_values = fields.field(ti.u32, shape=fields.dim('n'))
+"""
+    if single_choice:
+        source = source.replace("choices=(False, True)", "choices=(False,)")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert len(manifest["entries"]) == (2 if single_choice else 3)  # Plus the unrelated public free Kernel.
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(), code.host.Model()
+        a.prepare(7, False)
+        old = a.narrow_values
+        call = a.graph().bind({"delta": 3})
+        a.prepare(19, not single_choice)
+        b.prepare(5, False)
+        a.step(5)
+        b.step(9)
+        call.run()
+        np.testing.assert_array_equal(old.to_numpy(), 3)
+        current = a.narrow_values if single_choice else a.wide_values
+        np.testing.assert_array_equal(current.to_numpy(), 5 if single_choice else (1 << 33) + 5)
+        np.testing.assert_array_equal(b.narrow_values.to_numpy(), 9)
+        call.close()
+
+
 @pytest.mark.parametrize("inherited", [False, True, "free", "free_external"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_late_resource_context_preserves_generations(tmp_path, monkeypatch, inherited):
