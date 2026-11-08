@@ -84,7 +84,7 @@ class LlvmAotModule final : public aot::Module {
   // the module owns shared code while each invocation retains its bindings.
   aot::Kernel *specialize_kernel(aot::Kernel &kernel,
                                 LaunchContextBuilder &context,
-                                const std::vector<uint32_t> &constant_args);
+                                const std::vector<uint32_t> &constant_args) override;
 
  protected:
   void ensure_snode_tree_initialized(int logical_tree_id);

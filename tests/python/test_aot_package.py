@@ -5127,13 +5127,10 @@ def test_package_hybrid_failed_startup_releases_program(monkeypatch):
     np.testing.assert_array_equal(values.to_numpy(), [4, 4, 4])
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 @pytest.mark.parametrize("specialize", [False, True])
 def test_package_natural_calls_reuse_bindings_and_observe_changes(tmp_path, monkeypatch, specialize):
     from taichi_forge_runtime.aot import _package, _runtime
-
-    if specialize and ti.cfg.arch != ti.cuda:
-        pytest.skip("Prepared bitcode specialization is a CUDA experiment")
 
     package = _source_package(tmp_path, monkeypatch, """
 import taichi_forge as ti
@@ -5231,7 +5228,11 @@ class Model:
         if specialize:
             fields = ti.FieldsBuilder()
             values, sentinel = ti.field(ti.f32), ti.field(ti.i32)
-            fields.dense(ti.i, 13).place(values, sentinel)
+            if ti.cfg.arch == ti.vulkan:
+                fields.dense(ti.i, 13).place(values)
+                fields.dense(ti.i, 13).place(sentinel)
+            else:
+                fields.dense(ti.i, 13).place(values, sentinel)
             tree = fields.finalize()
             values.fill(10)
             sentinel.fill(73)

@@ -10,6 +10,8 @@
 #include "taichi/runtime/gfx/cooperative_matrix.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/graph_artifact.h"
+#include "taichi/aot/specialization.h"
+#include "taichi/rhi/vulkan/shader_specialization.h"
 #include "taichi/codegen/spirv/array_layout_abi.h"
 
 namespace taichi::lang {
@@ -443,6 +445,8 @@ class AotModuleImpl : public aot::Module {
         for (const auto &[index, handle] : registered_kernels_) {
           handles.push_back(handle);
         }
+        for (const auto &[key, kernel] : specialized_kernels_)
+          handles.push_back(kernel->handle());
         runtime_->release_aot_resources(handles, root_bindings_);
       } catch (const std::string &error) {
         // TI_ERROR reports sparse overflow as a string. Destruction must not
@@ -632,6 +636,62 @@ class AotModuleImpl : public aot::Module {
     TI_NOT_IMPLEMENTED;
   }
 
+#ifdef TI_WITH_VULKAN
+  aot::Kernel *specialize_kernel(aot::Kernel &kernel,
+                                 LaunchContextBuilder &context,
+                                 const std::vector<uint32_t> &constant_args) override {
+    auto *source = dynamic_cast<KernelImpl *>(&kernel);
+    TI_ERROR_IF(device_api_backend_ != Arch::vulkan || !source ||
+                    &source->runtime() != runtime_ || !source->device_range_tasks().empty() ||
+                    !kernel_indices_.count(kernel.name),
+                "Prepared specialization requires an ordinary Vulkan kernel");
+    const auto constants = aot::specialization_constants(kernel, context, constant_args);
+    const auto index = kernel_indices_.at(kernel.name);
+    const auto code_key = aot::specialization_key(std::to_string(index), constants);
+    auto params = source->params();
+    // Code is shared, while independent SNode instances retain their own
+    // resource view. The resource-view cache never rewrites module bindings.
+    std::string key = code_key;
+    for (auto root : params.root_buffer_bindings)
+      key += fmt::format("|r:{}", root);
+    key += fmt::format("|d:{}", params.sparse_diagnostic_domain);
+    auto found = specialized_kernels_.find(key);
+    if (found != specialized_kernels_.end())
+      return found->second.get();
+    const auto shared = specialized_code_.find(code_key);
+    std::unique_ptr<KernelImpl> result;
+    if (shared != specialized_code_.end()) {
+      const auto handle = runtime_->register_taichi_kernel_resource_view(params, shared->second);
+      result = std::make_unique<KernelImpl>(runtime_, std::move(params), &handle);
+    } else {
+      params.task_spirv_source_codes = params.spirv_codes();
+      params.shared_task_spirv_source_codes.reset();
+      std::vector<vulkan::ShaderArgumentConstant> values;
+      for (const auto &[offset, value] : constants)
+        values.push_back({static_cast<uint32_t>(offset), value.bits, value.value});
+      size_t folded = 0;
+      for (size_t i = 0; i < params.kernel_attribs.tasks_attribs.size(); ++i) {
+        const auto &task = params.kernel_attribs.tasks_attribs[i];
+        for (const auto &bind : task.buffer_binds) {
+          if (bind.buffer.type != TaskAttributes::BufferType::Args || bind.binding < 0)
+            continue;
+          size_t count = 0;
+          params.task_spirv_source_codes[i] = vulkan::specialize_spirv_arguments(
+              params.task_spirv_source_codes[i], bind.binding, values, &count);
+          folded += count;
+        }
+      }
+      TI_DEBUG("Prepared Vulkan specialization {} folded {} ABI loads", kernel.name, folded);
+      result = std::make_unique<KernelImpl>(runtime_, std::move(params));
+      specialized_code_.emplace(code_key, result->handle());
+    }
+    static_cast<CallableBase &>(*result) = static_cast<const CallableBase &>(kernel);
+    auto *callable = result.get();
+    specialized_kernels_.emplace(std::move(key), std::move(result));
+    return callable;
+  }
+#endif
+
  private:
   std::map<std::string, std::vector<uint32_t>> range_selections_;
 
@@ -761,6 +821,8 @@ class AotModuleImpl : public aot::Module {
   std::vector<std::string> shader_errors_;
   std::unordered_map<std::string, size_t> kernel_indices_;
   std::unordered_map<size_t, GfxRuntime::KernelHandle> registered_kernels_;
+  std::unordered_map<std::string, GfxRuntime::KernelHandle> specialized_code_;
+  std::unordered_map<std::string, std::unique_ptr<KernelImpl>> specialized_kernels_;
   std::vector<int> root_bindings_;
   std::vector<std::vector<std::uint8_t>> eager_initial_root_data_;
   bool owns_runtime_resources_{false};

@@ -1197,7 +1197,7 @@ class BoundCall:
     def prepare(self, *, specialize=False, constant_args=()):
         """Build native fixed execution without running the bound kernels.
 
-        Experimental CUDA bitcode specialization folds immutable ndarray layouts
+        CPU/CUDA bitcode and Vulkan 1.3 specialization fold immutable ndarray layouts
         and optional integer scalar argument indices during backend compilation.
         Contents and storage addresses remain instance-bound. Ordinary preparation
         does not recompile code. The specialized code cache is module-local.
@@ -1213,7 +1213,7 @@ class BoundCall:
                 raise ValueError("constant_args requires specialize=True")
             if specialize:
                 if graph:
-                    raise ValueError("Bitcode specialization currently accepts individual bound kernels")
+                    raise ValueError("Specialization currently accepts individual bound kernels")
                 if any(type(index) is not int or index < 0 or index >= len(self._arguments) for index in constant_args):
                     raise ValueError("constant_args must contain valid integer argument indices")
                 runtime._api.load_prepared_specialization()

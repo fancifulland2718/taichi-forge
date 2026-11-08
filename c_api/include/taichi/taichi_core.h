@@ -1438,7 +1438,8 @@ ti_prepare_kernel_ext(TiRuntime runtime,
                       const TiArgument *args,
                       uint32_t binding_count,
                       const TiNdArrayBinding *bindings);
-// Experimental CUDA bitcode backend specialization for immutable preparations.
+// Experimental CPU/CUDA bitcode and Vulkan 1.3 SPIR-V specialization for
+// immutable preparations.
 // Folds ndarray descriptors and selected integer scalar arguments, never array
 // addresses/contents. Reuses code within the module; may incur backend compilation.
 TI_DLL_EXPORT TiPreparedExecution TI_API_CALL

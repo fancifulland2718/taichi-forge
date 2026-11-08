@@ -1630,6 +1630,23 @@ Vulkan 复用固定命令。返回对象可重复调用、读取 `info`，使用
 调用未必能摊销，因此入口显式选择，失败不会静默回退。显式 ndarray 梯度绑定与
 普通执行相同。关闭依赖会完成在途工作并使关联 prepared 对象失效，不影响无关
 执行对象；暖态只查原生句柄，不重新装箱参数或扫描全部数组 owner。
+
+`bound_call.prepare(specialize=True, constant_args=(...))` 可从包内代码进行消费时
+特化：CPU/CUDA 使用 LLVM bitcode，Vulkan 使用 SPIR-V 并按 Vulkan 1.3 优化。
+准备时固定已绑定 ndarray 的形状、仿射步长，以及 `constant_args` 明确指定的整数
+标量参数位置；数组内容和地址不成为常量。CPU/CUDA 还利用已有分配身份证明的相对
+存储偏移，Vulkan 保留原描述符绑定。相同事实在同一 loaded module 内复用代码，
+不同实例仍持有独立参数、资源和退休租约。热调用复用原生准备，不重复特化。
+未指定的标量仍为代码的运行时输入；改变其值需新的不可变准备，但可命中相同代码。
+
+此选项目前用于普通 Kernel，不接受 Graph、device-range 任务或 CUDA PTX/cubin。
+CPU range 回调的完整特化需要包含参数来源标记的新导出；旧 bitcode 仅折叠能证明的
+位置。Vulkan 的额外整数能力仍须在导出时声明，例如 `caps=["spirv_has_int64"]`。
+原有资源准入范围不变，包括 Vulkan 对交错 Field 切片借用的限制。
+默认 `specialize=False`，普通 package 的混合模式尚未全局启用特化。
+本轮只验证局部数组、模型尺寸、别名、实例与准备复用，未完成全引擎后端资格。
+通用代码与特化代码的重复编译消除、跨进程特化缓存均后置；新进程仍可能重新特化，
+首次准备成本须计入首次可用时间，不生成额外发行 TCM。
 公开 Python 消费示例添加 `--prepared` 即可验证此路径。
 
 Kernel 的按值参数还接受向量序列、矩阵嵌套序列及按名称绑定的结构 mapping，支持

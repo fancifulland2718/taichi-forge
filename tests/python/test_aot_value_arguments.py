@@ -15,12 +15,14 @@ from tests import test_utils
 from tests.cpp.aot.python_scripts.value_argument_aot import export
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 @pytest.mark.parametrize("fold_dimensions", [False, True])
 def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(tmp_path, fold_dimensions):
     from taichi_forge_runtime.aot import Scalar
 
-    @ti.real_func
+    decorator = ti.func if ti.cfg.arch == ti.vulkan else ti.real_func
+
+    @decorator
     def helper(value: ti.i32) -> ti.i32:
         return 2 * value + 1
 
@@ -65,9 +67,12 @@ def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(
             bound.prepare(constant_args=(1,))
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 @pytest.mark.parametrize("field_storage", [False, True])
 def test_prepared_specialization_preserves_storage_relations_and_aliases(tmp_path, field_storage):
+    if field_storage and ti.cfg.arch == ti.vulkan:
+        pytest.skip("Vulkan does not admit sliced interleaved Field borrowing")
+
     @ti.kernel
     def update(x: ti.types.ndarray(ti.i32, 1), y: ti.types.ndarray(ti.i32, 1)):
         # Deliberately ordered accesses exercise partial and exact aliases.
@@ -128,6 +133,42 @@ def test_prepared_specialization_preserves_storage_relations_and_aliases(tmp_pat
                 for guard in (sentinel, other_sentinel):
                     if guard is not None:
                         np.testing.assert_array_equal(guard.to_numpy(), np.full(16, 71))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+@pytest.mark.parametrize("unsigned", [False, True])
+@pytest.mark.parametrize("bits", [16, 64])
+def test_prepared_specialization_preserves_integer_bits(tmp_path, unsigned, bits):
+    from taichi_forge_runtime.aot import Scalar
+
+    name = ("u" if unsigned else "i") + str(bits)
+    dtype = getattr(ti, name)
+
+    @ti.kernel
+    def update(output: ti.types.ndarray(dtype, 1), fixed: dtype, changing: dtype):
+        for i in output:
+            output[i] = fixed + changing + ti.cast(i, dtype)
+
+    caps = []
+    if ti.cfg.arch == ti.vulkan:
+        caps = [f"spirv_has_int{bits}"]
+        if bits == 16:
+            caps.append("spirv_has_int16_storage")
+    module = ti.aot.Module(caps=caps)
+    module.add_kernel(update)
+    artifact = tmp_path / "wide.tcm"
+    module.archive(str(artifact))
+    fixed = (1 << (bits - 1)) + 7 if unsigned else -(1 << (bits - 4)) - 7
+    with ti.aot.borrow_runtime() as runtime, runtime.load_module(artifact) as loaded, ExitStack() as stack:
+        array = stack.enter_context(closing(runtime.ndarray(name, 9)))
+        calls = [stack.enter_context(closing(loaded.kernel("update").bind(
+            array, Scalar(name, fixed), Scalar(name, changing)).prepare(
+                specialize=True, constant_args=(1,)))) for changing in (2, 17)]
+        for call, changing in zip(reversed(calls), (17, 2)):
+            call.run()
+            expected = np.arange(9, dtype=np.dtype(("uint" if unsigned else "int") + str(bits)))
+            expected += fixed + changing
+            np.testing.assert_array_equal(np.frombuffer(array.read(), dtype=expected.dtype), expected)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

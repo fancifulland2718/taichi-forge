@@ -1348,16 +1348,11 @@ static TiPreparedExecution prepare_kernel_impl(TiRuntime runtime,
     return TI_NULL_HANDLE;
   if (specialize) {
     TI_ERROR_IF(constant_count && !constant_args, "Specialization constants are null");
-#ifdef TI_WITH_LLVM
-    auto *module = dynamic_cast<taichi::lang::LLVM::LlvmAotModule *>(&arguments->owner->get());
-    TI_ERROR_IF(!module, "Prepared specialization requires a CUDA bitcode module");
     std::vector<uint32_t> indices;
     if (constant_count)
       indices.assign(constant_args, constant_args + constant_count);
-    arguments->kernel = module->specialize_kernel(*arguments->kernel, *arguments->context, indices);
-#else
-    TI_ERROR("Prepared specialization requires LLVM support");
-#endif
+    arguments->kernel = arguments->owner->get().specialize_kernel(
+        *arguments->kernel, *arguments->context, indices);
   }
   auto prepared = std::make_unique<capi::PreparedExecution>();
   prepared->owner = arguments->owner;

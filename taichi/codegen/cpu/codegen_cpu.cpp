@@ -174,6 +174,17 @@ class TaskCodeGenCPU : public TaskCodeGenLLVM {
 
     llvm::Value *epilogue = create_xlogue(stmt->tls_epilogue);
 
+    // CPU export inlines the scheduler and stores callbacks in its helper
+    // record. Preserve the compiler's argument-context proof through that
+    // optimization instead of reconstructing it from callback names/stores.
+    // A real_func's newly constructed context is deliberately not marked.
+    for (auto *callback : {static_cast<llvm::Value *>(body),
+                           static_cast<llvm::Value *>(tls_prologue), epilogue}) {
+      if (auto *function = llvm::dyn_cast<llvm::Function>(callback))
+        function->addParamAttr(0, llvm::Attribute::get(
+            *llvm_context, "taichi.aot.argument_context"));
+    }
+
     const char *scheduler = compile_config.debug
                                 ? "cpu_parallel_range_for_cancellable"
                                 : "cpu_parallel_range_for";

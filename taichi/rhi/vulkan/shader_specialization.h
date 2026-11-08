@@ -16,4 +16,16 @@ TI_DLL_EXPORT std::vector<uint32_t> specialize_spirv_shader(
     const std::vector<uint32_t> &code,
     const std::unordered_map<uint32_t, std::string> &values);
 
+struct ShaderArgumentConstant {
+  uint32_t offset;
+  unsigned bits;
+  uint64_t value;
+};
+
+// Consumer-side Vulkan 1.3 transform. Only constant-index integer loads from
+// the declared uniform argument binding qualify. Other resources stay dynamic.
+TI_DLL_EXPORT std::vector<uint32_t> specialize_spirv_arguments(
+    const std::vector<uint32_t> &code, uint32_t argument_binding,
+    const std::vector<ShaderArgumentConstant> &values, size_t *folded = nullptr);
+
 }  // namespace taichi::lang::vulkan

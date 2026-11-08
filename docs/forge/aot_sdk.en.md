@@ -2360,6 +2360,30 @@ Closing a dependency completes submitted work and invalidates its prepared
 objects; unrelated executions remain usable. Warm replay checks a native handle
 without re-marshalling arguments or scanning every array owner.
 
+`bound_call.prepare(specialize=True, constant_args=(...))` specializes code from
+the package: CPU/CUDA use LLVM bitcode, while Vulkan optimizes SPIR-V for Vulkan
+1.3. Preparation fixes bound ndarray shapes, affine strides and explicitly
+selected integer scalar argument positions. Array contents and addresses stay
+dynamic. CPU/CUDA also use relative storage offsets proven by existing allocation
+owners; Vulkan retains descriptor bindings. Equal facts share code within one
+loaded module, while instances keep independent arguments, resources and leases.
+Warm calls reuse native preparation without specializing again. Unselected
+scalars remain runtime code inputs; changing their values requires another
+immutable preparation but can reuse the same code.
+
+This option currently accepts ordinary Kernels, excluding Graphs, device-range
+tasks and CUDA PTX/cubin. Complete CPU range-callback specialization requires a
+new export carrying argument-origin attributes; older bitcode folds only proven
+locations. Vulkan integer capabilities must still be declared at export, for
+example `caps=["spirv_has_int64"]`. Existing resource admission limits remain,
+including sliced interleaved Field borrowing on Vulkan. The default remains
+`specialize=False`; hybrid package calls do not globally enable specialization.
+Qualification covers local array, model-size, alias, instance and preparation
+reuse fixtures, not the full engine. Eliminating duplicate generic/specialized
+compilation and adding a cross-process specialization cache are deferred. New
+processes can specialize again; count preparation in first-use cost. No extra
+distribution TCM is created.
+
 The corresponding C API is `ti_prepare_kernel_ext` /
 `ti_prepare_compute_graph_ext` with `TiNdArrayBinding` /
 `TiNamedNdArrayBinding`, followed by `ti_launch_prepared_ext` and

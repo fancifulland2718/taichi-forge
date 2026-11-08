@@ -7,6 +7,9 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h"
+#include "taichi/runtime/llvm/llvm_module_options.h"
+#include "taichi/aot/specialization.h"
 #include "taichi/program/launch_context_builder.h"
 #include "taichi/ir/type_factory.h"
 #include "taichi/ir/type_utils.h"
@@ -378,60 +381,15 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
     aot::Kernel &kernel, LaunchContextBuilder &context,
     const std::vector<uint32_t> &constant_args) {
   auto *source = dynamic_cast<llvm_aot::KernelImpl *>(&kernel);
-  TI_ERROR_IF(arch() != Arch::cuda || metadata_.kernel_format != "bc" || !source ||
+  TI_ERROR_IF((!arch_is_cpu(arch()) && arch() != Arch::cuda) || metadata_.kernel_format != "bc" || !source ||
                   !source->device_range_tasks().empty(),
-              "Prepared specialization requires an ordinary CUDA bitcode kernel");
+              "Prepared specialization requires an ordinary CPU/CUDA bitcode kernel");
   const auto alias = metadata_.kernel_aliases.find(kernel.name);
   const auto &code = alias == metadata_.kernel_aliases.end() ? kernel.name : alias->second;
   TI_ERROR_IF(!payload_kernels_.count(code), "Specialization kernel is not owned by this module");
 
-  // The argument ABI is authoritative. Only integer descriptor members and
-  // explicitly selected scalar arguments are eligible, never data/grad pointers.
-  struct Constant { unsigned bits; uint64_t value; };
-  std::map<int, Constant> constants;
-  auto add = [&](const std::vector<int> &path, unsigned bits) {
-    const int offset = kernel.args_type->get_element_offset(path);
-    TI_ERROR_IF(offset < 0 || offset + bits / 8 > kernel.args_size,
-                "Specialization argument is outside the loaded ABI");
-    uint64_t value = 0;
-    std::memcpy(&value, static_cast<const char *>(context.get_context().arg_buffer) + offset, bits / 8);
-    constants.emplace(offset, Constant{bits, value});
-  };
-  for (const auto &[path, parameter] : kernel.nested_parameters) {
-    if (parameter.ptype != ParameterType::kNdarray)
-      continue;
-    auto member = path;
-    member.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
-    member.push_back(0);
-    const int rank = parameter.total_dim - parameter.element_shape.size();
-    for (int axis = 0; axis < rank; ++axis) {
-      member.back() = axis;
-      add(member, 32);
-    }
-    if (std::find(kernel.runtime_affine_arrays.begin(), kernel.runtime_affine_arrays.end(), path) !=
-        kernel.runtime_affine_arrays.end()) {
-      for (int axis = 0; axis < rank; ++axis) {
-        member.back() = TypeFactory::stride_pos_in_ndarray(rank, axis);
-        add(member, 32);
-      }
-      member.back() = TypeFactory::affine_mode_pos_in_ndarray(rank);
-      add(member, 32);
-    }
-  }
-  for (uint32_t index : constant_args) {
-    const auto parameter = kernel.nested_parameters.find({static_cast<int>(index)});
-    TI_ERROR_IF(parameter == kernel.nested_parameters.end() || parameter->second.is_array ||
-                    parameter->second.ptype != ParameterType::kScalar ||
-                    !is_integral(parameter->second.get_dtype()),
-                "Specialization constants must name integer scalar arguments");
-    const auto bits = data_type_size(parameter->second.get_dtype()) * 8;
-    TI_ERROR_IF(bits != 8 && bits != 16 && bits != 32 && bits != 64,
-                "Unsupported specialization integer width");
-    add({static_cast<int>(index)}, bits);
-  }
-  std::string key = code;
-  for (const auto &[offset, value] : constants)
-    key += fmt::format("|{}:{}:{}", offset, value.bits, value.value);
+  const auto constants = aot::specialization_constants(kernel, context, constant_args);
+  std::string key = aot::specialization_key(code, constants);
 
   // Recover only relations proven by the already-bound allocation owners.
   // Two wrappers or nearby addresses do not prove a common allocation. The
@@ -515,6 +473,14 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
     TI_ERROR_IF(!entry || entry->arg_empty(), "Specialization task entry is missing");
     contexts.insert(entry);
   }
+  if (arch_is_cpu(arch())) {
+    for (auto &function : module) {
+      if (function.hasLocalLinkage() && !function.isDeclaration() &&
+          !function.arg_empty() && function.getArg(0)->getType()->isPointerTy() &&
+          function.getAttributes().hasParamAttr(0, "taichi.aot.argument_context"))
+        contexts.insert(&function);
+    }
+  }
   // Generated range callbacks receive exactly the parent's RuntimeContext.
   // Prove every use before including an internal function; a real_func can
   // instead receive a new context and must not inherit this argument layout.
@@ -536,10 +502,20 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
         if (call->getCalledFunction() == &function)
           continue;
         const auto *callee = call->getCalledFunction();
-        if (!callee || !call->isArgOperand(&use) ||
-            (callee->getName() != "gpu_parallel_range_for_with_tls" &&
-             callee->getName() != "gpu_parallel_range_for") ||
-            call->getArgOperandNo(&use) < 3 || call->getArgOperandNo(&use) > 5) {
+        const auto name = callee ? callee->getName() : llvm::StringRef{};
+        const bool gpu_range = name == "gpu_parallel_range_for_with_tls" ||
+                               name == "gpu_parallel_range_for";
+        const bool cpu_range = name == "cpu_parallel_range_for" ||
+                               name == "cpu_parallel_range_for_cancellable" ||
+                               name == "cpu_parallel_range_for_bounded" ||
+                               name == "cpu_parallel_range_for_bounded_cancellable";
+        // CPU callbacks preserve the argument buffer in their thread-local
+        // context copy; only cpu_thread_id changes. No other context fields
+        // are eligible for folding below.
+        const unsigned first_callback = gpu_range ? 3 : 6;
+        if (!callee || !call->isArgOperand(&use) || (!gpu_range && !cpu_range) ||
+            call->getArgOperandNo(&use) < first_callback ||
+            call->getArgOperandNo(&use) > first_callback + 2) {
           proven = false;
           break;
         }
@@ -602,6 +578,24 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
   }
   TI_DEBUG("Prepared specialization {} folded {} ABI loads and {} storage relations",
            code, replacements, pointer_replacements);
+  if (arch_is_cpu(arch())) {
+    // CUDA reoptimizes at registration. CPU normally optimizes at export, so
+    // rerun its existing pass pipeline after introducing prepared constants.
+    auto target = llvm::cantFail(llvm::orc::JITTargetMachineBuilder::detectHost());
+    const auto effective = LLVMModuleOptions::read(module, executor_->get_config());
+    auto &options = target.getOptions();
+    options.AllowFPOpFusion = effective.fast_math ? llvm::FPOpFusion::Fast : llvm::FPOpFusion::Strict;
+    options.UnsafeFPMath = effective.fast_math;
+    options.NoInfsFPMath = effective.fast_math;
+    options.NoNaNsFPMath = effective.fast_math;
+    auto machine = llvm::cantFail(target.createTargetMachine());
+    LLVMOptPipelineOptions passes;
+    passes.opt_level = llvm_opt_level_from_int(effective.opt_level);
+    passes.loop_vectorize = true;
+    passes.slp_vectorize = true;
+    passes.run_post_gep_passes = true;
+    run_module_opt_pipeline(module, machine.get(), passes);
+  }
   CompiledKernelData compiled{arch(), std::move(data).take_llvm_ckd_data()};
   KernelRegistrationState registration;
   auto handle = kernel_launcher_->register_llvm_kernel(compiled, registration);
