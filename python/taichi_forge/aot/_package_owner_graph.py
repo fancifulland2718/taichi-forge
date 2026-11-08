@@ -56,7 +56,15 @@ class OwnerGraph:
         import taichi_forge as ti
         from taichi_forge.lang.matrix import MatrixType
         from taichi_forge_runtime._static_values import read_static_key
-        from ._component import Array, Record, RuntimeValue, StaticValue, _ConditionalArray
+        from ._component import (
+            Array,
+            Record,
+            RuntimeValue,
+            StaticValue,
+            _ConditionalArray,
+            _InputPresence,
+            _OptionalArray,
+        )
         from ._package_fields import construct_fields, field_environment
         from ._package_records import write_member
         from ._package_types import resolve_type, type_spec
@@ -111,9 +119,13 @@ class OwnerGraph:
                 if item.get("external") and item["element"]["kind"] not in ("scalar", "tensor"):
                     raise ValueError("Typed external borrow requires scalar/vector/matrix elements")
                 declarations[attribute] = (
-                    _ConditionalArray(dtype, item["ndim"], conditions=tuple(item["conditions"].items()))
-                    if item.get("external") and item.get("conditions")
-                    else Array(dtype, item["ndim"])
+                    _OptionalArray(dtype, item["ndim"], presence=item["input_presence_attribute"])
+                    if item.get("external") and item.get("optional_input")
+                    else (
+                        _ConditionalArray(dtype, item["ndim"], conditions=tuple(item["conditions"].items()))
+                        if item.get("external") and item.get("conditions")
+                        else Array(dtype, item["ndim"])
+                    )
                 )
                 value = ti.ndarray(dtype, (1,) * item["ndim"])
             else:
@@ -127,7 +139,8 @@ class OwnerGraph:
                     item["dtype"] = item["element"]["dtype"]
                 else:
                     dtype = getattr(ti, item["dtype"])
-                declarations[attribute] = RuntimeValue(dtype, affects_plan=item.get("affects_plan", False))
+                value_type = _InputPresence if item.get("input_presence") else RuntimeValue
+                declarations[attribute] = value_type(dtype, affects_plan=item.get("affects_plan", False))
                 value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
             write_member(owner, attribute, value, schema)
         environment, expanded = _compose(field_environment(declarations, schema), schema, children)
@@ -184,6 +197,8 @@ def _compose(environment, schema, children):
                 )
                 if getattr(value, "conditions", ()):
                     changes["conditions"] = tuple((names[n], expected) for n, expected in value.conditions)
+                if getattr(value, "presence", ""):
+                    changes["presence"] = names[value.presence]
                 value = replace(value, **changes)
             elif isinstance(value, _ConditionalRecord):
                 value = _ConditionalRecord(tuple((names[n], expected) for n, expected in value.conditions))
@@ -203,6 +218,8 @@ def _compose(environment, schema, children):
             transformed = {**item, "path": [attribute, *item.get("path", (key,))]}
             if "source_path" in item:
                 transformed["source_path"] = [attribute, *item["source_path"]]
+            if "input_presence_attribute" in item:
+                transformed["input_presence_attribute"] = names[item["input_presence_attribute"]]
             if item.get("external"):
                 transformed["shape_expressions"] = [expression(axis) for axis in item["shape_expressions"]]
             if "reference_path" in item:

@@ -151,14 +151,23 @@ Ordinary helpers may forward these declarations and fixed Forge scalar/vector/ma
 type references without executing the helper during discovery or adding export-only
 wrappers. Preparation methods containing only record inputs are also retained.
 
-Format 60 adds `optional=True` to this declaration. Preparation may bind `None`;
-clearing the current binding leaves existing prepared calls holding their old
-resources. Ordinary numerical reads require a present input at that entry;
-only explicit presence checks such as `ti.static(self.values is not None)` select
-necessary code branches. Optional inputs do not expand the whole package into
-combinations. Local CPU/CUDA checks cover absence, restoration, old calls and
-presence rejection. Arbitrary conditional ports, struct elements and
-model-dependent element shapes are not yet supported by this form.
+Format 63 binds typed `optional=True` port presence as an i32 preparation argument.
+Explicit checks such as `ti.static(self.values is not None)` use one numerical
+implementation without enumerating presence combinations. Ordinary JIT retains
+its object checks. Preparation may bind `None`; existing prepared calls retain
+their previous resources and presence snapshots.
+The compiler records presence conditions dominating resource accesses, and the
+consumer checks required inputs before submission. Unguarded reads still require
+a present input. Inline `ti.func` and `ti.real_func` use the same rule; unproven
+device conditions conservatively retain required inputs. An absent, unused array
+uses a cached typed empty descriptor: the existing Runtime allocates one physical
+byte for a zero-sized ranked array, or one element for a rank-zero scalar. No
+model-sized placeholder is allocated. Local CPU/CUDA checks cover four two-port
+combinations, dependent-input rejection, presence-only queries, new sizes, nested
+owners, vector/rank-zero inputs and old Graph snapshots.
+Optional record presence still uses the existing static mechanism. Dynamic
+records, arbitrary conditional ports, struct elements and model-dependent element
+shapes remain outside this typed-port slice.
 
 Format 61 projects retained `ti.algorithms.sort`, `SortWorkspace`, and
 `primitive_sequence().sort(...)` / `GraphBuilder.append_native` onto the existing

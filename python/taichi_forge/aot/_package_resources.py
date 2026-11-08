@@ -1476,7 +1476,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 if optional.value:
                     add(
                         presence,
-                        dict(kind="static", choices=[("bool", False), ("bool", True)], kernel_only=False),
+                        dict(kind="value", dtype="i32", input_presence=True),
                         call,
                     )
                 shape = dimension(keywords["shape"])
@@ -1500,7 +1500,6 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                             {
                                 "optional_input": True,
                                 "input_presence_attribute": presence,
-                                "conditions": {presence: True},
                             }
                             if optional.value
                             else {}

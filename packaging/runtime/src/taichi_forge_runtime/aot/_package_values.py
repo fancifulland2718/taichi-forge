@@ -34,8 +34,23 @@ def check_admission(owner, contract):
         for binding in admission.get("input_presence", {}).values():
             if (path_value(owner, binding["path"]) is not None) is not binding["present"]:
                 raise ValueError("Optional Field input presence changed after construction")
+        presence = {}
+        for name, binding in admission.get("dynamic_input_presence", {}).items():
+            actual = path_value(owner, binding["path"]) is not None
+            if path_value(owner, binding["flag_path"]) is not actual:
+                raise ValueError("Optional input presence changed outside its preparation binding")
+            presence[name] = int(actual)
         for resource in admission.get("external_resources", {}).values():
-            check_external_resource(owner, resource, path_value(owner, resource["path"]))
+            value = path_value(owner, resource["path"])
+            if value is None and "required_when" in resource:
+                required = any(
+                    all(bool(evaluate_extent(expression, presence.__getitem__)) is truth for expression, truth in path)
+                    for path in resource["required_when"]
+                )
+                if required:
+                    raise ValueError("Optional input presence is required by the selected execution branch")
+                continue
+            check_external_resource(owner, resource, value)
         check_owner_bindings(owner, admission.get("owner_bindings", {}).values())
         for binding in admission.get("source_bindings", {}).values():
             for predicate in binding.get("presence", ()):
@@ -120,6 +135,10 @@ def capture_value(owner, spec):
         return resolve(spec["name"])
     for name in spec.get("path", (spec["name"],)):
         owner = getattr(owner, name)
+    if owner is None and "optional_array" in spec:
+        # A valid zero-work descriptor is an ABI token, not fabricated model
+        # storage. Admission has already ruled out every active read/write.
+        return root._forge_package_owner._empty_input(spec["optional_array"])
     if spec.get("kind") == "model_tensor_field":
         expected = tuple(
             (

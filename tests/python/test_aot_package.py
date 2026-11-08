@@ -4953,7 +4953,9 @@ class Model:
 """
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 60
+    assert manifest["version"] == 63
+    assert not manifest["entry_families"]
+    assert len([entry for entry in manifest["entries"].values() if entry["definition"].endswith(".update")]) == 1
     assert len([entry for entry in manifest["entries"].values() if entry["definition"].endswith(".required")]) == 1
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
         caller = ti.field(ti.f32, shape=13)
@@ -4987,6 +4989,202 @@ class Model:
         np.testing.assert_array_equal(caller.to_numpy(), expected + 2 * (np.arange(13) + 1))
         previous.close()
         imported.close()
+
+
+@pytest.mark.parametrize("function", ["func", "real_func"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_arrays_share_code_and_check_branch_requirements(tmp_path, monkeypatch, function):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        self.a, self.b = None, None
+        s = ti.experimental.ResourceScope(self)
+        s.out = s.field(ti.f32, shape=s.dim('n'))
+    def prepare(self, a, b):
+        s = ti.experimental.ResourceScope(self)
+        s.borrow('a', a, external=True, dtype=ti.f32, shape=s.dim('n'), optional=True)
+        s.borrow('b', b, external=True, dtype=ti.f32, shape=s.dim('n'), optional=True)
+    @ti.real_func
+    def contribution(self, i: ti.i32) -> ti.f32:
+        value = 0.
+        if ti.static(self.a is not None):
+            value += self.a[i]
+        if ti.static(self.b is not None):
+            value += 2 * self.b[i]
+        return value
+    @ti.kernel
+    def step(self):
+        for i in self.out:
+            self.out[i] = self.contribution(i)
+    @ti.kernel
+    def dependency(self):
+        for i in self.out:
+            if ti.static(self.a is not None):
+                self.out[i] = self.b[i]
+            else:
+                self.out[i] = -1
+    @ti.kernel
+    def both(self):
+        for i in self.out:
+            if ti.static(self.a is None or self.b is None):
+                self.out[i] = -2
+            else:
+                self.out[i] = self.a[i] + self.b[i]
+    @ti.kernel
+    def required(self):
+        for i in self.out:
+            self.out[i] = self.contribution(i) + self.b[i]
+    @ti.kernel
+    def query(self):
+        if ti.static(self.a is not None):
+            self.out[0] = 1
+        else:
+            self.out[0] = 0
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+""".replace("@ti.real_func", "@ti." + function)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    assert manifest["version"] == 63 and not manifest["entry_families"]
+    for name in ("step", "dependency", "both", "required", "query"):
+        assert (
+            len([entry for entry in manifest["entries"].values() if entry["definition"].endswith(".Model." + name)])
+            == 1
+        )
+    probe = tmp_path / "consume_optional_arrays.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys, numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            for n in (3, 19):
+                model = code.host.Model(n)
+                a, b = runtime.ndarray('f32', n), runtime.ndarray('f32', n)
+                av, bv = np.arange(n,dtype=np.float32), np.arange(n,dtype=np.float32) + 10
+                a.write(av.tobytes()); b.write(bv.tobytes())
+                for pa,pb in ((False,False),(True,False),(False,True),(True,True)):
+                    model.prepare(a if pa else None, b if pb else None)
+                    model.step()
+                    np.testing.assert_array_equal(model.out.to_numpy(), (av if pa else 0) + (2*bv if pb else 0))
+                    model.both()
+                    np.testing.assert_array_equal(model.out.to_numpy(), av+bv if pa and pb else -2)
+                    before = model.out.to_numpy().copy()
+                    if pa and not pb:
+                        try: model.dependency()
+                        except ValueError as error: assert 'presence' in str(error)
+                        else: raise AssertionError('missing dependent input accepted')
+                        np.testing.assert_array_equal(model.out.to_numpy(), before)
+                    else:
+                        model.dependency()
+                        np.testing.assert_array_equal(model.out.to_numpy(), bv if pa else -1)
+                    if not pb:
+                        try: model.required()
+                        except ValueError as error: assert 'presence' in str(error)
+                        else: raise AssertionError('unguarded required input accepted')
+                    model.query()
+                    assert model.out.to_numpy()[0] == int(pa)
+                model.prepare(a,b)
+                with model.graph().bind({}) as previous:
+                    model.prepare(None,None)
+                    model.graph().run({})
+                    previous.run()
+                    np.testing.assert_array_equal(model.out.to_numpy(), av+2*bv)
+                a.close(); b.close()
+            assert len(code._empty_inputs) == 1
+            assert next(iter(code._empty_inputs.values())).shape == (0,)
+        print('OPTIONAL_ARRAY_BRANCHES_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OPTIONAL_ARRAY_BRANCHES_OK" in result.stdout
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_inputs_keep_nested_owners_and_typed_empty_descriptors(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        self.values, self.bias = None, None
+        s = ti.experimental.ResourceScope(self)
+        s.out = s.field(ti.types.vector(3, ti.f32), shape=s.dim('n'))
+    def prepare(self, values, bias):
+        s = ti.experimental.ResourceScope(self)
+        s.borrow('values', values, external=True, dtype=ti.types.vector(3, ti.f32), shape=s.dim('n'), optional=True)
+        s.borrow('bias', bias, external=True, dtype=ti.f32, shape=(), optional=True)
+    @ti.func
+    def value(self, i):
+        value = ti.Vector.zero(ti.f32, 3)
+        if ti.static(self.values is not None):
+            value += self.values[i]
+        if ti.static(self.bias is not None):
+            value += self.bias[None]
+        return value
+    @ti.kernel
+    def step(self):
+        for i in self.out:
+            self.out[i] = self.value(i)
+@ti.data_oriented
+class Holder:
+    def __init__(self, n: int):
+        s = ti.experimental.ResourceScope(self)
+        s.worker = Model(n)
+    @ti.kernel
+    def step(self):
+        for i in self.worker.out:
+            self.worker.out[i] = self.worker.value(i)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    assert not manifest["entry_families"]
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        module = code.module("definition_fixture.model")
+        for instance in (module.Model(3), module.Holder(19)):
+            model = getattr(instance, "worker", instance)
+            values = runtime.ndarray("f32", model.n, element_shape=(3,))
+            bias = runtime.ndarray("f32", ())
+            values.write(np.arange(model.n * 3, dtype=np.float32).tobytes())
+            bias.write(np.array(5.0, np.float32).tobytes())
+            for present in (False, True, False):
+                model.prepare(values if present else None, bias if present else None)
+                instance.step()
+                np.testing.assert_array_equal(
+                    model.out.to_numpy(), np.arange(model.n * 3).reshape(model.n, 3) + 5 if present else 0
+                )
+            values.close()
+            bias.close()
+        assert {(value.shape, value.element_shape, value._memory.size) for value in code._empty_inputs.values()} == {
+            ((0,), (3,), 0),
+            ((), (), 4),
+        }
 
 
 @pytest.mark.parametrize("helper, padding", ((False, 0), (True, 2)))

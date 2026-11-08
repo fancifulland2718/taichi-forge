@@ -1500,6 +1500,7 @@ class LoadedPackage:
                 60,
                 61,
                 62,
+                63,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1535,6 +1536,7 @@ class LoadedPackage:
             raise ValueError("Host source inventory differs from package manifest")
         self._module = runtime.load_module(self.directory / "code.tcm")
         self._arrays, self._kernels = [], {}
+        self._empty_inputs = {}
         self._graph_ids = itertools.count()
         self._closed, self._entered = False, False
         self._name = "_forge_package_loaded_" + str(next(_ids))
@@ -1543,6 +1545,17 @@ class LoadedPackage:
     def _check(self):
         if self._closed:
             raise RuntimeError("Loaded package is closed")
+
+    def _empty_input(self, contract):
+        element = contract["element"]
+        key = (element["dtype"], tuple(element.get("element_shape", ())), contract["ndim"])
+        with self.runtime._lock:
+            self._check()
+            if key not in self._empty_inputs:
+                array = self.runtime.ndarray(key[0], (0,) * key[2], element_shape=key[1])
+                self._arrays.append(array)
+                self._empty_inputs[key] = array
+            return self._empty_inputs[key]
 
     def module(self, name):
         """Resolve a retained module inside this package's declared source boundary."""
@@ -1587,6 +1600,7 @@ class LoadedPackage:
         for array in reversed(self._arrays):
             array.close()
         self._arrays.clear()
+        self._empty_inputs.clear()
         self._closed = True
         for name in tuple(sys.modules):
             if name == self._name or name.startswith(self._name + "."):

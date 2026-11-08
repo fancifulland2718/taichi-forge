@@ -1795,8 +1795,20 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         present=key in code.dynamic if item.get("external") else key in bound_used,
                     )
                     for key, item in compilation_schemas.get(owner_name, {}).items()
-                    if key in code.used and item.get("optional_input")
+                    if key in code.used and item.get("optional_input") and not item.get("external")
                 }
+                dynamic_presence = {
+                    item["input_presence_attribute"]: dict(
+                        path=list(environment._paths[key]),
+                        flag_path=list(environment._paths[item["input_presence_attribute"]]),
+                    )
+                    for key, item in compilation_schemas.get(owner_name, {}).items()
+                    if item.get("external")
+                    and item.get("optional_input")
+                    and (key in code.used or item["input_presence_attribute"] in code.used)
+                }
+                if dynamic_presence:
+                    manifest["version"] = max(63, manifest["version"])
                 used_paths = [environment._paths[key] for key in bound_used if key in environment._paths]
                 source_bindings = {
                     key: dict(
@@ -1823,9 +1835,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                             environment,
                             {dim for axis in item["shape_expressions"] for dim in extent_dependencies(axis)},
                         ),
+                        **(
+                            {"required_when": code.contract.get("input_requirements", {}).get(key, [[]])}
+                            if item.get("optional_input")
+                            else {}
+                        ),
                     )
                     for key, item in compilation_schemas.get(owner_name, {}).items()
-                    if key in bound_used and item.get("external")
+                    if key in code.dynamic and item.get("external")
                 }
                 constants = {
                     key: dict(path=list(environment._paths[key]), value=value)
@@ -1839,6 +1856,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         **({"source_bindings": source_bindings} if source_bindings else {}),
                         **({"owner_bindings": child_bindings} if child_bindings else {}),
                         **({"input_presence": input_presence} if input_presence else {}),
+                        **({"dynamic_input_presence": dynamic_presence} if dynamic_presence else {}),
                         **({"external_resources": external_resources} if external_resources else {}),
                         **({"constants": constants} if constants else {}),
                     )
@@ -1846,6 +1864,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     or source_bindings
                     or child_bindings
                     or input_presence
+                    or dynamic_presence
                     or constants
                     or external_resources
                     else None
@@ -1890,6 +1909,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         for capture_name, schema in code.contract["captures"]
                     ]
                     for item in capture:
+                        resource = compilation_schemas.get(owner_name, {}).get(item["name"], {})
+                        if resource.get("external") and resource.get("optional_input"):
+                            item["optional_array"] = dict(element=resource["element"], ndim=resource["ndim"])
                         if item["kind"] == "local_tensor_workspace":
                             item.update(code.workspaces[item["name"]])
                             manifest["version"] = max(27, manifest["version"])

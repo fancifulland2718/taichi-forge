@@ -8,6 +8,7 @@ import warnings
 from collections import ChainMap
 import inspect
 import math
+from contextlib import nullcontext
 
 import numpy as np
 from taichi_forge._lib import core as _ti_core
@@ -1296,6 +1297,10 @@ class ASTTransformer(Builder):
             l = operands[i]
             r = operands[i + 1]
             if ctx.deployment is not None:
+                optional = ctx.deployment.optional_comparison(ctx, l, r, type(node_op).__name__)
+                if optional is not None:
+                    val = ti_ops.logical_and(val, optional)
+                    continue
                 ctx.deployment.check_record_comparison(l, r, type(node_op).__name__)
             op = ops.get(type(node_op))
 
@@ -1844,22 +1849,21 @@ class ASTTransformer(Builder):
                 build_stmts(ctx, node.orelse)
             return node
 
-        if (
-            is_static_if
-            and is_model_value(node.test.ptr)
-            and ctx.deployment is not None
-            and ASTTransformer.build_uniform_loop_branch(ctx, node)
-        ):
-            return node
+        if is_static_if and is_model_value(node.test.ptr) and ctx.deployment is not None:
+            with ctx.deployment.input_condition(node.test.ptr, True):
+                if ASTTransformer.build_uniform_loop_branch(ctx, node):
+                    return node
 
         with ctx.non_static_if_guard(node):
             stmt_dbg_info = _ti_core.DebugInfo(ctx.get_pos_info(node))
             impl.begin_frontend_if(ctx.ast_builder, node.test.ptr, stmt_dbg_info)
             ctx.ast_builder.begin_frontend_if_true()
-            true_scope = build_stmts(ctx, node.body, capture_scope=True)
+            with ctx.deployment.input_condition(node.test.ptr, True) if ctx.deployment is not None else nullcontext():
+                true_scope = build_stmts(ctx, node.body, capture_scope=True)
             ctx.ast_builder.pop_scope()
             ctx.ast_builder.begin_frontend_if_false()
-            false_scope = build_stmts(ctx, node.orelse, capture_scope=True)
+            with ctx.deployment.input_condition(node.test.ptr, False) if ctx.deployment is not None else nullcontext():
+                false_scope = build_stmts(ctx, node.orelse, capture_scope=True)
             ctx.ast_builder.pop_scope()
             for name in true_scope:
                 if name in false_scope:

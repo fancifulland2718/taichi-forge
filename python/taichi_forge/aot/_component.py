@@ -259,6 +259,31 @@ class _ConditionalArray(Array):
 
 
 @dataclass(frozen=True)
+class _InputPresence(RuntimeValue):
+    """Definition-only immutable scalar; normal JIT keeps its Python object."""
+
+
+@dataclass(frozen=True)
+class _OptionalArray(Array):
+    presence: str = ""
+
+    @property
+    def schema(self):
+        return (*super().schema, self.presence)
+
+
+@dataclass(frozen=True)
+class _OptionalArrayReference:
+    path: tuple
+
+    def _ti_expr_init(self):
+        return self
+
+    def __bool__(self):
+        raise TaichiCompilationError("An optional array reference requires an explicit comparison with None")
+
+
+@dataclass(frozen=True)
 class StaticValue:
     """Static code input, optionally with an explicit finite deployment domain.
 
@@ -1786,6 +1811,9 @@ class _Capture:
         self.model_dimensions.update(
             name for name, declaration in self.declarations.items() if isinstance(declaration, Dimension)
         )
+        self.model_dimensions.update(
+            name for name, declaration in self.declarations.items() if isinstance(declaration, _InputPresence)
+        )
         pending = list(self.model_dimensions)
         while pending:
             declaration = self.declarations.get(pending.pop())
@@ -1804,6 +1832,8 @@ class _Capture:
         self.objects = {}
         self.missing_record = None
         self.resource_conditions = {}
+        self.input_guards = []
+        self.input_requirements = {}
         self.record_equalities = set()
         self.record_field_keys = {}
         self.field_metadata = {}
@@ -1949,13 +1979,22 @@ class _Capture:
             key = core.FunctionKey(function.func.__name__, function.func_id, variant)
             state = dict(key=key, compiling=True, recursive=False, captures=(), local_index=None)
             self._real_functions[identity] = state
-            previous = (self.expressions, self.dynamic, self.resource_aliases,
-                        self.local_tensor_scope, self._current_real_function)
+            previous = (
+                self.expressions,
+                self.dynamic,
+                self.resource_aliases,
+                self.local_tensor_scope,
+                self._current_real_function,
+                self.input_guards,
+                self.input_requirements,
+            )
             self.expressions, self.dynamic, self.resource_aliases = {}, [], {}
+            self.input_guards, self.input_requirements = [], {}
             self.local_tensor_scope, self._current_real_function = (None, ("const", 0)), state
             try:
                 function.do_compile(key, args, features)
                 state["captures"] = tuple(self.dynamic)
+                state["input_requirements"] = self.input_requirements
                 if state["recursive"] and state["captures"]:
                     raise TaichiCompilationError(
                         "Recursive real_func captures require an explicit parameter contract; "
@@ -1965,8 +2004,15 @@ class _Capture:
                 self._real_functions.pop(identity, None)
                 raise
             finally:
-                (self.expressions, self.dynamic, self.resource_aliases,
-                 self.local_tensor_scope, self._current_real_function) = previous
+                (
+                    self.expressions,
+                    self.dynamic,
+                    self.resource_aliases,
+                    self.local_tensor_scope,
+                    self._current_real_function,
+                    self.input_guards,
+                    self.input_requirements,
+                ) = previous
                 state["compiling"] = False
         elif state["compiling"]:
             state["recursive"] = True
@@ -1981,11 +2027,15 @@ class _Capture:
                 values.append(self._workspace_operand(name))
             else:
                 path = self.component._paths[name]
-                values.append(self.attribute(None, path[-1], prefix=path[:-1]))
+                values.append(self.attribute(None, path[-1], prefix=path[:-1], _argument_binding=True))
             arguments.append(kernel_arguments.KernelArgument(self.declarations[name].annotation, "__capture_" + name))
+        for name, paths in state.get("input_requirements", {}).items():
+            self.input_requirements.setdefault(name, set()).update(tuple(self.input_guards) + path for path in paths)
         return function.func_call_rvalue(state["key"], args, capture_arguments=arguments, capture_values=values)
 
     def resolve_template(self, ctx, value):
+        if isinstance(value, _OptionalArrayReference) and not ctx.is_in_static_scope():
+            return self.attribute(ctx, value.path[-1], prefix=value.path[:-1])
         if isinstance(value, _StaticTemplate):
             self.static_templates.add(value.slot)
             return value.value
@@ -2019,7 +2069,7 @@ class _Capture:
         for dependency in extent_dependencies(declaration.expression) if declaration.expression else ():
             self.dimension_dependency(dependency)
 
-    def attribute(self, ctx, name, *, prefix=()):
+    def attribute(self, ctx, name, *, prefix=(), _argument_binding=False):
         path = (*prefix, name)
         name = _capture_id(path)
         declaration = self.declarations.get(name)
@@ -2045,9 +2095,13 @@ class _Capture:
                 "declare it as a runtime value, resource or static configuration"
             )
         self.used[name] = declaration.schema
-        # A typed external port may be optional for the Host while required by
-        # a particular numerical entry. Ordinary array reads bind a non-null
-        # argument; only explicit static presence queries select code variants.
+        if isinstance(declaration, _OptionalArray):
+            if ctx is not None and ctx.is_in_static_scope():
+                return _OptionalArrayReference(path)
+            if not _argument_binding:
+                self.input_requirements.setdefault(name, set()).add(tuple(self.input_guards))
+        # Allocation-conditioned declarations retain their existing static
+        # layout contract. Typed optional inputs above use invocation presence.
         conditional_array = isinstance(declaration, _ConditionalArray) and (ctx is None or ctx.is_in_static_scope())
         if conditional_array or isinstance(
             declaration, (_ConditionalDenseField, _ConditionalModelTensorField, _ConditionalRecord)
@@ -2164,6 +2218,40 @@ class _Capture:
             if name in self.model_dimensions:
                 self.expressions[name]._model_uniform = True
         return self.expressions[name]
+
+    def optional_comparison(self, ctx, left, right, operation):
+        from taichi_forge.lang import ops
+
+        reference = left if isinstance(left, _OptionalArrayReference) else right
+        if not isinstance(reference, _OptionalArrayReference):
+            return None
+        other = right if reference is left else left
+        if other is not None or operation not in ("Is", "IsNot", "Eq", "NotEq"):
+            raise TaichiCompilationError("Optional array references only support comparison with None")
+        name = self.declarations[_capture_id(reference.path)].presence
+        path = self.component._paths[name]
+        value = self.attribute(ctx, path[-1], prefix=path[:-1])
+        return ops.cmp_ne(value, 0) if operation in ("IsNot", "NotEq") else ops.cmp_eq(value, 0)
+
+    def input_condition(self, condition, truth):
+        from contextlib import contextmanager
+        from taichi_forge.lang._local_tensor import extent
+
+        @contextmanager
+        def scope():
+            expression = extent(condition)
+            known = expression is not None and all(
+                isinstance(self.declarations.get(name), _InputPresence) for name in extent_dependencies(expression)
+            )
+            if known:
+                self.input_guards.append((expression, truth))
+            try:
+                yield
+            finally:
+                if known:
+                    self.input_guards.pop()
+
+        return scope()
 
     def static_operand(self, ctx, value):
         """Unroll only a declared fixed owner composition, never live Python objects."""
@@ -2492,6 +2580,10 @@ class _Capture:
             )
         if self.resource_conditions:
             self.contract["resource_conditions"] = sorted(self.resource_conditions.items())
+        if self.input_requirements:
+            self.contract["input_requirements"] = {
+                name: sorted(paths, key=repr) for name, paths in sorted(self.input_requirements.items())
+            }
         if self.record_equalities:
             self.contract["record_equalities"] = sorted(self.record_equalities)
         if self.record_field_keys:
