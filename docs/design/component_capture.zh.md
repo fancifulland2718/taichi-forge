@@ -1067,6 +1067,15 @@ CPU/CUDA 局部验证覆盖不同 owner 方法、相同实现的实际代码条�
 消费及错误类型拒绝。无关输入不增加数值副本；可选 owner 的延迟绑定、模型选择
 不同 owner 类型及任意反射工厂仍未纳入本切片，不能据此宣称完整 TAA/EFC 可导出。
 
+`ti.aot.written_resources(owner, owner.record)` 供冷准备阶段查询正常 Graph 可能写入的
+原资源对象。普通 JIT 复用原 Component 编译效果分析；定义包在导出时保存同一编译器的
+参数效果，格式 48 的 Host 投影和 `Graph.written_resources()` 直接读取这些事实。
+查询只执行原 Host 录制，不运行数值 step；冷消费端不导入前端、不分配工作区、不 prepare
+或提交调用。未知/opaque 效果保守保留，显式可写数组没有绑定时拒绝，不能遗漏潜在写入。
+私有控制数组不属于 owner 状态；零次循环只纳入条件阶段。模型张量返回原成员而非 ABI
+标量视图。CPU/CUDA 已局部验证，GeoPhys capacity checkpoint 复用该公共查询；其资源
+清单与共享拷贝计划的定义包迁移仍未完成，不代表整个 checkpoint/EFC 已可导出。
+
 正常状态清单可通过有限字面量名字、局部 append/extend、固定循环及 `attrgetter`
 形成不可变 Field 来源 tuple，再用原 `owner_sequence` 构造独立算法对象。定义包只
 证明可能的资源路径；不执行清单 helper 的模型分支，不枚举条件组合。原 Host helper

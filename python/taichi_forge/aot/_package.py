@@ -503,6 +503,17 @@ def _host_projection(
                     for a in tensors
                 ]
             if not node.level and (node.module or "").startswith(("taichi.", "taichi_forge.")):
+                if node.module in ("taichi.aot", "taichi_forge.aot") and all(
+                    a.name == "written_resources" for a in node.names
+                ):
+                    self.minimum_version = max(self.minimum_version, 48)
+                    return [
+                        ast.Assign(
+                            [ast.Name(a.asname or a.name, ast.Store())],
+                            ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "written_resources", ast.Load()),
+                        )
+                        for a in node.names
+                    ]
                 if node.module in ("taichi.lang._ndarray", "taichi_forge.lang._ndarray"):
                     from ..lang._ndarray import Ndarray
 
@@ -699,6 +710,11 @@ def _host_projection(
                 )
             if role in ("graph", "sync"):
                 self.minimum_version = max(self.minimum_version, 9)
+            if role == "aot.written_resources":
+                self.minimum_version = max(self.minimum_version, 48)
+                return ast.copy_location(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "written_resources", ast.Load()), node
+                )
             if role in ("aot.Component", "aot.Module") and isinstance(node.ctx, ast.Load):
                 self.minimum_version = max(self.minimum_version, 9)
                 self.producer_only.append(dict(module=module, operation=role, line=node.lineno))
@@ -1573,6 +1589,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         dependencies=dict(methods=code.contract["methods"], functions=code.contract["functions"]),
                         compile_options=compile_options,
                     )
+                    from ._resource_effects import package_effects
+
+                    entry_manifest["resource_effects"] = package_effects(code, argument_schema, capture)
                     if code.contract.get("model_static_ranges"):
                         manifest["version"] = max(28, manifest["version"])
                         entry_manifest["model_static_ranges"] = code.contract["model_static_ranges"]

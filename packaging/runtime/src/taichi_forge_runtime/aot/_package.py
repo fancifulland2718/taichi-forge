@@ -166,6 +166,19 @@ class _ModuleBinding:
             **{dtype: dtype for dtype in _DTYPES},
         )
 
+    def written_resources(self, owner, record):
+        from ._package_graph import GraphBuilder
+
+        self.package._check()
+        if (
+            getattr(owner, "_forge_package_owner", None) is not self.package
+            or getattr(record, "__self__", None) is not owner
+        ):
+            raise ValueError("Write inspection requires the package owner's bound recording method")
+        builder = GraphBuilder(self.package)
+        record(builder)
+        return builder.compile().written_resources()
+
     def control_capabilities(self):
         self.package._check()
         modes = self.package.runtime.execution_control_capabilities()
@@ -1231,6 +1244,7 @@ class LoadedPackage:
                 45,
                 46,
                 47,
+                48,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

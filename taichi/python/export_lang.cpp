@@ -1873,6 +1873,16 @@ void export_lang(py::module &m) {
              }
              return result;
            })
+      .def("_kernel_resource_effects",
+           [](Program &program, Kernel *kernel) {
+             TI_ERROR_IF(kernel == nullptr,
+                         "Resource effect query received a null kernel");
+             auto tree_guard = program.acquire_snode_tree_lifecycle_read_guard();
+             const auto &compiled = program.compile_kernel(
+                 program.compile_config(), program.get_device_caps(), *kernel);
+             return graph_kernel_metadata_to_python(compiled.graph_metadata(),
+                                                    false);
+           })
       .def("_kernel_vulkan_artifacts", [](Program &program, Kernel *kernel) {
         py::dict result;
 #if defined(TI_WITH_VULKAN)

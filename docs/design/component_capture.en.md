@@ -1371,6 +1371,20 @@ create code copies. Late optional-owner binding, model-selected owner types and
 arbitrary reflective factories remain outside this slice; it does not qualify
 complete TAA/EFC definition export.
 
+`ti.aot.written_resources(owner, owner.record)` inspects possible writes of a
+normal Graph during cold preparation and returns the original resource objects.
+JIT reuses Component compiler effect analysis; definition export retains the same
+compiler's argument effects for the format 48 Host projection and
+`Graph.written_resources()`. Inspection runs ordinary Host recording, never a
+numerical step. The cold consumer imports no frontend and allocates no workspace,
+prepares no call and submits no work. Unknown/opaque effects retain possible
+writers; unbound explicit writable arrays reject. Private control arrays are not
+owner state, and a zero-iteration loop contributes only its condition. Model
+tensors return their original members instead of scalar-axis ABI views. Local
+CPU/CUDA checks pass, and GeoPhys capacity checkpoint uses this public query.
+Its resource inventory and shared-copy plan migration remain incomplete; this
+does not qualify complete checkpoint/EFC definition export.
+
 Normal inventories may form immutable Field-source tuples using finite literal
 names, local append/extend operations, fixed loops and `attrgetter`. Definition
 export proves possible resource paths without executing model branches or

@@ -1213,6 +1213,169 @@ class Model:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_write_inspection_uses_compiler_facts_without_execution(tmp_path, monkeypatch):
+    source = TYPED_OWNER_INPUT_SOURCE.replace(
+        "    def graph(self):\n        builder = ti.graph.GraphBuilder()",
+        "    def record(self, builder):",
+    ).replace(
+        "        return builder.compile()",
+        "    def graph(self):\n        builder = ti.graph.GraphBuilder()\n"
+        "        self.record(builder)\n        return builder.compile()\n"
+        "    def writes(self):\n        return ti.aot.written_resources(self, self.record)",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 48
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    original = package.Model(7, 5)
+    assert {id(field) for field in original.writes()} == {id(original.first.output), id(original.second.output)}
+    np.testing.assert_array_equal(original.first.output.to_numpy(), 0)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(13, 9), code.host.Model(3, 4)
+        graph = a.graph()
+        expected = {id(a.first.output), id(a.second.output)}
+        allocated = set(runtime._resources)
+        assert {id(field) for field in graph.written_resources()} == expected
+        assert {id(field) for field in a.writes()} == expected
+        assert {id(field) for field in b.writes()} == {id(b.first.output), id(b.second.output)}
+        assert set(runtime._resources) == allocated
+        np.testing.assert_array_equal(a.first.output.to_numpy(), 0)
+        # Incomplete/opaque evidence must keep possible writers, not drop them.
+        selected = [entry for entry in code.manifest["entries"].values() if entry["definition"].endswith(".step")]
+        for entry in selected:
+            assert entry["resource_effects"]["precision"] == "compiler_proven"
+            entry["resource_effects"]["precision"] = "conservative"
+        assert {id(field) for field in graph.written_resources()} == expected | {
+            id(a.scalar.values),
+            id(a.vector.values),
+        }
+        for entry in selected:
+            del entry["resource_effects"]
+        assert {id(field) for field in graph.written_resources()} == expected | {
+            id(a.scalar.values),
+            id(a.vector.values),
+        }
+        selected[0]["resource_effects"] = dict(precision="compiler_proven", arguments={})
+        with pytest.raises(ValueError, match="complete compiler effect"):
+            graph.written_resources()
+        with pytest.raises(ValueError, match="bound recording"):
+            from taichi_forge_runtime.aot._package import _ModuleBinding
+
+            _ModuleBinding(code).written_resources(a, b.record)
+    probe = tmp_path / "consume_write_facts.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError('Numerical source unavailable: ' + fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    model = code.host.Model(17, 11)
+    assert {id(x) for x in model.writes()} == {id(model.first.output), id(model.second.output)}
+    np.testing.assert_array_equal(model.first.output.to_numpy(), 0)
+    model.graph().run(dict(gain=2.0))
+    np.testing.assert_array_equal(model.first.output.to_numpy(), 6.0)
+    np.testing.assert_array_equal(model.second.output.to_numpy(), -10.0)
+print('SOURCE_FREE_WRITE_FACTS_OK')
+""",
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SOURCE_FREE_WRITE_FACTS_OK" in result.stdout
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_write_inspection_rejects_unbound_external_writes(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+from taichi_forge.aot import written_resources as writers
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.output = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+    @ti.kernel
+    def read(self, data: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for i in self.output:
+            self.output[i] = data[i]
+    @ti.kernel
+    def write(self, data: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for i in self.output:
+            data[i] = self.output[i]
+    def record_read(self, builder):
+        builder.dispatch(self.read, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, 'data', ti.f32, ndim=1))
+    def record_write(self, builder):
+        builder.dispatch(self.write, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, 'data', ti.f32, ndim=1))
+    def writes(self, external=False):
+        return writers(self, self.record_write if external else self.record_read)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    original = package.Model(7)
+    assert original.writes() == (original.output,)
+    with pytest.raises(ValueError, match="explicit writable"):
+        original.writes(True)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(11)
+        assert model.writes() == (model.output,)
+        with pytest.raises(ValueError, match="explicit writable"):
+            model.writes(True)
+
+
+@pytest.mark.parametrize("maximum", [0, 3])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_write_inspection_private_control_and_zero_loop(tmp_path, monkeypatch, maximum):
+    source = (
+        PACKAGE_WHILE_SOURCE.replace("        for i in range(self.n):\n            self.values[i] = 0\n", "")
+        .replace("def record(self, builder, maximum):", "def record(self, builder):")
+        .replace("max_iterations=maximum", f"max_iterations={maximum}")
+        .replace("self.record(builder, maximum)", "self.record(builder)")
+    )
+    source += """
+    def writes(self):
+        return ti.aot.written_resources(self, self.record)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    original = package.Model(7, 2, 3)
+    assert {id(x) for x in original.writes()} == ({id(original.values)} if maximum else set())
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(9, 2, 3)
+        assert {id(x) for x in model.writes()} == ({id(model.values)} if maximum else set())
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_write_inspection_returns_model_members_not_abi_views(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, MODEL_TENSOR_SOURCE, initializer="from .model import Model, Rows\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for dof in (3, 65):
+            rows = code.host.Rows(2, dof)
+            fields = rows.graph().written_resources()
+            assert {id(field) for field in fields} == {id(rows.rows.J), id(rows.rows.fixed), id(rows.rows.result)}
+            assert rows.rows.J._forge_package_model_scalar_view not in fields
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_typed_owner_inputs_share_host_and_keep_method_dependencies(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, TYPED_OWNER_INPUT_SOURCE)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")

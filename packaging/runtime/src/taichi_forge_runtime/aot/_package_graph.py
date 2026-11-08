@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 import copy
 import itertools
+import json
 
 from ._plan import ExecutionPlan
 from ._runtime import Scalar
@@ -316,6 +317,68 @@ class Graph:
         self.admissions = admissions or []
         self.range_checks = range_checks or []
         self.plan_values = plan_values or {}
+
+    def written_resources(self):
+        """Inspect compiled effects without allocating, preparing or submitting."""
+        self.package._check()
+        for owner, contract in self.admissions:
+            check_admission(owner, contract)
+        for owner, schema, previous in self.plan_values.values():
+            if static_key(capture_value(owner, schema)) != static_key(previous):
+                raise ValueError("Plan parameter changed before write inspection; rebuild the Graph")
+        written = set()
+
+        def visit(operations):
+            for operation in operations:
+                if operation["kind"] == "while":
+                    visit(operation["condition"])
+                    if operation["max_iterations"]:
+                        visit(operation["body"])
+                    continue
+                if operation["kind"] != "kernel":
+                    raise ValueError("Write inspection has no effect contract for this operation")
+                contract = self.package.manifest["entries"][operation["entry"]]
+                descriptors = [*contract["arguments"], *contract["captures"]]
+                resources = {
+                    str(index)
+                    for index, item in enumerate(descriptors)
+                    if item["kind"] in ("ndarray", "dense_field", "model_tensor_field", "local_tensor_workspace")
+                }
+                effects = contract.get("resource_effects")
+                if effects is None:
+                    accesses = {index: "opaque" for index in resources}
+                else:
+                    accesses = effects.get("arguments")
+                    if (
+                        effects.get("precision") not in ("compiler_proven", "conservative")
+                        or not isinstance(accesses, dict)
+                        or accesses.keys() != resources
+                        or any(
+                            access not in ("none", "read", "write", "read_write", "atomic", "opaque")
+                            for access in accesses.values()
+                        )
+                    ):
+                        raise ValueError("Write inspection requires a complete compiler effect contract")
+                for index, access in accesses.items():
+                    if effects is None or effects["precision"] != "compiler_proven" or access not in ("none", "read"):
+                        written.add(operation["arguments"][int(index)])
+
+        visit(json.loads(self.plan.to_json())["operations"])
+        if written & self.arguments.keys():
+            raise ValueError("Write inspection requires bindings for explicit writable resources")
+        result = {}
+        for name in sorted(written):
+            if name not in self.captures:
+                continue  # Private arrays belong to the recorded Plan, not the owner.
+            owner, spec = self.captures[name]
+            if spec["kind"] == "local_tensor_workspace":
+                continue
+            # Return the original model tensor, not its scalar-axis ABI view.
+            value = owner
+            for part in spec.get("path", (spec["name"],)):
+                value = getattr(value, part)
+            result[id(value)] = value
+        return tuple(result.values())
 
     def bind(self, arguments):
         self.package._check()
