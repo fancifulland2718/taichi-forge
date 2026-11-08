@@ -1119,10 +1119,15 @@ reported with other input gaps before compilation.
 
 Focused CPU/CUDA checks cover new sizes, code sharing across inherited types,
 independent instances, prepared snapshots and fresh consumers without frontend
-source. GeoPhys's three EFC parameter-publication definitions pass receiver-source
-preflight; this is not full EFC export or engine qualification. Inferring input
-types from Graph calls, multiple templates and model-dependent sort preparation
-data remains further work.
+source. Source discovery also follows the original `GraphBuilder`,
+`create_sequential` and ordinary forwarding functions, including explicit template
+dictionaries and dictionaries filtered by proven owner types. It does not record a
+Graph to discover entries. Mutated, escaped or unproven read-only mappings are
+rejected as origins; an unrelated method named `dispatch` is not a Forge Graph.
+GeoPhys's three EFC parameter-publication definitions, Newton condition and three
+sort-control definitions pass this input preflight. This is not full EFC export
+or engine qualification. Multiple templates and model-dependent sort preparation
+data remain further work.
 
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute

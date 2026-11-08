@@ -10471,7 +10471,7 @@ def test_package_free_receiver_rejects_unproven_call_domains(tmp_path, monkeypat
     elif change == "uncovered":
         source += "\ndef arbitrary(receiver):\n    publish(1.0, receiver)\n"
     else:
-        source = source.replace("publish(gain, solver=receiver)", "publish(*[gain, receiver])")
+        source = source.replace("publish(gain, solver=receiver)", "publish(*unknown_arguments())")
     package = _source_package(tmp_path, monkeypatch, source)
     with pytest.raises(ti.aot.PackageExportError, match="template input|receiver|argument sources"):
         ti.aot.export_package(package, tmp_path / "sdk")
@@ -10504,3 +10504,125 @@ def test_package_free_receiver_rejects_malformed_contract_before_loading(tmp_pat
         monkeypatch.setattr(runtime, "load_module", must_not_load)
         with pytest.raises(ValueError, match="receiver|numerical|format|ABI"):
             load_package(runtime, tmp_path / "sdk")
+
+
+FREE_GRAPH_RECEIVER_SOURCE = (
+    FREE_RECEIVER_SOURCE.replace(
+        "def forward(receiver, gain):\n    publish(gain, solver=receiver)",
+        "def forward(builder, kernel, inputs, *arguments):\n    builder.dispatch(kernel, *arguments, template_args=inputs)",
+    )
+    .replace(
+        "alias = self\n        forward(alias, gain)",
+        "graph = self.graph()\n        graph.run({'gain': gain})",
+    )
+    .replace(
+        "builder.dispatch(publish, gain, template_args={'solver': self})",
+        "region = builder.create_sequential()\n        inputs = {'solver': self}\n"
+        "        forward(region, publish, inputs, gain)\n        builder.append(region)",
+    )
+)
+
+
+@pytest.mark.parametrize("mapping", ["direct", "filtered"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_graph_only_free_receiver_is_discovered_without_recording(tmp_path, monkeypatch, mapping):
+    source = FREE_GRAPH_RECEIVER_SOURCE
+    if mapping == "filtered":
+        source = source.replace(
+            "def forward(builder, kernel, inputs, *arguments):\n    builder.dispatch(kernel, *arguments, template_args=inputs)",
+            "class Adapter:\n    pass\n\ndef forward(builder, kernel, inputs, *arguments):\n"
+            "    compile_args = {name: item.source if isinstance(item, Adapter) else item for name, item in inputs.items()}\n"
+            "    named = {name: item.source for name, item in inputs.items() if isinstance(item, Adapter)}\n"
+            "    scratch = []\n    scratch.append(named)\n"
+            "    builder.dispatch(kernel, *arguments, template_args=compile_args)",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+
+    def no_recording(*args, **kwargs):
+        raise AssertionError("Input discovery executed a Graph")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(ti.graph.GraphBuilder, "__init__", no_recording)
+        manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    owners = manifest["function_entries"]["definition_fixture.model.publish"]["owners"]
+    assert len(set(owners.values())) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7), code.host.model.Derived(13)
+        a.update(3)
+        prepared = a.graph().bind(dict(gain=5))
+        b.update(11)
+        prepared.run()
+        prepared.close()
+        np.testing.assert_array_equal(a.values.to_numpy(), 5 * (np.arange(7) + 7))
+        np.testing.assert_array_equal(b.values.to_numpy(), 11 * (np.arange(13) + 13))
+    probe = tmp_path / "graph_only_consume.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class NoSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, NoSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(17), code.host.model.Derived(129)
+    prepared = a.graph().bind(dict(gain=2))
+    b.update(3)
+    prepared.run()
+    prepared.close()
+    np.testing.assert_array_equal(a.values.to_numpy(), 2 * (np.arange(17) + 17))
+    np.testing.assert_array_equal(b.values.to_numpy(), 3 * (np.arange(129) + 129))
+print('GRAPH_FREE_RECEIVER_OK')
+""",
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "GRAPH_FREE_RECEIVER_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change", ["mutation", "escape", "fake_builder", "alias_mutation", "fake_dispatch", "known_mutator"]
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_graph_free_receiver_rejects_unproven_forwarding(tmp_path, monkeypatch, change):
+    source = FREE_GRAPH_RECEIVER_SOURCE
+    if change == "mutation":
+        source = source.replace(
+            "inputs = {'solver': self}", "inputs = {'solver': self}\n        inputs['solver'] = object()"
+        )
+    elif change == "escape":
+        source = source.replace("inputs = {'solver': self}", "inputs = {'solver': self}\n        mutate(inputs)")
+    elif change == "alias_mutation":
+        source = source.replace(
+            "inputs = {'solver': self}", "inputs = {'solver': self}\n        other = inputs\n        other.clear()"
+        )
+    elif change == "fake_dispatch":
+        source = source.replace(
+            "inputs = {'solver': self}", "inputs = {'solver': self}\n        object().dispatch(inputs)"
+        )
+    elif change == "known_mutator":
+        source += "\ndef mutate(inputs):\n    inputs.clear()\n"
+        source = source.replace("inputs = {'solver': self}", "inputs = {'solver': self}\n        mutate(inputs)")
+    else:
+        source = source.replace("builder = ti.graph.GraphBuilder()", "builder = fake_builder()")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="receiver|template input"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()

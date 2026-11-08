@@ -5,6 +5,7 @@ constructors, Host branches or numerical definitions to discover input types.
 """
 
 import ast
+import builtins
 from collections import deque
 from dataclasses import dataclass
 import inspect
@@ -18,8 +19,29 @@ class _Owner:
     identity: str
 
 
+@dataclass(frozen=True)
+class _Graph:
+    pass
+
+
+@dataclass(frozen=True)
+class _Kernel:
+    function: object
+
+
+@dataclass(frozen=True)
+class _Mapping:
+    items: tuple
+
+
+@dataclass(frozen=True)
+class _Literal:
+    value: object
+
+
 def discover(sources, imported):
     from taichi_forge.types.annotations import Template
+    from taichi_forge.graph import GraphBuilder
 
     owners, classes, functions, kernels = {}, {}, {}, {}
     for module, _, _, _, tree, _, schemas, definitions in sources:
@@ -100,23 +122,212 @@ def discover(sources, imported):
         for statement in node.body:
             walk(statement)
         stores, aliases = {}, {}
+
+        def alias(target, expression):
+            if isinstance(target, ast.Name):
+                aliases[target.id] = expression
+            elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(expression, (ast.Tuple, ast.List)):
+                if len(target.elts) == len(expression.elts):
+                    for child, item in zip(target.elts, expression.elts):
+                        alias(child, item)
+
         for part in nodes:
             if isinstance(part, ast.Name) and not isinstance(part.ctx, ast.Load):
                 stores[part.id] = stores.get(part.id, 0) + 1
-            if isinstance(part, ast.Assign) and len(part.targets) == 1 and isinstance(part.targets[0], ast.Name):
-                aliases[part.targets[0].id] = part.value
+            if isinstance(part, ast.Assign) and len(part.targets) == 1:
+                alias(part.targets[0], part.value)
         local_names = set(stores) | set(inspect.signature(function).parameters)
 
-        def value(expression, visiting=()):
+        def graph_source(expression, visiting=()):
+            if isinstance(expression, ast.Name):
+                if expression.id in arguments and expression.id not in stores:
+                    return isinstance(arguments[expression.id], _Graph)
+                if expression.id in aliases and stores.get(expression.id) == 1 and expression.id not in visiting:
+                    return graph_source(aliases[expression.id], (*visiting, expression.id))
+            if isinstance(expression, ast.IfExp):
+                return graph_source(expression.body, visiting) and graph_source(expression.orelse, visiting)
+            if isinstance(expression, ast.Call):
+                if isinstance(expression.func, ast.Attribute) and expression.func.attr == "create_sequential":
+                    return graph_source(expression.func.value, visiting)
+                root = expression.func
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                return (
+                    isinstance(root, ast.Name)
+                    and root.id not in local_names
+                    and _source_value(expression.func, namespace) is GraphBuilder
+                    and not expression.args
+                    and not expression.keywords
+                )
+            return False
+
+        # A mapping passed through ordinary forwarding must remain unchanged.
+        # Unknown calls and item writes invalidate its source, including aliases.
+        tainted, dependencies = set(), {}
+        for name, expression in aliases.items():
+            if not isinstance(expression, (ast.Dict, ast.DictComp, ast.Tuple, ast.List)):
+                dependencies[name] = {part.id for part in ast.walk(expression) if isinstance(part, ast.Name)}
+        reads = {}
+        for part in nodes:
+            if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load):
+                reads[part.id] = reads.get(part.id, 0) + 1
+
+        def retained(name, visited=()):
+            if name in visited:
+                return False
+            return reads.get(name, 0) > 1 or any(
+                retained(item, (*visited, name)) for item in dependencies.get(name, ())
+            )
+
+        for part in nodes:
+            if isinstance(part, ast.Subscript) and not isinstance(part.ctx, ast.Load):
+                tainted.update(n.id for n in ast.walk(part.value) if isinstance(n, ast.Name))
+            if isinstance(part, ast.Call):
+                resolved = _source_value(part.func, namespace)
+                known = inspect.isfunction(resolved) and (resolved in functions or resolved in kernels)
+                # Known local forwarding parameters are resolved below. Their
+                # mapping effects are checked in their own source context.
+                if isinstance(part.func, ast.Name) and isinstance(arguments.get(part.func.id), _Kernel):
+                    known = True
+                pure_mapping_use = isinstance(part.func, ast.Attribute) and (
+                    (part.func.attr == "dispatch" and graph_source(part.func.value))
+                    or (part.func.attr == "items" and not part.args and not part.keywords)
+                )
+                if not pure_mapping_use:
+                    exposed = [*part.args, *(k.value for k in part.keywords)]
+                    if isinstance(part.func, ast.Attribute):
+                        exposed.append(part.func.value)
+                    tainted.update(
+                        n.id
+                        for item in exposed
+                        for n in ast.walk(item)
+                        if isinstance(n, ast.Name) and (not known or retained(n.id))
+                    )
+        pending_taints = list(tainted)
+        while pending_taints:
+            for dependency in dependencies.get(pending_taints.pop(), ()):
+                if dependency not in tainted:
+                    tainted.add(dependency)
+                    pending_taints.append(dependency)
+
+        def value(expression, visiting=(), bindings=None):
+            bindings = bindings or {}
+
+            def child(item):
+                return value(item, visiting, bindings)
+
+            def source(item):
+                root = item
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if isinstance(root, ast.Name) and (root.id in local_names or root.id in bindings):
+                    return None
+                return _source_value(item, namespace)
+
             if isinstance(expression, ast.Name):
                 name = expression.id
+                if name in bindings:
+                    return bindings[name]
                 if name in arguments and name not in stores:
-                    return arguments[name]
+                    item = arguments[name]
+                    return None if isinstance(item, _Mapping) and name in tainted else item
                 if name in aliases and stores.get(name) == 1 and name not in visiting:
-                    return value(aliases[name], (*visiting, name))
+                    item = value(aliases[name], (*visiting, name), bindings)
+                    return None if isinstance(item, _Mapping) and name in tainted else item
+                if name not in local_names:
+                    resolved = _source_value(expression, namespace)
+                    if inspect.isfunction(resolved) and resolved in kernels:
+                        return _Kernel(resolved)
                 return None
             if isinstance(expression, ast.Attribute):
-                return member(value(expression.value, visiting), expression.attr)
+                item = member(child(expression.value), expression.attr)
+                if item is not None:
+                    return item
+                resolved = source(expression)
+                if inspect.isfunction(resolved) and resolved in kernels:
+                    return _Kernel(resolved)
+            if isinstance(expression, (ast.Tuple, ast.List)):
+                return tuple(child(item) for item in expression.elts)
+            if isinstance(expression, ast.Constant) and type(expression.value) in (bool, str):
+                return _Literal(expression.value)
+            if isinstance(expression, ast.Dict):
+                if all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in expression.keys):
+                    names = [key.value for key in expression.keys]
+                    if len(names) == len(set(names)):
+                        return _Mapping(
+                            tuple((key.value, child(item)) for key, item in zip(expression.keys, expression.values))
+                        )
+            if isinstance(expression, ast.DictComp) and len(expression.generators) == 1:
+                generator = expression.generators[0]
+                sequence = child(generator.iter)
+                target = generator.target
+                if (
+                    not generator.is_async
+                    and isinstance(sequence, tuple)
+                    and isinstance(target, (ast.Tuple, ast.List))
+                    and all(isinstance(n, ast.Name) for n in target.elts)
+                ):
+                    items = []
+                    for pair in sequence:
+                        if not isinstance(pair, tuple) or len(pair) != len(target.elts):
+                            return None
+                        context = dict(bindings, **{name.id: item for name, item in zip(target.elts, pair)})
+                        conditions = [value(test, visiting, context) for test in generator.ifs]
+                        if any(not isinstance(test, _Literal) or type(test.value) is not bool for test in conditions):
+                            return None
+                        if not all(test.value for test in conditions):
+                            continue
+                        key = value(expression.key, visiting, context)
+                        if not isinstance(key, _Literal) or not isinstance(key.value, str):
+                            return None
+                        items.append((key.value, value(expression.value, visiting, context)))
+                    if len(set(key for key, _ in items)) == len(items):
+                        return _Mapping(tuple(items))
+            if isinstance(expression, ast.IfExp):
+                condition = child(expression.test)
+                if isinstance(condition, _Literal) and type(condition.value) is bool:
+                    return child(expression.body if condition.value else expression.orelse)
+                left, right = child(expression.body), child(expression.orelse)
+                return left if left == right else None
+            if isinstance(expression, ast.Call):
+                if (
+                    isinstance(expression.func, ast.Name)
+                    and expression.func.id == "isinstance"
+                    and "isinstance" not in local_names
+                    and namespace.get("isinstance", builtins.isinstance) is builtins.isinstance
+                    and len(expression.args) == 2
+                    and not expression.keywords
+                ):
+                    item = child(expression.args[0])
+                    cls = source(expression.args[1])
+                    if isinstance(item, _Owner) and inspect.isclass(cls) and type(cls) is type:
+                        return _Literal(issubclass(classes[item.identity], cls))
+                if (
+                    isinstance(expression.func, ast.Attribute)
+                    and expression.func.attr == "items"
+                    and not expression.args
+                    and not expression.keywords
+                ):
+                    mapping = child(expression.func.value)
+                    if isinstance(mapping, _Mapping):
+                        return tuple((_Literal(key), item) for key, item in mapping.items)
+                if source(expression.func) is GraphBuilder:
+                    root = expression.func
+                    while isinstance(root, ast.Attribute):
+                        root = root.value
+                    if (
+                        isinstance(root, ast.Name)
+                        and root.id not in local_names
+                        and not expression.args
+                        and not expression.keywords
+                    ):
+                        return _Graph()
+                if (
+                    isinstance(expression.func, ast.Attribute)
+                    and expression.func.attr == "create_sequential"
+                    and isinstance(child(expression.func.value), _Graph)
+                ):
+                    return _Graph()
             return None
 
         def target(expression):
@@ -124,6 +335,10 @@ def discover(sources, imported):
             while isinstance(root, ast.Attribute):
                 root = root.value
             if isinstance(root, ast.Name) and root.id in local_names:
+                if isinstance(expression, ast.Name):
+                    item = value(expression)
+                    if isinstance(item, _Kernel):
+                        return item.function, None
                 if isinstance(expression, ast.Attribute):
                     receiver = value(expression.value)
                     if isinstance(receiver, _Owner):
@@ -135,16 +350,51 @@ def discover(sources, imported):
             result = _source_value(expression, namespace)
             return (result, None) if inspect.isfunction(result) else (None, None)
 
+        def record(callee, owner, call):
+            origin, definition, parameter = kernels[callee]
+            if not isinstance(owner, _Owner):
+                failures.append(
+                    f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
+                    f"receiver {parameter!r} has no definition-proven owner source"
+                )
+                invalid.add(callee)
+                return
+            domains.setdefault(callee, set()).add(owner.identity)
+            covered.add(id(call))
+
         for call in (part for part in nodes if isinstance(part, ast.Call)):
+            if (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "dispatch"
+                and isinstance(value(call.func.value), _Graph)
+                and call.args
+            ):
+                kernel = value(call.args[0])
+                if isinstance(kernel, _Kernel):
+                    inputs = next((value(k.value) for k in call.keywords if k.arg == "template_args"), None)
+                    receiver = kernels[kernel.function][2]
+                    mapping = dict(inputs.items) if isinstance(inputs, _Mapping) else {}
+                    record(kernel.function, mapping.get(receiver) if set(mapping) == {receiver} else None, call)
+                continue
             callee, receiver = target(call.func)
             if callee not in kernels and callee not in functions:
                 continue
-            if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+            values = [receiver] if receiver is not None else []
+            unknown_expansion = any(k.arg is None for k in call.keywords)
+            for argument in call.args:
+                if isinstance(argument, ast.Starred):
+                    items = value(argument.value)
+                    if isinstance(items, tuple):
+                        values.extend(items)
+                    else:
+                        unknown_expansion = True
+                else:
+                    values.append(value(argument))
+            if unknown_expansion:
                 if callee in kernels:
                     failures.append(f"{module}:{call.lineno}: free Kernel inputs require explicit argument sources")
                     invalid.add(callee)
                 continue
-            values = ([receiver] if receiver is not None else []) + [value(arg) for arg in call.args]
             kwargs = {item.arg: value(item.value) for item in call.keywords}
             signature = inspect.signature(callee)
             try:
@@ -155,20 +405,17 @@ def discover(sources, imported):
                     invalid.add(callee)
                 continue
             if callee in kernels:
-                origin, definition, parameter = kernels[callee]
-                owner = bound.arguments.get(parameter)
-                if not isinstance(owner, _Owner):
-                    failures.append(
-                        f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
-                        f"receiver {parameter!r} has no definition-proven owner source"
-                    )
-                    invalid.add(callee)
-                    continue
-                domains.setdefault(callee, set()).add(owner.identity)
-                covered.add(id(call))
-            elif any(isinstance(item, _Owner) for item in bound.arguments.values()):
+                record(callee, bound.arguments.get(kernels[callee][2]), call)
+            elif any(item is not None for item in bound.arguments.values()):
                 pending.append(
-                    (callee, {key: item for key, item in bound.arguments.items() if isinstance(item, _Owner)})
+                    (
+                        callee,
+                        {
+                            key: _Mapping(tuple(item.items())) if isinstance(item, dict) else item
+                            for key, item in bound.arguments.items()
+                            if item is not None
+                        },
+                    )
                 )
 
     # An input domain must cover each ordinary direct use in the scanned source,
@@ -177,6 +424,8 @@ def discover(sources, imported):
         for call in ast.walk(node):
             if isinstance(call, ast.Call) and id(call) not in covered:
                 callee = _source_value(call.func, function.__globals__)
+                if isinstance(call.func, ast.Attribute) and call.func.attr == "dispatch" and call.args:
+                    callee = _source_value(call.args[0], function.__globals__)
                 if inspect.isfunction(callee) and callee in domains:
                     failures.append(f"{module}:{call.lineno}: free Kernel call has no proven receiver context")
                     invalid.add(callee)
