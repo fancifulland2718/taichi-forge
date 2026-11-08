@@ -7,7 +7,7 @@ constructors, Host branches or numerical definitions to discover input types.
 import ast
 import builtins
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass, MISSING
 import inspect
 
 from taichi_forge_runtime._static_values import static_key
@@ -44,6 +44,12 @@ class _Mapping:
     items: tuple
 
 
+@dataclass(frozen=True)
+class _Record:
+    cls: type
+    items: tuple
+
+
 @dataclass(frozen=True, eq=False)
 class _Literal:
     value: object
@@ -61,6 +67,31 @@ def _literal_key(value):
     if type(value) is tuple:
         return ("tuple", tuple(_literal_key(item) for item in value))
     raise ValueError("Template value has no immutable definition source")
+
+
+def _plain_record(cls):
+    """Only generated frozen record constructors preserve their input members."""
+    return (
+        inspect.isclass(cls)
+        and type(cls) is type
+        and is_dataclass(cls)
+        and cls.__dataclass_params__.frozen
+        and inspect.isfunction(cls.__init__)
+        and cls.__init__.__code__.co_filename == "<string>"
+        and not hasattr(cls, "__post_init__")
+        and cls.__new__ is object.__new__
+        and cls.__getattribute__ is object.__getattribute__
+        and all(not hasattr(vars(base).get(field.name), "__get__") for base in cls.__mro__ for field in fields(cls))
+    )
+
+
+def _returns_on_all_paths(body):
+    if not body:
+        return False
+    last = body[-1]
+    return isinstance(last, ast.Return) or (
+        isinstance(last, ast.If) and _returns_on_all_paths(last.body) and _returns_on_all_paths(last.orelse)
+    )
 
 
 def discover(sources, imported):
@@ -120,8 +151,11 @@ def discover(sources, imported):
 
     visited, domains, covered, failures = set(), {}, set(), []
     invalid = set()
+    return_cache = {}
 
     def member(owner, name):
+        if isinstance(owner, _Record):
+            return dict(owner.items).get(name)
         if not isinstance(owner, _Owner):
             return None
         item = owners[owner.identity].get(name, {})
@@ -131,12 +165,7 @@ def discover(sources, imported):
             return _Resource(owner, tuple(item.get("path", (name,))))
         return None
 
-    while pending:
-        function, arguments, chain = pending.popleft()
-        identity = (function, tuple(sorted(arguments.items())))
-        if identity in visited:
-            continue
-        visited.add(identity)
+    def build_context(function, arguments, return_chain):
         module, node = functions[function]
         namespace = function.__globals__
         # A rebinding invalidates an earlier owner fact. Nested definitions have
@@ -186,6 +215,16 @@ def discover(sources, imported):
                 alias(part.targets[0], part.value)
         local_names = set(stores) | set(inspect.signature(function).parameters)
 
+        def source_value(expression):
+            if (
+                isinstance(expression, ast.Name)
+                and expression.id == "getattr"
+                and expression.id not in local_names
+                and namespace.get("getattr", builtins.getattr) is builtins.getattr
+            ):
+                return builtins.getattr
+            return _source_value(expression, namespace)
+
         def graph_source(expression, visiting=()):
             if isinstance(expression, ast.Name):
                 if expression.id in arguments and expression.id not in stores:
@@ -211,7 +250,7 @@ def discover(sources, imported):
 
         # A mapping passed through ordinary forwarding must remain unchanged.
         # Unknown calls and item writes invalidate its source, including aliases.
-        tainted, dependencies = set(), {}
+        tainted, record_tainted, dependencies = set(), set(), {}
         for name, expression in aliases.items():
             if not isinstance(expression, (ast.Dict, ast.DictComp, ast.Tuple, ast.List)):
                 dependencies[name] = {part.id for part in ast.walk(expression) if isinstance(part, ast.Name)}
@@ -228,11 +267,16 @@ def discover(sources, imported):
             )
 
         for part in nodes:
-            if isinstance(part, ast.Subscript) and not isinstance(part.ctx, ast.Load):
+            if isinstance(part, (ast.Subscript, ast.Attribute)) and not isinstance(part.ctx, ast.Load):
                 tainted.update(n.id for n in ast.walk(part.value) if isinstance(n, ast.Name))
+                record_tainted.update(n.id for n in ast.walk(part.value) if isinstance(n, ast.Name))
             if isinstance(part, ast.Call):
-                resolved = _source_value(part.func, namespace)
-                known = inspect.isfunction(resolved) and (resolved in functions or resolved in kernels)
+                resolved = source_value(part.func)
+                known = (
+                    (inspect.isfunction(resolved) and (resolved in functions or resolved in kernels))
+                    or _plain_record(resolved)
+                    or resolved is builtins.getattr
+                )
                 # Known local forwarding parameters are resolved below. Their
                 # mapping effects are checked in their own source context.
                 if isinstance(part.func, ast.Name) and isinstance(arguments.get(part.func.id), _Kernel):
@@ -251,12 +295,30 @@ def discover(sources, imported):
                         for n in ast.walk(item)
                         if isinstance(n, ast.Name) and (not known or retained(n.id))
                     )
-        pending_taints = list(tainted)
-        while pending_taints:
-            for dependency in dependencies.get(pending_taints.pop(), ()):
-                if dependency not in tainted:
-                    tainted.add(dependency)
-                    pending_taints.append(dependency)
+                    # Reading several members of a frozen record to supply a
+                    # Kernel does not expose the record itself for mutation.
+                    # Unknown Host calls and repeated whole-record forwarding
+                    # retain the conservative escape check.
+                    record_tainted.update(
+                        n.id
+                        for item in exposed
+                        for n in ast.walk(item)
+                        if isinstance(n, ast.Name)
+                        and (
+                            not known
+                            or resolved not in kernels
+                            and resolved is not builtins.getattr
+                            and isinstance(item, ast.Name)
+                            and retained(n.id)
+                        )
+                    )
+        for taint_set in (tainted, record_tainted):
+            pending_taints = list(taint_set)
+            while pending_taints:
+                for dependency in dependencies.get(pending_taints.pop(), ()):
+                    if dependency not in taint_set:
+                        taint_set.add(dependency)
+                        pending_taints.append(dependency)
 
         def value(expression, visiting=(), bindings=None):
             bindings = bindings or {}
@@ -270,7 +332,7 @@ def discover(sources, imported):
                     root = root.value
                 if isinstance(root, ast.Name) and (root.id in local_names or root.id in bindings):
                     return None
-                return _source_value(item, namespace)
+                return source_value(item)
 
             if isinstance(expression, ast.Name):
                 name = expression.id
@@ -278,10 +340,28 @@ def discover(sources, imported):
                     return bindings[name]
                 if name in arguments and name not in stores:
                     item = arguments[name]
-                    return None if isinstance(item, _Mapping) and name in tainted else item
+                    return (
+                        None
+                        if (
+                            isinstance(item, _Mapping)
+                            and name in tainted
+                            or isinstance(item, _Record)
+                            and name in record_tainted
+                        )
+                        else item
+                    )
                 if name in aliases and stores.get(name) == 1 and name not in visiting:
                     item = value(aliases[name], (*visiting, name), bindings)
-                    return None if isinstance(item, _Mapping) and name in tainted else item
+                    return (
+                        None
+                        if (
+                            isinstance(item, _Mapping)
+                            and name in tainted
+                            or isinstance(item, _Record)
+                            and name in record_tainted
+                        )
+                        else item
+                    )
                 if name not in local_names:
                     resolved = _source_value(expression, namespace)
                     if inspect.isfunction(resolved) and resolved in kernels:
@@ -345,6 +425,32 @@ def discover(sources, imported):
                 left, right = child(expression.body), child(expression.orelse)
                 return left if left == right else None
             if isinstance(expression, ast.Call):
+                cls = source(expression.func)
+                if cls is builtins.getattr and len(expression.args) in (2, 3) and not expression.keywords:
+                    name = child(expression.args[1])
+                    if isinstance(name, _Literal) and type(name.value) is str:
+                        return member(child(expression.args[0]), name.value)
+                if (
+                    _plain_record(cls)
+                    and not any(isinstance(arg, ast.Starred) for arg in expression.args)
+                    and all(item.arg is not None for item in expression.keywords)
+                ):
+                    try:
+                        bound = inspect.signature(cls).bind(
+                            *(child(arg) for arg in expression.args),
+                            **{k.arg: child(k.value) for k in expression.keywords},
+                        )
+                    except TypeError:
+                        return None
+                    members = dict(bound.arguments)
+                    for field in fields(cls):
+                        if field.name not in members:
+                            try:
+                                static_key(field.default)
+                                members[field.name] = _Literal(field.default) if field.default is not MISSING else None
+                            except ValueError:
+                                members[field.name] = None
+                    return _Record(cls, tuple(members.items()))
                 if (
                     isinstance(expression.func, ast.Name)
                     and expression.func.id == "isinstance"
@@ -383,9 +489,43 @@ def discover(sources, imported):
                     and isinstance(child(expression.func.value), _Graph)
                 ):
                     return _Graph()
+                callee, receiver = call_target(expression.func)
+                if (
+                    callee in functions
+                    and callee not in return_chain
+                    and _returns_on_all_paths(functions[callee][1].body)
+                    and not any(isinstance(arg, ast.Starred) for arg in expression.args)
+                    and all(k.arg is not None for k in expression.keywords)
+                ):
+                    args = ([receiver] if receiver is not None else []) + [child(arg) for arg in expression.args]
+                    try:
+                        bound = inspect.signature(callee).bind(
+                            *args, **{k.arg: child(k.value) for k in expression.keywords}
+                        )
+                    except TypeError:
+                        return None
+                    for name, parameter in inspect.signature(callee).parameters.items():
+                        if name not in bound.arguments and parameter.default is not inspect.Parameter.empty:
+                            try:
+                                static_key(parameter.default)
+                                bound.arguments[name] = _Literal(parameter.default)
+                            except ValueError:
+                                pass
+                    return_inputs = {
+                        key: _Mapping(tuple(item.items())) if isinstance(item, dict) else item
+                        for key, item in bound.arguments.items()
+                    }
+                    return_key = (callee, tuple(sorted(return_inputs.items())))
+                    if return_key not in return_cache:
+                        evaluate, _, returned_nodes, _ = build_context(callee, return_inputs, (*return_chain, callee))
+                        results = [evaluate(part.value) for part in returned_nodes if isinstance(part, ast.Return)]
+                        return_cache[return_key] = (
+                            results[0] if results and all(item == results[0] for item in results) else None
+                        )
+                    return return_cache[return_key]
             return None
 
-        def target(expression):
+        def call_target(expression):
             root = expression
             while isinstance(root, ast.Attribute):
                 root = root.value
@@ -404,6 +544,16 @@ def discover(sources, imported):
                 return None, None
             result = _source_value(expression, namespace)
             return (result, None) if inspect.isfunction(result) else (None, None)
+
+        return value, call_target, nodes, module
+
+    while pending:
+        function, arguments, chain = pending.popleft()
+        identity = (function, tuple(sorted(arguments.items())))
+        if identity in visited:
+            continue
+        visited.add(identity)
+        value, target, nodes, module = build_context(function, arguments, (function,))
 
         def record(callee, inputs, call):
             origin, definition, parameters = kernels[callee]

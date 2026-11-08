@@ -1154,6 +1154,14 @@ the exporter inspects their bodies without running the callback or its profiler.
 Parameterized callbacks, assignment expressions and rebound captures are not
 treated as proven template sources. Swapping source and destination still distinguishes existing
 resource-slot ABIs; this slice does not establish slot-normalized code sharing.
+The same source analysis follows ordinary factory returns containing generated,
+frozen Python dataclasses, including nested records and literal `getattr` member
+reads. No constructor or factory runs during export. Only existing owner/resource
+facts and immutable literal inputs flow through those records; their instances
+do not become new code identities. Mutable/customized record construction,
+unproven mutation and conflicting return sources reject. CPU/CUDA source-free
+checks cover this forwarding through the existing resource ABI. Late resource
+binding from a record parameter still requires separate allocation provenance.
 Nested local dispatch, model-dependent method lookup, multiple-owner inputs and
 model-dependent sort preparation remain further work.
 There is no new whole-engine wheel or size measurement from this slice.

@@ -11341,11 +11341,38 @@ class Derived(Model):
 """
 
 
-@pytest.mark.parametrize("callback", [False, True])
+RECORD_INPUT_SOURCE = """
+from dataclasses import dataclass
+factories = 0
+@dataclass(frozen=True)
+class FieldPair:
+    source: object
+    target: object
+@dataclass(frozen=True)
+class Inputs:
+    owner: object
+    fields: FieldPair
+def make_inputs(owner, source, target):
+    global factories
+    factories += 1
+    pair = FieldPair(source, target)
+    return Inputs(owner, pair)
+def forward_inputs(inputs, gain):
+    transfer(gain, inputs.owner, getattr(inputs.fields, 'source'), inputs.fields.target)
+"""
+
+
+@pytest.mark.parametrize("callback", [False, True, "record"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_resource_template_inputs_bind_actual_owner_paths(tmp_path, monkeypatch, callback):
     source = RESOURCE_INPUT_SOURCE
-    if callback:
+    if callback == "record":
+        source = source.replace("constructors = 0", "constructors = 0\n" + RECORD_INPUT_SOURCE)
+        source = source.replace(
+            "    transfer(gain, owner, source, target)",
+            "    inputs = make_inputs(owner, source, target)\n    forward_inputs(inputs, gain)",
+        )
+    elif callback:
         source = source.replace(
             "    def update(self, gain):",
             "    def profile(self, callback):\n        return callback()\n    def update(self, gain):",
@@ -11362,6 +11389,8 @@ def test_package_resource_template_inputs_bind_actual_owner_paths(tmp_path, monk
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert manifest["version"] == 52
     assert sys.modules["definition_fixture.model"].constructors == 0
+    if callback == "record":
+        assert sys.modules["definition_fixture.model"].factories == 0
     function = manifest["function_entries"]["definition_fixture.model.transfer"]
     assert len(function["owners"]["definition_fixture.model.Model"]) == 2
     # Existing compiler resource-slot contracts still distinguish a path swap.
@@ -11421,6 +11450,41 @@ print('RESOURCE_INPUT_SOURCE_FREE_OK')
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "RESOURCE_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["mutable", "post_init", "mutated", "ambiguous", "implicit_none"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_record_input_factories_reject_unproven_members(tmp_path, monkeypatch, change):
+    records = RECORD_INPUT_SOURCE
+    if change == "mutable":
+        records = records.replace("@dataclass(frozen=True)", "@dataclass", 1)
+    elif change == "post_init":
+        records = records.replace(
+            "    target: object", "    target: object\n    def __post_init__(self):\n        pass"
+        )
+    elif change == "mutated":
+        records = records.replace(
+            "    return Inputs(owner, pair)",
+            "    object.__setattr__(pair, 'source', target)\n    return Inputs(owner, pair)",
+        )
+    elif change == "ambiguous":
+        records = records.replace(
+            "    return Inputs(owner, pair)",
+            "    if owner.n > 3:\n        return Inputs(owner, FieldPair(target, source))\n    return Inputs(owner, pair)",
+        )
+    else:
+        records = records.replace("    return Inputs(owner, pair)",
+                                  "    if owner.n > 3:\n        return Inputs(owner, pair)")
+    source = RESOURCE_INPUT_SOURCE.replace("constructors = 0", "constructors = 0\n" + records).replace(
+        "    transfer(gain, owner, source, target)",
+        "    inputs = make_inputs(owner, source, target)\n    forward_inputs(inputs, gain)",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="proven|template"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert sys.modules["definition_fixture.model"].factories == 0
 
 
 @pytest.mark.parametrize("change", ["argument", "rebind", "walrus"])
