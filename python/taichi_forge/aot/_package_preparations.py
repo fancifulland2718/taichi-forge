@@ -202,6 +202,40 @@ def declaration_dependencies(sources, imported, fail):
         for module, _, _, _, tree, _, schemas, _ in sources
         for name in schemas
     }
+    classes = {
+        vars(imported[module]).get(node.name): (module, node, kind)
+        for module, _, _, _, tree, kind, *_ in sources
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and inspect.isclass(vars(imported[module]).get(node.name))
+    }
+    constant_cache = {}
+
+    def constants(cls):
+        from ._package_construction import construction_functions
+
+        if cls not in constant_cache:
+            facts = {}
+            for base in reversed(cls.__mro__):
+                if base not in classes:
+                    continue
+                module, node, kind = classes[base]
+                for function in construction_functions(node):
+                    if getattr(function, "_package_preparation_method", False):
+                        continue
+                    declared = scope_declarations(
+                        module,
+                        copy.deepcopy(function),
+                        kind,
+                        fail,
+                        vars(imported[module]),
+                        owner_node=node,
+                        owner_class=cls,
+                        declaration_constants_only=True,
+                    )
+                    facts.update(declared)
+            constant_cache[cls] = facts
+        return constant_cache[cls]
+
     result = {}
     for function, (module, _, kind, original) in candidates.items():
         domains = receivers[function]
@@ -211,13 +245,19 @@ def declaration_dependencies(sources, imported, fail):
         if len(parameters) != 1:
             fail(module, original, "Preparation owner parameter changes between source calls")
         _, normalized, _ = _normalize(function, original, module, kind, next(iter(parameters)), fail)
-        declarations = scope_declarations(
-            module, normalized, kind, fail, function.__globals__, declaration_domains_only=True
-        )
         for _, target in domains:
             cls = owners[target]
             if not ordinary_owner_lookup(cls):
                 fail(module, original, "Preparation requires ordinary owner lookup")
+            declarations = scope_declarations(
+                module,
+                copy.deepcopy(normalized),
+                kind,
+                fail,
+                function.__globals__,
+                constants(cls),
+                declaration_domains_only=True,
+            )
             dependencies = result.setdefault(cls, {})
             for name, item in declarations.items():
                 previous = dependencies.get(name)

@@ -396,6 +396,7 @@ def scope_declarations(
     owner_class=None,
     initial_conditions=None,
     declaration_domains_only=False,
+    declaration_constants_only=False,
 ):
     if constructor is None:
         return {}
@@ -1122,6 +1123,26 @@ def scope_declarations(
     def declare_static(scope, call, statement, conditions=None):
         from ._component import StaticValue, _static_value
 
+        def domain_value(expression):
+            try:
+                return ast.literal_eval(expression)
+            except (TypeError, ValueError):
+                from ._package_types import expand_local_type
+                from taichi_forge_runtime._static_values import read_static_key
+
+                expression = expand_local_type(expression, {}, kind)
+                if isinstance(expression, (ast.Tuple, ast.List)):
+                    return tuple(domain_value(item) for item in expression.elts)
+                if (
+                    isinstance(expression, ast.Attribute)
+                    and isinstance(expression.value, ast.Name)
+                    and expression.value.id == "self"
+                ):
+                    constant = declarations.get(expression.attr, (earlier or {}).get(expression.attr, {}))
+                    if constant.get("kind") == "constant" and "value" in constant:
+                        return read_static_key(constant["value"])
+                raise ValueError("Static choices require literal values or declared definition constants") from None
+
         if (
             len(call.args) != 1
             or not isinstance(call.args[0], ast.Constant)
@@ -1154,7 +1175,7 @@ def scope_declarations(
                 ):
                     raise ValueError("static_dtype choices must be primitive DSL types")
             else:
-                choices = ast.literal_eval(keywords["choices"])
+                choices = domain_value(keywords["choices"])
             kernel_only = ast.literal_eval(keywords.get("kernel_only", ast.Constant(False)))
             if not isinstance(choices, (tuple, list)):
                 raise ValueError("choices must be a tuple or list")
@@ -1426,9 +1447,7 @@ def scope_declarations(
     for statement in unconditional_statements(constructor.body):
         if isinstance(statement, ast.Expr):
             scope, method = operation(statement.value)
-            if method in ("static", "static_dtype"):
-                declare_static(scope, statement.value, statement, initial_conditions)
-            elif method == "constant":
+            if method == "constant":
                 declare_constant(scope, statement.value, statement)
     if owner_node is not None:
         from ._package_constants import resolve_constants
@@ -1436,6 +1455,18 @@ def scope_declarations(
         resolve_constants(
             module, owner_node, declarations, namespace, fail, constructor=constructor, owner_class=owner_class
         )
+
+    if declaration_constants_only:
+        # Preparation-domain discovery needs the parent's fixed definitions
+        # before its full schema can use the preparation's boolean domains.
+        # This projection does not admit resources or execute either Host path.
+        return {name: item for name, item in declarations.items() if item["kind"] == "constant"}
+
+    for statement in unconditional_statements(constructor.body):
+        if isinstance(statement, ast.Expr):
+            scope, method = operation(statement.value)
+            if method in ("static", "static_dtype"):
+                declare_static(scope, statement.value, statement, initial_conditions)
 
     if declaration_domains_only:
         # A discovery input, not an admitted schema. The complete owner and

@@ -14635,6 +14635,130 @@ def test_package_optional_fields_reuse_explicit_and_negated_presence(tmp_path, m
         np.testing.assert_array_equal(a.extra.to_numpy(), np.arange(3)[:, None] + np.arange(3)[None, :])
 
 
+CONSTANT_DOMAIN_SOURCE = """
+import taichi_forge as ti
+preparations = 0
+@ti.data_oriented
+class Model:
+    MODE_A = 4
+    MODE_B = 9
+    def __init__(self, n: int, alternate: bool):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.constant('MODE_A')
+        scope.constant('MODE_B')
+        prepare(self, alternate)
+        self.values = ti.field(ti.i32, shape=n)
+    @ti.kernel
+    def compute(self):
+        for i in range(self.n):
+            if ti.static(self.mode == self.MODE_A):
+                self.values[i] = i + 2
+            else:
+                self.values[i] = i * 3
+def prepare(owner, alternate):
+    global preparations
+    preparations += 1
+    owner.mode = owner.MODE_B if alternate else owner.MODE_A
+    scope = ti.experimental.ResourceScope(owner)
+    declare_modes(scope, owner)
+def declare_modes(scope, owner):
+    scope.static('mode', choices=(owner.MODE_A, owner.MODE_B))
+"""
+
+
+@pytest.mark.parametrize("origin", ["class", "constructor", "local"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_static_domains_use_declared_definition_constants(tmp_path, monkeypatch, origin):
+    source = CONSTANT_DOMAIN_SOURCE
+    if origin == "constructor":
+        source = source.replace("    MODE_A = 4\n    MODE_B = 9\n", "")
+        source = source.replace(
+            "        self.n = n", "        self.MODE_A = 4\n        self.MODE_B = 9\n        self.n = n"
+        )
+    elif origin == "local":
+        source = source.replace(
+            "        prepare(self, alternate)",
+            "        self.mode = self.MODE_B if alternate else self.MODE_A\n        scope.static('mode', choices=(self.MODE_A, self.MODE_B))",
+        )
+        source = source[: source.index("def prepare(")]
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].preparations == 0
+    family = next(iter(manifest["entry_families"].values()))
+    assert family["domain"]["mode"] == [("int", 4), ("int", 9)]
+    assert len(family["variants"]) == 2
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, False), code.host.Model(19, True)
+        for model, alternate in ((a, False), (b, True)):
+            reference = package.Model(model.n, alternate)
+            reference.compute()
+            model.compute()
+            np.testing.assert_array_equal(model.values.to_numpy(), reference.values.to_numpy())
+        b.mode = b.MODE_A
+        b.compute()
+        np.testing.assert_array_equal(b.values.to_numpy(), np.arange(19) + 2)
+        np.testing.assert_array_equal(a.values.to_numpy(), np.arange(7) + 2)
+    if origin == "class":
+        probe = tmp_path / "consume_constant_domains.py"
+        probe.write_text(
+            textwrap.dedent("""
+            import importlib.abc, sys
+            import numpy as np
+            class Block(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname.split('.')[0] in {'definition_fixture', 'taichi', 'taichi_forge'}:
+                        raise AssertionError(fullname)
+            sys.meta_path.insert(0, Block())
+            from taichi_forge_runtime.aot import Runtime, load_package
+            with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+                a, b = code.host.Model(11, False), code.host.Model(23, True)
+                a.compute()
+                b.compute()
+                np.testing.assert_array_equal(a.values.to_numpy(), np.arange(11) + 2)
+                np.testing.assert_array_equal(b.values.to_numpy(), np.arange(23) * 3)
+            print('CONSTANT_DOMAINS_OK')
+        """),
+            encoding="utf8",
+        )
+        env = dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        )
+        result = subprocess.run(
+            [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+            cwd=tmp_path,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "CONSTANT_DOMAINS_OK" in result.stdout
+
+
+@pytest.mark.parametrize("invalid", ["undeclared", "model", "descriptor"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unproven_definition_constant_domains(tmp_path, monkeypatch, invalid):
+    source = CONSTANT_DOMAIN_SOURCE
+    if invalid == "undeclared":
+        source = source.replace("        scope.constant('MODE_B')", "")
+    elif invalid == "model":
+        source = source.replace("        self.n = n", "        self.MODE_B = n\n        self.n = n")
+    else:
+        source = source.replace(
+            "    MODE_B = 9",
+            "    @property\n    def MODE_B(self):\n        raise AssertionError('descriptor executed')",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match="constant|Static domain"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].preparations == 0
+
+
 CONDITIONAL_DECLARATION_SOURCE = """
 import taichi_forge as ti
 preparations = 0

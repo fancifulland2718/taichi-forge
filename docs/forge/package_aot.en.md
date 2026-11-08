@@ -1717,6 +1717,12 @@ negation. Resource roles retain their branch guards. Branch-local names cannot
 escape or overwrite existing helper bindings. Undeclared guards, `kernel_only`
 resource conditions and conditional return/continue reject; sample values never
 prune these branches.
+Preparation static domains may reference the owner's declared definition constants.
+Preflight resolves those fixed parent declarations with the existing constant rules
+before checking preparation domains; complete construction/resource admission still
+runs. Class constants and unconditional fixed assignments are supported. Undeclared
+constants, model assignments and descriptors reject without sampling instances or
+executing preparation to obtain their values.
 Normal Host computation stays Python; declarations come from the actual
 ResourceScope or a proven scope factory and shared declaration helpers. Export
 does not extract contracts from a sample model's role list. Full admission still
