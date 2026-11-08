@@ -259,6 +259,24 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
                     def visit_Name(self, value):
                         return ast.copy_location(ast.Constant(member), value) if value.id == node.target.id else value
 
+                    def visit_JoinedStr(self, value):
+                        value = self.generic_visit(value)
+                        parts = []
+                        for part in value.values:
+                            if isinstance(part, ast.Constant) and type(part.value) is str:
+                                parts.append(part.value)
+                            elif (
+                                isinstance(part, ast.FormattedValue)
+                                and isinstance(part.value, ast.Constant)
+                                and type(part.value.value) is str
+                                and part.conversion == -1
+                                and part.format_spec is None
+                            ):
+                                parts.append(part.value.value)
+                            else:
+                                return value
+                        return ast.copy_location(ast.Constant("".join(parts)), value)
+
                     def visit_Call(self, value):
                         value = self.generic_visit(value)
                         if (

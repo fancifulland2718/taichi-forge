@@ -495,6 +495,8 @@ JIT 对照、无源码消费、新尺寸、分配前/后异常回收、正常树
 也通过 CPU/CUDA/Vulkan 无源码消费检查。
 
 固定名字循环也可以调用 `scope.static/constant/value/dim`，保留原声明顺序和循环变量末值。
+声明名可用 `f'{name}_mask'` 等仅由固定字符串组成的 f-string；模型值不能进入声明名。
+这只展开有限的接口成员，`scope.value` 的值继续作为运行时数据，不按值复制数值代码。
 `scope.member = scope.field(...) if self.flag else None` 复用同一条件布局及可选成员合同；
 禁用分支不求值 Field 的类型和尺寸。循环不展开数值代码，独立开关仍按实际依赖生成变体。
 这两种形式已做 CPU/CUDA 局部无源码检查，未据此扩展其他后端的资格。

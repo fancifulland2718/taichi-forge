@@ -584,7 +584,10 @@ calculate independent byte offsets nor allocate fields in disabled branches.
 Direct tuple unpacking of a literal dimension-name generator uses the same extent algebra.
 
 Fixed literal-name loops may call `scope.static/constant/value/dim`, preserving
-declaration order and the loop variable's final value. Conditional expressions
+declaration order and the loop variable's final value. Member names can use
+f-strings such as `f'{name}_mask'` made only from fixed strings; model values cannot
+enter names. This expands finite interface members, while `scope.value` remains
+runtime data and does not create numerical copies for each value. Conditional expressions
 such as `scope.member = scope.field(...) if self.flag else None` reuse the
 conditional-layout and optional-member contracts. Disabled branches do not
 evaluate Field types or extents. These forms have local CPU/CUDA source-free

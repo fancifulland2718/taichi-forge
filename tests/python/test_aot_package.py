@@ -13944,6 +13944,51 @@ def test_package_declaration_loops_require_fixed_distinct_names(tmp_path, monkey
     assert not (tmp_path / "sdk").exists()
 
 
+@pytest.mark.parametrize("model_name", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_literal_member_names_keep_values_dynamic(tmp_path, monkeypatch, model_name):
+    source = """
+import taichi as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, mask: int, shift: int):
+        global constructors
+        constructors += 1
+        self.n, self.key_mask, self.key_shift = n, mask, shift
+        scope = ti.experimental.ResourceScope(self)
+        for name in ('key',):
+            scope.value(f'{name}_mask', ti.u32, affects_plan=True)
+            scope.value(f'{name}_shift', ti.i32, affects_plan=True)
+        scope.data = scope.field(ti.u32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self, seed: ti.u32):
+        for i in self.data:
+            self.data[i] = ((seed + ti.cast(i, ti.u32)) & self.key_mask) << self.key_shift
+"""
+    if model_name:
+        source = source.replace("f'{name}_mask'", "f'{name}_{n}_mask'")
+    package = _source_package(tmp_path, monkeypatch, source)
+    if model_name:
+        with pytest.raises(ti.aot.PackageExportError, match="literal attribute name"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        assert sys.modules["definition_fixture.model"].constructors == 0
+        return
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sum(e.get("definition") == "definition_fixture.model.Model.step" for e in manifest["entries"].values()) == 1
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        a, b = library.host.Model(7, 0xFFFFFFFF, 0), library.host.Model(19, 0xF, 3)
+        for model, n, mask, shift in ((a, 7, 0xFFFFFFFF, 0), (b, 19, 0xF, 3)):
+            for _ in range(2):
+                model.step(0x80000001)
+            expected = ((np.arange(n, dtype=np.uint32) + np.uint32(0x80000001)) & np.uint32(mask)) << shift
+            np.testing.assert_array_equal(model.data.to_numpy(), expected)
+        a.key_mask, a.key_shift = 7, 1
+        a.step(2)
+        np.testing.assert_array_equal(a.data.to_numpy(), ((np.arange(7) + 2) & 7) << 1)
+
+
 def _optional_layout_source():
     source = CONDITIONAL_LAYOUT_SOURCE
     for flag, field in (("first", "extra"), ("second", "other")):
