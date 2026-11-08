@@ -449,6 +449,19 @@ class Api:
         function.argtypes, function.restype = [Handle, UInt], None
         setattr(self, name, function)
 
+    def load_prepared_specialization(self):
+        name = "ti_prepare_kernel_specialized_ext"
+        if getattr(self, name, None) is not None:
+            return
+        try:
+            function = getattr(self.library, name)
+        except AttributeError as error:
+            raise NotImplementedError("The selected Forge runtime has no prepared bitcode specialization") from error
+        function.argtypes = [Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Binding),
+                             UInt, C.POINTER(UInt)]
+        function.restype = Handle
+        setattr(self, name, function)
+
     def load_cuda_external_memory(self):
         if getattr(self, "ti_import_cuda_external_memory_ext", None) is not None:
             return

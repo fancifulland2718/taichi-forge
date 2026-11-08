@@ -26,6 +26,7 @@
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/cpu/kernel_launcher.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
+#include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #endif
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/binding_frame_replay.h"
@@ -1328,12 +1329,15 @@ void Runtime::clear_prepared(bool synchronize) {
     prepared_->clear(synchronize);
 }
 
-TiPreparedExecution ti_prepare_kernel_ext(TiRuntime runtime,
+static TiPreparedExecution prepare_kernel_impl(TiRuntime runtime,
                                           TiKernel kernel,
                                           uint32_t arg_count,
                                           const TiArgument *args,
                                           uint32_t binding_count,
-                                          const TiNdArrayBinding *bindings) {
+                                          const TiNdArrayBinding *bindings,
+                                          bool specialize,
+                                          uint32_t constant_count,
+                                          const uint32_t *constant_args) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
@@ -1342,6 +1346,19 @@ TiPreparedExecution ti_prepare_kernel_ext(TiRuntime runtime,
                                                binding_count, bindings);
   if (!arguments)
     return TI_NULL_HANDLE;
+  if (specialize) {
+    TI_ERROR_IF(constant_count && !constant_args, "Specialization constants are null");
+#ifdef TI_WITH_LLVM
+    auto *module = dynamic_cast<taichi::lang::LLVM::LlvmAotModule *>(&arguments->owner->get());
+    TI_ERROR_IF(!module, "Prepared specialization requires a CUDA bitcode module");
+    std::vector<uint32_t> indices;
+    if (constant_count)
+      indices.assign(constant_args, constant_args + constant_count);
+    arguments->kernel = module->specialize_kernel(*arguments->kernel, *arguments->context, indices);
+#else
+    TI_ERROR("Prepared specialization requires LLVM support");
+#endif
+  }
   auto prepared = std::make_unique<capi::PreparedExecution>();
   prepared->owner = arguments->owner;
   prepared->memories = arguments->memories;
@@ -1363,6 +1380,21 @@ TiPreparedExecution ti_prepare_kernel_ext(TiRuntime runtime,
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
+}
+
+TiPreparedExecution ti_prepare_kernel_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t arg_count, const TiArgument *args,
+    uint32_t binding_count, const TiNdArrayBinding *bindings) {
+  return prepare_kernel_impl(runtime, kernel, arg_count, args, binding_count, bindings,
+                             false, 0, nullptr);
+}
+
+TiPreparedExecution ti_prepare_kernel_specialized_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t arg_count, const TiArgument *args,
+    uint32_t binding_count, const TiNdArrayBinding *bindings,
+    uint32_t constant_count, const uint32_t *constant_args) {
+  return prepare_kernel_impl(runtime, kernel, arg_count, args, binding_count, bindings,
+                             true, constant_count, constant_args);
 }
 
 TiPreparedExecution ti_prepare_compute_graph_ext(

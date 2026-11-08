@@ -1,6 +1,14 @@
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 
 #include <algorithm>
+#include <cstring>
+#include <climits>
+
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Constants.h"
+#include "taichi/program/launch_context_builder.h"
+#include "taichi/ir/type_factory.h"
+#include "taichi/ir/type_utils.h"
 
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/aot/graph_artifact.h"
@@ -298,12 +306,14 @@ LlvmAotModule::~LlvmAotModule() {
 }
 
 LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
-    const std::string &name) {
-  TI_ASSERT(cache_reader_ != nullptr);
+    const std::string &name, LlvmOfflineCacheFileReader *reader) {
+  if (!reader)
+    reader = cache_reader_.get();
+  TI_ASSERT(reader != nullptr);
   LlvmOfflineCache::KernelCacheData loaded;
   auto ok = is_cuda_aot_artifact_format(metadata_.kernel_format)
-                ? cache_reader_->take_kernel_metadata(loaded, name)
-                : cache_reader_->take_kernel_cache(
+                ? reader->take_kernel_metadata(loaded, name)
+                : reader->take_kernel_cache(
                       loaded, name,
                       *executor_->get_llvm_context()->get_this_thread_context());
   if (!ok) {
@@ -361,6 +371,163 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
       id = tree_bindings_.at(id);
   }
   return loaded;
+}
+
+aot::Kernel *LlvmAotModule::specialize_kernel(
+    aot::Kernel &kernel, LaunchContextBuilder &context,
+    const std::vector<uint32_t> &constant_args) {
+  auto *source = dynamic_cast<llvm_aot::KernelImpl *>(&kernel);
+  TI_ERROR_IF(arch() != Arch::cuda || metadata_.kernel_format != "bc" || !source ||
+                  !source->device_range_tasks().empty(),
+              "Prepared specialization requires an ordinary CUDA bitcode kernel");
+  const auto alias = metadata_.kernel_aliases.find(kernel.name);
+  const auto &code = alias == metadata_.kernel_aliases.end() ? kernel.name : alias->second;
+  TI_ERROR_IF(!payload_kernels_.count(code), "Specialization kernel is not owned by this module");
+
+  // The argument ABI is authoritative. Only integer descriptor members and
+  // explicitly selected scalar arguments are eligible, never data/grad pointers.
+  struct Constant { unsigned bits; uint64_t value; };
+  std::map<int, Constant> constants;
+  auto add = [&](const std::vector<int> &path, unsigned bits) {
+    const int offset = kernel.args_type->get_element_offset(path);
+    TI_ERROR_IF(offset < 0 || offset + bits / 8 > kernel.args_size,
+                "Specialization argument is outside the loaded ABI");
+    uint64_t value = 0;
+    std::memcpy(&value, static_cast<const char *>(context.get_context().arg_buffer) + offset, bits / 8);
+    constants.emplace(offset, Constant{bits, value});
+  };
+  for (const auto &[path, parameter] : kernel.nested_parameters) {
+    if (parameter.ptype != ParameterType::kNdarray)
+      continue;
+    auto member = path;
+    member.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
+    member.push_back(0);
+    const int rank = parameter.total_dim - parameter.element_shape.size();
+    for (int axis = 0; axis < rank; ++axis) {
+      member.back() = axis;
+      add(member, 32);
+    }
+    if (std::find(kernel.runtime_affine_arrays.begin(), kernel.runtime_affine_arrays.end(), path) !=
+        kernel.runtime_affine_arrays.end()) {
+      for (int axis = 0; axis < rank; ++axis) {
+        member.back() = TypeFactory::stride_pos_in_ndarray(rank, axis);
+        add(member, 32);
+      }
+      member.back() = TypeFactory::affine_mode_pos_in_ndarray(rank);
+      add(member, 32);
+    }
+  }
+  for (uint32_t index : constant_args) {
+    const auto parameter = kernel.nested_parameters.find({static_cast<int>(index)});
+    TI_ERROR_IF(parameter == kernel.nested_parameters.end() || parameter->second.is_array ||
+                    parameter->second.ptype != ParameterType::kScalar ||
+                    !is_integral(parameter->second.get_dtype()),
+                "Specialization constants must name integer scalar arguments");
+    const auto bits = data_type_size(parameter->second.get_dtype()) * 8;
+    TI_ERROR_IF(bits != 8 && bits != 16 && bits != 32 && bits != 64,
+                "Unsupported specialization integer width");
+    add({static_cast<int>(index)}, bits);
+  }
+  std::string key = code;
+  for (const auto &[offset, value] : constants)
+    key += fmt::format("|{}:{}:{}", offset, value.bits, value.value);
+  const auto cached = specialized_kernels_.find(key);
+  if (cached != specialized_kernels_.end())
+    return cached->second.get();
+
+  // Ordinary loading consumes its reader's IR. Reopen only on a specialization
+  // miss instead of retaining every generic module in compiler memory. Reuse
+  // the same artifact decoder, task contracts and SNode relocation path.
+  TI_ERROR_IF(aot_artifact_sha256(read_artifact(*directory_, "metadata.tcb")) != metadata_.abi_sha256,
+              "AOT metadata changed after loading");
+  auto reader = LlvmOfflineCacheFileReader::make(directory_, LlvmOfflineCache::Format::BC);
+  TI_ERROR_IF(!reader, "Cannot reopen specialization bitcode metadata");
+  auto data = load_kernel_from_cache(code, reader.get());
+  auto &module = *data.compiled_data.module;
+  TI_ERROR_IF(cuda::is_graph_gate_launch_abi(compiled_kernel_launch_abi(module)),
+              "Prepared specialization does not accept gated graph kernels");
+  const auto &layout = module.getDataLayout();
+  std::set<llvm::Function *> contexts;
+  for (const auto &task : data.compiled_data.tasks) {
+    auto *entry = module.getFunction(task.name);
+    TI_ERROR_IF(!entry || entry->arg_empty(), "Specialization task entry is missing");
+    contexts.insert(entry);
+  }
+  // Generated range callbacks receive exactly the parent's RuntimeContext.
+  // Prove every use before including an internal function; a real_func can
+  // instead receive a new context and must not inherit this argument layout.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (auto &function : module) {
+      if (!function.hasLocalLinkage() || function.isDeclaration() || function.arg_empty() ||
+          function.use_empty() || contexts.count(&function))
+        continue;
+      bool proven = true;
+      for (auto &use : function.uses()) {
+        auto *call = llvm::dyn_cast<llvm::CallBase>(use.getUser());
+        if (!call || !contexts.count(call->getFunction()) || call->arg_empty() ||
+            call->getArgOperand(0) != call->getFunction()->getArg(0)) {
+          proven = false;
+          break;
+        }
+        if (call->getCalledFunction() == &function)
+          continue;
+        const auto *callee = call->getCalledFunction();
+        if (!callee || !call->isArgOperand(&use) ||
+            (callee->getName() != "gpu_parallel_range_for_with_tls" &&
+             callee->getName() != "gpu_parallel_range_for") ||
+            call->getArgOperandNo(&use) < 3 || call->getArgOperandNo(&use) > 5) {
+          proven = false;
+          break;
+        }
+      }
+      if (proven) {
+        contexts.insert(&function);
+        changed = true;
+      }
+    }
+  }
+  size_t replacements = 0;
+  for (auto *entry : contexts) {
+    for (auto &block : *entry) {
+      for (auto it = block.begin(); it != block.end();) {
+        auto *load = llvm::dyn_cast<llvm::LoadInst>(&*it++);
+        if (!load || load->isVolatile() || load->isAtomic() || !load->getType()->isIntegerTy())
+          continue;
+        int64_t offset = 0;
+        auto *base = llvm::GetPointerBaseWithConstantOffset(load->getPointerOperand(), offset, layout);
+        auto *buffer = llvm::dyn_cast<llvm::LoadInst>(base);
+        if (!buffer || buffer->isVolatile() || buffer->isAtomic() || !buffer->getType()->isPointerTy())
+          continue;
+        int64_t context_offset = 0;
+        auto *context_base = llvm::GetPointerBaseWithConstantOffset(
+            buffer->getPointerOperand(), context_offset, layout);
+        // RuntimeContext.arg_buffer is its first member. Do not match arbitrary
+        // loads merely because they happen to carry compiler-generated names.
+        if (context_base != entry->getArg(0) || context_offset != 0)
+          continue;
+        const auto value = constants.find(static_cast<int>(offset));
+        if (offset < 0 || offset > INT_MAX || value == constants.end() ||
+            load->getType()->getIntegerBitWidth() != value->second.bits)
+          continue;
+        load->replaceAllUsesWith(llvm::ConstantInt::get(load->getType(), value->second.value));
+        load->eraseFromParent();
+        ++replacements;
+      }
+    }
+  }
+  TI_DEBUG("Prepared specialization {} folded {} ABI loads", code, replacements);
+  CompiledKernelData compiled{arch(), std::move(data).take_llvm_ckd_data()};
+  KernelRegistrationState registration;
+  auto handle = kernel_launcher_->register_llvm_kernel(compiled, registration);
+  auto result = std::make_unique<llvm_aot::KernelImpl>(
+      kernel_launcher_.get(), handle, arch(), kernel.name, compiled.get_internal_data(),
+      kernel.runtime_affine_arrays);
+  static_cast<CallableBase &>(*result) = static_cast<const CallableBase &>(kernel);
+  auto *callable = result.get();
+  specialized_kernels_.emplace(std::move(key), std::move(result));
+  return callable;
 }
 
 std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel(

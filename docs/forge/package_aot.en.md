@@ -742,6 +742,31 @@ read back on every call, and mutable tensor arguments take fresh value snapshots
 CPU/CUDA device assertion polling requires explicit development debug mode;
 release waits and transfers do not insert error queries.
 
+For CUDA bitcode, low-level `BoundCall.prepare(specialize=True, constant_args=(...))`
+offers experimental preparation-time backend specialization. It folds ABI reads
+of bound ndarray shapes/strides and explicitly selected integer scalar argument
+indices in packaged LLVM IR, then uses the existing CUDA backend compiler.
+Addresses, array contents and other scalars remain instance-bound; changed shapes
+or selected constants require a new preparation. Internal callbacks participate
+only when their RuntimeContext provenance is proven; a `real_func`'s separate
+argument context is not confused with the kernel ABI. No numerical Python source,
+distribution changes or enumeration of model combinations is required.
+
+This option currently targets individual bound kernels. Ordinary package calls
+and Graph preparation do not enable it by default. Compatible executable code is
+shared within the loaded module, with existing instance and in-flight ownership.
+Ordinary entry lookup can still compile generic code first, so initial
+specialization is additional work. A module-local hit avoids compilation, but a
+new process only benefits from existing CUDA backend/driver caches and still runs
+LLVM optimization; there is no complete persistent specialization cache yet.
+Measure initial preparation, cached preparation, steady execution and local code
+storage before enabling it; hot kernel timing alone omits this tradeoff.
+Specialized code caching and native invocation reuse have separate responsibilities:
+the former owns compatible executable code; the latter retains instance argument
+frames, resource bindings and submission state. Specialization feeds the same
+preparation instead of introducing a second instance preparation pipeline. It does
+not by itself eliminate ordinary argument uploads and launch overhead.
+
 ## Ordinary imports with a standalone AOT Runtime
 
 Deployments without script-side JIT can select execution through Forge Runtime

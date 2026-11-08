@@ -1438,6 +1438,14 @@ ti_prepare_kernel_ext(TiRuntime runtime,
                       const TiArgument *args,
                       uint32_t binding_count,
                       const TiNdArrayBinding *bindings);
+// Experimental CUDA bitcode backend specialization for immutable preparations.
+// Folds ndarray descriptors and selected integer scalar arguments, never array
+// addresses/contents. Reuses code within the module; may incur backend compilation.
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_kernel_specialized_ext(TiRuntime runtime, TiKernel kernel,
+                                  uint32_t arg_count, const TiArgument *args,
+                                  uint32_t binding_count, const TiNdArrayBinding *bindings,
+                                  uint32_t constant_count, const uint32_t *constant_args);
 TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
 ti_prepare_compute_graph_ext(TiRuntime runtime,
                              TiComputeGraph graph,

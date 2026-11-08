@@ -79,6 +79,12 @@ class LlvmAotModule final : public aot::Module {
   std::unique_ptr<aot::CompiledGraph> get_graph(
       const std::string &name) override;
 
+  // Optional backend-only specialization of an immutable prepared invocation.
+  // Never captures storage addresses or contents; the module owns shared code.
+  aot::Kernel *specialize_kernel(aot::Kernel &kernel,
+                                LaunchContextBuilder &context,
+                                const std::vector<uint32_t> &constant_args);
+
  protected:
   void ensure_snode_tree_initialized(int logical_tree_id);
   RootStorage get_root_storage(int tree_id) override;
@@ -87,7 +93,7 @@ class LlvmAotModule final : public aot::Module {
   }
 
   LlvmOfflineCache::KernelCacheData load_kernel_from_cache(
-      const std::string &name);
+      const std::string &name, LlvmOfflineCacheFileReader *reader = nullptr);
 
   std::unique_ptr<aot::Kernel> make_new_kernel(
       const std::string &name) override;
@@ -119,6 +125,7 @@ class LlvmAotModule final : public aot::Module {
   std::unordered_map<std::string, std::string> artifact_failures_;
   std::unordered_map<std::string, std::string> payload_failures_;
   std::unordered_map<std::string, std::unique_ptr<llvm_aot::KernelImpl>> payload_kernels_;
+  std::unordered_map<std::string, std::unique_ptr<llvm_aot::KernelImpl>> specialized_kernels_;
   std::map<std::string, std::vector<std::uint32_t>> range_selections_;
   std::vector<int> snode_tree_ids_;
   // Keep logical dependencies after take_kernel_* transfers the code payload.

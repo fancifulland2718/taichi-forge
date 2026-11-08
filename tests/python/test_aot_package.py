@@ -5128,8 +5128,12 @@ def test_package_hybrid_failed_startup_releases_program(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_natural_calls_reuse_bindings_and_observe_changes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("specialize", [False, True])
+def test_package_natural_calls_reuse_bindings_and_observe_changes(tmp_path, monkeypatch, specialize):
     from taichi_forge_runtime.aot import _package, _runtime
+
+    if specialize and ti.cfg.arch != ti.cuda:
+        pytest.skip("Prepared bitcode specialization is a CUDA experiment")
 
     package = _source_package(tmp_path, monkeypatch, """
 import taichi_forge as ti
@@ -5169,6 +5173,7 @@ class Model:
 
     def prepared(*args, **kwargs):
         counts["prepare"] += 1
+        kwargs["specialize"] = specialize
         return prepare(*args, **kwargs)
 
     monkeypatch.setattr(_package, "check_admission", checked)
@@ -5223,6 +5228,32 @@ class Model:
         assert b.read(0) == 27  # Promoted calls preserve ordinary return semantics.
         b.step(7)
         assert b.read(0) == 34  # Prepared result storage is refreshed, not memoized.
+        if specialize:
+            fields = ti.FieldsBuilder()
+            values, sentinel = ti.field(ti.f32), ti.field(ti.i32)
+            fields.dense(ti.i, 13).place(values, sentinel)
+            tree = fields.finalize()
+            values.fill(10)
+            sentinel.fill(73)
+            view = runtime.import_dense_view(ti.experimental.ndarray_view(values))
+            b.prepare(view)
+            b.step(1)
+            b.step(1)
+            values.fill(20)
+            b.step(1)
+            np.testing.assert_array_equal(b.output.to_numpy(), np.full(13, 77))
+            np.testing.assert_array_equal(sentinel.to_numpy(), np.full(13, 73))
+            # Rebinding an equal-shaped but contiguous array must use its own
+            # stride facts, without invalidating another instance's code.
+            contiguous = runtime.ndarray("f32", 13)
+            contiguous.write(np.full(13, 30, dtype=np.float32))
+            b.prepare(contiguous)
+            b.step(1)
+            b.step(1)
+            np.testing.assert_array_equal(b.output.to_numpy(), np.full(13, 139))
+            view.close()
+            contiguous.close()
+            tree.destroy()
 
 
 def _source_package(

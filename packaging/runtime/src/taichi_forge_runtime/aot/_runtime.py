@@ -1194,14 +1194,32 @@ class BoundCall:
 
     __call__ = run
 
-    def prepare(self):
-        """Build native fixed execution without running the bound kernels."""
+    def prepare(self, *, specialize=False, constant_args=()):
+        """Build native fixed execution without running the bound kernels.
+
+        Experimental CUDA bitcode specialization folds immutable ndarray layouts
+        and optional integer scalar argument indices during backend compilation.
+        Contents and storage addresses remain instance-bound. Ordinary preparation
+        does not recompile code. The specialized code cache is module-local.
+        """
         runtime = self._entry._module._runtime
         with runtime._lock:
             for owner in self._owners:
                 owner._check()
             graph = isinstance(self._entry, Graph)
             function = runtime._api.ti_prepare_compute_graph_ext if graph else runtime._api.ti_prepare_kernel_ext
+            extra = ()
+            if constant_args and not specialize:
+                raise ValueError("constant_args requires specialize=True")
+            if specialize:
+                if graph:
+                    raise ValueError("Bitcode specialization currently accepts individual bound kernels")
+                if any(type(index) is not int or index < 0 or index >= len(self._arguments) for index in constant_args):
+                    raise ValueError("constant_args must contain valid integer argument indices")
+                runtime._api.load_prepared_specialization()
+                function = runtime._api.ti_prepare_kernel_specialized_ext
+                indices = (C.c_uint32 * len(constant_args))(*constant_args)
+                extra = (len(indices), indices)
             handle = runtime._api.call(
                 function,
                 runtime._handle,
@@ -1210,6 +1228,7 @@ class BoundCall:
                 self._arguments,
                 len(self._bindings),
                 self._bindings,
+                *extra,
             )
             return PreparedCall(runtime, handle, self._owners, return_layout=self._entry._return_layout)
 
