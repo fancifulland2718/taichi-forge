@@ -538,7 +538,7 @@ def discover(sources, imported):
                     and isinstance(child(expression.func.value), _Graph)
                 ):
                     return _Graph()
-                callee, receiver = call_target(expression.func)
+                callee, receiver = call_target(expression.func, visiting, bindings)
                 if (
                     callee in functions
                     and callee not in return_chain
@@ -574,17 +574,17 @@ def discover(sources, imported):
                     return return_cache[return_key]
             return None
 
-        def call_target(expression):
+        def call_target(expression, visiting=(), bindings=None):
             root = expression
             while isinstance(root, ast.Attribute):
                 root = root.value
             if isinstance(root, ast.Name) and root.id in local_names:
                 if isinstance(expression, ast.Name):
-                    item = value(expression)
+                    item = value(expression, visiting, bindings)
                     if isinstance(item, _Kernel):
                         return item.function, item.receiver
                 if isinstance(expression, ast.Attribute):
-                    receiver = value(expression.value)
+                    receiver = value(expression.value, visiting, bindings)
                     if isinstance(receiver, _Owner):
                         cls = classes[receiver.identity]
                         method = inspect.getattr_static(cls, expression.attr, None)

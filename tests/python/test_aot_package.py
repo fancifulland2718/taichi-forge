@@ -11624,7 +11624,9 @@ print('FREE_RECEIVER_SOURCE_FREE_OK')
     assert "FREE_RECEIVER_SOURCE_FREE_OK" in result.stdout
 
 
-@pytest.mark.parametrize("change", ["unknown", "rebound", "uncovered", "starred", "recursive_context"])
+@pytest.mark.parametrize(
+    "change", ["unknown", "rebound", "uncovered", "starred", "recursive_context", "cyclic_receiver", "cyclic_alias"]
+)
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_free_receiver_rejects_unproven_call_domains(tmp_path, monkeypatch, change):
     source = FREE_RECEIVER_SOURCE
@@ -11637,6 +11639,15 @@ def test_package_free_receiver_rejects_unproven_call_domains(tmp_path, monkeypat
     elif change == "recursive_context":
         source = source.replace(
             "def forward(receiver, gain):", "def forward(receiver, gain):\n    forward((receiver,), gain)"
+        )
+    elif change == "cyclic_receiver":
+        source = source.replace(
+            "def forward(receiver, gain):", "def forward(receiver, gain):\n    receiver = receiver.next()"
+        )
+    elif change == "cyclic_alias":
+        source = source.replace(
+            "def forward(receiver, gain):",
+            "def forward(receiver, gain):\n    other = receiver.next()\n    receiver = other.next()",
         )
     else:
         source = source.replace("publish(gain, solver=receiver)", "publish(*unknown_arguments())")
