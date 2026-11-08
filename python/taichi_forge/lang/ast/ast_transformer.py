@@ -1474,6 +1474,9 @@ class ASTTransformer(Builder):
                 begin = ti_ops.cast(expr.Expr(0), primitive_types.i32)
                 end = ti_ops.cast(end_expr, primitive_types.i32)
 
+            guard = getattr(node, "_uniform_loop_guard", None)
+            if guard is not None:
+                end = ti_ops.ifte(guard, end, begin)
             for_di = _ti_core.DebugInfo(ctx.get_pos_info(node))
             ctx.ast_builder.begin_frontend_range_for(loop_var.ptr, begin.ptr, end.ptr, for_di)
             with iteration_scope(ctx, loop_var, begin, end):
@@ -1491,6 +1494,9 @@ class ASTTransformer(Builder):
                 expr.Expr(impl.subscript(ctx.ast_builder, ndrange_var.acc_dimensions, 0)),
                 primitive_types.i32,
             )
+            guard = getattr(node, "_uniform_loop_guard", None)
+            if guard is not None:
+                ndrange_end = ti_ops.ifte(guard, ndrange_end, 0)
             ndrange_loop_var = expr.Expr(ctx.ast_builder.make_id_expr(""))
             for_di = _ti_core.DebugInfo(ctx.get_pos_info(node))
             ctx.ast_builder.begin_frontend_range_for(ndrange_loop_var.ptr, ndrange_begin.ptr, ndrange_end.ptr, for_di)
@@ -1538,6 +1544,9 @@ class ASTTransformer(Builder):
                 expr.Expr(impl.subscript(ctx.ast_builder, ndrange_var.acc_dimensions, 0)),
                 primitive_types.i32,
             )
+            guard = getattr(node, "_uniform_loop_guard", None)
+            if guard is not None:
+                ndrange_end = ti_ops.ifte(guard, ndrange_end, 0)
             ndrange_loop_var = expr.Expr(ctx.ast_builder.make_id_expr(""))
             for_di = _ti_core.DebugInfo(ctx.get_pos_info(node))
             ctx.ast_builder.begin_frontend_range_for(ndrange_loop_var.ptr, ndrange_begin.ptr, ndrange_end.ptr, for_di)
@@ -1584,6 +1593,8 @@ class ASTTransformer(Builder):
                     loop_var = ctx.deployment.field_operand(ctx, loop_var, for_loop=True)
                 if isinstance(loop_var, any_array.ModelTensorArray):
                     return ASTTransformer.build_grouped_ndrange_for(ctx, node, _Ndrange(*loop_var.shape))
+                if getattr(node, "_uniform_loop_guard", None) is not None and isinstance(loop_var, any_array.AnyArray):
+                    return ASTTransformer.build_grouped_ndrange_for(ctx, node, _Ndrange(*loop_var.shape))
                 loop_indices = expr.make_var_list(size=len(loop_var.shape), ast_builder=ctx.ast_builder)
                 expr_group = expr.make_expr_group(loop_indices)
                 impl.begin_frontend_struct_for(ctx.ast_builder, expr_group, loop_var)
@@ -1598,6 +1609,8 @@ class ASTTransformer(Builder):
                 if isinstance(loop_var, any_array.ModelTensorArray):
                     # Only logical Field axes participate in the iteration.
                     # Component axes remain inside the original loop body.
+                    return ASTTransformer.build_ndrange_for(ctx, node, _Ndrange(*loop_var.shape))
+                if getattr(node, "_uniform_loop_guard", None) is not None and isinstance(loop_var, any_array.AnyArray):
                     return ASTTransformer.build_ndrange_for(ctx, node, _Ndrange(*loop_var.shape))
                 _vars = []
                 for name in targets:
@@ -1770,6 +1783,56 @@ class ASTTransformer(Builder):
             "both values must have matching Taichi types; static Python objects remain block-local")
 
     @staticmethod
+    def build_uniform_loop_branch(ctx, node):
+        """Preserve a parallel loop under a uniform model-presence condition.
+
+        Only move side-effect-free iteration bounds out of the conditional.
+        Arbitrary calls, device indexing, sparse iteration and surrounding
+        statements retain their ordinary control-flow lowering.
+        """
+        if node.orelse or len(node.body) != 1 or not isinstance(node.body[0], ast.For):
+            return False
+        loop = node.body[0]
+
+        def safe_bound(value):
+            if isinstance(value, (ast.Name, ast.Constant)):
+                return True
+            if isinstance(value, ast.Attribute):
+                return safe_bound(value.value)
+            if isinstance(value, ast.Tuple):
+                return all(safe_bound(item) for item in value.elts)
+            if isinstance(value, ast.UnaryOp) and isinstance(value.op, (ast.UAdd, ast.USub)):
+                return safe_bound(value.operand)
+            if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.Add, ast.Sub, ast.Mult)):
+                return safe_bound(value.left) and safe_bound(value.right)
+            return False
+
+        decorator = ASTTransformer.get_decorator(ctx, loop.iter)
+        iterator = loop.iter
+        if decorator == "grouped":
+            if len(iterator.args) != 1:
+                return False
+            iterator = iterator.args[0]
+            decorator = ASTTransformer.get_decorator(ctx, iterator)
+        if decorator == "ndrange" or (
+            isinstance(iterator, ast.Call) and isinstance(iterator.func, ast.Name) and iterator.func.id == "range"
+        ):
+            if iterator.keywords or not all(safe_bound(arg) for arg in iterator.args):
+                return False
+        elif isinstance(iterator, (ast.Name, ast.Attribute)):
+            operand = build_stmt(ctx, iterator)
+            operand = ctx.deployment.field_operand(ctx, operand, for_loop=True)
+            if not isinstance(operand, (any_array.AnyArray, any_array.ModelTensorArray)):
+                return False
+        else:
+            return False
+        loop._uniform_loop_guard = node.test.ptr
+        # The conditional's lexical scope must not leak loop-local aliases.
+        with ctx.variable_scope_guard():
+            build_stmt(ctx, loop)
+        return True
+
+    @staticmethod
     def build_If(ctx, node):
         build_stmt(ctx, node.test)
         is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
@@ -1779,6 +1842,14 @@ class ASTTransformer(Builder):
                 build_stmts(ctx, node.body)
             else:
                 build_stmts(ctx, node.orelse)
+            return node
+
+        if (
+            is_static_if
+            and is_model_value(node.test.ptr)
+            and ctx.deployment is not None
+            and ASTTransformer.build_uniform_loop_branch(ctx, node)
+        ):
             return node
 
         with ctx.non_static_if_guard(node):

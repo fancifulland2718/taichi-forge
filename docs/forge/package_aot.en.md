@@ -1047,6 +1047,15 @@ prepare-sized CUDA blocks/shared arrays through the existing contracts. Ordinary
 runtime scalar declarations remain ineligible for static control. Focused CPU
 and CUDA tests cover this distinction, new sizes and source-free shared storage.
 
+A uniform model condition enclosing one ordinary `range/ndrange` or dense-array
+loop, with no `else`, can become a conditional iteration range. A false condition
+executes zero iterations; a true condition retains the parallel task and block
+setting. This does not change the ordered semantics of an original `ti.static`
+loop. Only side-effect-free bounds qualify; device indexing, calls in bounds and
+sparse iteration retain ordinary control flow. CPU/CUDA tests check backend task
+types as well as source-free results. This lowering alone does not establish a
+dynamic optional-input ABI.
+
 Device data and mutable locals cannot thereby enter `ti.static`. Loop bodies
 requiring Python object selection, type construction or compile-time indexing
 still need a valid runtime implementation. Loop bounds require proven integer

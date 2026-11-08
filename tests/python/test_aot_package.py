@@ -7201,6 +7201,111 @@ class Model:
 """
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_uniform_model_conditions_preserve_parallel_loops(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, mode: int):
+        self.n, self.mode = n, mode
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('mode')
+        scope.values = scope.field(ti.i32, shape=(scope.dim('n'), 2))
+    @ti.kernel
+    def step(self):
+        ti.loop_config(block_dim=128)
+        if ti.static(self.mode == 1):
+            for i in range(self.n):
+                self.values[i, 0] = 1
+        if ti.static(self.mode == 1):
+            for i in range(2, self.n + 2):
+                self.values[i - 2, 1] = 2
+        if ti.static(self.mode == 1):
+            for i, j in ti.ndrange(self.n, 2):
+                self.values[i, j] += 4
+        if ti.static(self.mode == 1):
+            for I in ti.grouped(ti.ndrange(self.n, 2)):
+                self.values[I] += 8
+        if ti.static(self.mode == 1):
+            for i, j in self.values:
+                self.values[i, j] += 16
+        if ti.static(self.mode == 1):
+            for I in ti.grouped(self.values):
+                self.values[I] += 32
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+"""
+    from taichi_forge.aot._component import _ComponentCode
+
+    tasks = []
+    original_export = _ComponentCode.export
+
+    def export(code, module, name):
+        result = original_export(code, module, name)
+        if code.entry_definition[1] == "Model.step":
+            tasks.extend(code.runtime.prog._kernel_task_manifest(code.kernel.compiled_kernels[code.key]))
+        return result
+
+    monkeypatch.setattr(_ComponentCode, "export", export)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    # Assert actual backend task geometry, not just equal numerical output:
+    # wrapping these loops in a device if would serialize all six loops.
+    parallel = [task for task in tasks if task["task_type"] == "range_for"]
+    assert len(parallel) == 6, tasks
+    assert not manifest["entry_families"]
+    if ti.cfg.arch == ti.cuda:
+        assert parallel[0]["selected_block_size"] == 128
+    expected = package.Model(19, 1)
+    expected.step()
+    np.testing.assert_array_equal(expected.values.to_numpy(), np.tile([61, 62], (19, 1)))
+    probe = tmp_path / "consume_uniform_loops.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys, numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as library:
+            for n in (3, 19):
+                active, absent = library.host.Model(n, 1), library.host.Model(n, 2)
+                with active.graph().bind({}) as call:
+                    active.mode = 2
+                    absent.step()
+                    call.run()
+                    np.testing.assert_array_equal(active.values.to_numpy(), np.tile([61, 62], (n, 1)))
+                    np.testing.assert_array_equal(absent.values.to_numpy(), 0)
+                    active.step()
+                    np.testing.assert_array_equal(active.values.to_numpy(), np.tile([61, 62], (n, 1)))
+        print('UNIFORM_LOOPS_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "UNIFORM_LOOPS_SOURCE_FREE_OK" in result.stdout
+
+
 @pytest.mark.parametrize("grouped", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_model_static_control_uses_one_implementation(tmp_path, monkeypatch, grouped):
