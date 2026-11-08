@@ -421,7 +421,18 @@ def normalize_factories(tree, namespace, module, fail, kind):
                     normalized = prove_factory(target, call, scopes, allow_void=isinstance(statement, ast.Expr))
                 except (TypeError, _Unproven) as error:
                     try:
-                        expanded = expand_declarations(target, statement, scopes)
+                        shadowed = {
+                            n.id
+                            for n in ast.walk(function)
+                            if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del))
+                        }
+                        shadowed.update(n.arg for n in ast.walk(function) if isinstance(n, ast.arg))
+                        shadowed.update(
+                            n.asname or n.name.split(".")[0] for n in ast.walk(function) if isinstance(n, ast.alias)
+                        )
+                        expanded = expand_declarations(
+                            target, statement, scopes, namespace=namespace, shadowed=shadowed
+                        )
                     except (TypeError, _Unproven) as expansion_error:
                         fail(module, call, f"Resource factory forwarding is unproven: {expansion_error}")
                     if expanded is None:

@@ -269,16 +269,20 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     fail(module, part, f"Preparation resource context is unproven: {error}")
                 if recipe is not None:
                     contexts.append(part)
-            typed_inputs = any(
+            input_declarations = any(
                 isinstance(call, ast.Call)
                 and isinstance(call.func, ast.Attribute)
-                and call.func.attr == "borrow"
-                and {keyword.arg for keyword in call.keywords} >= {"external", "dtype", "shape"}
+                and (
+                    call.func.attr == "record"
+                    or call.func.attr == "borrow"
+                    and {keyword.arg for keyword in call.keywords} >= {"external", "dtype", "shape"}
+                )
                 for call in ast.walk(method)
             )
             # Typed ports bind caller storage without allocating a group. The
+            # record may forward its members through a declaration helper. The
             # normal declaration parser below still proves the scope and types.
-            if not contexts and not typed_inputs:
+            if not contexts and not input_declarations:
                 continue
             if (
                 not method.args.args

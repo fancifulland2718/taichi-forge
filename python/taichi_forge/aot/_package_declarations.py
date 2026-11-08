@@ -5,12 +5,13 @@ import builtins
 import copy
 import hashlib
 import inspect
+import sys
 import textwrap
 
 from ._package_factories import _Unproven, _literal, _source_value, prove_factory
 
 
-def expand_declarations(function, statement, scopes, *, _active=(), _prefix=None):
+def expand_declarations(function, statement, scopes, *, namespace, shadowed=(), _active=(), _prefix=None):
     """Inline lexical declaration forwarding with literal control and Host paths.
 
     Application functions are never called. Only ResourceScope operations are
@@ -74,8 +75,17 @@ def expand_declarations(function, statement, scopes, *, _active=(), _prefix=None
     known_scopes = set(scopes)
     emitted = []
     serial = 0
+    location_serial = 0
     declaration_calls = 0
     dependencies = []
+    import taichi_forge as ti
+
+    # Forward only known DSL type namespaces through an unchanged caller import.
+    # Never evaluate helper globals, arbitrary constructors or model factories.
+    compatibility = sys.modules.get("taichi")
+    type_namespaces = (ti, ti.types, ti.math) + (
+        (compatibility,) if compatibility is not None and vars(compatibility).get("kernel") is ti.kernel else ()
+    )
     extent_names = set()
     lexical_names = {
         node.id
@@ -151,6 +161,15 @@ def expand_declarations(function, statement, scopes, *, _active=(), _prefix=None
             return copy.deepcopy(node)
         if isinstance(node, ast.Name):
             if node.id not in environment:
+                value = function.__globals__.get(node.id)
+                if node.id not in lexical_names and any(value is module for module in type_namespaces):
+                    aliases = [
+                        name
+                        for name, target in namespace.items()
+                        if target is value and name not in shadowed and name.isidentifier()
+                    ]
+                    if aliases:
+                        return ast.Name(sorted(aliases)[0], ast.Load())
                 raise _Unproven(f"declaration helper references an unbound name {node.id!r}")
             return copy.deepcopy(environment[node.id])
         if isinstance(node, ast.Attribute):
@@ -215,6 +234,18 @@ def expand_declarations(function, statement, scopes, *, _active=(), _prefix=None
                 root = root.value
             target = _source_value(node.func, function.__globals__)
             if (
+                isinstance(root, ast.Name)
+                and root.id not in lexical_names
+                and any(target is constructor for constructor in (ti.types.vector, ti.types.matrix))
+            ):
+                if any(keyword.arg is None for keyword in node.keywords):
+                    raise _Unproven("declaration type constructors require explicit arguments")
+                return ast.Call(
+                    expression(node.func),
+                    [expression(n) for n in node.args],
+                    [ast.keyword(k.arg, expression(k.value)) for k in node.keywords],
+                )
+            if (
                 isinstance(node.func, ast.Name)
                 and node.func.id == "getattr"
                 and node.func.id not in lexical_names
@@ -253,6 +284,8 @@ def expand_declarations(function, statement, scopes, *, _active=(), _prefix=None
                     target,
                     ast.Assign([ast.Name(name, ast.Store())], forwarded),
                     known_scopes,
+                    namespace=namespace,
+                    shadowed=shadowed,
                     _active=active,
                     _prefix=name,
                 )
@@ -292,12 +325,15 @@ def expand_declarations(function, statement, scopes, *, _active=(), _prefix=None
         raise _Unproven(f"unsupported declaration helper expression {type(node).__name__}")
 
     def emit(node):
+        nonlocal location_serial
         # Sites stay attached to the original call, with distinct columns for
-        # individual declarations. No fabricated file or model execution trace.
+        # each expression, including nested type and dimension constructors.
+        # The Host projection identifies declarations by their source site.
         for child in ast.walk(node):
             if isinstance(child, (ast.expr, ast.stmt)):
+                location_serial += 1
                 child.lineno = child.end_lineno = call.lineno
-                child.col_offset = call.col_offset + len(emitted) + 1
+                child.col_offset = call.col_offset + location_serial
                 child.end_col_offset = child.col_offset + 1
         emitted.append(node)
 

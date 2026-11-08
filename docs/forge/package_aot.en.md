@@ -147,6 +147,9 @@ Optional plain records can also contain typed ports. Their `parent_dim` and
 `require_le` declarations check the actual input size relationships without
 including the caller's allocation class in the package. Local CUDA checks cover
 record presence, new sizes, constraint rejection and old Graph input snapshots.
+Ordinary helpers may forward these declarations and fixed Forge scalar/vector/matrix
+type references without executing the helper during discovery or adding export-only
+wrappers. Preparation methods containing only record inputs are also retained.
 
 Format 60 adds `optional=True` to this declaration. Preparation may bind `None`;
 clearing the current binding leaves existing prepared calls holding their old

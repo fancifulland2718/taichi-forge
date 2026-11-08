@@ -4912,8 +4912,9 @@ class Model:
         imported.close()
 
 
+@pytest.mark.parametrize("helper", (False, True))
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_optional_record_borrows_caller_arrays(tmp_path, monkeypatch):
+def test_package_optional_record_borrows_caller_arrays(tmp_path, monkeypatch, helper):
     source = """
 from dataclasses import dataclass
 import taichi_forge as ti
@@ -4948,6 +4949,17 @@ class Model:
         b.dispatch(self.update)
         return b.compile()
 """
+    if helper:
+        start = source.index("            record.borrow")
+        end = source.index("    @ti.kernel", start)
+        body = textwrap.dedent(source[start:end]).replace("ti.", "dsl.")
+        (tmp_path / "port_declarations.py").write_text(
+            "import taichi_forge as dsl\ndef declare_packet(record, packet):\n" + textwrap.indent(body, "    "),
+            encoding="utf8",
+        )
+        monkeypatch.delitem(sys.modules, "port_declarations", raising=False)
+        source = source[:start] + "            declare_packet(record, packet)\n" + source[end:]
+        source = "from port_declarations import declare_packet\n" + source
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
