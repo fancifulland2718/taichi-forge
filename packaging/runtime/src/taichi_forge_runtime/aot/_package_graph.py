@@ -472,6 +472,7 @@ class Graph:
         # Native preparation owns immutable instance bindings and their leases.
         # Replaying the returned call does not interpret operations in Python.
         plan = self.plan.with_argument_resources(resources) if resources else self.plan
+        values = {name: self.package.runtime._adapt_package_array(value) for name, value in values.items()}
         prepared = plan.prepare(self.package._module, values)
         prepared._forge_package_graph = self
         return prepared

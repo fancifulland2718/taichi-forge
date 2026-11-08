@@ -367,6 +367,8 @@ def init(
     enable_fallback=True,
     require_version=None,
     startup_profile=None,
+    execution_mode=None,
+    aot_package_paths=(),
     **kwargs,
 ):
     """Initializes the Taichi runtime.
@@ -379,6 +381,13 @@ def init(
         default_fp (Optional[type]): Default floating-point type.
         default_ip (Optional[type]): Default integral type.
         require_version (Optional[string]): A version string.
+        execution_mode: ``jit`` (default) or ``hybrid``. Hybrid uses ordinary
+            imports for discovered AOT libraries and keeps script kernels JIT
+            on the same Program. Select before importing numerical libraries.
+            Defaults to ``FORGE_EXECUTION_MODE`` when omitted.
+        aot_package_paths: Optional definition-package search directories for
+            hybrid execution; installed packages and import paths are searched
+            automatically. ``ti.reset()`` retires the mixed session.
         **kwargs: Taichi provides highly customizable compilation through
             ``kwargs``, which allows for fine grained control of Taichi compiler
             behavior. Below we list some of the most frequently used ones. For a
@@ -392,6 +401,14 @@ def init(
             *``random_seed`` (int): Sets the seed of the random generator. The default is 0.
             *``startup_profile`` (bool): Enables or disables low-frequency import/init timing checkpoints. Set ``TI_STARTUP_PROFILE=1`` before import to include native loading.
     """
+    if execution_mode is None:
+        execution_mode = os.environ.get("FORGE_EXECUTION_MODE", "jit")
+    if execution_mode not in ("jit", "hybrid"):
+        raise ValueError("ti.init execution_mode must be 'jit' or 'hybrid'")
+    if execution_mode == "hybrid":
+        enable_fallback = False
+    elif aot_package_paths:
+        raise ValueError("aot_package_paths requires execution_mode='hybrid'")
     if startup_profile is not None:
         if not isinstance(startup_profile, bool):
             raise TypeError("ti.init(startup_profile=...) must be bool or None")
@@ -571,6 +588,17 @@ def init(
 
     # Recover the current working directory (https://github.com/taichi-dev/taichi/issues/4811)
     os.chdir(current_dir)
+    if execution_mode == "hybrid":
+        from taichi_forge_runtime import ExecutionSession
+
+        session = ExecutionSession(mode="hybrid", arch=_ti_core.arch_name(cfg.arch), package_paths=aot_package_paths)
+        try:
+            session.__enter__()
+        except BaseException:
+            session.close()
+            reset()
+            raise
+        impl.get_runtime()._package_execution_session = session
     startup_profile_mark("ti_init.total.end")
     return None
 

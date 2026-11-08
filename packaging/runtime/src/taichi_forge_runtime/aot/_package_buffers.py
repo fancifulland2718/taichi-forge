@@ -10,9 +10,10 @@ class HostBuffers:
     """Stage disjoint explicit Host arrays, without changing device calls."""
 
     def __init__(self, runtime, schemas, arguments):
-        self.runtime, self.arguments = runtime, list(arguments)
+        self.runtime = runtime
+        self.arguments = [runtime._adapt_package_array(value) for value in arguments]
         self.pending, self.allocated = [], []
-        for index, (schema, value) in enumerate(zip(schemas, arguments)):
+        for index, (schema, value) in enumerate(zip(schemas, self.arguments)):
             if schema["kind"] != "ndarray" or isinstance(value, NdArray):
                 continue
             try:

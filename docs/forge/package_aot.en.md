@@ -680,9 +680,55 @@ every call. For stable dimensions and resources, bind once during preparation
 and retain the returned execution. Warm Graph replay timings do not replace
 first-preparation or ordinary-call measurements.
 
-## Ordinary imports and startup mode
+## Selecting mixed JIT and AOT execution at startup
 
-Select execution through Forge Runtime before importing the engine. JIT and AOT
+When scripts and multiple compiled libraries work together, select hybrid mode
+once through normal initialization:
+
+```python
+import taichi_forge as ti
+
+ti.init(arch=ti.cuda, execution_mode="hybrid")
+from example_app import main  # This script imports its computation modules normally.
+main()
+ti.reset()
+```
+
+Alternatively set `FORGE_EXECUTION_MODE=hybrid` and keep `ti.init(arch=...)`.
+The default remains JIT; explicit `execution_mode="jit"` overrides the environment.
+No per-module selection or surrounding `ExecutionSession` block is required.
+Discovered definition libraries and their dependencies retain their module names.
+Other scripts, including unpackaged siblings in the same parent package, import
+normally and may use JIT kernels. Known numerical modules with a wrong target,
+ambiguous package or damaged artifact still reject without private-source fallback.
+
+Libraries borrow the active JIT Program instead of creating another device.
+Scalar/fixed-tensor JIT ndarrays, qualified Dense Fields and `ndarray_view` inputs
+are imported and cached at existing parameter/resource preparation boundaries.
+Callers keep their original objects; dtype, element shape, model dimensions,
+layout and lifetime checks remain, and outputs share the original storage.
+Input allocation code need not enter the library closure. Prepared Graphs keep
+their independent binding snapshots and leases, without reimporting on replay.
+Connecting the script and libraries adds no per-stage global waits or combined TCMs.
+
+Select the mode before importing numerical libraries, typically in one bootstrap
+file. Existing source objects are not replaced in place. `ti.reset()` retires the
+packages and borrowed runtime before clearing their public numerical module names.
+Ordinary script modules remain; their references to old computation objects become
+invalid. Independent execution domains, unqualified layouts and arbitrary object
+protocols do not become supported merely by enabling hybrid mode.
+
+Focused CPU/CUDA checks cover one script using two independent libraries, JIT input
+preparation and postprocessing, direct/Graph calls, new sizes, interleaved Fields,
+ndarrays, invalid bindings and tree retirement. EFC CUDA checks pass JIT Fields
+directly and match the original JIT oracle in 12 cases. Measure cold startup and
+cached-process first calls separately. Warm calls still have existing AOT Host
+admission/preparation costs; faster first loading does not establish faster execution.
+
+## Ordinary imports with a standalone AOT Runtime
+
+Deployments without script-side JIT can select execution through Forge Runtime
+before importing the engine. JIT and AOT
 use the same business imports, constructors and calls; application modules do not
 need `load_package`, TCM filenames or `session.module`:
 

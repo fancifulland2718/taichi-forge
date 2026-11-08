@@ -53,6 +53,8 @@ def sort_inputs(
         raise ValueError("Package native sort requires stable ascending exact order with NaNs last")
     if method not in ("auto", native):
         raise ValueError("Package sort requires the Runtime's native device method")
+    keys = package.runtime._adapt_package_array(keys)
+    values = package.runtime._adapt_package_array(values)
     arrays = (keys,) if values is None else (keys, values)
     for array in arrays:
         if not isinstance(array, NdArray):

@@ -557,6 +557,7 @@ class PyTaichi:
         # accidentally finalizing a borrower and waiting on the hot path.
         self._graph_execution_runtime_lock = threading.RLock()
         self._graph_execution_runtime = None
+        self._package_execution_session = None
         self.kernel_specialization_limit = 1024
         # Program owns every native Kernel until ti.reset(), even after the
         # defining Python Kernel is garbage-collected or its cache is cleared
@@ -1038,6 +1039,9 @@ class PyTaichi:
             self._clear()
 
     def _clear(self):
+        if self._package_execution_session is not None:
+            session, self._package_execution_session = self._package_execution_session, None
+            session.close()
         # Graph invalidation may release a native workspace. If an opt-in
         # submission still owns one, complete it before invalidating weakly
         # registered Graph wrappers. Program.finalize() would otherwise sync

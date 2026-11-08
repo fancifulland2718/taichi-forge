@@ -98,6 +98,7 @@ def check_external_resource(owner, contract, value):
     """Check the caller's storage contract, without requiring allocation provenance."""
     from ._runtime import NdArray
 
+    value = owner._forge_package_owner.runtime._adapt_package_array(value)
     if not isinstance(value, NdArray):
         raise ValueError("External resource requires an explicitly imported device array or Field view")
     value._descriptor(owner._forge_package_owner.runtime)

@@ -4979,6 +4979,154 @@ def test_package_execution_independent_roots_share_only_namespace(tmp_path, monk
     assert "namespace_fixture" not in sys.modules
 
 
+@pytest.mark.parametrize("configuration", ("keyword", "environment"))
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_hybrid_init_connects_script_and_independent_libraries(tmp_path, monkeypatch, configuration):
+    first = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        self.values = None
+    def prepare(self, values):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('values', values, external=True, dtype=ti.f32, shape=scope.dim('n'))
+    @ti.kernel
+    def update(self, gain: ti.f32):
+        for i in self.values:
+            self.values[i] += gain * i
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.update, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32), template_args={'self': self})
+        return builder.compile()
+"""
+    second = """
+import taichi_forge as ti
+@ti.kernel
+def scale(values: ti.types.ndarray(ti.f32, 1), factor: ti.f32):
+    for i in values:
+        values[i] *= factor
+"""
+    script = """
+import taichi_forge as ti
+from .model import Model
+from .second import scale
+@ti.kernel
+def prepare(values: ti.template(), offset: ti.f32):
+    for i in values:
+        values[i] = i + offset
+@ti.kernel
+def finish(values: ti.template()):
+    for i in values:
+        values[i] += 5
+def run():
+    results = []
+    frames = []
+    for n in (7, 19):
+        builder = ti.FieldsBuilder()
+        values, unrelated = ti.field(ti.f32), ti.field(ti.i32)
+        builder.dense(ti.i, n).place(values, unrelated)
+        tree = builder.finalize()
+        model = Model(n)
+        model.prepare(values)
+        frames.append((model, values, ti.experimental.ndarray_view(values), tree))
+    for step in (0, 1):
+        for model, values, view, tree in reversed(frames):
+            prepare(values, step + .5)
+            if step:
+                model.graph().run({'gain': 3.0})
+            else:
+                model.update(3.0)
+            scale(view, 2.0)
+            finish(values)
+            results.append(values.to_numpy())
+    extra = ti.ndarray(ti.f32, 11)
+    extra.fill(2)
+    scale(extra, 3.0)
+    results.append(extra.to_numpy())
+    return results, frames
+"""
+    source_root = tmp_path / "src"
+    source_root.mkdir()
+    package = _source_package(
+        source_root, monkeypatch, first, initializer="", extra_modules={"second": second, "script": script}
+    )
+    import importlib
+
+    first_module = importlib.import_module("definition_fixture.model")
+    second_module = importlib.import_module("definition_fixture.second")
+    first_manifest = ti.aot.export_package(first_module, tmp_path / "forge_aot/first", source_root=source_root)
+    ti.aot.export_package(second_module, tmp_path / "forge_aot/second", source_root=source_root)
+    assert "definition_fixture.script" not in first_manifest["application_modules"]
+    caller = importlib.import_module("definition_fixture.script")
+    expected, frames = caller.run()
+    arch = ti.cfg.arch
+    ti.reset()
+    del frames, caller, package, first_module, second_module
+    for name in tuple(sys.modules):
+        if name == "definition_fixture" or name.startswith("definition_fixture."):
+            monkeypatch.delitem(sys.modules, name)
+    # Only the ordinary front script and package directory remain importable.
+    (source_root / "definition_fixture/model.py").rename(tmp_path / "model.producer")
+    (source_root / "definition_fixture/second.py").rename(tmp_path / "second.producer")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delenv("FORGE_AOT_PACKAGE_PATH", raising=False)
+    importlib.import_module("definition_fixture")  # An existing plain parent may coexist with AOT children.
+    options = {"execution_mode": "hybrid"} if configuration == "keyword" else {}
+    monkeypatch.setenv("FORGE_EXECUTION_MODE", "hybrid" if configuration == "environment" else "jit")
+    ti.init(arch=arch, offline_cache=False, **options)
+    session = ti.lang.impl.get_runtime()._package_execution_session
+    assert session.runtime._frontend_program is ti.lang.impl.get_runtime().prog
+    assert session.loaded_packages == ()
+    from definition_fixture import script as mixed_script
+
+    actual, frames = mixed_script.run()
+    for reference, value in zip(expected, actual):
+        np.testing.assert_array_equal(value, reference)
+    assert len(session.loaded_packages) == 2
+    assert mixed_script.__file__ == str(source_root / "definition_fixture/script.py")
+    cache_size = len(session.runtime._package_array_adapter._cache)
+    model, values, view, tree = frames[0]
+    model.update(1)
+    assert len(session.runtime._package_array_adapter._cache) == cache_size
+    bad = ti.field(ti.i32, shape=7)
+    with pytest.raises(ValueError, match="dtype"):
+        model.prepare(bad)
+    assert model.values is values
+    tree.destroy()
+    with pytest.raises((ValueError, RuntimeError), match="retir|destroy|invalid|closed|released"):
+        model.update(1)
+    ti.reset()
+    assert session._closed
+    assert "definition_fixture.model" not in sys.modules
+    assert "definition_fixture.second" not in sys.modules
+    assert sys.modules["definition_fixture.script"] is mixed_script
+    # Reset retires numerical modules; it does not delete arbitrary JIT scripts.
+    for name in tuple(sys.modules):
+        if name == "definition_fixture" or name.startswith("definition_fixture."):
+            monkeypatch.delitem(sys.modules, name)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_hybrid_failed_startup_releases_program(monkeypatch):
+    from taichi_forge_runtime import execution
+
+    program = ti.lang.impl.get_runtime().prog
+    with pytest.raises(ValueError, match="execution_mode"):
+        ti.init(arch=ti.cpu, execution_mode="invalid")
+    assert ti.lang.impl.get_runtime().prog is program
+    monkeypatch.setattr(execution.ExecutionSession, "_discover", lambda session: setattr(session, "_index", ()))
+    with pytest.raises(ModuleNotFoundError, match="No definition packages"):
+        ti.init(arch=ti.cpu, execution_mode="hybrid")
+    assert ti.lang.impl.get_runtime().prog is None
+    assert execution._import_session is None
+    ti.init(arch=ti.cpu, execution_mode="jit", offline_cache=False)
+    values = ti.ndarray(ti.i32, 3)
+    values.fill(4)
+    np.testing.assert_array_equal(values.to_numpy(), [4, 4, 4])
+
+
 def _source_package(
     tmp_path, monkeypatch, source=SOURCE, *, initializer="from .model import Model\n", extra_modules=None
 ):

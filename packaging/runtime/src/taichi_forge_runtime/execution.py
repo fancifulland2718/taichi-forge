@@ -7,6 +7,7 @@ import providers, replace existing modules, compile source, or select sample mod
 from contextlib import ExitStack
 import importlib
 import importlib.abc
+import importlib.machinery
 import importlib.util
 from importlib import metadata
 import json
@@ -27,9 +28,17 @@ class _PackageImports(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         self.modules = {}
 
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split(".")[0] not in self.session._roots:
+        if self.session.mode == "hybrid":
+            if fullname not in self.session._module_names:
+                return None
+        elif fullname.split(".")[0] not in self.session._roots:
             return None
-        return importlib.util.spec_from_loader(fullname, self, is_package=self.session._is_package(fullname))
+        spec = importlib.util.spec_from_loader(fullname, self, is_package=self.session._is_package(fullname))
+        if self.session.mode == "hybrid" and spec.submodule_search_locations is not None:
+            source = importlib.machinery.PathFinder.find_spec(fullname, path)
+            if source is not None and source.submodule_search_locations is not None:
+                spec.submodule_search_locations = list(source.submodule_search_locations)
+        return spec
 
     def create_module(self, spec):
         return ModuleType(spec.name)
@@ -116,14 +125,16 @@ class ExecutionSession:
     never change implementation. Close instances/calls before closing a session.
     A supplied AOT Runtime remains owned by the caller (including borrowed JIT
     runtimes used to prepare script-side inputs).
+    ``hybrid`` shares the frontend Program and adapts qualified input storage;
+    applications normally select it with ``ti.init(execution_mode='hybrid')``.
     """
 
     def __init__(
         self, *, mode=None, arch="cpu", package_paths=(), runtime=None, jit_options=None, runtime_options=None
     ):
         self.mode = mode if mode is not None else os.environ.get("FORGE_EXECUTION_MODE", "jit")
-        if self.mode not in ("jit", "aot"):
-            raise ValueError("execution mode must be 'jit' or 'aot'")
+        if self.mode not in ("jit", "aot", "hybrid"):
+            raise ValueError("execution mode must be 'jit', 'aot' or 'hybrid'")
         self.arch = _arch(arch)
         self.package_paths = _paths(package_paths) + _paths(
             path for path in os.environ.get("FORGE_AOT_PACKAGE_PATH", "").split(os.pathsep) if path
@@ -137,6 +148,8 @@ class ExecutionSession:
             raise ValueError("runtime and runtime_options apply only to AOT")
         if self.mode == "aot" and self.jit_options:
             raise ValueError("jit_options apply only to JIT")
+        if self.mode == "hybrid" and self.runtime_options:
+            raise ValueError("Hybrid execution uses the initialized JIT Program")
         if runtime is not None and (runtime.arch != self.arch or self.runtime_options):
             raise ValueError("Supplied Runtime must match arch and cannot be reconfigured")
         self.runtime = runtime
@@ -145,6 +158,7 @@ class ExecutionSession:
         self._modules, self._packages = {}, {}
         self._index = None
         self._roots = set()
+        self._module_names = set()
         self._active = self._closed = False
 
     @property
@@ -153,11 +167,19 @@ class ExecutionSession:
         return tuple(self._packages)
 
     def __enter__(self):
+        try:
+            return self._enter()
+        except BaseException:
+            if not self._active:
+                self.close()
+            raise
+
+    def _enter(self):
         global _import_session
         with self._lock:
             if self._closed or self._active:
                 raise RuntimeError("Execution session is closed or already active")
-            if self.mode == "jit":
+            if self.mode in ("jit", "hybrid"):
                 if _import_session is not None:
                     raise RuntimeError("Cannot select JIT imports inside an active AOT import session")
                 ti = importlib.import_module("taichi_forge")
@@ -165,9 +187,11 @@ class ExecutionSession:
                     if str(ti.lang.impl.current_cfg().arch).split(".")[-1] != self.arch or self.jit_options:
                         raise ValueError("Existing JIT runtime differs or would require reconfiguration")
                 else:
-                    ti.init(arch=getattr(ti, self.arch), enable_fallback=False, **self.jit_options)
+                    ti.init(
+                        arch=getattr(ti, self.arch), enable_fallback=False, execution_mode="jit", **self.jit_options
+                    )
                     self._stack.callback(ti.reset)
-            else:
+            if self.mode != "jit":
                 with _import_lock:
                     if _import_session is not None:
                         raise RuntimeError("An AOT import session is already active")
@@ -177,9 +201,33 @@ class ExecutionSession:
                             "No definition packages found; install the SDK or set FORGE_AOT_PACKAGE_PATH"
                         )
                     self._roots = {name.split(".")[0] for item in self._index for name in item[3]}
-                    existing = sorted(name for name in sys.modules if name.split(".")[0] in self._roots)
+                    self._module_names = {name for item in self._index for name in item[3]}
+                    self._module_names.update(
+                        name.rsplit(".", count)[0]
+                        for name in tuple(self._module_names)
+                        for count in range(1, name.count(".") + 1)
+                    )
+                    if self.mode == "hybrid":
+                        exported = {item[2] for item in self._index}
+                        existing = sorted(
+                            name
+                            for name in sys.modules
+                            if name in self._module_names and (name in exported or not self._is_package(name))
+                        )
+                    else:
+                        existing = sorted(name for name in sys.modules if name.split(".")[0] in self._roots)
                     if existing:
                         raise RuntimeError(f"Select AOT before importing application packages: {existing}")
+                    if self.mode == "hybrid":
+                        from taichi_forge.aot._hybrid import PackageArrays
+
+                        if self.runtime is None:
+                            self.runtime = self._stack.enter_context(ti.aot.borrow_runtime())
+                        if getattr(self.runtime, "_frontend_program", None) is not ti.lang.impl.get_runtime().prog:
+                            raise ValueError("Hybrid packages must borrow the active JIT Program")
+                        arrays = PackageArrays(self.runtime)
+                        self.runtime._package_array_adapter = arrays
+                        self._stack.callback(arrays.close)
                     self._finder = _PackageImports(self)
                     sys.meta_path.insert(0, self._finder)
                     _import_session = self

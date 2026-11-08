@@ -955,9 +955,44 @@ Python。多个接收类可复用同一声明；调用来源未知、receiver �
 调用工作区，设备仍按实际计数执行，不读取设备计数准备空间，也不扩大实际 Launch。
 该上界不是精确维度或静态条件证明，不跨可能溢出的算术传播；无界设备范围仍拒绝。
 
-## 正常 import 与启动模式
+## 启动时选择 JIT 与 AOT 混合执行
 
-应用可以在首次导入引擎前，通过 Forge Runtime 选择执行模式。JIT/AOT 使用同一份
+需要脚本 JIT 和多个已封装计算库共同工作时，在正常初始化中选择一次混合模式：
+
+```python
+import taichi_forge as ti
+
+ti.init(arch=ti.cuda, execution_mode="hybrid")
+from example_app import main  # 该脚本内部照常 import 各计算模块
+main()
+ti.reset()
+```
+
+也可设置 `FORGE_EXECUTION_MODE=hybrid` 并沿用普通 `ti.init(arch=...)`。
+未设置时保持 JIT；显式 `execution_mode="jit"` 可覆盖环境设置。无需逐模块选择路径，
+无需把整个示例包在 `ExecutionSession` 上下文中。已发现的定义包及依赖按原模块名加载，
+其他脚本（包括同一父包中的未封装脚本）正常导入并可运行 JIT Kernel。已声明的数值模块
+遇到错误后端、歧义或损坏产物时仍拒绝；不能借混合模式回退编译该模块的私有源码。
+
+AOT 库自动借用当前 JIT Program；不另建计算设备。传入标量/固定张量的 JIT ndarray、
+合格 Dense Field 或 `ndarray_view` 时，在原参数/资源准备边界自动建立并缓存借用视图。
+调用方保留原对象；dtype、元素形状、模型尺寸、布局和存活期继续验证，输出写回同一存储。
+原始 Field 不必成为库的分配闭包。已准备 Graph 保留独立绑定和租约，重放不重复导入；
+不为连接脚本和核心增加逐阶段全局等待，也不生成组合 TCM。
+
+模式须在导入核心计算模块前选择，可统一放入启动文件；已导入/实例化的源码对象不会被
+原地换成 AOT。`ti.reset()` 按现有生命周期关闭包和借用 Runtime，随后清理本次创建的
+公共数值模块名；普通脚本模块不删除，其持有的旧计算对象随 reset 失效。
+独立执行域、复杂未资格布局及任意对象协议不因本开关自动获得支持。
+
+局部 CPU/CUDA 验证覆盖同一脚本调用两份独立库、JIT 输入准备及后处理、直接与 Graph
+调用、不同尺寸/交错 Field/ndarray、错误绑定及树退休。EFC CUDA 检查直接传 JIT Field，
+12 组结果与原 JIT 参考一致。冷启动与缓存后首调必须分别测量；热调用仍有原 AOT Host
+准入和准备成本，不能仅凭首次加载更快宣称运行性能更好。
+
+## 独立 AOT Runtime 的普通导入
+
+无需脚本 JIT 的独立部署也可以在首次导入引擎前，通过 Forge Runtime 选择执行模式。JIT/AOT 使用同一份
 业务导入、构造和调用代码；不需要 `load_package`、TCM 文件名或 `session.module`：
 
 ```python

@@ -461,6 +461,10 @@ class Runtime:
             self._api.call(self._api.ti_wait, self._handle)
             self._pending.clear()
 
+    def _adapt_package_array(self, value):
+        adapter = getattr(self, "_package_array_adapter", None)
+        return value if adapter is None else adapter(value)
+
     def import_ndarray(self, array):
         """Retain a zero-copy JIT ndarray through an explicit borrowed owner.
 
