@@ -98,7 +98,8 @@ scope.borrow("values", values, external=True, dtype=ti.f32, shape=scope.dim("n")
 格式 63 将类型化端口的 `optional=True` 存在性作为准备时绑定的 i32 参数。
 `ti.static(self.values is not None)` 等显式检查进入同一份数值代码，不再按端口有无
 展开数值版本。普通 JIT 保留原对象判断；准备时允许 `None`，清除当前绑定后旧
-prepared 调用仍保留原资源和存在性快照。
+prepared 调用仍保留原资源和存在性快照。构造后尚未准备的可选数组/记录从未绑定状态开始，
+正常 Host 的 `None` 可直接消费；绕过声明把它改为非空仍在准入时拒绝。
 编译器记录资源访问受哪些存在性分支控制，消费端在提交前检查所选路径的必需输入；
 无条件读取仍要求非空。内联 `ti.func` 与 `ti.real_func` 使用同一规则，未证明的设备
 分支按“可能访问”保守处理，不放宽缺失资源准入。缺失且不被访问的数组使用按类型

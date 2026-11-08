@@ -1181,6 +1181,13 @@ def managed_class(package, cls):
         self._forge_package_field_groups = {}
         self._forge_package_layouts = {}
         self._forge_package_member_layouts = {}
+        # Optional ports start unbound. A normal constructor may leave their
+        # source attributes at None without invoking a later preparation method.
+        # Only ResourceScope binding publishes presence; assigning a non-null
+        # object directly must still fail the ordinary admission check.
+        for name, item in package.manifest["owners"].get(selected_key, {}).items():
+            if item.get("input_presence"):
+                setattr(self, name, False)
         allocated = []
         token = _construction.set((package, allocated, self))
         try:

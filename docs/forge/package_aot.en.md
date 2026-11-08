@@ -156,6 +156,9 @@ Explicit checks such as `ti.static(self.values is not None)` use one numerical
 implementation without enumerating presence combinations. Ordinary JIT retains
 its object checks. Preparation may bind `None`; existing prepared calls retain
 their previous resources and presence snapshots.
+Before any preparation, optional arrays/records start unbound, so the normal
+Host's initial `None` is usable. Assigning a non-null value without its declared
+binding still fails admission.
 The compiler records presence conditions dominating resource accesses, and the
 consumer checks required inputs before submission. Unguarded reads still require
 a present input. Inline `ti.func` and `ti.real_func` use the same rule; unproven

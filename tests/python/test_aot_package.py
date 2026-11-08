@@ -5478,9 +5478,11 @@ class Model:
             expected = values.to_numpy()
             imported = [runtime.import_dense_view(ti.experimental.ndarray_view(field)) for field in (offsets, values)]
             owner = code.host.Model(n)
-            owner.prepare(None)
             owner.update()
             packet = code.module("definition_fixture.model").Packet(n + padding, *imported)
+            owner.packet = packet
+            with pytest.raises(ValueError, match="presence changed outside"):
+                owner.update()
             owner.prepare(packet)
             previous = owner.graph().bind({})
             owner.prepare(None)
@@ -5510,7 +5512,6 @@ class Model:
             from taichi_forge_runtime.aot import Runtime, load_package
             with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
                 model = code.host.Model(7)
-                model.prepare(None)
                 model.update()
                 offsets = runtime.ndarray('i32', 8)
                 values = runtime.ndarray('f32', 7, element_shape=(3,))
