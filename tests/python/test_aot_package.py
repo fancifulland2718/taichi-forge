@@ -13200,8 +13200,24 @@ class Wider(Model):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_package_definition_constants_preserve_dependencies_and_snapshots(tmp_path, monkeypatch):
-    package = _source_package(tmp_path, monkeypatch, CONSTANT_SOURCE, initializer="from .model import Model, Wider\n")
+@pytest.mark.parametrize("name_source", ["inline", "module", "qualified"])
+def test_package_definition_constants_preserve_dependencies_and_snapshots(tmp_path, monkeypatch, name_source):
+    source, modules = CONSTANT_SOURCE, None
+    if name_source != "inline":
+        declarations = "        declare_constant(scope, 'group_size')\n        scope.constant('scale')\n        scope.constant('unused')"
+        if name_source == "module":
+            source = "NAMES = ('group_size', 'scale', 'unused')\n" + source
+            names = "NAMES"
+        else:
+            source = "from . import definitions\n" + source
+            modules = {"definitions": "NAMES = ('group_size', 'scale', 'unused')\n"}
+            names = "definitions.NAMES"
+        source = source.replace(
+            declarations, f"        for name in {names}:\n            declare_constant(scope, name)"
+        )
+    package = _source_package(
+        tmp_path, monkeypatch, source, initializer="from .model import Model, Wider\n", extra_modules=modules
+    )
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert manifest["version"] == 30
     assert sys.modules["definition_fixture.model"].constructors == 0
@@ -14203,6 +14219,39 @@ def test_package_declaration_loops_require_fixed_distinct_names(tmp_path, monkey
     with pytest.raises(ti.aot.PackageExportError, match="fixed literal names"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize("case", ["mutable", "parameter", "local", "duplicate", "descriptor"])
+def test_package_declaration_name_sources_require_fixed_module_tuples(tmp_path, monkeypatch, case):
+    source = "NAMES = ('first', 'second')\n" + CONDITIONAL_LAYOUT_SOURCE
+    source = source.replace(
+        "        scope.static('first', choices=(False, True))\n        scope.static('second', choices=(False, True))",
+        "        for name in NAMES:\n            scope.static(name, choices=(False, True))",
+    )
+    if case == "mutable":
+        source = source.replace("NAMES = ('first', 'second')", "NAMES = ['first', 'second']")
+    elif case == "duplicate":
+        source = source.replace("NAMES = ('first', 'second')", "NAMES = ('first', 'first')")
+    elif case == "local":
+        source = source.replace(
+            "        for name in NAMES:", "        NAMES = ('first', 'second')\n        for name in NAMES:"
+        )
+    elif case == "parameter":
+        source = source.replace("def __init__(self,", "def __init__(self, NAMES,")
+    else:
+        source = """
+class Hidden:
+    @property
+    def names(self):
+        raise AssertionError('a declaration must not evaluate this descriptor')
+holder = Hidden()
+""" + source
+        source = source.replace("for name in NAMES:", "for name in holder.names:")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="fixed literal names"):
+        ti.aot.export_package(package, tmp_path / "sdk")
     assert not (tmp_path / "sdk").exists()
 
 

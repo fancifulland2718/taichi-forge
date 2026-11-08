@@ -246,7 +246,9 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
                 try:
                     names = ast.literal_eval(node.iter)
                 except (ValueError, TypeError):
-                    names = None
+                    from ._package_constants import definition_names
+
+                    names = definition_names(node.iter, namespace, constructor)
                 if (
                     not isinstance(names, (tuple, list))
                     or not names
@@ -311,7 +313,7 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
                         ast.copy_location(ast.Assign([copy.deepcopy(node.target)], ast.Constant(member)), node)
                     )
                     for statement in node.body:
-                        bound = Bind().visit(copy.deepcopy(statement))
+                        bound = ast.fix_missing_locations(Bind().visit(copy.deepcopy(statement)))
                         # A shared source line still denotes distinct binding
                         # sites. Keep relative ordering inside nested guards.
                         for part in ast.walk(bound):

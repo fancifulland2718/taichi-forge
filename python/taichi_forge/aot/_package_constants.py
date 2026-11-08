@@ -7,6 +7,35 @@ from taichi_forge_runtime._static_values import static_key
 from ._package_factories import _literal, _source_value
 
 
+def definition_names(expression, namespace, constructor):
+    """Read a fixed declaration-name tuple from its unshadowed module source."""
+    root = expression
+    while isinstance(root, ast.Attribute):
+        root = root.value
+    if not isinstance(root, ast.Name):
+        return None
+    for node in ast.walk(constructor):
+        if (
+            isinstance(node, ast.Name)
+            and node.id == root.id
+            and not isinstance(node.ctx, ast.Load)
+            or isinstance(node, ast.arg)
+            and node.arg == root.id
+            or isinstance(node, ast.alias)
+            and (node.asname or node.name.split(".")[0]) == root.id
+            or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler))
+            and node is not constructor
+            and node.name == root.id
+            or isinstance(node, (ast.Global, ast.Nonlocal))
+            and root.id in node.names
+        ):
+            return None
+    names = _source_value(expression, namespace)
+    # Unlike a literal list written at this declaration, a global mutable list
+    # can be populated by model preparation. It is not a definition contract.
+    return names if type(names) is tuple else None
+
+
 def class_constant(cls, name):
     value = inspect.getattr_static(cls, name)
     if not _literal(value):

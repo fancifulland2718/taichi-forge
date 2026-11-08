@@ -605,7 +605,11 @@ calculate independent byte offsets nor allocate fields in disabled branches.
 Direct tuple unpacking of a literal dimension-name generator uses the same extent algebra.
 
 Fixed literal-name loops may call `scope.static/constant/value/dim`, preserving
-declaration order and the loop variable's final value. Member names can use
+declaration order and the loop variable's final value. Names may also come from
+an unshadowed immutable module-level tuple, including a module-qualified reference,
+using the same declaration projection. Mutable global lists and property descriptors
+are not evaluated. The tuple organizes declaration names; actual constant values
+remain validated through numerical dependencies. Member names can use
 f-strings such as `f'{name}_mask'` made only from fixed strings; model values cannot
 enter names. This expands finite interface members, while `scope.value` remains
 runtime data and does not create numerical copies for each value. Conditional expressions
