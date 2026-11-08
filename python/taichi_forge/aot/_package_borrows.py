@@ -4,7 +4,7 @@ import ast
 from types import MappingProxyType
 
 
-def declaration(call, scope_path, schema, dimension, fail):
+def declaration(call, scope_path, schema, dimension, fail, *, preparation=False):
     """Admit known allocation paths, never infer a borrowed ABI from a sample."""
     if len(call.args) != 2 or not isinstance(call.args[0], ast.Constant):
         fail(call, "Package borrow requires a literal attribute and its declared source Field")
@@ -26,13 +26,23 @@ def declaration(call, scope_path, schema, dimension, fail):
         path.insert(0, node.attr)
         node = node.value
     parameter = node.id if isinstance(node, ast.Name) and node.id != "self" and not path else None
-    if scope_path and parameter is not None:
+    deferred = (
+        preparation
+        and isinstance(node, ast.Name)
+        and (
+            node.id != "self" or schema.get(path[0], {}).get("kind") not in ("owner", "owner_input", "dense_field")
+            if path
+            else node.id != "self"
+        )
+    )
+    if scope_path and parameter is not None and not deferred:
         fail(call, "Record borrowing requires a declared allocation path, not an untyped record input")
-    if parameter is None and (not isinstance(node, ast.Name) or node.id != "self" or not path):
+    if not deferred and parameter is None and (not isinstance(node, ast.Name) or node.id != "self" or not path):
         fail(call, "Borrowed Field requires a definition-proven self allocation path; untyped inputs are not sampled")
     source = schema.get(path[0], {}) if path else {}
     if (
-        parameter is None
+        not deferred
+        and parameter is None
         and source.get("kind") not in ("owner", "owner_input")
         and (
             source.get("kind") != "dense_field"
@@ -63,7 +73,8 @@ def declaration(call, scope_path, schema, dimension, fail):
 
     for key, target in resolved.items():
         if (
-            parameter is None
+            not deferred
+            and parameter is None
             and source.get("kind") not in ("owner", "owner_input")
             and (schema.get(key, {}).get("kind") != "dimension" or schema[key].get("path"))
         ):
@@ -80,7 +91,11 @@ def declaration(call, scope_path, schema, dimension, fail):
         kind="borrowed_field",
         **({"path": [*scope_path, name]} if scope_path else {}),
         source_path=path,
-        **({"input_parameter": parameter} if parameter is not None else {}),
+        **(
+            {"input_expression": call.args[1]}
+            if deferred
+            else {"input_parameter": parameter} if parameter is not None else {}
+        ),
         dimensions=relations,
         borrow_declaration=[call.lineno, call.col_offset],
     )
@@ -126,7 +141,7 @@ def project(owner, environment, schema):
         )
         if source is None:
             raise ValueError("Borrowed Field requires a declared original allocation")
-        if "input_parameter" in item and source.get("conditions"):
+        if ("input_parameter" in item or "input_method" in item) and source.get("conditions"):
             # An actual Field argument proves existence, not a numerical option.
             # Retain the source predicate as admission on its allocation owner.
             item["source_presence"] = [

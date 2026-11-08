@@ -133,7 +133,16 @@ def discover(sources, imported):
             if len(templates) > (1 if definition["owner"] is not None else 0):
                 kernels.setdefault(entry, (module, definition, tuple(templates)))
                 kernel_definitions.setdefault(entry, []).append(definition)
-    if not kernels:
+    requested = {}
+    for identity, schema in owners.items():
+        for name, item in schema.items():
+            if "input_expression" not in item:
+                continue
+            method = inspect.getattr_static(classes[identity], item["input_method"], None)
+            if method not in functions:
+                raise ValueError("Prepared input method is outside its ordinary source definition: " + identity)
+            requested.setdefault(method, []).append((identity, name, item))
+    if not kernels and not requested:
         return {}, []
 
     pending = deque()
@@ -147,11 +156,20 @@ def discover(sources, imported):
                 if inspect.isfunction(function) and function in functions:
                     parameters = list(inspect.signature(function).parameters)
                     if parameters and parameters[0] == "self":
-                        pending.append((function, {"self": _Owner(identity)}, (function,)))
+                        pending.append((function, {"self": _Owner(identity)}, (function,), None))
 
     visited, domains, covered, failures = set(), {}, set(), []
     invalid = set()
     return_cache = {}
+    binding_domains, binding_calls, binding_covered = {}, set(), set()
+
+    def source_callable(expression, namespace):
+        result = _source_value(expression, namespace)
+        if result is None and isinstance(expression, ast.Attribute):
+            cls = _source_value(expression.value, namespace)
+            if inspect.isclass(cls):
+                result = inspect.getattr_static(cls, expression.attr, None)
+        return result
 
     def member(owner, name):
         if isinstance(owner, _Record):
@@ -223,7 +241,7 @@ def discover(sources, imported):
                 and namespace.get("getattr", builtins.getattr) is builtins.getattr
             ):
                 return builtins.getattr
-            return _source_value(expression, namespace)
+            return source_callable(expression, namespace)
 
         def graph_source(expression, visiting=()):
             if isinstance(expression, ast.Name):
@@ -254,6 +272,11 @@ def discover(sources, imported):
         for name, expression in aliases.items():
             if not isinstance(expression, (ast.Dict, ast.DictComp, ast.Tuple, ast.List)):
                 dependencies[name] = {part.id for part in ast.walk(expression) if isinstance(part, ast.Name)}
+        record_dependencies = {
+            name: dependencies[name]
+            for name, expression in aliases.items()
+            if isinstance(expression, (ast.Name, ast.Attribute))
+        }
         reads = {}
         for part in nodes:
             if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load):
@@ -266,12 +289,34 @@ def discover(sources, imported):
                 retained(item, (*visited, name)) for item in dependencies.get(name, ())
             )
 
+        def record_retained(name, visited=()):
+            if name in visited:
+                return False
+            return reads.get(name, 0) > 1 or any(
+                record_retained(item, (*visited, name)) for item in record_dependencies.get(name, ())
+            )
+
+        def declared_receiver(expression, visiting=()):
+            if isinstance(expression, ast.Name):
+                name = expression.id
+                if name in arguments and name not in stores:
+                    return arguments[name]
+                if name in aliases and stores.get(name) == 1 and name not in visiting:
+                    return declared_receiver(aliases[name], (*visiting, name))
+            if isinstance(expression, ast.Attribute):
+                return member(declared_receiver(expression.value, visiting), expression.attr)
+            return None
+
         for part in nodes:
             if isinstance(part, (ast.Subscript, ast.Attribute)) and not isinstance(part.ctx, ast.Load):
                 tainted.update(n.id for n in ast.walk(part.value) if isinstance(n, ast.Name))
                 record_tainted.update(n.id for n in ast.walk(part.value) if isinstance(n, ast.Name))
             if isinstance(part, ast.Call):
                 resolved = source_value(part.func)
+                if isinstance(part.func, ast.Attribute):
+                    receiver = declared_receiver(part.func.value)
+                    if isinstance(receiver, _Owner):
+                        resolved = inspect.getattr_static(classes[receiver.identity], part.func.attr, None)
                 known = (
                     (inspect.isfunction(resolved) and (resolved in functions or resolved in kernels))
                     or _plain_record(resolved)
@@ -285,7 +330,7 @@ def discover(sources, imported):
                     (part.func.attr == "dispatch" and graph_source(part.func.value))
                     or (part.func.attr == "items" and not part.args and not part.keywords)
                 )
-                if not pure_mapping_use:
+                if not pure_mapping_use and not getattr(part, "_package_resource_metadata", False):
                     exposed = [*part.args, *(k.value for k in part.keywords)]
                     if isinstance(part.func, ast.Attribute):
                         exposed.append(part.func.value)
@@ -309,13 +354,13 @@ def discover(sources, imported):
                             or resolved not in kernels
                             and resolved is not builtins.getattr
                             and isinstance(item, ast.Name)
-                            and retained(n.id)
+                            and record_retained(n.id)
                         )
                     )
-        for taint_set in (tainted, record_tainted):
+        for taint_set, edges in ((tainted, dependencies), (record_tainted, record_dependencies)):
             pending_taints = list(taint_set)
             while pending_taints:
-                for dependency in dependencies.get(pending_taints.pop(), ()):
+                for dependency in edges.get(pending_taints.pop(), ()):
                     if dependency not in taint_set:
                         taint_set.add(dependency)
                         pending_taints.append(dependency)
@@ -542,18 +587,31 @@ def discover(sources, imported):
                         if inspect.isfunction(method) and (method in functions or method in kernels):
                             return method, receiver
                 return None, None
-            result = _source_value(expression, namespace)
+            result = source_callable(expression, namespace)
             return (result, None) if inspect.isfunction(result) else (None, None)
 
         return value, call_target, nodes, module
 
     while pending:
-        function, arguments, chain = pending.popleft()
+        function, arguments, chain, call_site = pending.popleft()
         identity = (function, tuple(sorted(arguments.items())))
+        value, target, nodes, module = build_context(function, arguments, (function,))
+        for owner, name, item in requested.get(function, ()):
+            receiver = arguments.get("self")
+            if not isinstance(receiver, _Owner) or receiver.identity != owner:
+                continue
+            fact = value(item["input_expression"])
+            if isinstance(fact, _Resource):
+                source = owners[fact.owner.identity].get(fact.path[0], {})
+                if source.get("kind") == "dense_field" and (
+                    len(fact.path) == 1 or source.get("struct_field") and len(fact.path) == 2
+                ):
+                    binding_domains.setdefault((owner, name), set()).add((fact.owner.identity, fact.path))
+                    if call_site is not None:
+                        binding_covered.add((function, call_site, owner, name))
         if identity in visited:
             continue
         visited.add(identity)
-        value, target, nodes, module = build_context(function, arguments, (function,))
 
         def record(callee, inputs, call):
             origin, definition, parameters = kernels[callee]
@@ -614,6 +672,9 @@ def discover(sources, imported):
             callee, receiver = target(call.func)
             if callee not in kernels and callee not in functions:
                 continue
+            for owner, name, _ in requested.get(callee, ()):
+                if isinstance(receiver, _Owner) and receiver.identity == owner:
+                    binding_calls.add((callee, id(call), owner, name))
             values = [receiver] if receiver is not None else []
             unknown_expansion = any(k.arg is None for k in call.keywords)
             for argument in call.args:
@@ -639,6 +700,10 @@ def discover(sources, imported):
                     failures.append(f"{module}:{call.lineno}: free Kernel argument mismatch: {error}")
                     invalid.add(callee)
                 continue
+            for owner, name, _ in requested.get(callee, ()):
+                actual = bound.arguments.get("self")
+                if isinstance(actual, _Owner) and actual.identity == owner:
+                    binding_calls.add((callee, id(call), owner, name))
             if callee in kernels:
                 record(callee, bound.arguments, call)
             elif any(item is not None for item in bound.arguments.values()):
@@ -653,19 +718,41 @@ def discover(sources, imported):
                             f"{module}:{call.lineno}: recursive Kernel input forwarding changes its source context"
                         )
                 else:
-                    pending.append((callee, inputs, (*chain, callee)))
+                    pending.append((callee, inputs, (*chain, callee), id(call)))
 
     # An input domain must cover each ordinary direct use in the scanned source,
     # not just the first convenient model path. Unknown forwarding stays a gap.
     for function, (module, node) in functions.items():
         for call in ast.walk(node):
             if isinstance(call, ast.Call) and id(call) not in covered:
-                callee = _source_value(call.func, function.__globals__)
+                callee = source_callable(call.func, function.__globals__)
+                for owner, name, _ in requested.get(callee, ()):
+                    binding_calls.add((callee, id(call), owner, name))
                 if isinstance(call.func, ast.Attribute) and call.func.attr == "dispatch" and call.args:
                     callee = _source_value(call.args[0], function.__globals__)
                 if inspect.isfunction(callee) and callee in domains:
                     failures.append(f"{module}:{call.lineno}: free Kernel call has no proven receiver context")
                     invalid.add(callee)
+
+    for entries in requested.values():
+        for owner, name, item in entries:
+            identities = binding_domains.get((owner, name), ())
+            if len(identities) != 1 or any(
+                key not in binding_covered for key in binding_calls if key[2:] == (owner, name)
+            ):
+                failures.append(
+                    f"{owner}.{name}: prepared Field input requires one proven allocation source at every call"
+                )
+                continue
+            source_type, source_member = next(iter(identities))
+            private_source = "_forge_package_source_" + name
+            item.update(
+                source_type=source_type, source_member=list(source_member), source_path=[private_source, *source_member]
+            )
+            del item["input_expression"]
+            owners[owner][private_source] = dict(
+                kind="owner_input", owner_type=source_type, field_input=name, binding_phase="preparation"
+            )
 
     result = {}
     for kernel, identities in domains.items():

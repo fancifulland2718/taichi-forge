@@ -1199,6 +1199,18 @@ rebind. Focused CPU/CUDA source-free checks reject cross-instance record members
 inconsistent dimensions and changed aliases. This does not infer layout from an
 arbitrary record argument or execute a binding factory to obtain a model sample.
 
+Version 56 extends that binding to preparation inputs with a proven original
+allocation. The existing Host-call analysis traces frozen record factories,
+normal method forwarding and a preceding single-assignment owner alias. Every
+discovered call must resolve to one source owner type and Field member; unknown
+or conflicting sources reject before numerical compilation. Preparation binds
+the caller's actual instance without copying or reallocating the source. Runtime
+checks its package, type, path, alias and dimension relations before publishing
+the private source link. A failed binding does not replace that link; arbitrary
+earlier Host writes are still outside the rollback boundary. CPU/CUDA source-free
+checks cover new sizes, independent/rebound inputs and retained Graph snapshots.
+Optional Field inputs and more complex binding factories remain separate gaps.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

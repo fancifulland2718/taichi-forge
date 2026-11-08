@@ -1325,15 +1325,36 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
             )
             allowed.add(id(call.func.value))
         elif method == "borrow" and isinstance(statement, ast.Expr):
+            from collections import ChainMap
             from ._package_borrows import declaration
 
             name, spec = declaration(
                 call,
                 scope_paths[scope],
-                {**(earlier or {}), **declarations},
+                ChainMap(declarations, earlier or {}),
                 dimension,
                 lambda node, message: fail(module, node, message),
+                preparation=getattr(constructor, "_package_preparation_method", False),
             )
+            if "input_expression" in spec:
+                expression = spec["input_expression"]
+                if (
+                    isinstance(expression, ast.Attribute)
+                    and isinstance(expression.value, ast.Name)
+                    and expression.value.id == "self"
+                ):
+                    assignments = [
+                        prior
+                        for prior in constructor.body
+                        if isinstance(prior, ast.Assign)
+                        and len(prior.targets) == 1
+                        and ast.dump(prior.targets[0]).replace("Store()", "Load()") == ast.dump(expression)
+                        and prior.lineno < call.lineno
+                    ]
+                    if len(assignments) != 1 or member_stores.get(expression.attr) != 1:
+                        fail(module, call, "Prepared input alias requires one preceding source assignment")
+                    spec["input_expression"] = assignments[0].value
+                spec["input_method"] = constructor.name
             parameter = spec.get("input_parameter")
             if parameter is not None and (parameter not in parameter_names or stores[parameter] != 1):
                 fail(module, call, "Borrowed input requires an unmodified constructor parameter")
@@ -1375,7 +1396,12 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                     for prior in constructor.body
                 )
             )
-            if not scope_paths[scope] and member_stores.get(name, 0) and not prior_input_binding:
+            if (
+                not scope_paths[scope]
+                and member_stores.get(name, 0)
+                and not prior_input_binding
+                and "input_expression" not in spec
+            ):
                 fail(module, call, "Borrowed Field cannot replace an existing owner attribute")
             spec["scope_allocation"] = origin(scope)
             add(name, spec, call)
@@ -1917,4 +1943,15 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 call,
                 "Computed static domain requires a proven model tensor axis; otherwise use literal choices",
             )
+    for call in (node for node in ast.walk(constructor) if isinstance(node, ast.Call)):
+        if id(call) in record_calls or operation(call)[1] in (
+            "record",
+            "borrow",
+            "dim",
+            "parent_dim",
+            "value",
+            "static",
+            "require_le",
+        ):
+            call._package_resource_metadata = True
     return declarations

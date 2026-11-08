@@ -3402,6 +3402,174 @@ class Model:
 """
 
 
+def _prepared_input_source():
+    source = RECORD_BORROW_SOURCE.replace(
+        "record.borrow('values', self.storage,", "record.borrow('values', binding.values,"
+    )
+    source = source.replace("        scope.storage = scope.field(ti.i32, shape=scope.dim('n'))", "")
+    source = source.replace("        scope = ti.experimental.ResourceScope(self)\n", "", 1)
+    source = source.replace("        preparations += 1", "        preparations += 1\n        self.n = binding.n")
+    source += """
+@ti.data_oriented
+class Source:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.storage = scope.field(ti.i32, shape=scope.dim('n'))
+        scope.other = scope.field(ti.i32, shape=scope.dim('n'))
+def make_binding(source):
+    return Binding(source.n, source.storage)
+class Harness:
+    def __init__(self, n):
+        scope = ti.experimental.ResourceScope(self)
+        scope.source = Source(n)
+        scope.consumer = Model(n)
+    def prepare(self):
+        binding = make_binding(self.source)
+        self.consumer.prepare(binding)
+"""
+    return source
+
+
+@pytest.mark.parametrize("alias", [False, True, "explicit"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_prepared_inputs_follow_record_factory_sources(tmp_path, monkeypatch, alias):
+    source = _prepared_input_source()
+    if alias is True:
+        source = source.replace(
+            "        self.n = binding.n", "        self.n = binding.n\n        self.input = binding.values"
+        )
+        source = source.replace(
+            "record = scope.record('binding', binding, optional=True)", "record = scope.record('binding', binding)"
+        )
+        source = source.replace(
+            "        if binding is not None:\n            size = record.dim('n')\n"
+            "            record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})",
+            "        record.dim('n')\n        scope.borrow('input', self.input, source_scope=True, dimensions={'n': scope.dim('n')})",
+        )
+        source = source.replace("self.binding.values[i]", "self.input[i]")
+    elif alias == "explicit":
+        source = source.replace("self.consumer.prepare(binding)", "Model.prepare(self.consumer, binding)")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    module = sys.modules["definition_fixture.model"]
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 56
+    assert module.constructors == module.preparations == 0
+    reference = module.Harness(7)
+    reference.source.storage.from_numpy(np.arange(7, dtype=np.int32))
+    reference.prepare()
+    reference.consumer.step(3)
+    expected = reference.consumer.output.to_numpy()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        host = code.host.model
+        a, b = host.Harness(7), host.Harness(31)
+        assert not hasattr(a.consumer, "output")
+        a.source.storage.from_numpy(np.arange(7, dtype=np.int32))
+        b.source.storage.from_numpy(np.arange(31, dtype=np.int32) * 2)
+        a.prepare()
+        b.prepare()
+        a.consumer.step(3)
+        np.testing.assert_array_equal(a.consumer.output.to_numpy(), expected)
+        saved = a.consumer.graph().bind({"delta": 5})
+        previous = a.consumer.output
+        # Rebind the consumer to another valid Source instance of a new size.
+        # Already prepared work retains both the old input and output groups.
+        a.consumer.prepare(host.make_binding(b.source))
+        a.consumer.step(9)
+        saved.run()
+        np.testing.assert_array_equal(previous.to_numpy(), np.arange(7) + 5)
+        np.testing.assert_array_equal(a.consumer.output.to_numpy(), np.arange(31) * 2 + 9)
+        saved.close()
+        resources = set(runtime._resources)
+        with pytest.raises(ValueError, match="declared allocation member"):
+            a.consumer.prepare(host.Binding(31, b.source.other))
+        assert set(runtime._resources) == resources
+        a.consumer.prepare(host.make_binding(b.source))
+        resources = set(runtime._resources)
+        with pytest.raises(ValueError, match="Dimension constraint"):
+            a.consumer.prepare(host.Binding(6, a.source.storage))
+        assert set(runtime._resources) == resources
+        contract = next(
+            item
+            for item in manifest["owners"]["definition_fixture.model.Model"].values()
+            if item.get("input_method") == "prepare"
+        )
+        assert getattr(a.consumer, contract["source_path"][0]) is b.source
+        a.consumer.prepare(host.make_binding(b.source))
+        if alias is True:
+            a.consumer.input = b.source.other
+        else:
+            a.consumer.binding = host.Binding(31, b.source.other)
+        with pytest.raises(ValueError, match="source|alias|allocation"):
+            a.consumer.step(0)
+        with load_package(runtime, tmp_path / "sdk") as foreign:
+            other_source = foreign.host.model.Source(13)
+            resources = set(runtime._resources)
+            with pytest.raises(ValueError, match="child owner"):
+                a.consumer.prepare(host.Binding(13, other_source.storage))
+            assert set(runtime._resources) == resources
+            assert getattr(a.consumer, contract["source_path"][0]) is b.source
+    probe = tmp_path / "consume_prepared_input.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.model.Harness(19), code.host.model.Harness(67)
+            a.source.storage.from_numpy(np.arange(19, dtype=np.int32))
+            b.source.storage.from_numpy(np.arange(67, dtype=np.int32) * 2)
+            a.prepare(); b.prepare()
+            a.consumer.step(4); b.consumer.step(9)
+            np.testing.assert_array_equal(a.consumer.output.to_numpy(), np.arange(19) + 4)
+            np.testing.assert_array_equal(b.consumer.output.to_numpy(), np.arange(67) * 2 + 9)
+        print('PREPARED_INPUT_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PREPARED_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["unknown_call", "unknown_explicit", "two_sources", "unreachable", "mutable"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_prepared_inputs_require_complete_source_calls(tmp_path, monkeypatch, change):
+    source = _prepared_input_source()
+    if change == "unknown_call":
+        source += "\n    def unknown(self, binding):\n        self.consumer.prepare(binding)\n"
+    elif change == "unknown_explicit":
+        source += "\n    def unknown(self, binding):\n        Model.prepare(self.consumer, binding)\n"
+    elif change == "two_sources":
+        source += "\n    def other(self):\n        self.consumer.prepare(Binding(self.source.n, self.source.other))\n"
+    elif change == "unreachable":
+        source = source.replace("        self.consumer.prepare(binding)", "        pass")
+    else:
+        source = source.replace("@dataclass(frozen=True)", "@dataclass")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ti.aot.PackageExportError, match="prepared Field input requires"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_prepared_record_borrows_preserve_source_layout(tmp_path, monkeypatch):
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=RECORD_BORROW_SOURCE)

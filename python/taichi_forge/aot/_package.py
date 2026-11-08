@@ -1357,6 +1357,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 for item in schema.values()
             ):
                 manifest["version"] = max(55, manifest["version"])
+            if any(item.get("input_method") for item in schema.values()):
+                manifest["version"] = max(56, manifest["version"])
             if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):
                 manifest["version"] = max(15, manifest["version"])
             if any(item.get("struct_field") for item in schema.values()):

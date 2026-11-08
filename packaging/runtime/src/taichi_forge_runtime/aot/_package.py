@@ -545,21 +545,29 @@ class _ModuleBinding:
             setattr(scope._root, contract["source_path"][0], None)
             setattr(scope._owner, name, None)
             return None
-        if "input_parameter" in contract:
-            from ._package_values import check_owner_bindings
+        source_binding = None
+        if "input_parameter" in contract or "input_method" in contract:
+            from ._package_values import owner_type
 
             source = getattr(field, "_forge_package_field_source", None)
             if source is None or tuple(contract["source_member"]) != source[1]:
                 raise ValueError("Borrowed input differs from its declared allocation member")
-            setattr(scope._root, contract["source_path"][0], source[0])
-            check_owner_bindings(
-                scope._root,
-                (dict(path=contract["source_path"][:1], owner_type=contract["source_type"]),),
-            )
-        if contract.get("kind") != "borrowed_field" or path_value(scope._root, contract["source_path"]) is not field:
+            if (
+                getattr(source[0], "_forge_package_owner", None) is not self.package
+                or owner_type(source[0]) != contract["source_type"]
+            ):
+                raise ValueError("Declared child owner differs from its package definition")
+            source_binding = (contract["source_path"][0], source[0])
+
+        def binding_value(path):
+            if source_binding is not None and path and path[0] == source_binding[0]:
+                return path_value(source_binding[1], path[1:])
+            return path_value(scope._root, path)
+
+        if contract.get("kind") != "borrowed_field" or binding_value(contract["source_path"]) is not field:
             raise ValueError("Borrowed Field differs from its declared allocation")
         for predicate in contract.get("source_presence", ()):
-            if path_value(scope._root, predicate["path"]) is not predicate["expected"]:
+            if binding_value(predicate["path"]) is not predicate["expected"]:
                 raise ValueError("Borrowed input source allocation presence changed")
         from .._dimensions import freeze_extent, check_constraints
 
@@ -572,11 +580,13 @@ class _ModuleBinding:
         check_constraints(
             {key: value["spec"] for key, value in contract.get("constraints", {}).items()},
             lambda key: (
-                path_value(scope._root, contract["dimension_paths"][key])
+                binding_value(contract["dimension_paths"][key])
                 if key in contract.get("dimension_paths", {})
                 else dimension_value(scope._root, key)
             ),
         )
+        if source_binding is not None:
+            setattr(scope._root, source_binding[0], source_binding[1])
         if scope._parent is None:
             setattr(scope._owner, name, field)
         return field
@@ -1016,6 +1026,7 @@ def managed_class(package, cls):
                     dict(path=item.get("path", [name]), owner_type=item["owner_type"])
                     for name, item in package.manifest["owners"].get(selected_key, {}).items()
                     if item["kind"] in ("owner", "owner_input")
+                    and item.get("binding_phase") != "preparation"
                     and all(getattr(self, flag) is expected for flag, expected in item.get("conditions", {}).items())
                 ),
             )
@@ -1344,6 +1355,7 @@ class LoadedPackage:
                 53,
                 54,
                 55,
+                56,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
