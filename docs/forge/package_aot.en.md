@@ -765,6 +765,11 @@ helper passes three-backend source-free checks with an optional second group.
 
 Fixed field-name tuples/lists used in `setattr(scope, name, scope.field(...))`
 (also vector/matrix/struct factories) expand to ordinary resource declarations.
+The member expression may add fixed string prefixes/suffixes or use an f-string
+without conversions or format specifications. Immutable definition tuples reuse
+the same source proof as declaration-name loops; mutable global lists and string
+function calls are not evaluated. CPU/CUDA checks cover shared layout, independent
+instances and isolated source-free consumption of these forms.
 The original allocation order and final loop-variable value are retained; native
 layout construction distinguishes multiple members from the same source call.
 The allocation expression must be independent of the loop variable. Duplicate

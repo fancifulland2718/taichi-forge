@@ -343,38 +343,58 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
                 or call.keywords
                 or node.orelse
                 or not isinstance(node.target, ast.Name)
-                or not isinstance(name, ast.Name)
-                or name.id != node.target.id
+                or node.target.id in scope_names | {"self"}
                 or not isinstance(allocation, ast.Call)
                 or not isinstance(allocation.func, ast.Attribute)
                 or not isinstance(allocation.func.value, ast.Name)
                 or allocation.func.value.id != receiver.id
                 or allocation.func.attr not in ("field", "vector_field", "matrix_field", "struct_field")
-                or any(isinstance(n, ast.Name) and n.id == name.id for n in ast.walk(allocation))
+                or any(isinstance(n, ast.Name) and n.id == node.target.id for n in ast.walk(allocation))
             ):
                 fail(module, node, "Field-name loop requires an unshadowed literal member declaration")
-            if not isinstance(node.iter, (ast.Tuple, ast.List)) or not node.iter.elts:
-                fail(module, node.iter, "Field-name loop requires an explicit nonempty literal tuple/list")
-            names = []
-            for item in node.iter.elts:
-                if not (
-                    isinstance(item, ast.Constant)
-                    and type(item.value) is str
-                    and item.value.isidentifier()
-                    and not item.value.startswith("__")
-                    and item.value not in names
+            try:
+                members = ast.literal_eval(node.iter)
+            except (ValueError, TypeError):
+                from ._package_constants import definition_names
+
+                members = definition_names(node.iter, namespace, constructor)
+            if not isinstance(members, (tuple, list)) or not members:
+                fail(module, node.iter, "Field-name loop requires a fixed nonempty tuple/list")
+
+            def member_name(expression, member):
+                if isinstance(expression, ast.Name) and expression.id == node.target.id:
+                    return member
+                if isinstance(expression, ast.Constant) and type(expression.value) is str:
+                    return expression.value
+                if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+                    return member_name(expression.left, member) + member_name(expression.right, member)
+                if isinstance(expression, ast.JoinedStr):
+                    return "".join(member_name(part, member) for part in expression.values)
+                if (
+                    isinstance(expression, ast.FormattedValue)
+                    and expression.conversion == -1
+                    and expression.format_spec is None
                 ):
-                    fail(module, item, "Field-name loop requires distinct non-mangled literal member names")
-                names.append(item.value)
+                    return member_name(expression.value, member)
+                fail(module, expression, "Field-name loop requires a fixed string expression")
+
+            names = []
+            for item in members:
+                if type(item) is not str:
+                    fail(module, node.iter, "Field-name loop requires fixed string members")
+                selected = member_name(name, item)
+                if not (selected.isidentifier() and not selected.startswith("__") and selected not in names):
+                    fail(module, name, "Field-name loop requires distinct non-mangled literal member names")
+                names.append(selected)
             result = []
-            for member in names:
+            for member, selected in zip(members, names):
                 # Retain the ordinary loop variable's last value and original
                 # allocation order. Only fixed declarations expand, not kernels.
                 result.append(ast.copy_location(ast.Assign([copy.deepcopy(node.target)], ast.Constant(member)), node))
                 result.append(
                     ast.copy_location(
                         ast.Assign(
-                            [ast.Attribute(copy.deepcopy(receiver), member, ast.Store())], copy.deepcopy(allocation)
+                            [ast.Attribute(copy.deepcopy(receiver), selected, ast.Store())], copy.deepcopy(allocation)
                         ),
                         node.body[0],
                     )

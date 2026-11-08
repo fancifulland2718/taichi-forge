@@ -13160,11 +13160,21 @@ class Model:
         np.testing.assert_array_equal(b.values.to_numpy(), np.arange(1, 20))
 
 
-@test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_path, monkeypatch):
+@pytest.mark.parametrize("names", ["literal", "prefix", "formatted", "global_tuple"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_path, monkeypatch, names):
     from tests.python.test_aot_dense_snode_group import _compiled_nodes
 
-    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=FIELD_LOOP_SOURCE)
+    source, prefix = FIELD_LOOP_SOURCE, "" if names == "literal" else "state_"
+    if prefix:
+        expression = "f'state_{name}'" if names == "formatted" else "'state_' + name"
+        source = source.replace("setattr(scope, name,", "setattr(scope, " + expression + ",")
+        for name in ("values", "vectors"):
+            source = source.replace("self." + name, "self." + prefix + name)
+    if names == "global_tuple":
+        source = source.replace("constructors = 0", "MEMBERS = ('values', 'weights')\nconstructors = 0")
+        source = source.replace("for name in ('values', 'weights'):", "for name in MEMBERS:")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert len(manifest["entries"]) == 2
@@ -13172,27 +13182,72 @@ def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_pat
         assert len([n for n in archive.namelist() if n.endswith((".ll", ".bc", ".spv"))]) == 2
     original = package.Model(7)
     original.step()
-    root = ti.lang.impl.get_runtime().prog.get_snode_root(original.values.snode.ptr.get_snode_tree_id())
+    root = ti.lang.impl.get_runtime().prog.get_snode_root(
+        getattr(original, prefix + "values").snode.ptr.get_snode_tree_id()
+    )
     nodes = _compiled_nodes(root)
     expected = np.arange(7)[:, None] * np.arange(1, 4)[None, :]
-    np.testing.assert_array_equal(original.vectors.to_numpy(), expected)
+    np.testing.assert_array_equal(getattr(original, prefix + "vectors").to_numpy(), expected)
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7), code.host.Model(19)
-        assert a.values._group_owner.layout["nodes"] == nodes
+        values, vectors = getattr(a, prefix + "values"), getattr(a, prefix + "vectors")
+        assert values._group_owner.layout["nodes"] == nodes
         assert a.last_member == original.last_member == "weights"
         assert a.last_vector == original.last_vector == "unused_vectors"
-        assert a.values._group_owner is a.vectors._group_owner
+        assert values._group_owner is vectors._group_owner
         a.step()
         b.step()
-        np.testing.assert_array_equal(a.vectors.to_numpy(), expected)
-        np.testing.assert_array_equal(a.weights.to_numpy(), 0)
-        np.testing.assert_array_equal(a.unused_vectors.to_numpy(), 0)
+        np.testing.assert_array_equal(vectors.to_numpy(), expected)
+        np.testing.assert_array_equal(getattr(a, prefix + "weights").to_numpy(), 0)
+        np.testing.assert_array_equal(getattr(a, prefix + "unused_vectors").to_numpy(), 0)
         a.tree.destroy()
         b.step()
-        np.testing.assert_array_equal(b.values.to_numpy(), 2)
+        np.testing.assert_array_equal(getattr(b, prefix + "values").to_numpy(), 2)
+    if names == "global_tuple":
+        probe = tmp_path / "consume_member_names.py"
+        probe.write_text(
+            textwrap.dedent("""
+            import importlib.abc, sys
+            import numpy as np
+            class NoSource(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                        raise AssertionError(fullname)
+            sys.meta_path.insert(0, NoSource())
+            from taichi_forge_runtime.aot import Runtime, load_package
+            with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+                a, b = code.host.Model(5), code.host.Model(11)
+                a.step(); b.step(); a.step()
+                np.testing.assert_array_equal(a.state_values.to_numpy(), 2)
+                np.testing.assert_array_equal(b.state_values.to_numpy(), 1)
+                np.testing.assert_array_equal(a.state_vectors.to_numpy(), np.arange(5)[:, None] * np.arange(1, 4)[None, :])
+                assert a.last_member == 'weights'
+            print('MEMBER_NAMES_SOURCE_FREE_OK')
+        """),
+            encoding="utf8",
+        )
+        env = dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        )
+        result = subprocess.run(
+            [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "MEMBER_NAMES_SOURCE_FREE_OK" in result.stdout
 
 
-@pytest.mark.parametrize("change", ["dynamic", "duplicate", "name_use", "mangled", "shadow", "effect"])
+@pytest.mark.parametrize(
+    "change",
+    ["dynamic", "duplicate", "name_use", "mangled", "shadow", "effect", "computed", "same_name", "mutable_names"],
+)
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_field_name_loops_reject_unproven_declarations(tmp_path, monkeypatch, change):
     model = FIELD_LOOP_SOURCE
@@ -13206,6 +13261,13 @@ def test_package_field_name_loops_reject_unproven_declarations(tmp_path, monkeyp
         model = model.replace("('values', 'weights')", "('__values', 'weights')")
     elif change == "shadow":
         model = model.replace("self, n: int):", "self, n: int, setattr=None):")
+    elif change == "computed":
+        model = model.replace("setattr(scope, name,", "setattr(scope, name.upper(),")
+    elif change == "same_name":
+        model = model.replace("setattr(scope, name,", "setattr(scope, 'same',")
+    elif change == "mutable_names":
+        model = model.replace("constructors = 0", "MEMBERS = ['values', 'weights']\nconstructors = 0")
+        model = model.replace("for name in ('values', 'weights'):", "for name in MEMBERS:")
     else:
         model = model.replace(
             "                setattr(scope, name, scope.field",
