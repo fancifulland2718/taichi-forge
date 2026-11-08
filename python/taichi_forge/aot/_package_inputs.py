@@ -40,10 +40,11 @@ def default_owner_call(constructor, parameter, before):
 
 def resolve_inputs(sources, imported):
     from ._package_factories import _source_value
+    from ._package_input_families import source_class, split_field_inputs
 
     owners = {
-        name + "." + owner: (schema, getattr(imported[name], owner))
-        for name, _, _, _, _, _, schemas, _ in sources
+        name + "." + owner: (schema, getattr(imported[name], source_class(tree, owner)))
+        for name, _, _, _, tree, _, schemas, _ in sources
         for owner, schema in schemas.items()
     }
     inputs = {
@@ -119,7 +120,7 @@ def resolve_inputs(sources, imported):
                 bound.apply_defaults()
             except TypeError as error:
                 raise ValueError("Declared constructor argument mismatch: " + target) from error
-            calls.setdefault(target, []).append((caller, bound.arguments))
+            calls.setdefault(target, []).append((caller, bound.arguments, item))
     untyped_targets = {owner for owner, name in inputs if (owner, name) not in annotated}
     for name, _, _, _, tree, *_ in sources:
         for node in ast.walk(tree):
@@ -210,7 +211,7 @@ def resolve_inputs(sources, imported):
         for (owner, name), item in inputs.items():
             observed_all = {
                 identity
-                for caller, args in calls.get(owner, ())
+                for caller, args, _ in calls.get(owner, ())
                 for identity in (input_types(caller, args.get(item["input_parameter"])) or ())
             }
             observed = observed_all - {absent}
@@ -218,6 +219,9 @@ def resolve_inputs(sources, imported):
                 item["optional_input"] = True
                 changed = True
             if len(observed) > 1:
+                if item["kind"] == "borrowed_field":
+                    split_field_inputs(sources, owner, inputs, calls.get(owner, ()), input_types)
+                    return resolve_inputs(sources, imported)
                 raise ValueError(f"Owner input {owner}.{name} has incompatible source definitions: {sorted(observed)}")
             if (owner, name) in annotated and observed - {origin(item)}:
                 raise ValueError(f"Owner input {owner}.{name} contradicts its declared source type")
@@ -258,7 +262,7 @@ def resolve_inputs(sources, imported):
             or any(
                 (actual := input_types(caller, args.get(item["input_parameter"]))) is None
                 or not actual <= ({origin(item), absent} if item.get("optional_input") else {origin(item)})
-                for caller, args in sites
+                for caller, args, _ in sites
             )
         ):
             raise ValueError(f"Owner input {owner}.{name} requires a proven source at every declared constructor call")

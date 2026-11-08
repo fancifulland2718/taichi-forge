@@ -461,7 +461,6 @@ def test_package_field_input_uses_original_tensor_member_layout(tmp_path, monkey
     "change, diagnostic",
     [
         (("Reader(self.values, n)", "Reader(None, n)"), "proven source"),
-        (("Reader(self.values, n)", "Reader(self.spare, self.m)"), "incompatible source"),
         (
             (
                 "scope = ti.experimental.ResourceScope(self)\n        self.n = n",
@@ -482,6 +481,37 @@ def test_package_field_input_rejects_missing_or_conflicting_source(tmp_path, mon
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk/package.json").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_input_retains_distinct_source_dimension_relations(tmp_path, monkeypatch):
+    package = _source_package(
+        tmp_path,
+        monkeypatch,
+        FIELD_INPUT_SOURCE.replace("Reader(self.values, n)", "Reader(self.spare, self.m)").replace(
+            "dimensions={'n': extent}, ", ""
+        ),
+    )
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert len(manifest["input_families"]["definition_fixture.model.Reader"]) == 2
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(7, True)
+        model.storage.reader.step(2.0)
+        model.reader.step(-3.0)
+        np.testing.assert_array_equal(model.storage.spare.to_numpy(), 2 * np.arange(9))
+        np.testing.assert_array_equal(model.storage.values.to_numpy(), -3 * np.arange(7))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_typed_field_inputs_preserve_declared_dimension_rejections(tmp_path, monkeypatch):
+    package = _source_package(
+        tmp_path, monkeypatch, FIELD_INPUT_SOURCE.replace("Reader(self.values, n)", "Reader(self.spare, self.m)")
+    )
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        with pytest.raises(ValueError, match="constraint"):
+            code.host.Model(7, True)
+        assert code._arrays == []
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -1077,6 +1107,181 @@ def test_package_declared_owner_graph_shares_children_and_keeps_instance_binding
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "CHILD_DEFINITIONS_SOURCE_FREE_OK" in result.stdout
+
+
+TYPED_FIELD_INPUT_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Storage:
+    def __init__(self, n: int, width: int):
+        global constructors
+        constructors += 1
+        self.n, self.width = n, width
+        scope = ti.experimental.ResourceScope(self)
+        columns = scope.dim('width')
+        scope.scalar = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+        scope.record = scope.struct_field({'x': ti.f32, 'v': ti.types.vector(self.width, ti.f32), 'id': ti.i32}, shape=scope.dim('n'), initialization='zero')
+@ti.data_oriented
+class Checkpoint:
+    def __init__(self, values):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('source', values, source_scope=True)
+        scope.backup = scope.field_like(self.source, layout=ti.Layout.SOA, initialization='zero')
+    @ti.kernel
+    def save(self):
+        for i in ti.grouped(self.source):
+            self.backup[i] = self.source[i]
+    @ti.kernel
+    def restore(self):
+        for i in ti.grouped(self.source):
+            self.source[i] = self.backup[i]
+    @ti.kernel
+    def common(self) -> ti.i32:
+        return 7
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, width: int):
+        scope = ti.experimental.ResourceScope(self)
+        scope.storage = Storage(n, width)
+        scope.first = Checkpoint(self.storage.scalar)
+        scope.second = Checkpoint(self.storage.record)
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.first.save)
+        builder.dispatch(self.second.save)
+        return builder.compile()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_typed_field_inputs_share_host_and_keep_dynamic_models(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, TYPED_FIELD_INPUT_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert manifest["version"] == 43
+    assert len(manifest["input_families"]["definition_fixture.model.Checkpoint"]) == 2
+    common = [item for item in manifest["entries"].values() if item["definition"].endswith(".common")]
+    assert len(common) == 1
+    host = (tmp_path / "sdk/host/model.py").read_text()
+    assert host.count("class Checkpoint:") == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(5, 3), code.host.Model(11, 7)
+        assert type(a.first) is type(a.second) is type(b.second)
+        assert a.first.source is a.storage.scalar
+        assert a.second.source is a.storage.record
+        for model, n, width in ((a, 5, 3), (b, 11, 7)):
+            scalar = np.arange(n, dtype=np.float32)
+            record = dict(
+                x=scalar * 3,
+                v=np.arange(n * width, dtype=np.float32).reshape(n, width),
+                id=np.arange(n, dtype=np.int32),
+            )
+            model.storage.scalar.from_numpy(scalar)
+            model.storage.record.from_numpy(record)
+            model.first.save()
+            model.second.save()
+            model.storage.scalar.from_numpy(scalar * 0)
+            model.storage.record.x.from_numpy(scalar * 0)
+            model.first.restore()
+            model.second.restore()
+            np.testing.assert_array_equal(model.storage.scalar.to_numpy(), scalar)
+            for key, expected in record.items():
+                np.testing.assert_array_equal(model.storage.record.to_numpy()[key], expected)
+            assert model.first.common() == model.second.common() == 7
+        graph = a.graph()
+        prepared = graph.bind({})
+        original = a.first.source
+        a.first.source = b.storage.record
+        with pytest.raises(ValueError, match="Borrowed Field"):
+            a.first.restore()
+        with pytest.raises(ValueError, match="Borrowed Field"):
+            graph.bind({})
+        prepared.run()
+        prepared.close()
+        a.first.source = original
+        with pytest.raises(ValueError, match="unique declared"):
+            type(a.first)(a.storage.record.v)
+    probe = tmp_path / "consume_typed_inputs.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError('Numerical source is not available: ' + fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(7, 5), code.host.Model(13, 9)
+    for model, n, width in ((a, 7, 5), (b, 13, 9)):
+        values = np.arange(n, dtype=np.float32)
+        vectors = np.arange(n * width, dtype=np.float32).reshape(n, width)
+        model.storage.scalar.from_numpy(values)
+        model.storage.record.v.from_numpy(vectors)
+        model.graph().run({})
+        model.storage.scalar.from_numpy(values * 0)
+        model.storage.record.v.from_numpy(vectors * 0)
+        model.first.restore()
+        model.second.restore()
+        np.testing.assert_array_equal(model.storage.scalar.to_numpy(), values)
+        np.testing.assert_array_equal(model.storage.record.v.to_numpy(), vectors)
+    np.testing.assert_array_equal(a.storage.scalar.to_numpy(), np.arange(7))
+print('TYPED_INPUT_SOURCE_FREE_OK')
+""",
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "TYPED_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_typed_inputs_use_declared_tuples_without_cartesian_expansion(tmp_path, monkeypatch):
+    source = (
+        TYPED_FIELD_INPUT_SOURCE.replace("def __init__(self, values):", "def __init__(self, values, peer):")
+        .replace(
+            "scope.borrow('source', values, source_scope=True)",
+            "scope.borrow('source', values, source_scope=True)\n        scope.borrow('peer', peer, source_scope=True)",
+        )
+        .replace("Checkpoint(self.storage.scalar)", "Checkpoint(self.storage.scalar, self.storage.record)")
+        .replace("Checkpoint(self.storage.record)", "Checkpoint(self.storage.record, self.storage.scalar)")
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert len(manifest["input_families"]["definition_fixture.model.Checkpoint"]) == 2
+    assert len([item for item in manifest["entries"].values() if item["definition"].endswith(".common")]) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(7, 5)
+        model.first.save()
+        model.second.save()
+        with pytest.raises(ValueError, match="unique declared"):
+            type(model.first)(model.storage.scalar, model.storage.scalar)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_typed_inputs_reject_unproven_host_selection(tmp_path, monkeypatch):
+    source = TYPED_FIELD_INPUT_SOURCE.replace(
+        "Checkpoint(self.storage.scalar)", "Checkpoint(self.storage.scalar if n > 3 else self.storage.record)"
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match="one proven source"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
 
 
 FIELD_LIKE_SOURCE = """

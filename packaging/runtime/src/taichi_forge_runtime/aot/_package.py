@@ -327,6 +327,7 @@ class _ModuleBinding:
         if construction is None or construction[0] is not self.package:
             raise ValueError("Field allocation requires its managed constructor")
         _, allocated, owner = construction
+        owner_key = self.owner_contract(owner, owner_key)
         for alias, value, expression in dimension_aliases:
             actual = self.extent(value.expression, owner) if isinstance(value, Extent) else operator.index(value)
             if actual != self.extent(expression, owner):
@@ -472,6 +473,7 @@ class _ModuleBinding:
             or construction[2] is not scope._root
         ):
             raise ValueError("Owner input requires its managed constructor scope")
+        owner_key = self.owner_contract(scope._root, owner_key)
         declaration = self.package.manifest["owners"][owner_key].get(name, {})
         if declaration.get("kind") != "owner_input":
             raise ValueError("Owner input differs from its declared reference")
@@ -509,6 +511,7 @@ class _ModuleBinding:
             or external is not False
         ):
             raise ValueError("Borrowed Field requires its managed source-scope construction")
+        owner_key = self.owner_contract(scope._root, owner_key)
         contract = self.package.manifest["owners"][owner_key].get(name, {})
         if contract.get("optional_input") and field is None:
             setattr(scope._root, contract["source_path"][0], None)
@@ -564,10 +567,27 @@ class _ModuleBinding:
         self.package._check()
         if getattr(owner, "_forge_package_owner", None) is not self.package:
             raise ValueError("Resource builder belongs to another loaded package")
-        return _GroupBuilder(owner, owner_key + ":" + group)
+        return _GroupBuilder(owner, self.owner_contract(owner, owner_key) + ":" + group)
+
+    def owner_contract(self, owner, key):
+        from ._package_values import owner_type
+
+        if key in self.package.manifest.get("input_families", {}):
+            selected = owner_type(owner)
+            if not any(item["owner"] == selected for item in self.package.manifest["input_families"][key]):
+                raise ValueError("Typed owner has no selected resource contract")
+            return selected
+        return key
+
+    def has_contract(self, owner, key):
+        from ._package_values import owner_type
+
+        return owner_type(owner) == key
 
     def context_builder(self, owner, key):
         self.package._check()
+        identity, separator, group = key.partition(":")
+        key = self.owner_contract(owner, identity) + separator + group
         construction = _construction.get()
         if (
             getattr(owner, "_forge_package_owner", None) is not self.package
@@ -626,7 +646,9 @@ class _ModuleBinding:
         self.package._check()
         if getattr(owner, "_forge_package_owner", None) is not self.package:
             raise ValueError("Constant declaration belongs to another loaded package")
-        key = type(owner)._forge_package_type
+        from ._package_values import owner_type
+
+        key = owner_type(owner)
         declaration = self.package.manifest["owners"][key][name]
         if declaration["kind"] != "constant":
             raise ValueError("Missing definition constant contract")
@@ -716,7 +738,9 @@ class _ResourceScope:
         ):
             raise ValueError("owner_dim requires a declared owner reference and dimension")
         package = self._root._forge_package_owner
-        schema = package.manifest["owners"][type(self._root)._forge_package_type]
+        from ._package_values import owner_type
+
+        schema = package.manifest["owners"][owner_type(self._root)]
         path = (reference, name)
         identity = "__record_" + "_".join(f"{len(part)}_{part}" for part in path)
         if schema.get(identity, {}).get("owner_dimension") != list(path):
@@ -799,22 +823,52 @@ def managed_class(package, cls):
         else package.manifest["module_root"] + relative
     )
     key = module + "." + cls.__name__
+    family = package.manifest.get("input_families", {}).get(key)
+    parameter_key = family[0]["owner"] if family else key
     parameters = {
         name: item["presence_parameter"]
-        for name, item in package.manifest["owners"].get(key, {}).items()
-        if item.get("presence_owner") == key
+        for name, item in package.manifest["owners"].get(parameter_key, {}).items()
+        if item.get("presence_owner") == parameter_key
     }
-    signature = inspect.signature(original) if parameters else None
+    signature = inspect.signature(original) if parameters or family else None
 
     @functools.wraps(original)
     def initialize(self, *args, **kwargs):
         package._check()
+        selected_key = key
+        if family:
+            from ._package_values import owner_type
+
+            bound = signature.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            matches = []
+            for candidate in family:
+                for parameter, expected in candidate["inputs"].items():
+                    actual = bound.arguments[parameter]
+                    source = (
+                        getattr(actual, "_forge_package_field_source", None)
+                        if expected["kind"] == "borrowed_field"
+                        else (actual, ())
+                    )
+                    if (
+                        source is None
+                        or getattr(source[0], "_forge_package_owner", None) is not package
+                        or owner_type(source[0]) != expected["source_type"]
+                        or tuple(expected["source_member"]) != source[1]
+                    ):
+                        break
+                else:
+                    matches.append(candidate["owner"])
+            if len(matches) != 1:
+                raise ValueError("Constructor inputs have no unique declared resource contract")
+            selected_key = matches[0]
+            self._forge_package_contract = selected_key
         if parameters:
             bound = signature.bind(self, *args, **kwargs)
             bound.apply_defaults()
             for attribute, parameter in parameters.items():
                 value = bound.arguments[parameter]
-                if package.manifest["owners"][key][attribute].get("presence_nonnull"):
+                if package.manifest["owners"][selected_key][attribute].get("presence_nonnull"):
                     value = value is not None
                 elif type(value) is not bool:
                     raise ValueError(f"Optional resource parameter {parameter!r} requires a boolean")
@@ -838,7 +892,7 @@ def managed_class(package, cls):
                 self,
                 (
                     dict(path=item.get("path", [name]), owner_type=item["owner_type"])
-                    for name, item in package.manifest["owners"].get(key, {}).items()
+                    for name, item in package.manifest["owners"].get(selected_key, {}).items()
                     if item["kind"] in ("owner", "owner_input")
                     and all(getattr(self, flag) is expected for flag, expected in item.get("conditions", {}).items())
                 ),
@@ -882,7 +936,19 @@ class entry:
         self._selected = {}
         self._conditions = {}
         self._selection_order = []
-        if self.family is not None:
+        if self.family is not None and "owner_inputs" in self.family:
+            for identity, target in self.family["owner_inputs"].items():
+                contract = package.manifest.get("entry_families", {}).get(target) or package.manifest["entries"].get(
+                    target
+                )
+                if (
+                    identity not in package.manifest["owners"]
+                    or contract is None
+                    or "owner_inputs" in contract
+                    or contract["arguments"] != self.family["arguments"]
+                ):
+                    raise ValueError("Typed entry family references incompatible numerical code")
+        if self.family is not None and "owner_inputs" not in self.family:
             self._domain = {
                 name: {static_key(read_static_key(key)) for key in values}
                 for name, values in self.family["domain"].items()
@@ -1008,6 +1074,15 @@ class entry:
             return self
         if owner is None:
             raise ValueError("Static package entries require their bound instance")
+        if "owner_inputs" in self.family:
+            from ._package_values import owner_type
+
+            symbol = self.family["owner_inputs"].get(owner_type(owner))
+            if symbol is None:
+                raise ValueError("Numerical method has no implementation for its input contract")
+            if symbol not in self._selected:
+                self._selected[symbol] = entry(self.package, symbol)
+            return self._selected[symbol]._select(owner)
         values = {}
         for name in self._selection_order:
             if not all(
@@ -1096,6 +1171,7 @@ class LoadedPackage:
                 40,
                 41,
                 42,
+                43,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

@@ -32,10 +32,12 @@ def layout_owner(environment, schema, name):
 
 class OwnerGraph:
     def __init__(self, sources, imported, module):
+        from ._package_input_families import source_class
+
         self.imported, self.module = imported, module
         self.definitions = {
-            name + "." + owner: (name, owner, copy.deepcopy(schema))
-            for name, _, _, _, _, _, schemas, _ in sources
+            name + "." + owner: (name, source_class(tree, owner), copy.deepcopy(schema))
+            for name, _, _, _, tree, _, schemas, _ in sources
             for owner, schema in schemas.items()
         }
         for identity in self.definitions:

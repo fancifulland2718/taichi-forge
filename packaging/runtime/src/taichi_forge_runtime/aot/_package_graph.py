@@ -11,7 +11,7 @@ import itertools
 
 from ._plan import ExecutionPlan
 from ._runtime import Scalar
-from ._package_values import capture_value, check_admission
+from ._package_values import capture_value, check_admission, owner_type
 from .._dimensions import extent_dependencies, local_workspace_shape, check_model_static_ranges
 from .._static_values import static_key
 
@@ -88,7 +88,7 @@ class GraphBuilder:
     def _record_plan_values(self, owner):
         if owner is None:
             return
-        schema = self.package.manifest["owners"].get(type(owner)._forge_package_type, {})
+        schema = self.package.manifest["owners"].get(owner_type(owner), {})
         for name, item in schema.items():
             if not item.get("affects_plan"):
                 continue

@@ -3,8 +3,7 @@
 from types import SimpleNamespace
 
 from .._static_values import read_static_key, static_key
-from ._package_values import path_value
-
+from ._package_values import path_value, owner_type
 
 def bind_closure(package, identity, values, *, options=None):
     package._check()
@@ -39,7 +38,7 @@ def bind_closure(package, identity, values, *, options=None):
                 owner, member = source
                 if (
                     getattr(owner, "_forge_package_owner", None) is not package
-                    or getattr(type(owner), "_forge_package_type", None) != candidate["owner_type"]
+                    or owner_type(owner) != candidate["owner_type"]
                     or list(member) != payload
                     or path_value(owner, payload) is not value
                 ):
@@ -108,7 +107,7 @@ class _TemplateEntry:
 
     def _bind(self, owner):
         self.package._check()
-        identity = getattr(type(owner), "_forge_package_type", None)
+        identity = owner_type(owner)
         if getattr(owner, "_forge_package_owner", None) is not self.package or identity not in self._entries:
             raise ValueError("Cold template factory requires its declared receiver in the same package")
         return self._entries[identity].__get__(owner)

@@ -261,6 +261,11 @@ def _host_projection(
     error_interfaces=frozenset(),
     host_contexts=None,
 ):
+    input_families = getattr(tree, "_package_input_families", {})
+    context_schemas = owners
+    owners = dict(owners)
+    for base, variants in input_families.items():
+        owners[base] = context_schemas[variants[0]["owner"].rpartition(".")[2]]
     numerical = {item["name"]: item for item in definitions}
     definitions_at = {
         (item["node"].lineno, item["node"].col_offset): item for item in definitions if not item.get("inherited")
@@ -356,7 +361,32 @@ def _host_projection(
                 and schema.get(target.attr, {}).get("kind") == "dense_field"
                 and schema[target.attr]["allocation"] == [node.lineno, node.col_offset]
             ):
-                node.value = field_allocation(module + "." + self.owner, target.attr, schema)
+                variants = input_families.get(self.owner)
+                if variants:
+                    value = None
+                    for variant in reversed(variants):
+                        identity = variant["owner"]
+                        allocation = field_allocation(
+                            identity, target.attr, context_schemas[identity.rpartition(".")[2]]
+                        )
+                        value = (
+                            allocation
+                            if value is None
+                            else ast.IfExp(
+                                ast.Call(
+                                    ast.Attribute(
+                                        ast.Name(_PREFIX + "runtime", ast.Load()), "has_contract", ast.Load()
+                                    ),
+                                    [ast.Name("self", ast.Load()), ast.Constant(identity)],
+                                    [],
+                                ),
+                                allocation,
+                                value,
+                            )
+                        )
+                    node.value = value
+                else:
+                    node.value = field_allocation(module + "." + self.owner, target.attr, schema)
                 return node
             return self.generic_visit(node)
 
@@ -1078,6 +1108,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             and definition["kind"] in ("kernel", "pyfunc")
             and not definition.get("error_interface")
         ],
+        input_families={
+            name + "." + base: variants
+            for name, _, _, _, tree, *_ in sources
+            for base, variants in getattr(tree, "_package_input_families", {}).items()
+        },
         error_interfaces=[
             name + "." + definition["name"]
             for name, _, _, _, _, _, _, definitions in sources
@@ -1086,6 +1121,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
         ],
     )
     payloads = {}
+    if manifest["input_families"]:
+        manifest["version"] = 43
     if manifest["target_selections"] or any(
         backend_query(node, kind) or backend_constant(node, kind) is not None
         for _, _, _, _, tree, kind, _, _ in sources
@@ -1264,7 +1301,22 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         if len(path) > 1:
                             item.setdefault("member_ids", {})[path[1]] = attribute
         entries = {}
-        compiled_definitions = list(definitions)
+        compiled_definitions = []
+        input_families = getattr(tree, "_package_input_families", {})
+        for definition in definitions:
+            variants = input_families.get(definition["owner"])
+            if variants:
+                for variant in variants:
+                    context = variant["owner"].rpartition(".")[2]
+                    compiled_definitions.append(
+                        {
+                            **definition,
+                            "owner": context,
+                            "name": context + definition["name"][len(definition["owner"]) :],
+                        }
+                    )
+            else:
+                compiled_definitions.append(definition)
         for class_name in schemas:
             for attribute, call, recipe in factory_calls.get(name + "." + class_name, ()):
                 closure_environment = copy.copy(environments[class_name])
@@ -1546,6 +1598,27 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         ),
                     )
                 )
+        for definition in definitions:
+            variants = input_families.get(definition["owner"])
+            if (
+                not variants
+                or definition["kind"] not in ("kernel", "pyfunc")
+                or definition.get("requires_owner")
+                or definition.get("error_interface")
+            ):
+                continue
+            methods = {
+                variant["owner"]: entries[
+                    variant["owner"].rpartition(".")[2] + definition["name"][len(definition["owner"]) :]
+                ]["symbol"]
+                for variant in variants
+            }
+            identity = json.dumps([name + "." + definition["name"], methods], sort_keys=True).encode()
+            symbol = "inputs_" + hashlib.sha256(identity).hexdigest()
+            first = next(iter(methods.values()))
+            contract = manifest["entry_families"].get(first) or manifest["entries"][first]
+            manifest["entry_families"][symbol] = dict(arguments=contract["arguments"], owner_inputs=methods)
+            entries[definition["name"]] = dict(symbol=symbol)
         host_source, minimum_version, producer_only = _host_projection(
             name,
             tree,

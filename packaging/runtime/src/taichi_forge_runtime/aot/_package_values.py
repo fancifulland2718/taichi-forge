@@ -22,6 +22,10 @@ def dimension_value(owner, name):
     return path_value(owner, getattr(owner, "_forge_package_dimension_paths", {}).get(name, (name,)))
 
 
+def owner_type(owner):
+    return getattr(owner, "_forge_package_contract", getattr(type(owner), "_forge_package_type", None))
+
+
 def check_admission(owner, contract):
     admission = contract.get("admission")
     if admission:
@@ -54,7 +58,7 @@ def check_owner_bindings(owner, bindings):
             raise ValueError("Owner reference no longer refers to its declared source")
         if (
             getattr(child, "_forge_package_owner", None) is not owner._forge_package_owner
-            or getattr(type(child), "_forge_package_type", None) != binding["owner_type"]
+            or owner_type(child) != binding["owner_type"]
         ):
             raise ValueError("Declared child owner differs from its package definition")
 

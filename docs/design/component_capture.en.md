@@ -1333,6 +1333,21 @@ can originate at the source owner. Newly built group names may change; existing
 frozen artifacts continue to use their versioned contracts. CPU/CUDA gates cover
 independent record copies, code reuse at 3/19 elements and frozen consumption at 37.
 
+Definition package format 43 supports several declared allocation sources for
+one class borrowing a Field. Export derives resource contracts from actual
+argument tuples at declared constructor calls, without executing constructors or
+forming a Cartesian product of individual parameter domains. Host retains one
+class; construction selects an instance contract from same-package allocation
+provenance, then numerical methods select implementations of the original
+definitions. Model sizes do not select types; methods that ignore the inputs
+continue sharing code. `field_like` allocates an independent backup from the
+selected source contract. Dimension checks, aliases, failure cleanup and prepared
+snapshots remain effective. Local CPU/CUDA checks cover scalar and model-vector
+Struct Fields, new sizes and source-free consumption. Each declared call must
+currently have one proved source; dynamic source selection, heterogeneous owner
+collection discovery, optional/type-domain combinations and cold Kernel factories
+inside these objects are not qualified by this slice.
+
 
 Declared resource records and non-owning owner references can pass through
 unannotated `ti.func` arguments and local aliases. The frontend retains their
