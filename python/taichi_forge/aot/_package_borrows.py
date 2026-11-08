@@ -15,7 +15,7 @@ def needs_source_proof(expression, schema):
     )
 
 
-def declaration(call, scope_path, schema, dimension, fail, *, preparation=False):
+def declaration(call, scope_path, schema, dimension, fail, *, preparation=False, namespace_check):
     """Admit known allocation paths, never infer a borrowed ABI from a sample."""
     if len(call.args) != 2 or not isinstance(call.args[0], ast.Constant):
         fail(call, "Package borrow requires a literal attribute and its declared source Field")
@@ -83,10 +83,10 @@ def declaration(call, scope_path, schema, dimension, fail, *, preparation=False)
         ):
             fail(call, "Borrowed dimension is absent from the original allocation namespace")
         if not isinstance(target, Extent) or any(
-            schema.get(n, {}).get("kind") != "dimension" or tuple(schema[n].get("path", (n,))[:-1]) != tuple(scope_path)
-            for n in extent_dependencies(target.expression)
+            schema.get(n, {}).get("kind") != "dimension" for n in extent_dependencies(target.expression)
         ):
             fail(call, "Borrowed target relation requires dimensions in its declaration namespace")
+        namespace_check(target)
         relations[key] = target.expression
     from ._component import _capture_id
 

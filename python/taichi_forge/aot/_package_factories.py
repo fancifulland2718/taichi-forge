@@ -402,7 +402,7 @@ def normalize_factories(tree, namespace, module, fail, kind):
                     if getattr(statement, "_package_resource_context", None) is not None:
                         scopes.add(statement.items[0].optional_vars.id)
                         yield from statements(statement.body)
-                    elif isinstance(statement, ast.If):
+                    elif isinstance(statement, (ast.If, ast.For)):
                         yield from statements(statement.body)
                         yield from statements(statement.orelse)
                     else:

@@ -20,6 +20,10 @@ def expand_alias_loop(node, scope_names, constructor, namespace, fail):
     ):
         return None
     iterator = node.iter
+    if isinstance(iterator, (ast.Tuple, ast.List)):
+        # Literal member lists use the same declaration-loop projection as
+        # dimensions and values; mapping aliases retain this source guard.
+        return None
     if not (
         not node.orelse
         and isinstance(iterator, ast.Call)

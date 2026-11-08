@@ -1225,6 +1225,15 @@ dimension relations. Absence does not evaluate them; later calls and preparation
 still check them even after the Host declaration ran. This guard cannot qualify
 constraints on an unrelated resource.
 
+Preparation declarations may iterate a tuple/list of distinct literal member names,
+using the original borrow helper or member non-None guards for borrows and constraints.
+Record scopes follow the same rule. Unshadowed `getattr(binding, name)` becomes a
+literal member path without running factories or expanding model data or numerical
+loops. Borrow dimension relations across record scopes require the existing
+`record.parent_dim`; directly mixing dimensions from another scope still rejects.
+Focused CPU/CUDA source-free checks cover this declaration form, not arbitrary
+cross-method Field binding sources.
+
 Version 58 lets the present arm of a declared optional record own explicit workspace
 groups, using the existing record-presence contract without another configuration
 boolean. Entries that do not use the record gain no code variants. Absent records

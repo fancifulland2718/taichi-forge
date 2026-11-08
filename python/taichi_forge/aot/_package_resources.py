@@ -131,6 +131,24 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
         ):
             scope_bindings.append((node.targets[0].id, (node.lineno, node.col_offset)))
 
+    # Record handles are declaration namespaces as well. Follow their lexical
+    # source binding without reading the record or running its factory.
+    for node in sorted(ast.walk(constructor), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "record"
+            and isinstance(node.value.func.value, ast.Name)
+            and any(
+                name == node.value.func.value.id and start <= (node.lineno, node.col_offset)
+                for name, start in scope_bindings
+            )
+        ):
+            scope_bindings.append((node.targets[0].id, (node.lineno, node.col_offset)))
+
     def scope_names_at(node):
         # A normal Host object may acquire a ResourceScope alias later in its
         # constructor. Only declarations after that binding (or within the
@@ -192,18 +210,23 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
             )
             if aliases is not None:
                 return aliases
-            declaration_calls = [
-                statement.value
-                for statement in node.body
-                if isinstance(statement, ast.Expr)
-                and isinstance(statement.value, ast.Call)
-                and isinstance(statement.value.func, ast.Attribute)
-                and isinstance(statement.value.func.value, ast.Name)
-                and statement.value.func.value.id in scope_names
-                and statement.value.func.attr in ("static", "constant", "value", "dim")
-            ]
-            if declaration_calls and len(declaration_calls) == len(node.body):
-                if node.orelse or not isinstance(node.target, ast.Name) or node.target.id in scope_names:
+
+            def declarations(body):
+                return bool(body) and all(
+                    isinstance(statement, ast.Expr)
+                    and isinstance(statement.value, ast.Call)
+                    and isinstance(statement.value.func, ast.Attribute)
+                    and isinstance(statement.value.func.value, ast.Name)
+                    and statement.value.func.value.id in scope_names
+                    and statement.value.func.attr in ("static", "constant", "value", "dim", "borrow", "require_le")
+                    or isinstance(statement, ast.If)
+                    and declarations(statement.body)
+                    and (not statement.orelse or declarations(statement.orelse))
+                    for statement in body
+                )
+
+            if declarations(node.body):
+                if node.orelse or not isinstance(node.target, ast.Name) or node.target.id in scope_names | {"self"}:
                     fail(module, node, "Declaration-name loop requires a single literal-name binding")
                 try:
                     names = ast.literal_eval(node.iter)
@@ -221,12 +244,48 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
                     def visit_Name(self, value):
                         return ast.copy_location(ast.Constant(member), value) if value.id == node.target.id else value
 
+                    def visit_Call(self, value):
+                        value = self.generic_visit(value)
+                        if (
+                            isinstance(value.func, ast.Name)
+                            and value.func.id == "getattr"
+                            and len(value.args) == 2
+                            and not value.keywords
+                            and isinstance(value.args[1], ast.Constant)
+                            and type(value.args[1].value) is str
+                            and value.args[1].value.isidentifier()
+                            and not value.args[1].value.startswith("__")
+                        ):
+                            if namespace.get("getattr", getattr) is not getattr or any(
+                                isinstance(n, ast.Name)
+                                and n.id == "getattr"
+                                and not isinstance(n.ctx, ast.Load)
+                                or isinstance(n, ast.arg)
+                                and n.arg == "getattr"
+                                or isinstance(n, ast.alias)
+                                and (n.asname or n.name.split(".")[0]) == "getattr"
+                                for n in ast.walk(constructor)
+                            ):
+                                fail(module, value, "Declaration member access requires the unshadowed getattr builtin")
+                            return ast.copy_location(
+                                ast.Attribute(value.args[0], value.args[1].value, ast.Load()), value
+                            )
+                        return value
+
                 result = []
-                for member in names:
+                for index, member in enumerate(names):
                     result.append(
                         ast.copy_location(ast.Assign([copy.deepcopy(node.target)], ast.Constant(member)), node)
                     )
-                    result.extend(Bind().visit(copy.deepcopy(statement)) for statement in node.body)
+                    for statement in node.body:
+                        bound = Bind().visit(copy.deepcopy(statement))
+                        # A shared source line still denotes distinct binding
+                        # sites. Keep relative ordering inside nested guards.
+                        for part in ast.walk(bound):
+                            if isinstance(part, (ast.expr, ast.stmt)):
+                                part.col_offset += index + 1
+                                part.end_col_offset = max(part.end_col_offset or 0, part.col_offset + 1)
+                        result.append(bound)
                 return result
             if (
                 len(node.body) != 1
@@ -1402,6 +1461,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 dimension,
                 lambda node, message: fail(module, node, message),
                 preparation=getattr(constructor, "_package_preparation_method", False),
+                namespace_check=lambda value: namespace_check(scope, value, call),
             )
             if "input_expression" in spec:
                 expression = spec["input_expression"]

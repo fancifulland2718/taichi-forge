@@ -3604,11 +3604,26 @@ def _optional_prepared_input_source():
     )
 
 
-@pytest.mark.parametrize("form", ["guard", "helper", "conditional_source", "constraint"])
+@pytest.mark.parametrize(
+    "form", ["guard", "helper", "conditional_source", "constraint", "helper_loop", "guard_loop", "parent_loop"]
+)
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_optional_prepared_field_inputs_reuse_presence_contract(tmp_path, monkeypatch, form):
     source = _optional_prepared_input_source()
-    if form == "constraint":
+    if form in ("helper_loop", "guard_loop", "parent_loop"):
+        start = source.index("        if binding.values is not None:")
+        end = source.index("        with resource_group(self, 'output'", start)
+        body = (
+            "            declare_source(record, name, getattr(binding, name), dimensions={'n': size})\n"
+            if form in ("helper_loop", "parent_loop")
+            else "            if getattr(binding, name) is not None:\n"
+            "                record.borrow(name, getattr(binding, name), source_scope=True, dimensions={'n': size})\n"
+        )
+        source = source[:start] + "        for name in ('values', 'unused'):\n" + body + source[end:]
+        source += FIELD_HELPER_SOURCE
+        if form == "parent_loop":
+            source = source.replace("size = record.dim('n')", "record.dim('n')\n        size = record.parent_dim('n')")
+    elif form == "constraint":
         source = source.replace("    unused: object = None", "    unused: object = None\n    limit: int = 0")
         source = source.replace(
             "record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})",
@@ -3730,13 +3745,16 @@ def test_package_optional_prepared_field_inputs_reuse_presence_contract(tmp_path
 
 
 @pytest.mark.parametrize(
-    "change", ["wrong_guard", "unknown_factory", "no_source", "unguarded_numerics", "unrelated_constraint"]
+    "change",
+    ["wrong_guard", "unknown_factory", "no_source", "unguarded_numerics", "unrelated_constraint", "foreign_dimension"],
 )
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_optional_prepared_inputs_reject_unproven_sources(tmp_path, monkeypatch, change):
     source = _optional_prepared_input_source()
     if change == "wrong_guard":
         source = source.replace("if binding.values is not None:", "if binding.unused is not None:")
+    elif change == "foreign_dimension":
+        source = source.replace("size = record.dim('n')", "size = record.dim('n')\n        size = scope.dim('n')")
     elif change == "unrelated_constraint":
         source = source.replace(
             "record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})",
@@ -3752,6 +3770,37 @@ def test_package_optional_prepared_inputs_reject_unproven_sources(tmp_path, monk
         source = source.replace("if ti.static(self.binding.values is not None):", "if ti.static(True):")
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     with pytest.raises(ti.aot.PackageExportError):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
+@pytest.mark.parametrize("change", ["model_names", "duplicate_names", "shadowed_getattr"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_prepared_input_member_loops_require_fixed_names(tmp_path, monkeypatch, change):
+    source = _optional_prepared_input_source()
+    start = source.index("        if binding.values is not None:")
+    end = source.index("        with resource_group(self, 'output'", start)
+    names = (
+        "binding.names"
+        if change == "model_names"
+        else "('values', 'values')" if change == "duplicate_names" else "('values', 'unused')"
+    )
+    source = (
+        source[:start]
+        + (
+            f"        for name in {names}:\n"
+            "            record.borrow(name, getattr(binding, name), source_scope=True, dimensions={'n': size})\n"
+        )
+        + source[end:]
+    )
+    if change == "shadowed_getattr":
+        source = source.replace(
+            "        size = record.dim('n')",
+            "        getattr = lambda owner, key: None\n        size = record.dim('n')",
+        )
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ti.aot.PackageExportError, match="fixed|unshadowed"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert not (tmp_path / "sdk").exists()
     assert sys.modules["definition_fixture.model"].constructors == 0
