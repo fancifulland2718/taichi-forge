@@ -4693,6 +4693,83 @@ def graph():
     np.testing.assert_array_equal(frames[0][2].to_numpy(), 2 * (np.arange(7) + 1.5) + 13)
 
 
+@pytest.mark.parametrize("cross_module", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_inherited_preparation_binds_concrete_ports(tmp_path, monkeypatch, cross_module):
+    mixin = """
+import taichi_forge as dsl
+class Ports:
+    def prepare(self, values):
+        scope = dsl.experimental.ResourceScope(self)
+        scope.borrow('values', values, external=True, dtype=dsl.f32, shape=scope.dim('n'))
+        self.scale = 1.0
+        scope.value('scale', dsl.f32)
+"""
+    model = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model(Ports):
+    def __init__(self, n: int):
+        self.n = n
+        self.values = None
+    @ti.kernel
+    def update(self, gain: ti.f32):
+        for i in self.values:
+            self.values[i] += self.scale * gain * (i + 1)
+@ti.data_oriented
+class Other(Ports):
+    def __init__(self, n: int):
+        self.n = n
+        self.values = None
+    @ti.kernel
+    def update(self, gain: ti.f32):
+        for i in self.values:
+            self.values[i] -= self.scale * gain * (i + 1)
+"""
+    source = ("from .ports import Ports\n" if cross_module else mixin) + model
+    package = _source_package(tmp_path, monkeypatch, source, initializer="")
+    if cross_module:
+        (tmp_path / "definition_fixture/ports.py").write_text(mixin, encoding="utf8")
+        monkeypatch.delitem(sys.modules, "definition_fixture.ports", raising=False)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    origin = "definition_fixture." + ("ports" if cross_module else "model") + ".Ports"
+    assert manifest["version"] == 62
+    assert manifest["preparation_owners"][origin] == [
+        "definition_fixture.model.Model",
+        "definition_fixture.model.Other",
+    ]
+    assert origin not in manifest["owners"]
+    assert manifest["field_groups"] == {}
+    # Hide private solver definitions while leaving caller-side JIT available.
+    for name in tuple(sys.modules):
+        if name == "definition_fixture" or name.startswith("definition_fixture."):
+            monkeypatch.delitem(sys.modules, name)
+    (tmp_path / "definition_fixture").rename(tmp_path / "producer_sources")
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        module = code.module("definition_fixture.model")
+        instances = []
+        for n, cls, sign in ((3, module.Model, 1), (17, module.Other, -1)):
+            caller = ti.field(ti.f32, shape=n)
+            caller.fill(2)
+            view = runtime.import_dense_view(ti.experimental.ndarray_view(caller))
+            current = cls(n)
+            current.prepare(view)
+            current.update(3)
+            instances.append((current, caller, view, sign))
+        for current, caller, view, sign in reversed(instances):
+            current.update(2)
+            np.testing.assert_array_equal(caller.to_numpy(), 2 + sign * 5 * (np.arange(current.n) + 1))
+            invalid = runtime.ndarray("i32", (current.n,))
+            try:
+                with pytest.raises(ValueError, match="dtype"):
+                    current.prepare(invalid)
+            finally:
+                invalid.close()
+            assert current.values is view
+        for _, _, view, _ in instances:
+            view.close()
+
+
 @pytest.mark.parametrize("tensor", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_typed_external_borrow_uses_caller_storage_contract(tmp_path, monkeypatch, tensor):
@@ -9855,12 +9932,22 @@ class Model:
 """
 
 
+@pytest.mark.parametrize("inherited", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_late_resource_context_preserves_generations(tmp_path, monkeypatch):
-    package, source = _resource_context_fixture(tmp_path, monkeypatch, model=PREPARATION_FIELDS_SOURCE)
+def test_package_late_resource_context_preserves_generations(tmp_path, monkeypatch, inherited):
+    model = PREPARATION_FIELDS_SOURCE
+    if inherited:
+        start, end = model.index("    def prepare("), model.index("    @ti.kernel")
+        prepare = model[start:end]
+        model = model[:start] + model[end:]
+        model = model.replace(
+            "@ti.data_oriented\nclass Model:",
+            "class Workspace:\n" + prepare + "\n@ti.data_oriented\nclass Model(Workspace):",
+        )
+    package, source = _resource_context_fixture(tmp_path, monkeypatch, model=model)
     module = sys.modules["definition_fixture.model"]
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 53
+    assert manifest["version"] == (62 if inherited else 53)
     assert module.constructors == module.preparations == 0
     original = package.Model()
     original.prepare(3)

@@ -1335,6 +1335,14 @@ Workspace declarations may read another declared Field's `.dtype`, including
 same-owner aliases and tensor scalar types. Resolution uses resource contracts,
 without executing constructors; unknown or cyclic type sources reject.
 
+Version 62 collects declared preparation methods through the effective Python
+method hierarchy, including ordinary mixins without a constructor. Typed ports,
+values and explicit workspace groups bind to the concrete receiver contract;
+the mixin does not become another distribution root. Focused CPU/CUDA checks
+cover cross-module ports, independent instances, late workspace replacement,
+failure cleanup and retained Graph generations. Ambiguous group identities and
+custom receiver lookup reject. This does not qualify complete EFC export.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

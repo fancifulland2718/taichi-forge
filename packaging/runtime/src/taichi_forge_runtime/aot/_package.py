@@ -682,6 +682,11 @@ class _ModuleBinding:
     def owner_contract(self, owner, key):
         from ._package_values import owner_type
 
+        if key in self.package.manifest.get("preparation_owners", {}):
+            selected = owner_type(owner)
+            if selected not in self.package.manifest["preparation_owners"][key]:
+                raise ValueError("Inherited preparation has no declared receiver contract")
+            return selected
         if key in self.package.manifest.get("input_families", {}):
             selected = owner_type(owner)
             if not any(item["owner"] == selected for item in self.package.manifest["input_families"][key]):
@@ -1494,6 +1499,7 @@ class LoadedPackage:
                 59,
                 60,
                 61,
+                62,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

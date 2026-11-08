@@ -137,8 +137,6 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
             continue
         methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
         constructor = methods.get("__init__")
-        if constructor is None:
-            continue
         selected, active = set(), set()
 
         def calls(function):
@@ -248,7 +246,8 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                 )
             active.remove(function.name)
 
-        visit(constructor)
+        if constructor is not None:
+            visit(constructor)
         # A declared resource group may be prepared after construction. Reading
         # its schema must not execute the method or move that allocation into
         # __init__. Only explicit group contexts have an independent lifetime;

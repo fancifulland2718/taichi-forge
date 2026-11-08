@@ -107,15 +107,18 @@ def _signature_failures(sources, imported_modules):
     return failures
 
 
-def _owner_schema(module, node, kind, namespace, *, include_preparation=False):
+def _owner_schema(module, node, kind, namespace, *, include_preparation=False, functions=None, earlier=None):
     """Infer types from syntax, never run __init__ or select a model branch."""
     if node.keywords:
         _fail(module, node, "custom owner metaclasses require further support")
-    schema = {}
-    for function in construction_functions(node):
+    schema = copy.deepcopy(earlier) if earlier is not None else {}
+    for function in construction_functions(node) if functions is None else functions:
         if getattr(function, "_package_preparation_method", False) and not include_preparation:
             continue
         for name, declaration in _construction_schema(module, node, function, kind, namespace, schema).items():
+            if functions is not None:
+                declaration["declaration_module"] = module
+                declaration["declaration_owner"] = node.name
             if getattr(function, "_package_preparation_method", False) and declaration.get("external"):
                 declaration["binding_phase"] = "preparation"
             if getattr(function, "_package_preparation_method", False) and declaration["kind"] == "borrowed_field":
@@ -139,7 +142,7 @@ def _owner_schema(module, node, kind, namespace, *, include_preparation=False):
                 )
             if name in schema and schema[name]["kind"] != "value":
                 previous = schema[name]
-                origins = ("scope_allocation", "scope_allocations")
+                origins = ("scope_allocation", "scope_allocations", "declaration_module", "declaration_owner")
                 if declaration["kind"] == previous["kind"] == "dimension" and (
                     {k: v for k, v in declaration.items() if k not in origins}
                     == {k: v for k, v in previous.items() if k not in origins}
@@ -270,7 +273,11 @@ def _analyze(module, source, namespace, target):
                 continue
             if decorators not in ([], ["data_oriented"], ["dataclass"]):
                 _fail(module, node, "owner decorator combinations are not yet supported")
-            if decorators == ["data_oriented"] or inherited_owner or declared_owner:
+            if (
+                decorators == ["data_oriented"]
+                or inherited_owner
+                or (declared_owner and any(isinstance(n, ast.FunctionDef) and n.name == "__init__" for n in node.body))
+            ):
                 owners[node.name] = _owner_schema(module, node, kind, namespace)
             dataclass_owner = decorators == ["dataclass"]
             members = [(node.name, n) for n in node.body]
@@ -345,6 +352,15 @@ def _host_projection(
     owners = dict(owners)
     for base, variants in input_families.items():
         owners[base] = context_schemas[variants[0]["owner"].rpartition(".")[2]]
+    binding_schemas = {**getattr(tree, "_package_preparation_schemas", {}), **owners}
+    binding_schemas = {
+        owner: {
+            key: item
+            for key, item in schema.items()
+            if item.get("declaration_module", module) == module and item.get("declaration_owner", owner) == owner
+        }
+        for owner, schema in binding_schemas.items()
+    }
     numerical = {item["name"]: item for item in definitions}
     definitions_at = {
         (item["node"].lineno, item["node"].col_offset): item for item in definitions if not item.get("inherited")
@@ -432,7 +448,7 @@ def _host_projection(
 
         def _allocation(self, node):
             target = node.targets[0] if isinstance(node, ast.Assign) else node.target
-            schema = owners.get(self.owner, {})
+            schema = binding_schemas.get(self.owner, {})
             placement = next(
                 (
                     item["placement"]
@@ -962,7 +978,7 @@ def _host_projection(
                 and kind(ast.Attribute(node.args[0], "algorithms", ast.Load())) == "algorithms"
             ):
                 self.minimum_version = max(self.minimum_version, 61)
-            for item in owners.get(self.owner, {}).values():
+            for item in binding_schemas.get(self.owner, {}).values():
                 if item.get("reference_declaration") == [
                     getattr(node, "lineno", None),
                     getattr(node, "col_offset", None),
@@ -980,7 +996,7 @@ def _host_projection(
                         ),
                         node,
                     )
-            for item in owners.get(self.owner, {}).values():
+            for item in binding_schemas.get(self.owner, {}).values():
                 if item.get("borrow_declaration") == [getattr(node, "lineno", None), getattr(node, "col_offset", None)]:
                     self.minimum_version = max(
                         self.minimum_version,
@@ -998,7 +1014,7 @@ def _host_projection(
                         ),
                         node,
                     )
-            for item in owners.get(self.owner, {}).values():
+            for item in binding_schemas.get(self.owner, {}).values():
                 if item.get("group_builder", {}).get("allocation") == [
                     getattr(node, "lineno", None),
                     getattr(node, "col_offset", None),
@@ -1038,7 +1054,7 @@ def _host_projection(
                     and node.args[0].id == "self"
                     and any(
                         [node.lineno, node.col_offset] in item.get("scope_allocations", [item.get("scope_allocation")])
-                        for item in owners.get(self.owner, {}).values()
+                        for item in binding_schemas.get(self.owner, {}).values()
                     )
                 ):
                     # The normal scope forwards attributes to this same owner;
@@ -1088,7 +1104,7 @@ def _host_projection(
             constant = next(
                 (
                     item
-                    for item in owners.get(self.owner, {}).values()
+                    for item in binding_schemas.get(self.owner, {}).values()
                     if item.get("constant_declaration") == [node.lineno, node.col_offset]
                 ),
                 None,
@@ -1110,13 +1126,16 @@ def _host_projection(
             declaration = next(
                 (
                     (name, item)
-                    for name, item in owners.get(self.owner, {}).items()
+                    for name, item in binding_schemas.get(self.owner, {}).items()
                     if item.get("value_declaration") == [node.lineno, node.col_offset]
                 ),
                 None,
             )
             if declaration is not None:
                 name, item = declaration
+                element = item.get("element")
+                if element is None:
+                    element = type_spec(resolve_type(item["type_node"], namespace), builder)
                 return ast.copy_location(
                     ast.Expr(
                         ast.Call(
@@ -1124,7 +1143,7 @@ def _host_projection(
                             [
                                 ast.Name("self", ast.Load()),
                                 ast.Constant(name),
-                                ast.parse(repr(item["element"]), mode="eval").body,
+                                ast.parse(repr(element), mode="eval").body,
                                 ast.parse(repr(item.get("path", [name])), mode="eval").body,
                             ],
                             [],
@@ -1250,7 +1269,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     resolve_owners(
         sources,
         imported_modules,
-        lambda *args: _owner_schema(*args, include_preparation=True),
+        lambda *args, **kwargs: _owner_schema(*args, include_preparation=True, **kwargs),
         _fail,
     )
     from ._package_owner_sequences import resolve_sequences
@@ -1323,6 +1342,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             for name, _, _, _, tree, *_ in sources
             for base, variants in getattr(tree, "_package_input_families", {}).items()
         },
+        preparation_owners={
+            name + "." + base: sorted(receivers)
+            for name, _, _, _, tree, *_ in sources
+            for base, receivers in getattr(tree, "_package_preparation_owners", {}).items()
+        },
         error_interfaces=[
             name + "." + definition["name"]
             for name, _, _, _, _, _, _, definitions in sources
@@ -1333,6 +1357,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     payloads = {}
     if manifest["input_families"]:
         manifest["version"] = 43
+    if manifest["preparation_owners"]:
+        manifest["version"] = max(62, manifest["version"])
     if manifest["target_selections"] or any(
         backend_query(node, kind) or backend_constant(node, kind) is not None
         for _, _, _, _, tree, kind, _, _ in sources

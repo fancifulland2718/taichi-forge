@@ -4,9 +4,12 @@ import ast
 import copy
 import inspect
 
+from ._package_construction import construction_functions, ordinary_owner_lookup
+
 
 def resolve_owners(sources, imported, owner_schema, fail):
     classes = {}
+    trees = {name: tree for name, _, _, _, tree, *_ in sources}
     definitions = {}
     for name, _, _, _, tree, kind, schemas, entries in sources:
         for node in tree.body:
@@ -38,15 +41,24 @@ def resolve_owners(sources, imported, owner_schema, fail):
             if inspect.getattr_static(cls, method) is not original:
                 fail(name, node, "Overridden type construction requires a concrete constructor contract")
         for method in node.body:
-            if (
-                getattr(method, "_package_construction_method", False)
-                or getattr(method, "_package_preparation_method", False)
-            ) and (inspect.getattr_static(cls, method.name) is not inspect.getattr_static(base, method.name)):
+            if getattr(method, "_package_construction_method", False) and (
+                inspect.getattr_static(cls, method.name) is not inspect.getattr_static(base, method.name)
+            ):
                 fail(name, method, "Overridden construction resource methods require their own constructor contract")
         constructor = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
         if constructor is None:
             fail(name, node, "constructor replacement requires an explicit resource contract")
-        own = owner_schema(name, node, kind, vars(imported[name]))
+        own = owner_schema(
+            name,
+            node,
+            kind,
+            vars(imported[name]),
+            functions=[
+                method
+                for method in construction_functions(node)
+                if not getattr(method, "_package_preparation_method", False)
+            ],
+        )
         for item in own.values():
             item["declaration_module"] = name
             item["declaration_owner"] = node.name
@@ -133,6 +145,54 @@ def resolve_owners(sources, imported, owner_schema, fail):
             ):
                 continue
             schema = constructor_schema(cls)
+            # Preparation follows effective Python method lookup independently
+            # of constructor inheritance. A plain mixin need not have __init__.
+            methods = []
+            seen_methods = set()
+            for base in cls.__mro__:
+                for method_name in vars(base):
+                    if method_name in seen_methods:
+                        continue
+                    seen_methods.add(method_name)
+                    if base not in classes:
+                        continue
+                    origin, base_node, base_kind, _ = classes[base]
+                    method = next(
+                        (m for m in base_node.body if isinstance(m, ast.FunctionDef) and m.name == method_name), None
+                    )
+                    if method is not None and getattr(method, "_package_preparation_method", False):
+                        methods.append((base, origin, base_node, base_kind, method))
+            if methods and not ordinary_owner_lookup(cls):
+                fail(name, node, "Preparation inheritance requires ordinary owner lookup")
+            for base, origin, base_node, base_kind, method in sorted(
+                methods, key=lambda item: (-cls.__mro__.index(item[0]), item[4].lineno)
+            ):
+                schema = owner_schema(
+                    origin, base_node, base_kind, vars(imported[origin]), functions=[method], earlier=schema
+                )
+                if base is not cls:
+                    local = {
+                        key: item
+                        for key, item in schema.items()
+                        if item.get("declaration_module") == origin and item.get("declaration_owner") == base_node.name
+                    }
+                    tree_origin = trees[origin]
+                    if not hasattr(tree_origin, "_package_preparation_schemas"):
+                        tree_origin._package_preparation_schemas = {}
+                        tree_origin._package_preparation_owners = {}
+                    tree_origin._package_preparation_schemas.setdefault(base_node.name, {}).update(copy.deepcopy(local))
+                    receivers = tree_origin._package_preparation_owners.setdefault(base_node.name, set())
+                    receivers.add(name + "." + node.name)
+                    if base_node.name in classes[base][3]:
+                        receivers.add(origin + "." + base_node.name)
+            group_origins = {}
+            for item in schema.values():
+                if item["kind"] != "dense_field":
+                    continue
+                group = item.get("group", "fields")
+                origin = (item["declaration_module"], item["declaration_owner"])
+                if group_origins.setdefault(group, origin) != origin:
+                    fail(name, node, "Inherited resource groups have ambiguous allocation identities")
             effective = []
             seen = set()
             for base in cls.__mro__:
