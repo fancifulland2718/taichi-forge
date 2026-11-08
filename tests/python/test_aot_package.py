@@ -12027,7 +12027,52 @@ def forward_inputs(inputs, gain):
 """
 
 
-@pytest.mark.parametrize("callback", [False, True, "record"])
+FILTERED_RESOURCE_GRAPH_SOURCE = """
+class Adapter:
+    pass
+def filtered_forward(builder, kernel, inputs, *arguments):
+    compile_args = {name: item.source if isinstance(item, Adapter) else item for name, item in inputs.items()}
+    named = {name: item.source for name, item in inputs.items() if isinstance(item, Adapter)}
+    scratch = []
+    scratch.append(named)
+    builder.dispatch(kernel, *arguments, template_args=compile_args)
+"""
+
+
+def _filtered_resource_graph_source():
+    return RESOURCE_INPUT_SOURCE.replace(
+        "constructors = 0", "constructors = 0\n" + FILTERED_RESOURCE_GRAPH_SOURCE
+    ).replace(
+        "builder.dispatch(transfer, gain, template_args={'solver': self, 'source': self.left, 'target': self.right})",
+        "check, body = builder.create_sequential(), builder.create_sequential()\n"
+        "        filtered_forward(body, transfer, {'solver': self, 'source': self.left, 'target': self.right}, gain)\n"
+        "        builder.append(check)\n        builder.append(body)",
+    )
+
+
+@pytest.mark.parametrize("change", ["custom_instance_check", "field_subtype", "shadowed_builtin"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_filtered_field_inputs_require_proven_type_tests(tmp_path, monkeypatch, change):
+    source = _filtered_resource_graph_source()
+    if change == "custom_instance_check":
+        source = source.replace(
+            "class Adapter:",
+            "class Checks(type):\n    def __instancecheck__(cls, value):\n"
+            "        raise AssertionError('Exporter must not execute instance checks')\n"
+            "class Adapter(metaclass=Checks):",
+        )
+    elif change == "field_subtype":
+        source = source.replace("isinstance(item, Adapter)", "isinstance(item, ti.MatrixField)")
+    else:
+        source = source.replace("class Adapter:", "isinstance = lambda value, cls: False\nclass Adapter:")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="proven|template"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@pytest.mark.parametrize("callback", [False, True, "record", "filtered_graph"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_resource_template_inputs_bind_actual_owner_paths(tmp_path, monkeypatch, callback):
     source = RESOURCE_INPUT_SOURCE
@@ -12037,6 +12082,8 @@ def test_package_resource_template_inputs_bind_actual_owner_paths(tmp_path, monk
             "    transfer(gain, owner, source, target)",
             "    inputs = make_inputs(owner, source, target)\n    forward_inputs(inputs, gain)",
         )
+    elif callback == "filtered_graph":
+        source = _filtered_resource_graph_source()
     elif callback:
         source = source.replace(
             "    def update(self, gain):",

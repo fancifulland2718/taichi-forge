@@ -1262,6 +1262,14 @@ not rolled back. Prepared Graph calls retain their old resource leases, and new
 instances and call bindings stay independent. Focused CPU/CUDA source-free checks
 cover these behaviors, not complete engine export.
 
+Ordinary Graph forwarding may filter allocation-proven Fields with unshadowed
+`isinstance`. The source analyzer resolves only tests with the same result for
+every possible Field family (and None for optional inputs); it does not execute
+custom instance checks or guess an unresolved Field subtype. This preserves the
+original Field paths through Host adapter filtering without new code variants.
+Focused CPU/CUDA source-free checks cover forwarding, independent instances and
+rejection of custom, shadowed or ambiguous type tests.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

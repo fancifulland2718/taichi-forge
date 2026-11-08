@@ -98,6 +98,9 @@ def _returns_on_all_paths(body):
 def discover(sources, imported):
     from taichi_forge.types.annotations import Template
     from taichi_forge.graph import GraphBuilder
+    from taichi_forge.lang.field import ScalarField
+    from taichi_forge.lang.matrix import MatrixField
+    from taichi_forge.lang.struct import StructField
 
     owners, classes, functions, kernels, kernel_definitions = {}, {}, {}, {}, {}
     for module, _, _, _, tree, _, schemas, definitions in sources:
@@ -510,8 +513,19 @@ def discover(sources, imported):
                 ):
                     item = child(expression.args[0])
                     cls = source(expression.args[1])
-                    if isinstance(item, _Owner) and inspect.isclass(cls) and type(cls) is type:
-                        return _Literal(issubclass(classes[item.identity], cls))
+                    if inspect.isclass(cls) and type(cls) is type:
+                        if isinstance(item, _Owner):
+                            return _Literal(issubclass(classes[item.identity], cls))
+                        if isinstance(item, _Resource):
+                            # Allocation-proven Fields cannot be arbitrary Host
+                            # adapters. Keep the family broad until its element
+                            # type is resolved; only unanimous answers are safe.
+                            candidates = (ScalarField, MatrixField, StructField)
+                            if item.optional:
+                                candidates += (type(None),)
+                            answers = {issubclass(candidate, cls) for candidate in candidates}
+                            if len(answers) == 1:
+                                return _Literal(answers.pop())
                 if (
                     isinstance(expression.func, ast.Attribute)
                     and expression.func.attr == "items"
