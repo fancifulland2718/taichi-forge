@@ -152,7 +152,10 @@ Field 合同也未因此扩大为任意可写输入。
 call，可反复 `run()` 或 `submit()`；`graph.run(arguments)` / `graph.submit(arguments)`
 是每次重新 prepare 的单次便利调用，后者返回已有 Runtime ticket 并持有在途资源租约，
 不推荐作为稳态路径。绑定方法保留 owner 捕获；prepare 对每个实例的标量/张量值及原生
-资源绑定取快照，后续 Host 修改不改变旧调用。`template_args={'self': owner}` 必须与
+资源取快照。正常 Host 也可复用 `graph.submit(graph.bind(...))`，后续提交同一已绑定对象
+不重新准备；跨 Graph 的绑定明确拒绝。晚期准备中声明但尚不存在的 Plan 参数记录缺席状态，
+不阻断无关入口；参数后来出现或改变时，旧 Graph 重新绑定仍要求重新构图。
+后续 Host 修改不改变旧调用。`template_args={'self': owner}` 必须与
 绑定接收者一致。`private_scalar` 复用已有 Plan 的不可变标量资源，支持顺序节点的独立
 名称作用域。`private_ndarray` 描述每次原生准备独立拥有的标量元素存储。CPU/CUDA 的
 平坦 `while_loop` 区域复用现有精确原生 Plan 执行器，支持提前退出和零次上限；CUDA

@@ -12,10 +12,26 @@ import json
 from types import SimpleNamespace
 
 from ._plan import ExecutionPlan
-from ._runtime import Scalar
+from ._runtime import PreparedCall, Scalar
 from ._package_values import capture_value, check_admission, owner_type
 from .._dimensions import extent_dependencies, local_workspace_shape, check_model_static_ranges
 from .._static_values import static_key
+
+
+_MISSING_PLAN_VALUE = object()
+
+
+def _plan_value(owner, spec):
+    # A deferred preparation may declare a parameter that this recording never
+    # reads. Preserve absence as a guard instead of inventing a numeric default.
+    try:
+        return capture_value(owner, spec)
+    except AttributeError:
+        return _MISSING_PLAN_VALUE
+
+
+def _plan_key(value):
+    return ("missing_plan_value",) if value is _MISSING_PLAN_VALUE else static_key(value)
 
 
 class ArgKind(Enum):
@@ -96,16 +112,16 @@ class GraphBuilder:
             if not item.get("affects_plan"):
                 continue
             spec = dict(name=name, kind="value", dtype=item["dtype"], path=item.get("path", [name]))
-            value = capture_value(owner, spec)
+            value = _plan_value(owner, spec)
             key = id(owner), name
             previous = self._plan_values.get(key)
-            if previous is not None and static_key(previous[2]) != static_key(value):
+            if previous is not None and _plan_key(previous[2]) != _plan_key(value):
                 raise ValueError(f"Plan parameter {name!r} changed while recording; rebuild the Graph")
             self._plan_values[key] = owner, spec, value
 
     def _check_plan_values(self):
         for owner, spec, value in self._plan_values.values():
-            if static_key(capture_value(owner, spec)) != static_key(value):
+            if _plan_key(_plan_value(owner, spec)) != _plan_key(value):
                 raise ValueError(f"Plan parameter {spec['name']!r} changed; rebuild the Graph before preparing")
 
     def dispatch(self, kernel, *args, template_args=None):
@@ -230,7 +246,7 @@ class GraphBuilder:
                 raise ValueError(f"Graph argument {name!r} has conflicting declarations")
             combined[name] = schema
         for key, binding in sequence._plan_values.items():
-            if key in self._plan_values and static_key(self._plan_values[key][2]) != static_key(binding[2]):
+            if key in self._plan_values and _plan_key(self._plan_values[key][2]) != _plan_key(binding[2]):
                 raise ValueError("Graph sequences recorded different plan parameters")
         self.operations.extend(sequence.operations)
         self.arguments = combined
@@ -355,7 +371,7 @@ class Graph:
         for owner, contract in self.admissions:
             check_admission(owner, contract)
         for owner, schema, previous in self.plan_values.values():
-            if static_key(capture_value(owner, schema)) != static_key(previous):
+            if _plan_key(_plan_value(owner, schema)) != _plan_key(previous):
                 raise ValueError("Plan parameter changed before write inspection; rebuild the Graph")
         written = set()
 
@@ -421,7 +437,7 @@ class Graph:
         for owner, contract in self.admissions:
             check_admission(owner, contract)
         for owner, schema, previous in self.plan_values.values():
-            if static_key(capture_value(owner, schema)) != static_key(previous):
+            if _plan_key(_plan_value(owner, schema)) != _plan_key(previous):
                 raise ValueError(f"Plan parameter {schema['name']!r} changed; rebuild the Graph before preparing")
         values = {}
         for name, schema in self.arguments.items():
@@ -456,12 +472,22 @@ class Graph:
         # Native preparation owns immutable instance bindings and their leases.
         # Replaying the returned call does not interpret operations in Python.
         plan = self.plan.with_argument_resources(resources) if resources else self.plan
-        return plan.prepare(self.package._module, values)
+        prepared = plan.prepare(self.package._module, values)
+        prepared._forge_package_graph = self
+        return prepared
+
+    def _prepared(self, arguments):
+        self.package._check()
+        if isinstance(arguments, PreparedCall):
+            if getattr(arguments, "_forge_package_graph", None) is not self:
+                raise ValueError("Prepared Graph arguments belong to another recording")
+            return arguments
+        return self.bind(arguments)
 
     def run(self, arguments):
         # Convenience for one submission. Repeated replay uses bind(...).run().
         # Runtime retains in-flight preparations until the usual synchronization.
-        self.bind(arguments).run()
+        self._prepared(arguments).run()
 
     def submit(self, arguments):
         """Prepare one immutable call and return the existing Runtime ticket.
@@ -469,4 +495,4 @@ class Graph:
         The ticket and Runtime retain its resource leases. Repeated execution
         with unchanged bindings can use bind(...).submit() explicitly.
         """
-        return self.bind(arguments).submit()
+        return self._prepared(arguments).submit()

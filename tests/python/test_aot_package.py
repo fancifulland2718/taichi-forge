@@ -7199,6 +7199,50 @@ class Model:
 """
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_graph_keeps_absent_late_plan_parameter_guard(tmp_path, monkeypatch):
+    source = PACKAGE_WHILE_SOURCE.replace(
+        "    @ti.kernel\n    def reset",
+        "    def prepare_other(self, passes):\n" "        self.passes = passes\n" "    @ti.kernel\n    def reset",
+    ).replace(
+        "scope.value('gain', ti.i32)",
+        "scope.value('gain', ti.i32)\n        self.passes = 0\n"
+        "        scope.value('passes', ti.i32, affects_plan=True)\n        del self.passes",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        owner = code.host.Model(3, 5, 2)
+        graph = owner.graph(5)
+        assert graph.written_resources()
+        with graph.bind({}) as prepared:
+            # Runtime replay uses its already-prepared immutable bindings,
+            # even after an unrelated late preparation makes this plan stale.
+            owner.prepare_other(7)
+            with pytest.raises(ValueError, match="Plan parameter"):
+                graph.bind({})
+            with pytest.raises(ValueError, match="Plan parameter"):
+                graph.written_resources()
+
+            def unexpected_bind(arguments):
+                raise AssertionError("prepared replay attempted to prepare again")
+
+            graph.bind = unexpected_bind
+            with graph.submit(prepared) as ticket:
+                ticket.wait()
+            np.testing.assert_array_equal(owner.values.to_numpy(), np.arange(1, 4) * 10)
+        del owner.passes
+        recording = code.graph_builder()
+        owner.record(recording, 5)
+        owner.prepare_other(9)
+        with pytest.raises(ValueError, match="Plan parameter"):
+            recording.compile()
+        other = code.graph_builder()
+        owner.record(other, 5)
+        with pytest.raises(ValueError, match="different plan parameters"):
+            recording.append(other)
+
+
 @pytest.mark.parametrize("plan_value", [False, True, "scalar"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monkeypatch, plan_value):
@@ -7258,6 +7302,13 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
             assert len(document['resources']) == 2
             assert not ga.arguments and not gb.arguments
             pa, pb = ga.bind({}), gb.bind({})
+            prepared_graph = ga
+            try:
+                ga.submit(pb)
+            except ValueError as error:
+                assert 'another recording' in str(error)
+            else:
+                raise AssertionError('foreign prepared Graph arguments accepted')
             a.limit, a.gain = 1, 7
             if sys.argv[3] == 'True':
                 try:
@@ -7284,7 +7335,8 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
                 pa.run()
                 np.testing.assert_array_equal(a.values.to_numpy(), np.arange(1, 4) * 10)
                 np.testing.assert_array_equal(b.values.to_numpy(), np.arange(1, 18) * -6)
-            pa.run()
+            with prepared_graph.submit(pa) as ticket:
+                ticket.wait()
             pb.run()
             pa.close()
             pb.close()

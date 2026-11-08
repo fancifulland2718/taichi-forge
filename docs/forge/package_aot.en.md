@@ -223,6 +223,11 @@ prepared call for repeated `run()` or `submit()` replay. `graph.run(arguments)`
 and `graph.submit(arguments)` prepare anew for each invocation; they are not the
 preferred steady-state path. The latter returns the existing Runtime ticket,
 which retains in-flight resource leases.
+Normal Host code can also pass a result of `graph.bind(...)` to the same Graph's
+`run` or `submit`; replay performs no new preparation and rejects another Graph's
+bindings. An unset deferred Plan parameter is recorded as absent rather than
+blocking an unrelated entry. Its later appearance or change requires rerecording
+before a new binding; existing prepared calls retain their snapshots.
 Bound methods retain owner captures. Preparation snapshots scalar/tensor values
 and native resource bindings for each instance; later Host changes do not mutate
 an earlier prepared call. `template_args={'self': owner}` must match the bound
