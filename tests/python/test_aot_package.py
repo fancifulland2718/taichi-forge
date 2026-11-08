@@ -5101,6 +5101,67 @@ class Model:
     assert "NATIVE_SORT_PACKAGE_OK" in result.stdout
 
 
+@pytest.mark.parametrize("dtype,tensor", (("f32", False), ("f32", True), ("u64", False)))
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_workspace_dtype_uses_declared_resource(tmp_path, monkeypatch, dtype, tensor):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.values = s.field(ti.DTYPE, shape=s.dim('n'))
+        s.borrow('alias', self.values, source_scope=True)
+        s.scratch = s.field(self.alias.dtype, shape=s.dim('n'))
+    @ti.kernel
+    def run(self):
+        for i in self.scratch:
+            self.scratch[i] = self.values[i] * 2
+""".replace("DTYPE", dtype)
+    if tensor:
+        source = source.replace("s.values = s.field(", "s.values = s.vector_field(3, ")
+        source = source.replace("self.values[i] * 2", "self.values[i][1] * 2")
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for n in (3, 17):
+            original, owner = package.Model(n), code.host.Model(n)
+            values = np.arange(n, dtype=np.float32 if dtype == "f32" else np.uint64)
+            if tensor:
+                values = np.repeat(values[:, None], 3, axis=1)
+            original.values.from_numpy(values)
+            owner.values.from_numpy(values)
+            original.run()
+            owner.run()
+            np.testing.assert_array_equal(owner.scratch.to_numpy(), original.scratch.to_numpy())
+            assert owner.scratch.dtype == dtype
+
+
+@pytest.mark.parametrize("cycle", (False, True))
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_workspace_dtype_rejects_unknown_or_cyclic_source(tmp_path, monkeypatch, cycle):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        s = ti.experimental.ResourceScope(self)
+        s.values = s.field(self.missing.dtype, shape=3)
+    @ti.kernel
+    def run(self):
+        self.values[0] = 1
+"""
+    if cycle:
+        source = source.replace(
+            "    @ti.kernel", "        s.missing = s.field(self.values.dtype, shape=3)\n    @ti.kernel"
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match="unknown or cyclic resource"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 CACHED_FACTORY_SOURCE = """
 import taichi_forge as ti
 from functools import lru_cache, cache

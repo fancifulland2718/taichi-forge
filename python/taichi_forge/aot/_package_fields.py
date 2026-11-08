@@ -168,6 +168,54 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             key=lambda pair: pair[1]["allocation"],
         )
     )
+    # Field dtype metadata comes from a declared resource type, not a live
+    # constructor sample. Resolve aliases before allocating any witness Field.
+    type_nodes = {key: item["type_node"] for key, item in schema.items() if "type_node" in item}
+
+    def resource_dtype(expression, visiting=()):
+        from taichi_forge.types._argument_descriptor import describe_element_type
+
+        path = []
+        while isinstance(expression, ast.Attribute):
+            path.insert(0, expression.attr)
+            expression = expression.value
+        if not isinstance(expression, ast.Name) or expression.id != "self":
+            raise ValueError("Field dtype metadata requires a declared owner resource")
+        while True:
+            key = next((key for key, spec in schema.items() if spec.get("path", [key]) == path), None)
+            if key is None or key in visiting:
+                raise ValueError("Field dtype metadata has an unknown or cyclic resource source")
+            visiting = (*visiting, key)
+            spec = schema[key]
+            if spec["kind"] != "borrowed_field":
+                break
+            if any(name in spec for name in ("input_parameter", "input_expression", "source_type")):
+                raise ValueError("Field dtype metadata requires a resolved resource type contract")
+            path = spec["source_path"]
+        if spec["kind"] not in ("dense_field", "ndarray") or key not in type_nodes:
+            raise ValueError("Field dtype metadata requires an explicit scalar or tensor resource type")
+        node = type_nodes[key]
+        source_namespace = (
+            vars(imported_modules[spec["declaration_module"]])
+            if imported_modules is not None and "declaration_module" in spec
+            else namespace
+        )
+        source_namespace = {
+            **source_namespace,
+            "_forge_package_vector": ti.types.vector,
+            "_forge_package_matrix": ti.types.matrix,
+        }
+        # .dtype means the scalar component type, also for model-sized tensors.
+        if isinstance(node, ast.Call):
+            from ._package_factories import _source_value
+
+            factory = _source_value(node.func, source_namespace)
+            axes = 1 if factory is ti.types.vector else 2 if factory is ti.types.matrix else 0
+            if axes:
+                node = next((k.value for k in node.keywords if k.arg == "dtype"), None) or node.args[axes]
+        dtype = resolve_type(node, source_namespace, resource_dtype=lambda value: resource_dtype(value, visiting))
+        return describe_element_type(dtype).scalar_type
+
     declarations = {}
     from types import SimpleNamespace
 
@@ -244,6 +292,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             allow_members=item.get("struct_field", False),
             model_tensors=model_tensors,
             witness=field_extent,
+            resource_dtype=resource_dtype,
         )
         item["element"] = type_spec(dtype, module, model_tensors=model_tensors)
         if "local_type_source" in item and item["element"]["kind"] == "struct":

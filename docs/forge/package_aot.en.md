@@ -1331,6 +1331,10 @@ original Field paths through Host adapter filtering without new code variants.
 Focused CPU/CUDA source-free checks cover forwarding, independent instances and
 rejection of custom, shadowed or ambiguous type tests.
 
+Workspace declarations may read another declared Field's `.dtype`, including
+same-owner aliases and tensor scalar types. Resolution uses resource contracts,
+without executing constructors; unknown or cyclic type sources reject.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

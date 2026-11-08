@@ -137,7 +137,9 @@ def member_initialization(node, members, source_members):
     return result
 
 
-def resolve_type(node, namespace, *, allow_ndarray=False, allow_members=False, model_tensors=None, witness=None):
+def resolve_type(
+    node, namespace, *, allow_ndarray=False, allow_members=False, model_tensors=None, witness=None, resource_dtype=None
+):
     """Resolve only fixed type declarations; do not execute application factories."""
     import taichi_forge as ti
 
@@ -160,6 +162,16 @@ def resolve_type(node, namespace, *, allow_ndarray=False, allow_members=False, m
                 return defaults[expression.id]
             return namespace[expression.id]
         if isinstance(expression, ast.Attribute):
+            root = expression.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if (
+                resource_dtype is not None
+                and expression.attr == "dtype"
+                and isinstance(root, ast.Name)
+                and root.id == "self"
+            ):
+                return resource_dtype(expression.value)
             parent = value(expression.value)
             if allow_members and isinstance(parent, ti.lang.struct.StructType) and expression.attr == "members":
                 return parent.members
