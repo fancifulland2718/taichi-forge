@@ -364,7 +364,7 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
     Declarations().visit(constructor)
 
 
-def scope_declarations(module, constructor, kind, fail, namespace, earlier=None, *, owner_node=None):
+def scope_declarations(module, constructor, kind, fail, namespace, earlier=None, *, owner_node=None, owner_class=None):
     if constructor is None:
         return {}
     _normalize_scope_aliases(constructor, kind)
@@ -1275,6 +1275,15 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                     name = presence_parameter(statement, test.left.id, nonnull=True)
                     expected = isinstance(test.ops[0], ast.IsNot) == expected
                 declaration = declarations.get(name, (earlier or {}).get(name, {}))
+                if declaration.get("kind") == "constant" and declaration.get("value", (None,))[0] == "bool":
+                    selected = declaration["value"][1] == expected
+                    inactive = statement.orelse if selected else statement.body
+                    # The original Host condition stays in source. Only the
+                    # fixed class layout's live declarations enter this owner.
+                    for branch in inactive:
+                        allowed.update(id(n) for n in ast.walk(branch) if scope_binding(n) in scopes)
+                    yield from statements(statement.body if selected else statement.orelse, conditions)
+                    continue
                 if not (
                     declaration.get("kind") == "static"
                     and bool(declaration["choices"])
@@ -1337,7 +1346,9 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
     if owner_node is not None:
         from ._package_constants import resolve_constants
 
-        resolve_constants(module, owner_node, declarations, namespace, fail, constructor=constructor)
+        resolve_constants(
+            module, owner_node, declarations, namespace, fail, constructor=constructor, owner_class=owner_class
+        )
 
     conditional_fields = set()
     for statement, conditions in statements(constructor.body):

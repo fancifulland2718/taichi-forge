@@ -110,9 +110,15 @@ The mixin has no standalone owner or numerical entry; concrete receivers supply
 the complete MRO and resource contract. Host construction is retained once, and
 existing binding/allocation calls select the concrete receiver's contract.
 CPU/CUDA checks cover source-free consumption and reuse of the same numerical
-entry. Missing receivers or incompatible resource projections reject. Resource
-branches based on instance `hasattr` still need separate analysis; resolving the
-MRO does not turn them into arbitrary static configuration axes.
+entry. Missing receivers or incompatible resource projections reject. Fixed
+boolean class layouts can use `ResourceScope.constant`: the concrete receiver
+selects the declaration branch while normal Host control is retained. Existing
+contract selection projects each receiver's allocation arguments without eagerly
+evaluating unused dimensions. CPU/CUDA checks cover distinct group layouts,
+source-free consumption and rejection of changed constants. Actual layout/ABI
+differences may still require distinct code; same-layout receivers share the
+qualified entry. The exporter does not infer absence from instance `hasattr` or
+expand a class layout fact into arbitrary model boolean configurations.
 This implementation uses one code module per export; it does not automatically
 provide multiple physical code partitions or qualify their loading costs.
 

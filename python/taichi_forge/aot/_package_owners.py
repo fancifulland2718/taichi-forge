@@ -125,6 +125,7 @@ def resolve_owners(sources, imported, owner_schema, fail):
                 if not getattr(method, "_package_preparation_method", False)
             ],
             inherited=inherited,
+            owner_class=cls,
         )
         if any(item.get("owner_dimension", [None])[0] in inherited for item in own.values()):
             node._package_inherited_resource_dependencies = True
@@ -202,7 +203,13 @@ def resolve_owners(sources, imported, owner_schema, fail):
                 return value
 
             for key, item in own.items():
-                if key in local and description(local[key]) != description(item):
+                previous = local.get(key)
+                constant_override = (
+                    previous is not None and previous.get("constant_from_class") and item.get("constant_from_class")
+                )
+                if previous is not None and description(
+                    {k: v for k, v in previous.items() if not (constant_override and k == "value")}
+                ) != description({k: v for k, v in item.items() if not (constant_override and k == "value")}):
                     fail(name, node, "Cooperative construction has incompatible resource projections: " + key)
                 local[key] = copy.deepcopy(item)
             concrete_module, concrete_node, *_ = classes[cls]

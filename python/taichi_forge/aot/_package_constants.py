@@ -20,7 +20,7 @@ def check_constant_slot(cls, name):
         raise ValueError("Definition constant cannot execute an owner descriptor or custom assignment")
 
 
-def resolve_constants(module, node, schema, namespace, fail, *, constructor=None):
+def resolve_constants(module, node, schema, namespace, fail, *, constructor=None, owner_class=None):
     constants = {name: item for name, item in schema.items() if item["kind"] == "constant"}
     if not constants:
         return
@@ -81,7 +81,7 @@ def resolve_constants(module, node, schema, namespace, fail, *, constructor=None
                 fail(module, statement, str(error))
     for name, item in constants.items():
         try:
-            check_constant_slot(namespace[node.name], name)
+            check_constant_slot(owner_class or namespace[node.name], name)
         except ValueError as error:
             fail(module, constructor, str(error))
         if name in assigned:
@@ -90,7 +90,7 @@ def resolve_constants(module, node, schema, namespace, fail, *, constructor=None
             fail(module, constructor, "Definition constant requires one unconditional fixed assignment: " + name)
         else:
             try:
-                item["value"] = class_constant(namespace[node.name], name)
+                item["value"] = class_constant(owner_class or namespace[node.name], name)
             except (AttributeError, ValueError) as error:
                 fail(module, constructor, f"Definition constant {name!r} has no fixed class value: {error}")
             item["constant_from_class"] = True

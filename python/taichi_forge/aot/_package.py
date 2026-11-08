@@ -108,7 +108,16 @@ def _signature_failures(sources, imported_modules):
 
 
 def _owner_schema(
-    module, node, kind, namespace, *, include_preparation=False, functions=None, earlier=None, inherited=None
+    module,
+    node,
+    kind,
+    namespace,
+    *,
+    include_preparation=False,
+    functions=None,
+    earlier=None,
+    inherited=None,
+    owner_class=None,
 ):
     """Infer types from syntax, never run __init__ or select a model branch."""
     if node.keywords:
@@ -118,7 +127,9 @@ def _owner_schema(
         if getattr(function, "_package_preparation_method", False) and not include_preparation:
             continue
         dependencies = {**(inherited or {}), **schema}
-        for name, declaration in _construction_schema(module, node, function, kind, namespace, dependencies).items():
+        for name, declaration in _construction_schema(
+            module, node, function, kind, namespace, dependencies, owner_class=owner_class
+        ).items():
             if functions is not None:
                 declaration["declaration_module"] = module
                 declaration["declaration_owner"] = node.name
@@ -160,7 +171,7 @@ def _owner_schema(
     return schema
 
 
-def _construction_schema(module, node, constructor, kind, namespace, earlier=None):
+def _construction_schema(module, node, constructor, kind, namespace, earlier=None, *, owner_class=None):
     annotations = {
         a.arg: a.annotation
         for a in (*constructor.args.posonlyargs, *constructor.args.args, *constructor.args.kwonlyargs)
@@ -205,14 +216,14 @@ def _construction_schema(module, node, constructor, kind, namespace, earlier=Non
                 _fail(module, statement, f"attribute {target.attr!r} has conflicting types")
             schema[target.attr] = spec
     for name, declaration in scope_declarations(
-        module, constructor, kind, _fail, namespace, earlier, owner_node=node
+        module, constructor, kind, _fail, namespace, earlier, owner_node=node, owner_class=owner_class
     ).items():
         if name in schema and schema[name]["kind"] != "value":
             _fail(module, constructor, f"ResourceScope role {name!r} conflicts with a resource allocation")
         schema[name] = declaration
         if "presence_parameter" in declaration:
             declaration["presence_owner"] = module + "." + node.name
-    resolve_constants(module, node, schema, namespace, _fail, constructor=constructor)
+    resolve_constants(module, node, schema, namespace, _fail, constructor=constructor, owner_class=owner_class)
     return schema
 
 
@@ -359,6 +370,7 @@ def _host_projection(
     application_modules=None,
     error_interfaces=frozenset(),
     host_contexts=None,
+    construction_schema=None,
 ):
     input_families = getattr(tree, "_package_input_families", {})
     context_schemas = owners
@@ -489,12 +501,23 @@ def _host_projection(
                 and schema[target.attr]["allocation"] == [node.lineno, node.col_offset]
             ):
                 variants = input_families.get(self.owner)
+                receivers = getattr(tree, "_package_construction_owners", {}).get(self.owner)
+                if receivers:
+                    variants = []
+                    for identity in sorted(receivers):
+                        concrete = construction_schema(identity)
+                        if concrete.get(target.attr, {}).get("allocation") == [node.lineno, node.col_offset]:
+                            variants.append({"owner": identity, "schema": concrete})
+                    if not variants:
+                        _fail(module, node, "Cooperative allocation has no concrete resource contract")
                 if variants:
                     value = None
                     for variant in reversed(variants):
                         identity = variant["owner"]
                         allocation = field_allocation(
-                            identity, target.attr, context_schemas[identity.rpartition(".")[2]]
+                            identity,
+                            target.attr,
+                            variant["schema"] if "schema" in variant else context_schemas[identity.rpartition(".")[2]],
                         )
                         value = (
                             allocation
@@ -2305,6 +2328,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             application_modules,
             frozenset(manifest["error_interfaces"]),
             host_contexts,
+            lambda identity: owner_graph.construct(identity)[1],
         )
         payloads["host/" + relative.as_posix()] = host_source.encode("utf8")
         manifest["version"] = max(manifest["version"], minimum_version)

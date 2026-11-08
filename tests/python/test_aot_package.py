@@ -5788,7 +5788,8 @@ class Model(Derived):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_cooperative_constructor_uses_concrete_receiver_contract(tmp_path, monkeypatch):
+@pytest.mark.parametrize("layout_constant", [False, True])
+def test_package_cooperative_constructor_uses_concrete_receiver_contract(tmp_path, monkeypatch, layout_constant):
     source = """
 import taichi_forge as ti
 from resource_contexts import resource_group
@@ -5824,6 +5825,31 @@ class Model(Mixin, Layout):
 class Other(Model):
     pass
 """
+    if layout_constant:
+        source = source.replace("scope.dim('n')", "scope.dim('n')\n        self.m = n + 2\n        scope.dim('m')")
+        source = source.replace(
+            "@ti.data_oriented\nclass Mixin:",
+            """
+class WithError(Layout):
+    def __init__(self, storage: Storage):
+        super().__init__(storage)
+        with resource_group(self, 'error', initialization='zero') as scope:
+            scope.error = scope.field(ti.i32, shape=scope.owner_dim('storage', 'm'))
+@ti.data_oriented
+class Mixin:""",
+        )
+        source = source.replace(
+            "        with resource_group(self, 'extra'",
+            "        record = ti.experimental.ResourceScope(self)\n        record.constant('owns_error')\n        with resource_group(self, 'extra'",
+        )
+        source = source.replace(
+            "            scope.extra = scope.field(ti.i32, shape=scope.owner_dim('storage', 'n'))",
+            "            scope.extra = scope.field(ti.i32, shape=scope.owner_dim('storage', 'n'))\n            if self.owns_error:\n                scope.error = scope.field(ti.i32, shape=scope.owner_dim('storage', 'm'))",
+        )
+        source = source.replace(
+            "class Model(Mixin, Layout):\n    pass", "class Model(Mixin, WithError):\n    owns_error = False"
+        )
+        source = source.replace("class Other(Model):\n    pass", "class Other(Mixin, Layout):\n    owns_error = True")
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert manifest["version"] == 68
@@ -5835,7 +5861,14 @@ class Other(Model):
     step = [
         entry for entry in manifest["entries"].values() if "definition_fixture.model.Model.step" in entry["definitions"]
     ]
-    assert len(step) == 1 and "definition_fixture.model.Other.step" in step[0]["definitions"]
+    assert len(step) == 1
+    if not layout_constant:
+        assert "definition_fixture.model.Other.step" in step[0]["definitions"]
+    else:
+        for cls, value in (("Model", False), ("Other", True)):
+            declaration = manifest["owners"]["definition_fixture.model." + cls]["owns_error"]
+            assert declaration["kind"] == "constant" and declaration["value"] == ("bool", value)
+            assert "choices" not in declaration
     original = sys.modules["definition_fixture.model"]
     assert original.constructors == 0
     expected = original.Model(original.Storage(7))
@@ -5846,6 +5879,20 @@ class Other(Model):
         a, b = module.Model(module.Storage(7)), module.Other(module.Storage(19))
         assert a.base._group_owner is not a.extra._group_owner
         assert a.extra._group_owner is not b.extra._group_owner
+        if layout_constant:
+            assert not a.owns_error and b.owns_error
+            assert a.error.shape == (9,) and b.error.shape == (21,)
+            assert a.extra._group_owner is not a.error._group_owner
+            assert b.extra._group_owner is b.error._group_owner
+            storage = module.Storage(5)
+            registered = set(runtime._resources)
+            module.Other.owns_error = False
+            try:
+                with pytest.raises(ValueError, match="Definition constant.*changed"):
+                    module.Other(storage)
+            finally:
+                module.Other.owns_error = True
+            assert runtime._resources == registered
         a.step(3)
         b.step(-2)
         np.testing.assert_array_equal(a.extra.to_numpy(), expected.extra.to_numpy())
