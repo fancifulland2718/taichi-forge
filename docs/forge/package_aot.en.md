@@ -19,6 +19,16 @@ inputs or restrict ordinary JIT specialization from actual arguments.
 
 ## Producing and consuming a package
 
+Use `ti.aot.check_package(module, arch="cuda", source_root="path/to/src")`
+to run the exporter's declaration preflight without constructing application
+models, compiling numerical kernels or writing artifacts. Normal imports and
+backend initialization still occur. The JSON-serializable report lists source
+hashes, decorated definitions/types, template/owner requirements, target
+selections, input sources and closures. Unsupported declarations raise the same
+`PackageExportError` as export instead of disappearing. A passed declaration
+check leaves compilation, Host projection and consumption marked `not_run`;
+module checks must still be followed by final complete export and consumption.
+
 Export an imported source package, selecting the backend explicitly:
 
 ```python
@@ -109,7 +119,16 @@ Construction and Host control flow execute normally in the consumer. Each loaded
 package has its own Python namespace. Lazy submodules bind to their own code
 owner, and instances retain separate resources. Calls reuse the existing Runtime
 argument snapshots and leases; no shared module resource pointer is switched
-between instances. Allocation lifetime currently ends at `LoadedPackage.close()`;
+to select an instance. Ordinary package calls, including hybrid mode, default
+to eligible CPU/CUDA bitcode or Vulkan 1.3 SPIR-V specialization when a stable
+binding is first reused. The initial call still uses generic AOT. Scalar code
+facts come from declared model dimensions, not ordinary integer arguments;
+array contents and instance addresses remain dynamic. Native preparation is
+retained per instance. Host arrays still transfer through their original path.
+Device-range tasks and unsupported formats retain generic AOT; specialization
+errors are not swallowed. Cross-process specialization caching and eliminating
+initial generic compilation remain deferred; record first and second calls
+separately. Allocation lifetime currently ends at `LoadedPackage.close()`;
 independent object retirement is not implemented.
 
 Callers may retain the Forge frontend and use their own JIT kernels to prepare

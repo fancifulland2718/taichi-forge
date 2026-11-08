@@ -5302,6 +5302,77 @@ def _source_package(
     return importlib.import_module("definition_fixture")
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize("resource_owners", [False, True])
+def test_package_check_shares_export_preflight_without_compilation(tmp_path, monkeypatch, resource_owners):
+    source = OWNER_INPUT_SOURCE if resource_owners else """
+import taichi_forge as ti
+@ti.dataclass
+class Pair:
+    x: ti.i32
+@ti.real_func
+def twice(x: ti.i32) -> ti.i32:
+    return x * 2
+@ti.pyfunc
+def plus(x: ti.i32) -> ti.i32:
+    return x + 1
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        raise AssertionError('preflight must not instantiate an application')
+    @ti.kernel
+    def value(self, x: ti.i32) -> ti.i32:
+        return twice(plus(x))
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = set(tmp_path.rglob("*"))
+    compiled = ti.lang.impl.get_runtime().get_num_compiled_functions()
+
+    def no_builder(*args, **kwargs):
+        raise AssertionError("check_package must stop before AOT compilation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ti.aot.Module, "__init__", no_builder)
+        report = ti.aot.check_package(package, arch="cpu", source_root=tmp_path)
+    assert set(tmp_path.rglob("*")) == before
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == compiled
+    assert report["declaration_check"] == "passed"
+    assert report["compilation"] == report["consumption"] == "not_run"
+    assert report["host_projection"] == "not_run"
+    json.dumps(report)  # Reusable structured coverage, not Python/AST objects.
+    definitions = [item for module in report["modules"].values() for item in module["definitions"]]
+    assert any(item["name"].endswith(".unimported.available_without_a_test") for item in definitions)
+    assert any(item["kind"] == "func" for item in definitions)
+    if not resource_owners:
+        assert {item["kind"] for item in definitions} >= {"kernel", "func", "real_func", "pyfunc"}
+        assert {item["kind"] for module in report["modules"].values() for item in module["types"]} == {
+            "dataclass", "data_oriented"
+        }
+    manifest = ti.aot.export_package(package, tmp_path.parent / (tmp_path.name + "-export"),
+                                     arch="cpu", source_root=tmp_path)
+    declared = {item["name"] for item in definitions}
+    assert all(entry["definition"] in declared for entry in manifest["entries"].values())
+    with pytest.raises(ValueError, match="differs"):
+        ti.aot.check_package(package, arch="cuda")
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_check_and_export_reject_the_same_declaration(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, """
+import taichi_forge as ti
+@ti.pyfunc
+def untyped(x):
+    return x + 1
+""", initializer="")
+    with pytest.raises(ti.aot.PackageExportError) as check:
+        ti.aot.check_package(package)
+    with pytest.raises(ti.aot.PackageExportError) as export:
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert str(check.value) == str(export.value)
+    assert "explicit parameter types" in str(check.value)
+    assert not (tmp_path / "sdk").exists()
+
+
 def test_package_specialization_policy_uses_native_task_and_format_contract(tmp_path):
     from taichi_forge_runtime.aot._package_calls import specialization_entries
 

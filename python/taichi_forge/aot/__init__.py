@@ -22,6 +22,7 @@ _component_exports = {
     "Variant": "._component_variants",
     "build_variants": "._component_variants",
     "export_package": "._package",
+    "check_package": "._package",
     "PackageExportError": "._package",
     "written_resources": "._resource_effects",
 }

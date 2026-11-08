@@ -1210,22 +1210,9 @@ def _host_projection(
     return ast.unparse(projected) + "\n", projector.minimum_version, projector.producer_only
 
 
-def export_package(package, output, *, arch=None, caps=None, source_root=None):
-    """Experimentally export all decorated definitions in an imported module/package.
-
-    Selects ``arch`` on a cold Runtime or validates the currently initialized
-    backend. No constructor, test, Host branch, initializer or step is executed
-    to discover numerical coverage. Typed arrays/values and directly typed
-    scalar owner attributes form the current supported scope.
-    """
+def _preflight_package(package, *, arch=None, source_root=None):
+    """The declaration phase shared by inspection and production export."""
     import taichi_forge as ti
-    from taichi_forge.aot._component import Component
-    from taichi_forge_runtime._static_values import static_key, read_static_key
-    from ._package_variants import compile_static_variants
-    from taichi_forge.aot.module import Module
-    from taichi_forge.types.ndarray_type import NdarrayType
-    from taichi_forge.lang.matrix import MatrixType
-    from taichi_forge.lang.struct import StructType
 
     if arch is not None:
         from taichi_forge.lang import impl
@@ -1242,12 +1229,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             )
 
     if not isinstance(package, ModuleType) or not getattr(package, "__file__", None):
-        raise TypeError("export_package requires an imported source module or package")
-    output = Path(output).resolve()
-    if output.exists():
-        raise FileExistsError(output)
-    if source_root is not None and output.is_relative_to(Path(source_root).resolve()):
-        raise ValueError("Package output must be outside its application source root")
+        raise TypeError("Package preflight requires an imported source module or package")
     paths, namespaces, dependency_report = collect_sources(package, source_root)
     program = ti.lang.impl.get_runtime().prog
     if program is None:
@@ -1323,9 +1305,87 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     from ._package_field_like import resolve_field_likes
 
     resolve_field_likes(sources)
-    from ._package_closures import calls as closure_calls, materialize as materialize_closure
+    from ._package_closures import calls as closure_calls
 
     factory_calls = closure_calls(sources, imported_modules, _fail)
+    return (
+        sources, namespaces, dependency_report, application_modules, imported_modules,
+        host_contexts, function_inputs, factory_calls, target_arch,
+    )
+
+
+def check_package(package, *, arch=None, source_root=None):
+    """Check package declarations without compiling kernels or writing artifacts.
+
+    Uses exactly the exporter's source discovery and declaration resolution.
+    Normal imports and backend initialization still occur. Raises
+    PackageExportError for unsupported declarations; successful inspection does
+    not qualify device compilation, Host projection or numerical execution.
+    """
+    sources, namespaces, dependencies, _, _, _, inputs, factories, target = _preflight_package(
+        package, arch=arch, source_root=source_root
+    )
+    modules = {}
+    for name, path, relative, text, tree, kind, owners, definitions in sources:
+        records = []
+        for definition in definitions:
+            records.append(
+                dict(
+                    name=name + "." + definition["name"],
+                    kind=definition["kind"], line=definition["node"].lineno,
+                    requires_owner=bool(definition.get("requires_owner")),
+                    free_template=bool(definition.get("free_template")),
+                    error_interface=bool(definition.get("error_interface")),
+                    closure_definition=bool(definition.get("closure_definition")),
+                )
+            )
+        modules[name] = dict(
+            source=str(path), relative=relative.as_posix(),
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            definitions=records, owners=sorted(owners),
+            types=[
+                dict(name=name + "." + node.name, kind=kind(decorator), line=node.lineno)
+                for node in tree.body if isinstance(node, ast.ClassDef)
+                for decorator in node.decorator_list if kind(decorator) in ("dataclass", "data_oriented")
+            ],
+            declarations=tree._package_factory_declarations,
+            target_selections=tree._package_target_selections,
+        )
+    return dict(
+        kind="forge_package_preflight", version=1, module_root=package.__name__,
+        target=target.name, declaration_check="passed", compilation="not_run",
+        host_projection="not_run", consumption="not_run", modules=modules,
+        namespaces=list(namespaces), dependencies=dependencies,
+        function_inputs={name: sorted({call["definition"] for call in calls}) for name, calls in inputs.items()},
+        closure_inputs={name: sorted({attribute for attribute, _, _ in calls}) for name, calls in factories.items()},
+    )
+
+
+def export_package(package, output, *, arch=None, caps=None, source_root=None):
+    """Export decorated definitions without executing a model to discover coverage.
+
+    ``check_package`` runs this same declaration phase without compilation.
+    Selects ``arch`` on a cold Runtime or validates the active backend.
+    """
+    import taichi_forge as ti
+    from taichi_forge.aot._component import Component
+    from taichi_forge_runtime._static_values import static_key, read_static_key
+    from ._package_variants import compile_static_variants
+    from taichi_forge.aot.module import Module
+    from taichi_forge.types.ndarray_type import NdarrayType
+    from taichi_forge.lang.matrix import MatrixType
+    from taichi_forge.lang.struct import StructType
+    from ._package_closures import materialize as materialize_closure
+
+    output = Path(output).resolve()
+    if output.exists():
+        raise FileExistsError(output)
+    if source_root is not None and output.is_relative_to(Path(source_root).resolve()):
+        raise ValueError("Package output must be outside its application source root")
+    (
+        sources, namespaces, dependency_report, application_modules, imported_modules,
+        host_contexts, function_inputs, factory_calls, target_arch,
+    ) = _preflight_package(package, arch=arch, source_root=source_root)
     module = Module(caps=caps)
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
 
