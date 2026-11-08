@@ -4,6 +4,7 @@ from collections import deque
 
 from taichi_forge_runtime._static_values import read_static_key, static_key
 from ._package_records import read_member, write_member
+from ._component import _DefinitionMissingRecord
 
 
 def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None):
@@ -54,10 +55,17 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                     write_member(owner, name, value, schema)
             for name, value in records.items():
                 write_member(owner, name, value if selection[name] else None, schema)
-            code = environment.compile(entry, *arguments, owner=owner, template_args=template_args)
+            try:
+                code = environment.compile(entry, *arguments, owner=owner, template_args=template_args)
+            except _DefinitionMissingRecord as missing:
+                # Only an explicitly identified absent required record makes a
+                # selection inadmissible. Keep exploring dependencies reached
+                # on that branch; all other compilation failures still abort.
+                code = missing
+            else:
+                codes.append(code)
             if not code.static.keys() <= domains.keys():
                 raise ValueError("Kernel static dependencies are outside the declared package domain")
-            codes.append(code)
             # Forget unread values. They are unconstrained by this code, not a
             # second identity for it. A changed read value may expose a new path.
             reads = {*code.static, *(name for name in code.objects if name in records)}

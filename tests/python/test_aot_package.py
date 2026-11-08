@@ -5076,6 +5076,87 @@ class Model:
                 array.close()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_records_keep_required_branch_dependencies(tmp_path, monkeypatch):
+    source = """
+from dataclasses import dataclass
+import taichi_forge as ti
+@dataclass(frozen=True)
+class Packet:
+    values: object
+@ti.data_oriented
+class Model:
+    def __init__(self, empty: bool):
+        self.empty = empty
+        self.primary = self.aux = None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('empty', choices=(False, True), kernel_only=True)
+        scope.output = scope.field(ti.i32, shape=())
+    def prepare(self, primary, aux):
+        scope = ti.experimental.ResourceScope(self)
+        first = scope.record('primary', primary, optional=True)
+        if primary is not None:
+            first.borrow('values', primary.values, external=True, dtype=ti.i32, shape=1)
+        second = scope.record('aux', aux, optional=True)
+        if aux is not None:
+            second.borrow('values', aux.values, external=True, dtype=ti.i32, shape=1)
+    @ti.kernel
+    def step(self):
+        if ti.static(self.primary is not None):
+            self.output[None] = self.primary.values[0] + self.aux.values[0]
+        elif ti.static(self.aux is not None):
+            self.output[None] = self.aux.values[0]
+        else:
+            if ti.static(self.empty):
+                self.output[None] = 7
+            else:
+                self.output[None] = self.aux.values[0]
+    @ti.kernel
+    def required(self):
+        self.output[None] = self.aux.values[0]
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.step)
+        return b.compile()
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sorted(len(entry["variants"]) for entry in manifest["entry_families"].values()) == [1, 3]
+    for name in tuple(sys.modules):
+        if name == "definition_fixture" or name.startswith("definition_fixture."):
+            monkeypatch.delitem(sys.modules, name)
+    (tmp_path / "definition_fixture").rename(tmp_path / "producer_sources")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        module = code.module("definition_fixture.model")
+        values = runtime.ndarray("i32", (1,))
+        values.from_numpy(np.array([11], dtype=np.int32))
+        packet = module.Packet(values)
+        for primary, aux, empty, expected in (
+            (packet, packet, False, 22),
+            (None, packet, False, 11),
+            (None, None, True, 7),
+        ):
+            owner = module.Model(empty)
+            owner.prepare(primary, aux)
+            owner.step()
+            assert int(owner.output.to_numpy()) == expected
+            with owner.graph().bind({}) as call:
+                call.run()
+            assert int(owner.output.to_numpy()) == expected
+        for primary, aux, empty in ((packet, None, True), (None, None, False)):
+            owner = module.Model(empty)
+            owner.output.from_numpy(np.array(99, dtype=np.int32))
+            owner.prepare(primary, aux)
+            with pytest.raises(ValueError, match="variant|configuration|presence|supported|selection"):
+                owner.step()
+            with pytest.raises(ValueError, match="variant|configuration|presence|supported|selection"):
+                owner.graph().bind({})
+            assert int(owner.output.to_numpy()) == 99
+        with pytest.raises(ValueError, match="variant|configuration|presence|supported|selection"):
+            owner.required()
+        values.close()
+
+
 @pytest.mark.parametrize("namespace_lookup", (False, True))
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_native_sort_reuses_provider_and_workspace(tmp_path, monkeypatch, namespace_lookup):

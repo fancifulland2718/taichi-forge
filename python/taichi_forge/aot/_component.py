@@ -42,6 +42,15 @@ from taichi_forge_runtime._static_values import StaticDType, static_key
 _STATELESS_OWNER = object()
 
 
+class _DefinitionMissingRecord(ValueError):
+    """A package selection omits a record required on its reached branch."""
+
+    def __init__(self, name, capture):
+        super().__init__(f"Numerical entry requires record {name!r}")
+        self.static = dict(capture.static)
+        self.objects = dict(capture.objects)
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -1648,7 +1657,14 @@ class Component:
             context = _Capture(self, owner, kernel, signature, entry_path)
             # No self identity or runtime value enters the template mapper.
             key = (kernel.func, "component_" + str(len(kernel._component_candidates)), kernel.autodiff_mode)
-            kernel.materialize(key=key, args=call_args, arg_features=tuple(features), for_aot=True, deployment=context)
+            try:
+                kernel.materialize(
+                    key=key, args=call_args, arg_features=tuple(features), for_aot=True, deployment=context
+                )
+            except Exception as error:
+                if context.missing_record is not None:
+                    raise _DefinitionMissingRecord(context.missing_record, context) from error
+                raise
             code = _ComponentCode(kernel, key, context)
             kernel._component_candidates.append(code)
             return code
@@ -1786,6 +1802,7 @@ class _Capture:
         self.static = {}
         self.static_objects = {}
         self.objects = {}
+        self.missing_record = None
         self.resource_conditions = {}
         self.record_equalities = set()
         self.record_field_keys = {}
@@ -2063,6 +2080,9 @@ class _Capture:
             previous = self.objects.setdefault(name, present)
             if previous != present:
                 raise TaichiCompilationError("Component record presence changed during compilation; retry")
+            if not present and self.component._symbolic_dimensions and ctx is not None and not ctx.is_in_static_scope():
+                self.missing_record = name
+                raise TaichiCompilationError(f"Numerical entry requires record self.{'.'.join(path)}")
             return _RecordReference(path) if present else None
         if isinstance(declaration, Dimension):
             self.dimension_dependency(name)

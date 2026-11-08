@@ -1350,6 +1350,14 @@ validate during export; ordinary Component capture continues to validate its
 actual model. CPU/CUDA checks include a legal `count >= n + 2` input, for which
 unit-sized witnesses are invalid, and rejection of undersized caller storage.
 
+An optional record can still be required on a reached numerical branch. Export
+excludes only selections explicitly diagnosed by capture as missing that record,
+and continues exploring newly observed dependencies; other compilation failures
+abort export. The consumer rejects missing-input selections before submission.
+This supports, for example, optional drives that require a mass-data record when
+enabled, without silently skipping the drive calculation or declaring that
+record mandatory for unrelated entries.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.
