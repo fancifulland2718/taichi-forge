@@ -24,9 +24,15 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     domains.update(
         (name, (read_static_key(item["value"]),)) for name, item in schema.items() if item["kind"] == "constant"
     )
-    if not domains:
+    records = {
+        name: read_member(owner, name, schema)
+        for name, item in schema.items()
+        if item["kind"] == "record" and item.get("optional")
+    }
+    if not domains and not records:
         return [environment.compile(entry, *arguments, owner=owner, template_args=template_args)]
     initial = {name: values[0] for name, values in domains.items()}
+    initial.update((name, True) for name in records)
     previous = {name: read_member(owner, name, schema) for name in domains}
     pending, visited, codes = deque([initial]), set(), []
     try:
@@ -37,22 +43,35 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
             if identity in visited:
                 continue
             visited.add(identity)
-            if any(all(keys[name] == value for name, value in code.static.items()) for code in codes):
+            if any(
+                all(keys[name] == value for name, value in code.static.items())
+                and all(selection[name] is value for name, value in code.objects.items() if name in records)
+                for code in codes
+            ):
                 continue
             for name, value in selection.items():
-                write_member(owner, name, value, schema)
+                if name not in records:
+                    write_member(owner, name, value, schema)
+            for name, value in records.items():
+                write_member(owner, name, value if selection[name] else None, schema)
             code = environment.compile(entry, *arguments, owner=owner, template_args=template_args)
             if not code.static.keys() <= domains.keys():
                 raise ValueError("Kernel static dependencies are outside the declared package domain")
             codes.append(code)
             # Forget unread values. They are unconstrained by this code, not a
             # second identity for it. A changed read value may expose a new path.
-            selected = {**initial, **{name: selection[name] for name in code.static}}
-            for name in code.static:
-                for value in domains[name]:
+            reads = {*code.static, *(name for name in code.objects if name in records)}
+            selected = {**initial, **{name: selection[name] for name in reads}}
+            for name in reads:
+                for value in domains.get(name, (True, False)):
                     if static_key(value) != keys[name]:
                         pending.append({**selected, name: value})
+            # Restore namespaces before selecting any of their scalar leaves.
+            for name, value in records.items():
+                write_member(owner, name, value, schema)
     finally:
+        for name, value in records.items():
+            write_member(owner, name, value, schema)
         for name, value in previous.items():
             write_member(owner, name, value, schema)
     return codes

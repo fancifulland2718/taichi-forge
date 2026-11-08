@@ -89,7 +89,7 @@ class OwnerGraph:
             if item["kind"] in ("dense_field", "dimension", "borrowed_field", "host_owner_sequence"):
                 continue
             if item["kind"] == "record":
-                declarations[attribute] = Record()
+                declarations[attribute] = Record(optional=item.get("optional", False))
                 continue
             if item["kind"] in ("owner", "owner_input"):
                 if item["kind"] == "owner_input":

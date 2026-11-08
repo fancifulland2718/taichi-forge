@@ -655,7 +655,7 @@ to preserve other arguments' evaluation order. Recursion, shadowed bindings,
 model-driven calls and effects reject. Focused CPU/CUDA source-free checks retain
 shared code, record constraints and instance isolation. The original rigid
 dimension helper passes nested-call analysis; its remaining resource domains
-still need work. Arbitrary declaration helpers, populated optional records, borrowed Fields with unresolved cross-object provenance and model-driven
+still need work. Arbitrary declaration helpers, borrowed Fields with unresolved cross-object provenance and model-driven
 local tensor type domains remain unfinished; this is not full EFC qualification.
 
 Borrowed dimension relations may use a single-assignment local dictionary,
@@ -1170,6 +1170,17 @@ instances, retained Graph calls and source-free consumption. Deferred raw/defaul
 root allocations, child owners and conditional method-parameter inputs remain
 outside this slice; recursive/concurrent preparation of the same instance group
 is rejected.
+
+Version 54 retains optional plain records declared by `scope.record(...,
+optional=True)`. Member declarations under a proven `is not None` guard use the
+existing record-presence contract. Only kernels that read that record select a
+presence variant; record dimensions and values remain runtime data, and unread
+records/options do not multiply code. CPU/CUDA checks cover constructor and later
+preparation declarations, changing presence, independent instances, retained
+prepared calls, constraints and source-free consumption. Metadata-only scopes in
+preparation methods are allowed; actual Field allocations still require explicit
+group contexts. This slice does not resolve arbitrary external binding records,
+conditional child allocations or unknown borrowed Field provenance.
 
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute

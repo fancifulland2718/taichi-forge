@@ -116,6 +116,12 @@ def _owner_schema(module, node, kind, namespace, *, include_preparation=False):
         if getattr(function, "_package_preparation_method", False) and not include_preparation:
             continue
         for name, declaration in _construction_schema(module, node, function, kind, namespace, schema).items():
+            if (
+                getattr(function, "_package_preparation_method", False)
+                and declaration["kind"] == "dense_field"
+                and not declaration.get("group_builder", {}).get("context")
+            ):
+                _fail(module, function, "Preparation resource allocations require explicit group contexts")
             if getattr(function, "_package_preparation_method", False) and (
                 "presence_parameter" in declaration
                 or declaration["kind"] in ("owner", "owner_input", "host_owner_sequence")
@@ -1340,6 +1346,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(13, manifest["version"])
             if any(item["kind"] == "record" or item.get("constraints") for item in schema.values()):
                 manifest["version"] = max(19, manifest["version"])
+            if any(item["kind"] == "record" and item.get("optional") for item in schema.values()):
+                manifest["version"] = max(54, manifest["version"])
             if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):
                 manifest["version"] = max(15, manifest["version"])
             if any(item.get("struct_field") for item in schema.values()):
@@ -1780,7 +1788,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     entry_manifest["admission"] = admission
                 variants.append(
                     dict(
-                        selection={key: value for key, value in code.static.items() if key not in constants},
+                        selection={
+                            **{key: value for key, value in code.static.items() if key not in constants},
+                            **{
+                                key: ("bool", value)
+                                for key, value in code.objects.items()
+                                if compilation_schemas.get(owner_name, {}).get(key, {}).get("optional")
+                            },
+                        },
                         symbol=entry_manifest["symbol"],
                     )
                 )
@@ -1792,10 +1807,19 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 family_identity = json.dumps([name + "." + definition["name"], variants], sort_keys=True).encode()
                 symbol = "family_" + hashlib.sha256(family_identity).hexdigest()
                 used = {key for variant in variants for key in variant["selection"]}
+                presence = {key for key in used if compilation_schemas[owner_name][key].get("optional")}
                 manifest["entry_families"][symbol] = dict(
                     arguments=argument_schema,
                     variants=variants,
-                    domain={key: compilation_schemas[owner_name][key]["choices"] for key in sorted(used)},
+                    domain={
+                        key: (
+                            [["bool", False], ["bool", True]]
+                            if key in presence
+                            else compilation_schemas[owner_name][key]["choices"]
+                        )
+                        for key in sorted(used)
+                    },
+                    **({"record_presence": sorted(presence)} if presence else {}),
                     **(
                         {"paths": {key: list(environment._paths[key]) for key in used}}
                         if any(len(environment._paths[key]) > 1 for key in used)
@@ -1803,10 +1827,16 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     ),
                 )
                 conditions = {
-                    key: compilation_schemas[owner_name][key]["conditions"]
+                    key: dict(compilation_schemas[owner_name][key]["conditions"])
                     for key in sorted(used)
                     if compilation_schemas[owner_name][key].get("conditions")
                 }
+                for key in used:
+                    path = environment._paths[key]
+                    for parent in presence:
+                        prefix = environment._paths[parent]
+                        if len(prefix) < len(path) and path[: len(prefix)] == prefix:
+                            conditions.setdefault(key, {})[parent] = True
                 if conditions:
                     manifest["version"] = max(manifest["version"], 37)
                     manifest["entry_families"][symbol]["conditions"] = conditions

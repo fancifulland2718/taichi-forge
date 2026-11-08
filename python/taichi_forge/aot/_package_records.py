@@ -35,8 +35,20 @@ def record_environment(declarations, schema):
                 Dimension(declaration.kind) if isinstance(declaration, Dimension) and len(path) > 1 else declaration
             )
 
-    def records(members):
-        return {key: Record(**records(value)) if isinstance(value, dict) else value for key, value in members.items()}
+    from ._component import _capture_id
+
+    def records(members, prefix=()):
+        return {
+            key: (
+                Record(
+                    optional=schema.get(_capture_id((*prefix, key)), {}).get("optional", False),
+                    **records(value, (*prefix, key)),
+                )
+                if isinstance(value, dict)
+                else value
+            )
+            for key, value in members.items()
+        }
 
     environment = Component(**records(tree))
     flattened = dict(environment.declarations)

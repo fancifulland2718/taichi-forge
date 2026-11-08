@@ -1098,6 +1098,15 @@ class entry:
                 name: {static_key(read_static_key(key)) for key in values}
                 for name, values in self.family["domain"].items()
             }
+            presence = self.family.get("record_presence", [])
+            if (
+                not isinstance(presence, list)
+                or any(not isinstance(key, str) for key in presence)
+                or len(presence) != len(set(presence))
+                or not set(presence) <= self._domain.keys()
+                or any(self._domain[key] != {static_key(False), static_key(True)} for key in presence)
+            ):
+                raise ValueError("Record presence differs from its declared package domain")
             for variant in self.family["variants"]:
                 if _entry_contract(package.manifest, variant["symbol"]) is None:
                     raise ValueError("Static entry family references missing numerical code")
@@ -1234,7 +1243,8 @@ class entry:
                 values.get(key) == static_key(expected) for key, expected in self._conditions.get(name, {}).items()
             ):
                 continue
-            value = static_key(path_value(owner, self.family.get("paths", {}).get(name, (name,))))
+            value = path_value(owner, self.family.get("paths", {}).get(name, (name,)))
+            value = static_key(value is not None if name in self.family.get("record_presence", ()) else value)
             if value not in self._domain[name]:
                 raise ValueError("Static configuration is outside its declared package domain")
             values[name] = value
@@ -1327,6 +1337,7 @@ class LoadedPackage:
                 51,
                 52,
                 53,
+                54,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

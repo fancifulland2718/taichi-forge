@@ -3175,6 +3175,190 @@ def declare_layout(scope, layout, capacity, dtype, *, bounded=True):
     assert "PACKAGE_RECORDS_OK" in result.stdout
 
 
+def _optional_record_source():
+    source = RECORD_RESOURCES_SOURCE.replace(
+        "record = scope.record('layout', layout)",
+        "record = scope.record('layout', layout, optional=True)\n        if layout is not None:",
+    )
+    start = source.index("        count = record.dim")
+    end = source.index("        scope.values =", start)
+    source = source[:start] + textwrap.indent(source[start:end], "    ") + source[end:]
+    source = source.replace(
+        "        scope.values =",
+        "        unused = scope.record('unused', layout, optional=True)\n        scope.values =",
+    )
+    start = source.index("        for i in range(self.layout.n):")
+    end = source.index("    @ti.kernel", start)
+    source = (
+        source[:start] + "        for i in self.values:\n            self.values[i] = -5\n"
+        "        if ti.static(self.layout is not None):\n" + textwrap.indent(source[start:end], "    ") + source[end:]
+    )
+    return source
+
+
+@pytest.mark.parametrize("late", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_records_project_only_used_presence(tmp_path, monkeypatch, late):
+    source = _optional_record_source()
+    if late:
+        source = source.replace(
+            "import taichi_forge as ti", "import taichi_forge as ti\nfrom resource_contexts import resource_group"
+        )
+        source = source.replace(
+            "    def __init__(self, capacity: int, layout):",
+            "    def __init__(self):\n        pass\n    def prepare(self, capacity: int, layout):",
+        )
+        source = source.replace(
+            "        scope.values = scope.field(ti.f32, shape=parent)",
+            "        with resource_group(self, 'state', initialization='zero') as fields:\n"
+            "            fields.values = fields.field(ti.f32, shape=fields.dim('capacity'))",
+        )
+        package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    else:
+        package = _source_package(tmp_path, monkeypatch, source)
+
+    def make(cls, n, layout):
+        if not late:
+            return cls(n, layout)
+        instance = cls()
+        instance.prepare(n, layout)
+        return instance
+
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 54
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["entry_families"]) == 1
+    family = next(iter(manifest["entry_families"].values()))
+    assert family["record_presence"] == ["layout"]
+    assert len(family["variants"]) == 3  # absent, mode False, mode True; unused record has no axis
+    assert all("unused" not in item["selection"] for item in family["variants"])
+    Layout = sys.modules["definition_fixture.model"].Layout
+    reference = make(package.Model, 7, Layout(5, 2.5, True))
+    reference.step()
+    expected = reference.values.to_numpy()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = make(code.host.Model, 7, Layout(5, 2.5, True)), make(code.host.Model, 31, None)
+        a.step()
+        b.step()
+        np.testing.assert_array_equal(a.values.to_numpy(), expected)
+        np.testing.assert_array_equal(b.values.to_numpy(), -5)
+        prepared = a.graph().bind({})
+        a.layout = None
+        a.step()
+        np.testing.assert_array_equal(a.values.to_numpy(), -5)
+        prepared.run()
+        np.testing.assert_array_equal(a.values.to_numpy(), expected)
+        prepared.close()
+        b.layout = Layout(31, 7.0, False, True)
+        b.step()
+        np.testing.assert_array_equal(b.values.to_numpy(), np.arange(31) + 7)
+        b.layout = Layout(32, 7.0)
+        with pytest.raises(ValueError, match="Dimension constraint"):
+            b.step()
+        b.clear()
+        np.testing.assert_array_equal(b.values.to_numpy(), -1)
+    probe = tmp_path / "consume_optional_record.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            Model = code.host.Model
+            Layout = sys.modules[Model.__module__].Layout
+            def make(n, layout):
+                if sys.argv[3] == '0':
+                    return Model(n, layout)
+                instance = Model()
+                instance.prepare(n, layout)
+                return instance
+            a, b = make(17, None), make(67, Layout(67, 3., True))
+            a.step(); b.step()
+            np.testing.assert_array_equal(a.values.to_numpy(), -5)
+            np.testing.assert_array_equal(b.values.to_numpy(), np.arange(67) + 6)
+            a.layout = Layout(17, 2.)
+            a.step()
+            b.layout = None
+            b.step()
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(17) + 2)
+            np.testing.assert_array_equal(b.values.to_numpy(), -5)
+        print('OPTIONAL_RECORD_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"], str(int(late))],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OPTIONAL_RECORD_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change,diagnostic",
+    [
+        ("other_scope", "only declare its present members"),
+        ("absent", "only declare its present members"),
+        ("truth", "Conditional resources require"),
+        ("rebind", "unchanged source binding"),
+        ("unmanaged", "explicit group contexts"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_optional_records_reject_unproven_guards(tmp_path, monkeypatch, change, diagnostic):
+    source = _optional_record_source()
+    if change == "other_scope":
+        source = source.replace(
+            "            count =", "            scope.value('capacity', ti.i32)\n            count ="
+        )
+    elif change == "absent":
+        source = source.replace(
+            "        unused =", "        else:\n            record.value('gain', ti.f32)\n        unused ="
+        )
+    elif change == "truth":
+        source = source.replace("if layout is not None:", "if layout:")
+    elif change == "rebind":
+        source = source.replace(
+            "        if layout is not None:", "        layout = None\n        if layout is not None:"
+        )
+    else:
+        source = source.replace(
+            "import taichi_forge as ti", "import taichi_forge as ti\nfrom resource_contexts import resource_group"
+        )
+        source = source.replace(
+            "    def __init__(self, capacity: int, layout):",
+            "    def __init__(self):\n        pass\n    def prepare(self, capacity: int, layout):",
+        )
+        source = source.replace(
+            "        unused =",
+            "        with resource_group(self, 'state') as fields:\n"
+            "            fields.extra = fields.field(ti.i32, shape=())\n        unused =",
+        )
+    package = (
+        _resource_context_fixture(tmp_path, monkeypatch, model=source)[0]
+        if change == "unmanaged"
+        else _source_package(tmp_path, monkeypatch, source)
+    )
+    with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize("change", ["effect", "condition", "loop", "call", "shadow"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_declaration_helpers_reject_unproven_execution(tmp_path, monkeypatch, change):

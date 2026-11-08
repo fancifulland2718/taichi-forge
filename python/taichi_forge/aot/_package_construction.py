@@ -282,7 +282,6 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                 isinstance(n, ast.Call)
                 and qualified_kind(n, kind)
                 in (
-                    "experimental.ResourceScope",
                     "FieldsBuilder",
                     "field",
                     "Vector.field",

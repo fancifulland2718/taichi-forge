@@ -453,7 +453,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 or len(call.keywords) == 1
                 and call.keywords[0].arg == "optional"
                 and isinstance(call.keywords[0].value, ast.Constant)
-                and call.keywords[0].value.value is False
+                and type(call.keywords[0].value.value) is bool
             )
             and isinstance(call.args[0], ast.Constant)
             and type(call.args[0].value) is str
@@ -479,6 +479,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
         declarations[identity] = dict(
             kind="record",
             path=list(path),
+            **({"optional": True} if call.keywords and call.keywords[0].value.value else {}),
             scope_allocation=[
                 scopes[parent].value.lineno,
                 scopes[parent].value.col_offset,
@@ -1062,6 +1063,50 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 and scope_binding(n.value) in scopes
                 for n in ast.walk(statement)
             ):
+                # An optional plain record already has an existing Component
+                # presence contract. Its leaf declarations describe the present
+                # branch; they do not create a second boolean configuration axis.
+                test = statement.test
+                if (
+                    isinstance(test, ast.Compare)
+                    and len(test.ops) == 1
+                    and isinstance(test.ops[0], (ast.Is, ast.IsNot))
+                    and isinstance(test.comparators[0], ast.Constant)
+                    and test.comparators[0].value is None
+                ):
+                    record_scope = None
+                    for key in scopes:
+                        path = scope_paths[key]
+                        if (
+                            path
+                            and declarations.get(_capture_id(path), {}).get("optional")
+                            and source_expression(test.left) == source_expression(scopes[key].value.args[1])
+                        ):
+                            source = scopes[key].value.args[1]
+                            while isinstance(source, ast.Attribute):
+                                source = source.value
+                            if not isinstance(source, ast.Name) or stores.get(source.id) != 1 or source.id in deleted:
+                                fail(module, test, "Optional record guard requires an unchanged source binding")
+                            record_scope = key
+                            break
+                    if record_scope is not None:
+                        present, absent = (
+                            (statement.body, statement.orelse)
+                            if isinstance(test.ops[0], ast.IsNot)
+                            else (statement.orelse, statement.body)
+                        )
+                        path = scope_paths[record_scope]
+                        for branch, is_present in ((present, True), (absent, False)):
+                            for part in (n for item in branch for n in ast.walk(item)):
+                                nested_scope, method = operation(part)
+                                if nested_scope is not None and (
+                                    not is_present
+                                    or scope_paths[nested_scope][: len(path)] != path
+                                    or method not in ("dim", "parent_dim", "value", "static", "require_le", "borrow")
+                                ):
+                                    fail(module, part, "Optional record guard may only declare its present members")
+                        yield from statements(present, conditions)
+                        continue
                 test, expected = statement.test, True
                 if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
                     test, expected = test.operand, False
