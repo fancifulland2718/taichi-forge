@@ -1073,9 +1073,12 @@ def _host_projection(
                     len(node.args) == 1
                     and isinstance(node.args[0], ast.Name)
                     and node.args[0].id == "self"
-                    and any(
-                        [node.lineno, node.col_offset] in item.get("scope_allocations", [item.get("scope_allocation")])
-                        for item in binding_schemas.get(self.owner, {}).values()
+                    and (
+                        getattr(node, "_package_scope_initializer", False)
+                        or any(
+                            [node.lineno, node.col_offset] in item.get("scope_allocations", [item.get("scope_allocation")])
+                            for item in binding_schemas.get(self.owner, {}).values()
+                        )
                     )
                 ):
                     # The normal scope forwards attributes to this same owner;

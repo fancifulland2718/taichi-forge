@@ -76,6 +76,10 @@ ti.aot.export_package(roots, "dist/engine_cuda", arch="cuda", source_root="path/
 `library.host` 是第一个根，其他根可用 `library.module("renderer_api")` 访问。
 源根选择只决定定义覆盖，不能替代实际编译、数值消费及实例隔离检查。
 
+构造函数也可无条件调用 `ti.experimental.ResourceScope(self)`（或已证明的转发工厂）
+来初始化声明状态，而不保存返回句柄。导出器仍验证 owner、初始化策略及 builder，
+不把条件调用、其他 owner 或任意隐藏分配当作有效声明；这种空作用域不增加设备代码。
+
 `source_root` 模式使用第 2 版包清单，消费者仍兼容第 1 版；旧消费者拒绝新版本。
 `library.host` 仍是最初选择的模块/包。包内绝对、相对和 importlib 导入解析到
 各自加载包的命名空间；任意表达式计算的动态依赖不被猜测为完整闭包。

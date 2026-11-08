@@ -96,6 +96,12 @@ one loaded package. For standalone consumption, `library.host` is the first root
 use `library.module("renderer_api")` for another. Source coverage does not replace
 device compilation, numerical consumption, or instance isolation checks.
 
+A constructor may also call `ti.experimental.ResourceScope(self)` (or a proven
+forwarding factory) unconditionally to initialize declaration state without
+retaining its handle. The same owner, initialization, and builder checks apply;
+conditional calls, other owners, and arbitrary hidden allocation are not accepted
+as declarations. An empty scope does not add device code.
+
 This mode uses package manifest version 2. Consumers retain version 1 support;
 older consumers reject the new version. `library.host` still denotes the selected
 entry module/package. Imports resolve within each loaded package's namespace.

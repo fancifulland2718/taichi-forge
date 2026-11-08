@@ -5521,6 +5521,60 @@ def test_package_multiple_roots_require_valid_common_sources(tmp_path, monkeypat
     assert not (tmp_path / "rejected").exists()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize("factory", [False, True])
+def test_package_discarded_scope_keeps_owner_registry_and_validation(tmp_path, monkeypatch, factory):
+    source = """
+import taichi_forge as ti
+class HostState:
+    def __init__(self):
+        SCOPE(self)
+        self.calls = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        SCOPE(self)
+        self.n = n
+        self.values = ti.ndarray(ti.i32, n)
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in range(self.n):
+            self.values[i] = i + bias
+""".replace("SCOPE", "resource_scope" if factory else "ti.experimental.ResourceScope")
+    if factory:
+        source = RESOURCE_FACTORY_SOURCE + source
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        assert code.host.model.HostState().calls == 0
+        first, second = code.host.Model(7), code.host.Model(19)
+        first.step(2)
+        second.step(5)
+        np.testing.assert_array_equal(first.values.to_numpy(), np.arange(7) + 2)
+        np.testing.assert_array_equal(second.values.to_numpy(), np.arange(19) + 5)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize("declaration", ["if n:\n            scope(self)", "scope(other)"])
+def test_package_discarded_scope_rejects_conditional_or_foreign_owner(tmp_path, monkeypatch, declaration):
+    source = """
+import taichi_forge as ti
+def scope(owner):
+    return ti.experimental.ResourceScope(owner)
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, other=None):
+        DECLARATION
+    @ti.kernel
+    def step(self):
+        pass
+""".replace("DECLARATION", declaration)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="ResourceScope"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 def test_package_specialization_policy_uses_native_task_and_format_contract(tmp_path):
     from taichi_forge_runtime.aot._package_calls import specialization_entries
 

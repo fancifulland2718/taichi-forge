@@ -16,6 +16,21 @@ def _normalize_scope_aliases(constructor, kind):
     may reuse a local name. Other writes and captured locals keep the existing
     rejection path; they cannot be mistaken for a declaration namespace.
     """
+    # A scope can initialize the owner's declaration registry without keeping
+    # a Python handle. Give only unconditional standalone calls a local name
+    # so they use the same owner/builder/initialization proof as assignments.
+    names = {node.id for node in ast.walk(constructor) if isinstance(node, ast.Name)}
+    names.update(node.arg for node in ast.walk(constructor) if isinstance(node, ast.arg))
+    for index, statement in enumerate(constructor.body):
+        if isinstance(statement, ast.Expr) and qualified_kind(statement.value, kind) == "experimental.ResourceScope":
+            alias = f"_forge_scope_unused_{statement.lineno}_{statement.col_offset}"
+            while alias in names:
+                alias += "_"
+            names.add(alias)
+            statement.value._package_discarded_scope = True
+            constructor.body[index] = ast.copy_location(
+                ast.Assign([ast.Name(alias, ast.Store())], statement.value), statement
+            )
     bindings = {}
     for statement in constructor.body:
         if (
@@ -474,6 +489,8 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
             fail(module, statement, "Package ResourceScope aliases must not be reassigned")
         scopes[scope] = statement
         scope_groups[scope] = "builder_" + builder.id if builder is not None else "fields"
+        if builder is None and getattr(call, "_package_discarded_scope", False):
+            call._package_scope_initializer = True
     recognized_calls = {id(statement.value) for statement in scopes.values()}
     for node in ast.walk(constructor):
         if (
