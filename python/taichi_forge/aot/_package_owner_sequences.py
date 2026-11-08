@@ -9,6 +9,12 @@ def constructor_items(schema):
     for item in schema.values():
         if item["kind"] == "host_owner_sequence":
             yield from item.get("constructors", ())
+        elif item.get("owner_alternatives"):
+            for choice in item["owner_alternatives"]:
+                for key in ("declaration_module", "declaration_owner"):
+                    if key in item:
+                        choice.setdefault(key, item[key])
+                yield choice
         else:
             yield item
 

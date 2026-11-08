@@ -26,6 +26,20 @@ def owner_type(owner):
     return getattr(owner, "_forge_package_contract", getattr(type(owner), "_forge_package_type", None))
 
 
+def selected_owner_declaration(owner, item):
+    alternatives = item.get("owner_alternatives")
+    if not alternatives:
+        return item
+    matches = [
+        choice
+        for choice in alternatives
+        if all(getattr(owner, flag) is expected for flag, expected in choice.get("conditions", {}).items())
+    ]
+    if len(matches) != 1:
+        raise ValueError("Child construction has missing or ambiguous declared guards")
+    return {**item, **matches[0]}
+
+
 def check_admission(owner, contract):
     admission = contract.get("admission")
     if admission:

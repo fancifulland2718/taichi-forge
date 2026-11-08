@@ -895,16 +895,18 @@ class _ModuleBinding:
         return _ResourceScope(owner)
 
     def child_scope(self, parent, name, owner):
-        from ._package_values import owner_type
+        from ._package_values import owner_type, selected_owner_declaration
 
         scope = self.resource_scope(owner)
         self.resource_scope(parent)
         if owner is parent or type(name) is not str or not name.isidentifier():
             raise ValueError("A child resource scope requires a distinct owner and a name")
         declaration = self.package.manifest["owners"][owner_type(parent)].get(name, {})
+        declaration = selected_owner_declaration(parent, declaration)
         if declaration.get("kind") != "owner" or declaration.get("owner_type") != owner_type(owner):
             raise ValueError("Child registration differs from the parent's declared owner contract")
-        if getattr(parent, name, owner) is not owner:
+        previous = getattr(parent, name, None)
+        if previous is not None and previous is not owner:
             raise ValueError("An existing child resource owner cannot be replaced")
         setattr(parent, name, owner)
         # The child owns a separate allocation namespace. A record scope would
@@ -1221,12 +1223,12 @@ def managed_class(package, cls):
         token = _construction.set((package, allocated, self))
         try:
             original(self, *args, **kwargs)
-            from ._package_values import check_owner_bindings
+            from ._package_values import check_owner_bindings, selected_owner_declaration
 
             check_owner_bindings(
                 self,
                 (
-                    dict(path=item.get("path", [name]), owner_type=item["owner_type"])
+                    dict(path=item.get("path", [name]), owner_type=selected_owner_declaration(self, item)["owner_type"])
                     for name, item in package.manifest["owners"].get(selected_key, {}).items()
                     if item["kind"] in ("owner", "owner_input")
                     and item.get("binding_phase") != "preparation"
@@ -1642,6 +1644,7 @@ class LoadedPackage:
                 66,
                 67,
                 68,
+                69,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

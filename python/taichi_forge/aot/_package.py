@@ -1449,7 +1449,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     import taichi_forge as ti
     from taichi_forge.aot._component import Component
     from taichi_forge_runtime._static_values import static_key, read_static_key
-    from ._package_variants import compile_static_variants
+    from ._package_variants import compile_owner_variants, compile_static_variants
     from taichi_forge.aot.module import Module
     from taichi_forge.types.ndarray_type import NdarrayType
     from taichi_forge.lang.matrix import MatrixType
@@ -1585,7 +1585,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
         environments = {}
         compilation_schemas = {}
         for class_name in schemas:
-            owner, schema, environment, expanded = owner_graph.construct(name + "." + class_name)
+            owner, schema, environment, expanded = owner_graph.context(name + "." + class_name)
             schemas[class_name] = schema
             owners[class_name], environments[class_name] = owner, environment
             compilation_schemas[class_name] = expanded
@@ -1679,11 +1679,19 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "order_source",
                         "sequence_declaration",
                         "constructors",
+                        "owner_alternatives",
+                        "choice_guards",
                     )
                 }
                 for attribute, item in schema.items()
             }
             for attribute, item in schema.items():
+                if item.get("owner_alternatives"):
+                    manifest["version"] = max(69, manifest["version"])
+                    manifest["owners"][name + "." + class_name][attribute]["owner_alternatives"] = [
+                        dict(owner_type=choice["owner_type"], conditions=choice.get("conditions", {}))
+                        for choice in item["owner_alternatives"]
+                    ]
                 if item["kind"] == "host_owner_sequence":
                     manifest["owners"][name + "." + class_name][attribute]["owner_types"] = sorted(
                         {child["owner_type"] for child in item["constructors"]}
@@ -1929,36 +1937,66 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 if "closure_environment" in definition
                 else environments[owner_name] if owner_name is not None else Component()
             )
+            compilation_schema = compilation_schemas.get(owner_name, {})
+
+            def template_arguments(receiver):
+                if "function_kernel" not in definition:
+                    return None
+                return {
+                    definition["function_receiver"]: receiver,
+                    **{key: read_static_key(value) for key, value in definition["function_templates"].items()},
+                    **{key: reduce(getattr, path, receiver) for key, path in definition["function_resources"].items()},
+                }
+
             try:
-                codes = compile_static_variants(
-                    environment,
-                    entry,
-                    values,
-                    owner,
-                    compilation_schemas.get(owner_name, {}),
-                    template_args=(
-                        {
-                            definition["function_receiver"]: owner,
-                            **{key: read_static_key(value) for key, value in definition["function_templates"].items()},
-                            **{
-                                key: reduce(getattr, path, owner)
-                                for key, path in definition["function_resources"].items()
-                            },
-                        }
-                        if "function_kernel" in definition
-                        else None
-                    ),
-                )
+                if "closure_environment" not in definition and any(
+                    item.get("owner_alternatives") for item in compilation_schema.values()
+                ):
+                    contexts = compile_owner_variants(
+                        owner_graph, name + "." + owner_name, entry, values, template_args=template_arguments
+                    )
+                else:
+                    contexts = [
+                        (code, owner, environment, compilation_schema)
+                        for code in compile_static_variants(
+                            environment,
+                            entry,
+                            values,
+                            owner,
+                            compilation_schema,
+                            template_args=template_arguments(owner),
+                        )
+                    ]
             except Exception as error:
                 raise PackageExportError(f"{definition_name}: {error}") from error
             variants = []
-            for code in codes:
+            family_schema, family_paths = {}, {}
+            for code, owner, environment, compilation_schema in contexts:
+                if "closure_environment" in definition and any(
+                    compilation_schema[key].get("owner_alternatives")
+                    for key in owner_bindings(environment, compilation_schema, code.used)
+                ):
+                    _fail(name, node, "Closure factory using a child implementation choice requires its own typed root")
+                for key, item in compilation_schema.items():
+                    previous = family_schema.get(key)
+                    if previous is not None and item["kind"] == previous["kind"] == "static":
+                        item = {
+                            **item,
+                            "choices": list({tuple(v): v for v in [*previous["choices"], *item["choices"]]}.values()),
+                            "conditions": {
+                                flag: value
+                                for flag, value in previous.get("conditions", {}).items()
+                                if item.get("conditions", {}).get(flag) is value
+                            },
+                        }
+                    family_schema[key] = item
+                family_paths.update(environment._paths)
                 condition_values = {**code.static, **{key: static_key(value) for key, value in code.objects.items()}}
                 for attribute in {key for key, _ in code.contract["captures"]} | code.static.keys():
-                    required = compilation_schemas.get(owner_name, {}).get(attribute, {}).get("conditions", {})
+                    required = compilation_schema.get(attribute, {}).get("conditions", {})
                     if (
-                        compilation_schemas.get(owner_name, {}).get(attribute, {}).get("external")
-                        or compilation_schemas.get(owner_name, {}).get(attribute, {}).get("dynamic_input_storage")
+                        compilation_schema.get(attribute, {}).get("external")
+                        or compilation_schema.get(attribute, {}).get("dynamic_input_storage")
                     ) and attribute in code.dynamic:
                         continue
                     if any(condition_values.get(key) != static_key(value) for key, value in required.items()):
@@ -1972,15 +2010,12 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 bound_used = {
                     key: value
                     for key, value in code.used.items()
-                    if compilation_schemas.get(owner_name, {}).get(key, {}).get("external")
+                    if compilation_schema.get(key, {}).get("external")
                     and key in code.dynamic
-                    or compilation_schemas.get(owner_name, {}).get(key, {}).get("dynamic_input_storage")
+                    or compilation_schema.get(key, {}).get("dynamic_input_storage")
                     or all(
                         condition_values.get(flag) == static_key(expected)
-                        for flag, expected in compilation_schemas.get(owner_name, {})
-                        .get(key, {})
-                        .get("conditions", {})
-                        .items()
+                        for flag, expected in compilation_schema.get(key, {}).get("conditions", {}).items()
                     )
                 }
                 constraints, dimensions, _ = environment.constraint_facts(owner, bound_used)
@@ -1989,7 +2024,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         path=list(environment._paths[key]),
                         present=key in code.dynamic if item.get("external") else key in bound_used,
                     )
-                    for key, item in compilation_schemas.get(owner_name, {}).items()
+                    for key, item in compilation_schema.items()
                     if key in code.used and item.get("optional_input") and not item.get("external")
                 }
                 dynamic_presence = {
@@ -1997,7 +2032,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         path=list(environment._paths[key]),
                         flag_path=list(environment._paths[item["input_presence_attribute"]]),
                     )
-                    for key, item in compilation_schemas.get(owner_name, {}).items()
+                    for key, item in compilation_schema.items()
                     if item.get("external")
                     and item.get("optional_input")
                     and (key in code.used or item["input_presence_attribute"] in code.used)
@@ -2009,11 +2044,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         path=list(environment._paths[key]),
                         required_when=code.contract.get("input_requirements", {}).get(key, []),
                     )
-                    for key, item in compilation_schemas.get(owner_name, {}).items()
+                    for key, item in compilation_schema.items()
                     if item.get("dynamic_input_record") and key in code.used
                 }
                 for key in input_records:
-                    flag = compilation_schemas[owner_name][key]["input_presence_attribute"]
+                    flag = compilation_schema[key]["input_presence_attribute"]
                     dynamic_presence[flag] = dict(
                         path=list(environment._paths[key]), flag_path=list(environment._paths[flag])
                     )
@@ -2025,14 +2060,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         source_path=item["source_path"],
                         **({"presence": item["source_presence"]} if item.get("source_presence") else {}),
                     )
-                    for key, item in compilation_schemas.get(owner_name, {}).items()
+                    for key, item in compilation_schema.items()
                     if item["kind"] == "borrowed_field"
                     and any(
                         tuple(path[: len(environment._paths[key])]) == tuple(environment._paths[key])
                         for path in used_paths
                     )
                 }
-                child_bindings = owner_bindings(environment, compilation_schemas.get(owner_name, {}), bound_used)
+                child_bindings = owner_bindings(environment, compilation_schema, bound_used)
                 from taichi_forge_runtime._dimensions import extent_dependencies
 
                 external_resources = {
@@ -2051,7 +2086,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         ),
                         **({"input_record": item["input_record"]} if item.get("input_record") else {}),
                     )
-                    for key, item in compilation_schemas.get(owner_name, {}).items()
+                    for key, item in compilation_schema.items()
                     if key in code.dynamic and item.get("external")
                 }
                 conditional_resources = {
@@ -2065,9 +2100,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         dimensions=dimension_relations(
                             environment, {axis for axis in item["shape"] if isinstance(axis, str)}
                         ),
-                        **layout_owner(environment, compilation_schemas[owner_name], key),
+                        **layout_owner(environment, compilation_schema, key),
                     )
-                    for key, item in compilation_schemas.get(owner_name, {}).items()
+                    for key, item in compilation_schema.items()
                     if key in code.dynamic and item.get("dynamic_input_storage")
                 }
                 if conditional_resources:
@@ -2075,7 +2110,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 constants = {
                     key: dict(path=list(environment._paths[key]), value=value)
                     for key, value in code.static.items()
-                    if compilation_schemas.get(owner_name, {}).get(key, {}).get("kind") == "constant"
+                    if compilation_schema.get(key, {}).get("kind") == "constant"
                 }
                 admission = (
                     dict(
@@ -2089,11 +2124,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                             {
                                 "input_records": input_records,
                                 "constraint_records": {
-                                    key: compilation_schemas[owner_name][constraint["when"]]["input_record"]
+                                    key: compilation_schema[constraint["when"]]["input_record"]
                                     for key, constraint in constraints.items()
-                                    if compilation_schemas.get(owner_name, {})
-                                    .get(constraint["when"], {})
-                                    .get("input_record")
+                                    if compilation_schema.get(constraint["when"], {}).get("input_record")
                                 },
                             }
                             if input_records
@@ -2152,7 +2185,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         for capture_name, schema in code.contract["captures"]
                     ]
                     for item in capture:
-                        resource = compilation_schemas.get(owner_name, {}).get(item["name"], {})
+                        resource = compilation_schema.get(item["name"], {})
                         if resource.get("input_record"):
                             item["nullable_record"] = list(environment._paths[resource["input_record"]])
                         if resource.get("external") and (
@@ -2171,9 +2204,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                                 environment, (n for n in shape if isinstance(n, str))
                             )
                         if item["kind"] in ("dense_field", "model_tensor_field"):
-                            item.update(
-                                layout_owner(environment, compilation_schemas.get(owner_name, {}), item["name"])
-                            )
+                            item.update(layout_owner(environment, compilation_schema, item["name"]))
                         if item["kind"] in ("ndarray", "dense_field", "model_tensor_field"):
                             item.pop("dtype")
                         if item["kind"] == "dimension" and environment.declarations[item["name"]].expression:
@@ -2214,7 +2245,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                             **{
                                 key: ("bool", value)
                                 for key, value in code.objects.items()
-                                if compilation_schemas.get(owner_name, {}).get(key, {}).get("optional")
+                                if compilation_schema.get(key, {}).get("optional")
                             },
                         },
                         symbol=entry_manifest["symbol"],
@@ -2228,34 +2259,30 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 family_identity = json.dumps([name + "." + definition["name"], variants], sort_keys=True).encode()
                 symbol = "family_" + hashlib.sha256(family_identity).hexdigest()
                 used = {key for variant in variants for key in variant["selection"]}
-                presence = {key for key in used if compilation_schemas[owner_name][key].get("optional")}
+                presence = {key for key in used if family_schema[key].get("optional")}
                 manifest["entry_families"][symbol] = dict(
                     arguments=argument_schema,
                     variants=variants,
                     domain={
-                        key: (
-                            [["bool", False], ["bool", True]]
-                            if key in presence
-                            else compilation_schemas[owner_name][key]["choices"]
-                        )
+                        key: ([["bool", False], ["bool", True]] if key in presence else family_schema[key]["choices"])
                         for key in sorted(used)
                     },
                     **({"record_presence": sorted(presence)} if presence else {}),
                     **(
-                        {"paths": {key: list(environment._paths[key]) for key in used}}
-                        if any(len(environment._paths[key]) > 1 for key in used)
+                        {"paths": {key: list(family_paths[key]) for key in used}}
+                        if any(len(family_paths[key]) > 1 for key in used)
                         else {}
                     ),
                 )
                 conditions = {
-                    key: dict(compilation_schemas[owner_name][key]["conditions"])
+                    key: dict(family_schema[key]["conditions"])
                     for key in sorted(used)
-                    if compilation_schemas[owner_name][key].get("conditions")
+                    if family_schema[key].get("conditions")
                 }
                 for key in used:
-                    path = environment._paths[key]
+                    path = family_paths[key]
                     for parent in presence:
-                        prefix = environment._paths[parent]
+                        prefix = family_paths[parent]
                         if len(prefix) < len(path) and path[: len(prefix)] == prefix:
                             conditions.setdefault(key, {})[parent] = True
                 if conditions:

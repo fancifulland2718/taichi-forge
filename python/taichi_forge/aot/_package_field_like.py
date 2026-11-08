@@ -25,6 +25,8 @@ def resolve_field_likes(sources):
                 "field_like currently requires an unconditional original allocation"
             )
         if item.get("kind") in ("owner", "owner_input"):
+            if len({choice["owner_type"] for choice in item.get("owner_alternatives", ())}) > 1:
+                raise ValueError("field_like across child implementation choices requires a resolved allocation type")
             identity, field, prefix = allocation(item["owner_type"], rest, (*visiting, token), present=present)
             return identity, field, [name, *prefix]
         if item.get("kind") == "borrowed_field" and not rest:

@@ -119,6 +119,27 @@ source-free consumption and rejection of changed constants. Actual layout/ABI
 differences may still require distinct code; same-layout receivers share the
 qualified entry. The exporter does not infer absence from instance `hasattr` or
 expand a class layout fact into arbitrary model boolean configurations.
+
+Version 69 admits different child types at one parent attribute under mutually
+exclusive declared boolean branches, such as `if self.method:
+scope.worker = First(self)` / `else: scope.worker = Second(self)`. The child
+types may have different field layouts and device methods. The parent class and
+Host constructor remain single definitions. Only numerical entries that use the
+child or read the selector gain necessary implementations; unrelated entries and
+unused sibling configuration do not create code copies. Selection reuses static
+dependencies and entry bindings. Compiler resource witnesses are reused across
+entries while consumer instances retain independent state. A shared outer
+presence condition is retained, and an initial `None` may register its first
+child; registration cannot replace an existing object.
+Focused CPU/CUDA checks cover ordinary JIT, different layouts, sizes 7/19,
+source-free subprocess consumption, wrong types and changed selectors. CPU also
+covers unused siblings, optional branches and qualified nested paths. Branches
+must be disjoint and cover the declared domain within their common presence
+condition. Cross-choice constructor-input, `field_like` source and free-function
+receiver inference remain unsupported; the first child type is not used as a
+substitute contract. Closure factories combined with child choices are also not
+qualified. These checks do not qualify complete rigid or engine export.
+
 This implementation uses one code module per export; it does not automatically
 provide multiple physical code partitions or qualify their loading costs.
 

@@ -35,6 +35,7 @@ class OwnerGraph:
         from ._package_input_families import source_class
 
         self.imported, self.module = imported, module
+        self._contexts = {}
         self.definitions = {
             name + "." + owner: (name, source_class(tree, owner), copy.deepcopy(schema))
             for name, _, _, _, tree, _, schemas, _ in sources
@@ -43,6 +44,13 @@ class OwnerGraph:
         for identity in self.definitions:
             self._validate(identity, ())
 
+    def context(self, identity, choices=None):
+        """Reuse definition witnesses across kernels, never consumer instances."""
+        key = identity, tuple(sorted((choices or {}).items()))
+        if key not in self._contexts:
+            self._contexts[key] = self.construct(identity, choices=choices)
+        return self._contexts[key]
+
     def _validate(self, identity, ancestors):
         if identity not in self.definitions:
             raise ValueError("Declared child owner is outside the supported definition closure: " + identity)
@@ -50,9 +58,10 @@ class OwnerGraph:
             raise ValueError("Declared owner construction is cyclic: " + " -> ".join((*ancestors, identity)))
         for item in self.definitions[identity][2].values():
             if item["kind"] == "owner":
-                self._validate(item["owner_type"], (*ancestors, identity))
+                for choice in item.get("owner_alternatives", [item]):
+                    self._validate(choice["owner_type"], (*ancestors, identity))
 
-    def construct(self, identity, *, resource_only=False, references=()):
+    def construct(self, identity, *, resource_only=False, references=(), choices=None, path=()):
         import taichi_forge as ti
         from taichi_forge.lang.matrix import MatrixType
         from taichi_forge_runtime._static_values import read_static_key
@@ -61,6 +70,7 @@ class OwnerGraph:
             Record,
             RuntimeValue,
             StaticValue,
+            _ChoiceRecord,
             _ConditionalArray,
             _InputPresence,
             _OptionalArray,
@@ -72,6 +82,32 @@ class OwnerGraph:
 
         name, class_name, original = self.definitions[identity]
         schema = copy.deepcopy(original)
+        static_values = {
+            key: (choices or {}).get((*path, key), read_static_key(item["choices"][0]))
+            for key, item in schema.items()
+            if item["kind"] == "static"
+        }
+        for attribute, item in schema.items():
+            alternatives = item.get("owner_alternatives")
+            if alternatives:
+                applicable = [
+                    option
+                    for option in alternatives
+                    if all(
+                        static_values.get(key) is value
+                        for key, value in option.get("conditions", {}).items()
+                        if key not in item.get("conditions", {})
+                    )
+                ]
+                if len(applicable) != 1:
+                    raise ValueError("Child implementation choices must cover their declared guard domain")
+                selected = applicable[0]
+                item["owner_type"] = selected["owner_type"]
+                item["choice_guards"] = {
+                    key: value
+                    for key, value in selected.get("conditions", {}).items()
+                    if key not in item.get("conditions", {})
+                }
         if resource_only:
             # An input borrows its existing allocation scope. It does not create
             # or recursively compile that scope's owned solver/workspace objects.
@@ -103,8 +139,14 @@ class OwnerGraph:
                 if item["kind"] == "owner_input":
                     declarations[attribute] = Record(optional=bool(item.get("conditions")))
                     continue
-                value, _, child, expanded = self.construct(item["owner_type"], references=references)
-                declarations[attribute] = Record(optional=bool(item.get("conditions")))
+                value, _, child, expanded = self.construct(
+                    item["owner_type"], references=references, choices=choices, path=(*path, attribute)
+                )
+                declarations[attribute] = (
+                    _ChoiceRecord(item["choice_guards"].items(), optional=bool(item.get("conditions")))
+                    if item.get("owner_alternatives")
+                    else Record(optional=bool(item.get("conditions")))
+                )
                 children[attribute] = (child, expanded)
             elif item["kind"] == "static":
                 choices = tuple(read_static_key(key) for key in item["choices"])
@@ -163,6 +205,7 @@ def _compose(environment, schema, children):
         Dimension,
         Record,
         _ConditionalRecord,
+        _ChoiceRecord,
         _InputRecord,
         _ModelTensorField,
         _capture_id,
@@ -173,7 +216,7 @@ def _compose(environment, schema, children):
     derived, expanded = set(environment._derived_attributes), dict(schema)
     for attribute, (child, child_schema) in children.items():
         names = {key: _capture_id((attribute, *path)) for key, path in child._paths.items()}
-        owner_conditions = schema[attribute].get("conditions", {})
+        owner_conditions = {**schema[attribute].get("conditions", {}), **schema[attribute].get("choice_guards", {})}
 
         def expression(value):
             op, *args = value
@@ -216,6 +259,10 @@ def _compose(environment, schema, children):
                 value = _ConditionalRecord(tuple((names[n], expected) for n, expected in value.conditions))
             elif isinstance(value, _InputRecord):
                 value = _InputRecord(names[value.presence])
+            elif isinstance(value, _ChoiceRecord):
+                value = _ChoiceRecord(
+                    tuple((names[n], expected) for n, expected in value.guards), optional=value.optional
+                )
             elif isinstance(value, Record):
                 value = Record(optional=value.optional)
             declarations[names[key]], paths[names[key]] = value, (attribute, *child._paths[key])
@@ -248,6 +295,16 @@ def _compose(environment, schema, children):
                 ]
             if "conditions" in item:
                 transformed["conditions"] = {names[n]: expected for n, expected in item["conditions"].items()}
+            if "choice_guards" in item:
+                transformed["choice_guards"] = {names[n]: expected for n, expected in item["choice_guards"].items()}
+            if "owner_alternatives" in item:
+                transformed["owner_alternatives"] = [
+                    {
+                        **choice,
+                        "conditions": {names[n]: expected for n, expected in choice.get("conditions", {}).items()},
+                    }
+                    for choice in item["owner_alternatives"]
+                ]
             if owner_conditions:
                 transformed["conditions"] = {**transformed.get("conditions", {}), **owner_conditions}
             expanded[names[key]] = transformed

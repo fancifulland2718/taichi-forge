@@ -627,6 +627,25 @@ def scope_declarations(
 
     def add(name, spec, node):
         existing = declarations.get(name)
+        if existing is not None and existing["kind"] == spec["kind"] == "owner":
+            choices = existing.get("owner_alternatives", [existing])
+            if any(
+                not any(
+                    key in spec.get("conditions", {}) and spec["conditions"][key] is not value
+                    for key, value in prior.get("conditions", {}).items()
+                )
+                for prior in choices
+            ):
+                fail(module, node, "Child owner constructions require mutually exclusive declared guards")
+            if "owner_alternatives" not in existing:
+                existing["owner_alternatives"] = [dict(existing)]
+            existing["owner_alternatives"].append(spec)
+            existing["conditions"] = {
+                key: value
+                for key, value in existing.get("conditions", {}).items()
+                if spec.get("conditions", {}).get(key) is value
+            }
+            return
         if existing is not None and existing["kind"] == spec["kind"] == "dimension":
             # Two explicit groups may use the same owner count. Provenance of
             # its declaration does not create a different dimension value.
@@ -681,6 +700,7 @@ def scope_declarations(
     extent_namespaces = {}
     constraint_declarations = {}
     scope_writes = []
+    child_stores = {}
     current_conditions = {}
     stores = {n.arg: 1 for n in ast.walk(constructor.args) if isinstance(n, ast.arg)}
     parameter_names = frozenset(stores)
@@ -2058,28 +2078,7 @@ def scope_declarations(
                                 root = root.value
                             if not isinstance(root, ast.Name) or root.id in stores:
                                 fail(module, statement, "Declared child owner requires an unshadowed class definition")
-                            initial_none = (
-                                conditions
-                                and member_stores[target.attr] == 2
-                                and any(
-                                    isinstance(prior, ast.Assign)
-                                    and len(prior.targets) == 1
-                                    and isinstance(prior.targets[0], ast.Attribute)
-                                    and isinstance(prior.targets[0].value, ast.Name)
-                                    and prior.targets[0].value.id == "self"
-                                    and prior.targets[0].attr == target.attr
-                                    and isinstance(prior.value, ast.Constant)
-                                    and prior.value.value is None
-                                    and prior.lineno < statement.lineno
-                                    for prior in constructor.body
-                                )
-                            )
-                            if member_stores[target.attr] != 1 and not initial_none:
-                                fail(
-                                    module,
-                                    statement,
-                                    "Declared child owner requires one construction and optional None default",
-                                )
+                            child_stores.setdefault(target.attr, []).append(statement)
                             add(
                                 target.attr,
                                 dict(
@@ -2146,6 +2145,21 @@ def scope_declarations(
                         aliases[name.id] = value
                         alias_conditions[name.id] = dict(conditions)
 
+    for name, statements in child_stores.items():
+        initial_none = any(
+            isinstance(prior, ast.Assign)
+            and len(prior.targets) == 1
+            and isinstance(prior.targets[0], ast.Attribute)
+            and isinstance(prior.targets[0].value, ast.Name)
+            and prior.targets[0].value.id == "self"
+            and prior.targets[0].attr == name
+            and isinstance(prior.value, ast.Constant)
+            and prior.value.value is None
+            and prior.lineno < min(s.lineno for s in statements)
+            for prior in constructor.body
+        )
+        if member_stores[name] != len(statements) + int(initial_none):
+            fail(module, statements[0], "Declared child owner requires one construction and optional None default")
     for target in scope_writes:
         if declarations.get(target.attr, {}).get("kind") in ("dimension", "value", "static", "constant", "owner"):
             allowed.add(id(target.value))

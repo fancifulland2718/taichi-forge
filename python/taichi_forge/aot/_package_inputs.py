@@ -145,6 +145,8 @@ def resolve_inputs(sources, imported):
         item = owners.get(owner, ({}, None))[0].get(key, {})
         kind = item.get("kind")
         if kind in ("owner", "owner_input"):
+            if len({choice["owner_type"] for choice in item.get("owner_alternatives", ())}) > 1:
+                raise ValueError("Constructor input from a child implementation choice requires a resolved source type")
             return member_type(item["owner_type"], rest, visited) if "owner_type" in item else None
         if kind == "dense_field":
             if not rest or (item.get("struct_field") and len(rest) == 1):

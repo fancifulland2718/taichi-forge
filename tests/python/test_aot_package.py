@@ -5601,6 +5601,268 @@ class Model:
 """
 
 
+CHILD_CHOICES_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class First:
+    def __init__(self, parent):
+        global constructors
+        constructors += 1
+        scope = ti.experimental.ResourceScope(parent).child('child', self)
+        scope.owner_reference('parent', parent)
+        n = scope.owner_dim('parent', 'n')
+        scope.a = scope.field(ti.i32, shape=n, initialization='zero')
+    @ti.func
+    def evaluate(self, i):
+        self.a[i] = i + 3
+        return self.a[i]
+@ti.data_oriented
+class Second:
+    def __init__(self, parent):
+        global constructors
+        constructors += 1
+        scope = ti.experimental.ResourceScope(parent).child('child', self)
+        scope.owner_reference('parent', parent)
+        n = scope.owner_dim('parent', 'n')
+        scope.b = scope.field(ti.i32, shape=(n, 2), initialization='zero')
+    @ti.func
+    def evaluate(self, i):
+        self.b[i, 1] = 2 * i - 5
+        return self.b[i, 1]
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, second: bool):
+        self.n, self.second = n, second
+        scope = ti.experimental.ResourceScope(self)
+        n = scope.dim('n')
+        scope.static('second', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=n, initialization='zero')
+        if self.second:
+            scope.child = Second(self)
+        else:
+            scope.child = First(self)
+    @ti.kernel
+    def step(self):
+        for i in self.out:
+            self.out[i] = self.child.evaluate(i)
+    @ti.kernel
+    def independent(self, bias: ti.i32):
+        for i in self.out:
+            self.out[i] = i + bias
+    @ti.kernel
+    def parent_flag(self):
+        for i in self.out:
+            if ti.static(self.second):
+                self.out[i] = 12
+            else:
+                self.out[i] = -12
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_child_choices_share_unrelated_parent_code(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, CHILD_CHOICES_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    original = sys.modules["definition_fixture.model"]
+    assert original.constructors == 0
+    assert manifest["version"] == 69
+    parent = manifest["owners"]["definition_fixture.model.Model"]
+    assert len(parent["child"]["owner_alternatives"]) == 2
+    assert len([name for name in manifest["owners"] if name.startswith("definition_fixture.model.Model")]) == 1
+    independent = [
+        entry
+        for entry in manifest["entries"].values()
+        if "definition_fixture.model.Model.independent" in entry["definitions"]
+    ]
+    assert len(independent) == 1
+    steps = [
+        entry for entry in manifest["entries"].values() if "definition_fixture.model.Model.step" in entry["definitions"]
+    ]
+    assert len(steps) == 2
+    for second in (False, True):
+        model = original.Model(7, second)
+        model.step()
+        np.testing.assert_array_equal(model.out.to_numpy(), 2 * np.arange(7) - 5 if second else np.arange(7) + 3)
+    probe = tmp_path / "consume_child_choices.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoPrivateSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoPrivateSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(7, False), code.host.Model(19, True)
+            a.step()
+            b.step()
+            np.testing.assert_array_equal(a.out.to_numpy(), np.arange(7) + 3)
+            np.testing.assert_array_equal(b.out.to_numpy(), 2 * np.arange(19) - 5)
+            a.independent(9)
+            np.testing.assert_array_equal(a.out.to_numpy(), np.arange(7) + 9)
+            np.testing.assert_array_equal(b.out.to_numpy(), 2 * np.arange(19) - 5)
+            a.parent_flag()
+            b.parent_flag()
+            np.testing.assert_array_equal(a.out.to_numpy(), np.full(7, -12))
+            np.testing.assert_array_equal(b.out.to_numpy(), np.full(19, 12))
+            registered = set(runtime._resources)
+            try:
+                code.host.model.First(b)
+            except ValueError as error:
+                assert 'declared owner contract' in str(error)
+            else:
+                raise AssertionError('Wrong child type accepted')
+            assert runtime._resources == registered
+            b.second = False
+            try:
+                b.step()
+            except ValueError as error:
+                assert 'child owner' in str(error) or 'layout configuration' in str(error)
+            else:
+                raise AssertionError('Changed construction guards accepted')
+        print('CHILD_CHOICES_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CHILD_CHOICES_SOURCE_FREE_OK" in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize(
+    "replacement,reason",
+    [
+        ("        if self.second:\n            scope.child = First(self)", "mutually exclusive"),
+        ("        scope.child = First(self)", "mutually exclusive"),
+        ("        else:\n            scope.child = First(self)\n        self.child = None", "one construction"),
+    ],
+)
+def test_package_child_choices_reject_overlapping_or_unscoped_writes(tmp_path, monkeypatch, replacement, reason):
+    source = CHILD_CHOICES_SOURCE.replace("        else:\n            scope.child = First(self)", replacement)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match=reason):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_child_choices_do_not_expand_unused_sibling(tmp_path, monkeypatch):
+    source = CHILD_CHOICES_SOURCE.replace("ResourceScope(parent).child('child', self)", "ResourceScope(self)")
+    source = source.replace("n: int, second: bool", "n: int, second: bool, other: bool")
+    source = source.replace(
+        "        scope.static('second', choices=(False, True))",
+        """
+        scope.static('second', choices=(False, True))
+        self.other = other
+        scope.static('other', choices=(False, True))
+        if self.other:
+            scope.unused = First(self)
+        else:
+            scope.unused = Second(self)
+""",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    steps = [
+        entry for entry in manifest["entries"].values() if "definition_fixture.model.Model.step" in entry["definitions"]
+    ]
+    assert len(steps) == 2
+    assert all("other" not in family.get("domain", {}) for family in manifest["entry_families"].values())
+    from taichi_forge_runtime.aot import Runtime, load_package
+
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for second in (False, True):
+            for other in (False, True):
+                model = code.host.Model(11, second, other)
+                model.step()
+                np.testing.assert_array_equal(
+                    model.out.to_numpy(), 2 * np.arange(11) - 5 if second else np.arange(11) + 3
+                )
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_child_choices_preserve_optional_parent_branch(tmp_path, monkeypatch):
+    source = CHILD_CHOICES_SOURCE.replace("n: int, second: bool", "n: int, second: bool, enabled: bool")
+    source = source.replace(
+        "        scope.static('second', choices=(False, True))",
+        """
+        scope.static('second', choices=(False, True))
+        self.enabled = enabled
+        scope.static('enabled', choices=(False, True))
+        self.child = None
+""",
+    )
+    start = source.index("        if self.second:\n            scope.child")
+    end = source.index("    @ti.kernel", start)
+    source = source[:start] + "        if self.enabled:\n" + textwrap.indent(source[start:end], "    ") + source[end:]
+    source = source.replace(
+        "            self.out[i] = self.child.evaluate(i)",
+        """
+            self.out[i] = -9
+            if ti.static(self.enabled):
+                self.out[i] = self.child.evaluate(i)
+""",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    from taichi_forge_runtime.aot import Runtime, load_package
+
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for second in (False, True):
+            for enabled in (False, True):
+                model = code.host.Model(5, second, enabled)
+                model.step()
+                expected = (2 * np.arange(5) - 5 if second else np.arange(5) + 3) if enabled else np.full(5, -9)
+                np.testing.assert_array_equal(model.out.to_numpy(), expected)
+                if not enabled:
+                    assert model.child is None
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_nested_child_choices_keep_qualified_guards(tmp_path, monkeypatch):
+    source = CHILD_CHOICES_SOURCE + """
+@ti.data_oriented
+class Outer:
+    def __init__(self, n: int, second: bool):
+        scope = ti.experimental.ResourceScope(self)
+        scope.inner = Model(n, second)
+    @ti.kernel
+    def run(self):
+        for i in self.inner.out:
+            self.inner.out[i] = self.inner.child.evaluate(i)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    from taichi_forge_runtime.aot import Runtime, load_package
+
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for second in (False, True):
+            model = code.host.model.Outer(13, second)
+            model.run()
+            np.testing.assert_array_equal(
+                model.inner.out.to_numpy(), 2 * np.arange(13) - 5 if second else np.arange(13) + 3
+            )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 @pytest.mark.parametrize("factory", [False, True])
 def test_package_child_registration_preserves_owned_layout_and_source_free_host(tmp_path, monkeypatch, factory):

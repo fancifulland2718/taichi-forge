@@ -182,6 +182,8 @@ def discover(sources, imported, *, preparation_receivers=None):
             return None
         item = owners[owner.identity].get(name, {})
         if item.get("kind") in ("owner", "owner_input") and item.get("owner_type") in owners:
+            if len({choice["owner_type"] for choice in item.get("owner_alternatives", ())}) > 1:
+                return None  # A choice is not evidence for its first receiver type.
             return _Owner(item["owner_type"], owner.root or owner.identity, (*owner.path, name))
         if item.get("kind") in ("dense_field", "model_tensor_field", "borrowed_field", "fixed_snode_field"):
             return _Resource(owner, tuple(item.get("path", (name,))))

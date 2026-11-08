@@ -6,7 +6,8 @@ from taichi_forge_runtime._static_values import read_static_key, static_key
 from ._package_records import read_member, write_member
 from ._component import _DefinitionMissingResource
 
-def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None):
+
+def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None, fixed=None):
     """Cover a kernel's finite declaration domain without multiplying owners.
 
     A compiled contract covers every assignment of unread configuration values.
@@ -24,6 +25,10 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     domains.update(
         (name, (read_static_key(item["value"]),)) for name, item in schema.items() if item["kind"] == "constant"
     )
+    for name, value in (fixed or {}).items():
+        if name not in domains or static_key(value) not in tuple(static_key(v) for v in domains[name]):
+            raise ValueError("Child implementation guard is outside the declared static domain")
+        domains[name] = (value,)
     records = {
         name: read_member(owner, name, schema)
         for name, item in schema.items()
@@ -84,3 +89,72 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     if not codes:
         raise ValueError("Numerical entry has no admissible resource/configuration choice")
     return codes
+
+
+def compile_owner_variants(graph, identity, entry, arguments, *, template_args=None):
+    """Explore child implementations only after an entry actually uses them.
+
+    The parent class/instance and Host constructor remain single definitions.
+    These temporary compiler witnesses describe local method/layout choices;
+    they never become separately exported parent profiles or mutable state.
+    """
+    from ._package_owner_graph import owner_bindings
+    from types import SimpleNamespace
+
+    pending, visited, emitted, results = deque([{}]), set(), set(), []
+    while pending:
+        selection = pending.popleft()
+        key = tuple(sorted(selection.items()))
+        if key in visited:
+            continue
+        visited.add(key)
+        owner, _, environment, schema = graph.context(identity, selection)
+        choices = {name: item for name, item in schema.items() if item.get("owner_alternatives")}
+        fixed = {}
+        for item in choices.values():
+            for name, value in item.get("choice_guards", {}).items():
+                if name in fixed and fixed[name] is not value:
+                    raise ValueError("Child implementation guards contradict one another")
+                fixed[name] = value
+        selected_entry = (
+            SimpleNamespace(_primal=entry._primal, _kernel_owner=owner)
+            if getattr(entry, "_kernel_owner", None) is not None
+            else entry
+        )
+        codes = compile_static_variants(
+            environment,
+            selected_entry,
+            arguments,
+            owner,
+            schema,
+            template_args=template_args(owner) if template_args else None,
+            fixed=fixed,
+        )
+        for code in codes:
+            bindings = owner_bindings(environment, schema, code.used)
+            # The existing compiler still decides physical code sharing. This
+            # merely avoids emitting the same logical selection twice when a
+            # branch did not visit the changed child.
+            signature = (
+                code.kernel,
+                code.key,
+                tuple(sorted(code.static.items())),
+                tuple(sorted(code.objects.items())),
+                tuple(sorted((name, item["owner_type"]) for name, item in bindings.items())),
+            )
+            if signature not in emitted:
+                emitted.add(signature)
+                results.append((code, owner, environment, schema))
+            for name, item in choices.items():
+                # A parent method can also read the same configuration without
+                # touching the child. Its own static branches remain complete.
+                if name not in bindings and not code.static.keys() & item.get("choice_guards", {}).keys():
+                    continue
+                for alternative in item["owner_alternatives"]:
+                    guards = {
+                        tuple(environment._paths[flag]): value
+                        for flag, value in alternative.get("conditions", {}).items()
+                        if flag not in item.get("conditions", {})
+                    }
+                    pending.append({**selection, **guards})
+    return results

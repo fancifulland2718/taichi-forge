@@ -664,6 +664,14 @@ class _ConditionalRecord(Record):
         object.__setattr__(self, "conditions", tuple(conditions))
 
 
+class _ChoiceRecord(Record):
+    """A child implementation selected by declared Host construction guards."""
+
+    def __init__(self, guards, *, optional=False):
+        super().__init__(optional=optional)
+        object.__setattr__(self, "guards", tuple(guards))
+
+
 class _OwnerSequence(Record):
     """A fixed Host composition of declared owners; no device subscript ABI."""
 
@@ -2176,6 +2184,14 @@ class _Capture:
             if not present and self.component._symbolic_dimensions and ctx is not None and not ctx.is_in_static_scope():
                 self.missing_resource = name
                 raise TaichiCompilationError(f"Numerical entry requires record self.{'.'.join(path)}")
+            if present and isinstance(declaration, _ChoiceRecord):
+                # Record implementation identity only where a numerical entry
+                # actually traverses it. Unrelated methods do not acquire the
+                # parent's construction configuration as code dependencies.
+                for guard, expected in declaration.guards:
+                    guard_path = self.component._paths[guard]
+                    if self.attribute(ctx, guard_path[-1], prefix=guard_path[:-1]) is not expected:
+                        raise TaichiCompilationError("Child implementation differs from its construction guards")
             return _RecordReference(path) if present else None
         if isinstance(declaration, Dimension):
             self.dimension_dependency(name)
