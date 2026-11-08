@@ -42,11 +42,11 @@ from taichi_forge_runtime._static_values import StaticDType, static_key
 _STATELESS_OWNER = object()
 
 
-class _DefinitionMissingRecord(ValueError):
-    """A package selection omits a record required on its reached branch."""
+class _DefinitionMissingResource(ValueError):
+    """A package selection omits an input required on its reached branch."""
 
     def __init__(self, name, capture):
-        super().__init__(f"Numerical entry requires record {name!r}")
+        super().__init__(f"Numerical entry requires resource {name!r}")
         self.static = dict(capture.static)
         self.objects = dict(capture.objects)
 
@@ -1701,8 +1701,8 @@ class Component:
                     key=key, args=call_args, arg_features=tuple(features), for_aot=True, deployment=context
                 )
             except Exception as error:
-                if context.missing_record is not None:
-                    raise _DefinitionMissingRecord(context.missing_record, context) from error
+                if context.missing_resource is not None:
+                    raise _DefinitionMissingResource(context.missing_resource, context) from error
                 raise
             code = _ComponentCode(kernel, key, context)
             kernel._component_candidates.append(code)
@@ -1844,7 +1844,7 @@ class _Capture:
         self.static = {}
         self.static_objects = {}
         self.objects = {}
-        self.missing_record = None
+        self.missing_resource = None
         self.resource_conditions = {}
         self.input_guards = []
         self.input_requirements = {}
@@ -2153,6 +2153,14 @@ class _Capture:
                     raise TaichiCompilationError("Conditional Field presence requires boolean values")
                 present = present and actual is expected
             if not present:
+                if (
+                    self.component._symbolic_dimensions
+                    and ctx is not None
+                    and not ctx.is_in_static_scope()
+                    and isinstance(declaration, (_ConditionalDenseField, _ConditionalModelTensorField))
+                ):
+                    self.missing_resource = name
+                    raise TaichiCompilationError(f"Numerical entry requires Field self.{'.'.join(path)}")
                 return None
         if isinstance(declaration, _OwnerReference):
             if not declaration.matches(self.component, self.owner, name):
@@ -2166,7 +2174,7 @@ class _Capture:
             if previous != present:
                 raise TaichiCompilationError("Component record presence changed during compilation; retry")
             if not present and self.component._symbolic_dimensions and ctx is not None and not ctx.is_in_static_scope():
-                self.missing_record = name
+                self.missing_resource = name
                 raise TaichiCompilationError(f"Numerical entry requires record self.{'.'.join(path)}")
             return _RecordReference(path) if present else None
         if isinstance(declaration, Dimension):

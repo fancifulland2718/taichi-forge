@@ -3501,6 +3501,51 @@ class Model:
     assert "DYNAMIC_WORKSPACE_SOURCE_FREE_OK" in result.stdout
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_required_conditional_workspace_selects_only_admissible_code(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool, unused: bool):
+        self.n = n
+        self.enabled = enabled
+        self.unused = unused
+        s = ti.experimental.ResourceScope(self)
+        s.static('enabled', choices=(False, True))
+        s.static('unused', choices=(False, True))
+        s.counter = s.field(ti.i32, shape=())
+        s.extra = s.field(ti.i32, shape=s.dim('n')) if self.unused else None
+        s.workspace = s.field(ti.i32, shape=s.dim('n')) if self.enabled else None
+    @ti.kernel
+    def step(self):
+        for i in self.workspace:
+            self.workspace[i] = i + 3
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.step)
+        return b.compile()
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    (family,) = manifest["entry_families"].values()
+    assert len(family["variants"]) == 1 and set(family["domain"]) == {"enabled"}
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for unused in (False, True):
+            model = code.host.Model(17, True, unused)
+            model.step()
+            np.testing.assert_array_equal(model.workspace.to_numpy(), np.arange(17) + 3)
+            with model.graph().bind({}) as call:
+                call.run()
+            np.testing.assert_array_equal(model.workspace.to_numpy(), np.arange(17) + 3)
+        missing = code.host.Model(5, False, True)
+        assert missing.workspace is None
+        with pytest.raises(ValueError, match="configuration|variant|selection"):
+            missing.step()
+        with pytest.raises(ValueError, match="configuration|variant|selection"):
+            missing.graph().bind({})
+
+
 def _optional_record_source():
     source = RECORD_RESOURCES_SOURCE.replace(
         "record = scope.record('layout', layout)",

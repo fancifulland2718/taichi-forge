@@ -4,8 +4,7 @@ from collections import deque
 
 from taichi_forge_runtime._static_values import read_static_key, static_key
 from ._package_records import read_member, write_member
-from ._component import _DefinitionMissingRecord
-
+from ._component import _DefinitionMissingResource
 
 def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None):
     """Cover a kernel's finite declaration domain without multiplying owners.
@@ -57,8 +56,8 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                 write_member(owner, name, value if selection[name] else None, schema)
             try:
                 code = environment.compile(entry, *arguments, owner=owner, template_args=template_args)
-            except _DefinitionMissingRecord as missing:
-                # Only an explicitly identified absent required record makes a
+            except _DefinitionMissingResource as missing:
+                # Only an explicitly identified absent required resource makes a
                 # selection inadmissible. Keep exploring dependencies reached
                 # on that branch; all other compilation failures still abort.
                 code = missing
@@ -82,4 +81,6 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
             write_member(owner, name, value, schema)
         for name, value in previous.items():
             write_member(owner, name, value, schema)
+    if not codes:
+        raise ValueError("Numerical entry has no admissible resource/configuration choice")
     return codes

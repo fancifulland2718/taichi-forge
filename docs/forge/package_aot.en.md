@@ -1393,6 +1393,12 @@ This supports, for example, optional drives that require a mass-data record when
 enabled, without silently skipping the drive calculation or declaring that
 record mandatory for unrelated entries.
 
+The same admission rule covers conditional Fields controlled by declared
+configuration: an entry that directly uses dedicated workspace emits code only
+for configurations containing that workspace. Calls without it reject. Exploration
+still follows dependencies actually read by the entry; unrelated settings do not
+multiply code. Export fails explicitly when no admissible configuration exists.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.
