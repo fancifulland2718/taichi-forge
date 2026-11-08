@@ -185,7 +185,8 @@ def _ternary_operation(taichi_op, python_op, a, b, c):
         from taichi_forge.lang._local_tensor import extent, select_extent
 
         host_select = taichi_op.__name__ in ("expr_select", "expr_ifte") and all(
-            extent(value) is not None for value in (a, b, c))
+            isinstance(value, bool) or extent(value) is not None for value in original
+        )
         if host_select:
             # Pure immutable integer operands need no device control-flow
             # temporary. The same select can be evaluated during preparation.
@@ -193,7 +194,7 @@ def _ternary_operation(taichi_op, python_op, a, b, c):
         result = model_expression(
             expr.Expr(taichi_op(a.ptr, b.ptr, c.ptr), dbg_info=_ti_core.DebugInfo(stack_info())), *original)
         if host_select:
-            select_extent(result, a, b, c)
+            select_extent(result, *original)
         return result
     from taichi_forge.lang.matrix import Matrix  # pylint: disable-msg=C0415
 

@@ -5548,8 +5548,9 @@ class Model:
         assert "OPTIONAL_RECORD_SOURCE_FREE_OK" in result.stdout
 
 
+@pytest.mark.parametrize("guard", ("plain", "and_backend", "or_false"))
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_optional_records_keep_required_branch_dependencies(tmp_path, monkeypatch):
+def test_package_optional_records_keep_required_branch_dependencies(tmp_path, monkeypatch, guard):
     source = """
 from dataclasses import dataclass
 import taichi_forge as ti
@@ -5591,6 +5592,12 @@ class Model:
         b.dispatch(self.step)
         return b.compile()
 """
+    if guard == "and_backend":
+        source = source.replace(
+            "self.primary is not None):", "self.primary is not None and ti.lang.impl.current_cfg().arch != ti.vulkan):"
+        )
+    elif guard == "or_false":
+        source = source.replace("self.primary is not None):", "self.primary is not None or False):")
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     # Only the explicit algorithm option remains static; two record-presence

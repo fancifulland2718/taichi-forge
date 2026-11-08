@@ -1404,6 +1404,12 @@ This supports, for example, optional drives that require a mass-data record when
 enabled, without silently skipping the drive calculation or declaring that
 record mandatory for unrelated entries.
 
+When dynamic input presence is combined with a fixed backend boolean, as in
+`ti.static(packet is not None and ti.lang.impl.current_cfg().arch == ti.cuda)`,
+admission retains the complete condition provenance. An unreached branch does
+not require that input; another input read on a reached branch remains required.
+This reuses the same code without relaxing checks or enumerating presence states.
+
 The same admission rule covers conditional Fields controlled by declared
 configuration: an entry that directly uses dedicated workspace emits code only
 for configurations containing that workspace. Calls without it reject. Exploration

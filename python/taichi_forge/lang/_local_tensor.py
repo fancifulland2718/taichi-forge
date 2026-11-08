@@ -67,7 +67,12 @@ def binary_extent(result, operation, left, right):
 
 
 def select_extent(result, condition, yes, no):
-    dimensions = tuple(extent(value) for value in (condition, yes, no))
+    # Static and/or lower to operand selection. A fixed backend comparison
+    # can leave a bool arm; retain its proof without allowing bool dimensions
+    # in the general extent API or admitting mutable/device predicates.
+    dimensions = tuple(
+        ("const", int(value)) if isinstance(value, bool) else extent(value) for value in (condition, yes, no)
+    )
     if all(value is not None for value in dimensions):
         result._uniform_extent = ("select", *dimensions)
     return result
