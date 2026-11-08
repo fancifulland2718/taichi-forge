@@ -678,6 +678,26 @@ class _ResourceTemplate:
     snode_depth: int = None
 
 
+@dataclass(frozen=True)
+class _StaticTemplate:
+    slot: tuple
+    value: object
+
+
+def _used_template_signature(signature, used):
+    """Project explicit static facts at the same AST reads as resource facts."""
+
+    def project(fact, slot):
+        kind, value = fact
+        if kind == "static" and slot not in used:
+            return ("unused_static", None)
+        if kind == "tuple":
+            return (kind, tuple(project(item, (*slot, index)) for index, item in enumerate(value)))
+        return fact
+
+    return (tuple((index, *project(fact, (index,))) for index, *fact in signature[0]), signature[1])
+
+
 def _capture_id(path):
     return path[0] if len(path) == 1 else "__record_" + "_".join(f"{len(part)}_{part}" for part in path)
 
@@ -1594,7 +1614,7 @@ class Component:
             layouts = _DenseLayoutValidation(self, owner)
             for code in kernel._component_candidates:
                 if (
-                    code.call_signature == signature
+                    code.call_signature == _used_template_signature(signature, code.static_templates)
                     and all(resource_templates.get(slot) == name for slot, name in code.resource_templates.items())
                     and code.matches(self, owner, layouts=layouts)
                 ):
@@ -1638,9 +1658,9 @@ class Component:
             # when selected by the normal AST, not when len/iteration sees the
             # tuple. Unused resource identity/type must not contaminate the ABI.
             if all(fact[0] == "static" for _, fact in elements):
-                return value, ("static", _static_value(value))
+                return _StaticTemplate(slot, value), ("static", _static_value(value))
             return tuple(item for item, _ in elements), ("tuple", tuple(fact for _, fact in elements))
-        return value, ("static", _static_value(value))
+        return _StaticTemplate(slot, value), ("static", _static_value(value))
 
     def _template_record(self, owner, value):
         if value is None:
@@ -1762,6 +1782,7 @@ class _Capture:
         self.fixed_members = {}
         self.fixed_dependencies = {}
         self.resource_templates = {}
+        self.static_templates = set()
         self._layouts = _DenseLayoutValidation(component, owner)
         # Functions retain real call boundaries. Each callable has its own
         # parameter expressions while dependency facts remain in this capture.
@@ -1917,6 +1938,9 @@ class _Capture:
         return function.func_call_rvalue(state["key"], args, capture_arguments=arguments, capture_values=values)
 
     def resolve_template(self, ctx, value):
+        if isinstance(value, _StaticTemplate):
+            self.static_templates.add(value.slot)
+            return value.value
         for child, path in self._method_owners:
             if value is child:
                 for depth, part in enumerate(path):
@@ -2371,6 +2395,7 @@ class _Capture:
         mismatch = self.dependency_mismatch(self.component, self.owner, layouts=layouts)
         if mismatch:
             raise TaichiCompilationError(f"Component dependency changed during compilation: {mismatch}; retry")
+        self.call_signature = _used_template_signature(self.call_signature, self.static_templates)
         self.contract = {
             "version": 1,
             "entry": self.entry_definition,
@@ -2591,6 +2616,7 @@ class _ComponentCode:
         self.workspaces = dict(context.workspaces)
         self.model_static_ranges = tuple(context.model_static_ranges)
         self.resource_templates = dict(context.resource_templates)
+        self.static_templates = frozenset(context.static_templates)
         self._contract = json.dumps(context.contract)
         self.explicit_arguments = tuple(
             arg for i, arg in enumerate(kernel.arguments) if i not in kernel.template_slot_locations

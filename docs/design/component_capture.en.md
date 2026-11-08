@@ -232,6 +232,17 @@ frozen Graph consumption with two instances of one loaded module. GeoPhys's
 normal CUDA merge-sort stage also passes new-capacity consumption and independent
 stable-order checks; this does not qualify its complete TGS root.
 
+Explicit static templates also enter code identity only when read by the original
+AST. Unread parameters and values excluded by a static branch do not create code
+copies; read booleans, constants and immutable tuples retain their specialization.
+Mixed resource tuples record selected static leaves. A wholly static tuple read
+as a value remains one complete value, without a claim of element-level pruning.
+Invalid mutable objects still reject at template admission. Ordinary JIT template
+calls are unchanged. Focused CPU/CUDA checks cover four Graph calls exporting
+three actual bitcode files, necessary branch/value differences, new-size independent
+instances and adjacent resource-template behavior. This is not a measurement of
+whole-engine package savings.
+
 `ResourceScope.borrow(name, field, dimensions={...})` declares a normal foreign
 Field binding without changing the Field or retaining its Python owner. For
 example, `scope.borrow("mass", source.mass, dimensions={"n": scope.dim("nv")})`

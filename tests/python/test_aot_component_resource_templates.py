@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from zipfile import ZipFile
 import taichi_forge as ti
 from taichi_forge.aot._component import Component
 from taichi_forge_runtime.aot import Runtime
@@ -47,6 +48,13 @@ class _State:
     def record_gather(self, builder):
         result = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, 2)
         builder.dispatch(_gather_columns, result, template_args=dict(fields=(self.x, self.y)))
+
+    def record_static_options(self, builder):
+        for enabled, increment, diagnostic in ((False, 2, "a"), (False, 19, "b"), (True, 2, "c"), (True, 7, "d")):
+            builder.dispatch(
+                _static_options,
+                template_args=dict(owner=self, use_increment=enabled, increment=increment, diagnostic=diagnostic),
+            )
 
 
 def _compile(state, *, reverse=False, inplace=False, alternate_unused=False):
@@ -199,3 +207,78 @@ def test_tuple_field_templates_gather_without_capturing_unused_elements(tmp_path
             finally:
                 for result in outputs:
                     result.close()
+
+
+@ti.kernel
+def _static_options(
+    owner: ti.template(), use_increment: ti.template(), increment: ti.template(), diagnostic: ti.template()
+):
+    for i in range(owner.count):
+        value = i
+        if ti.static(use_increment):
+            value += increment
+        owner.x[i] = value
+
+
+@ti.kernel
+def _static_tuple_options(fields: ti.template()):
+    for i in fields[0]:
+        fields[0][i] = fields[1][0]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_static_template_unused_arguments_do_not_multiply_numerical_code(tmp_path):
+    first, other = _State(3), _State(37)
+    environment, second = Component.from_owner(first), Component.from_owner(other)
+
+    def compile(owner, env, enabled, increment, diagnostic):
+        return env.compile(
+            _static_options,
+            owner=owner,
+            template_args=dict(owner=owner, use_increment=enabled, increment=increment, diagnostic=diagnostic),
+        )
+
+    plain = compile(first, environment, False, 2, "first")
+    assert compile(other, second, False, 19, ("other", 7)) is plain
+    plus_two = compile(first, environment, True, 2, "first")
+    assert compile(other, second, True, 2, None) is plus_two
+    plus_seven = compile(other, second, True, 7, False)
+    assert len({code.key for code in (plain, plus_two, plus_seven)}) == 3
+    for code, expected in ((plain, 0), (plus_two, 2), (plus_seven, 7)):
+        code.run(second, other)
+        np.testing.assert_array_equal(other.x.to_numpy(), np.arange(37) + expected)
+    _static_options(other, True, 2, object())
+    np.testing.assert_array_equal(other.x.to_numpy(), np.arange(37) + 2)
+    facts = plain.contract["templates"]
+    assert facts[2][1] == facts[3][1] == "unused_static"
+    assert plus_two.contract["templates"][2][1] == "static"
+    # Mixed tuple paths record only selected static leaves. An all-static tuple
+    # remains one immutable value when read, preserving its exact semantics.
+    selected = environment.compile(_static_tuple_options, owner=first, template_args=dict(fields=(first.x, (5, 8), 99)))
+    assert (
+        second.compile(_static_tuple_options, owner=other, template_args=dict(fields=(other.x, (5, 8), -700)))
+        is selected
+    )
+    selected.run(second, other)
+    np.testing.assert_array_equal(other.x.to_numpy(), 5)
+    root = environment.compile_graph(first.record_static_options)
+    module = ti.aot.Module()
+    plan = root.export(module, "options")
+    assert len(set(plan.kernel_entries)) == 3
+    artifact = tmp_path / "static_options.tcm"
+    module.archive(str(artifact))
+    with ZipFile(artifact) as archive:
+        assert len([name for name in archive.namelist() if name.endswith(".bc")]) == 3
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime, runtime.load_module(artifact) as loaded:
+        component = loaded.component("options")
+        with component.instantiate(dict(count=17)) as a, component.instantiate(dict(count=65)) as b:
+            a.initialize(zero=root.contract["resources"])
+            b.initialize(zero=root.contract["resources"])
+            with a.prepare() as pa, b.prepare() as pb:
+                pa.run()
+                pb.run()
+                pa.run()
+                for state, n in ((a, 17), (b, 65)):
+                    np.testing.assert_array_equal(np.frombuffer(state.resource("x").read(), np.int32), np.arange(n) + 7)
