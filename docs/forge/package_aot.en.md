@@ -1149,7 +1149,10 @@ the same receiver. Direct calls and Graph use the original resource ABI and inst
 binding. Consumer validation checks the paths against the compiled resource contract;
 unknown paths, cross-instance fields and unproven aliases reject. Focused CPU/CUDA
 checks cover dynamic sizes, inherited owners, independent instances and source-free
-Graph consumption. Swapping source and destination still distinguishes existing
+Graph consumption. Zero-argument Host callbacks retain proven enclosing inputs;
+the exporter inspects their bodies without running the callback or its profiler.
+Parameterized callbacks, assignment expressions and rebound captures are not
+treated as proven template sources. Swapping source and destination still distinguishes existing
 resource-slot ABIs; this slice does not establish slot-normalized code sharing.
 Nested local dispatch, model-dependent method lookup, multiple-owner inputs and
 model-dependent sort preparation remain further work.

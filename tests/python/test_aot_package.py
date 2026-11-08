@@ -10860,9 +10860,24 @@ class Derived(Model):
 """
 
 
+@pytest.mark.parametrize("callback", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_resource_template_inputs_bind_actual_owner_paths(tmp_path, monkeypatch):
-    package = _source_package(tmp_path, monkeypatch, RESOURCE_INPUT_SOURCE)
+def test_package_resource_template_inputs_bind_actual_owner_paths(tmp_path, monkeypatch, callback):
+    source = RESOURCE_INPUT_SOURCE
+    if callback:
+        source = source.replace(
+            "    def update(self, gain):",
+            "    def profile(self, callback):\n        return callback()\n    def update(self, gain):",
+        )
+        source = source.replace(
+            "        forward(self, self.left, self.right, gain)",
+            "        self.profile(lambda: forward(self, self.left, self.right, gain))",
+        )
+        source = source.replace(
+            "        forward(self, self.right, self.left, gain)",
+            "        self.profile(lambda: forward(self, self.right, self.left, gain))",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert manifest["version"] == 52
     assert sys.modules["definition_fixture.model"].constructors == 0
@@ -10925,6 +10940,24 @@ print('RESOURCE_INPUT_SOURCE_FREE_OK')
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "RESOURCE_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["argument", "rebind", "walrus"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_callback_template_inputs_require_stable_closed_sources(tmp_path, monkeypatch, change):
+    bodies = {
+        "argument": "        callback = lambda owner: transfer(1., owner, owner.left, owner.right)\n        return callback(other)",
+        "rebind": "        owner = self\n        callback = lambda: transfer(1., owner, owner.left, owner.right)\n        owner = other\n        return callback()",
+        "walrus": "        return (lambda: transfer(1., (owner := other), self.left, self.right))()",
+    }
+    source = RESOURCE_INPUT_SOURCE.replace(
+        "    def update(self, gain):",
+        "    def unresolved(self, other):\n" + bodies[change] + "\n    def update(self, gain):",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="proven|template"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
 
 
 @pytest.mark.parametrize("change", ["unknown", "foreign_path", "undeclared", "swapped_abi"])

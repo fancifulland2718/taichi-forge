@@ -144,7 +144,24 @@ def discover(sources, imported):
         nodes = []
 
         def walk(statement):
-            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            if isinstance(statement, ast.Lambda):
+                parameters = statement.args
+                if not (
+                    parameters.posonlyargs
+                    or parameters.args
+                    or parameters.kwonlyargs
+                    or parameters.vararg
+                    or parameters.kwarg
+                    or any(
+                        isinstance(part, (ast.NamedExpr, ast.Yield, ast.YieldFrom)) for part in ast.walk(statement.body)
+                    )
+                ):
+                    # A zero-argument Host callback retains its enclosing
+                    # stable input facts. Discover its body without invoking
+                    # the callback or its scheduler/profiler.
+                    walk(statement.body)
+                return
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 return
             nodes.append(statement)
             for child in ast.iter_child_nodes(statement):
