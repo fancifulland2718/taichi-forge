@@ -172,11 +172,24 @@ def _owner_schema(
 
 
 def _construction_schema(module, node, constructor, kind, namespace, earlier=None, *, owner_class=None):
+    conditions = getattr(constructor, "_package_construction_conditions", {})
+    for name in conditions:
+        declaration = (earlier or {}).get(name, {})
+        if not (
+            declaration.get("kind") == "static"
+            and declaration.get("choices")
+            and {tuple(v) for v in declaration["choices"]} <= {("bool", False), ("bool", True)}
+            and not declaration.get("kernel_only")
+            and all(conditions.get(key) is value for key, value in declaration.get("conditions", {}).items())
+        ):
+            _fail(module, constructor, "Construction method guard requires a declared boolean owner static")
     annotations = {
         a.arg: a.annotation
         for a in (*constructor.args.posonlyargs, *constructor.args.args, *constructor.args.kwonlyargs)
     }
     schema = field_declarations(module, constructor, kind, _fail)
+    if conditions and schema:
+        _fail(module, constructor, "Conditional construction fields require scoped resource declarations")
     for statement in ast.walk(constructor):
         if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
             continue
@@ -190,7 +203,7 @@ def _construction_schema(module, node, constructor, kind, namespace, earlier=Non
             if target.attr in schema and schema[target.attr]["kind"] == "dense_field":
                 continue
             if isinstance(value, ast.Call) and qualified_kind(value, kind) == "ndarray":
-                if statement not in constructor.body or len(targets) != 1:
+                if conditions or statement not in constructor.body or len(targets) != 1:
                     _fail(module, statement, "conditional or aliased allocation requires a resource contract")
                 arguments = dict(zip(("dtype", "shape"), value.args))
                 if len(value.args) > 2 or any(k.arg not in ("dtype", "shape") for k in value.keywords):
@@ -211,12 +224,20 @@ def _construction_schema(module, node, constructor, kind, namespace, earlier=Non
                     dtype = {int: "i32", float: "f32", bool: "i32"}.get(type(value.value))
                 if dtype not in _DTYPES:
                     continue  # Host-only data is preserved; a numerical use diagnoses missing type information.
-                spec = dict(kind="value", dtype=dtype)
+                spec = dict(kind="value", dtype=dtype, **({"conditions": dict(conditions)} if conditions else {}))
             if target.attr in schema and schema[target.attr] != spec:
                 _fail(module, statement, f"attribute {target.attr!r} has conflicting types")
             schema[target.attr] = spec
     for name, declaration in scope_declarations(
-        module, constructor, kind, _fail, namespace, earlier, owner_node=node, owner_class=owner_class
+        module,
+        constructor,
+        kind,
+        _fail,
+        namespace,
+        earlier,
+        owner_node=node,
+        owner_class=owner_class,
+        initial_conditions=conditions,
     ).items():
         if name in schema and schema[name]["kind"] != "value":
             _fail(module, constructor, f"ResourceScope role {name!r} conflicts with a resource allocation")

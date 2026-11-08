@@ -202,16 +202,55 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                 break
             needed = expanded
 
-        def visit(function):
+        def call_sites(function, conditions):
+            sites = {}
+
+            def expression(value, guards):
+                if guards is None:
+                    return
+                if isinstance(value, ast.Call):
+                    sites[id(value)] = dict(guards)
+                elif isinstance(value, ast.IfExp):
+                    expression(value.body, guarded(value.test, guards, True))
+                    expression(value.orelse, guarded(value.test, guards, False))
+
+            def guarded(test, guards, expected):
+                if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                    test, expected = test.operand, not expected
+                if not (
+                    isinstance(test, ast.Attribute)
+                    and isinstance(test.value, ast.Name)
+                    and test.value.id == "self"
+                    and test.attr not in guards
+                ):
+                    return None
+                return {**guards, test.attr: expected}
+
+            def body(statements, guards):
+                if guards is None:
+                    return
+                for statement in statements:
+                    if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)):
+                        expression(statement.value, guards)
+                    elif isinstance(statement, ast.If):
+                        body(statement.body, guarded(statement.test, guards, True))
+                        body(statement.orelse, guarded(statement.test, guards, False))
+
+            body(function.body, conditions)
+            return sites
+
+        def visit(function, conditions=None):
+            conditions = conditions or {}
             if function.name in active:
                 fail(module, function, "Recursive construction methods require explicit resource declarations")
             active.add(function.name)
+            sites = call_sites(function, conditions)
             for call in calls(function):
                 method = methods[call.func.attr]
                 if method.name not in needed:
                     continue
-                if not any(isinstance(s, ast.Expr) and s.value is call for s in function.body):
-                    fail(module, call, "Construction method calls require an unconditional standalone statement")
+                if id(call) not in sites:
+                    fail(module, call, "Construction method calls require a direct statement or declared owner guard")
                 args = method.args
                 if (
                     call.args
@@ -227,14 +266,17 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                 if method.name in selected:
                     fail(module, call, "Construction resource methods must have one call site")
                 if any(
-                    isinstance(n, (ast.Return, ast.Yield, ast.YieldFrom, ast.AsyncFunctionDef))
+                    isinstance(n, (ast.Yield, ast.YieldFrom, ast.AsyncFunctionDef))
+                    or isinstance(n, ast.Return)
+                    and n is not method.body[-1]
                     for n in ast.walk(method)
                 ):
-                    fail(module, method, "Construction resource methods cannot return or yield")
+                    fail(module, method, "Construction resource methods permit only a terminal Host return")
                 selected.add(method.name)
                 method._package_construction_method = True
                 method._package_construction_order = len(selected)
-                visit(method)
+                method._package_construction_conditions = sites[id(call)]
+                visit(method, sites[id(call)])
                 facts.append(
                     dict(
                         kind="construction_method",

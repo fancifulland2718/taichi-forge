@@ -11621,7 +11621,7 @@ def test_package_inherited_type_members_reject_unproven_contracts(tmp_path, monk
 
 
 @pytest.mark.parametrize(
-    "change", ["conditional", "argument", "repeated", "replace", "return", "override", "recursive"]
+    "change", ["conditional", "undeclared_guard", "argument", "repeated", "replace", "return", "override", "recursive"]
 )
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_rejects_ambiguous_construction_methods(tmp_path, monkeypatch, change):
@@ -11631,6 +11631,8 @@ def test_package_rejects_ambiguous_construction_methods(tmp_path, monkeypatch, c
     )
     if change == "conditional":
         source = source.replace("        self._allocate()", "        if n:\n            self._allocate()")
+    elif change == "undeclared_guard":
+        source = source.replace("        self._allocate()", "        if self.n:\n            self._allocate()")
     elif change == "argument":
         source = source.replace("self._allocate()", "self._allocate(n)").replace(
             "def _allocate(self)", "def _allocate(self, n)"
@@ -11642,7 +11644,9 @@ def test_package_rejects_ambiguous_construction_methods(tmp_path, monkeypatch, c
             "        self._allocate()", "        self._allocate = lambda: None\n        self._allocate()"
         )
     elif change == "return":
-        source = source.replace("    @ti.kernel", "        return self.a\n    @ti.kernel")
+        source = source.replace(
+            "    def _allocate(self):", "    def _allocate(self):\n        if self.n == 0:\n            return None"
+        )
     elif change == "recursive":
         source = source.replace("    def _allocate(self):", "    def _allocate(self):\n        self._allocate()")
     else:
@@ -11652,6 +11656,105 @@ def test_package_rejects_ambiguous_construction_methods(tmp_path, monkeypatch, c
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk").exists()
+
+
+@pytest.mark.parametrize("statement_form", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_conditional_construction_preserves_host_return(tmp_path, monkeypatch, statement_form):
+    source = """
+import taichi as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool = True):
+        global constructors
+        constructors += 1
+        self.enabled = enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        if enabled:
+            self.n = n
+        self.plan = self._allocate() if self.enabled else None
+    def _allocate(self):
+        scope = ti.experimental.ResourceScope(self, initialization='zero')
+        scope.data = scope.field(ti.i32, shape=scope.dim('n'))
+        return {'shape': self.data.shape, 'n': self.n}
+    @ti.kernel
+    def step(self, delta: ti.i32):
+        if ti.static(self.enabled):
+            for i in self.data:
+                self.data[i] += delta * (i + 1)
+"""
+    if statement_form:
+        source = source.replace(
+            "        self.plan = self._allocate() if self.enabled else None",
+            "        self.plan = None\n        if self.enabled:\n            self.plan = self._allocate()",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = package.Model(7)
+    original.step(3)
+    expected = original.data.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        a, b = library.host.Model(7), library.host.Model(19)
+        before = set(runtime._resources)
+        off = library.host.Model(-1, False)
+        assert set(runtime._resources) == before
+        assert off.plan is None and not hasattr(off, "data") and not hasattr(off, "n")
+        assert a.plan == {"shape": (7,), "n": 7}
+        assert b.plan == {"shape": (19,), "n": 19}
+        a.step(3)
+        b.step(5)
+        off.step(9)
+        np.testing.assert_array_equal(a.data.to_numpy(), expected)
+        np.testing.assert_array_equal(b.data.to_numpy(), 5 * np.arange(1, 20))
+        a.step(-2)
+        np.testing.assert_array_equal(b.data.to_numpy(), 5 * np.arange(1, 20))
+    probe = tmp_path / "consume_construction_return.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            off = code.host.Model(-1, False)
+            a, b = code.host.Model(7), code.host.Model(19)
+            assert off.plan is None and not hasattr(off, 'data') and not hasattr(off, 'n')
+            assert a.plan == {'shape': (7,), 'n': 7}
+            assert b.plan == {'shape': (19,), 'n': 19}
+            a.step(3)
+            b.step(5)
+            off.step(9)
+            np.testing.assert_array_equal(a.data.to_numpy(), 3 * np.arange(1, 8))
+            np.testing.assert_array_equal(b.data.to_numpy(), 5 * np.arange(1, 20))
+        print('CONSTRUCTION_RETURN_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CONSTRUCTION_RETURN_SOURCE_FREE_OK" in result.stdout
 
 
 @pytest.mark.parametrize(

@@ -339,12 +339,15 @@ query implicitly. `GraphBuilder` retains class-method visibility for checks such
 as `private_ndarray`. This does not qualify arbitrary nested/provider graphs;
 concrete graph eligibility remains a preparation check.
 
-An ordinary constructor may unconditionally call resource-allocation methods on
+An ordinary constructor may call resource-allocation methods on
 the same class. Forge reuses its resource and context-manager analysis without
 executing constructors or flattening/removing consumer Host methods. Currently a
-method accepts only `self`, has one standalone call site, and may forward to another
-construction method. Conditional calls, returns/yields, replacement, and inherited
-overrides of existing allocation methods are rejected. Subsequent Host initialization
+method accepts only `self`, has one direct call site (including assignment of its
+return value), and may forward to another construction method. A declared boolean
+owner static may guard an `if` or conditional-expression call; its resource contract
+retains the guard, so disabled branches neither allocate nor read their dimensions.
+A terminal Host return is supported. Early returns, yields, undeclared guards, loop
+calls, replacement, and inherited overrides are rejected. Subsequent Host initialization
 and context exception cleanup retain their original order. Identical dimension
 declarations may recur across construction methods; conflicting dimensions and
 repeated resource allocations remain errors.

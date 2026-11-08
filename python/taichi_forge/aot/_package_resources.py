@@ -364,9 +364,21 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
     Declarations().visit(constructor)
 
 
-def scope_declarations(module, constructor, kind, fail, namespace, earlier=None, *, owner_node=None, owner_class=None):
+def scope_declarations(
+    module,
+    constructor,
+    kind,
+    fail,
+    namespace,
+    earlier=None,
+    *,
+    owner_node=None,
+    owner_class=None,
+    initial_conditions=None,
+):
     if constructor is None:
         return {}
+    initial_conditions = initial_conditions or {}
     _normalize_scope_aliases(constructor, kind)
     _normalize_field_loops(module, constructor, kind, fail, namespace)
     scopes, declarations, allowed = {}, {}, set()
@@ -1313,6 +1325,8 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 yield statement
 
     def declare_constant(scope, call, statement):
+        if initial_conditions:
+            fail(module, call, "Definition constants must remain unconditional")
         if (
             scope_paths[scope]
             or len(call.args) != 1
@@ -1340,7 +1354,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
         if isinstance(statement, ast.Expr):
             scope, method = operation(statement.value)
             if method == "static":
-                declare_static(scope, statement.value, statement)
+                declare_static(scope, statement.value, statement, initial_conditions)
             elif method == "constant":
                 declare_constant(scope, statement.value, statement)
     if owner_node is not None:
@@ -1351,7 +1365,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
         )
 
     conditional_fields = set()
-    for statement, conditions in statements(constructor.body):
+    for statement, conditions in statements(constructor.body, initial_conditions):
         current_conditions = conditions
         call = statement.value if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)) else None
         scope, method = operation(call)
@@ -2151,7 +2165,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
             fail(module, constructor, "Declared Dense placement requires a member whenever its branch is active")
     for name in conditional_fields:
         group = declarations[name]["group"]
-        group_conditions = builders.get(group, {}).get("conditions", {})
+        group_conditions = builders.get(group, {}).get("conditions", initial_conditions)
         if not any(
             item["kind"] == "dense_field"
             and item.get("group") == group
