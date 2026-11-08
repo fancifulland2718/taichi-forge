@@ -1710,6 +1710,11 @@ Normal Host computation stays Python; declarations come from the actual
 ResourceScope or a proven scope factory and shared declaration helpers. Export
 does not extract contracts from a sample model's role list. Full admission still
 rejects escaped declaration scopes and invalid layout guards.
+Top-level guards such as `if not self.enabled: return` can condition subsequent
+resources through existing declared boolean domains. Export preserves the original
+predicate and Host return semantics; `borrow(..., source_scope=True)` can reuse an
+allocation under its presence guards. Undeclared predicates, aliases outside those
+guards and other unproven early returns reject instead of making resources unconditional.
 
 Dynamic local vectors/matrices also support
 `range(begin, ti.min(device_count, model_bound))`, with `begin` and `model_bound`

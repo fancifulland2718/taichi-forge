@@ -1040,6 +1040,9 @@ Python。多个接收类可复用同一声明；调用来源未知、receiver �
 只声明 value/static 而不分配资源的准备函数也沿用此路径：正常 Host 计算保留为 Python，
 声明通过实际 ResourceScope 或已证明的 scope factory 以及共用声明 helper 解析。
 不从样本模型的角色列表提取合同；声明 scope 逃逸与布局条件错误仍由完整准入拒绝。
+准备函数的顶层 `if not self.enabled: return` 可沿已有布尔域控制余下资源；导出保留
+原条件与 Host 返回语义，同条件下的 `borrow(..., source_scope=True)` 复用原分配。
+未声明条件、跨出分配条件的别名及其他未证明的提前返回拒绝，不把余下资源当成无条件资源。
 
 动态局部向量/矩阵也可用于 `range(begin, ti.min(device_count, model_bound))`。
 `begin` 和 `model_bound` 必须来自可证明的整数维度/常量表达式；prepare 按上界分配

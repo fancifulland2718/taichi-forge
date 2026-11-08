@@ -12341,9 +12341,13 @@ def prepare(owner, active):
 """
 
 
-@pytest.mark.parametrize("values_only", [False, True])
+@pytest.mark.parametrize(
+    "values_only, early_return",
+    [(False, False), (True, False), (False, True)],
+    ids=["fields", "values", "return_guard"],
+)
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_free_preparation_domains_precede_constructor_guards(tmp_path, monkeypatch, values_only):
+def test_package_free_preparation_domains_precede_constructor_guards(tmp_path, monkeypatch, values_only, early_return):
     model = PREPARATION_DOMAIN_SOURCE
     if values_only:
         model = model.replace("self.work[i] + delta", "self.offset + delta")
@@ -12357,9 +12361,21 @@ def declare_roles(scope, integer_type):
     scope.value('offset', integer_type)
 """
         )
+    if early_return:
+        model = model.replace("prepare(self, active)", "self.prepare_status = prepare(self, active)")
+        model = model.replace("self.work[i] + delta", "delta")
+        model = model.replace(
+            "self.extra[i] += delta * 2",
+            "self.extra[i] += delta * 2\n                self.base[i] += self.work_alias[i]",
+        )
+        model = model.replace(
+            "    with resource_group(owner, 'work'",
+            "    if not owner.active:\n        return\n    with resource_group(owner, 'work'",
+        )
+        model += "\n        fields.borrow('work_alias', owner.work, source_scope=True)\n    owner.work.from_numpy(np.full(owner.n, 2, dtype=np.int32))\n    return 'prepared'\n"
     start = model.index("def prepare(owner,")
     extra = {
-        "preparation": "import taichi_forge as ti\nfrom resource_contexts import resource_group\npreparations = 0\n"
+        "preparation": "import numpy as np\nimport taichi_forge as ti\nfrom resource_contexts import resource_group\npreparations = 0\n"
         + model[start:]
     }
     model = "from .preparation import prepare\n" + model[:start]
@@ -12369,16 +12385,20 @@ def declare_roles(scope, integer_type):
     assert len(manifest["entries"]) == 3  # Two dependent implementations and the fixture's free Kernel.
     reference = package.Model(3, True)
     reference.step(4)
-    np.testing.assert_array_equal(reference.base.to_numpy(), 4 + 6 * values_only)
+    np.testing.assert_array_equal(reference.base.to_numpy(), 4 + 6 * values_only + 2 * early_return)
     np.testing.assert_array_equal(reference.extra.to_numpy(), 8)
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7, True), code.host.Model(19, False)
         a.step(4)
         b.step(9)
-        np.testing.assert_array_equal(a.base.to_numpy(), 4 + 14 * values_only)
+        np.testing.assert_array_equal(a.base.to_numpy(), 4 + 14 * values_only + 2 * early_return)
         np.testing.assert_array_equal(a.extra.to_numpy(), 8)
         np.testing.assert_array_equal(b.base.to_numpy(), 9 + 38 * values_only)
         assert not hasattr(b, "extra")
+        if early_return:
+            assert not hasattr(b, "work")
+            assert a.work_alias is a.work and not hasattr(b, "work_alias")
+            assert a.prepare_status == "prepared" and b.prepare_status is None
     probe = tmp_path / "consume_domains.py"
     probe.write_text(
         textwrap.dedent("""
@@ -12391,14 +12411,19 @@ def declare_roles(scope, integer_type):
         sys.meta_path.insert(0, NoSource())
         from taichi_forge_runtime.aot import Runtime, load_package
         values_only = sys.argv[3] == 'True'
+        early_return = sys.argv[4] == 'True'
         with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
             a, b = code.host.Model(11, False), code.host.Model(23, True)
             a.step(3)
             b.step(5)
             np.testing.assert_array_equal(a.base.to_numpy(), 3 + 22 * values_only)
-            np.testing.assert_array_equal(b.base.to_numpy(), 5 + 46 * values_only)
+            np.testing.assert_array_equal(b.base.to_numpy(), 5 + 46 * values_only + 2 * early_return)
             np.testing.assert_array_equal(b.extra.to_numpy(), 10)
             assert not hasattr(a, 'extra')
+            if early_return:
+                assert not hasattr(a, 'work')
+                assert b.work_alias is b.work and not hasattr(a, 'work_alias')
+                assert a.prepare_status is None and b.prepare_status == 'prepared'
         print('PREPARATION_DOMAINS_SOURCE_FREE_OK')
     """),
         encoding="utf8",
@@ -12411,7 +12436,15 @@ def declare_roles(scope, integer_type):
         TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
     )
     result = subprocess.run(
-        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"], str(values_only)],
+        [
+            sys.executable,
+            "-B",
+            str(probe),
+            str(tmp_path / "sdk"),
+            manifest["target"],
+            str(values_only),
+            str(early_return),
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -12437,6 +12470,40 @@ def test_package_preparation_domains_do_not_bypass_full_admission(tmp_path, monk
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     with pytest.raises(ti.aot.PackageExportError, match=message):
         ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize(
+    "guard, diagnostic",
+    [
+        ("if not owner.active:\n        return 1", "bare return guards"),
+        ("if not active:\n        return", "declared boolean owner static"),
+        ("for unused in range(1):\n        return", "bare return guards"),
+    ],
+)
+def test_package_free_preparation_rejects_unproved_return_paths(tmp_path, monkeypatch, guard, diagnostic):
+    source = PREPARATION_DOMAIN_SOURCE.replace(
+        "    with resource_group(owner, 'work'", "    " + guard + "\n    with resource_group(owner, 'work'"
+    )
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ti.aot.PackageExportError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cpu)
+    assert sys.modules["definition_fixture.model"].preparations == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize("opposite", [False, True])
+def test_package_preparation_alias_requires_allocation_guard(tmp_path, monkeypatch, opposite):
+    source, allocation = PREPARATION_DOMAIN_SOURCE.split("    with resource_group(owner, 'work'", 1)
+    source += "    if owner.active:\n" + textwrap.indent("    with resource_group(owner, 'work'" + allocation, "    ")
+    if opposite:
+        source += "    if not owner.active:\n    "
+    source += "    declarations.borrow('work_alias', owner.work, source_scope=True)\n"
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ti.aot.PackageExportError, match="allocation and its presence guards"):
+        ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cpu)
     assert not (tmp_path / "sdk").exists()
 
 

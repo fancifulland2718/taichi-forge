@@ -104,6 +104,33 @@ def _candidates(sources, imported):
     return candidates
 
 
+def _guard_returns(body, module, fail):
+    """Make fallthrough resource conditions explicit, preserving Host returns."""
+    for index, statement in enumerate(body):
+        if (
+            isinstance(statement, ast.If)
+            and not statement.orelse
+            and len(statement.body) == 1
+            and isinstance(statement.body[0], ast.Return)
+            and (
+                statement.body[0].value is None
+                or isinstance(statement.body[0].value, ast.Constant)
+                and statement.body[0].value.value is None
+            )
+        ):
+            # The original predicate and return still execute normally. Only
+            # the lexical placement of the remaining statements changes, so
+            # the existing resource parser validates their actual guard.
+            statement.orelse = _guard_returns(body[index + 1 :], module, fail)
+            return [*body[:index], statement]
+        if any(
+            isinstance(node, ast.Return) and not (node is statement and index == len(body) - 1)
+            for node in ast.walk(statement)
+        ):
+            fail(module, statement, "Preparation permits bare return guards or a terminal Host return")
+    return body
+
+
 def _normalize(function, original, module, kind, receiver, fail):
     arguments = (*original.args.posonlyargs, *original.args.args, *original.args.kwonlyargs)
     parameter_nodes = {id(part) for part in arguments if part.arg == receiver}
@@ -127,6 +154,7 @@ def _normalize(function, original, module, kind, receiver, fail):
     ):
         fail(module, original, "Preparation requires an unchanged synchronous owner parameter")
     normalized = copy.deepcopy(original)
+    normalized.body = _guard_returns(normalized.body, module, fail)
 
     class Receiver(ast.NodeTransformer):
         def visit_Name(self, node):

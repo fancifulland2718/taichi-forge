@@ -1609,6 +1609,7 @@ def scope_declarations(
                 lambda node, message: fail(module, node, message),
                 preparation=getattr(constructor, "_package_preparation_method", False),
                 namespace_check=lambda value: namespace_check(scope, value, call),
+                conditions=conditions,
             )
             if "input_expression" in spec:
                 spec["input_method"] = constructor.name

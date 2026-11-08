@@ -68,7 +68,7 @@ def prepared_alias_source(owner, method, expression, fail):
     return candidates[0]
 
 
-def declaration(call, scope_path, schema, dimension, fail, *, preparation=False, namespace_check):
+def declaration(call, scope_path, schema, dimension, fail, *, preparation=False, namespace_check, conditions=None):
     """Admit known allocation paths, never infer a borrowed ABI from a sample."""
     if len(call.args) != 2 or not isinstance(call.args[0], ast.Constant):
         fail(call, "Package borrow requires a literal attribute and its declared source Field")
@@ -102,11 +102,13 @@ def declaration(call, scope_path, schema, dimension, fail, *, preparation=False,
         and source.get("kind") not in ("owner", "owner_input")
         and (
             source.get("kind") != "dense_field"
-            or source.get("conditions")
+            or any(
+                (conditions or {}).get(key) is not expected for key, expected in source.get("conditions", {}).items()
+            )
             or len(path) not in ((1, 2) if source.get("struct_field") else (1,))
         )
     ):
-        fail(call, "Borrowed Field requires an earlier unconditional declared allocation or Struct Field member")
+        fail(call, "Borrowed Field requires an earlier declared allocation and its presence guards")
     mapping = keywords.get("dimensions", ast.Dict([], []))
     if isinstance(mapping, ast.Constant) and mapping.value is None:
         mapping = ast.Dict([], [])
