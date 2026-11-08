@@ -172,6 +172,21 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
     # constructor sample. Resolve aliases before allocating any witness Field.
     type_nodes = {key: item["type_node"] for key, item in schema.items() if "type_node" in item}
 
+    def owner_dtype(expression):
+        from taichi_forge_runtime._static_values import read_static_key
+        from ._package_types import producer_static
+
+        path = []
+        while isinstance(expression, ast.Attribute):
+            path.insert(0, expression.attr)
+            expression = expression.value
+        spec = next((item for key, item in schema.items() if item.get("path", [key]) == path), {})
+        if not spec.get("static_dtype"):
+            return None
+        if len(spec["choices"]) != 1:
+            raise ValueError("Field layout requires one fixed dtype; numerical dtype choices cannot change its ABI")
+        return producer_static(read_static_key(spec["choices"][0]))
+
     def resource_dtype(expression, visiting=()):
         from taichi_forge.types._argument_descriptor import describe_element_type
 
@@ -213,7 +228,9 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             axes = 1 if factory is ti.types.vector else 2 if factory is ti.types.matrix else 0
             if axes:
                 node = next((k.value for k in node.keywords if k.arg == "dtype"), None) or node.args[axes]
-        dtype = resolve_type(node, source_namespace, resource_dtype=lambda value: resource_dtype(value, visiting))
+        dtype = resolve_type(
+            node, source_namespace, resource_dtype=lambda value: resource_dtype(value, visiting), owner_dtype=owner_dtype
+        )
         return describe_element_type(dtype).scalar_type
 
     declarations = {}
@@ -293,6 +310,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             model_tensors=model_tensors,
             witness=field_extent,
             resource_dtype=resource_dtype,
+            owner_dtype=owner_dtype,
         )
         item["element"] = type_spec(dtype, module, model_tensors=model_tensors)
         if "local_type_source" in item and item["element"]["kind"] == "struct":

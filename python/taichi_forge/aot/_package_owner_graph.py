@@ -77,7 +77,7 @@ class OwnerGraph:
         )
         from ._package_fields import construct_fields, field_environment
         from ._package_records import write_member
-        from ._package_types import resolve_type, type_spec
+        from ._package_types import resolve_type, type_spec, producer_static
         from ._package_borrows import project as project_borrows
 
         name, class_name, original = self.definitions[identity]
@@ -149,7 +149,7 @@ class OwnerGraph:
                 )
                 children[attribute] = (child, expanded)
             elif item["kind"] == "static":
-                choices = tuple(read_static_key(key) for key in item["choices"])
+                choices = tuple(producer_static(read_static_key(key)) for key in item["choices"])
                 declarations[attribute] = StaticValue(choices=choices, kernel_only=item["kernel_only"])
                 value = choices[0]
             elif item["kind"] == "constant":

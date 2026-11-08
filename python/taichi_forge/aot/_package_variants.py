@@ -5,6 +5,7 @@ from collections import deque
 from taichi_forge_runtime._static_values import read_static_key, static_key
 from ._package_records import read_member, write_member
 from ._component import _DefinitionMissingResource
+from ._package_types import producer_static
 
 
 def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None, fixed=None):
@@ -56,7 +57,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                 continue
             for name, value in selection.items():
                 if name not in records:
-                    write_member(owner, name, value, schema)
+                    write_member(owner, name, producer_static(value), schema)
             for name, value in records.items():
                 write_member(owner, name, value if selection[name] else None, schema)
             try:

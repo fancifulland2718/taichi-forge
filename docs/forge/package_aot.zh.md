@@ -1040,6 +1040,10 @@ Python。多个接收类可复用同一声明；调用来源未知、receiver �
 只声明 value/static 而不分配资源的准备函数也沿用此路径：正常 Host 计算保留为 Python，
 声明通过实际 ResourceScope 或已证明的 scope factory 以及共用声明 helper 解析。
 不从样本模型的角色列表提取合同；声明 scope 逃逸与布局条件错误仍由完整准入拒绝。
+共用声明 helper 中的 `static_dtype` 复用已有标量类型身份：实际读取该类型的数值入口
+保留必要特化，未读入口不复制。单一存储 dtype 可用于 Field 类型；不同 dtype 改变
+Field ABI 的选择仍拒绝。导出不执行类型工厂，消费 Host 使用类型名称，无须导入数值源码。
+CPU/CUDA 局部检查覆盖数值类型选择、固定存储类型、独立实例及独立进程无源码消费。
 准备函数的顶层 `if not self.enabled: return` 可沿已有布尔域控制余下资源；导出保留
 原条件与 Host 返回语义，同条件下的 `borrow(..., source_scope=True)` 复用原分配。
 未声明条件、跨出分配条件的别名及其他未证明的提前返回拒绝，不把余下资源当成无条件资源。

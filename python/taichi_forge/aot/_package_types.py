@@ -9,6 +9,18 @@ from types import ModuleType
 from taichi_forge.types._argument_descriptor import describe_element_type
 
 
+def producer_static(value):
+    """Restore a canonical type identity only at the compiler witness boundary."""
+    from taichi_forge_runtime._static_values import StaticDType
+    import taichi_forge as ti
+
+    if type(value) is StaticDType:
+        return getattr(ti, value.name)
+    if type(value) is tuple:
+        return tuple(producer_static(item) for item in value)
+    return value
+
+
 def qualified_kind(node, kind):
     if getattr(node, "_package_role", None) is not None:
         return node._package_role
@@ -138,7 +150,15 @@ def member_initialization(node, members, source_members):
 
 
 def resolve_type(
-    node, namespace, *, allow_ndarray=False, allow_members=False, model_tensors=None, witness=None, resource_dtype=None
+    node,
+    namespace,
+    *,
+    allow_ndarray=False,
+    allow_members=False,
+    model_tensors=None,
+    witness=None,
+    resource_dtype=None,
+    owner_dtype=None,
 ):
     """Resolve only fixed type declarations; do not execute application factories."""
     import taichi_forge as ti
@@ -165,6 +185,10 @@ def resolve_type(
             root = expression.value
             while isinstance(root, ast.Attribute):
                 root = root.value
+            if owner_dtype is not None and isinstance(root, ast.Name) and root.id == "self":
+                dtype = owner_dtype(expression)
+                if dtype is not None:
+                    return dtype
             if (
                 resource_dtype is not None
                 and expression.attr == "dtype"

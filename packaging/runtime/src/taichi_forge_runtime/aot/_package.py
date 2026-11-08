@@ -1002,6 +1002,15 @@ class _ResourceScope:
             raise ValueError(f"Static configuration {name!r} is outside its declared domain")
         self._identity(name)
 
+    def static_dtype(self, name, *, choices, kernel_only=False):
+        # Host projection exposes primitive DSL types as canonical ABI names.
+        # Keep those names usable by Field allocation; type specialization is
+        # distinguished from string configuration at entry selection below.
+        choices = tuple(choices)
+        if any(type(value) is not str or value not in _DTYPES for value in choices):
+            raise ValueError("static_dtype choices must be primitive DSL types")
+        self.static(name, choices=choices, kernel_only=kernel_only)
+
     def dim(self, name):
         if not isinstance(name, str) or not name.isidentifier():
             raise ValueError("A dimension requires an explicit owner attribute name")
@@ -1536,7 +1545,10 @@ class entry:
             ):
                 continue
             value = path_value(owner, self.family.get("paths", {}).get(name, (name,)))
-            value = static_key(value is not None if name in self.family.get("record_presence", ()) else value)
+            if type(value) is str and all(key[0] == "dtype" for key in self._domain[name]):
+                value = ("dtype", value)
+            else:
+                value = static_key(value is not None if name in self.family.get("record_presence", ()) else value)
             if value not in self._domain[name]:
                 raise ValueError("Static configuration is outside its declared package domain")
             values[name] = value

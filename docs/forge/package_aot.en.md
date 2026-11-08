@@ -1706,6 +1706,12 @@ construction and preparation. This discovery executes no Host code, preserves ca
 order and does not bypass resource-use validation. Local CPU/CUDA checks cover new
 sizes, independent instances and source-free consumption in a separate process.
 The same path admits value/static-only preparation without resource allocation.
+Shared declaration helpers can forward `static_dtype` using the existing scalar
+type identities. Only numerical entries reading that type gain variants; unread
+entries remain shared. A singleton storage dtype can define a Field, while choices
+changing its ABI reject. Export executes no type factory, and Host consumption uses
+type names without numerical-source imports. Local CPU/CUDA checks cover numerical
+choices, fixed storage types, independent instances and source-free subprocesses.
 Normal Host computation stays Python; declarations come from the actual
 ResourceScope or a proven scope factory and shared declaration helpers. Export
 does not extract contracts from a sample model's role list. Full admission still

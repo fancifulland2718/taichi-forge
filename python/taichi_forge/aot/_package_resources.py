@@ -1120,8 +1120,7 @@ def scope_declarations(
         return name
 
     def declare_static(scope, call, statement, conditions=None):
-        from ._component import StaticValue
-        from taichi_forge_runtime._static_values import static_key
+        from ._component import StaticValue, _static_value
 
         if (
             len(call.args) != 1
@@ -1139,12 +1138,30 @@ def scope_declarations(
         ):
             fail(module, call, "Static declaration requires explicit finite choices")
         try:
-            choices = ast.literal_eval(keywords["choices"])
+            dtype_domain = call.func.attr == "static_dtype"
+            if dtype_domain:
+                from ._package_types import expand_local_type
+                from ._package_factories import _source_value
+                from taichi_forge.types import primitive_types
+
+                nodes = keywords["choices"]
+                if not isinstance(nodes, (ast.Tuple, ast.List)):
+                    raise ValueError("static_dtype requires explicit primitive type choices")
+                choices = tuple(_source_value(expand_local_type(node, {}, kind), namespace) for node in nodes.elts)
+                if any(
+                    id(value) not in primitive_types.type_ids or value is int or value is float or value is bool
+                    for value in choices
+                ):
+                    raise ValueError("static_dtype choices must be primitive DSL types")
+            else:
+                choices = ast.literal_eval(keywords["choices"])
             kernel_only = ast.literal_eval(keywords.get("kernel_only", ast.Constant(False)))
             if not isinstance(choices, (tuple, list)):
                 raise ValueError("choices must be a tuple or list")
             declaration = StaticValue(choices=choices, kernel_only=kernel_only)
         except (TypeError, ValueError) as error:
+            if call.func.attr == "static_dtype":
+                fail(module, call, f"Invalid static dtype domain: {error}")
             choices = keywords["choices"]
             name = call.args[0].value
             # An existing singleton type declaration can describe the model's
@@ -1174,8 +1191,9 @@ def scope_declarations(
                 scope,
                 call.args[0].value,
                 kind="static",
-                choices=[static_key(v) for v in declaration.choices],
+                choices=[_static_value(v) for v in declaration.choices],
                 kernel_only=kernel_only,
+                **({"static_dtype": True} if dtype_domain else {}),
                 static_declaration=[statement.lineno, statement.col_offset],
                 **({"conditions": dict(conditions)} if conditions else {}),
                 scope_allocation=origin(scope),
@@ -1242,7 +1260,16 @@ def scope_declarations(
                                     not is_present
                                     or not (
                                         scope_paths[nested_scope][: len(path)] == path
-                                        and method in ("dim", "parent_dim", "value", "static", "require_le", "borrow")
+                                        and method
+                                        in (
+                                            "dim",
+                                            "parent_dim",
+                                            "value",
+                                            "static",
+                                            "static_dtype",
+                                            "require_le",
+                                            "borrow",
+                                        )
                                         or nested_scope in guarded_groups
                                         and method in ("dim", "field", "vector_field", "matrix_field", "struct_field")
                                     )
@@ -1394,7 +1421,7 @@ def scope_declarations(
     for statement in unconditional_statements(constructor.body):
         if isinstance(statement, ast.Expr):
             scope, method = operation(statement.value)
-            if method == "static":
+            if method in ("static", "static_dtype"):
                 declare_static(scope, statement.value, statement, initial_conditions)
             elif method == "constant":
                 declare_constant(scope, statement.value, statement)
@@ -1422,7 +1449,7 @@ def scope_declarations(
         if method == "record" and isinstance(statement, ast.Expr) and id(call) in optional_records:
             allowed.add(id(call.func.value))
             optional_members.add(absent_record(call))
-        elif method == "static" and isinstance(statement, ast.Expr):
+        elif method in ("static", "static_dtype") and isinstance(statement, ast.Expr):
             declare_static(scope, call, statement, conditions)
         elif method == "constant" and isinstance(statement, ast.Expr):
             continue  # Definition values were proven before reading Field shapes.

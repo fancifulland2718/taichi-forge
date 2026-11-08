@@ -14635,6 +14635,123 @@ def test_package_optional_fields_reuse_explicit_and_negated_presence(tmp_path, m
         np.testing.assert_array_equal(a.extra.to_numpy(), np.arange(3)[:, None] + np.arange(3)[None, :])
 
 
+STATIC_DTYPE_SOURCE = """
+import taichi_forge as ti
+preparations = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, integral: bool):
+        self.n = n
+        prepare(self, integral)
+        self.values = ti.field(ti.f32, shape=n)
+    @ti.kernel
+    def compute(self, delta: ti.f32):
+        for i in range(self.n):
+            self.values[i] = ti.cast(i + delta, self.compute_type)
+    @ti.kernel
+    def plain(self):
+        for i in range(self.n):
+            self.values[i] = i
+def prepare(owner, integral):
+    global preparations
+    preparations += 1
+    owner.compute_type = ti.i32 if integral else ti.f32
+    scope = ti.experimental.ResourceScope(owner)
+    declare_types(scope, ti.f32, ti.i32)
+def declare_types(scope, floating, integer):
+    scope.static_dtype('compute_type', choices=(floating, integer))
+"""
+
+
+@pytest.mark.parametrize("storage_type", [False, True], ids=["numerical", "storage"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_static_dtype_preparation(tmp_path, monkeypatch, storage_type):
+    source = STATIC_DTYPE_SOURCE
+    if storage_type:
+        source = source.replace("ti.field(ti.f32,", "ti.field(self.storage_type,")
+        source = source.replace("    owner.compute_type =", "    owner.storage_type = ti.f32\n    owner.compute_type =")
+        source += "    scope.static_dtype('storage_type', choices=(floating,))\n"
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].preparations == 0
+    assert len(manifest["entry_families"]) == 1
+    family = next(iter(manifest["entry_families"].values()))
+    assert family["domain"] == {"compute_type": [("dtype", "f32"), ("dtype", "i32")]}
+    assert len(family["variants"]) == 2
+    assert sum(item["definition"].endswith(".Model.plain") for item in manifest["entries"].values()) == 1
+    references = []
+    for n, integral in ((7, False), (19, True)):
+        original = package.Model(n, integral)
+        original.compute(0.75)
+        references.append(original.values.to_numpy())
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, False), code.host.Model(19, True)
+        for model, expected in zip((a, b), references):
+            model.compute(0.75)
+            np.testing.assert_array_equal(model.values.to_numpy(), expected)
+        a.plain()
+        np.testing.assert_array_equal(a.values.to_numpy(), np.arange(7))
+        np.testing.assert_array_equal(b.values.to_numpy(), references[1])
+        a.compute_type = "f64"
+        with pytest.raises(ValueError, match="outside.*domain"):
+            a.compute(0.75)
+    probe = tmp_path / "consume_dtype.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in {'definition_fixture', 'taichi', 'taichi_forge'}:
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(11, False), code.host.Model(23, True)
+            a.compute(0.75)
+            b.compute(0.75)
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(11) + 0.75)
+            np.testing.assert_array_equal(b.values.to_numpy(), np.arange(23))
+        print('STATIC_DTYPE_OK')
+        """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "STATIC_DTYPE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("invalid", ["tensor", "factory", "layout"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_invalid_static_dtype_declarations(tmp_path, monkeypatch, invalid):
+    source = STATIC_DTYPE_SOURCE
+    if invalid == "tensor":
+        source = source.replace("choices=(floating, integer)", "choices=(ti.types.vector(3, ti.f32),)")
+    elif invalid == "factory":
+        source = source.replace("choices=(floating, integer)", "choices=(make_type(),)")
+        source += "\ndef make_type():\n    raise AssertionError('Application type factory executed')\n"
+    else:
+        source = source.replace("ti.field(ti.f32,", "ti.field(self.compute_type,")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match="dtype|declaration|forwarding"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].preparations == 0
+
+
 STATIC_DOMAIN_SOURCE = """
 import taichi_forge as ti
 constructors = 0
