@@ -10460,7 +10460,7 @@ print('FREE_RECEIVER_SOURCE_FREE_OK')
     assert "FREE_RECEIVER_SOURCE_FREE_OK" in result.stdout
 
 
-@pytest.mark.parametrize("change", ["unknown", "rebound", "uncovered", "starred"])
+@pytest.mark.parametrize("change", ["unknown", "rebound", "uncovered", "starred", "recursive_context"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_free_receiver_rejects_unproven_call_domains(tmp_path, monkeypatch, change):
     source = FREE_RECEIVER_SOURCE
@@ -10470,10 +10470,16 @@ def test_package_free_receiver_rejects_unproven_call_domains(tmp_path, monkeypat
         source = source.replace("forward(alias, gain)", "alias = object()\n        forward(alias, gain)")
     elif change == "uncovered":
         source += "\ndef arbitrary(receiver):\n    publish(1.0, receiver)\n"
+    elif change == "recursive_context":
+        source = source.replace(
+            "def forward(receiver, gain):", "def forward(receiver, gain):\n    forward((receiver,), gain)"
+        )
     else:
         source = source.replace("publish(gain, solver=receiver)", "publish(*unknown_arguments())")
     package = _source_package(tmp_path, monkeypatch, source)
-    with pytest.raises(ti.aot.PackageExportError, match="template input|receiver|argument sources"):
+    with pytest.raises(
+        ti.aot.PackageExportError, match="template input|receiver|argument sources|recursive Kernel input"
+    ):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk").exists()

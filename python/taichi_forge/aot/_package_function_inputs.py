@@ -87,7 +87,7 @@ def discover(sources, imported):
                 if inspect.isfunction(function) and function in functions:
                     parameters = list(inspect.signature(function).parameters)
                     if parameters and parameters[0] == "self":
-                        pending.append((function, {"self": _Owner(identity)}))
+                        pending.append((function, {"self": _Owner(identity)}, (function,)))
 
     visited, domains, covered, failures = set(), {}, set(), []
     invalid = set()
@@ -101,7 +101,7 @@ def discover(sources, imported):
         return None
 
     while pending:
-        function, arguments = pending.popleft()
+        function, arguments, chain = pending.popleft()
         identity = (function, tuple(sorted(arguments.items())))
         if identity in visited:
             continue
@@ -407,16 +407,18 @@ def discover(sources, imported):
             if callee in kernels:
                 record(callee, bound.arguments.get(kernels[callee][2]), call)
             elif any(item is not None for item in bound.arguments.values()):
-                pending.append(
-                    (
-                        callee,
-                        {
-                            key: _Mapping(tuple(item.items())) if isinstance(item, dict) else item
-                            for key, item in bound.arguments.items()
-                            if item is not None
-                        },
-                    )
-                )
+                inputs = {
+                    key: _Mapping(tuple(item.items())) if isinstance(item, dict) else item
+                    for key, item in bound.arguments.items()
+                    if item is not None
+                }
+                if callee in chain:
+                    if (callee, tuple(sorted(inputs.items()))) not in visited:
+                        failures.append(
+                            f"{module}:{call.lineno}: recursive Kernel input forwarding changes its source context"
+                        )
+                else:
+                    pending.append((callee, inputs, (*chain, callee)))
 
     # An input domain must cover each ordinary direct use in the scanned source,
     # not just the first convenient model path. Unknown forwarding stays a gap.
