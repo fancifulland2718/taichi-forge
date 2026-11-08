@@ -1789,6 +1789,13 @@ TI_DLL_EXPORT void TI_API_CALL
 ti_finish_prepared_instance_retirement_ext(TiRuntime runtime,
                                            TiPreparedExecution execution);
 
+// Enable device assertion polling at explicit waits and Host transfers.
+// LLVM runtimes default to disabled; borrowed runtimes inherit Program.debug.
+// This does not add assertions to release-compiled kernels. Driver failures,
+// argument validation and resource lifetime checks are independent of this flag.
+TI_DLL_EXPORT void TI_API_CALL
+ti_set_runtime_debug_mode_ext(TiRuntime runtime, TiBool enabled);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

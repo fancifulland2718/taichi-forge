@@ -10,6 +10,34 @@ from taichi_forge._lib import utils as runtime_utils
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], debug=True, offline_cache=False)
+def test_lightweight_runtime_debug_assertion_polling(tmp_path):
+    from taichi_forge_runtime.aot import Runtime
+
+    @ti.kernel
+    def checked(value: ti.i32):
+        assert value > 0, "developer assertion"
+
+    module = ti.aot.Module()
+    module.add_kernel(checked)
+    module.save(tmp_path)
+    arch = "cuda" if ti.lang.impl.current_cfg().arch == ti.cuda else "cpu"
+    # Independent runtimes opt in explicitly; a borrowed runtime inherits the
+    # Program's debug setting. Release waits do not poll device assertion state.
+    with Runtime(arch, debug=True) as runtime:
+        with runtime.load_module(tmp_path) as loaded:
+            loaded.kernel("checked").run(1)
+            runtime.wait()
+            loaded.kernel("checked").run(-1)
+            with pytest.raises(RuntimeError, match="developer assertion"):
+                runtime.wait()
+    with ti.aot.borrow_runtime() as runtime:
+        with runtime.load_module(tmp_path) as loaded:
+            loaded.kernel("checked").run(-1)
+            with pytest.raises(RuntimeError, match="developer assertion"):
+                runtime.wait()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_lightweight_array_allocation_usages():
     from tests.python.aot_optix_probe import read, write

@@ -6,6 +6,10 @@
 [按包定义导出 AOT](package_aot.zh.md)。目前仅覆盖标量/Ndarray 原型，不代表完整引擎支持。
 
 应用产物选择、生产/消费成本和包归属见 [AOT 部署配置](aot_deployment_profiles.zh.md)。
+CPU/CUDA 独立 `Runtime` 默认不在同步或 Host 传输后回读设备断言状态。
+开发时可显式使用 `Runtime("cuda", debug=True)`；借用 JIT Runtime 时继承
+`ti.init(debug=True)`。这只启用已有断言的检查，不会给发行代码补插断言。
+设备驱动错误和输入/资源生命周期合同仍由原执行路径处理。
 有界独立 CUDA 队列、精确设备依赖和显式初始化见
 [CUDA 执行域](cuda_execution_domains.zh.md)。开发接口在运行时绑定已保存计划，
 不序列化 stream 身份，也不改变已选择的执行路线。

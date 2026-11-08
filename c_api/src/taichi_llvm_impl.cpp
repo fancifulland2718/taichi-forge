@@ -75,7 +75,8 @@ LlvmRuntime::LlvmRuntime(taichi::lang::LlvmRuntimeExecutor &executor,
                          taichi::uint64 *buffer)
     : Runtime(executor.get_config().arch),
       executor_(&executor),
-      result_buffer(buffer) {
+      result_buffer(buffer),
+      debug_(executor.get_config().debug) {
 }
 
 LlvmRuntime::~LlvmRuntime() {
@@ -185,7 +186,11 @@ void LlvmRuntime::wait() {
       taichi::lang::CUDAContext::check_runtime_health();
 #endif
     synchronize_execution_domains();
-    check_runtime_error();
+    // Device assertion polling launches a query kernel and reads a scalar back
+    // even when no assertion fired. It belongs to explicit development mode,
+    // not every release transfer/wait. Driver errors and ordering still apply.
+    if (debug_)
+      check_runtime_error();
   } catch (const taichi::lang::BackendRuntimeError &error) {
     runtime_fault_domain()->report_backend_error(error, 0);
     throw;
@@ -193,6 +198,23 @@ void LlvmRuntime::wait() {
 }
 
 }  // namespace capi
+
+void ti_set_runtime_debug_mode_ext(TiRuntime runtime, TiBool enabled) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  if (enabled != TI_FALSE && enabled != TI_TRUE) {
+    ti_set_last_error(TI_ERROR_INVALID_ARGUMENT, "debug mode requires a boolean");
+    return;
+  }
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  if (!taichi::arch_is_cpu(rt.arch) && rt.arch != taichi::Arch::cuda) {
+    ti_set_last_error(TI_ERROR_NOT_SUPPORTED, "Device assertion polling requires an LLVM runtime");
+    return;
+  }
+  static_cast<capi::LlvmRuntime &>(rt).set_debug_mode(enabled == TI_TRUE);
+  TI_CAPI_TRY_CATCH_END();
+}
 
 // function.export_cpu_runtime
 void ti_export_cpu_memory(TiRuntime runtime,

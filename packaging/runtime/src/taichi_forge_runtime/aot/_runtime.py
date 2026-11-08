@@ -128,7 +128,9 @@ class Runtime:
     Native driver or bundled LLVM loading may still compile code on first use.
     """
 
-    def __init__(self, arch="cpu", *, device_index=0, library_path=None, runtime_path=None):
+    def __init__(self, arch="cpu", *, device_index=0, library_path=None, runtime_path=None, debug=False):
+        if type(debug) is not bool:
+            raise TypeError("debug must be a boolean")
         self._lock = threading.RLock()
         self._borrower = None
         self._ndarray_importer = None
@@ -158,6 +160,14 @@ class Runtime:
         self._handle = self._api.call(self._api.ti_create_runtime, native_arch, index)
         if not self._handle:
             raise RuntimeError("Native AOT runtime creation returned no handle")
+        if debug:
+            try:
+                self._api.load_debug_mode()
+                self._api.call(self._api.ti_set_runtime_debug_mode_ext, self._handle, True)
+            except BaseException:
+                self._api.call(self._api.ti_destroy_runtime, self._handle)
+                self._handle = None
+                raise
 
     @classmethod
     def _from_borrowed(cls, client, library_path, *, ndarray_importer=None, texture_importer=None,

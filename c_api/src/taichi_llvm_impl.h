@@ -23,6 +23,7 @@ class LlvmRuntime : public Runtime {
   virtual ~LlvmRuntime();
 
   void check_runtime_error();
+  void set_debug_mode(bool enabled) { debug_ = enabled; }
   taichi::lang::Device &get() override;
   void prepare_cpu_scheduler(taichi::lang::NativePreparationContext &context);
   std::pair<const taichi::lang::StructType *, std::size_t>
@@ -51,6 +52,7 @@ class LlvmRuntime : public Runtime {
   std::unique_ptr<taichi::lang::LlvmRuntimeExecutor> owned_executor_;
   taichi::lang::LlvmRuntimeExecutor *executor_{nullptr};
   taichi::uint64 *result_buffer{nullptr};
+  bool debug_{false};
 };
 
 }  // namespace capi

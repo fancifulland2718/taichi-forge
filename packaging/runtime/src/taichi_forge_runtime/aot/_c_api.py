@@ -438,6 +438,17 @@ class Api:
         function.argtypes, function.restype = [Handle], UInt
         setattr(self, name, function)
 
+    def load_debug_mode(self):
+        name = "ti_set_runtime_debug_mode_ext"
+        if getattr(self, name, None) is not None:
+            return
+        try:
+            function = getattr(self.library, name)
+        except AttributeError as error:
+            raise NotImplementedError("The selected Forge runtime has no explicit device debug mode") from error
+        function.argtypes, function.restype = [Handle, UInt], None
+        setattr(self, name, function)
+
     def load_cuda_external_memory(self):
         if getattr(self, "ti_import_cuda_external_memory_ext", None) is not None:
             return

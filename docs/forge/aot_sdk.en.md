@@ -1,5 +1,11 @@
 # Standalone AOT SDK
 
+CPU/CUDA standalone `Runtime` does not poll device assertion state after waits
+or Host transfers by default. Development can opt in with
+`Runtime("cuda", debug=True)`; borrowed runtimes inherit `ti.init(debug=True)`.
+This checks existing assertions; it does not insert assertions into release code.
+Driver errors and input/resource lifetime contracts retain their normal handling.
+
 [中文](aot_sdk.zh.md)
 
 For the new experiment using existing decorators to separate numerical methods
