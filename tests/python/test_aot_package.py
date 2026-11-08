@@ -12341,9 +12341,22 @@ def prepare(owner, active):
 """
 
 
+@pytest.mark.parametrize("values_only", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_free_preparation_domains_precede_constructor_guards(tmp_path, monkeypatch):
+def test_package_free_preparation_domains_precede_constructor_guards(tmp_path, monkeypatch, values_only):
     model = PREPARATION_DOMAIN_SOURCE
+    if values_only:
+        model = model.replace("self.work[i] + delta", "self.offset + delta")
+        model = (
+            model[: model.index("    declarations = ti.experimental.ResourceScope(owner)")]
+            + """    owner.offset = owner.n * 2
+    declarations = ti.experimental.ResourceScope(owner)
+    declare_roles(declarations, ti.i32)
+def declare_roles(scope, integer_type):
+    scope.static('active', choices=(False, True))
+    scope.value('offset', integer_type)
+"""
+        )
     start = model.index("def prepare(owner,")
     extra = {
         "preparation": "import taichi_forge as ti\nfrom resource_contexts import resource_group\npreparations = 0\n"
@@ -12356,15 +12369,15 @@ def test_package_free_preparation_domains_precede_constructor_guards(tmp_path, m
     assert len(manifest["entries"]) == 3  # Two dependent implementations and the fixture's free Kernel.
     reference = package.Model(3, True)
     reference.step(4)
-    np.testing.assert_array_equal(reference.base.to_numpy(), 4)
+    np.testing.assert_array_equal(reference.base.to_numpy(), 4 + 6 * values_only)
     np.testing.assert_array_equal(reference.extra.to_numpy(), 8)
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7, True), code.host.Model(19, False)
         a.step(4)
         b.step(9)
-        np.testing.assert_array_equal(a.base.to_numpy(), 4)
+        np.testing.assert_array_equal(a.base.to_numpy(), 4 + 14 * values_only)
         np.testing.assert_array_equal(a.extra.to_numpy(), 8)
-        np.testing.assert_array_equal(b.base.to_numpy(), 9)
+        np.testing.assert_array_equal(b.base.to_numpy(), 9 + 38 * values_only)
         assert not hasattr(b, "extra")
     probe = tmp_path / "consume_domains.py"
     probe.write_text(
@@ -12377,12 +12390,13 @@ def test_package_free_preparation_domains_precede_constructor_guards(tmp_path, m
                     raise AssertionError(fullname)
         sys.meta_path.insert(0, NoSource())
         from taichi_forge_runtime.aot import Runtime, load_package
+        values_only = sys.argv[3] == 'True'
         with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
             a, b = code.host.Model(11, False), code.host.Model(23, True)
             a.step(3)
             b.step(5)
-            np.testing.assert_array_equal(a.base.to_numpy(), 3)
-            np.testing.assert_array_equal(b.base.to_numpy(), 5)
+            np.testing.assert_array_equal(a.base.to_numpy(), 3 + 22 * values_only)
+            np.testing.assert_array_equal(b.base.to_numpy(), 5 + 46 * values_only)
             np.testing.assert_array_equal(b.extra.to_numpy(), 10)
             assert not hasattr(a, 'extra')
         print('PREPARATION_DOMAINS_SOURCE_FREE_OK')
@@ -12397,7 +12411,7 @@ def test_package_free_preparation_domains_precede_constructor_guards(tmp_path, m
         TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
     )
     result = subprocess.run(
-        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"], str(values_only)],
         env=env,
         capture_output=True,
         text=True,
@@ -12409,13 +12423,16 @@ def test_package_free_preparation_domains_precede_constructor_guards(tmp_path, m
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 @pytest.mark.parametrize("case", ["kernel_only", "escape"])
-def test_package_preparation_domains_do_not_bypass_full_admission(tmp_path, monkeypatch, case):
+@pytest.mark.parametrize("values_only", [False, True])
+def test_package_preparation_domains_do_not_bypass_full_admission(tmp_path, monkeypatch, case, values_only):
     source = PREPARATION_DOMAIN_SOURCE
+    if values_only:
+        source = source[: source.index("    with resource_group(owner, 'work'")]
     if case == "kernel_only":
         source = source.replace("choices=(False, True)", "choices=(False, True), kernel_only=True")
         message = "declared boolean owner static"
     else:
-        source += "\n    owner.escaped = fields\n"
+        source += "\n    owner.escaped = " + ("declarations" if values_only else "fields") + "\n"
         message = "ResourceScope use requires"
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     with pytest.raises(ti.aot.PackageExportError, match=message):

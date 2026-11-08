@@ -9,7 +9,7 @@ import textwrap
 
 from ._package_construction import ordinary_owner_lookup
 from ._package_contexts import discover_contexts, _generator_context
-from ._package_factories import _source_value, normalize_factories
+from ._package_factories import _source_value, normalize_factories, prove_factory
 from ._package_function_inputs import discover
 from ._package_input_families import source_class
 
@@ -32,8 +32,47 @@ def _declares_group(node, namespace):
     return False
 
 
+def _declares_values(node, namespace):
+    """Recognize a normal scope use without interpreting a model's role list."""
+    import taichi_forge as ti
+
+    for statement in node.body:
+        if not (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and isinstance(statement.value, ast.Call)
+        ):
+            continue
+        call = statement.value
+        target = _source_value(call.func, namespace)
+        if target is not ti.experimental.ResourceScope:
+            try:
+                normalized = prove_factory(target, call)
+            except (TypeError, ValueError, OSError):
+                continue  # Full normalization still diagnoses unproved factories.
+            if normalized is None or getattr(normalized, "_package_role", None) != "experimental.ResourceScope":
+                continue
+        scope = statement.targets[0].id
+        if any(
+            isinstance(part, ast.Call)
+            and (
+                isinstance(part.func, ast.Attribute)
+                and isinstance(part.func.value, ast.Name)
+                and part.func.value.id == scope
+                or any(
+                    isinstance(arg, ast.Name) and arg.id == scope
+                    for arg in (*part.args, *(keyword.value for keyword in part.keywords))
+                )
+            )
+            for part in ast.walk(node)
+        ):
+            return True
+    return False
+
+
 def is_preparation(function):
-    """A group-owning Host call needs full preparation analysis, not factory folding."""
+    """Owner preparation needs full analysis, not pure-factory folding."""
     if not inspect.isfunction(function):
         return False
     try:
@@ -44,7 +83,9 @@ def is_preparation(function):
         len(tree.body) == 1
         and isinstance(tree.body[0], ast.FunctionDef)
         and not tree.body[0].decorator_list
-        and _declares_group(tree.body[0], function.__globals__)
+        and (
+            _declares_group(tree.body[0], function.__globals__) or _declares_values(tree.body[0], function.__globals__)
+        )
     )
 
 
@@ -55,10 +96,10 @@ def _candidates(sources, imported):
         for node in tree.body:
             if not isinstance(node, ast.FunctionDef) or node.decorator_list:
                 continue
-            # Explicit independent groups have the existing preparation
-            # lifetime. Arbitrary Host functions/allocations are not lifted.
+            # Explicit groups and value-only declarations use the same owner
+            # projection. Raw allocations still fail full preparation admission.
             function = namespace.get(node.name)
-            if inspect.isfunction(function) and _declares_group(node, namespace):
+            if inspect.isfunction(function) and (_declares_group(node, namespace) or _declares_values(node, namespace)):
                 candidates[function] = (module, tree, kind, node)
     return candidates
 

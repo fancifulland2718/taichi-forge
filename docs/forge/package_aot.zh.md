@@ -1037,6 +1037,9 @@ Python。多个接收类可复用同一声明；调用来源未知、receiver �
 反向依赖也使用这一合同：外部准备函数的无条件 static 声明可供父构造中的资源条件读取。
 导出先从已证明的调用接收者收集声明域，再完整校验构造和准备函数；预收集不执行 Host，
 不改变调用顺序，也不跳过资源使用校验。CPU/CUDA 局部检查覆盖新尺寸、两实例及独立进程消费。
+只声明 value/static 而不分配资源的准备函数也沿用此路径：正常 Host 计算保留为 Python，
+声明通过实际 ResourceScope 或已证明的 scope factory 以及共用声明 helper 解析。
+不从样本模型的角色列表提取合同；声明 scope 逃逸与布局条件错误仍由完整准入拒绝。
 
 动态局部向量/矩阵也可用于 `range(begin, ti.min(device_count, model_bound))`。
 `begin` 和 `model_bound` 必须来自可证明的整数维度/常量表达式；prepare 按上界分配

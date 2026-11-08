@@ -1705,6 +1705,11 @@ constructor. Export collects domains from proven receivers before fully validati
 construction and preparation. This discovery executes no Host code, preserves call
 order and does not bypass resource-use validation. Local CPU/CUDA checks cover new
 sizes, independent instances and source-free consumption in a separate process.
+The same path admits value/static-only preparation without resource allocation.
+Normal Host computation stays Python; declarations come from the actual
+ResourceScope or a proven scope factory and shared declaration helpers. Export
+does not extract contracts from a sample model's role list. Full admission still
+rejects escaped declaration scopes and invalid layout guards.
 
 Dynamic local vectors/matrices also support
 `range(begin, ti.min(device_count, model_bound))`, with `begin` and `model_bound`
