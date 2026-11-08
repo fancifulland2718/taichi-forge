@@ -14,6 +14,9 @@ def constructor_items(schema):
 
 
 def resolve_sequences(sources, imported):
+    from ._package_source_sequences import SourceSequences
+
+    inventories = SourceSequences(sources, imported)
     classes = {
         getattr(imported[module], name): module + "." + name
         for module, _, _, _, _, _, schemas, _ in sources
@@ -33,7 +36,13 @@ def resolve_sequences(sources, imported):
                 return classes.get(value) if isinstance(value, type) else None
 
             calls, _ = constructor_calls(
-                constructor, schema, vars(imported[module]), recipe, attributes=sequences.keys(), host_sequence=True
+                constructor,
+                schema,
+                vars(imported[module]),
+                recipe,
+                attributes=sequences.keys(),
+                host_sequence=True,
+                source_aliases=inventories.constructor_aliases(constructor, vars(imported[module])),
             )
             for name, item in sequences.items():
                 declarations = [

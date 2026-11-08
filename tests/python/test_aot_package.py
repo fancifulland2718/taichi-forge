@@ -1384,6 +1384,117 @@ def test_package_host_owner_sequences_reject_unproven_sources(tmp_path, monkeypa
     assert not (tmp_path / "sdk").exists()
 
 
+INVENTORY_FIELD_INPUT_SOURCE = (
+    TYPED_FIELD_INPUT_SOURCE[: TYPED_FIELD_INPUT_SOURCE.index("@ti.data_oriented\nclass Model:")] + """
+from operator import attrgetter
+def source_names(mode):
+    names = ['scalar']
+    if mode > 0:
+        names.append('record')
+    return tuple(names)
+def source_fields(storage, mode):
+    return tuple((name, attrgetter(name)(storage)) for name in source_names(mode))
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, width: int, mode: int):
+        scope = ti.experimental.ResourceScope(self)
+        scope.storage = Storage(n, width)
+        self.names, sources = zip(*source_fields(self.storage, mode))
+        self.groups = tuple(Checkpoint(value) for value in sources)
+        scope.owner_sequence('groups', self.groups)
+    def save(self):
+        for group in self.groups:
+            group.save()
+    def restore(self):
+        for group in self.groups:
+            group.restore()
+"""
+)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_owner_sequence_reuses_normal_source_inventory(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, INVENTORY_FIELD_INPUT_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["input_families"]["definition_fixture.model.Checkpoint"]) == 2
+    assert not any("domain" in item for item in manifest["entry_families"].values())
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(5, 3, 0), code.host.Model(11, 7, 1)
+        assert len(a.groups) == 1 and len(b.groups) == 2
+        for model, n in ((a, 5), (b, 11)):
+            expected = np.arange(n, dtype=np.float32)
+            model.storage.scalar.from_numpy(expected)
+            model.save()
+            model.storage.scalar.from_numpy(expected * 0)
+            model.restore()
+            np.testing.assert_array_equal(model.storage.scalar.to_numpy(), expected)
+    probe = tmp_path / "consume_inventory.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(7, 3, 0), code.host.Model(17, 5, 1)
+    assert len(a.groups) == 1 and len(b.groups) == 2
+    for model, n in ((a, 7), (b, 17)):
+        values = np.arange(n, dtype=np.float32)
+        model.storage.scalar.from_numpy(values)
+        model.save()
+        model.storage.scalar.from_numpy(values * 0)
+        model.restore()
+        np.testing.assert_array_equal(model.storage.scalar.to_numpy(), values)
+print('INVENTORY_SOURCE_FREE_OK')
+""",
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "INVENTORY_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "before, after",
+    [
+        ("names = ['scalar']", "effect()\n    names = ['scalar']"),
+        ("names.append('record')", "names.append(dynamic_name(mode))"),
+        ("names.append('record')", "names.append(mode)"),
+        ("return tuple(names)", "return names"),
+        ("return tuple(names)", "return tuple([names])"),
+        ("def source_names(mode):", "def source_names(mode):\n    return source_names(mode)"),
+        (
+            "self.names, sources = zip(*source_fields(self.storage, mode))",
+            "self.names, sources = zip(*source_fields(self.storage, mode))\n        sources = unknown()",
+        ),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_owner_inventory_rejects_unproven_sources(tmp_path, monkeypatch, before, after):
+    package = _source_package(tmp_path, monkeypatch, INVENTORY_FIELD_INPUT_SOURCE.replace(before, after))
+    with pytest.raises(ValueError, match="fixed tuple|unproven|Recursive"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 FIELD_LIKE_SOURCE = """
 import taichi_forge as ti
 constructors = 0

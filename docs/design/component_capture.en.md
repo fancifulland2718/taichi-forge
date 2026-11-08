@@ -1357,6 +1357,15 @@ their actual owners and resource snapshots. Unproved source factories, rewritten
 collection declarations and numerical Kernel iteration over these collections
 still reject. This does not qualify arbitrary application state-inventory inference.
 
+Normal inventories may form immutable Field-source tuples using finite literal
+names, local append/extend operations, fixed loops and `attrgetter`. Definition
+export proves possible resource paths without executing model branches or
+enumerating condition combinations. Original Host helpers choose the actual
+collection. Helpers must resolve to verified scanned definitions; dynamic names,
+unknown effects, recursion, mutable returns and rebinding reject. This has proved
+possible sources in GeoPhys's original CCD inventory, but complete resource types,
+optional presence and consumption still require their own validation.
+
 
 Declared resource records and non-owning owner references can pass through
 unannotated `ti.func` arguments and local aliases. The frontend retains their

@@ -13,7 +13,9 @@ from taichi_forge_runtime._static_values import read_static_key
 from ._package_factories import _source_value
 
 
-def constructor_calls(constructor, schema, namespace, recipe_for, *, attributes=None, host_sequence=False):
+def constructor_calls(
+    constructor, schema, namespace, recipe_for, *, attributes=None, host_sequence=False, source_aliases=None
+):
     domains = {
         tuple(item.get("path", [name])): tuple(read_static_key(v) for v in item["choices"])
         for name, item in schema.items()
@@ -231,6 +233,14 @@ def constructor_calls(constructor, schema, namespace, recipe_for, *, attributes=
             continue
         target = targets[0]
         expression = rewrite(statement.value, names=aliases)
+        proven = {
+            n.id: source_aliases[n.id]
+            for n in ast.walk(target)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and n.id in (source_aliases or {})
+        }
+        if proven:
+            aliases.update(proven)
+            continue
         if isinstance(target, ast.Name) and stores[target.id] == 1:
             # Aliases forward syntax only. Mutated/rebound locals are not facts.
             aliases[target.id] = expression
