@@ -489,7 +489,9 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
             fail(module, statement, "Package ResourceScope aliases must not be reassigned")
         scopes[scope] = statement
         scope_groups[scope] = "builder_" + builder.id if builder is not None else "fields"
-        if builder is None and getattr(call, "_package_discarded_scope", False):
+        if builder is None and (
+            getattr(call, "_package_discarded_scope", False) or hasattr(call, "_package_child_registration")
+        ):
             call._package_scope_initializer = True
     recognized_calls = {id(statement.value) for statement in scopes.values()}
     for node in ast.walk(constructor):

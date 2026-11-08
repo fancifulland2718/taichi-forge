@@ -1076,13 +1076,25 @@ def _host_projection(
                     and (
                         getattr(node, "_package_scope_initializer", False)
                         or any(
-                            [node.lineno, node.col_offset] in item.get("scope_allocations", [item.get("scope_allocation")])
+                            [node.lineno, node.col_offset]
+                            in item.get("scope_allocations", [item.get("scope_allocation")])
                             for item in binding_schemas.get(self.owner, {}).values()
                         )
                     )
                 ):
                     # The normal scope forwards attributes to this same owner;
                     # declarations are projected separately at their source sites.
+                    registration = getattr(node, "_package_child_registration", None)
+                    if registration is not None:
+                        self.minimum_version = max(self.minimum_version, 66)
+                        return ast.copy_location(
+                            ast.Call(
+                                ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "child_scope", ast.Load()),
+                                [*copy.deepcopy(registration), ast.Name("self", ast.Load())],
+                                [],
+                            ),
+                            node,
+                        )
                     return ast.copy_location(
                         ast.Call(
                             ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "resource_scope", ast.Load()),

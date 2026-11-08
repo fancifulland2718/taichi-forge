@@ -5575,11 +5575,126 @@ class Model:
     assert not (tmp_path / "sdk").exists()
 
 
+CHILD_REGISTRATION_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Child:
+    def __init__(self, parent):
+        global constructors
+        constructors += 1
+        scope = SCOPE(parent).child('child', self)
+        scope.owner_reference('parent', parent)
+        n = scope.owner_dim('parent', 'n')
+        scope.values = scope.field(ti.i32, shape=n, initialization='zero')
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.values:
+            self.values[i] = i + bias
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.child = Child(self)
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize("factory", [False, True])
+def test_package_child_registration_preserves_owned_layout_and_source_free_host(tmp_path, monkeypatch, factory):
+    source = CHILD_REGISTRATION_SOURCE.replace(
+        "SCOPE", "resource_scope" if factory else "ti.experimental.ResourceScope"
+    )
+    if factory:
+        source = RESOURCE_FACTORY_SOURCE + source
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 66
+    original = sys.modules["definition_fixture.model"]
+    assert original.constructors == 0
+    model = original.Model(7)
+    model.child.step(3)
+    np.testing.assert_array_equal(model.child.values.to_numpy(), np.arange(7) + 3)
+    probe = tmp_path / "consume_child_registration.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoPrivateSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoPrivateSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(7), code.host.Model(19)
+            assert a.child.parent is a and b.child.parent is b
+            assert a.child.values._group_owner is not b.child.values._group_owner
+            a.child.step(3)
+            b.child.step(-2)
+            np.testing.assert_array_equal(a.child.values.to_numpy(), np.arange(7) + 3)
+            np.testing.assert_array_equal(b.child.values.to_numpy(), np.arange(19) - 2)
+            saved = a.child
+            registered = set(runtime._resources)
+            try:
+                code.host.model.Child(a)
+            except ValueError as error:
+                assert 'cannot be replaced' in str(error)
+            else:
+                raise AssertionError('Child ownership was silently replaced')
+            assert a.child is saved and runtime._resources == registered
+        print('CHILD_REGISTRATION_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CHILD_REGISTRATION_SOURCE_FREE_OK" in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "parent = self\n        scope = SCOPE(parent).child('child', self)",
+        "scope = SCOPE(parent).child('child', parent)",
+        "scope = SCOPE(parent).child(str(parent), self)",
+    ],
+)
+def test_package_child_registration_rejects_unproven_parent_and_name(tmp_path, monkeypatch, replacement):
+    source = CHILD_REGISTRATION_SOURCE.replace("scope = SCOPE(parent).child('child', self)", replacement)
+    source = source.replace("SCOPE", "ti.experimental.ResourceScope")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="Child ResourceScope requires"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 def test_package_specialization_policy_uses_native_task_and_format_contract(tmp_path):
     from taichi_forge_runtime.aot._package_calls import specialization_entries
 
-    metadata = dict(kernel_format="bc", device_range_dispatch=[dict(name="device", version=1, tasks=[0])],
-                    kernel_aliases=[dict(key="alias", value="device")])
+    metadata = dict(
+        kernel_format="bc",
+        device_range_dispatch=[dict(name="device", version=1, tasks=[0])],
+        kernel_aliases=[dict(key="alias", value="device")],
+    )
     path = tmp_path / "aot_metadata.json"
     path.write_text(json.dumps(metadata))
     entries = ("ordinary", "device", "alias")

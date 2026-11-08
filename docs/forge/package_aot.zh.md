@@ -80,6 +80,14 @@ ti.aot.export_package(roots, "dist/engine_cuda", arch="cuda", source_root="path/
 来初始化声明状态，而不保存返回句柄。导出器仍验证 owner、初始化策略及 builder，
 不把条件调用、其他 owner 或任意隐藏分配当作有效声明；这种空作用域不增加设备代码。
 
+版本 66 支持构造器中的无条件局部赋值
+`scope = ResourceScope(parent).child('child', self)`，也接受已证明的同义工厂。
+父对象必须是未改写的构造参数，名称为字面量；子对象继续拥有独立分配作用域，
+父对象的正常声明须以 `parent_scope.child = Child(...)` 指定该子类型。
+消费者保留注册并拒绝替换已有子对象，不复制父对象状态。CPU/CUDA 局部检查覆盖
+动态尺寸、两实例及无源码消费。此切片不支持隐式推断普通父属性赋值，也不扩展
+`child.parent_dim`、条件注册或跨构造器组分配。
+
 `source_root` 模式使用第 2 版包清单，消费者仍兼容第 1 版；旧消费者拒绝新版本。
 `library.host` 仍是最初选择的模块/包。包内绝对、相对和 importlib 导入解析到
 各自加载包的命名空间；任意表达式计算的动态依赖不被猜测为完整闭包。

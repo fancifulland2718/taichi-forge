@@ -5,6 +5,7 @@ not arbitrary Python execution, model preparation or numerical evaluation.
 """
 
 import ast
+import copy
 from dataclasses import dataclass
 import hashlib
 import inspect
@@ -397,6 +398,78 @@ def normalize_factories(tree, namespace, module, fail, kind):
             scopes = set()
             checked_calls = set()
 
+            # child() returns the child's ordinary allocation scope. Prove the
+            # parent factory first, then retain registration for Host projection;
+            # do not mistake the parent for this constructor's resource owner.
+            for statement in function.body:
+                if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
+                    continue
+                call = statement.value
+                if not (
+                    isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "child"
+                    and isinstance(call.func.value, ast.Call)
+                ):
+                    continue
+                parent = call.func.value
+                normalized_parent = parent
+                if qualified_kind(parent, kind) != "experimental.ResourceScope":
+                    try:
+                        normalized_parent = prove_factory(_source_value(parent.func, namespace), parent)
+                    except (TypeError, _Unproven) as error:
+                        fail(module, parent, f"Resource factory forwarding is unproven: {error}")
+                if normalized_parent is None or qualified_kind(normalized_parent, kind) != "experimental.ResourceScope":
+                    continue
+                parameters = {
+                    arg.arg for arg in (*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs)
+                }
+                root = parent.func
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if not isinstance(root, ast.Name) or any(
+                    isinstance(n, ast.Name)
+                    and n.id == root.id
+                    and not isinstance(n.ctx, ast.Load)
+                    or isinstance(n, ast.arg)
+                    and n.arg == root.id
+                    or isinstance(n, ast.alias)
+                    and (n.asname or n.name.split(".")[0]) == root.id
+                    for n in ast.walk(function)
+                ):
+                    fail(module, call, "Child ResourceScope factory requires an unshadowed source binding")
+                if not (
+                    len(normalized_parent.args) == 1
+                    and not normalized_parent.keywords
+                    and isinstance(normalized_parent.args[0], ast.Name)
+                    and normalized_parent.args[0].id in parameters - {"self"}
+                    and not any(
+                        isinstance(n, ast.Name)
+                        and n.id == normalized_parent.args[0].id
+                        and not isinstance(n.ctx, ast.Load)
+                        for n in ast.walk(function)
+                    )
+                    and len(call.args) == 2
+                    and isinstance(call.args[0], ast.Constant)
+                    and type(call.args[0].value) is str
+                    and call.args[0].value.isidentifier()
+                    and not call.args[0].value.startswith("__")
+                    and isinstance(call.args[1], ast.Name)
+                    and call.args[1].id == "self"
+                ):
+                    fail(module, call, "Child ResourceScope requires a stable parent parameter, literal name and self")
+                normalized = ast.copy_location(
+                    ast.Call(parent.func, [ast.Name("self", ast.Load())], copy.deepcopy(call.keywords)), call
+                )
+                normalized._package_role = "experimental.ResourceScope"
+                normalized._package_child_registration = (
+                    copy.deepcopy(normalized_parent.args[0]),
+                    copy.deepcopy(call.args[0]),
+                )
+                if hasattr(normalized_parent, "_package_factory"):
+                    normalized._package_factory = normalized_parent._package_factory
+                    declarations.append({**normalized._package_factory, "module": module, "line": parent.lineno})
+                statement.value = normalized
+
             def statements(body):
                 for statement in body:
                     if getattr(statement, "_package_resource_context", None) is not None:
@@ -418,7 +491,11 @@ def normalize_factories(tree, namespace, module, fail, kind):
                 target = _source_value(call.func, namespace)
                 expanded = None
                 try:
-                    normalized = prove_factory(target, call, scopes, allow_void=isinstance(statement, ast.Expr))
+                    normalized = (
+                        None
+                        if hasattr(call, "_package_child_registration")
+                        else prove_factory(target, call, scopes, allow_void=isinstance(statement, ast.Expr))
+                    )
                 except (TypeError, _Unproven) as error:
                     try:
                         shadowed = {

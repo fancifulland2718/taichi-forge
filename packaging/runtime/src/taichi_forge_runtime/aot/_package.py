@@ -893,6 +893,23 @@ class _ModuleBinding:
             raise ValueError("Resource scope belongs to another loaded package")
         return _ResourceScope(owner)
 
+    def child_scope(self, parent, name, owner):
+        from ._package_values import owner_type
+
+        scope = self.resource_scope(owner)
+        self.resource_scope(parent)
+        if owner is parent or type(name) is not str or not name.isidentifier():
+            raise ValueError("A child resource scope requires a distinct owner and a name")
+        declaration = self.package.manifest["owners"][owner_type(parent)].get(name, {})
+        if declaration.get("kind") != "owner" or declaration.get("owner_type") != owner_type(owner):
+            raise ValueError("Child registration differs from the parent's declared owner contract")
+        if getattr(parent, name, owner) is not owner:
+            raise ValueError("An existing child resource owner cannot be replaced")
+        setattr(parent, name, owner)
+        # The child owns a separate allocation namespace. A record scope would
+        # instead root every dimension and allocation at the parent.
+        return scope
+
     def declare_value(self, owner, name, spec, path=None):
         self.package._check()
         if getattr(owner, "_forge_package_owner", None) is not self.package:
@@ -1612,6 +1629,7 @@ class LoadedPackage:
                 63,
                 64,
                 65,
+                66,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

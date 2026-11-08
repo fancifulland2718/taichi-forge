@@ -87,6 +87,16 @@ root fails the preflight/export. `module_roots` records explicit selections;
 `sources` in the manifest and `modules` in preflight record the actual closure.
 Unselected, unreachable modules under `source_root` are not automatically included:
 the build must still account for the engine's public roots and declarations.
+
+Version 66 supports an unconditional constructor assignment
+`scope = ResourceScope(parent).child('child', self)`, including proven forwarding
+factories. The parent must be an unchanged constructor parameter and the name a
+literal. The child retains its own allocation namespace; the parent's ordinary
+declaration must identify its type through `parent_scope.child = Child(...)`.
+Consumption preserves registration and rejects replacing an existing child.
+Focused CPU/CUDA checks cover new sizes, independent instances and source-free
+consumption. This slice does not infer undeclared parent attribute assignments
+or extend `child.parent_dim`, conditional registration or multi-constructor groups.
 This implementation uses one code module per export; it does not automatically
 provide multiple physical code partitions or qualify their loading costs.
 
