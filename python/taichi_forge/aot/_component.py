@@ -924,8 +924,18 @@ class Component:
     is supplied by the application. Graph export follows separately.
     """
 
-    __slots__ = ("_declarations", "_dense_members", "_sources", "_paths", "_borrowed_reads", "_source_scope_paths",
-                 "_derived_attributes", "_constraints", "_lexical_bindings")
+    __slots__ = (
+        "_declarations",
+        "_dense_members",
+        "_sources",
+        "_paths",
+        "_borrowed_reads",
+        "_source_scope_paths",
+        "_derived_attributes",
+        "_constraints",
+        "_lexical_bindings",
+        "_symbolic_dimensions",
+    )
 
     def __init__(self, **declarations):
         flattened, paths = {}, {}
@@ -990,6 +1000,7 @@ class Component:
         # Filled only by definition-based producer analysis. It does not alter
         # Python closure cells or the ordinary JIT specialization path.
         self._lexical_bindings = MappingProxyType({})
+        self._symbolic_dimensions = False
 
     def _set_declarations(self, declarations):
         # Construction/borrow projection can extend the immutable environment.
@@ -1364,7 +1375,16 @@ class Component:
             for name in extent_dependencies(spec["left"]) | extent_dependencies(spec["right"]):
                 depend(name)
         validate_constraints(constraints, dimensions.keys(), used)
-        check_constraints(constraints, lambda name: _dimension_value(self, owner, name), sources, entry=entry)
+        # Definition export supplies shape witnesses, not a caller's model.
+        # Preserve every constraint in the emitted contract, but evaluate
+        # model-dependent inequalities only when actual inputs are bound.
+        checked = {
+            name: spec
+            for name, spec in constraints.items()
+            if not self._symbolic_dimensions
+            or not (extent_dependencies(spec["left"]) | extent_dependencies(spec["right"]))
+        }
+        check_constraints(checked, lambda name: _dimension_value(self, owner, name), sources, entry=entry)
         return constraints, dimensions, sources
 
     def _project_borrowed(self, borrowed, roots, sources, visible_dimensions, constraints, visible_fields, namespaces):

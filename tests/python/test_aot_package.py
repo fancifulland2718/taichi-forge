@@ -4989,9 +4989,9 @@ class Model:
         imported.close()
 
 
-@pytest.mark.parametrize("helper", (False, True))
+@pytest.mark.parametrize("helper, padding", ((False, 0), (True, 2)))
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_optional_record_borrows_caller_arrays(tmp_path, monkeypatch, helper):
+def test_package_optional_record_borrows_caller_arrays(tmp_path, monkeypatch, helper, padding):
     source = """
 from dataclasses import dataclass
 import taichi_forge as ti
@@ -5026,6 +5026,10 @@ class Model:
         b.dispatch(self.update)
         return b.compile()
 """
+    if padding:
+        source = source.replace(
+            "record.parent_dim('n'), record.dim('count'), when", "record.parent_dim('n') + 2, record.dim('count'), when"
+        )
     if helper:
         start = source.index("            record.borrow")
         end = source.index("    @ti.kernel", start)
@@ -5041,19 +5045,19 @@ class Model:
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
         for n in (5, 17):
-            offsets = ti.field(ti.i32, shape=n + 1)
+            offsets = ti.field(ti.i32, shape=n + padding + 1)
             values = ti.Vector.field(3, ti.f32, shape=n)
-            offsets.from_numpy(np.arange(n + 1, dtype=np.int32))
+            offsets.from_numpy(np.arange(n + padding + 1, dtype=np.int32))
             values.fill(0)
             original = package.Model(n)
-            original.prepare(sys.modules["definition_fixture.model"].Packet(n, offsets, values))
+            original.prepare(sys.modules["definition_fixture.model"].Packet(n + padding, offsets, values))
             original.update()
             expected = values.to_numpy()
             imported = [runtime.import_dense_view(ti.experimental.ndarray_view(field)) for field in (offsets, values)]
             owner = code.host.Model(n)
             owner.prepare(None)
             owner.update()
-            packet = code.module("definition_fixture.model").Packet(n, *imported)
+            packet = code.module("definition_fixture.model").Packet(n + padding, *imported)
             owner.prepare(packet)
             previous = owner.graph().bind({})
             owner.prepare(None)
@@ -5062,8 +5066,8 @@ class Model:
             runtime.wait()
             np.testing.assert_array_equal(values.to_numpy(), expected * 2)
             assert int(owner.counter.to_numpy()) == 3
-            short_offsets = runtime.ndarray("i32", (n,))
-            invalid = code.module("definition_fixture.model").Packet(n - 1, short_offsets, imported[1])
+            short_offsets = runtime.ndarray("i32", (n + padding,))
+            invalid = code.module("definition_fixture.model").Packet(n + padding - 1, short_offsets, imported[1])
             with pytest.raises(ValueError, match="enough_offsets"):
                 owner.prepare(invalid)
             short_offsets.close()

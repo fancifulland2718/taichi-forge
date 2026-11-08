@@ -51,6 +51,7 @@ def record_environment(declarations, schema):
         }
 
     environment = Component(**records(tree))
+    environment._symbolic_dimensions = True
     flattened = dict(environment.declarations)
     for name, declaration in declarations.items():
         if isinstance(declaration, Dimension):

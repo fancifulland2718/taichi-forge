@@ -1343,6 +1343,13 @@ cover cross-module ports, independent instances, late workspace replacement,
 failure cleanup and retained Graph generations. Ambiguous group identities and
 custom receiver lookup reject. This does not qualify complete EFC export.
 
+Model-dependent dimension constraints are retained for real input admission.
+Definition export's temporary type/layout witnesses need not satisfy a particular
+model's inequalities. Declaration references and constraint structure still
+validate during export; ordinary Component capture continues to validate its
+actual model. CPU/CUDA checks include a legal `count >= n + 2` input, for which
+unit-sized witnesses are invalid, and rejection of undersized caller storage.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.
