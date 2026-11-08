@@ -107,12 +107,14 @@ def _signature_failures(sources, imported_modules):
     return failures
 
 
-def _owner_schema(module, node, kind, namespace):
+def _owner_schema(module, node, kind, namespace, *, include_preparation=False):
     """Infer types from syntax, never run __init__ or select a model branch."""
     if node.keywords:
         _fail(module, node, "custom owner metaclasses require further support")
     schema = {}
     for function in construction_functions(node):
+        if getattr(function, "_package_preparation_method", False) and not include_preparation:
+            continue
         for name, declaration in _construction_schema(module, node, function, kind, namespace, schema).items():
             if getattr(function, "_package_preparation_method", False) and (
                 "presence_parameter" in declaration
@@ -1168,7 +1170,15 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             if recipe is not None:
                 function = _source_value(node.items[0].context_expr.func, vars(imported_modules[name]))
                 host_contexts.add(function, recipe)
-    resolve_owners(sources, imported_modules, _owner_schema, _fail)
+    # Resolve preparation declarations with the complete owner hierarchy. The
+    # local declaration pass describes construction only; neither pass executes
+    # Host preparation or infers its contract from a sample model.
+    resolve_owners(
+        sources,
+        imported_modules,
+        lambda *args: _owner_schema(*args, include_preparation=True),
+        _fail,
+    )
     from ._package_owner_sequences import resolve_sequences
 
     resolve_sequences(sources, imported_modules)
