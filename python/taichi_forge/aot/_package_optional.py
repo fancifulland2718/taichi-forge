@@ -1,9 +1,8 @@
 """Project typed input records without specializing their presence.
 
-Allocation-controlling records retain their layout contract until conditional
-owned storage can use the same invocation binding rules.
+Whole optional Dense groups retain their native layout and allocation lifetime;
+partial or mixed-layout conditions keep the existing specialization contract.
 """
-
 
 def project_input_records(owner, schema, declarations):
     from taichi_forge.types import primitive_types
@@ -31,8 +30,9 @@ def project_input_records(owner, schema, declarations):
             for item in members.values()
         ):
             continue
-        # A record whose presence or dimensions allocate internal storage is
-        # not merely a nullable input namespace. Preserve its existing layout.
+        # Whole present-only groups can share code without sharing storage.
+        # Partial group layouts and dimensions escaping the record need their
+        # existing layout contract, not an inferred nullable descriptor.
         axes = {key for key, item in members.items() if item["kind"] == "dimension"}
 
         def uses_axis(value):
@@ -42,11 +42,28 @@ def project_input_records(owner, schema, declarations):
                 return any(uses_axis(child) for child in value.values())
             return isinstance(value, (tuple, list)) and any(uses_axis(child) for child in value)
 
-        if any(
-            name in item.get("conditions", {})
-            or key not in members
-            and any(uses_axis(item.get(part, ())) for part in ("expression", "shape", "shape_expressions", "element"))
-            for key, item in schema.items()
+        conditioned = {key: item for key, item in schema.items() if name in item.get("conditions", {})}
+        storage = {key: item for key, item in conditioned.items() if item["kind"] == "dense_field"}
+        groups = {item.get("group", "fields") for item in storage.values()}
+        if (
+            any(
+                item.get("conditions") != {name: True}
+                or item["kind"] not in ("dense_field", "dimension")
+                or item["kind"] == "dense_field"
+                and (item.get("struct_field") or item["element"].get("model_tensor") or not item.get("group_builder"))
+                for item in conditioned.values()
+            )
+            or any(
+                item["kind"] == "dense_field" and item.get("group", "fields") in groups and key not in storage
+                for key, item in schema.items()
+            )
+            or any(
+                key not in members
+                and any(
+                    uses_axis(item.get(part, ())) for part in ("expression", "shape", "shape_expressions", "element")
+                )
+                for key, item in schema.items()
+            )
         ):
             # A first edge leaving the nullable namespace also covers derived
             # dimensions that subsequently feed an owned layout or another
@@ -60,3 +77,6 @@ def project_input_records(owner, schema, declarations):
         write_member(owner, presence, 1, schema)
         for item in members.values():
             item["input_record"] = name
+        for item in storage.values():
+            item["input_record"] = name
+            item["dynamic_input_storage"] = True

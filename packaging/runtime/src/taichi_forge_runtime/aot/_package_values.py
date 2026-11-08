@@ -61,6 +61,17 @@ def check_admission(owner, contract):
                     raise ValueError("Optional input presence is required by the selected execution branch")
                 continue
             check_external_resource(owner, resource, value)
+        for name, resource in admission.get("conditional_resources", {}).items():
+            if not records[resource["input_record"]]:
+                continue
+            value = path_value(owner, resource["path"])
+            allocated_owner = path_value(owner, resource.get("layout_owner_path", ()))
+            member = resource.get("layout_member", name)
+            schema = owner._forge_package_owner.manifest["owners"][owner_type(allocated_owner)]
+            source = (allocated_owner, tuple(schema[member].get("path", (member,))))
+            if getattr(value, "_forge_package_field_source", None) != source:
+                raise ValueError("Conditional workspace no longer refers to its owned Field")
+            check_external_resource(owner, resource, value)
         check_owner_bindings(owner, admission.get("owner_bindings", {}).values())
         for binding in admission.get("source_bindings", {}).values():
             for predicate in binding.get("presence", ()):

@@ -766,8 +766,8 @@ def _host_projection(
                         )
                         body = self.visit(ast.Module(body=node.body, type_ignores=[]))
                         node.body = body.body
-                        if len(groups) > 1:
-                            self.minimum_version = max(self.minimum_version, 58)
+                        if groups:
+                            self.minimum_version = max(self.minimum_version, 58 if len(groups) > 1 else 53)
                             offset = int(
                                 bool(node.body)
                                 and isinstance(node.body[0], ast.Expr)
@@ -1764,8 +1764,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     required = compilation_schemas.get(owner_name, {}).get(attribute, {}).get("conditions", {})
                     if (
                         compilation_schemas.get(owner_name, {}).get(attribute, {}).get("external")
-                        and attribute in code.dynamic
-                    ):
+                        or compilation_schemas.get(owner_name, {}).get(attribute, {}).get("dynamic_input_storage")
+                    ) and attribute in code.dynamic:
                         continue
                     if any(condition_values.get(key) != static_key(value) for key, value in required.items()):
                         _fail(
@@ -1780,6 +1780,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     for key, value in code.used.items()
                     if compilation_schemas.get(owner_name, {}).get(key, {}).get("external")
                     and key in code.dynamic
+                    or compilation_schemas.get(owner_name, {}).get(key, {}).get("dynamic_input_storage")
                     or all(
                         condition_values.get(flag) == static_key(expected)
                         for flag, expected in compilation_schemas.get(owner_name, {})
@@ -1859,6 +1860,24 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     for key, item in compilation_schemas.get(owner_name, {}).items()
                     if key in code.dynamic and item.get("external")
                 }
+                conditional_resources = {
+                    key: dict(
+                        path=list(environment._paths[key]),
+                        element=item["element"],
+                        input_record=item["input_record"],
+                        shape_expressions=[
+                            ("dim", axis) if isinstance(axis, str) else ("const", axis) for axis in item["shape"]
+                        ],
+                        dimensions=dimension_relations(
+                            environment, {axis for axis in item["shape"] if isinstance(axis, str)}
+                        ),
+                        **layout_owner(environment, compilation_schemas[owner_name], key),
+                    )
+                    for key, item in compilation_schemas.get(owner_name, {}).items()
+                    if key in code.dynamic and item.get("dynamic_input_storage")
+                }
+                if conditional_resources:
+                    manifest["version"] = max(65, manifest["version"])
                 constants = {
                     key: dict(path=list(environment._paths[key]), value=value)
                     for key, value in code.static.items()
@@ -1887,6 +1906,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                             else {}
                         ),
                         **({"external_resources": external_resources} if external_resources else {}),
+                        **({"conditional_resources": conditional_resources} if conditional_resources else {}),
                         **({"constants": constants} if constants else {}),
                     )
                     if constraints
@@ -1945,6 +1965,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                             resource.get("optional_input") or resource.get("input_record")
                         ):
                             item["optional_array"] = dict(element=resource["element"], ndim=resource["ndim"])
+                        if resource.get("dynamic_input_storage"):
+                            item["optional_array"] = dict(element=resource["element"], ndim=len(resource["shape"]))
                         if item["kind"] == "local_tensor_workspace":
                             item.update(code.workspaces[item["name"]])
                             manifest["version"] = max(27, manifest["version"])

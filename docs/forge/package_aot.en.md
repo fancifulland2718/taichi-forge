@@ -171,9 +171,18 @@ check branch requirements and member dimension constraints; an absent record's
 unreachable members are not read. Local CPU/CUDA checks cover dynamic member
 loops, scalar values, `ti.real_func`, dependent-record rejection, preparation
 changes and independent consumers that forbid frontend/private-definition imports.
-Records controlling owned workspace allocation, containing static options, or
-feeding dimensions into declarations outside the record retain their existing
-layout/selection contract until their binding lifetime is handled. Arbitrary
+Record checks use `is None` / `is not None`, without substituting presence for
+potentially overloaded equality. Format 65 also covers whole independent Dense
+workspace groups controlled by a record. The original SNode recipe allocates
+present groups, with instance ownership and actual dimension checks. Absent
+groups allocate no workspace; only unreachable parameters use empty descriptors.
+A successful explicit None binding removes the group's current bindings; early
+returns preserve state, failed preparation restores fields/groups, and previous
+Graphs retain their snapshots. Local CPU/CUDA source-free checks include these
+behaviors, dimension mismatch and foreign workspace rejection. Partial-group
+layout choices, records containing static options, and dimensions escaping the
+record retain their existing contract. Numerical code checks record presence,
+rather than inferring it from workspace object comparisons. Arbitrary
 conditional ports, struct elements and model-dependent element shapes remain
 outside this typed-port slice.
 

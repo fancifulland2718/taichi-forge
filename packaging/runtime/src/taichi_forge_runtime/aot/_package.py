@@ -795,10 +795,29 @@ class _ModuleBinding:
             # detach any existing state. Start the group transaction only when
             # the first original allocation context is actually entered.
             with ExitStack() as stack:
-                batch = dict(owner=owner, keys=keys, stack=stack, started=False)
+                batch = dict(owner=owner, keys=keys, stack=stack, started=False, records=set())
                 token = _preparation_batches.set((*_preparation_batches.get(), batch))
                 try:
                     yield
+                    if not batch["started"] and batch["records"]:
+                        # A successful explicit None binding can retire its
+                        # whole optional group without entering an allocation
+                        # context. An early return before binding does nothing.
+                        schema = self.package.manifest["owners"][keys[0].partition(":")[0]]
+                        inactive = []
+                        for key in keys:
+                            members = [item for item in schema.values() if item.get("field_group") == key]
+                            if members and all(
+                                item.get("dynamic_input_storage")
+                                and item["input_record"] in batch["records"]
+                                and path_value(owner, schema[item["input_record"]].get("path", (item["input_record"],)))
+                                is None
+                                for item in members
+                            ):
+                                inactive.append(key)
+                        if inactive:
+                            with self._preparation_storage(owner, inactive, retire_missing=True):
+                                pass
                 finally:
                     _preparation_batches.reset(token)
         finally:
@@ -1054,6 +1073,10 @@ class _ResourceScope:
         )
         if contract.get("dynamic_input_record"):
             setattr(self._root, contract["input_presence_attribute"], value is not None)
+            for batch in reversed(_preparation_batches.get()):
+                if batch["owner"] is self._root:
+                    batch["records"].add(self._identity(name))
+                    break
         return _ResourceScope(value, parent=self, path=(*self._path, name))
 
     def require_le(self, name, left, right, *, when):
@@ -1512,6 +1535,7 @@ class LoadedPackage:
                 62,
                 63,
                 64,
+                65,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

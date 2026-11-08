@@ -2131,6 +2131,16 @@ class _Capture:
             present = True
             for condition, expected in declaration.conditions:
                 predicate = self.declarations.get(condition)
+                if isinstance(predicate, _InputRecord):
+                    if expected is not True or not isinstance(declaration, _ConditionalDenseField):
+                        raise TaichiCompilationError("Dynamic record storage requires a whole present-only Dense group")
+                    record_path = self.component._paths[condition]
+                    self.attribute(ctx, record_path[-1], prefix=record_path[:-1])
+                    if ctx is not None and ctx.is_in_static_scope():
+                        return _OptionalArrayReference(path)
+                    if not _argument_binding:
+                        self.input_requirements.setdefault(condition, set()).add(tuple(self.input_guards))
+                    continue
                 if isinstance(predicate, Record) and predicate.optional and not getattr(predicate, "conditions", ()):
                     actual = self.attribute(ctx, condition) is not None
                 elif isinstance(predicate, StaticValue):
@@ -2250,7 +2260,12 @@ class _Capture:
         other = right if reference is left else left
         if other is not None or operation not in ("Is", "IsNot", "Eq", "NotEq"):
             raise TaichiCompilationError("Optional input references only support comparison with None")
-        name = self.declarations[_capture_id(reference.path)].presence
+        declaration = self.declarations[_capture_id(reference.path)]
+        if isinstance(declaration, _ConditionalDenseField):
+            raise TaichiCompilationError("Test a conditional workspace's record presence explicitly")
+        if isinstance(reference, _InputRecordReference) and operation in ("Eq", "NotEq"):
+            raise TaichiCompilationError("Optional input records require 'is None' or 'is not None'")
+        name = declaration.presence
         path = self.component._paths[name]
         value = self.attribute(ctx, path[-1], prefix=path[:-1])
         return ops.cmp_ne(value, 0) if operation in ("IsNot", "NotEq") else ops.cmp_eq(value, 0)

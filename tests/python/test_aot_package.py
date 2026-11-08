@@ -3352,6 +3352,155 @@ def test_package_optional_record_prepares_only_its_workspace(tmp_path, monkeypat
     assert "RECORD_WORKSPACE_SOURCE_FREE_OK" in result.stdout
 
 
+@pytest.mark.parametrize("invalid", (None, "workspace", "equality"))
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_dynamic_record_owns_optional_workspace(tmp_path, monkeypatch, invalid):
+    source = """
+from dataclasses import dataclass
+import taichi_forge as ti
+from resource_contexts import resource_group
+@dataclass(frozen=True)
+class Packet:
+    count: int
+    value: int
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        self.packet = None
+        s = ti.experimental.ResourceScope(self)
+        s.counter = s.field(ti.i32, shape=())
+    def prepare(self, packet, fail=False, skip=False):
+        if skip:
+            return
+        s = ti.experimental.ResourceScope(self)
+        record = s.record('packet', packet, optional=True)
+        if packet is not None:
+            record.dim('count')
+            record.value('value', ti.i32)
+            self.capacity = max(1, packet.count)
+            with resource_group(self, 'work', initialization='zero') as fields:
+                fields.workspace = fields.field(ti.i32, shape=fields.dim('capacity'))
+                if fail:
+                    raise ValueError('preparation failure')
+            record.require_le('fits', record.dim('count'), record.parent_dim('capacity'), when='value')
+    @ti.real_func
+    def store(self, i: ti.i32):
+        self.workspace[i] = self.packet.value + i
+    @ti.kernel
+    def step(self):
+        self.counter[None] += 1
+        if ti.static(self.packet is not None):
+            for i in range(self.packet.count):
+                self.store(i)
+    @ti.kernel
+    def required(self) -> ti.i32:
+        return self.workspace[0]
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.step)
+        return b.compile()
+"""
+    if invalid:
+        predicate = "self.workspace is not None" if invalid == "workspace" else "self.packet == None"
+        source += f"\n    @ti.kernel\n    def invalid(self) -> ti.i32:\n        return ti.cast(ti.static({predicate}), ti.i32)\n"
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    if invalid:
+        with pytest.raises(ti.aot.PackageExportError, match="record presence|require 'is None'"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        return
+    original = sys.modules["definition_fixture.model"]
+    reference = original.Model()
+    reference.prepare(original.Packet(5, 3))
+    reference.step()
+    expected = reference.workspace.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 65 and not manifest["entry_families"]
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        Model, Packet = code.host.model.Model, code.host.model.Packet
+        a, b = Model(), Model()
+        a.prepare(Packet(5, 3))
+        b.prepare(None)
+        assert len(a._forge_package_field_groups) == 2
+        assert len(b._forge_package_field_groups) == 1 and not hasattr(b, "workspace")
+        a.step()
+        b.step()
+        np.testing.assert_array_equal(a.workspace.to_numpy(), expected)
+        old = a.workspace
+        with a.graph().bind({}) as call:
+            a.prepare(None)
+            assert not hasattr(a, "workspace") and len(a._forge_package_field_groups) == 1
+            a.step()
+            call.run()
+            np.testing.assert_array_equal(old.to_numpy(), expected)
+        with pytest.raises(ValueError, match="presence"):
+            a.required()
+        a.prepare(Packet(7, 11))
+        saved = a.workspace
+        groups = dict(a._forge_package_field_groups)
+        a.prepare(None, skip=True)
+        assert a.workspace is saved and a._forge_package_field_groups == groups
+        with pytest.raises(ValueError, match="preparation failure"):
+            a.prepare(Packet(19, 11), fail=True)
+        assert a.workspace is saved and a._forge_package_field_groups == groups
+        with pytest.raises(ValueError, match="dimension|Dimension|shape"):
+            a.step()
+        a.prepare(Packet(19, 17))
+        a.step()
+        np.testing.assert_array_equal(a.workspace.to_numpy(), np.arange(19) + 17)
+        b.prepare(Packet(19, 23))
+        b.step()
+        own = a.workspace
+        a.workspace = b.workspace
+        with pytest.raises(ValueError, match="owned Field"):
+            a.step()
+        a.workspace = own
+        with b.graph().bind({}) as call:
+            call.run()
+        np.testing.assert_array_equal(b.workspace.to_numpy(), np.arange(19) + 23)
+    probe = tmp_path / "consume_dynamic_workspace.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys, numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.model.Model(), code.host.model.Model()
+            Packet = code.host.model.Packet
+            a.prepare(Packet(13, 7)); b.prepare(None)
+            old = a.workspace
+            with a.graph().bind({}) as call:
+                a.prepare(None)
+                assert not hasattr(a, 'workspace') and not hasattr(b, 'workspace')
+                call.run(); a.step(); b.step()
+                np.testing.assert_array_equal(old.to_numpy(), np.arange(13) + 7)
+            a.prepare(Packet(31, 9)); a.step()
+            np.testing.assert_array_equal(a.workspace.to_numpy(), np.arange(31) + 9)
+        print('DYNAMIC_WORKSPACE_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "DYNAMIC_WORKSPACE_SOURCE_FREE_OK" in result.stdout
+
+
 def _optional_record_source():
     source = RECORD_RESOURCES_SOURCE.replace(
         "record = scope.record('layout', layout)",
