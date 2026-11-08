@@ -1775,6 +1775,25 @@ def test_package_backend_query_retains_typed_input_format_requirement(tmp_path, 
         assert code.host.model.selected_backend() == ti.cpu.name
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_host_backend_text_matches_normal_policy_input(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.kernel
+def entry() -> ti.i32:
+    return 1
+def policy():
+    arch = ti.lang.impl.current_cfg().arch
+    return arch.name, str(arch), str(arch).split('.')[-1]
+"""
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import policy\n")
+    expected = package.policy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        assert code.host.policy() == expected
+        assert code.host.policy()[-1] == manifest["target"]
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_typed_inputs_use_declared_tuples_without_cartesian_expansion(tmp_path, monkeypatch):
     source = (

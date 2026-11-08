@@ -34,6 +34,9 @@ _DTYPES = ("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
 class _Backend:
     name: str
 
+    def __str__(self):
+        return "Arch." + self.name
+
 
 _BACKENDS = {name: _Backend(name) for name in ("x64", "arm64", "cuda", "vulkan")}
 
