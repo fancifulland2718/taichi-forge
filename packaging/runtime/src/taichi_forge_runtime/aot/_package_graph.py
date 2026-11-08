@@ -9,6 +9,7 @@ from enum import Enum
 import copy
 import itertools
 import json
+from types import SimpleNamespace
 
 from ._plan import ExecutionPlan
 from ._runtime import Scalar
@@ -59,6 +60,7 @@ class _Bindings:
         self.ids = itertools.count()
         self.captures = {}
         self.constants = {}
+        self.native_resources = {}
 
     def name(self):
         return self.prefix + str(next(self.ids))
@@ -239,6 +241,31 @@ class GraphBuilder:
         self._plan_values.update(sequence._plan_values)
         return self
 
+    def append_native(self, sequence, *, prewarm=False):
+        from ._package_algorithms import PrimitiveSequence, sort_inputs
+
+        self.package._check()
+        if not isinstance(sequence, PrimitiveSequence) or sequence.package is not self.package:
+            raise ValueError("Package native recording requires its own primitive sequence")
+        if type(prewarm) is not bool:
+            raise TypeError("Native prewarm must be bool")
+        # Recording only describes the operation. Existing Plan preparation
+        # admits the device provider, allocates scratch and freezes each binding.
+        operations, captures = [], {}
+        for arrays in sequence.calls:
+            sort_inputs(self.package, *arrays)
+            operation = dict(kind="sort")
+            for port, array in zip(("keys", "values"), arrays):
+                if array not in self._bindings.native_resources:
+                    self._bindings.native_resources[array] = SimpleNamespace(value=array)
+                holder = self._bindings.native_resources[array]
+                name, binding = self._bindings.capture(holder, dict(name="value", kind="ndarray"))
+                operation[port], captures[name] = name, binding
+            operations.append(operation)
+        self.operations.extend(operations)
+        self._captures.update(captures)
+        return self
+
     def while_loop(
         self,
         condition,
@@ -339,6 +366,9 @@ class Graph:
                         visit(operation["body"])
                     continue
                 if operation["kind"] != "kernel":
+                    if operation["kind"] == "sort":
+                        written.update(value for key, value in operation.items() if key != "kind")
+                        continue
                     raise ValueError("Write inspection has no effect contract for this operation")
                 contract = self.package.manifest["entries"][operation["entry"]]
                 descriptors = [*contract["arguments"], *contract["captures"]]

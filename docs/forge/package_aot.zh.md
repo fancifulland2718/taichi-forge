@@ -108,6 +108,13 @@ prepared 调用仍保留原资源。普通数值读取只为该入口增加“�
 `source_scope=True` 的借用仍是保留原分配组的另一种合同；旧 Component 的只读外部
 Field 合同也未因此扩大为任意可写输入。
 
+格式 61 将保留的 `ti.algorithms.sort`、`SortWorkspace` 和
+`primitive_sequence().sort(...)` / `GraphBuilder.append_native` 接到现有原生 Plan/provider。
+支持稳定升序、精确排序、NaN 最后及当前后端的原生方法；其他排序策略明确拒绝。
+排序实现不复制进应用 TCM；直接调用按工作区复用准备结果，Graph 在 `bind` 时准备，
+录制和准备均不执行排序。CPU/CUDA 无前端消费检查覆盖新容量、重复键稳定性、两个实例、
+工作区清理、Graph 顺序及资源退休。尚不代表其他原生算法都已获得包投影。
+
 ## 首批支持范围与验证
 
 - 顶层 Kernel 和普通 `data_oriented` 类的实例 Kernel、它们调用的 `func` helper；支持普通导入别名。

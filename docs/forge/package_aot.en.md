@@ -159,6 +159,16 @@ necessary code branches. Optional inputs do not expand the whole package into
 combinations. Local CPU/CUDA checks cover absence, restoration, old calls and
 presence rejection. Arbitrary conditional ports, struct elements and
 model-dependent element shapes are not yet supported by this form.
+
+Format 61 projects retained `ti.algorithms.sort`, `SortWorkspace`, and
+`primitive_sequence().sort(...)` / `GraphBuilder.append_native` onto the existing
+native Plan/provider. It accepts stable ascending exact order, NaNs last, and
+the selected backend's native method; other strategies fail explicitly. Provider
+code is not copied into the application TCM. Immediate calls reuse workspace
+preparation; Graphs prepare at `bind`, without executing sorting during recording
+or preparation. CPU/CUDA frontend-free checks cover new capacities, stable ties,
+two instances, workspace clearing, Graph order and resource retirement. This does
+not qualify package projection of other native algorithms.
 The `source_scope=True` borrow described
 below retains its separate original-group contract; existing Component read-only
 external Fields do not thereby become arbitrary writable inputs.

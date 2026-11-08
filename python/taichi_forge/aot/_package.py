@@ -37,7 +37,7 @@ from ._package_construction import (
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
 _PREFIX = "_forge_package_"
-_HOST_OPS = frozenset(("ndarray", "graph", "sync"))
+_HOST_OPS = frozenset(("ndarray", "graph", "sync", "algorithms"))
 _HOST_RESOURCE_TYPES = frozenset(("Field", "ScalarField", "MatrixField", "StructField"))
 _PRODUCER_ALLOCATIONS = frozenset(
     ("root", "FieldsBuilder", "field", "axes", "Vector.field", "Matrix.field", "Struct.field", "types.struct.field")
@@ -564,6 +564,8 @@ def _host_projection(
                     if a.name == "import_module"
                 ]
             if not node.level and node.module in ("taichi", "taichi_forge"):
+                if any(a.name == "algorithms" for a in node.names):
+                    self.minimum_version = max(self.minimum_version, 61)
                 names = [a for a in node.names if a.name not in _DECORATORS]
                 tensors = [a for a in names if a.name in ("Vector", "Matrix")]
                 names = [a for a in names if a not in tensors]
@@ -912,6 +914,8 @@ def _host_projection(
             ):
                 _fail(module, node, "Host references a device-only helper")
             role = kind(node)
+            if role == "algorithms":
+                self.minimum_version = max(self.minimum_version, 61)
             if qualified_kind(node, kind) in (
                 "math.vec2",
                 "math.vec3",
@@ -949,6 +953,15 @@ def _host_projection(
             return self.generic_visit(node)
 
         def visit_Call(self, node):
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in ("getattr", "hasattr")
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "algorithms"
+                and kind(ast.Attribute(node.args[0], "algorithms", ast.Load())) == "algorithms"
+            ):
+                self.minimum_version = max(self.minimum_version, 61)
             for item in owners.get(self.owner, {}).values():
                 if item.get("reference_declaration") == [
                     getattr(node, "lineno", None),

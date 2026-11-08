@@ -4995,6 +4995,112 @@ class Model:
                 array.close()
 
 
+@pytest.mark.parametrize("namespace_lookup", (False, True))
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_native_sort_reuses_provider_and_workspace(tmp_path, monkeypatch, namespace_lookup):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.keys = s.field(ti.i32, shape=s.dim('n'))
+        s.values = s.field(ti.i32, shape=s.dim('n'))
+        self.workspace = ti.algorithms.SortWorkspace(max_items=n)
+    @ti.kernel
+    def initialize(self):
+        for i in self.keys:
+            self.keys[i] = (self.n - i) % 7
+            self.values[i] = i
+    def sort(self, descending=False):
+        ti.algorithms.sort(self.keys, self.values, workspace=self.workspace, descending=descending)
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.initialize)
+        sequence = ti.algorithms.primitive_sequence().sort(self.keys, self.values, workspace=self.workspace)
+        b.append_native(sequence, prewarm=True)
+        return b.compile()
+"""
+    if namespace_lookup:
+        source = source.replace("ti.algorithms", "getattr(ti, 'algorithms')")
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 61
+    assert {item["definition"] for item in manifest["entries"].values()} == {
+        "definition_fixture.model.Model.initialize",
+        "definition_fixture.unimported.available_without_a_test",
+    }  # The native provider is not copied into a numerical TCM.
+    original = package.Model(19)
+    original.initialize()
+    original.sort()
+    np.testing.assert_array_equal(original.values.to_numpy(), np.argsort((19 - np.arange(19)) % 7, kind="stable"))
+    (tmp_path / "definition_fixture").rename(tmp_path / "producer_hidden")
+    probe = tmp_path / "native_sort_consumer.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import sys
+        import numpy as np
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(19), code.host.Model(129)
+            for owner in (a, b):
+                expected = np.argsort((owner.n - np.arange(owner.n)) % 7, kind='stable')
+                owner.initialize(); owner.sort()
+                np.testing.assert_array_equal(owner.values.to_numpy(), expected)
+                first = owner.workspace._prepared
+                owner.initialize(); owner.sort()
+                assert owner.workspace._prepared is first
+                np.testing.assert_array_equal(owner.values.to_numpy(), expected)
+                owner.keys.from_numpy(np.full(owner.n, 99, np.int32))
+                graph = owner.graph()
+                assert set(map(id, graph.written_resources())) == {id(owner.keys), id(owner.values)}
+                prepared = graph.bind({})
+                np.testing.assert_array_equal(owner.keys.to_numpy(), 99)
+                # Clearing the separate immediate-call cache cannot retire Graph bindings.
+                owner.workspace.clear()
+                prepared.run(); runtime.wait()
+                np.testing.assert_array_equal(owner.values.to_numpy(), expected)
+                prepared.close()
+                try:
+                    owner.sort(descending=True)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError('unsupported ordering was silently changed')
+            a.initialize(); b.initialize(); a.sort(); b.sort()
+            np.testing.assert_array_equal(a.values.to_numpy(), np.argsort((19-np.arange(19))%7, kind='stable'))
+            np.testing.assert_array_equal(b.values.to_numpy(), np.argsort((129-np.arange(129))%7, kind='stable'))
+            a.keys.close()
+            try:
+                a.sort()
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError('retired input was accepted')
+        assert 'taichi_forge' not in sys.modules and 'taichi' not in sys.modules
+        print('NATIVE_SORT_PACKAGE_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NATIVE_SORT_PACKAGE_OK" in result.stdout
+
+
 CACHED_FACTORY_SOURCE = """
 import taichi_forge as ti
 from functools import lru_cache, cache

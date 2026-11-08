@@ -147,6 +147,7 @@ class _ElementType:
 class _ModuleBinding:
     def __init__(self, package):
         from ._package_graph import Arg, ArgKind, GraphBuilder
+        from ._package_algorithms import Algorithms
 
         self.package = package
         self.target = _BACKENDS[package.runtime.arch]
@@ -159,6 +160,7 @@ class _ModuleBinding:
         self.host = _HostAPI(
             ndarray=self.ndarray,
             sync=package.runtime.wait,
+            algorithms=Algorithms(package),
             graph=SimpleNamespace(
                 Arg=Arg,
                 ArgKind=ArgKind,
@@ -1491,6 +1493,7 @@ class LoadedPackage:
                 58,
                 59,
                 60,
+                61,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
