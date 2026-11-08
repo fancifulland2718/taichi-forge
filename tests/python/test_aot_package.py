@@ -3835,23 +3835,36 @@ class Harness:
     return source
 
 
-@pytest.mark.parametrize("alias", [False, True, "explicit"])
+def _prepared_field_alias_source(*, cross_method=False):
+    source = _prepared_input_source()
+    source = source.replace(
+        "        self.n = binding.n", "        self.n = binding.n\n        self.input = binding.values"
+    )
+    source = source.replace(
+        "record = scope.record('binding', binding, optional=True)", "record = scope.record('binding', binding)"
+    )
+    source = source.replace(
+        "        if binding is not None:\n            size = record.dim('n')\n"
+        "            record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})",
+        "        record.dim('n')\n        scope.borrow('input', self.input, source_scope=True, dimensions={'n': scope.dim('n')})",
+    )
+    source = source.replace("self.binding.values[i]", "self.input[i]")
+    if cross_method:
+        source = source.replace("        constructors += 1", "        constructors += 1\n        self.input = None")
+        source = source.replace("        self.input = binding.values", "        self.bind_input(binding.values)")
+        source = source.replace(
+            "@ti.data_oriented\nclass Source:",
+            "    def bind_input(self, field):\n        self.input = field\n\n@ti.data_oriented\nclass Source:",
+        )
+    return source
+
+
+@pytest.mark.parametrize("alias", [False, True, "explicit", "cross_method"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_prepared_inputs_follow_record_factory_sources(tmp_path, monkeypatch, alias):
     source = _prepared_input_source()
-    if alias is True:
-        source = source.replace(
-            "        self.n = binding.n", "        self.n = binding.n\n        self.input = binding.values"
-        )
-        source = source.replace(
-            "record = scope.record('binding', binding, optional=True)", "record = scope.record('binding', binding)"
-        )
-        source = source.replace(
-            "        if binding is not None:\n            size = record.dim('n')\n"
-            "            record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})",
-            "        record.dim('n')\n        scope.borrow('input', self.input, source_scope=True, dimensions={'n': scope.dim('n')})",
-        )
-        source = source.replace("self.binding.values[i]", "self.input[i]")
+    if alias in (True, "cross_method"):
+        source = _prepared_field_alias_source(cross_method=alias == "cross_method")
     elif alias == "explicit":
         source = source.replace("self.consumer.prepare(binding)", "Model.prepare(self.consumer, binding)")
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
@@ -3896,11 +3909,11 @@ def test_package_prepared_inputs_follow_record_factory_sources(tmp_path, monkeyp
         contract = next(
             item
             for item in manifest["owners"]["definition_fixture.model.Model"].values()
-            if item.get("input_method") == "prepare"
+            if item.get("input_method") == ("bind_input" if alias == "cross_method" else "prepare")
         )
         assert getattr(a.consumer, contract["source_path"][0]) is b.source
         a.consumer.prepare(host.make_binding(b.source))
-        if alias is True:
+        if alias in (True, "cross_method"):
             a.consumer.input = b.source.other
         else:
             a.consumer.binding = host.Binding(31, b.source.other)
@@ -3951,6 +3964,31 @@ def test_package_prepared_inputs_follow_record_factory_sources(tmp_path, monkeyp
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PREPARED_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["second_writer", "conditional_writer", "unknown_call", "unknown_source"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_cross_method_inputs_require_unique_proven_binding(tmp_path, monkeypatch, change):
+    source = _prepared_field_alias_source(cross_method=True)
+    if change == "second_writer":
+        source = source.replace(
+            "@ti.data_oriented\nclass Source:",
+            "    def rebind(self, field):\n        self.input = field\n\n@ti.data_oriented\nclass Source:",
+        )
+    elif change == "conditional_writer":
+        source = source.replace(
+            "        self.input = field", "        if field is not None:\n            self.input = field"
+        )
+    elif change == "unknown_call":
+        source += "\n    def unknown(self, field):\n        self.consumer.bind_input(field)\n"
+    else:
+        source = source.replace("        self.input = field", "        self.input = unknown(field)")
+        source += "\ndef unknown(field):\n    raise AssertionError('must not execute')\n"
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ti.aot.PackageExportError, match="ordinary binding method|prepared Field input"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0
 
 
 @pytest.mark.parametrize("change", ["unknown_call", "unknown_explicit", "two_sources", "unreachable", "mutable"])

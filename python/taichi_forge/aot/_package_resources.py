@@ -1464,6 +1464,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 namespace_check=lambda value: namespace_check(scope, value, call),
             )
             if "input_expression" in spec:
+                spec["input_method"] = constructor.name
                 expression = spec["input_expression"]
                 if (
                     isinstance(expression, ast.Attribute)
@@ -1478,10 +1479,16 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                         and ast.dump(prior.targets[0]).replace("Store()", "Load()") == ast.dump(expression)
                         and prior.lineno < call.lineno
                     ]
-                    if len(assignments) != 1 or member_stores.get(expression.attr) != 1:
+                    if not assignments and not member_stores.get(expression.attr):
+                        from ._package_borrows import prepared_alias_source
+
+                        spec["input_method"], spec["input_expression"] = prepared_alias_source(
+                            owner_node, constructor, expression, lambda node, message: fail(module, node, message)
+                        )
+                    elif len(assignments) != 1 or member_stores.get(expression.attr) != 1:
                         fail(module, call, "Prepared input alias requires one preceding source assignment")
-                    spec["input_expression"] = assignments[0].value
-                spec["input_method"] = constructor.name
+                    else:
+                        spec["input_expression"] = assignments[0].value
                 if getattr(call, "_package_optional_borrow", False):
                     spec["optional_input"] = True
             parameter = spec.get("input_parameter")

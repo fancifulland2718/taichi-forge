@@ -1209,6 +1209,16 @@ checks its package, type, path, alias and dimension relations before publishing
 the private source link. A failed binding does not replace that link; arbitrary
 earlier Host writes are still outside the rollback boundary. CPU/CUDA source-free
 checks cover new sizes, independent/rebound inputs and retained Graph snapshots.
+
+Preparation declarations may also borrow a `self` Field assigned in another ordinary
+binding method. There must be one direct assignment source, with its original
+allocation type proven at every known call; initial `None` in the constructor is
+not another allocation source. The borrow still checks the actual Field, original
+member and owner before publishing the private source link. A Host assignment alone
+does not refresh that binding. This rule does not infer method execution order;
+multiple writers, conditional assignments and unknown argument forwarding reject.
+Focused CPU/CUDA source-free checks include new sizes, wrong sources, rebinding and
+retained Graph snapshots.
 Version 57 also admits optional Field members supplied by these factories. A
 metadata-only non-None guard or a proven optional declaration helper uses the
 existing conditional Field contract; presence is updated at preparation, and

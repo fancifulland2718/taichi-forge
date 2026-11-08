@@ -15,6 +15,59 @@ def needs_source_proof(expression, schema):
     )
 
 
+def prepared_alias_source(owner, method, expression, fail):
+    """Find a unique ordinary binding definition, not an execution snapshot.
+
+    The input analyzer must still prove every call's original allocation. The
+    later borrow declaration checks the actual Field before publishing its
+    private source binding, so this does not infer inter-method call ordering.
+    """
+    candidates = []
+    for function in owner.body if owner is not None else ():
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        writes = [
+            part
+            for part in ast.walk(function)
+            if isinstance(part, ast.Attribute)
+            and part.attr == expression.attr
+            and isinstance(part.value, ast.Name)
+            and part.value.id == "self"
+            and not isinstance(part.ctx, ast.Load)
+        ]
+        for target in writes:
+            assignment = next(
+                (
+                    part
+                    for part in function.body
+                    if isinstance(part, ast.Assign) and len(part.targets) == 1 and part.targets[0] is target
+                ),
+                None,
+            )
+            if (
+                assignment is not None
+                and function.name == "__init__"
+                and isinstance(assignment.value, ast.Constant)
+                and assignment.value.value is None
+            ):
+                continue
+            if (
+                assignment is None
+                or len(writes) != 1
+                or function is method
+                or not isinstance(function, ast.FunctionDef)
+                or function.decorator_list
+                or function.args.posonlyargs
+                or not function.args.args
+                or function.args.args[0].arg != "self"
+            ):
+                fail(expression, "Prepared input alias requires one ordinary binding method with one direct assignment")
+            candidates.append((function.name, assignment.value))
+    if len(candidates) != 1:
+        fail(expression, "Prepared input alias requires one ordinary binding method with one direct assignment")
+    return candidates[0]
+
+
 def declaration(call, scope_path, schema, dimension, fail, *, preparation=False, namespace_check):
     """Admit known allocation paths, never infer a borrowed ABI from a sample."""
     if len(call.args) != 2 or not isinstance(call.args[0], ast.Constant):
