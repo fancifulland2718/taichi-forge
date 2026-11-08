@@ -680,6 +680,65 @@ every call. For stable dimensions and resources, bind once during preparation
 and retain the returned execution. Warm Graph replay timings do not replace
 first-preparation or ordinary-call measurements.
 
+## Ordinary imports and startup mode
+
+Select execution through Forge Runtime before importing the engine. JIT and AOT
+use the same business imports, constructors and calls; application modules do not
+need `load_package`, TCM filenames or `session.module`:
+
+```python
+from taichi_forge_runtime import ExecutionSession
+
+with ExecutionSession(mode="aot", arch="cuda"):
+    from constraints.efc.solver import TiConstraintSolver
+
+    solver = TiConstraintSolver(max_nefc=128, nv=19, enabled_methods=("newton",))
+    # Prepare inputs normally, then bind_solver_fields / load_constraints.
+    # solver.solve(method="newton", iterations=60, tolerance=1e-6)
+    # solver.back_project()
+```
+
+With `mode="jit"`, ordinary imports load source and use the existing JIT path.
+Omitting `mode` reads `FORGE_EXECUTION_MODE`, defaulting to `jit`. Keep this setup
+in the application's single bootstrap entry; business modules retain ordinary
+imports. Inputs must still meet each path's existing contracts: arbitrary Python
+or Field objects are not automatically transferable between runtimes.
+
+AOT startup reads the index; the first business import loads the matching package.
+Discovery uses `package.json` entries in installed distribution file records,
+`package.json` directly inside each `sys.path` directory or its
+`forge_aot/**/package.json` subtree, and manifests below
+`package_paths` / `FORGE_AOT_PACKAGE_PATH`. No new decorators, per-kernel registry
+or provider factories are required. Extract existing ZIPs first. For a local
+slice, use e.g. `package_paths=["D:/sdk/efc-cuda"]`; an installed SDK needs no such
+path argument.
+
+Selection uses the ordinary module name and target backend. An explicit exported
+root takes precedence over another package's retained dependency projection.
+Multiple candidates for the same root/backend reject as ambiguous instead of
+relying on directory order. Within claimed application namespaces, missing modules,
+wrong targets, corrupt payloads and incompatible contracts reject without private
+JIT fallback. Unrelated Python scripts and dependencies import normally. Shared
+ancestor namespaces can contain independent numerical libraries without creating
+solver-plus-renderer combination roots.
+
+Modules and packages are cached per session. Solver calls add no discovery scans,
+proxy interpreter or per-kernel scheduling. Native preparation, execution, instance
+binding and retirement retain their existing semantics. Closing removes public
+module names created by the session and releases its packages/owned runtime. Select
+the mode before engine imports; already imported source objects cannot switch in
+place, and only one process-wide AOT import session may be active. Finish application
+threads and release calls before closing. `runtime=existing_runtime` reuses a
+caller's device without transferring ownership. JIT reuses an existing runtime on
+the same backend; `jit_options` configure a new runtime, which the session owns.
+
+Focused CPU/CUDA checks cover ordinary imports, installed-distribution and path
+discovery, independent instances, missing/wrong/ambiguous package rejection, and
+namespace cleanup. The existing EFC CUDA package also runs its 12 PGS/CG/Newton
+comparisons through ordinary imports in a process prohibiting frontend/private
+source imports. This establishes the generic import mechanism and local EFC
+qualification, not completed migration of every engine module.
+
 ## Remaining shared mechanisms
 
 Complex SNode/Field layouts, the inheritance restrictions above, template/other conditional-resource domains,

@@ -4782,6 +4782,203 @@ def test_package_host_preparation_arrays_are_not_owner_declaration_methods(tmp_p
         np.testing.assert_array_equal(a.values.to_numpy(), 2 * np.arange(7) + 1.5)
 
 
+@pytest.mark.parametrize("discovery", ("path", "installed", "root"))
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_execution_session_keeps_normal_imports(tmp_path, monkeypatch, discovery):
+    from taichi_forge_runtime import ExecutionSession
+
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        scope = ti.experimental.ResourceScope(self)
+        self.n = n
+        scope.values = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.values:
+            self.values[i] = i + bias
+"""
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    package = _source_package(source_root, monkeypatch, source)
+    output = tmp_path / "forge_aot" / "fixture"
+    manifest = ti.aot.export_package(package, output, source_root=source_root)
+    # This session reuses an already initialized JIT runtime without owning it.
+    with ExecutionSession(mode="jit", arch=manifest["target"]):
+        from definition_fixture.model import Model
+
+        original = Model(7)
+        original.step(5)
+        expected = original.values.to_numpy()
+    assert ti.lang.impl.get_runtime().prog is not None
+    with pytest.raises(RuntimeError, match="before importing"):
+        with ExecutionSession(mode="aot", arch=manifest["target"], package_paths=[output]):
+            pass
+    if discovery == "installed":
+        # A real dist-info RECORD exercises automatic wheel discovery without
+        # importing a provider or rebuilding/installing a native environment.
+        installed = tmp_path / "site"
+        installed.mkdir()
+        output.rename(installed / "sdk_payload")
+        metadata_dir = installed / "fixture_sdk-1.0.dist-info"
+        metadata_dir.mkdir()
+        (metadata_dir / "METADATA").write_text("Metadata-Version: 2.1\nName: fixture-sdk\nVersion: 1.0\n")
+        (metadata_dir / "RECORD").write_text("sdk_payload/package.json,,\n")
+    probe = tmp_path / "consume_normal_import.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge'):
+                    raise AssertionError('frontend imported: ' + fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime import ExecutionSession
+        with ExecutionSession(arch=sys.argv[1]) as session:
+            assert session.runtime is None
+            from definition_fixture import model as from_parent
+            from definition_fixture.model import Model
+            import definition_fixture.model as module
+            assert from_parent is module
+            assert from_parent.__name__ == 'definition_fixture.model'
+            assert module.__name__ == 'definition_fixture.model'
+            assert module.Model is Model
+            first, second = Model(7), Model(19)
+            first.step(5)
+            second.step(2)
+            np.testing.assert_array_equal(first.values.to_numpy(), np.arange(7) + 5)
+            np.testing.assert_array_equal(second.values.to_numpy(), np.arange(19) + 2)
+            assert len(session.loaded_packages) == 1
+            session._discover = lambda: (_ for _ in ()).throw(AssertionError('rescanned'))
+            from definition_fixture.model import Model as Again
+            assert Again is Model
+            try:
+                import definition_fixture.not_exported
+            except ModuleNotFoundError:
+                pass
+            else:
+                raise AssertionError('missing package silently fell back')
+        assert 'definition_fixture.model' not in sys.modules
+        assert not any(name.startswith('_forge_package_loaded_') for name in sys.modules)
+        print('NORMAL_IMPORT_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        FORGE_EXECUTION_MODE="aot",
+        FORGE_AOT_PACKAGE_PATH="",
+        PYTHONPATH=os.pathsep.join(
+            (
+                str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+                (
+                    str(tmp_path / "site")
+                    if discovery == "installed"
+                    else str(output if discovery == "root" else tmp_path)
+                ),
+            )
+        ),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NORMAL_IMPORT_SOURCE_FREE_OK" in result.stdout
+    np.testing.assert_array_equal(expected, np.arange(7) + 5)
+    ti.reset()
+    with ExecutionSession(mode="jit", arch=manifest["target"], jit_options={"offline_cache": False}):
+        from definition_fixture.model import Model
+
+        cold = Model(7)
+        cold.step(5)
+        np.testing.assert_array_equal(cold.values.to_numpy(), expected)
+    assert ti.lang.impl.get_runtime().prog is None
+
+
+def test_package_execution_discovery_rejects_ambiguous_or_wrong_target(tmp_path, monkeypatch):
+    from taichi_forge_runtime import ExecutionSession
+    from taichi_forge_runtime import execution
+
+    monkeypatch.setattr(execution.metadata, "distributions", lambda: ())
+    monkeypatch.setenv("FORGE_AOT_PACKAGE_PATH", str(tmp_path))
+    for name, target in (("first", "cuda"), ("other", "vulkan")):
+        path = tmp_path / name
+        path.mkdir()
+        (path / "package.json").write_text(
+            json.dumps(
+                dict(
+                    kind="forge_definition_package_prototype",
+                    target=target,
+                    entry_module="discovery_fixture.core",
+                    application_modules=["discovery_fixture.core"],
+                    files={},
+                )
+            )
+        )
+    with ExecutionSession(mode="aot", arch="cuda") as session:
+        assert session._resolve("discovery_fixture.core") == tmp_path / "first"
+        assert session.runtime is None
+        with pytest.raises(ModuleNotFoundError, match="No AOT package"):
+            import discovery_fixture.missing
+    with ExecutionSession(mode="aot", arch="cpu") as session:
+        with pytest.raises(ModuleNotFoundError, match="available targets"):
+            import discovery_fixture.core
+        assert session.runtime is None
+    import shutil
+
+    shutil.copytree(tmp_path / "first", tmp_path / "duplicate")
+    with ExecutionSession(mode="aot", arch="cuda") as session:
+        with pytest.raises(ValueError, match="Ambiguous"):
+            import discovery_fixture.core
+        assert session.runtime is None
+
+
+def test_package_execution_independent_roots_share_only_namespace(tmp_path, monkeypatch):
+    from taichi_forge_runtime import ExecutionSession, execution
+
+    monkeypatch.setattr(execution.metadata, "distributions", lambda: ())
+    monkeypatch.delenv("FORGE_AOT_PACKAGE_PATH", raising=False)
+    for name in ("solver", "renderer"):
+        path = tmp_path / name
+        path.mkdir()
+        (path / "package.json").write_text(
+            json.dumps(
+                dict(
+                    kind="forge_definition_package_prototype",
+                    target="cuda",
+                    entry_module="namespace_fixture." + name,
+                    application_modules=["namespace_fixture", "namespace_fixture." + name],
+                    files={},
+                )
+            )
+        )
+    with ExecutionSession(mode="aot", arch="cuda", package_paths=tmp_path) as session:
+        import namespace_fixture
+
+        assert namespace_fixture.__path__ == []
+        assert session.runtime is None
+        assert session._resolve("namespace_fixture.solver") == tmp_path / "solver"
+        assert session._resolve("namespace_fixture.renderer") == tmp_path / "renderer"
+        with pytest.raises(RuntimeError, match="already active"):
+            with ExecutionSession(mode="aot", arch="cuda", package_paths=tmp_path):
+                pass
+        with pytest.raises(RuntimeError, match="active AOT"):
+            with ExecutionSession(mode="jit", arch="cuda"):
+                pass
+    assert "namespace_fixture" not in sys.modules
+
+
 def _source_package(
     tmp_path, monkeypatch, source=SOURCE, *, initializer="from .model import Model\n", extra_modules=None
 ):

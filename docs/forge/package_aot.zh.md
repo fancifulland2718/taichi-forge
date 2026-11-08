@@ -955,6 +955,51 @@ Python。多个接收类可复用同一声明；调用来源未知、receiver �
 调用工作区，设备仍按实际计数执行，不读取设备计数准备空间，也不扩大实际 Launch。
 该上界不是精确维度或静态条件证明，不跨可能溢出的算术传播；无界设备范围仍拒绝。
 
+## 正常 import 与启动模式
+
+应用可以在首次导入引擎前，通过 Forge Runtime 选择执行模式。JIT/AOT 使用同一份
+业务导入、构造和调用代码；不需要 `load_package`、TCM 文件名或 `session.module`：
+
+```python
+from taichi_forge_runtime import ExecutionSession
+
+with ExecutionSession(mode="aot", arch="cuda"):
+    from constraints.efc.solver import TiConstraintSolver
+
+    solver = TiConstraintSolver(max_nefc=128, nv=19, enabled_methods=("newton",))
+    # 正常准备输入、bind_solver_fields / load_constraints
+    # solver.solve(method="newton", iterations=60, tolerance=1e-6)
+    # solver.back_project()
+```
+
+改成 `mode="jit"` 后，正常导入源码并沿原 JIT 执行。省略 `mode` 时读取
+`FORGE_EXECUTION_MODE`，缺省为 `jit`；可以将上述启动代码放在应用唯一入口，
+让业务文件继续使用普通 `import`。输入对象仍须满足各路径原有合同；这不是任意
+Python/Field 对象都可无转换跨 Runtime 传递的承诺。
+
+AOT 启动只读取索引，首次业务导入才加载对应数值包。查找来源是已安装 distribution
+的文件记录中的 `package.json`、`sys.path` 各目录本身的 `package.json` 或其下的
+`forge_aot/**/package.json`，
+以及 `package_paths` / `FORGE_AOT_PACKAGE_PATH` 指定目录中的清单。无需新增装饰器、
+逐 Kernel 注册或 provider 工厂。现有 ZIP 须先解压；例如本地切片可以设置
+`package_paths=["D:/sdk/efc-cuda"]`，正式安装的 SDK 则无需这个路径参数。
+
+选择按普通模块名和目标后端进行：该模块的正式导出根优先于其他包的依赖投影，
+同根同后端多份候选明确报歧义；不按目录顺序猜测。已接管的应用命名空间缺少模块、
+后端不符、载荷损坏或不相容时拒绝，不回退私有 JIT。无关 Python 脚本/依赖照常导入。
+共享父命名空间可容纳独立数值库，不因此产生仿真+渲染组合根。
+
+模块和包均按 session 缓存；求解调用没有新增检索、代理解释器或逐核调度。原生
+Runtime 的 prepare/执行、实例绑定和退休语义继续复用。关闭 session 会移除它创建的
+公共导入名并释放其包/自有 Runtime；不能在已导入源码对象上原地切换模式，也不能
+同时激活两套进程级 AOT 导入规则。先于引擎 import 初始化；应用线程退出、调用释放后
+再关闭 session。传入 `runtime=existing_runtime` 可复用调用方设备，其所有权不转移。
+JIT 模式复用同后端的既有 Runtime；新建时可用 `jit_options`，自建 Runtime 随 session 关闭。
+
+当前局部 CPU/CUDA 检查覆盖普通 import、源码 JIT、无前端 AOT、安装记录/导入路径发现、
+模块缓存、实例隔离、缺包/后端/歧义拒绝和关闭。GeoPhys 冻结 EFC 包通过普通 import 的
+12 组 PGS/CG/Newton 与原 JIT 对照；这不代表整引擎所有公开包已完成导出。
+
 ## 仍需补齐的共同机制
 
 复杂 SNode/Field 布局、上述继承限制、模板参数域/其余条件资源域、无类型或 Python 专用 `pyfunc`、梯度、任意 Python
