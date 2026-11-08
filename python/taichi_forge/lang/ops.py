@@ -82,6 +82,13 @@ def cast(obj, dtype):
         if ((dtype == source_type and dtype in (primitive_types.i32, primitive_types.u1))
                 or (dtype == primitive_types.i32 and source_type == primitive_types.u1)):
             result._uniform_extent = obj._uniform_extent
+    if (
+        isinstance(obj, expr.Expr)
+        and hasattr(obj, "_allocation_upper_extent")
+        and dtype == primitive_types.i32
+        and obj.ptr.get_rvalue_type() == primitive_types.i32
+    ):
+        result._allocation_upper_extent = obj._allocation_upper_extent
     return result
 
 

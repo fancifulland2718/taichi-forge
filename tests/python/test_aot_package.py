@@ -8111,6 +8111,98 @@ class Model:
 """
 
 
+BOUNDED_LOCAL_TENSOR_SOURCE = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, width: int):
+        self.n = n
+        self.width = width
+        self.active = ti.field(ti.i32, shape=())
+        self.output = ti.field(ti.f32, shape=n)
+    @ti.kernel
+    def step(self):
+        for i in range(1, ti.min(self.active[None], self.n)):
+            values = ti.Vector.zero(ti.f32, self.width)
+            for j in range(self.width):
+                values[j] = (i + 1) * (j + 1)
+            self.output[i] = values[self.width - 1]
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_device_range_uses_model_workspace_bound(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, BOUNDED_LOCAL_TENSOR_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    assert sum(entry["definition"].endswith("Model.step") for entry in manifest["entries"].values()) == 1
+    reference = package.Model(7, 3)
+    reference.active[None] = 4
+    reference.step()
+    np.testing.assert_array_equal(reference.output.to_numpy(), [0, 6, 9, 12, 0, 0, 0])
+    probe = tmp_path / "consume_bounded_range.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            models = [code.host.Model(7, 3), code.host.Model(19, 65)]
+            calls = [model.graph().bind({}) for model in models]
+            for model, call in zip(models, calls):
+                assert call.info['resource_bytes'] == (model.n - 1) * model.width * 4
+                for count in (-1, 0, 4, model.n + 8):
+                    for prepared in (False, True):
+                        model.active.from_numpy(np.array(count, np.int32))
+                        model.output.from_numpy(np.full(model.n, -1., np.float32))
+                        call.run() if prepared else model.step()
+                        indices = np.arange(model.n)
+                        expected = np.where((indices >= 1) & (indices < count),
+                                            (indices + 1) * model.width, -1.)
+                        np.testing.assert_array_equal(model.output.to_numpy(), expected)
+            for call in calls:
+                call.close()
+        print('BOUNDED_LOCAL_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "BOUNDED_LOCAL_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("bound", ["self.active[None]", "ti.min(self.active[None], self.n) + self.active[None]"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unbounded_device_local_workspace(tmp_path, monkeypatch, bound):
+    source = BOUNDED_LOCAL_TENSOR_SOURCE.replace("ti.min(self.active[None], self.n)", bound)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="declared range/ndrange iteration domain"):
+        ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+
+
 MODEL_TENSOR_COPY_SOURCE = """
 import taichi_forge as ti
 constructors = 0

@@ -1399,6 +1399,14 @@ for configurations containing that workspace. Calls without it reject. Explorati
 still follows dependencies actually read by the entry; unrelated settings do not
 multiply code. Export fails explicitly when no admissible configuration exists.
 
+Dynamic local vectors/matrices also support
+`range(begin, ti.min(device_count, model_bound))`, with `begin` and `model_bound`
+proven integer dimension/constant expressions. Prepare allocates invocation scratch
+from the bound while the device retains its actual trip count. Preparation reads
+no device count and does not enlarge the launch. This bound proves neither an
+exact dimension nor a static condition; it does not propagate through potentially
+overflowing arithmetic. Unbounded device ranges still reject.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

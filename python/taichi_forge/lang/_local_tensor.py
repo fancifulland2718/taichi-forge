@@ -18,6 +18,12 @@ def extent(value):
     return getattr(value, "_uniform_extent", None) if isinstance(value, Expr) else None
 
 
+def upper_extent(value):
+    """An allocation bound, never a proof that the device value is uniform."""
+    exact = extent(value)
+    return exact if exact is not None else getattr(value, "_allocation_upper_extent", None)
+
+
 def is_model_value(value):
     """An immutable scalar expression depending on a declared model axis."""
     return isinstance(value, Expr) and getattr(value, "_model_uniform", False)
@@ -36,6 +42,16 @@ def model_expression(result, *inputs):
 
 
 def binary_extent(result, operation, left, right):
+    # A clamped device range can retain its actual trip count while prepare
+    # allocates scratch from an immutable upper bound. Do not propagate this
+    # as an exact extent or through arithmetic which may overflow or wrap.
+    if operation == "min":
+        from taichi_forge.types import primitive_types
+
+        if result.ptr.get_rvalue_type() == primitive_types.i32:
+            bounds = [bound for value in (left, right) if (bound := upper_extent(value)) is not None]
+            if bounds:
+                result._allocation_upper_extent = bounds[0] if len(bounds) == 1 else ("min", *bounds)
     # Retain only operations whose complete immutable inputs are known.
     if not hasattr(left, "_uniform_extent") and not hasattr(right, "_uniform_extent"):
         return result
@@ -73,7 +89,7 @@ def iteration_scope(ctx, index=None, begin=None, end=None):
         return nullcontext()
     if ctx.deployment.local_tensor_scope is not None:
         return nullcontext()
-    left, right = extent(begin), extent(end)
+    left, right = extent(begin), upper_extent(end)
     count = None if left is None or right is None else ("sub", ("max", left, right), left)
     if index is not None and begin is not None:
         index = index - begin
