@@ -6,8 +6,8 @@ from types import MappingProxyType
 
 def declaration(call, scope_path, schema, dimension, fail):
     """Admit known allocation paths, never infer a borrowed ABI from a sample."""
-    if scope_path or len(call.args) != 2 or not isinstance(call.args[0], ast.Constant):
-        fail(call, "Package borrow requires a literal root attribute and its declared source Field")
+    if len(call.args) != 2 or not isinstance(call.args[0], ast.Constant):
+        fail(call, "Package borrow requires a literal attribute and its declared source Field")
     name = call.args[0].value
     keywords = {k.arg: k.value for k in call.keywords}
     if (
@@ -26,6 +26,8 @@ def declaration(call, scope_path, schema, dimension, fail):
         path.insert(0, node.attr)
         node = node.value
     parameter = node.id if isinstance(node, ast.Name) and node.id != "self" and not path else None
+    if scope_path and parameter is not None:
+        fail(call, "Record borrowing requires a declared allocation path, not an untyped record input")
     if parameter is None and (not isinstance(node, ast.Name) or node.id != "self" or not path):
         fail(call, "Borrowed Field requires a definition-proven self allocation path; untyped inputs are not sampled")
     source = schema.get(path[0], {}) if path else {}
@@ -67,13 +69,16 @@ def declaration(call, scope_path, schema, dimension, fail):
         ):
             fail(call, "Borrowed dimension is absent from the original allocation namespace")
         if not isinstance(target, Extent) or any(
-            schema.get(n, {}).get("kind") != "dimension" or schema[n].get("path")
+            schema.get(n, {}).get("kind") != "dimension" or tuple(schema[n].get("path", (n,))[:-1]) != tuple(scope_path)
             for n in extent_dependencies(target.expression)
         ):
             fail(call, "Borrowed target relation requires dimensions in its declaration namespace")
         relations[key] = target.expression
-    return name, dict(
+    from ._component import _capture_id
+
+    return _capture_id((*scope_path, name)), dict(
         kind="borrowed_field",
+        **({"path": [*scope_path, name]} if scope_path else {}),
         source_path=path,
         **({"input_parameter": parameter} if parameter is not None else {}),
         dimensions=relations,

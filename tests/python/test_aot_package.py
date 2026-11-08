@@ -3359,6 +3359,136 @@ def test_package_optional_records_reject_unproven_guards(tmp_path, monkeypatch, 
     assert not (tmp_path / "sdk").exists()
 
 
+RECORD_BORROW_SOURCE = """
+from dataclasses import dataclass
+import taichi_forge as ti
+from resource_contexts import resource_group
+constructors = 0
+preparations = 0
+@dataclass(frozen=True)
+class Binding:
+    n: int
+    values: object
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.storage = scope.field(ti.i32, shape=scope.dim('n'))
+    def prepare(self, binding):
+        global preparations
+        preparations += 1
+        scope = ti.experimental.ResourceScope(self)
+        record = scope.record('binding', binding, optional=True)
+        if binding is not None:
+            size = record.dim('n')
+            record.borrow('values', self.storage, source_scope=True, dimensions={'n': size})
+        with resource_group(self, 'output', initialization='zero') as fields:
+            fields.output = fields.field(ti.i32, shape=fields.dim('n'))
+    @ti.kernel
+    def step(self, delta: ti.i32):
+        for i in self.output:
+            self.output[i] = -1
+        if ti.static(self.binding is not None):
+            for i in range(self.binding.n):
+                self.output[i] = self.binding.values[i] + delta
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        delta = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'delta', ti.i32)
+        builder.dispatch(self.step, delta)
+        return builder.compile()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_prepared_record_borrows_preserve_source_layout(tmp_path, monkeypatch):
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=RECORD_BORROW_SOURCE)
+    module = sys.modules["definition_fixture.model"]
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 55
+    assert module.constructors == module.preparations == 0
+    Binding = module.Binding
+    reference = package.Model(7)
+    reference.storage.from_numpy(np.arange(7, dtype=np.int32))
+    reference.prepare(Binding(7, reference.storage))
+    reference.step(3)
+    expected = reference.output.to_numpy()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7), code.host.Model(31)
+        a.storage.from_numpy(np.arange(7, dtype=np.int32))
+        a.prepare(Binding(7, a.storage))
+        b.prepare(None)
+        a.step(3)
+        b.step(8)
+        np.testing.assert_array_equal(a.output.to_numpy(), expected)
+        np.testing.assert_array_equal(b.output.to_numpy(), -1)
+        old = a.output
+        saved = a.graph().bind({"delta": 5})
+        a.prepare(None)
+        a.step(99)
+        saved.run()
+        np.testing.assert_array_equal(old.to_numpy(), np.arange(7) + 5)
+        np.testing.assert_array_equal(a.output.to_numpy(), -1)
+        saved.close()
+        resources = set(runtime._resources)
+        with pytest.raises(ValueError, match="record member"):
+            a.prepare(Binding(7, b.storage))
+        assert set(runtime._resources) == resources
+        with pytest.raises(ValueError, match="Dimension constraint"):
+            a.prepare(Binding(6, a.storage))
+        assert set(runtime._resources) == resources
+        a.prepare(Binding(7, a.storage))
+        a.binding = Binding(7, b.storage)
+        with pytest.raises(ValueError, match="alias|source|allocation"):
+            a.step(1)
+    probe = tmp_path / "consume_record_borrow.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            Model = code.host.Model
+            Binding = sys.modules[Model.__module__].Binding
+            a, b = Model(19), Model(67)
+            a.storage.from_numpy(np.arange(19, dtype=np.int32))
+            b.storage.from_numpy(np.arange(67, dtype=np.int32) * 2)
+            a.prepare(Binding(19, a.storage)); b.prepare(Binding(67, b.storage))
+            a.step(4); b.step(9)
+            np.testing.assert_array_equal(a.output.to_numpy(), np.arange(19) + 4)
+            np.testing.assert_array_equal(b.output.to_numpy(), np.arange(67) * 2 + 9)
+            a.prepare(None)
+            a.step(0)
+            np.testing.assert_array_equal(a.output.to_numpy(), -1)
+        print('RECORD_BORROW_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RECORD_BORROW_SOURCE_FREE_OK" in result.stdout
+
+
 @pytest.mark.parametrize("change", ["effect", "condition", "loop", "call", "shadow"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_declaration_helpers_reject_unproven_execution(tmp_path, monkeypatch, change):

@@ -527,16 +527,20 @@ class _ModuleBinding:
         construction = _construction.get()
         if (
             not isinstance(scope, _ResourceScope)
-            or scope._parent is not None
-            or construction is None
-            or construction[0] is not self.package
-            or construction[2] is not scope._root
+            or getattr(scope._root, "_forge_package_owner", None) is not self.package
             or source_scope is not True
             or external is not False
         ):
             raise ValueError("Borrowed Field requires its managed source-scope construction")
         owner_key = self.owner_contract(scope._root, owner_key)
-        contract = self.package.manifest["owners"][owner_key].get(name, {})
+        contract = self.package.manifest["owners"][owner_key].get(scope._identity(name), {})
+        if (
+            not (construction is not None and construction[0] is self.package and construction[2] is scope._root)
+            and contract.get("binding_phase") != "preparation"
+        ):
+            raise ValueError("Borrowed Field requires its managed source-scope construction")
+        if scope._parent is not None and getattr(scope._owner, name, None) is not field:
+            raise ValueError("Borrowed record member differs from its declared allocation")
         if contract.get("optional_input") and field is None:
             setattr(scope._root, contract["source_path"][0], None)
             setattr(scope._owner, name, None)
@@ -573,7 +577,8 @@ class _ModuleBinding:
                 else dimension_value(scope._root, key)
             ),
         )
-        setattr(scope._owner, name, field)
+        if scope._parent is None:
+            setattr(scope._owner, name, field)
         return field
 
     def placement(self, owner, shape):
@@ -1338,6 +1343,7 @@ class LoadedPackage:
                 52,
                 53,
                 54,
+                55,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

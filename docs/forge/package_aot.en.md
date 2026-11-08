@@ -1182,6 +1182,15 @@ preparation methods are allowed; actual Field allocations still require explicit
 group contexts. This slice does not resolve arbitrary external binding records,
 conditional child allocations or unknown borrowed Field provenance.
 
+Version 55 allows record members to borrow a definition-proven allocation path
+from the same owner, including later preparation methods. The original allocation
+schema supplies the ABI; the record member must already refer to that exact Field.
+Frozen records are checked without mutation. Source and target dimension relations
+are verified, and prepared Graph calls retain their existing resources after a
+rebind. Focused CPU/CUDA source-free checks reject cross-instance record members,
+inconsistent dimensions and changed aliases. This does not infer layout from an
+arbitrary record argument or execute a binding factory to obtain a model sample.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

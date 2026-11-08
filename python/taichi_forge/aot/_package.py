@@ -116,6 +116,10 @@ def _owner_schema(module, node, kind, namespace, *, include_preparation=False):
         if getattr(function, "_package_preparation_method", False) and not include_preparation:
             continue
         for name, declaration in _construction_schema(module, node, function, kind, namespace, schema).items():
+            if getattr(function, "_package_preparation_method", False) and declaration["kind"] == "borrowed_field":
+                if "input_parameter" in declaration:
+                    _fail(module, function, "Prepared Field inputs require a definition-proven allocation path")
+                declaration["binding_phase"] = "preparation"
             if (
                 getattr(function, "_package_preparation_method", False)
                 and declaration["kind"] == "dense_field"
@@ -1348,6 +1352,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(19, manifest["version"])
             if any(item["kind"] == "record" and item.get("optional") for item in schema.values()):
                 manifest["version"] = max(54, manifest["version"])
+            if any(
+                item["kind"] == "borrowed_field" and (item.get("path") or item.get("binding_phase"))
+                for item in schema.values()
+            ):
+                manifest["version"] = max(55, manifest["version"])
             if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):
                 manifest["version"] = max(15, manifest["version"])
             if any(item.get("struct_field") for item in schema.values()):

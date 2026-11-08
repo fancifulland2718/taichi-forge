@@ -1375,7 +1375,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                     for prior in constructor.body
                 )
             )
-            if member_stores.get(name, 0) and not prior_input_binding:
+            if not scope_paths[scope] and member_stores.get(name, 0) and not prior_input_binding:
                 fail(module, call, "Borrowed Field cannot replace an existing owner attribute")
             spec["scope_allocation"] = origin(scope)
             add(name, spec, call)
