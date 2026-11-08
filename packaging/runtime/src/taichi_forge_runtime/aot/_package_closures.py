@@ -133,44 +133,72 @@ class _FunctionEntry:
 
         self.package = package
         spec = package.manifest.get("function_entries", {}).get(identity)
-        if not isinstance(spec, dict) or set(spec) != {"receiver", "parameters", "owners"}:
+        if not isinstance(spec, dict) or set(spec) != {"receiver", "parameters", "templates", "owners"}:
             raise ValueError("Free Kernel requires a complete receiver contract")
         parameters, receiver, owners = spec["parameters"], spec["receiver"], spec["owners"]
+        templates = spec["templates"]
         if (
             not isinstance(parameters, list)
             or not all(isinstance(name, str) and name.isidentifier() for name in parameters)
             or len(set(parameters)) != len(parameters)
             or receiver not in parameters
+            or not isinstance(templates, list)
+            or not all(isinstance(name, str) and name in parameters for name in templates)
+            or len(set(templates)) != len(templates)
+            or receiver not in templates
             or not isinstance(owners, dict)
             or not owners
         ):
             raise ValueError("Free Kernel has an invalid receiver signature")
         self.receiver = receiver
+        self.templates = tuple(templates)
+        self.static_parameters = tuple(name for name in templates if name != receiver)
         self.signature = inspect.Signature(
             [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in parameters]
         )
         self._entries = {}
-        for owner, symbol in owners.items():
-            if owner not in package.manifest["owners"] or not isinstance(symbol, str):
+        for owner, cases in owners.items():
+            if owner not in package.manifest["owners"] or not isinstance(cases, list) or not cases:
                 raise ValueError("Free Kernel receiver is outside the declared package")
-            bound = entry(package, symbol)
-            if [item["name"] for item in bound.contract["arguments"]] != [n for n in parameters if n != receiver]:
-                raise ValueError("Free Kernel receiver binding differs from its numerical ABI")
-            self._entries[owner] = bound
+            choices = {}
+            for case in cases:
+                if (
+                    not isinstance(case, dict)
+                    or set(case) != {"symbol", "values"}
+                    or not isinstance(case["symbol"], str)
+                    or not isinstance(case["values"], dict)
+                    or set(case["values"]) != set(self.static_parameters)
+                ):
+                    raise ValueError("Free Kernel has an invalid template input case")
+                key = tuple(static_key(read_static_key(case["values"][name])) for name in self.static_parameters)
+                if key in choices:
+                    raise ValueError("Free Kernel has duplicate template input cases")
+                bound = entry(package, case["symbol"])
+                if [item["name"] for item in bound.contract["arguments"]] != [
+                    n for n in parameters if n not in templates
+                ]:
+                    raise ValueError("Free Kernel receiver binding differs from its numerical ABI")
+                choices[key] = bound
+            self._entries[owner] = choices
 
-    def _bind(self, owner):
+    def _bind(self, inputs):
         self.package._check()
+        owner = inputs[self.receiver]
         identity = owner_type(owner)
         if getattr(owner, "_forge_package_owner", None) is not self.package or identity not in self._entries:
             raise ValueError("Free Kernel requires its declared receiver in the same package")
-        return self._entries[identity].__get__(owner)
+        key = tuple(static_key(inputs[name]) for name in self.static_parameters)
+        entry = self._entries[identity].get(key)
+        if entry is None:
+            raise ValueError("Free Kernel template inputs are outside their definition-proven domain")
+        return entry.__get__(owner)
 
     def __call__(self, *args, **kwargs):
         bound = self.signature.bind(*args, **kwargs)
-        owner = bound.arguments.pop(self.receiver)
-        return self._bind(owner)(**bound.arguments)
+        inputs = {name: bound.arguments.pop(name) for name in self.templates}
+        return self._bind(inputs)(**bound.arguments)
 
     def _graph_bind(self, args, templates):
-        if not isinstance(templates, dict) or set(templates) != {self.receiver}:
+        if not isinstance(templates, dict) or set(templates) != set(self.templates):
             raise ValueError("Free Kernel Graph requires its declared template receiver")
-        return self._bind(templates[self.receiver]), args
+        return self._bind(templates), args

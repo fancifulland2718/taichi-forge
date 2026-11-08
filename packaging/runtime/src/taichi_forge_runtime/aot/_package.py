@@ -1251,6 +1251,7 @@ class LoadedPackage:
                 47,
                 48,
                 49,
+                50,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1268,8 +1269,8 @@ class LoadedPackage:
         for symbol in bindings:
             _entry_contract(self.manifest, symbol)
         functions = self.manifest.get("function_entries", {})
-        if not isinstance(functions, dict) or functions and self.manifest["version"] < 49:
-            raise ValueError("Free Kernel receiver bindings require definition package format 49")
+        if not isinstance(functions, dict) or functions and self.manifest["version"] < 50:
+            raise ValueError("Free Kernel input bindings require definition package format 50")
         from ._package_closures import _FunctionEntry
 
         for identity in functions:

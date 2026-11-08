@@ -10393,12 +10393,12 @@ class Derived(Model):
 def test_package_free_kernel_receiver_preserves_shared_code_and_instance_binding(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, FREE_RECEIVER_SOURCE)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 49
+    assert manifest["version"] == 50
     assert sys.modules["definition_fixture.model"].constructors == 0
     function = manifest["function_entries"]["definition_fixture.model.publish"]
     assert function["receiver"] == "solver" and function["parameters"] == ["gain", "solver"]
     assert len(function["owners"]) == 2
-    assert len(set(function["owners"].values())) == 1
+    assert len({case["symbol"] for cases in function["owners"].values() for case in cases}) == 1
     assert len([item for item in manifest["entries"].values() if item["definition"].endswith(".publish")]) == 1
     host = (tmp_path / "sdk/host/model.py").read_text()
     assert "def forward" in host and "def update" in host
@@ -10500,7 +10500,7 @@ def test_package_free_receiver_rejects_malformed_contract_before_loading(tmp_pat
     elif change == "abi":
         function["parameters"][0] = "other"
     else:
-        function["owners"][next(iter(function["owners"]))] = "missing"
+        function["owners"][next(iter(function["owners"]))][0]["symbol"] = "missing"
     (tmp_path / "sdk/package.json").write_text(json.dumps(manifest), encoding="utf8")
     with Runtime(manifest["target"]) as runtime:
 
@@ -10552,7 +10552,7 @@ def test_package_graph_only_free_receiver_is_discovered_without_recording(tmp_pa
         manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     owners = manifest["function_entries"]["definition_fixture.model.publish"]["owners"]
-    assert len(set(owners.values())) == 1
+    assert len({case["symbol"] for cases in owners.values() for case in cases}) == 1
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7), code.host.model.Derived(13)
         a.update(3)
@@ -10632,3 +10632,134 @@ def test_package_graph_free_receiver_rejects_unproven_forwarding(tmp_path, monke
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk").exists()
+
+
+FREE_STATIC_INPUT_SOURCE = (
+    FREE_RECEIVER_SOURCE.replace(
+        "def publish(gain: ti.f32, solver: ti.template()):",
+        "def publish(gain: ti.f32, solver: ti.template(), enabled: ti.template(), increment: ti.template(), note: ti.template()):",
+    )
+    .replace(
+        "solver.values[i] = gain * (i + solver.n)",
+        "factor = gain\n        if ti.static(enabled):\n            factor += increment\n        solver.values[i] = factor * (i + solver.n)",
+    )
+    .replace(
+        "publish(gain, solver=receiver)",
+        "publish(gain, receiver, False, 2, 'first')\n    publish(gain, receiver, False, 17, 'second')",
+    )
+    .replace(
+        "template_args={'solver': self}",
+        "template_args={'solver': self, 'enabled': True, 'increment': 3, 'note': 'graph'}",
+    )
+    .replace(
+        "    def writes(self):",
+        "    def offset(self, gain):\n        publish(gain, self, True, 3, 'offset')\n"
+        "    def other_offset(self, gain):\n        publish(gain, self, True, 7, 'offset')\n"
+        "    def writes(self):",
+    )
+)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_free_static_input_tuples_share_only_actual_numerical_variants(tmp_path, monkeypatch):
+    from zipfile import ZipFile
+
+    package = _source_package(tmp_path, monkeypatch, FREE_STATIC_INPUT_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 50
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    function = manifest["function_entries"]["definition_fixture.model.publish"]
+    assert function["templates"] == ["solver", "enabled", "increment", "note"]
+    cases = function["owners"]["definition_fixture.model.Model"]
+    # Five actual call tuples, rather than enabled x increment x note products.
+    assert len(cases) == 5
+    assert len({case["symbol"] for case in cases}) == 3
+    assert len([item for item in manifest["entries"].values() if item["definition"].endswith(".publish")]) == 3
+    with ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        # The automatic Field accessor is a distinct required numerical entry.
+        assert len([name for name in archive.namelist() if name.endswith(".bc")]) == len(manifest["entries"]) == 4
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(11), code.host.model.Derived(29)
+        a.update(2)
+        np.testing.assert_array_equal(a.values.to_numpy(), 2 * (np.arange(11) + 11))
+        prepared = a.graph().bind(dict(gain=5))
+        b.other_offset(2)
+        prepared.run()
+        prepared.close()
+        np.testing.assert_array_equal(a.values.to_numpy(), 8 * (np.arange(11) + 11))
+        np.testing.assert_array_equal(b.values.to_numpy(), 9 * (np.arange(29) + 29))
+        for enabled, increment, note in ((True, 9, "graph"), (1, 3, "graph"), (True, 3, object())):
+            with pytest.raises(ValueError, match="definition-proven domain|immutable"):
+                code.host.model.publish(1, a, enabled, increment, note)
+    probe = tmp_path / "static_input_consume.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class NoSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, NoSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(17), code.host.model.Derived(65)
+    prepared = a.graph().bind(dict(gain=5))
+    b.other_offset(4)
+    prepared.run()
+    prepared.close()
+    np.testing.assert_array_equal(a.values.to_numpy(), 8 * (np.arange(17) + 17))
+    np.testing.assert_array_equal(b.values.to_numpy(), 11 * (np.arange(65) + 65))
+print('STATIC_INPUT_SOURCE_FREE_OK')
+""",
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "STATIC_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["dynamic", "duplicate_case", "template_signature", "invalid_value"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_static_input_domains_reject_unknown_and_malformed_sources(tmp_path, monkeypatch, change):
+    source = FREE_STATIC_INPUT_SOURCE
+    if change == "dynamic":
+        source = source.replace(
+            "publish(gain, receiver, False, 2, 'first')", "publish(gain, receiver, False, gain, 'first')"
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    if change == "dynamic":
+        with pytest.raises(ti.aot.PackageExportError, match="unproven template input"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        assert not (tmp_path / "sdk").exists()
+        return
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    function = manifest["function_entries"]["definition_fixture.model.publish"]
+    cases = function["owners"]["definition_fixture.model.Model"]
+    if change == "duplicate_case":
+        cases.append(cases[0])
+    elif change == "template_signature":
+        function["templates"].remove("enabled")
+    else:
+        cases[0]["values"]["enabled"] = ["bool", 1]
+    (tmp_path / "sdk/package.json").write_text(json.dumps(manifest), encoding="utf8")
+    with Runtime(manifest["target"]) as runtime:
+
+        def must_not_load(*args, **kwargs):
+            raise AssertionError("Malformed static cases reached native loading")
+
+        monkeypatch.setattr(runtime, "load_module", must_not_load)
+        with pytest.raises(ValueError, match="template input|static value"):
+            load_package(runtime, tmp_path / "sdk")

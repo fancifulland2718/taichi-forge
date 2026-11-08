@@ -1101,12 +1101,16 @@ It provides no new whole-wheel size or performance measurement.
 
 ## Free-kernel owner arguments
 
-Version 49 supports module-level kernels with one `ti.template()` owner argument.
+Version 50 supports module-level kernels with one `ti.template()` owner argument
+and additional immutable static templates proven from original call sites.
 Its name and position need not be `self` or the first argument. Source facts flow
 from declared classes' ordinary Host methods, proven child-owner paths and plain
 function forwarding. Export does not invoke those methods for model samples and
-requires no new decorator or per-kernel registration. Field templates, additional
-static templates, dynamic factory returns and unproven forwarding remain unsupported.
+requires no new decorator or per-kernel registration. It records actual argument
+tuples, not a Cartesian product of separate parameter domains. Static origins
+currently cover literals, immutable tuples and ordinary forwarding. Model runtime
+values, Field templates, dynamic factory returns and unproven forwarding reject.
+Earlier format-49 free-kernel packages must be exported again.
 
 The original Component compiler handles the numerical definition, resource layout
 and effective static dependencies. Proven receiver types may reference the same
@@ -1126,8 +1130,12 @@ Graph to discover entries. Mutated, escaped or unproven read-only mappings are
 rejected as origins; an unrelated method named `dispatch` is not a Forge Graph.
 GeoPhys's three EFC parameter-publication definitions, Newton condition and three
 sort-control definitions pass this input preflight. This is not full EFC export
-or engine qualification. Multiple templates and model-dependent sort preparation
-data remain further work.
+or engine qualification. Additional template checks cover five source call tuples
+sharing three necessary numerical definitions (with a separate accessor), unread
+static-branch inputs, rejection of dynamic inputs and wrong types, and source-free
+CUDA consumption with independent instances. Field/multiple-owner inputs, methods
+with extra templates and model-dependent sort preparation remain further work.
+There is no new whole-engine wheel or size measurement from this slice.
 
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute

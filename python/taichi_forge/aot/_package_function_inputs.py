@@ -10,6 +10,7 @@ from collections import deque
 from dataclasses import dataclass
 import inspect
 
+from taichi_forge_runtime._static_values import static_key
 from ._package_factories import _source_value
 from ._package_input_families import source_class
 
@@ -34,9 +35,23 @@ class _Mapping:
     items: tuple
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class _Literal:
     value: object
+
+    def __hash__(self):
+        return hash(static_key(self.value))
+
+    def __eq__(self, other):
+        return isinstance(other, _Literal) and static_key(self.value) == static_key(other.value)
+
+
+def _literal_key(value):
+    if isinstance(value, _Literal):
+        return static_key(value.value)
+    if type(value) is tuple:
+        return ("tuple", tuple(_literal_key(item) for item in value))
+    raise ValueError("Template value has no immutable definition source")
 
 
 def discover(sources, imported):
@@ -71,8 +86,8 @@ def discover(sources, imported):
             if kernel is None:
                 continue
             templates = [a.name for a in kernel.arguments if isinstance(a.annotation, Template)]
-            if len(templates) == 1:
-                kernels[entry] = (module, definition, templates[0])
+            if templates:
+                kernels[entry] = (module, definition, tuple(templates))
     if not kernels:
         return {}, []
 
@@ -248,7 +263,9 @@ def discover(sources, imported):
                     return _Kernel(resolved)
             if isinstance(expression, (ast.Tuple, ast.List)):
                 return tuple(child(item) for item in expression.elts)
-            if isinstance(expression, ast.Constant) and type(expression.value) in (bool, str):
+            if isinstance(expression, ast.Constant) and (
+                expression.value is None or type(expression.value) in (bool, int, float, str)
+            ):
                 return _Literal(expression.value)
             if isinstance(expression, ast.Dict):
                 if all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in expression.keys):
@@ -350,16 +367,26 @@ def discover(sources, imported):
             result = _source_value(expression, namespace)
             return (result, None) if inspect.isfunction(result) else (None, None)
 
-        def record(callee, owner, call):
-            origin, definition, parameter = kernels[callee]
-            if not isinstance(owner, _Owner):
+        def record(callee, inputs, call):
+            origin, definition, parameters = kernels[callee]
+            receivers = [key for key in parameters if isinstance(inputs.get(key), _Owner)]
+            if len(receivers) != 1:
                 failures.append(
                     f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
-                    f"receiver {parameter!r} has no definition-proven owner source"
+                    "requires one definition-proven owner receiver"
                 )
                 invalid.add(callee)
                 return
-            domains.setdefault(callee, set()).add(owner.identity)
+            receiver = receivers[0]
+            try:
+                values = tuple((key, _literal_key(inputs.get(key))) for key in parameters if key != receiver)
+            except ValueError:
+                failures.append(
+                    f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} has an unproven template input"
+                )
+                invalid.add(callee)
+                return
+            domains.setdefault(callee, set()).add((inputs[receiver].identity, receiver, values))
             covered.add(id(call))
 
         for call in (part for part in nodes if isinstance(part, ast.Call)):
@@ -372,9 +399,9 @@ def discover(sources, imported):
                 kernel = value(call.args[0])
                 if isinstance(kernel, _Kernel):
                     inputs = next((value(k.value) for k in call.keywords if k.arg == "template_args"), None)
-                    receiver = kernels[kernel.function][2]
+                    parameters = kernels[kernel.function][2]
                     mapping = dict(inputs.items) if isinstance(inputs, _Mapping) else {}
-                    record(kernel.function, mapping.get(receiver) if set(mapping) == {receiver} else None, call)
+                    record(kernel.function, mapping if set(mapping) == set(parameters) else {}, call)
                 continue
             callee, receiver = target(call.func)
             if callee not in kernels and callee not in functions:
@@ -405,7 +432,7 @@ def discover(sources, imported):
                     invalid.add(callee)
                 continue
             if callee in kernels:
-                record(callee, bound.arguments.get(kernels[callee][2]), call)
+                record(callee, bound.arguments, call)
             elif any(item is not None for item in bound.arguments.values()):
                 inputs = {
                     key: _Mapping(tuple(item.items())) if isinstance(item, dict) else item
@@ -436,14 +463,21 @@ def discover(sources, imported):
     for kernel, identities in domains.items():
         if kernel in invalid:
             continue
-        module, definition, receiver = kernels[kernel]
+        module, definition, parameters = kernels[kernel]
+        receivers = {receiver for _, receiver, _ in identities}
+        if len(receivers) != 1:
+            failures.append(f"{module}.{definition['name']}: template receiver position changes between definitions")
+            continue
+        receiver = next(iter(receivers))
         definition["free_template"] = receiver
-        for identity in sorted(identities):
+        definition["function_templates"] = parameters
+        for identity, _, values in sorted(identities, key=repr):
             result.setdefault(identity, []).append(
                 dict(
                     kernel=kernel,
                     definition=module + "." + definition["name"],
                     receiver=receiver,
+                    templates=dict(values),
                     node=definition["node"],
                 )
             )

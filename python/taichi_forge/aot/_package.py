@@ -94,7 +94,7 @@ def _signature_failures(sources, imported_modules):
                 continue  # The normal export check reports unsupported descriptors.
             arguments = kernel.arguments[1:] if owner is not None else kernel.arguments
             for argument in arguments:
-                if definition.get("free_template") == argument.name:
+                if argument.name in definition.get("function_templates", ()):
                     continue
                 try:
                     _describe_entry_argument(argument)
@@ -726,7 +726,7 @@ def _host_projection(
                 )
                 return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
             if definition.get("free_template"):
-                self.minimum_version = max(self.minimum_version, 49)
+                self.minimum_version = max(self.minimum_version, 50)
                 descriptor = ast.Call(
                     ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "function_entry", ast.Load()),
                     [ast.Constant(module + "." + definition["name"])],
@@ -1071,7 +1071,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     """
     import taichi_forge as ti
     from taichi_forge.aot._component import Component
-    from taichi_forge_runtime._static_values import static_key
+    from taichi_forge_runtime._static_values import static_key, read_static_key
     from ._package_variants import compile_static_variants
     from taichi_forge.aot.module import Module
     from taichi_forge.types.ndarray_type import NdarrayType
@@ -1438,10 +1438,15 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         owner=class_name,
                         node=call["node"],
                         kind="kernel",
-                        name=class_name + ".__function_" + hashlib.sha256(call["definition"].encode()).hexdigest(),
+                        name=class_name
+                        + ".__function_"
+                        + hashlib.sha256(
+                            json.dumps([call["definition"], call["templates"]], sort_keys=True).encode()
+                        ).hexdigest(),
                         function_kernel=call["kernel"],
                         function_identity=call["definition"],
                         function_receiver=call["receiver"],
+                        function_templates=call["templates"],
                     )
                 )
         for class_name in schemas:
@@ -1507,7 +1512,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             if kernel is None:
                 _fail(name, node, "decorated definition did not resolve to a Forge kernel")
             arguments = (
-                [argument for argument in kernel.arguments if argument.name != definition["function_receiver"]]
+                [
+                    argument
+                    for argument in kernel.arguments
+                    if argument.name not in {definition["function_receiver"], *definition["function_templates"]}
+                ]
                 if "function_kernel" in definition
                 else (
                     kernel.arguments[1:]
@@ -1557,7 +1566,12 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     owner,
                     compilation_schemas.get(owner_name, {}),
                     template_args=(
-                        {definition["function_receiver"]: owner} if "function_kernel" in definition else None
+                        {
+                            definition["function_receiver"]: owner,
+                            **{key: read_static_key(value) for key, value in definition["function_templates"].items()},
+                        }
+                        if "function_kernel" in definition
+                        else None
                     ),
                 )
             except Exception as error:
@@ -1740,16 +1754,24 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             else:
                 entries[definition["name"]] = entry_manifest
             if "function_kernel" in definition:
-                manifest["version"] = max(manifest["version"], 49)
+                manifest["version"] = max(manifest["version"], 50)
                 descriptor = manifest.setdefault("function_entries", {}).setdefault(
                     definition["function_identity"],
                     dict(
                         receiver=definition["function_receiver"],
                         parameters=[argument.name for argument in kernel.arguments],
+                        templates=[
+                            argument.name
+                            for argument in kernel.arguments
+                            if argument.name in {definition["function_receiver"], *definition["function_templates"]}
+                        ],
                         owners={},
                     ),
                 )
-                descriptor["owners"][name + "." + owner_name] = entries[definition["name"]]["symbol"]
+                case = dict(symbol=entries[definition["name"]]["symbol"], values=definition["function_templates"])
+                cases = descriptor["owners"].setdefault(name + "." + owner_name, [])
+                if case not in cases:
+                    cases.append(case)
             if "closure_kernel" in definition:
                 manifest["version"] = max(manifest["version"], 25)
                 if definition["closure_template_owner"]:
