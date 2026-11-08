@@ -167,7 +167,7 @@ def project(owner, environment, schema):
         if whole_struct and item["dimensions"]:
             raise ValueError("Whole StructField borrowing retains its original source namespace")
         namespace = path[:-2] if source.get("struct_field") and not whole_struct else path[:-1]
-        checks = {}
+        checks = dict(item.get("constraints", {}))
         for dimension, expression in item["dimensions"].items():
             original = _capture_id((*namespace, dimension))
             if not isinstance(declarations.get(original), Dimension):

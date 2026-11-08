@@ -3604,11 +3604,18 @@ def _optional_prepared_input_source():
     )
 
 
-@pytest.mark.parametrize("form", ["guard", "helper", "conditional_source"])
+@pytest.mark.parametrize("form", ["guard", "helper", "conditional_source", "constraint"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_optional_prepared_field_inputs_reuse_presence_contract(tmp_path, monkeypatch, form):
     source = _optional_prepared_input_source()
-    if form == "helper":
+    if form == "constraint":
+        source = source.replace("    unused: object = None", "    unused: object = None\n    limit: int = 0")
+        source = source.replace(
+            "record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})",
+            "record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})\n"
+            "            record.require_le('fits', record.dim('limit'), size, when='values')",
+        )
+    elif form == "helper":
         source = (
             source.replace(
                 "        if binding.values is not None:\n            record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})",
@@ -3664,6 +3671,17 @@ def test_package_optional_prepared_field_inputs_reuse_presence_contract(tmp_path
         a.prepare(True, True)
         a.consumer.step(11)
         np.testing.assert_array_equal(a.consumer.output.to_numpy(), np.arange(7) + 11)
+        if form == "constraint":
+            Binding = code.host.model.Binding
+            a.consumer.binding = Binding(7, a.source.storage, limit=8)
+            with pytest.raises(ValueError, match="Dimension constraint"):
+                a.consumer.step(0)
+            with pytest.raises(ValueError, match="Dimension constraint"):
+                a.consumer.prepare(Binding(7, a.source.storage, limit=8))
+            a.consumer.prepare(Binding(7, None, limit=8))
+            a.consumer.step(0)
+            np.testing.assert_array_equal(a.consumer.output.to_numpy(), -1)
+            a.prepare(True, True)
         a.consumer.binding = code.host.model.Binding(7, None)
         with pytest.raises(ValueError, match="presence|source|alias|allocation"):
             a.consumer.step(0)
@@ -3711,12 +3729,20 @@ def test_package_optional_prepared_field_inputs_reuse_presence_contract(tmp_path
     assert "OPTIONAL_PREPARED_SOURCE_FREE_OK" in result.stdout
 
 
-@pytest.mark.parametrize("change", ["wrong_guard", "unknown_factory", "no_source", "unguarded_numerics"])
+@pytest.mark.parametrize(
+    "change", ["wrong_guard", "unknown_factory", "no_source", "unguarded_numerics", "unrelated_constraint"]
+)
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_optional_prepared_inputs_reject_unproven_sources(tmp_path, monkeypatch, change):
     source = _optional_prepared_input_source()
     if change == "wrong_guard":
         source = source.replace("if binding.values is not None:", "if binding.unused is not None:")
+    elif change == "unrelated_constraint":
+        source = source.replace(
+            "record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})",
+            "record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})\n"
+            "            record.require_le('fits', size, size, when='unused')",
+        )
     elif change == "unknown_factory":
         source = source.replace("source.storage if enabled else None", "unknown(source) if enabled else None")
         source += '\ndef unknown(source):\n    raise AssertionError("must not run")\n'

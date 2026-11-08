@@ -1135,24 +1135,42 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                             else (statement.orelse, statement.body)
                         )
                         calls = [part.value for part in present if isinstance(part, ast.Expr)]
+                        borrows = [call for call in calls if operation(call)[1] == "borrow"]
+                        triggers = {
+                            (operation(call)[0], call.args[0].value)
+                            for call in borrows
+                            if call.args and isinstance(call.args[0], ast.Constant) and type(call.args[0].value) is str
+                        }
+
+                        def associated_constraint(call):
+                            scope, method = operation(call)
+                            when = next((k.value for k in call.keywords if k.arg == "when"), None)
+                            return (
+                                method == "require_le"
+                                and isinstance(when, ast.Constant)
+                                and (scope, when.value) in triggers
+                            )
+
                         if (
-                            calls
+                            borrows
                             and needs_source_proof(test.left, ChainMap(declarations, earlier or {}))
                             and len(calls) == len(present)
                             and all(isinstance(part, ast.Pass) for part in absent)
                             and all(
-                                operation(call)[1] == "borrow"
-                                and len(call.args) == 2
-                                and source_expression(call.args[1]) == source_expression(test.left)
+                                isinstance(call, ast.Call) and (call in borrows or associated_constraint(call))
                                 for call in calls
+                            )
+                            and all(
+                                len(call.args) == 2 and source_expression(call.args[1]) == source_expression(test.left)
+                                for call in borrows
                             )
                         ):
                             # This is the existing optional Field contract, not
                             # a model configuration axis. Project absence through
                             # the same borrow binding; keep dimension expressions
                             # in the present arm so they are not evaluated on None.
-                            statement._package_optional_input_borrows = calls
-                            for call in calls:
+                            statement._package_optional_input_borrows = borrows
+                            for call in borrows:
                                 call._package_optional_borrow = True
                             yield from statements(present, conditions)
                             continue
@@ -1489,7 +1507,9 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
             spec = dict(left=left.expression, right=right.expression, when=trigger)
             dimensions = {k for k, v in declarations.items() if v["kind"] == "dimension"}
             roles = {
-                k for k, v in declarations.items() if v["kind"] in ("dimension", "value", "dense_field", "ndarray")
+                k
+                for k, v in declarations.items()
+                if v["kind"] in ("dimension", "value", "dense_field", "ndarray", "borrowed_field")
             }
             try:
                 validate_constraints({name: spec}, dimensions, roles)

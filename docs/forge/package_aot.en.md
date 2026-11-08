@@ -1219,6 +1219,11 @@ source-free checks cover present/absent/rebound inputs, conditional source
 allocations and retained Graph snapshots. Unknown sources and numerical reads
 without the presence guard reject. Arbitrary optional expressions, child-owner
 construction and more complex binding factories remain separate gaps.
+The same non-None arm may declare `require_le` constraints whose `when` is that
+borrow. Explicit capacity constraints are retained alongside generated source/target
+dimension relations. Absence does not evaluate them; later calls and preparation
+still check them even after the Host declaration ran. This guard cannot qualify
+constraints on an unrelated resource.
 
 Version 58 lets the present arm of a declared optional record own explicit workspace
 groups, using the existing record-presence contract without another configuration
