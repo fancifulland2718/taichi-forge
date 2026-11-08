@@ -1243,6 +1243,11 @@ loops. Borrow dimension relations across record scopes require the existing
 `record.parent_dim`; directly mixing dimensions from another scope still rejects.
 Focused CPU/CUDA source-free checks cover this declaration form, not arbitrary
 cross-method Field binding sources.
+Ordinary declaration helpers may compose these borrows, including fixed member-name
+loops, unshadowed literal `getattr`, and proven optional-borrow helpers. Existing
+single-evaluation input forwarding, lexical aliases and source digests are retained.
+Dynamic member lists, shadowed `getattr` and default-valued member lookup reject;
+helpers are not executed to discover layouts.
 
 Version 58 lets the present arm of a declared optional record own explicit workspace
 groups, using the existing record-presence contract without another configuration

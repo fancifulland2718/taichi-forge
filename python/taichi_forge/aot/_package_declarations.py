@@ -1,6 +1,7 @@
 """Expand proven declaration helpers, not numerical bodies or model execution."""
 
 import ast
+import builtins
 import copy
 import hashlib
 import inspect
@@ -90,7 +91,18 @@ def expand_declarations(function, statement, scopes, *, _active=(), _prefix=None
         if node is not tree.body[0] and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     )
     operations = frozenset(
-        ("record", "dim", "parent_dim", "derived_dim", "power_of_two_dim", "static", "constant", "value", "require_le")
+        (
+            "record",
+            "dim",
+            "parent_dim",
+            "derived_dim",
+            "power_of_two_dim",
+            "static",
+            "constant",
+            "value",
+            "require_le",
+            "borrow",
+        )
     )
 
     def extent(node):
@@ -202,6 +214,18 @@ def expand_declarations(function, statement, scopes, *, _active=(), _prefix=None
             while isinstance(root, ast.Attribute):
                 root = root.value
             target = _source_value(node.func, function.__globals__)
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and node.func.id not in lexical_names
+                and function.__globals__.get("getattr", builtins.getattr) is builtins.getattr
+                and len(node.args) == 2
+                and not node.keywords
+            ):
+                member = literal(expression(node.args[1]))
+                if type(member) is not str or not member.isidentifier() or member.startswith("__"):
+                    raise _Unproven("declaration member access requires a literal attribute name")
+                return ast.Attribute(expression(node.args[0]), member, ast.Load())
             if inspect.isfunction(target) and isinstance(root, ast.Name) and root.id not in lexical_names:
                 if not allow_helper:
                     raise _Unproven("nested declaration helper calls require their own assignment or statement")

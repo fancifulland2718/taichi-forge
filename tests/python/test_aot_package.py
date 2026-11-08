@@ -3604,13 +3604,38 @@ def _optional_prepared_input_source():
     )
 
 
+def _nested_prepared_input_source():
+    source = _optional_prepared_input_source()
+    start = source.index("        size = record.dim('n')")
+    end = source.index("        with resource_group(self, 'output'", start)
+    source = source[:start] + "        declare_members(record, binding)\n" + source[end:]
+    return source + FIELD_HELPER_SOURCE + """
+def declare_members(record, binding):
+    dimensions = {'n': record.dim('n')}
+    for name in ('values', 'unused'):
+        declare_source(record, name, getattr(binding, name), dimensions=dimensions)
+"""
+
+
 @pytest.mark.parametrize(
-    "form", ["guard", "helper", "conditional_source", "constraint", "helper_loop", "guard_loop", "parent_loop"]
+    "form",
+    [
+        "guard",
+        "helper",
+        "conditional_source",
+        "constraint",
+        "helper_loop",
+        "guard_loop",
+        "parent_loop",
+        "nested_helper",
+    ],
 )
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_optional_prepared_field_inputs_reuse_presence_contract(tmp_path, monkeypatch, form):
     source = _optional_prepared_input_source()
-    if form in ("helper_loop", "guard_loop", "parent_loop"):
+    if form == "nested_helper":
+        source = _nested_prepared_input_source()
+    elif form in ("helper_loop", "guard_loop", "parent_loop"):
         start = source.index("        if binding.values is not None:")
         end = source.index("        with resource_group(self, 'output'", start)
         body = (
@@ -3801,6 +3826,25 @@ def test_package_prepared_input_member_loops_require_fixed_names(tmp_path, monke
         )
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     with pytest.raises(ti.aot.PackageExportError, match="fixed|unshadowed"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
+@pytest.mark.parametrize("change", ["model_names", "shadowed_getattr", "getattr_default"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_nested_borrow_helpers_require_literal_members(tmp_path, monkeypatch, change):
+    source = _nested_prepared_input_source()
+    if change == "model_names":
+        source = source.replace("for name in ('values', 'unused'):", "for name in binding.names:")
+    elif change == "shadowed_getattr":
+        source = source.replace(
+            "def declare_members(record, binding):", "def declare_members(record, binding, getattr=None):"
+        )
+    else:
+        source = source.replace("getattr(binding, name)", "getattr(binding, name, None)")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ti.aot.PackageExportError, match="factory forwarding is unproven"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert not (tmp_path / "sdk").exists()
     assert sys.modules["definition_fixture.model"].constructors == 0
