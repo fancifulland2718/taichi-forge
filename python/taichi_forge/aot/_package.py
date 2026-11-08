@@ -1204,7 +1204,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
         for _, _, _, _, tree, kind, _, _ in sources
         for node in ast.walk(tree)
     ):
-        manifest["version"] = 6
+        manifest["version"] = max(6, manifest["version"])
     if any(
         "value_declaration" in item
         for _, _, _, _, _, _, schemas, _ in sources

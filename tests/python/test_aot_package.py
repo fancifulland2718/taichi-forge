@@ -1757,6 +1757,25 @@ print('TYPED_INPUT_SOURCE_FREE_OK')
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_backend_query_retains_typed_input_format_requirement(tmp_path, monkeypatch):
+    source = TYPED_FIELD_INPUT_SOURCE + "\ndef selected_backend():\n    return ti.lang.impl.current_cfg().arch.name\n"
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cpu)
+    assert manifest["version"] >= 43
+    assert len(manifest["input_families"]["definition_fixture.model.Checkpoint"]) == 2
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(5, 3)
+        values = np.arange(5, dtype=np.float32)
+        model.storage.scalar.from_numpy(values)
+        model.first.save()
+        model.storage.scalar.from_numpy(values * 0)
+        model.first.restore()
+        np.testing.assert_array_equal(model.storage.scalar.to_numpy(), values)
+        assert code.host.model.selected_backend() == ti.cpu.name
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_typed_inputs_use_declared_tuples_without_cartesian_expansion(tmp_path, monkeypatch):
     source = (
         TYPED_FIELD_INPUT_SOURCE.replace("def __init__(self, values):", "def __init__(self, values, peer):")
