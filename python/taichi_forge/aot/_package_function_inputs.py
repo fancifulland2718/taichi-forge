@@ -28,6 +28,7 @@ class _Graph:
 @dataclass(frozen=True)
 class _Kernel:
     function: object
+    receiver: object = None
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,7 @@ def discover(sources, imported):
     from taichi_forge.types.annotations import Template
     from taichi_forge.graph import GraphBuilder
 
-    owners, classes, functions, kernels = {}, {}, {}, {}
+    owners, classes, functions, kernels, kernel_definitions = {}, {}, {}, {}, {}
     for module, _, _, _, tree, _, schemas, definitions in sources:
         namespace = vars(imported[module])
         for name, schema in schemas.items():
@@ -79,15 +80,20 @@ def discover(sources, imported):
                             if inspect.isfunction(function):
                                 functions[function] = (module, method)
         for definition in definitions:
-            if definition["kind"] != "kernel" or definition["owner"] is not None:
+            if definition["kind"] != "kernel":
                 continue
-            entry = namespace.get(definition["node"].name)
+            if definition["owner"] is None:
+                entry = namespace.get(definition["node"].name)
+            else:
+                cls = namespace.get(source_class(tree, definition["owner"]))
+                entry = inspect.getattr_static(cls, definition["node"].name, None) if inspect.isclass(cls) else None
             kernel = getattr(entry, "_primal", None)
             if kernel is None:
                 continue
             templates = [a.name for a in kernel.arguments if isinstance(a.annotation, Template)]
-            if templates:
-                kernels[entry] = (module, definition, tuple(templates))
+            if len(templates) > (1 if definition["owner"] is not None else 0):
+                kernels.setdefault(entry, (module, definition, tuple(templates)))
+                kernel_definitions.setdefault(entry, []).append(definition)
     if not kernels:
         return {}, []
 
@@ -255,9 +261,14 @@ def discover(sources, imported):
                         return _Kernel(resolved)
                 return None
             if isinstance(expression, ast.Attribute):
-                item = member(child(expression.value), expression.attr)
+                receiver = child(expression.value)
+                item = member(receiver, expression.attr)
                 if item is not None:
                     return item
+                if isinstance(receiver, _Owner):
+                    method = inspect.getattr_static(classes[receiver.identity], expression.attr, None)
+                    if inspect.isfunction(method) and method in kernels:
+                        return _Kernel(method, receiver)
                 resolved = source(expression)
                 if inspect.isfunction(resolved) and resolved in kernels:
                     return _Kernel(resolved)
@@ -355,13 +366,13 @@ def discover(sources, imported):
                 if isinstance(expression, ast.Name):
                     item = value(expression)
                     if isinstance(item, _Kernel):
-                        return item.function, None
+                        return item.function, item.receiver
                 if isinstance(expression, ast.Attribute):
                     receiver = value(expression.value)
                     if isinstance(receiver, _Owner):
                         cls = classes[receiver.identity]
                         method = inspect.getattr_static(cls, expression.attr, None)
-                        if inspect.isfunction(method) and method in functions:
+                        if inspect.isfunction(method) and (method in functions or method in kernels):
                             return method, receiver
                 return None, None
             result = _source_value(expression, namespace)
@@ -401,6 +412,12 @@ def discover(sources, imported):
                     inputs = next((value(k.value) for k in call.keywords if k.arg == "template_args"), None)
                     parameters = kernels[kernel.function][2]
                     mapping = dict(inputs.items) if isinstance(inputs, _Mapping) else {}
+                    if kernel.receiver is not None:
+                        receiver = parameters[0]
+                        if receiver in mapping and mapping[receiver] != kernel.receiver:
+                            mapping = {}
+                        else:
+                            mapping[receiver] = kernel.receiver
                     record(kernel.function, mapping if set(mapping) == set(parameters) else {}, call)
                 continue
             callee, receiver = target(call.func)
@@ -469,13 +486,16 @@ def discover(sources, imported):
             failures.append(f"{module}.{definition['name']}: template receiver position changes between definitions")
             continue
         receiver = next(iter(receivers))
-        definition["free_template"] = receiver
-        definition["function_templates"] = parameters
+        public_identity = kernel.__module__ + "." + kernel.__qualname__
+        for item in kernel_definitions[kernel]:
+            item["free_template"] = receiver
+            item["function_templates"] = parameters
+            item["function_identity"] = public_identity
         for identity, _, values in sorted(identities, key=repr):
             result.setdefault(identity, []).append(
                 dict(
                     kernel=kernel,
-                    definition=module + "." + definition["name"],
+                    definition=public_identity,
                     receiver=receiver,
                     templates=dict(values),
                     node=definition["node"],

@@ -1133,8 +1133,14 @@ sort-control definitions pass this input preflight. This is not full EFC export
 or engine qualification. Additional template checks cover five source call tuples
 sharing three necessary numerical definitions (with a separate accessor), unread
 static-branch inputs, rejection of dynamic inputs and wrong types, and source-free
-CUDA consumption with independent instances. Field/multiple-owner inputs, methods
-with extra templates and model-dependent sort preparation remain further work.
+CUDA consumption with independent instances. Version 51 extends the same actual
+input tuples to methods and inherited numerical mixins. The Host descriptor keeps
+the original bound or explicit class-call syntax; Graph preparation chooses the
+code and binds its receiver once. CPU/CUDA checks include saved bound methods,
+independent instances, mismatched Graph receivers and unknown runtime templates.
+Nested local dispatch, model-dependent method lookup, Field/multiple-owner inputs
+and model-dependent sort preparation remain further work; the real EFC factor
+dispatcher still needs its numerical flags and resource sources resolved.
 There is no new whole-engine wheel or size measurement from this slice.
 
 Other recognized unsupported declarations or Host frontend operations reject export;

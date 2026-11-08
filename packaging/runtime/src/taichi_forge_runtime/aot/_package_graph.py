@@ -108,10 +108,10 @@ class GraphBuilder:
 
     def dispatch(self, kernel, *args, template_args=None):
         from ._package import entry, _BoundEntry
-        from ._package_closures import _TemplateEntry, _FunctionEntry
+        from ._package_closures import _TemplateEntry, _FunctionEntry, _BoundMethodEntry
 
         self.package._check()
-        if isinstance(kernel, _FunctionEntry):
+        if isinstance(kernel, (_FunctionEntry, _BoundMethodEntry)):
             kernel, args = kernel._graph_bind(args, template_args)
             template_args = None
         if isinstance(kernel, _TemplateEntry):

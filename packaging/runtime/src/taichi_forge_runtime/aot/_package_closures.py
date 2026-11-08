@@ -202,3 +202,32 @@ class _FunctionEntry:
         if not isinstance(templates, dict) or set(templates) != set(self.templates):
             raise ValueError("Free Kernel Graph requires its declared template receiver")
         return self._bind(templates), args
+
+
+class _MethodEntry(_FunctionEntry):
+    """Preserve Python method binding without sharing mutable instance pointers."""
+
+    def __init__(self, package, identity):
+        super().__init__(package, identity)
+        if next(iter(self.signature.parameters)) != self.receiver or package.manifest["version"] < 51:
+            raise ValueError("Method template inputs require a leading receiver and package format 51")
+
+    def __get__(self, owner, cls=None):
+        self.package._check()
+        return self if owner is None else _BoundMethodEntry(self, owner)
+
+
+class _BoundMethodEntry:
+    def __init__(self, entry, owner):
+        self.entry, self.owner = entry, owner
+
+    def __call__(self, *args, **kwargs):
+        return self.entry(self.owner, *args, **kwargs)
+
+    def _graph_bind(self, args, templates):
+        templates = {} if templates is None else dict(templates)
+        receiver = self.entry.receiver
+        if receiver in templates and templates[receiver] is not self.owner:
+            raise ValueError("Method Graph receiver differs from its bound instance")
+        templates[receiver] = self.owner
+        return self.entry._graph_bind(args, templates)

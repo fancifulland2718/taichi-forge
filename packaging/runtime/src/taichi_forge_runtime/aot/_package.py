@@ -288,6 +288,11 @@ class _ModuleBinding:
 
         return _FunctionEntry(self.package, identity)
 
+    def method_entry(self, identity):
+        from ._package_closures import _MethodEntry
+
+        return _MethodEntry(self.package, identity)
+
     def import_module(self, name):
         self.package._check()
         modules = self.package.manifest.get("application_modules")
@@ -1252,6 +1257,7 @@ class LoadedPackage:
                 48,
                 49,
                 50,
+                51,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

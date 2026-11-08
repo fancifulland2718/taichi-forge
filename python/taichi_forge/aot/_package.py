@@ -649,12 +649,25 @@ def _host_projection(
                         and definition["kind"] in ("kernel", "pyfunc")
                         and not definition.get("error_interface")
                     ):
+                        input_method = definition.get("free_template")
+                        if input_method:
+                            self.minimum_version = max(self.minimum_version, 51)
                         node.body.append(
                             ast.Assign(
                                 [ast.Name(definition["node"].name, ast.Store())],
                                 ast.Call(
-                                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "entry", ast.Load()),
-                                    [ast.Constant(entries[definition["name"]]["symbol"])],
+                                    ast.Attribute(
+                                        ast.Name(_PREFIX + "runtime", ast.Load()),
+                                        "method_entry" if input_method else "entry",
+                                        ast.Load(),
+                                    ),
+                                    [
+                                        ast.Constant(
+                                            definition["function_identity"]
+                                            if input_method
+                                            else entries[definition["name"]]["symbol"]
+                                        )
+                                    ],
                                     [],
                                 ),
                             )
@@ -718,17 +731,22 @@ def _host_projection(
                 return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
             if definition["kind"] in ("func", "real_func"):
                 return None
-            if definition.get("requires_owner"):
+            if definition.get("free_template"):
+                method = definition["owner"] is not None
+                self.minimum_version = max(self.minimum_version, 51 if method else 50)
                 descriptor = ast.Call(
-                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "unbound_entry", ast.Load()),
-                    [ast.Constant(module + "." + definition["name"])],
+                    ast.Attribute(
+                        ast.Name(_PREFIX + "runtime", ast.Load()),
+                        "method_entry" if method else "function_entry",
+                        ast.Load(),
+                    ),
+                    [ast.Constant(definition["function_identity"])],
                     [],
                 )
                 return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
-            if definition.get("free_template"):
-                self.minimum_version = max(self.minimum_version, 50)
+            if definition.get("requires_owner"):
                 descriptor = ast.Call(
-                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "function_entry", ast.Load()),
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "unbound_entry", ast.Load()),
                     [ast.Constant(module + "." + definition["name"])],
                     [],
                 )

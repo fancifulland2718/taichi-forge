@@ -10660,16 +10660,42 @@ FREE_STATIC_INPUT_SOURCE = (
 )
 
 
+@pytest.mark.parametrize("placement", ["free", "method", "mixin"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_free_static_input_tuples_share_only_actual_numerical_variants(tmp_path, monkeypatch):
+def test_package_free_static_input_tuples_share_only_actual_numerical_variants(tmp_path, monkeypatch, placement):
     from zipfile import ZipFile
 
-    package = _source_package(tmp_path, monkeypatch, FREE_STATIC_INPUT_SOURCE)
+    source = FREE_STATIC_INPUT_SOURCE
+    definition = "definition_fixture.model.publish"
+    if placement != "free":
+        start, stop = source.index("@ti.kernel"), source.index("\ndef forward")
+        numerical = source[start:stop].replace(
+            "def publish(gain: ti.f32, solver: ti.template(),", "def publish(self, gain: ti.f32,"
+        )
+        numerical = numerical.replace("solver.", "self.")
+        numerical = "\n".join("    " + line if line else "" for line in numerical.splitlines())
+        source = source[:start] + source[stop:]
+        if placement == "method":
+            source = source.replace("class Model:\n", "class Model:\n" + numerical + "\n")
+            definition = "definition_fixture.model.Model.publish"
+        else:
+            source = source.replace(
+                "@ti.data_oriented\nclass Model:",
+                "class NumericalMixin:\n" + numerical + "\n\n@ti.data_oriented\nclass Model(NumericalMixin):",
+            )
+            definition = "definition_fixture.model.NumericalMixin.publish"
+        source = source.replace("publish(gain, receiver,", "receiver.publish(gain,").replace(
+            "publish(gain, self,", "self.publish(gain,"
+        )
+        source = source.replace("builder.dispatch(publish,", "builder.dispatch(self.publish,").replace(
+            "'solver': self, ", ""
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 50
+    assert manifest["version"] == (50 if placement == "free" else 51)
     assert sys.modules["definition_fixture.model"].constructors == 0
-    function = manifest["function_entries"]["definition_fixture.model.publish"]
-    assert function["templates"] == ["solver", "enabled", "increment", "note"]
+    function = manifest["function_entries"][definition]
+    assert function["templates"] == ["solver" if placement == "free" else "self", "enabled", "increment", "note"]
     cases = function["owners"]["definition_fixture.model.Model"]
     # Five actual call tuples, rather than enabled x increment x note products.
     assert len(cases) == 5
@@ -10690,7 +10716,22 @@ def test_package_free_static_input_tuples_share_only_actual_numerical_variants(t
         np.testing.assert_array_equal(b.values.to_numpy(), 9 * (np.arange(29) + 29))
         for enabled, increment, note in ((True, 9, "graph"), (1, 3, "graph"), (True, 3, object())):
             with pytest.raises(ValueError, match="definition-proven domain|immutable"):
-                code.host.model.publish(1, a, enabled, increment, note)
+                if placement == "free":
+                    code.host.model.publish(1, a, enabled, increment, note)
+                else:
+                    a.publish(1, enabled, increment, note)
+        if placement != "free":
+            saved = a.publish
+            code.host.model.Model.publish(b, 2, True, 7, "offset")
+            saved(4, True, 3, "offset")
+            np.testing.assert_array_equal(a.values.to_numpy(), 7 * (np.arange(11) + 11))
+            np.testing.assert_array_equal(b.values.to_numpy(), 9 * (np.arange(29) + 29))
+            builder = code.host.model.ti.graph.GraphBuilder()
+            gain = code.host.model.ti.graph.Arg(code.host.model.ti.graph.ArgKind.SCALAR, "gain", code.host.model.ti.f32)
+            with pytest.raises(ValueError, match="bound instance"):
+                builder.dispatch(
+                    a.publish, gain, template_args={"self": b, "enabled": True, "increment": 3, "note": "graph"}
+                )
     probe = tmp_path / "static_input_consume.py"
     probe.write_text(
         """
@@ -10729,6 +10770,31 @@ print('STATIC_INPUT_SOURCE_FREE_OK')
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "STATIC_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_method_templates_reject_model_driven_static_inputs(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+    @ti.kernel
+    def fill(self, gain: ti.template()):
+        for i in self.values:
+            self.values[i] = gain
+    def known(self):
+        self.fill(2)
+    def unknown(self, gain):
+        self.fill(gain)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="unproven template input"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
 
 
 @pytest.mark.parametrize("change", ["dynamic", "duplicate_case", "template_signature", "invalid_value"])
