@@ -10,6 +10,13 @@ No export decorator, per-kernel registration or component root is required.
 This is a limited prototype, not a complete engine distribution interface.
 Its format and supported scope are experimental.
 
+Before numerical compilation, export collects independent input-signature gaps
+in recognized kernels alongside declaration errors. Diagnostics identify the
+module, source line, entry and parameter. Missing template type domains or array
+element types/ranks are not inferred by constructing models or running tests,
+and failing entries are not omitted. This diagnostic does not qualify those
+inputs or restrict ordinary JIT specialization from actual arguments.
+
 ## Producing and consuming a package
 
 Export an imported source package, selecting the backend explicitly:

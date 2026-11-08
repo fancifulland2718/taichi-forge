@@ -51,6 +51,59 @@ def _fail(module, node, message):
     raise PackageExportError(f"{module}:{getattr(node, 'lineno', 1)}: {message}")
 
 
+def _describe_entry_argument(argument):
+    """Check the existing package ABI before creating any representative arrays."""
+    from taichi_forge.types._argument_descriptor import describe_annotation
+    from taichi_forge.types.annotations import Template
+    from taichi_forge.types.ndarray_type import NdarrayType
+    from taichi_forge.lang.matrix import MatrixType
+    from taichi_forge.lang.struct import StructType
+
+    annotation = argument.annotation
+    if isinstance(annotation, Template):
+        raise ValueError(
+            "template input requires a definition-proven owner, resource or static domain; "
+            "the exporter cannot infer it from a model/test invocation"
+        )
+    descriptor = describe_annotation(annotation)
+    if descriptor.element is None:
+        raise ValueError("requires an explicit value or ndarray type")
+    if isinstance(annotation, NdarrayType):
+        if not descriptor.element.is_complete or type(annotation.ndim) is not int or annotation.needs_grad:
+            raise ValueError("ndarray arguments require explicit element type/rank and no gradients")
+    elif not isinstance(annotation, (MatrixType, StructType)) and str(descriptor.element.scalar_type) not in _DTYPES:
+        raise ValueError("requires a supported scalar, compound value or ndarray type")
+    if argument.default is not inspect.Parameter.empty:
+        raise ValueError("kernel default arguments are not yet supported")
+    return descriptor
+
+
+def _signature_failures(sources, imported_modules):
+    """Report independent kernel signature gaps together, without compilation."""
+    failures = []
+    for module, _, _, _, _, _, _, definitions in sources:
+        imported = imported_modules[module]
+        for definition in definitions:
+            if definition["kind"] != "kernel" or definition.get("requires_owner") or definition.get("error_interface"):
+                continue
+            owner = definition["owner"]
+            namespace = getattr(imported, owner) if owner is not None else imported
+            entry = getattr(namespace, definition["node"].name)
+            kernel = getattr(entry, "_primal", None)
+            if kernel is None:
+                continue  # The normal export check reports unsupported descriptors.
+            arguments = kernel.arguments[1:] if owner is not None else kernel.arguments
+            for argument in arguments:
+                try:
+                    _describe_entry_argument(argument)
+                except (TypeError, ValueError) as error:
+                    failures.append(
+                        f"{module}:{definition['node'].lineno}: {definition['name']} "
+                        f"argument {argument.name!r}: {error}"
+                    )
+    return failures
+
+
 def _owner_schema(module, node, kind, namespace):
     """Infer types from syntax, never run __init__ or select a model branch."""
     if node.keywords:
@@ -1012,7 +1065,6 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     from ._package_variants import compile_static_variants
     from taichi_forge.aot.module import Module
     from taichi_forge.types.ndarray_type import NdarrayType
-    from taichi_forge.types._argument_descriptor import describe_annotation
     from taichi_forge.lang.matrix import MatrixType
     from taichi_forge.lang.struct import StructType
 
@@ -1058,8 +1110,13 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             failures.append(str(error))
             continue
         sources.append((name, path, relative, text, tree, kind, owners, definitions))
+    signatures = _signature_failures(sources, imported_modules)
     if failures:
+        if signatures:
+            failures.append("Entry signatures:\n" + "\n".join(signatures))
         raise PackageExportError("Package declaration preflight failed:\n" + "\n".join(failures))
+    if signatures:
+        raise PackageExportError("Package entry signature preflight failed:\n" + "\n".join(signatures))
     from ._package_contexts import HostContexts
     from ._package_factories import _source_value
 
@@ -1421,13 +1478,12 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             values, argument_schema = [], []
             for argument in arguments:
                 annotation = argument.annotation
-                descriptor = describe_annotation(annotation)
-                if descriptor.element is None:
-                    _fail(name, node, f"argument {argument.name!r} requires an explicit value or ndarray type")
+                try:
+                    descriptor = _describe_entry_argument(argument)
+                except (TypeError, ValueError) as error:
+                    _fail(name, node, f"argument {argument.name!r}: {error}")
                 dtype = str(descriptor.element.scalar_type)
                 if isinstance(annotation, NdarrayType):
-                    if not descriptor.element.is_complete or type(annotation.ndim) is not int or annotation.needs_grad:
-                        _fail(name, node, "ndarray arguments require explicit element type/rank and no gradients")
                     values.append(ti.ndarray(annotation.dtype, (1,) * annotation.ndim))
                     argument_schema.append(
                         dict(
@@ -1447,8 +1503,6 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 else:
                     values.append(0.0 if dtype.startswith("f") else 0)
                     argument_schema.append(dict(name=argument.name, kind="value", dtype=dtype))
-                if argument.default is not inspect.Parameter.empty:
-                    _fail(name, node, "kernel default arguments are not yet supported")
             environment = (
                 definition["closure_environment"]
                 if "closure_environment" in definition

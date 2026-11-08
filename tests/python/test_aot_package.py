@@ -4412,6 +4412,41 @@ def test_package_does_not_defer_eager_unprojected_allocations(tmp_path, monkeypa
     assert not (tmp_path / "sdk").exists()
 
 
+@pytest.mark.parametrize("array_annotation", ["ti.types.ndarray(ndim=1)", "ti.types.ndarray(dtype=ti.f32)"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_reports_input_signature_gaps_before_numerical_compilation(tmp_path, monkeypatch, array_annotation):
+    source = SOURCE + f"""
+@ti.kernel
+def use_template(data: ti.template()):
+    data[0] = 4
+@ti.kernel
+def use_array(data: {array_annotation}):
+    data[0] = 5
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    module = sys.modules["definition_fixture.model"]
+
+    def reject_compile(*args, **kwargs):
+        raise AssertionError("Signature errors must be collected before numerical compilation")
+
+    monkeypatch.setattr(ti.aot.Component, "compile", reject_compile)
+    with pytest.raises(ti.aot.PackageExportError, match="entry signature preflight") as failure:
+        ti.aot.export_package(package, tmp_path / "sdk")
+    message = str(failure.value)
+    assert "use_template argument 'data': template input requires a definition-proven" in message
+    assert "use_array argument 'data': ndarray arguments require explicit element type/rank" in message
+    assert "object at 0x" not in message
+    assert module.constructors == 0
+    assert not (tmp_path / "sdk").exists()
+    # JIT still uses the actual caller's types; package rejection is not a JIT restriction.
+    field = ti.field(ti.i32, shape=3)
+    module.use_template(field)
+    assert field[0] == 4
+    data = ti.ndarray(ti.f32, shape=3)
+    module.use_array(data)
+    assert data[0] == 5
+
+
 @pytest.mark.parametrize("helper_kind", ["func", "real_func", "pyfunc"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_compiles_definitions_without_constructor_or_test_trace(tmp_path, monkeypatch, helper_kind):
