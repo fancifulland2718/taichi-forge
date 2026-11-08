@@ -1,6 +1,7 @@
 """Bind precompiled factory entries to existing allocation provenance."""
 
 from types import SimpleNamespace
+import inspect
 
 from .._static_values import read_static_key, static_key
 from ._package_values import path_value, owner_type
@@ -122,3 +123,54 @@ class _TemplateEntry:
         else:
             raise TypeError("Cold template factory requires its explicit self receiver")
         return descriptor._bind(owner)(*args, **kwargs)
+
+
+class _FunctionEntry:
+    """An original free Kernel with an instance-bound template receiver."""
+
+    def __init__(self, package, identity):
+        from ._package import entry
+
+        self.package = package
+        spec = package.manifest.get("function_entries", {}).get(identity)
+        if not isinstance(spec, dict) or set(spec) != {"receiver", "parameters", "owners"}:
+            raise ValueError("Free Kernel requires a complete receiver contract")
+        parameters, receiver, owners = spec["parameters"], spec["receiver"], spec["owners"]
+        if (
+            not isinstance(parameters, list)
+            or not all(isinstance(name, str) and name.isidentifier() for name in parameters)
+            or len(set(parameters)) != len(parameters)
+            or receiver not in parameters
+            or not isinstance(owners, dict)
+            or not owners
+        ):
+            raise ValueError("Free Kernel has an invalid receiver signature")
+        self.receiver = receiver
+        self.signature = inspect.Signature(
+            [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in parameters]
+        )
+        self._entries = {}
+        for owner, symbol in owners.items():
+            if owner not in package.manifest["owners"] or not isinstance(symbol, str):
+                raise ValueError("Free Kernel receiver is outside the declared package")
+            bound = entry(package, symbol)
+            if [item["name"] for item in bound.contract["arguments"]] != [n for n in parameters if n != receiver]:
+                raise ValueError("Free Kernel receiver binding differs from its numerical ABI")
+            self._entries[owner] = bound
+
+    def _bind(self, owner):
+        self.package._check()
+        identity = owner_type(owner)
+        if getattr(owner, "_forge_package_owner", None) is not self.package or identity not in self._entries:
+            raise ValueError("Free Kernel requires its declared receiver in the same package")
+        return self._entries[identity].__get__(owner)
+
+    def __call__(self, *args, **kwargs):
+        bound = self.signature.bind(*args, **kwargs)
+        owner = bound.arguments.pop(self.receiver)
+        return self._bind(owner)(**bound.arguments)
+
+    def _graph_bind(self, args, templates):
+        if not isinstance(templates, dict) or set(templates) != {self.receiver}:
+            raise ValueError("Free Kernel Graph requires its declared template receiver")
+        return self._bind(templates[self.receiver]), args

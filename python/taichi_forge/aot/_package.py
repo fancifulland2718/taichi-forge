@@ -94,6 +94,8 @@ def _signature_failures(sources, imported_modules):
                 continue  # The normal export check reports unsupported descriptors.
             arguments = kernel.arguments[1:] if owner is not None else kernel.arguments
             for argument in arguments:
+                if definition.get("free_template") == argument.name:
+                    continue
                 try:
                     _describe_entry_argument(argument)
                 except (TypeError, ValueError) as error:
@@ -723,6 +725,14 @@ def _host_projection(
                     [],
                 )
                 return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
+            if definition.get("free_template"):
+                self.minimum_version = max(self.minimum_version, 49)
+                descriptor = ast.Call(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "function_entry", ast.Load()),
+                    [ast.Constant(module + "." + definition["name"])],
+                    [],
+                )
+                return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
             descriptor = ast.Call(
                 ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "entry", ast.Load()),
                 [ast.Constant(entries[definition["name"]]["symbol"])],
@@ -1110,13 +1120,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             failures.append(str(error))
             continue
         sources.append((name, path, relative, text, tree, kind, owners, definitions))
-    signatures = _signature_failures(sources, imported_modules)
     if failures:
+        signatures = _signature_failures(sources, imported_modules)
         if signatures:
             failures.append("Entry signatures:\n" + "\n".join(signatures))
         raise PackageExportError("Package declaration preflight failed:\n" + "\n".join(failures))
-    if signatures:
-        raise PackageExportError("Package entry signature preflight failed:\n" + "\n".join(signatures))
     from ._package_contexts import HostContexts
     from ._package_factories import _source_value
 
@@ -1134,6 +1142,15 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     from ._package_inputs import resolve_inputs
 
     resolve_inputs(sources, imported_modules)
+    from ._package_function_inputs import discover as discover_function_inputs
+
+    try:
+        function_inputs, input_failures = discover_function_inputs(sources, imported_modules)
+    except ValueError as error:
+        raise PackageExportError(str(error)) from error
+    signatures = input_failures + _signature_failures(sources, imported_modules)
+    if signatures:
+        raise PackageExportError("Package entry signature preflight failed:\n" + "\n".join(signatures))
     from ._package_field_like import resolve_field_likes
 
     resolve_field_likes(sources)
@@ -1399,6 +1416,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
         compiled_definitions = []
         input_families = getattr(tree, "_package_input_families", {})
         for definition in definitions:
+            if definition.get("free_template"):
+                continue
             variants = input_families.get(definition["owner"])
             if variants:
                 for variant in variants:
@@ -1412,6 +1431,19 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     )
             else:
                 compiled_definitions.append(definition)
+        for class_name in schemas:
+            for call in function_inputs.get(name + "." + class_name, ()):
+                compiled_definitions.append(
+                    dict(
+                        owner=class_name,
+                        node=call["node"],
+                        kind="kernel",
+                        name=class_name + ".__function_" + hashlib.sha256(call["definition"].encode()).hexdigest(),
+                        function_kernel=call["kernel"],
+                        function_identity=call["definition"],
+                        function_receiver=call["receiver"],
+                    )
+                )
         for class_name in schemas:
             for attribute, call, recipe in factory_calls.get(name + "." + class_name, ()):
                 closure_environment = copy.copy(environments[class_name])
@@ -1443,11 +1475,16 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             ):
                 continue
             owner_name, node = definition["owner"], definition["node"]
+            definition_name = definition.get("function_identity", name + "." + definition["name"])
             owner = owners.get(owner_name)
             entry = (
-                definition["closure_kernel"]
-                if "closure_kernel" in definition
-                else getattr(owner if owner is not None else imported, node.name)
+                definition["function_kernel"]
+                if "function_kernel" in definition
+                else (
+                    definition["closure_kernel"]
+                    if "closure_kernel" in definition
+                    else getattr(owner if owner is not None else imported, node.name)
+                )
             )
             if definition.get("closure_template_owner"):
                 # Reuse Component's explicit template receiver. No generated
@@ -1470,10 +1507,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             if kernel is None:
                 _fail(name, node, "decorated definition did not resolve to a Forge kernel")
             arguments = (
-                kernel.arguments[1:]
-                if owner is not None
-                and ("closure_kernel" not in definition or definition.get("closure_template_owner"))
-                else kernel.arguments
+                [argument for argument in kernel.arguments if argument.name != definition["function_receiver"]]
+                if "function_kernel" in definition
+                else (
+                    kernel.arguments[1:]
+                    if owner is not None
+                    and ("closure_kernel" not in definition or definition.get("closure_template_owner"))
+                    else kernel.arguments
+                )
             )
             values, argument_schema = [], []
             for argument in arguments:
@@ -1510,10 +1551,17 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             )
             try:
                 codes = compile_static_variants(
-                    environment, entry, values, owner, compilation_schemas.get(owner_name, {})
+                    environment,
+                    entry,
+                    values,
+                    owner,
+                    compilation_schemas.get(owner_name, {}),
+                    template_args=(
+                        {definition["function_receiver"]: owner} if "function_kernel" in definition else None
+                    ),
                 )
             except Exception as error:
-                raise PackageExportError(f"{name}.{definition['name']}: {error}") from error
+                raise PackageExportError(f"{definition_name}: {error}") from error
             variants = []
             for code in codes:
                 for attribute in {key for key, _ in code.contract["captures"]} | code.static.keys():
@@ -1578,8 +1626,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 identity = (code.kernel, code.key)
                 if identity in shared_entries:
                     entry_manifest = shared_entries[identity]
-                    if name + "." + definition["name"] not in entry_manifest["definitions"]:
-                        entry_manifest["definitions"].append(name + "." + definition["name"])
+                    if definition_name not in entry_manifest["definitions"]:
+                        entry_manifest["definitions"].append(definition_name)
                     if entry_manifest.get("admission") != admission:
                         # The compiler's code/ABI identity is already equal.
                         # Instance type/provenance checks are a separate logical
@@ -1636,8 +1684,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                                 item["dimension_relations"] = relations
                     entry_manifest = dict(
                         symbol=symbol,
-                        definition=name + "." + definition["name"],
-                        definitions=[name + "." + definition["name"]],
+                        definition=definition_name,
+                        definitions=[definition_name],
                         arguments=argument_schema,
                         captures=capture,
                         dependencies=dict(methods=code.contract["methods"], functions=code.contract["functions"]),
@@ -1691,6 +1739,17 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 entries[definition["name"]] = dict(symbol=symbol)
             else:
                 entries[definition["name"]] = entry_manifest
+            if "function_kernel" in definition:
+                manifest["version"] = max(manifest["version"], 49)
+                descriptor = manifest.setdefault("function_entries", {}).setdefault(
+                    definition["function_identity"],
+                    dict(
+                        receiver=definition["function_receiver"],
+                        parameters=[argument.name for argument in kernel.arguments],
+                        owners={},
+                    ),
+                )
+                descriptor["owners"][name + "." + owner_name] = entries[definition["name"]]["symbol"]
             if "closure_kernel" in definition:
                 manifest["version"] = max(manifest["version"], 25)
                 if definition["closure_template_owner"]:

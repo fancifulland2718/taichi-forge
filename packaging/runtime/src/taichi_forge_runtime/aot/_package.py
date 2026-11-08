@@ -283,6 +283,11 @@ class _ModuleBinding:
 
         return bind_closure(self.package, identity, values, options=options)
 
+    def function_entry(self, identity):
+        from ._package_closures import _FunctionEntry
+
+        return _FunctionEntry(self.package, identity)
+
     def import_module(self, name):
         self.package._check()
         modules = self.package.manifest.get("application_modules")
@@ -1245,6 +1250,7 @@ class LoadedPackage:
                 46,
                 47,
                 48,
+                49,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1261,6 +1267,13 @@ class LoadedPackage:
             raise ValueError("Logical entry binding collides with another package entry")
         for symbol in bindings:
             _entry_contract(self.manifest, symbol)
+        functions = self.manifest.get("function_entries", {})
+        if not isinstance(functions, dict) or functions and self.manifest["version"] < 49:
+            raise ValueError("Free Kernel receiver bindings require definition package format 49")
+        from ._package_closures import _FunctionEntry
+
+        for identity in functions:
+            _FunctionEntry(self, identity)
         files = self.manifest["files"]
         if not {"code.tcm", "host/__init__.py"} <= files.keys():
             raise ValueError("Package is missing code or Host entry")

@@ -1099,6 +1099,31 @@ qualification; configuration declarations, iteration plans and construction clos
 This changes the Python Producer/Runtime contract only, not the native AOT format.
 It provides no new whole-wheel size or performance measurement.
 
+## Free-kernel owner arguments
+
+Version 49 supports module-level kernels with one `ti.template()` owner argument.
+Its name and position need not be `self` or the first argument. Source facts flow
+from declared classes' ordinary Host methods, proven child-owner paths and plain
+function forwarding. Export does not invoke those methods for model samples and
+requires no new decorator or per-kernel registration. Field templates, additional
+static templates, dynamic factory returns and unproven forwarding remain unsupported.
+
+The original Component compiler handles the numerical definition, resource layout
+and effective static dependencies. Proven receiver types may reference the same
+code, with separate instance selection; instance counts, sizes and call sites do
+not copy numerical definitions. Positional/keyword calls and
+`GraphBuilder.dispatch(..., template_args={'original_parameter': owner})` use the
+same binding. Prepared snapshots and write-resource inspection reuse existing
+mechanisms; receivers from another package are rejected. Unproven calls are
+reported with other input gaps before compilation.
+
+Focused CPU/CUDA checks cover new sizes, code sharing across inherited types,
+independent instances, prepared snapshots and fresh consumers without frontend
+source. GeoPhys's three EFC parameter-publication definitions pass receiver-source
+preflight; this is not full EFC export or engine qualification. Inferring input
+types from Graph calls, multiple templates and model-dependent sort preparation
+data remains further work.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

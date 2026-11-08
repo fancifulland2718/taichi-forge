@@ -6,7 +6,7 @@ from taichi_forge_runtime._static_values import read_static_key, static_key
 from ._package_records import read_member, write_member
 
 
-def compile_static_variants(environment, entry, arguments, owner, schema):
+def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None):
     """Cover a kernel's finite declaration domain without multiplying owners.
 
     A compiled contract covers every assignment of unread configuration values.
@@ -25,7 +25,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema):
         (name, (read_static_key(item["value"]),)) for name, item in schema.items() if item["kind"] == "constant"
     )
     if not domains:
-        return [environment.compile(entry, *arguments, owner=owner)]
+        return [environment.compile(entry, *arguments, owner=owner, template_args=template_args)]
     initial = {name: values[0] for name, values in domains.items()}
     previous = {name: read_member(owner, name, schema) for name in domains}
     pending, visited, codes = deque([initial]), set(), []
@@ -41,7 +41,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema):
                 continue
             for name, value in selection.items():
                 write_member(owner, name, value, schema)
-            code = environment.compile(entry, *arguments, owner=owner)
+            code = environment.compile(entry, *arguments, owner=owner, template_args=template_args)
             if not code.static.keys() <= domains.keys():
                 raise ValueError("Kernel static dependencies are outside the declared package domain")
             codes.append(code)

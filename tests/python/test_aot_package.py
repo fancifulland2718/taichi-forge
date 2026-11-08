@@ -10350,3 +10350,157 @@ def test_package_rejects_shadowed_backend_and_dimension_names(tmp_path, monkeypa
     with pytest.raises(ti.aot.PackageExportError, match=message):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert not (tmp_path / "sdk").exists()
+
+
+FREE_RECEIVER_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.kernel
+def publish(gain: ti.f32, solver: ti.template()):
+    for i in solver.values:
+        solver.values[i] = gain * (i + solver.n)
+
+def forward(receiver, gain):
+    publish(gain, solver=receiver)
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+    def update(self, gain):
+        alias = self
+        forward(alias, gain)
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        self.record(builder)
+        return builder.compile()
+    def record(self, builder):
+        gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+        builder.dispatch(publish, gain, template_args={'solver': self})
+    def writes(self):
+        return ti.aot.written_resources(self, self.record)
+
+class Derived(Model):
+    pass
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_free_kernel_receiver_preserves_shared_code_and_instance_binding(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, FREE_RECEIVER_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 49
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    function = manifest["function_entries"]["definition_fixture.model.publish"]
+    assert function["receiver"] == "solver" and function["parameters"] == ["gain", "solver"]
+    assert len(function["owners"]) == 2
+    assert len(set(function["owners"].values())) == 1
+    assert len([item for item in manifest["entries"].values() if item["definition"].endswith(".publish")]) == 1
+    host = (tmp_path / "sdk/host/model.py").read_text()
+    assert "def forward" in host and "def update" in host
+    assert "solver.values[i]" not in host and "@ti.kernel" not in host
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(5), code.host.model.Derived(11)
+        assert a.writes() == (a.values,)
+        a.update(2)
+        code.host.model.publish(gain=3, solver=b)
+        prepared = a.graph().bind(dict(gain=4))
+        b.update(7)
+        prepared.run()
+        prepared.close()
+        np.testing.assert_array_equal(a.values.to_numpy(), 4 * (np.arange(5) + 5))
+        np.testing.assert_array_equal(b.values.to_numpy(), 7 * (np.arange(11) + 11))
+        with pytest.raises(ValueError, match="declared receiver"):
+            code.host.model.publish(1, object())
+        with load_package(runtime, tmp_path / "sdk") as other:
+            with pytest.raises(ValueError, match="same package"):
+                code.host.model.publish(1, other.host.Model(3))
+    probe = tmp_path / "free_receiver_consume.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(17), code.host.model.Derived(65)
+    assert a.writes() == (a.values,)
+    prepared = a.graph().bind(dict(gain=3))
+    b.update(5)
+    prepared.run()
+    prepared.close()
+    np.testing.assert_array_equal(a.values.to_numpy(), 3 * (np.arange(17) + 17))
+    np.testing.assert_array_equal(b.values.to_numpy(), 5 * (np.arange(65) + 65))
+print('FREE_RECEIVER_SOURCE_FREE_OK')
+""",
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FREE_RECEIVER_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["unknown", "rebound", "uncovered", "starred"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_free_receiver_rejects_unproven_call_domains(tmp_path, monkeypatch, change):
+    source = FREE_RECEIVER_SOURCE
+    if change == "unknown":
+        source = source.replace("forward(alias, gain)", "forward(object(), gain)")
+    elif change == "rebound":
+        source = source.replace("forward(alias, gain)", "alias = object()\n        forward(alias, gain)")
+    elif change == "uncovered":
+        source += "\ndef arbitrary(receiver):\n    publish(1.0, receiver)\n"
+    else:
+        source = source.replace("publish(gain, solver=receiver)", "publish(*[gain, receiver])")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="template input|receiver|argument sources"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
+@pytest.mark.parametrize("change", ["version", "receiver", "owner", "abi", "missing_code"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_free_receiver_rejects_malformed_contract_before_loading(tmp_path, monkeypatch, change):
+    package = _source_package(tmp_path, monkeypatch, FREE_RECEIVER_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    function = manifest["function_entries"]["definition_fixture.model.publish"]
+    if change == "version":
+        manifest["version"] = 48
+    elif change == "receiver":
+        function["receiver"] = "missing"
+    elif change == "owner":
+        function["owners"]["unknown.Owner"] = next(iter(function["owners"].values()))
+    elif change == "abi":
+        function["parameters"][0] = "other"
+    else:
+        function["owners"][next(iter(function["owners"]))] = "missing"
+    (tmp_path / "sdk/package.json").write_text(json.dumps(manifest), encoding="utf8")
+    with Runtime(manifest["target"]) as runtime:
+
+        def must_not_load(*args, **kwargs):
+            raise AssertionError("Invalid binding reached native code loading")
+
+        monkeypatch.setattr(runtime, "load_module", must_not_load)
+        with pytest.raises(ValueError, match="receiver|numerical|format|ABI"):
+            load_package(runtime, tmp_path / "sdk")
