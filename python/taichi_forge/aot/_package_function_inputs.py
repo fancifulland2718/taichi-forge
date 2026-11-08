@@ -770,24 +770,30 @@ def discover(sources, imported, *, preparation_receivers=None):
                     binding_calls.add((callee, id(call), owner, name))
             values = [receiver] if receiver is not None else []
             unknown_expansion = any(k.arg is None for k in call.keywords)
+            unknown_position = False
             for argument in call.args:
                 if isinstance(argument, ast.Starred):
                     items = value(argument.value)
-                    if isinstance(items, tuple):
+                    if isinstance(items, tuple) and not unknown_position:
                         values.extend(items)
                     else:
                         unknown_expansion = True
-                else:
+                        unknown_position = True
+                elif not unknown_position:
                     values.append(value(argument))
-            if unknown_expansion:
-                if callee in kernels:
-                    failures.append(f"{module}:{call.lineno}: free Kernel inputs require explicit argument sources")
-                    invalid.add(callee)
+            if unknown_expansion and callee in kernels:
+                failures.append(f"{module}:{call.lineno}: free Kernel inputs require explicit argument sources")
+                invalid.add(callee)
                 continue
-            kwargs = {item.arg: value(item.value) for item in call.keywords}
+            kwargs = {item.arg: value(item.value) for item in call.keywords if item.arg is not None}
             signature = inspect.signature(callee)
             try:
-                bound = signature.bind(*values, **kwargs)
+                # A successful ordinary Host call preserves its explicit
+                # positional prefix and named arguments even when other options
+                # are runtime data. Missing arguments provide no source facts;
+                # duplicate bindings still fail in the normal Python call.
+                bind = signature.bind_partial if unknown_expansion else signature.bind
+                bound = bind(*values, **kwargs)
             except TypeError as error:
                 if callee in kernels:
                     failures.append(f"{module}:{call.lineno}: free Kernel argument mismatch: {error}")

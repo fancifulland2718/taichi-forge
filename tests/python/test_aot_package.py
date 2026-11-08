@@ -12574,13 +12574,18 @@ def prepare(owner, n: int, wide: bool):
         call.close()
 
 
-@pytest.mark.parametrize("inherited", [False, True, "free", "free_external", "free_forwarding", "free_local"])
+@pytest.mark.parametrize(
+    "inherited", [False, True, "free", "free_external", "free_forwarding", "free_local", "free_options"]
+)
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_late_resource_context_preserves_generations(tmp_path, monkeypatch, inherited):
     model = PREPARATION_FIELDS_SOURCE
     extra_modules = {}
-    if inherited in ("free", "free_external", "free_forwarding", "free_local"):
+    if inherited in ("free", "free_external", "free_forwarding", "free_local", "free_options"):
         model = _free_preparation_source()
+        if inherited == "free_options":
+            model = model.replace("        prepare(self, n, fail=fail)", "        forward_options(self, n, fail)")
+            model += "\ndef forward_options(owner, n, fail):\n    options = dict(fail=fail)\n    prepare(owner, n, **options)\n"
         if inherited == "free_forwarding":
             model += "\ndef forward(owner, n, fail=False):\n    prepare(owner, n, fail=fail)\n"
             model = model.replace(
@@ -12624,7 +12629,7 @@ def test_package_late_resource_context_preserves_generations(tmp_path, monkeypat
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         registered = set(runtime._resources)
         a, b = code.host.Model(), code.host.Model()
-        if inherited in ("free", "free_external", "free_forwarding", "free_local"):
+        if inherited in ("free", "free_external", "free_forwarding", "free_local", "free_options"):
             b = sys.modules[code.host.Model.__module__].Alternate()
         assert set(runtime._resources) == registered
         if inherited == "free_forwarding":
@@ -15413,7 +15418,18 @@ print('FREE_RECEIVER_SOURCE_FREE_OK')
 
 
 @pytest.mark.parametrize(
-    "change", ["unknown", "rebound", "uncovered", "starred", "recursive_context", "cyclic_receiver", "cyclic_alias"]
+    "change",
+    [
+        "unknown",
+        "rebound",
+        "uncovered",
+        "starred",
+        "host_starred",
+        "keyword_expansion",
+        "recursive_context",
+        "cyclic_receiver",
+        "cyclic_alias",
+    ],
 )
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_free_receiver_rejects_unproven_call_domains(tmp_path, monkeypatch, change):
@@ -15424,6 +15440,10 @@ def test_package_free_receiver_rejects_unproven_call_domains(tmp_path, monkeypat
         source = source.replace("forward(alias, gain)", "alias = object()\n        forward(alias, gain)")
     elif change == "uncovered":
         source += "\ndef arbitrary(receiver):\n    publish(1.0, receiver)\n"
+    elif change == "host_starred":
+        source = source.replace("forward(alias, gain)", "forward(*unknown_arguments(), alias, gain)")
+    elif change == "keyword_expansion":
+        source = source.replace("publish(gain, solver=receiver)", "publish(gain, solver=receiver, **unknown_options())")
     elif change == "recursive_context":
         source = source.replace(
             "def forward(receiver, gain):", "def forward(receiver, gain):\n    forward((receiver,), gain)"

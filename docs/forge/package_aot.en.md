@@ -1702,6 +1702,11 @@ Source discovery also follows function-local imports of preparation functions
 and module aliases from the existing source closure. It reads those definitions
 without running the Host function; an import that overwrites the owner parameter
 cannot reuse the original owner fact.
+Ordinary Host forwarding keeps proven explicit arguments when other options arrive
+through a runtime `**mapping` or an unknown trailing `*sequence`. Such options do
+not supply declaration facts or extra variants. Arguments after an unknown positional
+expansion cannot establish a positional source; direct Kernel template inputs still
+require explicit, proven bindings.
 This does not yet support changing one resource attribute between unrelated
 element types during preparation.
 Preparation may use a boolean domain already declared by its owner, including
