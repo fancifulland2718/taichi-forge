@@ -5607,6 +5607,26 @@ def test_package_model_static_control_rejects_device_or_mutable_values(tmp_path,
         ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cpu)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_plain_dimension_static_alias_uses_runtime_control(tmp_path, monkeypatch):
+    source = SOURCE.replace(
+        "        self.gain = gain",
+        "        self.gain = gain\n" "        scope = ti.experimental.ResourceScope(self)\n" "        scope.dim('n')",
+    )
+    source = source.replace(
+        "        for i in range(self.n):",
+        "        count = ti.static(self.n)\n" "        for i in ti.static(range(count)):",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len([entry for entry in manifest["entries"].values() if entry["definition"].endswith(".initialize")]) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        a, b = loaded.host.Model(7, 2.0), loaded.host.Model(129, -3.0)
+        for owner in (b, a):
+            np.testing.assert_array_equal(owner.values.to_numpy(), np.arange(owner.n) * owner.gain + 0.5)
+
+
 MODEL_SHARED_SOURCE = """
 import taichi_forge as ti
 constructors = 0
@@ -5655,8 +5675,9 @@ class Model:
 
 @pytest.mark.parametrize("square", [False, True])
 @pytest.mark.parametrize("model_block", [False, True])
+@pytest.mark.parametrize("standalone", [False, True])
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_package_model_shared_arrays_bind_native_storage(tmp_path, monkeypatch, square, model_block):
+def test_package_model_shared_arrays_bind_native_storage(tmp_path, monkeypatch, square, model_block, standalone):
     import ctypes as C
     driver = C.WinDLL("nvcuda.dll") if sys.platform == "win32" else C.CDLL("libcuda.so.1")
     device, capacity = C.c_int(), C.c_int()
@@ -5664,6 +5685,14 @@ def test_package_model_shared_arrays_bind_native_storage(tmp_path, monkeypatch, 
     if driver.cuDeviceGetAttribute(C.byref(capacity), 97, device) != 0:
         assert driver.cuDeviceGetAttribute(C.byref(capacity), 8, device) == 0
     source = MODEL_SHARED_SOURCE
+    if standalone:
+        source = source.replace(
+            "self.vector = ti.Vector.field(self.dof, ti.f32, shape=self.n)\n"
+            "        self.result = ti.field(ti.f32, shape=self.n)",
+            "scope = ti.experimental.ResourceScope(self)\n"
+            "        scope.dim('dof')\n"
+            "        scope.result = scope.field(ti.f32, shape=scope.dim('n'))",
+        )
     if model_block:
         source = source.replace("ti.loop_config(block_dim=32)",
                                 "workers = ti.static(128 if self.dof > 32 else 32)\n"

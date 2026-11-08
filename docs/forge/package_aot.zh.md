@@ -638,6 +638,11 @@ CPU/Vulkan 动态 SharedArray、real_func 内部
 真正的静态配置保持原路径。导出不按 DOF 枚举代码；原静态迭代的顺序也保留，
 顶层循环不会被改成并行循环。直接 Field 的 `self` 尺寸别名连接到同一维度关系。
 
+显式声明的 `ResourceScope.dim` 尺寸现可使用同一 lowering，不要求该轴同时用于模型
+张量 Field。静态局部别名以及 prepare 决定的 CUDA block/共享数组复用原合同；普通
+runtime scalar 声明仍不能进入静态控制。局部 CPU/CUDA 检查覆盖上述区别、新尺寸和
+无源码共享存储消费。
+
 设备数据或可变局部量不能因此进入 `ti.static`；需要 Python 对象选择、类型构造或
 编译期索引的循环体不自动获得运行时等价实现。循环范围须有可验证的整数维度表达式；
 普通调用及 Graph prepare 从实际参数快照核查现有 i32 循环 ABI 的中间运算，防止

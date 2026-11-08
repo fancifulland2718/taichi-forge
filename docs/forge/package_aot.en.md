@@ -980,6 +980,12 @@ values do not enumerate code copies. Iteration order is preserved, including
 top-level loops which must not become parallel. Direct Field `self` size
 aliases connect to the same dimension relation.
 
+Explicitly declared `ResourceScope.dim` extents now use this lowering even when
+no model tensor Field contains that axis. This covers static local aliases and
+prepare-sized CUDA blocks/shared arrays through the existing contracts. Ordinary
+runtime scalar declarations remain ineligible for static control. Focused CPU
+and CUDA tests cover this distinction, new sizes and source-free shared storage.
+
 Device data and mutable locals cannot thereby enter `ti.static`. Loop bodies
 requiring Python object selection, type construction or compile-time indexing
 still need a valid runtime implementation. Loop bounds require proven integer

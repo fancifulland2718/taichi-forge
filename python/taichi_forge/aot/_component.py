@@ -1739,6 +1739,12 @@ class _Capture:
             axis for declaration in self.declarations.values() if isinstance(declaration, _ModelTensorField)
             for axis in declaration.element_shape if isinstance(axis, str)
         }
+        # A declared extent can size local/shared storage without appearing in
+        # a model tensor Field. Preserve its symbolic value in normal static
+        # aliases/control, using the same runtime lowering and prepare checks.
+        self.model_dimensions.update(
+            name for name, declaration in self.declarations.items() if isinstance(declaration, Dimension)
+        )
         pending = list(self.model_dimensions)
         while pending:
             declaration = self.declarations.get(pending.pop())
