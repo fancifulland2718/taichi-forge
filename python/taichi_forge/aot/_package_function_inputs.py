@@ -95,7 +95,7 @@ def _returns_on_all_paths(body):
     )
 
 
-def discover(sources, imported):
+def discover(sources, imported, *, preparation_receivers=None):
     from taichi_forge.types.annotations import Template
     from taichi_forge.graph import GraphBuilder
     from taichi_forge.lang.field import ScalarField
@@ -146,7 +146,7 @@ def discover(sources, imported):
             if method not in functions:
                 raise ValueError("Prepared input method is outside its ordinary source definition: " + identity)
             requested.setdefault(method, []).append((identity, name, item))
-    if not kernels and not requested:
+    if not kernels and not requested and preparation_receivers is None:
         return {}, []
 
     pending = deque()
@@ -630,6 +630,14 @@ def discover(sources, imported):
                     binding_domains.setdefault((owner, name), set()).add((fact.owner.identity, fact.path))
                     if call_site is not None:
                         binding_covered.add((function, call_site, owner, name))
+        if preparation_receivers is not None and function in preparation_receivers:
+            receivers = [(key, item.identity) for key, item in arguments.items() if isinstance(item, _Owner)]
+            if len(receivers) != 1:
+                raise ValueError(f"{module}:{functions[function][1].lineno}: preparation requires one proven owner")
+            else:
+                preparation_receivers[function].add(receivers[0])
+                if call_site is not None:
+                    covered.add(call_site)
         if identity in visited:
             continue
         visited.add(identity)
@@ -742,6 +750,18 @@ def discover(sources, imported):
                         )
                 else:
                     pending.append((callee, inputs, (*chain, callee), id(call)))
+
+    if preparation_receivers is not None:
+        # Use the same source flow as free Kernels, before new preparation
+        # declarations exist. Numerical/input validation runs after this pass.
+        for function, (module, node) in functions.items():
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call) or id(call) in covered:
+                    continue
+                callee = source_callable(call.func, function.__globals__)
+                if inspect.isfunction(callee) and callee in preparation_receivers:
+                    raise ValueError(f"{module}:{call.lineno}: preparation call has no proven owner receiver")
+        return {}, []
 
     # An input domain must cover each ordinary direct use in the scanned source,
     # not just the first convenient model path. Unknown forwarding stays a gap.

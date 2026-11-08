@@ -4763,7 +4763,9 @@ def test_package_host_preparation_arrays_are_not_owner_declaration_methods(tmp_p
         np.testing.assert_array_equal(a.values.to_numpy(), 2 * np.arange(7) + 1.5)
 
 
-def _source_package(tmp_path, monkeypatch, source=SOURCE, *, initializer="from .model import Model\n"):
+def _source_package(
+    tmp_path, monkeypatch, source=SOURCE, *, initializer="from .model import Model\n", extra_modules=None
+):
     root = tmp_path / "definition_fixture"
     root.mkdir()
     (root / "__init__.py").write_text(initializer, encoding="utf8")
@@ -4787,6 +4789,9 @@ def _source_package(tmp_path, monkeypatch, source=SOURCE, *, initializer="from .
         encoding="utf8",
     )
     monkeypatch.syspath_prepend(str(tmp_path))
+    for name, content in (extra_modules or {}).items():
+        (root / (name + ".py")).write_text(textwrap.dedent(content), encoding="utf8")
+        monkeypatch.delitem(sys.modules, "definition_fixture." + name, raising=False)
     for key in (
         "definition_fixture",
         "definition_fixture.model",
@@ -10625,10 +10630,12 @@ def resource_group(owner, name, *, initialization='consumer_explicit'):
 """
 
 
-def _resource_context_fixture(tmp_path, monkeypatch, *, helper=RESOURCE_CONTEXT_SOURCE, model=CONTEXT_FIELDS_SOURCE):
+def _resource_context_fixture(
+    tmp_path, monkeypatch, *, helper=RESOURCE_CONTEXT_SOURCE, model=CONTEXT_FIELDS_SOURCE, extra_modules=None
+):
     (tmp_path / "resource_contexts.py").write_text(textwrap.dedent(helper), encoding="utf8")
     monkeypatch.delitem(sys.modules, "resource_contexts", raising=False)
-    package = _source_package(tmp_path, monkeypatch, model)
+    package = _source_package(tmp_path, monkeypatch, model, extra_modules=extra_modules)
     source = Path(sys.modules["definition_fixture.model"].__file__)
     return package, source
 
@@ -10664,11 +10671,30 @@ class Model:
 """
 
 
-@pytest.mark.parametrize("inherited", [False, True])
+def _free_preparation_source():
+    model = PREPARATION_FIELDS_SOURCE
+    start, end = model.index("    def prepare("), model.index("    @ti.kernel")
+    prepare = textwrap.dedent(model[start:end]).replace("self", "owner")
+    body = "    def prepare(self, n: int, fail=False):\n        prepare(self, n, fail=fail)\n"
+    body += "    def prepare_again(self, n):\n        prepare(self, n)\n"
+    return model[:start] + body + model[end:] + "\n" + prepare + "\nclass Alternate(Model):\n    pass\n"
+
+
+@pytest.mark.parametrize("inherited", [False, True, "free", "free_external"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_late_resource_context_preserves_generations(tmp_path, monkeypatch, inherited):
     model = PREPARATION_FIELDS_SOURCE
-    if inherited:
+    extra_modules = {}
+    if inherited in ("free", "free_external"):
+        model = _free_preparation_source()
+        if inherited == "free_external":
+            start, end = model.index("def prepare(owner,"), model.index("class Alternate")
+            extra_modules["preparation"] = (
+                "import taichi_forge as ti\nfrom resource_contexts import resource_group\npreparations = 0\n"
+                + model[start:end]
+            )
+            model = model[:start] + "from .preparation import prepare\n" + model[end:]
+    elif inherited:
         start, end = model.index("    def prepare("), model.index("    @ti.kernel")
         prepare = model[start:end]
         model = model[:start] + model[end:]
@@ -10676,7 +10702,7 @@ def test_package_late_resource_context_preserves_generations(tmp_path, monkeypat
             "@ti.data_oriented\nclass Model:",
             "class Workspace:\n" + prepare + "\n@ti.data_oriented\nclass Model(Workspace):",
         )
-    package, source = _resource_context_fixture(tmp_path, monkeypatch, model=model)
+    package, source = _resource_context_fixture(tmp_path, monkeypatch, model=model, extra_modules=extra_modules)
     module = sys.modules["definition_fixture.model"]
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert manifest["version"] == (62 if inherited else 53)
@@ -10688,6 +10714,8 @@ def test_package_late_resource_context_preserves_generations(tmp_path, monkeypat
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         registered = set(runtime._resources)
         a, b = code.host.Model(), code.host.Model()
+        if inherited in ("free", "free_external"):
+            b = sys.modules[code.host.Model.__module__].Alternate()
         assert set(runtime._resources) == registered
         a.prepare(7)
         b.prepare(29)
@@ -10762,6 +10790,34 @@ def test_package_late_resource_context_preserves_generations(tmp_path, monkeypat
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PREPARATION_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change,diagnostic",
+    [
+        ("unknown", "no proven owner receiver"),
+        ("rebind", "unchanged synchronous owner"),
+        ("yield", "unchanged synchronous owner"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_free_preparation_rejects_unproven_receiver(tmp_path, monkeypatch, change, diagnostic):
+    model = _free_preparation_source()
+    if change == "unknown":
+        model += "\ndef unknown(value):\n    prepare(value, 3)\n"
+    elif change == "rebind":
+        model = model.replace(
+            "def prepare(owner, n: int, fail=False):", "def prepare(owner, n: int, fail=False):\n    owner = None"
+        )
+    else:
+        model = model.replace(
+            "def prepare(owner, n: int, fail=False):", "def prepare(owner, n: int, fail=False):\n    yield owner"
+        )
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=model)
+    with pytest.raises(ti.aot.PackageExportError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0
 
 
 @pytest.mark.parametrize(

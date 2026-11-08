@@ -738,6 +738,27 @@ def _host_projection(
 
         def visit_FunctionDef(self, node):
             nonlocal kind
+            preparation = getattr(node, "_package_free_preparation", None)
+            if preparation is not None:
+                identity, receiver, normalized = preparation
+                normalized = copy.deepcopy(normalized)
+                normalized.args = copy.deepcopy(node.args)
+                previous, self.owner = self.owner, identity
+                try:
+                    projected = self.visit_FunctionDef(normalized)
+                finally:
+                    self.owner = previous
+                if receiver != "self":
+                    offset = int(
+                        bool(projected.body)
+                        and isinstance(projected.body[0], ast.Expr)
+                        and isinstance(projected.body[0].value, ast.Constant)
+                        and isinstance(projected.body[0].value.value, str)
+                    )
+                    projected.body.insert(
+                        offset, ast.Assign([ast.Name("self", ast.Store())], ast.Name(receiver, ast.Load()))
+                    )
+                return projected
             definition = definitions_at.get((node.lineno, node.col_offset))
             if definition is None:
                 if host_contexts is not None and self.owner is None:
@@ -1278,6 +1299,18 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     from ._package_inputs import resolve_inputs
 
     resolve_inputs(sources, imported_modules)
+    from ._package_preparations import resolve as resolve_preparations
+
+    try:
+        resolve_preparations(
+            sources,
+            imported_modules,
+            lambda *args, **kwargs: _owner_schema(*args, include_preparation=True, **kwargs),
+            _fail,
+            host_contexts,
+        )
+    except ValueError as error:
+        raise PackageExportError(str(error)) from error
     from ._package_function_inputs import discover as discover_function_inputs
 
     try:

@@ -1399,6 +1399,15 @@ for configurations containing that workspace. Calls without it reject. Explorati
 still follows dependencies actually read by the entry; unrelated settings do not
 multiply code. Export fails explicitly when no admissible configuration exists.
 
+Ordinary free Host functions may prepare explicit independent resource groups
+for an owner proven by normal source calls. They use the existing group contracts,
+replacement transactions and invocation leases; export executes neither the
+function nor a sample model. The retained function stays Python, including its
+failure handling. Multiple receiver classes may reuse the same declaration;
+unknown calls, reassigned receivers and incompatible declaration contracts reject.
+This does not yet support changing one resource attribute between unrelated
+element types during preparation.
+
 Dynamic local vectors/matrices also support
 `range(begin, ti.min(device_count, model_bound))`, with `begin` and `model_bound`
 proven integer dimension/constant expressions. Prepare allocates invocation scratch
