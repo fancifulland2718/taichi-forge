@@ -395,6 +395,48 @@ def normalize_factories(tree, namespace, module, fail, kind):
                 or getattr(function, "_package_preparation_method", False)
             ):
                 continue
+            names = {part.id for part in ast.walk(function) if isinstance(part, ast.Name)}
+            names.update(part.arg for part in ast.walk(function) if isinstance(part, ast.arg))
+
+            class BindInlineScope(ast.NodeTransformer):
+                def visit_FunctionDef(self, node):
+                    return node
+
+                visit_AsyncFunctionDef = visit_FunctionDef
+                visit_ClassDef = visit_FunctionDef
+
+                def visit_Expr(self, statement):
+                    call = statement.value
+                    if not (
+                        isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Attribute)
+                        and isinstance(call.func.value, ast.Call)
+                    ):
+                        return statement
+                    factory = call.func.value
+                    candidate = factory
+                    if qualified_kind(candidate, kind) != "experimental.ResourceScope":
+                        try:
+                            candidate = prove_factory(_source_value(factory.func, namespace), factory)
+                        except (TypeError, _Unproven):
+                            return statement  # The full factory pass reports the unsupported source.
+                    if candidate is None or qualified_kind(candidate, kind) != "experimental.ResourceScope":
+                        return statement
+                    name = f"_forge_scope_inline_{factory.lineno}_{factory.col_offset}"
+                    while name in names:
+                        name += "_"
+                    names.add(name)
+                    call.func.value = ast.copy_location(ast.Name(name, ast.Load()), factory)
+                    binding = ast.copy_location(ast.Assign([ast.Name(name, ast.Store())], factory), statement)
+                    return [binding, statement]
+
+            # An unused method call on a proven scope is equivalent to an
+            # ordinary local binding immediately followed by that call. Retain
+            # its position, original factory and validation; never hoist from
+            # arbitrary argument expressions or execute Host preparation.
+            binder = BindInlineScope()
+            body = binder.visit(ast.Module(body=function.body, type_ignores=[]))
+            function.body = ast.fix_missing_locations(body).body
             scopes = set()
             checked_calls = set()
 

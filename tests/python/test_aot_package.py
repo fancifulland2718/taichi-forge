@@ -11124,9 +11124,16 @@ class Model:
 
 
 @pytest.mark.parametrize("host_tensor", [False, True])
+@pytest.mark.parametrize("scope_form", ["assigned", "inline", "factory_inline"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_package_resource_scope_values_preserve_compound_captures(tmp_path, monkeypatch, host_tensor):
+def test_package_resource_scope_values_preserve_compound_captures(tmp_path, monkeypatch, host_tensor, scope_form):
     source = SCOPE_VALUES_SOURCE
+    if scope_form != "assigned":
+        expression = "resource_scope(self)" if scope_form == "factory_inline" else "ti.experimental.ResourceScope(self)"
+        source = source.replace("        scope = ti.experimental.ResourceScope(self)\n", "")
+        source = source.replace("scope.value(", expression + ".value(")
+        if scope_form == "factory_inline":
+            source = RESOURCE_FACTORY_SOURCE + source
     if host_tensor:
         source = "from taichi_forge import Matrix as MatrixValue\n" + source.replace(
             "self.gain, self.shift, self.transform = gain, shift, transform",

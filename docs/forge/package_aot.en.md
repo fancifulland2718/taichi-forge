@@ -565,6 +565,13 @@ are never executed. Side effects, model-dependent conditions, unknown globals,
 argument call expressions and shadowed factory names reject export.
 `declaration_factories` records each proven source and its digest.
 
+A standalone `ResourceScope(self).value(...)` or an equivalent proven factory
+call can use the same local-scope projection. The scope is bound at that statement
+before its original method call; it is not moved across control flow or extracted
+from arbitrary argument expressions. CPU/CUDA checks cover compound captures and
+isolated consumption. This does not additionally qualify the Host body of a
+retained application-local factory that directly constructs ResourceScope.
+
 Unused imports of projected factories are removed from retained Host code. Other
 Host calls and dependencies are preserved. This does not qualify arbitrary
 factories, context managers or the entire factory module's closure. The original
