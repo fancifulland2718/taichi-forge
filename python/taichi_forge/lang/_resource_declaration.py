@@ -220,7 +220,12 @@ class ResourceScope:
             return value.expression if isinstance(value, Extent) else freeze_extent(("const", value))
 
         spec = dict(left=expression(left), right=expression(right), when=when)
-        roles = set().union(*(self._registry.get(kind, {}) for kind in ("fields", "arrays", "dimensions", "values", "borrowed")))
+        roles = set().union(
+            *(
+                self._registry.get(kind, {})
+                for kind in ("fields", "arrays", "dimensions", "values", "borrowed", "typed_inputs")
+            )
+        )
         validate_constraints({name: spec}, self._registry["dimensions"].keys(), roles)
         if self._owner is not None:
             check_constraints({name: spec}, self._normal_dimension)

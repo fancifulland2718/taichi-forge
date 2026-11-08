@@ -4912,6 +4912,77 @@ class Model:
         imported.close()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_record_borrows_caller_arrays(tmp_path, monkeypatch):
+    source = """
+from dataclasses import dataclass
+import taichi_forge as ti
+@dataclass(frozen=True)
+class Packet:
+    count: int
+    offsets: object
+    values: object
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        self.packet = None
+        s = ti.experimental.ResourceScope(self)
+        s.counter = s.field(ti.i32, shape=())
+    def prepare(self, packet):
+        s = ti.experimental.ResourceScope(self)
+        record = s.record('packet', packet, optional=True)
+        if packet is not None:
+            record.borrow('offsets', packet.offsets, external=True, dtype=ti.i32, shape=record.dim('count') + 1)
+            record.borrow('values', packet.values, external=True, dtype=ti.types.vector(3, ti.f32),
+                          shape=record.parent_dim('n'))
+            record.require_le('enough_offsets', record.parent_dim('n'), record.dim('count'), when='offsets')
+    @ti.kernel
+    def update(self):
+        self.counter[None] += 1
+        if ti.static(self.packet is not None):
+            for i in range(self.n):
+                self.packet.values[i] += self.packet.offsets[i + 1]
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.update)
+        return b.compile()
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for n in (5, 17):
+            offsets = ti.field(ti.i32, shape=n + 1)
+            values = ti.Vector.field(3, ti.f32, shape=n)
+            offsets.from_numpy(np.arange(n + 1, dtype=np.int32))
+            values.fill(0)
+            original = package.Model(n)
+            original.prepare(sys.modules["definition_fixture.model"].Packet(n, offsets, values))
+            original.update()
+            expected = values.to_numpy()
+            imported = [runtime.import_dense_view(ti.experimental.ndarray_view(field)) for field in (offsets, values)]
+            owner = code.host.Model(n)
+            owner.prepare(None)
+            owner.update()
+            packet = code.module("definition_fixture.model").Packet(n, *imported)
+            owner.prepare(packet)
+            previous = owner.graph().bind({})
+            owner.prepare(None)
+            owner.update()
+            previous.run()
+            runtime.wait()
+            np.testing.assert_array_equal(values.to_numpy(), expected * 2)
+            assert int(owner.counter.to_numpy()) == 3
+            short_offsets = runtime.ndarray("i32", (n,))
+            invalid = code.module("definition_fixture.model").Packet(n - 1, short_offsets, imported[1])
+            with pytest.raises(ValueError, match="enough_offsets"):
+                owner.prepare(invalid)
+            short_offsets.close()
+            previous.close()
+            for array in imported:
+                array.close()
+
+
 CACHED_FACTORY_SOURCE = """
 import taichi_forge as ti
 from functools import lru_cache, cache

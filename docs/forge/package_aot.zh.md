@@ -99,6 +99,9 @@ scope.borrow("values", values, external=True, dtype=ti.f32, shape=scope.dim("n")
 prepared 调用仍保留原资源。普通数值读取只为该入口增加“输入必须存在”的调用条件；
 只有 `ti.static(self.values is not None)` 等显式存在性判断才选择必要代码分支，不把
 整个包按可选输入组合展开。局部 CPU/CUDA 验证包含空输入、恢复、旧调用和存在性拒绝。
+可选普通记录的成员也可使用类型化端口，沿用 `parent_dim` 和 `require_le` 检查实际
+消费尺寸关系；记录保留为 Host 数据，不要求调用方的分配类进入包。CUDA 局部验证
+包含记录存在/缺失、新尺寸、尺寸关系拒绝及旧 Graph 的输入快照。
 任意条件输入、结构体元素及模型决定的元素形状尚未接入这种端口。下文
 `source_scope=True` 的借用仍是保留原分配组的另一种合同；旧 Component 的只读外部
 Field 合同也未因此扩大为任意可写输入。

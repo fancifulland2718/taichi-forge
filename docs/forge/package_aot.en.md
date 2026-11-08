@@ -143,6 +143,11 @@ checks cover scalar/vector reads and writes, new sizes, interleaved layouts,
 old Graph snapshots after rebinding, type/shape rejection and source-tree
 retirement. Failed preparation preserves the previous binding, calls also check
 the resource contract, and package closure does not own caller storage.
+Optional plain records can also contain typed ports. Their `parent_dim` and
+`require_le` declarations check the actual input size relationships without
+including the caller's allocation class in the package. Local CUDA checks cover
+record presence, new sizes, constraint rejection and old Graph input snapshots.
+
 Format 60 adds `optional=True` to this declaration. Preparation may bind `None`;
 clearing the current binding leaves existing prepared calls holding their old
 resources. Ordinary numerical reads require a present input at that entry;
