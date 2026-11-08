@@ -389,7 +389,9 @@ def normalize_factories(tree, namespace, module, fail, kind):
             continue
         for function in cls.body:
             if not isinstance(function, ast.FunctionDef) or not (
-                function.name == "__init__" or getattr(function, "_package_construction_method", False)
+                function.name == "__init__"
+                or getattr(function, "_package_construction_method", False)
+                or getattr(function, "_package_preparation_method", False)
             ):
                 continue
             scopes = set()

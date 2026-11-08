@@ -218,7 +218,9 @@ def discover_contexts(tree, namespace, module, fail):
             continue
         for constructor in cls.body:
             if not isinstance(constructor, ast.FunctionDef) or not (
-                constructor.name == "__init__" or getattr(constructor, "_package_construction_method", False)
+                constructor.name == "__init__"
+                or getattr(constructor, "_package_construction_method", False)
+                or getattr(constructor, "_package_preparation_method", False)
             ):
                 continue
             parents = {id(child): parent for parent in ast.walk(constructor) for child in ast.iter_child_nodes(parent)}
@@ -261,6 +263,7 @@ def discover_contexts(tree, namespace, module, fail):
                 ):
                     fail(module, node, "Resource context requires an unshadowed module binding")
                 node._package_resource_context = recipe
+                node._package_deferred_context = constructor.name != "__init__"
                 recipes.append({k: v for k, v in recipe.items() if k != "call"} | dict(module=module, line=node.lineno))
     return recipes
 

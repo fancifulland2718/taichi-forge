@@ -38,9 +38,10 @@ def resolve_owners(sources, imported, owner_schema, fail):
             if inspect.getattr_static(cls, method) is not original:
                 fail(name, node, "Overridden type construction requires a concrete constructor contract")
         for method in node.body:
-            if getattr(method, "_package_construction_method", False) and (
-                inspect.getattr_static(cls, method.name) is not inspect.getattr_static(base, method.name)
-            ):
+            if (
+                getattr(method, "_package_construction_method", False)
+                or getattr(method, "_package_preparation_method", False)
+            ) and (inspect.getattr_static(cls, method.name) is not inspect.getattr_static(base, method.name)):
                 fail(name, method, "Overridden construction resource methods require their own constructor contract")
         constructor = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
         if constructor is None:

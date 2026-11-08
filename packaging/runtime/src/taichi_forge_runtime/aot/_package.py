@@ -4,6 +4,7 @@ No frontend import, source compilation, numeric AST or kernel interpreter.
 Bindings use the ordinary Runtime Kernel API and its per-call resource leases.
 """
 
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 import functools
@@ -638,7 +639,73 @@ class _ModuleBinding:
         return getattr(module, name)
 
     def resource_context(self, module, name, *args, **kwargs):
+        owner = kwargs.pop("_forge_package_owner", None)
+        if owner is not None:
+            return self._preparation_context(owner, module, name, args, kwargs)
         return self.context_function(module, name)(*args, **kwargs)
+
+    @contextmanager
+    def _preparation_context(self, owner, module, name, args, kwargs):
+        """Give an ordinary late Host context a fresh instance-owned group.
+
+        Earlier prepared calls keep their existing resource leases. No code
+        object or module-wide binding is changed, and the original generator
+        continues to own its finalizers and bookkeeping.
+        """
+        self.package._check()
+        key = kwargs.get("_forge_package_group", "")
+        identity, separator, group = key.partition(":")
+        key = self.owner_contract(owner, identity) + separator + group
+        if (
+            getattr(owner, "_forge_package_owner", None) is not self.package
+            or key not in self.package.manifest["field_groups"]
+        ):
+            raise ValueError("Preparation requires its declared owner and resource group")
+        if key in getattr(owner, "_forge_package_preparing", ()):
+            raise ValueError("A resource group is already being prepared on this instance")
+        members = {
+            attribute
+            for attribute, item in self.package.manifest["owners"][key.partition(":")[0]].items()
+            if item.get("field_group") == key
+        }
+        missing = object()
+        values = {attribute: getattr(owner, attribute, missing) for attribute in members}
+        active = getattr(owner, "_forge_package_preparing", None)
+        if active is None:
+            owner._forge_package_preparing = active = set()
+        active.add(key)
+        previous = _construction.get()
+        allocated = []
+        token = _construction.set((self.package, allocated, owner))
+        maps = (owner._forge_package_field_groups, owner._forge_package_layouts)
+        saved = [mapping.pop(key, missing) for mapping in maps]
+        selections = {attribute: owner._forge_package_member_layouts.pop(attribute, missing) for attribute in members}
+        try:
+            with self.context_function(module, name)(*args, **kwargs) as scope:
+                yield scope
+        except BaseException:
+            for value in reversed(allocated):
+                value.close()
+                self.package._arrays.remove(value)
+            for mapping, value in zip(maps, saved):
+                mapping.pop(key, None)
+                if value is not missing:
+                    mapping[key] = value
+            for attribute, value in values.items():
+                if value is missing:
+                    owner.__dict__.pop(attribute, None)
+                else:
+                    setattr(owner, attribute, value)
+                owner._forge_package_member_layouts.pop(attribute, None)
+                if selections[attribute] is not missing:
+                    owner._forge_package_member_layouts[attribute] = selections[attribute]
+            raise
+        else:
+            if previous is not None and previous[0] is self.package:
+                previous[1].extend(allocated)
+        finally:
+            _construction.reset(token)
+            active.remove(key)
 
     def type(self, spec):
         if spec["kind"] == "ndarray_annotation":
@@ -1259,6 +1326,7 @@ class LoadedPackage:
                 50,
                 51,
                 52,
+                53,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

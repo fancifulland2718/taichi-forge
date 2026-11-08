@@ -47,7 +47,9 @@ def select_target_branches(tree, kind, target, module, fail):
             continue
         for function in cls.body:
             if not isinstance(function, ast.FunctionDef) or not (
-                function.name == "__init__" or getattr(function, "_package_construction_method", False)
+                function.name == "__init__"
+                or getattr(function, "_package_construction_method", False)
+                or getattr(function, "_package_preparation_method", False)
             ):
                 continue
             writes = {}

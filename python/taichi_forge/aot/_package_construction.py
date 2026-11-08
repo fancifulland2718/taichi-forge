@@ -31,7 +31,11 @@ def construction_functions(node):
         child
         for child in node.body
         if isinstance(child, ast.FunctionDef)
-        and (child.name == "__init__" or getattr(child, "_package_construction_method", False))
+        and (
+            child.name == "__init__"
+            or getattr(child, "_package_construction_method", False)
+            or getattr(child, "_package_preparation_method", False)
+        )
     ]
     return sorted(
         functions,
@@ -245,6 +249,60 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
             active.remove(function.name)
 
         visit(constructor)
+        # A declared resource group may be prepared after construction. Reading
+        # its schema must not execute the method or move that allocation into
+        # __init__. Only explicit group contexts have an independent lifetime;
+        # raw/default-root allocations keep their existing rejection boundary.
+        for name, method in methods.items():
+            if name == "__init__" or name in selected or method.decorator_list or not allocates(method):
+                continue
+            contexts = []
+            for part in ast.walk(method):
+                if not isinstance(part, ast.With) or len(part.items) != 1:
+                    continue
+                call = part.items[0].context_expr
+                if not isinstance(call, ast.Call):
+                    continue
+                try:
+                    recipe = prove_context(_source_value(call.func, namespace), call)
+                except (TypeError, ValueError, OSError) as error:
+                    fail(module, part, f"Preparation resource context is unproven: {error}")
+                if recipe is not None:
+                    contexts.append(part)
+            if not contexts:
+                continue
+            if (
+                not method.args.args
+                or method.args.args[0].arg != "self"
+                or method.args.posonlyargs
+                or any(isinstance(n, (ast.Yield, ast.YieldFrom, ast.AsyncFunctionDef)) for n in ast.walk(method))
+            ):
+                fail(module, method, "Preparation resource methods require an ordinary synchronous owner receiver")
+            if any(
+                isinstance(n, ast.Call)
+                and qualified_kind(n, kind)
+                in (
+                    "experimental.ResourceScope",
+                    "FieldsBuilder",
+                    "field",
+                    "Vector.field",
+                    "Matrix.field",
+                    "Struct.field",
+                )
+                for n in ast.walk(method)
+            ):
+                fail(module, method, "Preparation resource allocations require explicit group contexts")
+            method._package_preparation_method = True
+            method._package_construction_order = len(selected) + method.lineno
+            facts.append(
+                dict(
+                    kind="preparation_method",
+                    module=module,
+                    definition=f"{module}.{cls.name}.{name}",
+                    sha256=hashlib.sha256(ast.dump(method).encode()).hexdigest(),
+                )
+            )
+            selected.add(name)
         for name in selected:
             for node in ast.walk(cls):
                 if (

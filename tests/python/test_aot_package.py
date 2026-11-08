@@ -8297,6 +8297,168 @@ def _resource_context_fixture(tmp_path, monkeypatch, *, helper=RESOURCE_CONTEXT_
     return package, source
 
 
+PREPARATION_FIELDS_SOURCE = """
+import taichi_forge as ti
+from resource_contexts import resource_group, read_events
+constructors = 0
+preparations = 0
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        global constructors
+        constructors += 1
+        self.n = 0
+    def prepare(self, n: int, fail=False):
+        global preparations
+        preparations += 1
+        self.n = n
+        with resource_group(self, 'state', initialization='zero') as scope:
+            scope.values = scope.field(ti.i32, shape=scope.dim('n'))
+            if fail:
+                raise ValueError('preparation failure')
+    @ti.kernel
+    def step(self, delta: ti.i32):
+        for i in self.values:
+            self.values[i] += delta
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        delta = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'delta', ti.i32)
+        builder.dispatch(self.step, delta)
+        return builder.compile()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_late_resource_context_preserves_generations(tmp_path, monkeypatch):
+    package, source = _resource_context_fixture(tmp_path, monkeypatch, model=PREPARATION_FIELDS_SOURCE)
+    module = sys.modules["definition_fixture.model"]
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 53
+    assert module.constructors == module.preparations == 0
+    original = package.Model()
+    original.prepare(3)
+    original.step(5)
+    np.testing.assert_array_equal(original.values.to_numpy(), 5)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        registered = set(runtime._resources)
+        a, b = code.host.Model(), code.host.Model()
+        assert set(runtime._resources) == registered
+        a.prepare(7)
+        b.prepare(29)
+        a.step(2)
+        b.step(9)
+        old_values = a.values
+        old_tree = a.tree
+        old_call = a.graph().bind({"delta": 3})
+        a.prepare(65)
+        assert a.values is not old_values
+        a.step(4)
+        old_call.run()
+        np.testing.assert_array_equal(old_values.to_numpy(), 5)
+        np.testing.assert_array_equal(a.values.to_numpy(), 4)
+        np.testing.assert_array_equal(b.values.to_numpy(), 9)
+        latest = a.values
+        registered = set(runtime._resources)
+        with pytest.raises(ValueError, match="preparation failure"):
+            a.prepare(65, fail=True)
+        assert a.values is latest
+        assert set(runtime._resources) == registered
+        a.step(1)
+        np.testing.assert_array_equal(a.values.to_numpy(), 5)
+        old_call.close()
+        old_tree.destroy()
+        b.step(1)
+        np.testing.assert_array_equal(b.values.to_numpy(), 10)
+    probe = tmp_path / "consume_preparation.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            baseline = set(runtime._resources)
+            a, b = code.host.Model(), code.host.Model()
+            assert set(runtime._resources) == baseline
+            a.prepare(13)
+            b.prepare(67)
+            old = a.values
+            call = a.graph().bind({'delta': 11})
+            a.prepare(129)
+            call.run()
+            a.step(3)
+            b.step(5)
+            np.testing.assert_array_equal(old.to_numpy(), 11)
+            np.testing.assert_array_equal(a.values.to_numpy(), 3)
+            np.testing.assert_array_equal(b.values.to_numpy(), 5)
+            call.close()
+        print('PREPARATION_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PREPARATION_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change,diagnostic",
+    [
+        ("loop", "constructor statements"),
+        ("replace", "cannot be replaced"),
+        ("lookup", "ordinary owner"),
+        ("yield", "synchronous owner"),
+        ("raw", "explicit group contexts"),
+        ("override", "Overridden construction"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_late_resource_context_rejects_unproven_lifetimes(tmp_path, monkeypatch, change, diagnostic):
+    model = PREPARATION_FIELDS_SOURCE
+    if change == "loop":
+        model = model.replace(
+            "        with resource_group", "        for _ in range(2):\n            with resource_group"
+        )
+        model = (
+            model.replace("            scope.values", "                scope.values")
+            .replace("            if fail:", "                if fail:")
+            .replace("                raise ValueError", "                    raise ValueError")
+        )
+    elif change == "replace":
+        model = model.replace("        self.n = 0", "        self.n = 0\n        self.prepare = lambda: None")
+    elif change == "lookup":
+        model += "\n    def __setattr__(self, key, value):\n        object.__setattr__(self, key, value)\n"
+    elif change == "yield":
+        model = model.replace("    @ti.kernel", "        yield self.values\n    @ti.kernel")
+    elif change == "raw":
+        model = model.replace("        self.n = n", "        self.n = n\n        self.raw = ti.field(ti.i32, shape=n)")
+    else:
+        model += "\nclass Other(Model):\n    def prepare(self, n, fail=False):\n        pass\n"
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=model)
+    with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    module = sys.modules["definition_fixture.model"]
+    assert module.constructors == module.preparations == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize("inline,construction_method", [(False, False), (True, False), (False, True)])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_discovers_context_group_without_discarding_host_lifecycle(
@@ -8331,7 +8493,7 @@ def test_package_discovers_context_group_without_discarding_host_lifecycle(
     assert len(recipe["finalization_lines"]) == 2  # Success and failure stay distinct.
     assert module.constructors == 0 and helper.events == []
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 16
+    assert manifest["version"] == (53 if construction_method else 16)
     original = package.Model(5)
     original.step()
     np.testing.assert_array_equal(original.values.to_numpy(), 1)
@@ -8359,6 +8521,11 @@ def test_package_discovers_context_group_without_discarding_host_lifecycle(
             ("failure", "state"),
         ]
         a.tree.destroy()
+        if construction_method:
+            a.n = 11
+            a._allocate()
+            a.step()
+            np.testing.assert_array_equal(a.values.to_numpy(), 1)
         b.step()
         np.testing.assert_array_equal(b.values.to_numpy(), 2)
 

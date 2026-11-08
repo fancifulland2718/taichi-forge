@@ -1158,6 +1158,19 @@ Nested local dispatch, model-dependent method lookup, multiple-owner inputs and
 model-dependent sort preparation remain further work.
 There is no new whole-engine wheel or size measurement from this slice.
 
+Version 53 discovers explicit resource-group contexts in ordinary preparation
+methods as well as constructors, without calling those methods during export or
+adding a registration decorator. The retained Host method decides when to allocate.
+A repeated context creates a fresh instance group; already prepared calls keep
+their original leases. The original generator owns finalization, and a failed
+context releases its new group and restores the previous field bindings. This
+does not roll back arbitrary Host changes made outside that context. Focused
+CPU/CUDA checks cover no allocation before preparation, new sizes, independent
+instances, retained Graph calls and source-free consumption. Deferred raw/default
+root allocations, child owners and conditional method-parameter inputs remain
+outside this slice; recursive/concurrent preparation of the same instance group
+is rejected.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

@@ -114,6 +114,15 @@ def _owner_schema(module, node, kind, namespace):
     schema = {}
     for function in construction_functions(node):
         for name, declaration in _construction_schema(module, node, function, kind, namespace, schema).items():
+            if getattr(function, "_package_preparation_method", False) and (
+                "presence_parameter" in declaration
+                or declaration["kind"] in ("owner", "owner_input", "host_owner_sequence")
+            ):
+                _fail(
+                    module,
+                    function,
+                    "Preparation groups currently require declared fields, not conditional inputs or child owners",
+                )
             if name in schema and schema[name]["kind"] != "value":
                 previous = schema[name]
                 origins = ("scope_allocation", "scope_allocations")
@@ -612,15 +621,20 @@ def _host_projection(
                 call = node.items[0].context_expr
                 group = module + "." + self.owner + f":context_{node.lineno}_{node.col_offset}"
                 helper_module, helper_name = recipe["definition"].rsplit(".", 1)
+                deferred = getattr(node, "_package_deferred_context", False)
                 node.items[0].context_expr = ast.copy_location(
                     ast.Call(
                         ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "resource_context", ast.Load()),
                         [ast.Constant(helper_module), ast.Constant(helper_name), *call.args],
-                        [*call.keywords, ast.keyword("_forge_package_group", ast.Constant(group))],
+                        [
+                            *call.keywords,
+                            ast.keyword("_forge_package_group", ast.Constant(group)),
+                            *([ast.keyword("_forge_package_owner", ast.Name("self", ast.Load()))] if deferred else []),
+                        ],
                     ),
                     call,
                 )
-                self.minimum_version = max(self.minimum_version, 16)
+                self.minimum_version = max(self.minimum_version, 53 if deferred else 16)
             return self.generic_visit(node)
 
         def visit_ClassDef(self, node):
