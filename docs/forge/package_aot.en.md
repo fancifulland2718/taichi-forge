@@ -216,8 +216,10 @@ For entries in the same package, retained Host recorders can use
 `ti.graph.Arg`, `ArgKind`, `GraphBuilder.dispatch`, sequential nodes and `append`.
 `compile()` builds an existing `ExecutionPlan` referencing exported symbols;
 it creates no combination TCM. `graph.bind(arguments)` returns the native
-prepared call for repeated `run()` replay. `graph.run(arguments)` is a single-use
-convenience that prepares anew; it is not the preferred steady-state path.
+prepared call for repeated `run()` or `submit()` replay. `graph.run(arguments)`
+and `graph.submit(arguments)` prepare anew for each invocation; they are not the
+preferred steady-state path. The latter returns the existing Runtime ticket,
+which retains in-flight resource leases.
 Bound methods retain owner captures. Preparation snapshots scalar/tensor values
 and native resource bindings for each instance; later Host changes do not mutate
 an earlier prepared call. `template_args={'self': owner}` must match the bound
@@ -227,8 +229,9 @@ by each native preparation. Flat CPU/CUDA `while_loop` regions reuse the existin
 exact native Plan executor, including early termination and a zero iteration cap.
 CUDA preparation checks the actual conditional-graph capability; this facade does
 not silently insert a masked or Host-controlled fallback. Controls and regions must
-belong to the same recording. Focused source-free CPU/CUDA checks cover independent
-private arrays and interleaved prepared snapshots. Nested/Vulkan control recipes and
+belong to the same recording; predicates and counters accept rank-zero or rank-one
+i32 arrays. Focused source-free CPU/CUDA checks cover both control shapes, ticket
+submission, independent private arrays and interleaved prepared snapshots. Nested/Vulkan control recipes and
 native-provider Graph nodes remain outside this facade. Loop bounds are currently
 recording-time values; changing a bound requires rerecording the Host plan.
 

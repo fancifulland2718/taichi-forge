@@ -7198,17 +7198,20 @@ class Model:
 """
 
 
-@pytest.mark.parametrize("plan_value", [False, True])
+@pytest.mark.parametrize("plan_value", [False, True, "scalar"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monkeypatch, plan_value):
+    scalar_controls, plan_value = plan_value == "scalar", plan_value is True
     source = PACKAGE_WHILE_SOURCE
+    if scalar_controls:
+        source = source.replace("ndim=1", "ndim=0").replace("[0]", "[None]").replace("(1,)", "()")
     if plan_value:
         source = source.replace("scope.value('limit', ti.i32)", "scope.value('limit', ti.i32, affects_plan=True)")
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert len(manifest["entries"]) == 4 and not manifest["entry_families"]  # three kernels plus fixture entry
     reference = package.Model(3, 5, 2)
-    counter = ti.ndarray(ti.i32, shape=1)
+    counter = ti.ndarray(ti.i32, shape=() if scalar_controls else (1,))
     reference.reset(counter)
     for _ in range(5):
         reference.advance(counter)
@@ -7312,6 +7315,9 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
                 pass
             else:
                 raise AssertionError('private scope collision accepted')
+            with a.graph(5).submit({}) as ticket:
+                ticket.wait()
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(1, 4) * 7)
         try:
             Runtime.execution_control_capabilities(runtime)
         except RuntimeError:
@@ -7319,7 +7325,7 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
         else:
             raise AssertionError('closed runtime accepted a capability query')
         print('PACKAGE_WHILE_OK')
-    """),
+    """).replace("(1,)", "()" if scalar_controls else "(1,)"),
         encoding="utf8",
     )
     env = dict(

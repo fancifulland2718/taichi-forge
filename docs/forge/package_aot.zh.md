@@ -148,14 +148,16 @@ Field 合同也未因此扩大为任意可写输入。
 同包入口的 Host recorder 可使用 `ti.graph.Arg`、`ArgKind`、
 `GraphBuilder.dispatch`、顺序节点和 `append`。`compile()` 生成引用已导出符号的
 既有 `ExecutionPlan`，不生成组合 TCM。`graph.bind(arguments)` 返回原生 prepared
-call，可反复 `run()`；`graph.run(arguments)` 是每次重新 prepare 的单次便利调用，
+call，可反复 `run()` 或 `submit()`；`graph.run(arguments)` / `graph.submit(arguments)`
+是每次重新 prepare 的单次便利调用，后者返回已有 Runtime ticket 并持有在途资源租约，
 不推荐作为稳态路径。绑定方法保留 owner 捕获；prepare 对每个实例的标量/张量值及原生
 资源绑定取快照，后续 Host 修改不改变旧调用。`template_args={'self': owner}` 必须与
 绑定接收者一致。`private_scalar` 复用已有 Plan 的不可变标量资源，支持顺序节点的独立
 名称作用域。`private_ndarray` 描述每次原生准备独立拥有的标量元素存储。CPU/CUDA 的
 平坦 `while_loop` 区域复用现有精确原生 Plan 执行器，支持提前退出和零次上限；CUDA
 准备检查实际 conditional graph 能力，不静默加入 masked 或 Host 控制回退。控制参数
-和区域须来自同一录制。局部 CPU/CUDA 无源码检查覆盖私有数组隔离及 prepared 快照
+和区域须来自同一录制；predicate/counter 接受零维或一维 i32 数组。局部 CPU/CUDA
+无源码检查覆盖两种控制形状、ticket 提交、私有数组隔离及 prepared 快照
 交错执行。嵌套/Vulkan 控制配方和原生 provider 节点尚未接入此接口。循环上限目前在
 录图时确定；改变上限须重新运行 Host 构图。
 

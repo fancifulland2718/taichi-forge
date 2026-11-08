@@ -298,10 +298,11 @@ class GraphBuilder:
         for role, argument in (("predicate", predicate), ("counter", counter)):
             if argument is None and role == "counter":
                 continue
-            if not isinstance(argument, Arg) or argument.schema() != dict(
-                kind="ndarray", element=dict(kind="scalar", dtype="i32", element_shape=[]), ndim=1
+            if not isinstance(argument, Arg) or argument.schema() not in (
+                dict(kind="ndarray", element=dict(kind="scalar", dtype="i32", element_shape=[]), ndim=rank)
+                for rank in (0, 1)
             ):
-                raise ValueError(f"Graph while {role} requires a rank-one i32 array")
+                raise ValueError(f"Graph while {role} requires a scalar or rank-one i32 array")
             if isinstance(argument, _PrivateArg) and argument.scope is not self._bindings:
                 raise ValueError(f"Graph while {role} belongs to another recording")
         # Merge through the ordinary sequence checks before publishing anything.
@@ -461,3 +462,11 @@ class Graph:
         # Convenience for one submission. Repeated replay uses bind(...).run().
         # Runtime retains in-flight preparations until the usual synchronization.
         self.bind(arguments).run()
+
+    def submit(self, arguments):
+        """Prepare one immutable call and return the existing Runtime ticket.
+
+        The ticket and Runtime retain its resource leases. Repeated execution
+        with unchanged bindings can use bind(...).submit() explicitly.
+        """
+        return self.bind(arguments).submit()
