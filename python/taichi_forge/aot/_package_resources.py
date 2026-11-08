@@ -1462,12 +1462,23 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                     or type(call.args[0].value) is not str
                     or not call.args[0].value.isidentifier()
                     or len(keywords) != len(call.keywords)
-                    or set(keywords) != {"external", "dtype", "shape"}
+                    or set(keywords) - {"external", "dtype", "shape", "optional"}
+                    or not {"external", "dtype", "shape"} <= keywords.keys()
                     or not isinstance(keywords["external"], ast.Constant)
                     or keywords["external"].value is not True
                     or conditions
                 ):
                     fail(module, call, "Typed external borrow requires a name, dtype, shape and external=True")
+                optional = keywords.get("optional", ast.Constant(False))
+                if not isinstance(optional, ast.Constant) or type(optional.value) is not bool:
+                    fail(module, optional, "Typed external optional flag must be a literal boolean")
+                presence = "_forge_package_port_present_" + member(scope, call.args[0].value)
+                if optional.value:
+                    add(
+                        presence,
+                        dict(kind="static", choices=[("bool", False), ("bool", True)], kernel_only=False),
+                        call,
+                    )
                 shape = dimension(keywords["shape"])
                 namespace_check(scope, shape, call)
                 shape = (shape,) if isinstance(shape, Extent) else shape
@@ -1485,6 +1496,15 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                         shape_expressions=[axis.expression for axis in shape],
                         borrow_declaration=[call.lineno, call.col_offset],
                         scope_allocation=origin(scope),
+                        **(
+                            {
+                                "optional_input": True,
+                                "input_presence_attribute": presence,
+                                "conditions": {presence: True},
+                            }
+                            if optional.value
+                            else {}
+                        ),
                     ),
                     call,
                 )

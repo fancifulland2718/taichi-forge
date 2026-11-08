@@ -4845,6 +4845,73 @@ class Model:
         values.close()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_external_ports_preserve_old_prepared_calls(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        self.values = None
+        s = ti.experimental.ResourceScope(self)
+        s.counter = s.field(ti.i32, shape=())
+    def prepare(self, values):
+        s = ti.experimental.ResourceScope(self)
+        s.borrow('values', values, external=True, dtype=ti.f32, shape=s.dim('n'), optional=True)
+    @ti.kernel
+    def update(self):
+        self.counter[None] += 1
+        if ti.static(self.values is not None):
+            for i in self.values:
+                self.values[i] += i + 1
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.update)
+        return b.compile()
+    @ti.kernel
+    def required(self):
+        for i in self.values:
+            self.values[i] += 100
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 60
+    assert len([entry for entry in manifest["entries"].values() if entry["definition"].endswith(".required")]) == 1
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        caller = ti.field(ti.f32, shape=13)
+        caller.fill(0)
+        original = package.Model(13)
+        original.prepare(None)
+        original.update()
+        assert original.counter[None] == 1
+        original.prepare(caller)
+        original.update()
+        expected = caller.to_numpy()
+        imported = runtime.import_dense_view(ti.experimental.ndarray_view(caller))
+        owner = code.host.Model(13)
+        owner.prepare(None)
+        owner.update()
+        with pytest.raises(ValueError, match="presence"):
+            owner.required()
+        owner.prepare(imported)
+        previous = owner.graph().bind({})
+        owner.prepare(None)
+        owner.graph().run({})
+        previous.run()
+        runtime.wait()
+        np.testing.assert_array_equal(caller.to_numpy(), expected + np.arange(13) + 1)
+        assert int(owner.counter.to_numpy()) == 3
+        owner.values = imported
+        with pytest.raises(ValueError, match="presence"):
+            owner.update()
+        owner.prepare(imported)
+        owner.update()
+        np.testing.assert_array_equal(caller.to_numpy(), expected + 2 * (np.arange(13) + 1))
+        previous.close()
+        imported.close()
+
+
 CACHED_FACTORY_SOURCE = """
 import taichi_forge as ti
 from functools import lru_cache, cache

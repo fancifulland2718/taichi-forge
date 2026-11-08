@@ -143,8 +143,15 @@ checks cover scalar/vector reads and writes, new sizes, interleaved layouts,
 old Graph snapshots after rebinding, type/shape rejection and source-tree
 retirement. Failed preparation preserves the previous binding, calls also check
 the resource contract, and package closure does not own caller storage.
-Optional/conditional ports, struct elements and model-dependent element shapes
-are not yet supported by this port form. The `source_scope=True` borrow described
+Format 60 adds `optional=True` to this declaration. Preparation may bind `None`;
+clearing the current binding leaves existing prepared calls holding their old
+resources. Ordinary numerical reads require a present input at that entry;
+only explicit presence checks such as `ti.static(self.values is not None)` select
+necessary code branches. Optional inputs do not expand the whole package into
+combinations. Local CPU/CUDA checks cover absence, restoration, old calls and
+presence rejection. Arbitrary conditional ports, struct elements and
+model-dependent element shapes are not yet supported by this form.
+The `source_scope=True` borrow described
 below retains its separate original-group contract; existing Component read-only
 external Fields do not thereby become arbitrary writable inputs.
 

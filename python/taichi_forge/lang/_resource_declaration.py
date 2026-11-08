@@ -456,7 +456,18 @@ class ResourceScope:
         del caller
         return Extent(("dim", alias))
 
-    def borrow(self, name, field, *, dimensions=None, source_scope=False, external=False, dtype=None, shape=None):
+    def borrow(
+        self,
+        name,
+        field,
+        *,
+        dimensions=None,
+        source_scope=False,
+        external=False,
+        dtype=None,
+        shape=None,
+        optional=False,
+    ):
         """Bind an existing Field and explicitly relate its whole source group.
 
         The target retains the original Field and storage ownership. This is a
@@ -488,6 +499,7 @@ class ResourceScope:
                 or shape is None
                 or not isinstance(name, str)
                 or not name.isidentifier()
+                or type(optional) is not bool
             ):
                 raise TypeError("Typed external borrow requires a name, dtype, shape and external=True")
             element = describe_element_type(dtype)
@@ -500,14 +512,18 @@ class ResourceScope:
                 if not set(extent_dependencies(expression)) <= self._registry["dimensions"].keys():
                     raise ValueError("External shape requires dimensions in its declaration scope")
             expected = tuple(evaluate_extent(expression, self._normal_dimension) for expression in expressions)
-            if not isinstance(field, (Field, Ndarray)) or isinstance(field, StructField):
+            if element.category not in ("scalar", "tensor"):
+                raise ValueError("Typed external resource requires scalar/vector/matrix elements")
+            if field is None and optional:
+                matches = True
+            elif not isinstance(field, (Field, Ndarray)) or isinstance(field, StructField):
                 raise TypeError("Typed external borrow requires scalar/vector/matrix Field or ndarray storage")
-            if isinstance(field, Ndarray):
+            elif isinstance(field, Ndarray):
                 matches = element.matches(field.get_type().element_type)
             else:
                 lanes = ((field.n,) if field.ndim == 1 else (field.n, field.m)) if hasattr(field, "n") else ()
                 matches = field.dtype == element.scalar_type and lanes == tuple(element.shape)
-            if element.category not in ("scalar", "tensor") or not matches or tuple(field.shape) != expected:
+            if not matches or field is not None and tuple(field.shape) != expected:
                 raise ValueError("Typed external resource dtype or shape differs from its declaration")
             if self._read_only:
                 if getattr(self._owner, name) is not field:
@@ -515,9 +531,13 @@ class ResourceScope:
             else:
                 setattr(self._owner, name, field)
             # No allocation identity or ownership is inferred for caller storage.
-            self._registry.setdefault("typed_inputs", {})[name] = dict(dtype=dtype, shape=expressions)
+            self._registry.setdefault("typed_inputs", {})[name] = dict(
+                dtype=dtype, shape=expressions, optional=optional
+            )
             return field
 
+        if optional is not False:
+            raise TypeError("Optional borrow requires an explicit external type and shape")
         if not isinstance(name, str) or not name.isidentifier() or not isinstance(field, Field):
             raise TypeError("Resource borrow requires an attribute name and a Field")
         if isinstance(field, StructField):

@@ -29,13 +29,13 @@ def owner_type(owner):
 def check_admission(owner, contract):
     admission = contract.get("admission")
     if admission:
-        for resource in admission.get("external_resources", {}).values():
-            check_external_resource(owner, resource, path_value(owner, resource["path"]))
         for binding in admission.get("constants", {}).values():
             check_constant(owner, binding["path"], binding["value"])
         for binding in admission.get("input_presence", {}).values():
             if (path_value(owner, binding["path"]) is not None) is not binding["present"]:
                 raise ValueError("Optional Field input presence changed after construction")
+        for resource in admission.get("external_resources", {}).values():
+            check_external_resource(owner, resource, path_value(owner, resource["path"]))
         check_owner_bindings(owner, admission.get("owner_bindings", {}).values())
         for binding in admission.get("source_bindings", {}).values():
             for predicate in binding.get("presence", ()):

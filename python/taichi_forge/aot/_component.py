@@ -245,6 +245,11 @@ class Array:
 
 
 @dataclass(frozen=True)
+class _ConditionalArray(Array):
+    conditions: tuple = ()
+
+
+@dataclass(frozen=True)
 class StaticValue:
     """Static code input, optionally with an explicit finite deployment domain.
 
@@ -2003,7 +2008,13 @@ class _Capture:
                 "declare it as a runtime value, resource or static configuration"
             )
         self.used[name] = declaration.schema
-        if isinstance(declaration, (_ConditionalDenseField, _ConditionalModelTensorField, _ConditionalRecord)):
+        # A typed external port may be optional for the Host while required by
+        # a particular numerical entry. Ordinary array reads bind a non-null
+        # argument; only explicit static presence queries select code variants.
+        conditional_array = isinstance(declaration, _ConditionalArray) and (ctx is None or ctx.is_in_static_scope())
+        if conditional_array or isinstance(
+            declaration, (_ConditionalDenseField, _ConditionalModelTensorField, _ConditionalRecord)
+        ):
             self.resource_conditions[name] = declaration.conditions
             present = True
             for condition, expected in declaration.conditions:

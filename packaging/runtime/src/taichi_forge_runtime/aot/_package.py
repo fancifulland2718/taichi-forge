@@ -535,6 +535,7 @@ class _ModuleBinding:
         external=False,
         dtype=None,
         shape=None,
+        optional=False,
     ):
         self.package._check()
         construction = _construction.get()
@@ -548,6 +549,7 @@ class _ModuleBinding:
                 or external is not True
                 or source_scope is not False
                 or dimensions is not None
+                or type(optional) is not bool
             ):
                 raise ValueError("Typed external resource requires its managed package scope")
             owner_key = self.owner_contract(scope._root, owner_key)
@@ -564,17 +566,23 @@ class _ModuleBinding:
             )
             if (
                 not contract.get("external")
+                or optional != contract.get("optional_input", False)
                 or actual_type != contract.get("element")
                 or expressions != tuple(freeze_extent(axis) for axis in contract.get("shape_expressions", ()))
             ):
                 raise ValueError("External resource type or shape expression differs from its declaration")
-            check_external_resource(scope._root, contract, field)
+            if field is not None or not optional:
+                check_external_resource(scope._root, contract, field)
             if scope._parent is not None:
                 if getattr(scope._owner, name) is not field:
                     raise ValueError("A borrowed record must retain its existing member")
             else:
                 setattr(scope._owner, name, field)
+            if optional:
+                setattr(scope._root, contract["input_presence_attribute"], field is not None)
             return field
+        if optional is not False:
+            raise ValueError("Optional borrow requires an explicit external type and shape")
         if (
             not isinstance(scope, _ResourceScope)
             or getattr(scope._root, "_forge_package_owner", None) is not self.package
@@ -1482,6 +1490,7 @@ class LoadedPackage:
                 57,
                 58,
                 59,
+                60,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

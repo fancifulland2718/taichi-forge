@@ -969,7 +969,10 @@ def _host_projection(
                     )
             for item in owners.get(self.owner, {}).values():
                 if item.get("borrow_declaration") == [getattr(node, "lineno", None), getattr(node, "col_offset", None)]:
-                    self.minimum_version = max(self.minimum_version, 59 if item.get("external") else 20)
+                    self.minimum_version = max(
+                        self.minimum_version,
+                        (60 if item.get("optional_input") else 59) if item.get("external") else 20,
+                    )
                     return ast.copy_location(
                         ast.Call(
                             ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "borrow", ast.Load()),
@@ -1720,6 +1723,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 condition_values = {**code.static, **{key: static_key(value) for key, value in code.objects.items()}}
                 for attribute in {key for key, _ in code.contract["captures"]} | code.static.keys():
                     required = compilation_schemas.get(owner_name, {}).get(attribute, {}).get("conditions", {})
+                    if (
+                        compilation_schemas.get(owner_name, {}).get(attribute, {}).get("external")
+                        and attribute in code.dynamic
+                    ):
+                        continue
                     if any(condition_values.get(key) != static_key(value) for key, value in required.items()):
                         _fail(
                             name,
@@ -1731,7 +1739,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 bound_used = {
                     key: value
                     for key, value in code.used.items()
-                    if all(
+                    if compilation_schemas.get(owner_name, {}).get(key, {}).get("external")
+                    and key in code.dynamic
+                    or all(
                         condition_values.get(flag) == static_key(expected)
                         for flag, expected in compilation_schemas.get(owner_name, {})
                         .get(key, {})
@@ -1741,7 +1751,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 }
                 constraints, dimensions, _ = environment.constraint_facts(owner, bound_used)
                 input_presence = {
-                    key: dict(path=list(environment._paths[key]), present=key in bound_used)
+                    key: dict(
+                        path=list(environment._paths[key]),
+                        present=key in code.dynamic if item.get("external") else key in bound_used,
+                    )
                     for key, item in compilation_schemas.get(owner_name, {}).items()
                     if key in code.used and item.get("optional_input")
                 }

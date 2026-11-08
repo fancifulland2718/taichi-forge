@@ -56,7 +56,7 @@ class OwnerGraph:
         import taichi_forge as ti
         from taichi_forge.lang.matrix import MatrixType
         from taichi_forge_runtime._static_values import read_static_key
-        from ._component import Array, Record, RuntimeValue, StaticValue
+        from ._component import Array, Record, RuntimeValue, StaticValue, _ConditionalArray
         from ._package_fields import construct_fields, field_environment
         from ._package_records import write_member
         from ._package_types import resolve_type, type_spec
@@ -110,7 +110,11 @@ class OwnerGraph:
                 item["element"] = type_spec(dtype, self.module)
                 if item.get("external") and item["element"]["kind"] not in ("scalar", "tensor"):
                     raise ValueError("Typed external borrow requires scalar/vector/matrix elements")
-                declarations[attribute] = Array(dtype, item["ndim"])
+                declarations[attribute] = (
+                    _ConditionalArray(dtype, item["ndim"], conditions=tuple(item["conditions"].items()))
+                    if item.get("external") and item.get("conditions")
+                    else Array(dtype, item["ndim"])
+                )
                 value = ti.ndarray(dtype, (1,) * item["ndim"])
             else:
                 if "type_node" in item:
@@ -170,12 +174,17 @@ def _compose(environment, schema, children):
                     changes["conditions"] = tuple((names[n], expected) for n, expected in value.conditions)
                 value = replace(value, **changes)
             elif isinstance(value, Array):
-                value = Array(
-                    value.dtype,
-                    value.ndim,
-                    None if value.shape is None else tuple(names[n] if isinstance(n, str) else n for n in value.shape),
-                    names[value.resource_id] if value.resource_id else "",
+                changes = dict(
+                    shape=(
+                        None
+                        if value.shape is None
+                        else tuple(names[n] if isinstance(n, str) else n for n in value.shape)
+                    ),
+                    resource_id=names[value.resource_id] if value.resource_id else "",
                 )
+                if getattr(value, "conditions", ()):
+                    changes["conditions"] = tuple((names[n], expected) for n, expected in value.conditions)
+                value = replace(value, **changes)
             elif isinstance(value, _ConditionalRecord):
                 value = _ConditionalRecord(tuple((names[n], expected) for n, expected in value.conditions))
             elif isinstance(value, Record):
