@@ -9,7 +9,7 @@ def source_class(tree, name):
     return getattr(tree, "_package_owner_contexts", {}).get(name, name)
 
 
-def split_field_inputs(sources, owner, inputs, sites, input_types):
+def split_constructor_inputs(sources, owner, inputs, sites, input_types):
     """Split resource contracts only for actual, fully proved argument tuples.
 
     Numerical definitions and the projected Host class remain single definitions.
@@ -22,21 +22,21 @@ def split_field_inputs(sources, owner, inputs, sites, input_types):
         for name, item in parameters.items():
             values = input_types(caller, arguments.get(item["input_parameter"]))
             if values is None or len(values) != 1 or next(iter(values))[0] is None:
-                raise ValueError("Typed Field inputs require one proven source at each constructor call: " + owner)
+                raise ValueError("Typed resource inputs require one proven source at each constructor call: " + owner)
             identity, path = next(iter(values))
             if (item["kind"] == "owner_input") == bool(path):
                 raise ValueError("Typed constructor input differs from its resource kind: " + owner)
             selection[name] = dict(source_type=identity, source_member=list(path))
         selections.append((selection, declaration))
     if not selections:
-        raise ValueError("Typed Field inputs require declared constructor calls: " + owner)
+        raise ValueError("Typed resource inputs require declared constructor calls: " + owner)
     module, _, base = owner.rpartition(".")
     source = next(source for source in sources if source[0] == module)
     tree, schemas = source[4], source[6]
     contexts = getattr(tree, "_package_owner_contexts", {})
     families = getattr(tree, "_package_input_families", {})
     if base in contexts or base in families:
-        raise ValueError("Recursive typed Field input contexts require resolved source definitions: " + owner)
+        raise ValueError("Recursive typed resource input contexts require resolved source definitions: " + owner)
     original = schemas.pop(base)
     variants = {}
     for selection, declaration in selections:

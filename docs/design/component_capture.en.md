@@ -1357,6 +1357,20 @@ their actual owners and resource snapshots. Unproved source factories, rewritten
 collection declarations and numerical Kernel iteration over these collections
 still reject. This does not qualify arbitrary application state-inventory inference.
 
+The same constructor input families can also receive distinct declared owner
+classes. Actual argument tuples determine instance contracts; source annotations
+still constrain them, and input domains are not expanded into Cartesian products.
+Format 47 separates instance admission from numerical code: when the compiler
+proves an identical code/ABI identity, lightweight `entry_bindings` reference that
+code while retaining their own type, provenance and dimension checks. They do not
+copy code or complete contracts. Direct calls and Graph preparation enforce the
+same checks; prepared calls retain independent resource snapshots. Local CPU/CUDA
+checks cover differing owner methods, actual code counts for identical methods,
+new sizes, source-free consumption and wrong-type rejection. Unused inputs do not
+create code copies. Late optional-owner binding, model-selected owner types and
+arbitrary reflective factories remain outside this slice; it does not qualify
+complete TAA/EFC definition export.
+
 Normal inventories may form immutable Field-source tuples using finite literal
 names, local append/extend operations, fixed loops and `attrgetter`. Definition
 export proves possible resource paths without executing model branches or

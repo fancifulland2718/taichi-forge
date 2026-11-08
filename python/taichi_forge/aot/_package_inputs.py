@@ -40,7 +40,7 @@ def default_owner_call(constructor, parameter, before):
 
 def resolve_inputs(sources, imported):
     from ._package_factories import _source_value
-    from ._package_input_families import source_class, split_field_inputs
+    from ._package_input_families import source_class, split_constructor_inputs
     from ._package_owner_sequences import constructor_items
 
     owners = {
@@ -219,13 +219,11 @@ def resolve_inputs(sources, imported):
             if absent in observed_all and item.get("optional_capable") and not item.get("optional_input"):
                 item["optional_input"] = True
                 changed = True
-            if len(observed) > 1:
-                if item["kind"] == "borrowed_field":
-                    split_field_inputs(sources, owner, inputs, calls.get(owner, ()), input_types)
-                    return resolve_inputs(sources, imported)
-                raise ValueError(f"Owner input {owner}.{name} has incompatible source definitions: {sorted(observed)}")
             if (owner, name) in annotated and observed - {origin(item)}:
                 raise ValueError(f"Owner input {owner}.{name} contradicts its declared source type")
+            if len(observed) > 1:
+                split_constructor_inputs(sources, owner, inputs, calls.get(owner, ()), input_types)
+                return resolve_inputs(sources, imported)
             if observed and origin(item) is None:
                 source_type, source_member = observed.pop()
                 if item["kind"] == "owner_input":

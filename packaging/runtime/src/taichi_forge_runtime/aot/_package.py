@@ -955,12 +955,37 @@ class _UnboundEntry:
         raise TypeError("Numerical mixin entry requires its exported concrete receiver: " + self.definition)
 
 
+def _entry_contract(manifest, symbol):
+    bindings = manifest.get("entry_bindings", {})
+    if symbol not in bindings:
+        return manifest["entries"].get(symbol)
+    binding = bindings[symbol]
+    if (
+        not isinstance(binding, dict)
+        or set(binding) != {"code", "admission"}
+        or type(binding["code"]) is not str
+        or binding["code"] not in manifest["entries"]
+        or binding["admission"] is not None
+        and not isinstance(binding["admission"], dict)
+    ):
+        raise ValueError("Logical entry binding requires existing code and an admission contract")
+    contract = {**manifest["entries"][binding["code"]]}
+    contract.pop("admission", None)
+    if binding["admission"] is not None:
+        contract["admission"] = binding["admission"]
+    return contract
+
+
 class entry:
     def __init__(self, package, symbol):
         self.symbol = symbol
         self.package = package
         self.family = package.manifest.get("entry_families", {}).get(symbol)
-        self.contract = self.family if self.family is not None else package.manifest["entries"][symbol]
+        self.contract = self.family if self.family is not None else _entry_contract(package.manifest, symbol)
+        if self.contract is None:
+            raise ValueError("Package entry references missing numerical code")
+        if self.family is None:
+            self.symbol = self.contract["symbol"]
         self._variants = []
         self._domain = {}
         self._selected = {}
@@ -968,8 +993,8 @@ class entry:
         self._selection_order = []
         if self.family is not None and "owner_inputs" in self.family:
             for identity, target in self.family["owner_inputs"].items():
-                contract = package.manifest.get("entry_families", {}).get(target) or package.manifest["entries"].get(
-                    target
+                contract = package.manifest.get("entry_families", {}).get(target) or _entry_contract(
+                    package.manifest, target
                 )
                 if (
                     identity not in package.manifest["owners"]
@@ -984,7 +1009,7 @@ class entry:
                 for name, values in self.family["domain"].items()
             }
             for variant in self.family["variants"]:
-                if variant["symbol"] not in package.manifest["entries"]:
+                if _entry_contract(package.manifest, variant["symbol"]) is None:
                     raise ValueError("Static entry family references missing numerical code")
                 selection = {name: static_key(read_static_key(key)) for name, key in variant["selection"].items()}
                 if not selection.keys() <= self._domain.keys():
@@ -1205,6 +1230,7 @@ class LoadedPackage:
                 44,
                 45,
                 46,
+                47,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1214,6 +1240,13 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        bindings = self.manifest.get("entry_bindings", {})
+        if not isinstance(bindings, dict) or bindings and self.manifest["version"] < 47:
+            raise ValueError("Logical entry bindings require definition package format 47")
+        if bindings.keys() & (self.manifest["entries"].keys() | self.manifest.get("entry_families", {}).keys()):
+            raise ValueError("Logical entry binding collides with another package entry")
+        for symbol in bindings:
+            _entry_contract(self.manifest, symbol)
         files = self.manifest["files"]
         if not {"code.tcm", "host/__init__.py"} <= files.keys():
             raise ValueError("Package is missing code or Host entry")

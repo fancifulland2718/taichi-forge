@@ -2,6 +2,7 @@
 
 import ast
 import importlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -753,7 +754,7 @@ def test_package_fixed_alias_mapping_rejects_unproven_inputs(tmp_path, monkeypat
     "before,after,diagnostic",
     [
         ("Reader(self)", "Reader(None)", "every declared constructor call"),
-        ("Forward(self.storage)", "Forward(self)", "incompatible source definitions"),
+        ("Forward(self.storage)", "Forward(self)", "Borrowed source member is absent"),
         (
             "scope.owner_reference('source', source)",
             "scope.owner_reference('source', source, optional=True)",
@@ -1152,6 +1153,339 @@ class Model:
         builder.dispatch(self.second.save)
         return builder.compile()
 """
+
+
+TYPED_OWNER_INPUT_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class ScalarStorage:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+    @ti.func
+    def read(self, index):
+        return self.values[index] + 3.0
+@ti.data_oriented
+class VectorStorage:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.vector_field(3, ti.f32, shape=scope.dim('n'), initialization='zero')
+    @ti.func
+    def read(self, index):
+        return self.values[index].sum() - 5.0
+@ti.data_oriented
+class Reader:
+    def __init__(self, source):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('source', source)
+        self.n = source.n
+        scope.derived_dim('n', scope.owner_dim('source', 'n'))
+        scope.output = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.output:
+            self.output[i] = gain * self.source.read(i)
+    @ti.kernel
+    def common(self) -> ti.i32:
+        return 7
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, m: int):
+        scope = ti.experimental.ResourceScope(self)
+        scope.scalar = ScalarStorage(n)
+        scope.vector = VectorStorage(m)
+        scope.first = Reader(self.scalar)
+        scope.second = Reader(self.vector)
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+        builder.dispatch(self.first.step, gain)
+        builder.dispatch(self.second.step, gain)
+        return builder.compile()
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_typed_owner_inputs_share_host_and_keep_method_dependencies(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, TYPED_OWNER_INPUT_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["input_families"]["definition_fixture.model.Reader"]) == 2
+    assert len([item for item in manifest["entries"].values() if item["definition"].endswith(".common")]) == 1
+    assert (tmp_path / "sdk/host/model.py").read_text().count("class Reader:") == 1
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        # Three Reader definitions and the fixture's unimported public entry.
+        assert len([name for name in archive.namelist() if name.endswith((".ll", ".bc", ".spv"))]) == 4
+    original = package.Model(7, 5)
+    original.scalar.values.from_numpy(np.arange(7, dtype=np.float32))
+    original.vector.values.from_numpy(np.arange(15, dtype=np.float32).reshape(5, 3))
+    original.first.step(2.0)
+    original.second.step(2.0)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, 5), code.host.Model(13, 11)
+        assert type(a.first) is type(a.second) is type(b.first)
+        a.scalar.values.from_numpy(np.arange(7, dtype=np.float32))
+        a.vector.values.from_numpy(np.arange(15, dtype=np.float32).reshape(5, 3))
+        graph = a.graph()
+        prepared = graph.bind(dict(gain=2.0))
+        prepared.run()
+        for current, expected in ((a.first, original.first), (a.second, original.second)):
+            np.testing.assert_array_equal(current.output.to_numpy(), expected.output.to_numpy())
+        b.first.step(-2.0)
+        np.testing.assert_array_equal(b.first.output.to_numpy(), -6.0)
+        original_source = a.first.source
+        a.first.source = a.vector
+        with pytest.raises(ValueError, match="owner|Owner"):
+            a.first.step(1.0)
+        with pytest.raises(ValueError, match="owner|Owner"):
+            graph.bind(dict(gain=1.0))
+        prepared.run()
+        a.first.source = original_source
+        prepared.close()
+        assert a.first.common() == a.second.common() == 7
+        with pytest.raises(ValueError, match="unique declared"):
+            type(a.first)(a.scalar.values)
+    probe = tmp_path / "consume_typed_owners.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError('Numerical source unavailable: ' + fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(19, 17), code.host.Model(3, 5)
+    a.vector.values.from_numpy(np.ones((17, 3), dtype=np.float32))
+    a.graph().run(dict(gain=3.0))
+    b.graph().run(dict(gain=-2.0))
+    np.testing.assert_array_equal(a.first.output.to_numpy(), 9.0)
+    np.testing.assert_array_equal(a.second.output.to_numpy(), -6.0)
+    np.testing.assert_array_equal(b.first.output.to_numpy(), -6.0)
+    np.testing.assert_array_equal(b.second.output.to_numpy(), 10.0)
+    assert a.first.output._group_owner is not b.first.output._group_owner
+print('TYPED_OWNER_SOURCE_FREE_OK')
+""",
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "TYPED_OWNER_SOURCE_FREE_OK" in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_typed_owner_tuples_do_not_copy_code_for_unused_inputs(tmp_path, monkeypatch):
+    source = (
+        TYPED_OWNER_INPUT_SOURCE.replace("def __init__(self, source):", "def __init__(self, source, peer):")
+        .replace(
+            "scope.owner_reference('source', source)",
+            "scope.owner_reference('source', source)\n        scope.owner_reference('peer', peer)",
+        )
+        .replace("Reader(self.scalar)", "Reader(self.scalar, self.vector)")
+        .replace(
+            "Reader(self.vector)",
+            "Reader(self.vector, self.scalar)\n        scope.third = Reader(self.scalar, self.scalar)",
+        )
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["input_families"]["definition_fixture.model.Reader"]) == 3
+    assert len([item for item in manifest["entries"].values() if item["definition"].endswith(".step")]) == 2
+    assert len([item for item in manifest["entries"].values() if item["definition"].endswith(".common")]) == 1
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([name for name in archive.namelist() if name.endswith((".ll", ".bc", ".spv"))]) == 4
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(13, 19)
+        model.first.step(2.0)
+        model.third.step(2.0)
+        np.testing.assert_array_equal(model.first.output.to_numpy(), model.third.output.to_numpy())
+        with pytest.raises(ValueError, match="unique declared"):
+            type(model.first)(model.vector, model.vector)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_typed_owner_inputs_propagate_through_declared_forwarders(tmp_path, monkeypatch):
+    source = (
+        TYPED_OWNER_INPUT_SOURCE.replace(
+            "class Model:",
+            """class Forward:
+    def __init__(self, source):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('source', source)
+        scope.reader = Reader(source)
+@ti.data_oriented
+class Model:""",
+        )
+        .replace("Reader(self.scalar)", "Forward(self.scalar)")
+        .replace("Reader(self.vector)", "Forward(self.vector)")
+    )
+    source = source.replace("builder.dispatch(self.first.step, gain)", "builder.dispatch(self.first.reader.step, gain)")
+    source = source.replace(
+        "builder.dispatch(self.second.step, gain)", "builder.dispatch(self.second.reader.step, gain)"
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert len(manifest["input_families"]["definition_fixture.model.Forward"]) == 2
+    assert len(manifest["input_families"]["definition_fixture.model.Reader"]) == 2
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([name for name in archive.namelist() if name.endswith((".ll", ".bc", ".spv"))]) == 4
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(13, 19)
+        model.graph().run(dict(gain=2.0))
+        np.testing.assert_array_equal(model.first.reader.output.to_numpy(), 6.0)
+        np.testing.assert_array_equal(model.second.reader.output.to_numpy(), -10.0)
+
+
+@pytest.mark.parametrize("static", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_typed_owner_inputs_separate_type_admission_from_identical_code(tmp_path, monkeypatch, static):
+    source = TYPED_OWNER_INPUT_SOURCE
+    start, end = source.index("@ti.data_oriented\nclass VectorStorage"), source.index("@ti.data_oriented\nclass Reader")
+    source = source[:start] + "@ti.data_oriented\nclass VectorStorage(ScalarStorage):\n    pass\n" + source[end:]
+    source = source.replace("self.source.read(i)", "self.source.values[i]")
+    if static:
+        source = source.replace("def __init__(self, source):", "def __init__(self, source, enabled: bool = True):")
+        source = source.replace(
+            "scope.owner_reference('source', source)",
+            "scope.owner_reference('source', source)\n        self.enabled = enabled\n"
+            "        scope.static('enabled', choices=(False, True))",
+        )
+        source = source.replace(
+            "self.output[i] = gain * self.source.values[i]",
+            "if ti.static(self.enabled):\n                self.output[i] = gain * self.source.values[i]\n"
+            "            else:\n                self.output[i] = -1.0",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 47
+    assert len(manifest["input_families"]["definition_fixture.model.Reader"]) == 2
+    assert manifest["entry_bindings"]
+    with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
+        assert len([name for name in archive.namelist() if name.endswith((".ll", ".bc", ".spv"))]) == 3 + static
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(7, 11)
+        model.scalar.values.from_numpy(np.arange(7, dtype=np.float32))
+        model.vector.values.from_numpy(np.arange(11, dtype=np.float32))
+        graph = model.graph()
+        prepared = graph.bind(dict(gain=2.0))
+        prepared.run()
+        np.testing.assert_array_equal(model.first.output.to_numpy(), 2 * np.arange(7))
+        np.testing.assert_array_equal(model.second.output.to_numpy(), 2 * np.arange(11))
+        model.first.source = model.vector
+        with pytest.raises(ValueError, match="owner|Owner"):
+            model.first.step(1.0)
+        with pytest.raises(ValueError, match="owner|Owner"):
+            graph.bind(dict(gain=1.0))
+        prepared.run()
+        prepared.close()
+        np.testing.assert_array_equal(model.first.output.to_numpy(), 2 * np.arange(7))
+        if static:
+            model.second.enabled = False
+            model.second.step(1.0)
+            np.testing.assert_array_equal(model.second.output.to_numpy(), -1.0)
+    # No binding may target another binding, silently drop a required format,
+    # or shadow native code. Reject before importing any retained Host modules.
+    if not static:
+        binding = next(iter(manifest["entry_bindings"]))
+        for change in ("missing", "recursive", "collision", "version", "null"):
+            changed = json.loads(json.dumps(manifest))
+            if change == "version":
+                changed["version"] = 46
+            elif change == "null":
+                changed["entry_bindings"][binding] = None
+            elif change == "collision":
+                changed["entry_bindings"][next(iter(changed["entries"]))] = changed["entry_bindings"].pop(binding)
+            else:
+                changed["entry_bindings"][binding]["code"] = binding if change == "recursive" else "missing"
+            (tmp_path / "sdk/package.json").write_text(json.dumps(changed), encoding="utf8")
+            with Runtime(manifest["target"]) as runtime, pytest.raises(ValueError, match="binding"):
+                load_package(runtime, tmp_path / "sdk")
+        (tmp_path / "sdk/package.json").write_text(json.dumps(manifest), encoding="utf8")
+        probe = tmp_path / "consume_shared_owner_code.py"
+        probe.write_text(
+            """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError('Numerical source unavailable: ' + fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    model = code.host.Model(19, 17)
+    model.scalar.values.from_numpy(np.arange(19, dtype=np.float32))
+    model.vector.values.from_numpy(np.arange(17, dtype=np.float32))
+    prepared = model.graph().bind(dict(gain=3.0))
+    prepared.run()
+    np.testing.assert_array_equal(model.first.output.to_numpy(), 3 * np.arange(19))
+    np.testing.assert_array_equal(model.second.output.to_numpy(), 3 * np.arange(17))
+    prepared.close()
+print('SHARED_OWNER_CODE_SOURCE_FREE_OK')
+""",
+            encoding="utf8",
+        )
+        result = subprocess.run(
+            [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+            cwd=tmp_path,
+            env=dict(
+                os.environ,
+                PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+                TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+            ),
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "SHARED_OWNER_CODE_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change,diagnostic",
+    [
+        ("annotation", "contradicts its declared source type"),
+        ("model_selection", "one proven source"),
+        ("wrong_kind", "resource kind"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_typed_owner_inputs_reject_unproven_domains(tmp_path, monkeypatch, change, diagnostic):
+    source = TYPED_OWNER_INPUT_SOURCE
+    if change == "annotation":
+        source = source.replace("def __init__(self, source):", "def __init__(self, source: ScalarStorage):")
+    elif change == "model_selection":
+        source = source.replace("Reader(self.scalar)", "Reader(self.scalar if n > 3 else self.vector)")
+    else:
+        source = source.replace("Reader(self.scalar)", "Reader(self.scalar.values)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
 
 
 @pytest.mark.parametrize("collection", [False, True])

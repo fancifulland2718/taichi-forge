@@ -1508,10 +1508,20 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 identity = (code.kernel, code.key)
                 if identity in shared_entries:
                     entry_manifest = shared_entries[identity]
-                    if entry_manifest.get("admission") != admission:
-                        raise PackageExportError("Shared package code requires compatible dimension admission")
                     if name + "." + definition["name"] not in entry_manifest["definitions"]:
                         entry_manifest["definitions"].append(name + "." + definition["name"])
+                    if entry_manifest.get("admission") != admission:
+                        # The compiler's code/ABI identity is already equal.
+                        # Instance type/provenance checks are a separate logical
+                        # entry, never a reason to export that code again.
+                        binding = dict(code=entry_manifest["symbol"], admission=admission)
+                        binding_symbol = (
+                            "binding_" + hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+                        )
+                        manifest.setdefault("entry_bindings", {})[binding_symbol] = binding
+                        manifest["version"] = max(47, manifest["version"])
+                        entry_manifest = {**entry_manifest, "symbol": binding_symbol}
+                        entry_manifest.pop("admission", None)
                 else:
                     # Semantic capture identity alone does not describe the
                     # per-kernel compilation policy. Target and module options
@@ -1647,7 +1657,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             identity = json.dumps([name + "." + definition["name"], methods], sort_keys=True).encode()
             symbol = "inputs_" + hashlib.sha256(identity).hexdigest()
             first = next(iter(methods.values()))
-            contract = manifest["entry_families"].get(first) or manifest["entries"][first]
+            code_symbol = manifest.get("entry_bindings", {}).get(first, {}).get("code", first)
+            contract = manifest["entry_families"].get(first) or manifest["entries"][code_symbol]
             manifest["entry_families"][symbol] = dict(arguments=contract["arguments"], owner_inputs=methods)
             entries[definition["name"]] = dict(symbol=symbol)
         host_source, minimum_version, producer_only = _host_projection(
