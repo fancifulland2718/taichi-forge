@@ -1076,6 +1076,12 @@ CPU/CUDA 局部验证覆盖不同 owner 方法、相同实现的实际代码条�
 标量视图。CPU/CUDA 已局部验证，GeoPhys capacity checkpoint 复用该公共查询；其资源
 清单与共享拷贝计划的定义包迁移仍未完成，不代表整个 checkpoint/EFC 已可导出。
 
+同一构造器可顺序复用局部 ResourceScope 名字，或在一个无条件资源上下文结束后将其
+重新绑定到 owner scope。导出按赋值位置区分局部句柄，原维度命名空间、初始化政策及
+独立 FieldsBuilder 边界保持不变，不执行构造器或增加数值副本。CPU/CUDA 局部检查
+覆盖新尺寸、双实例、独立组退休和无源码消费。条件重绑、闭包捕获及不明确的混合上下文
+仍拒绝；这只消除已证明顺序绑定的限制，不扩大任意 Python 作用域支持，也不新增格式。
+
 正常状态清单可通过有限字面量名字、局部 append/extend、固定循环及 `attrgetter`
 形成不可变 Field 来源 tuple，再用原 `owner_sequence` 构造独立算法对象。定义包只
 证明可能的资源路径；不执行清单 helper 的模型分支，不枚举条件组合。原 Host helper

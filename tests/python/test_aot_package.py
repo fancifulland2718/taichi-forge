@@ -7333,6 +7333,137 @@ class Model:
 """
 
 
+@pytest.mark.parametrize("explicit_builders", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_sequential_scope_aliases_preserve_allocation_boundaries(tmp_path, monkeypatch, explicit_builders):
+    source = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, m: int):
+        global constructors
+        constructors += 1
+        self.n, self.m = n, m
+        scope = ti.experimental.ResourceScope(self, initialization='zero')
+        rows = scope.dim('n')
+        scope.a = scope.field(ti.i32, shape=rows)
+        scope = ti.experimental.ResourceScope(self, initialization='consumer_explicit')
+        scope.b = scope.field(ti.i32, shape=scope.dim('m'), initialization='zero')
+        scope = ti.experimental.ResourceScope(self)
+        scope.value('gain', ti.i32)
+    @ti.kernel
+    def step(self):
+        for i in self.a:
+            self.a[i] += self.gain
+        for i in self.b:
+            self.b[i] += 2 * self.gain
+""".replace("        self.n, self.m = n, m", "        self.n, self.m = n, m\n        self.gain = 3")
+    if explicit_builders:
+        source = (
+            source.replace(
+                "scope = ti.experimental.ResourceScope(self, initialization='zero')",
+                "first = ti.FieldsBuilder()\n        scope = ti.experimental.ResourceScope(self, builder=first, initialization='zero')",
+            )
+            .replace(
+                "scope = ti.experimental.ResourceScope(self, initialization='consumer_explicit')",
+                "self.first_tree = first.finalize()\n        second = ti.FieldsBuilder()\n"
+                "        scope = ti.experimental.ResourceScope(self, builder=second, initialization='consumer_explicit')",
+            )
+            .replace(
+                "        scope = ti.experimental.ResourceScope(self)\n",
+                "        self.second_tree = second.finalize()\n        scope = ti.experimental.ResourceScope(self)\n",
+            )
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["field_groups"]) == (2 if explicit_builders else 1)
+    assert len(manifest["entries"]) == 2  # The fixture also has an unimported public kernel.
+    original = package.Model(7, 5)
+    original.step()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, 5), code.host.Model(3, 19)
+        assert (a.a._group_owner is a.b._group_owner) != explicit_builders
+        assert a.a._group_owner is not b.a._group_owner
+        a.step()
+        b.gain = -2
+        b.step()
+        np.testing.assert_array_equal(a.a.to_numpy(), original.a.to_numpy())
+        np.testing.assert_array_equal(a.b.to_numpy(), original.b.to_numpy())
+        np.testing.assert_array_equal(b.a.to_numpy(), -2)
+        np.testing.assert_array_equal(b.b.to_numpy(), -4)
+        if explicit_builders:
+            a.first_tree.destroy()
+            np.testing.assert_array_equal(a.b.to_numpy(), 6)
+    if not explicit_builders:
+        probe = tmp_path / "consume_scope_aliases.py"
+        probe.write_text(
+            """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError('Numerical source unavailable: ' + fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(13, 17), code.host.Model(3, 7)
+    a.step()
+    b.gain = -5
+    b.step()
+    np.testing.assert_array_equal(a.a.to_numpy(), 3)
+    np.testing.assert_array_equal(a.b.to_numpy(), 6)
+    np.testing.assert_array_equal(b.b.to_numpy(), -10)
+print('SOURCE_FREE_SCOPE_ALIASES_OK')
+""",
+            encoding="utf8",
+        )
+        result = subprocess.run(
+            [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+            cwd=tmp_path,
+            env=dict(
+                os.environ,
+                PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+                TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+            ),
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "SOURCE_FREE_SCOPE_ALIASES_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["conditional", "ordinary", "delete", "capture", "global", "import"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_sequential_scope_aliases_reject_ambiguous_lifetimes(tmp_path, monkeypatch, change):
+    binding = "        scope = ti.experimental.ResourceScope(self)"
+    source = SCOPE_FIELDS_SOURCE.replace(
+        "        self.total = ti.field(ti.f32, shape=())",
+        "        self.total = ti.field(ti.f32, shape=())\n" + binding,
+    )
+    if change == "conditional":
+        source = source.replace(binding, "        if n:\n    " + binding, 1)
+    elif change == "ordinary":
+        source = source.replace("        scope.v =", "        scope = object()\n        scope.v =")
+    elif change == "delete":
+        source = source.replace("        scope.v =", "        del scope\n        scope.v =")
+    elif change == "global":
+        source = source.replace("        global constructors", "        global constructors, scope")
+    elif change == "import":
+        source = source.replace("        scope.v =", "        import math as scope\n        scope.v =")
+    else:
+        source = source.replace("        scope.v =", "        captured = lambda: scope\n        scope.v =")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="ResourceScope"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize("construction_method", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_scope_fields_share_dimension_and_native_layout_rules(tmp_path, monkeypatch, construction_method):
@@ -8205,6 +8336,27 @@ def test_package_context_alias_reuse_preserves_distinct_native_groups(tmp_path, 
         np.testing.assert_array_equal(a.aux.to_numpy(), 2)
         b.step()
         np.testing.assert_array_equal(b.aux.to_numpy(), 4)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_context_alias_can_be_rebound_to_a_later_owner_scope(tmp_path, monkeypatch):
+    model = CONTEXT_FIELDS_SOURCE.replace(
+        "    @ti.kernel",
+        "        self.gain = 3\n        scope = ti.experimental.ResourceScope(self)\n"
+        "        scope.value('gain', ti.i32)\n    @ti.kernel",
+    ).replace("self.values[i] += 1", "self.values[i] += self.gain")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=model)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["field_groups"]) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(3), code.host.Model(11)
+        a.step()
+        b.gain = -2
+        b.step()
+        np.testing.assert_array_equal(a.values.to_numpy(), 3)
+        np.testing.assert_array_equal(b.values.to_numpy(), -2)
+        assert a.values._group_owner is not b.values._group_owner
 
 
 @pytest.mark.parametrize("change", ["reassign", "escape", "after"])

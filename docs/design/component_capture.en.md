@@ -1385,6 +1385,15 @@ CPU/CUDA checks pass, and GeoPhys capacity checkpoint uses this public query.
 Its resource inventory and shared-copy plan migration remain incomplete; this
 does not qualify complete checkpoint/EFC definition export.
 
+Constructors may sequentially reuse a local ResourceScope name, including an
+owner scope after an unconditional resource context. Export distinguishes handles
+by assignment position while retaining the original dimension namespace,
+initialization policy and independent FieldsBuilder boundaries. It executes no
+constructor and adds no numerical copies or format version. Local CPU/CUDA checks
+cover new sizes, separate instances, independent group retirement and source-free
+consumption. Conditional rebinding, captured locals and ambiguous mixed contexts
+still reject; this does not admit arbitrary Python scope behavior.
+
 Normal inventories may form immutable Field-source tuples using finite literal
 names, local append/extend operations, fixed loops and `attrgetter`. Definition
 export proves possible resource paths without executing model branches or

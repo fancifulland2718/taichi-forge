@@ -8,6 +8,115 @@ from taichi_forge_runtime._dimensions import Extent, extent_dependencies, evalua
 from ._package_types import qualified_kind, project_tensor_axes, expand_local_type
 from ._package_fields import field_type_shape, field_order
 
+
+def _normalize_scope_aliases(constructor, kind):
+    """Distinguish sequential local handles without changing their resources.
+
+    Only unconditional ResourceScope assignments and proven resource contexts
+    may reuse a local name. Other writes and captured locals keep the existing
+    rejection path; they cannot be mistaken for a declaration namespace.
+    """
+    bindings = {}
+    for statement in constructor.body:
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and qualified_kind(statement.value, kind) == "experimental.ResourceScope"
+        ):
+            bindings.setdefault(statement.targets[0].id, []).append((statement, statement.targets[0]))
+        elif getattr(statement, "_package_resource_context", None) is not None:
+            target = statement.items[0].optional_vars
+            bindings.setdefault(target.id, []).append((statement, target))
+    nodes = list(ast.walk(constructor))
+    nested = [
+        node
+        for node in nodes
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
+        and node is not constructor
+    ]
+    names = {node.id for node in nodes if isinstance(node, ast.Name)} | {
+        node.arg for node in nodes if isinstance(node, ast.arg)
+    }
+    replacements = {}
+    for name, statements in bindings.items():
+        targets = {id(target) for _, target in statements}
+        if (
+            len(statements) < 2
+            or any(
+                isinstance(node, ast.Name)
+                and node.id == name
+                and isinstance(node.ctx, (ast.Store, ast.Del))
+                and id(node) not in targets
+                or isinstance(node, ast.arg)
+                and node.arg == name
+                for node in nodes
+            )
+            or any(
+                isinstance(node, ast.Name) and node.id == name or isinstance(node, ast.arg) and node.arg == name
+                for child in nested
+                for node in ast.walk(child)
+            )
+            or any(
+                isinstance(node, (ast.Global, ast.Nonlocal))
+                and name in node.names
+                or isinstance(node, ast.alias)
+                and (node.asname or node.name.split(".")[0]) == name
+                or isinstance(
+                    node,
+                    (
+                        ast.FunctionDef,
+                        ast.AsyncFunctionDef,
+                        ast.ClassDef,
+                        ast.ExceptHandler,
+                        ast.MatchAs,
+                        ast.MatchStar,
+                    ),
+                )
+                and node is not constructor
+                and node.name == name
+                or isinstance(node, ast.MatchMapping)
+                and node.rest == name
+                for node in nodes
+            )
+        ):
+            continue
+        for statement, target in statements[1:]:
+            alias = f"_forge_scope_{statement.lineno}_{statement.col_offset}"
+            while alias in names:
+                alias += "_"
+            names.add(alias)
+            replacements[id(statement)] = name, alias, target
+    if not replacements:
+        return
+
+    class Rename(ast.NodeTransformer):
+        def __init__(self):
+            self.current = {}
+
+        def visit_Name(self, node):
+            node.id = self.current.get(node.id, node.id)
+            return node
+
+    rename = Rename()
+    for statement in constructor.body:
+        replacement = replacements.get(id(statement))
+        if replacement is not None:
+            # The RHS observes the previous binding, just as ordinary Python.
+            if isinstance(statement, ast.Assign):
+                statement.value = rename.visit(statement.value)
+            else:
+                statement.items[0].context_expr = rename.visit(statement.items[0].context_expr)
+            name, alias, target = replacement
+            target.id = alias
+            rename.current[name] = alias
+            if isinstance(statement, ast.With):
+                for child in statement.body:
+                    rename.visit(child)
+        else:
+            rename.visit(statement)
+
+
 def _normalize_field_loops(module, constructor, kind, fail, namespace):
     """Expand literal member declarations, never iterate model data or numerical code."""
     scope_bindings, context_bindings = [], []
@@ -184,6 +293,7 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
 def scope_declarations(module, constructor, kind, fail, namespace, earlier=None, *, owner_node=None):
     if constructor is None:
         return {}
+    _normalize_scope_aliases(constructor, kind)
     _normalize_field_loops(module, constructor, kind, fail, namespace)
     scopes, declarations, allowed = {}, {}, set()
     scope_groups, builders = {}, {}
