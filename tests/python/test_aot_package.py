@@ -8828,6 +8828,133 @@ def test_package_conditional_struct_requires_valid_presence(tmp_path, monkeypatc
     assert not (tmp_path / "sdk").exists()
 
 
+@pytest.mark.parametrize("layout,record", [("AOS", False), ("AOS", True), ("SOA", True), ("placement", False)])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_conditional_model_tensors_preserve_native_layout(tmp_path, monkeypatch, layout, record):
+    from tests.python.test_aot_dense_snode_group import _compiled_nodes
+
+    source = (
+        _conditional_struct_source(layout)
+        .replace("ti.types.vector(3, ti.f32)", "ti.types.vector(self.m, ti.f32)")
+        .replace("        if self.first:", "        scope.dim('m')\n        if self.first:", 1)
+        .replace(
+            "self.extra.v[i] = ti.Vector([i, i + 1, i + 2])",
+            "for j in range(self.m):\n                    self.extra.v[i][j] = i + j",
+        )
+    )
+    if not record:
+        source = (
+            source.replace(
+                "scope.struct_field(dict(x=ti.f32, v=ti.types.vector(self.m, ti.f32)),",
+                "scope.vector_field(self.m, ti.f32,",
+            )
+            .replace(", layout=ti.Layout.AOS", "")
+            .replace("                self.extra.x[i] = 2 * i\n", "")
+            .replace("self.extra.v[i]", "self.extra[i]")
+        )
+    if layout == "placement":
+        source = (
+            CONDITIONAL_LAYOUT_SOURCE.replace("scope.vector_field(3,", "scope.vector_field(self.m,")
+            .replace("        if self.first:", "        scope.dim('m')\n        if self.first:", 1)
+            .replace(
+                "self.extra[i] = ti.Vector([i, i + 1, i + 2])",
+                "for j in range(self.m):\n                    self.extra[i][j] = i + j",
+            )
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 46
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    counts = {}
+    for item in manifest["entries"].values():
+        method = item["definition"].rsplit(".", 1)[-1]
+        counts[method] = counts.get(method, 0) + 1
+    assert counts == dict(common=1, first_step=2, second_step=2, available_without_a_test=1)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        instances = []
+        for n, m, first, second in ((5, 0, False, False), (7, 5, True, False), (3, 13, True, True)):
+            original, current = package.Model(n, m, first, second), code.host.Model(n, m, first, second)
+            instances.append(current)
+            for instance in (original, current):
+                instance.common(4.0)
+                instance.first_step()
+                instance.second_step()
+            root = ti.lang.impl.get_runtime().prog.get_snode_root(original.values.snode.ptr.get_snode_tree_id())
+            assert current.values._group_owner.layout["nodes"] == _compiled_nodes(root)
+            np.testing.assert_array_equal(current.values.to_numpy(), original.values.to_numpy())
+            if first:
+                actual = current.extra.v if record else current.extra
+                expected = original.extra.v if record else original.extra
+                np.testing.assert_array_equal(actual.to_numpy(), expected.to_numpy())
+                np.testing.assert_array_equal(actual.to_numpy(), np.arange(n)[:, None] + np.arange(m))
+            else:
+                assert current.extra is None
+        builder = code.graph_builder()
+        builder.dispatch(instances[1].first_step)
+        with builder.compile().bind({}) as prepared:
+            instances[1].first = False
+            prepared.run()
+            with pytest.raises(ValueError, match="layout configuration changed"):
+                instances[1].common(1.0)
+        assert len({id(instance.values._group_owner) for instance in instances}) == 3
+    probe = tmp_path / "consume_conditional_model.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, Block())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    absent = code.host.Model(5, 0, False, False)
+    current = code.host.Model(3, 129, True, True)
+    absent.common(2.0)
+    current.first_step()
+    current.second_step()
+    value = current.extra.v if int(sys.argv[3]) else current.extra
+    np.testing.assert_array_equal(value.to_numpy(), np.arange(3)[:, None] + np.arange(129))
+    np.testing.assert_array_equal(absent.values.to_numpy(), 2 * (np.arange(5) + 1))
+    assert absent.extra is None and absent.other is None
+print('CONDITIONAL_MODEL_SOURCE_FREE_OK')
+""",
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"], str(int(record))],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CONDITIONAL_MODEL_SOURCE_FREE_OK" in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_conditional_model_tensor_rejects_unguarded_reads(tmp_path, monkeypatch):
+    source = (
+        _conditional_struct_source("SOA")
+        .replace("ti.types.vector(3, ti.f32)", "ti.types.vector(self.m, ti.f32)")
+        .replace("        if self.first:", "        scope.dim('m')\n        if self.first:", 1)
+    )
+    source = source.replace("self.values[i] = gain * (i + 1)", "self.values[i] = self.extra.v[i][0]")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="NoneType|Conditional"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_conditional_struct_in_child_keeps_qualified_guards(tmp_path, monkeypatch):
     source = _conditional_struct_source("SOA") + """

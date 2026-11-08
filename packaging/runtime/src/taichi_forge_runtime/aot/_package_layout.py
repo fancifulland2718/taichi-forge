@@ -20,18 +20,25 @@ def _select_members(contract, selected):
         for name, paths in contract["members"].items()
         if all(selected[key] is value for key, value in contract["conditions"].get(name, {}).items())
     }
+    source = json.loads(contract["schema"])
+    source_paths, _ = _tree(source["nodes"])
+
+    def member_paths(selector):
+        if selector[0] == "schema_nodes":
+            return [source_paths[index] for index in selector[1]]
+        return selector
+
     # Remove inactive place nodes and their now-unused Dense ancestors. This
     # changes construction topology only: no strides, offsets, padding or sizes
     # are calculated here. instantiate() still uses the original StructCompiler.
     needed = {()}
-    for paths in active.values():
-        for path in paths:
+    for selector in active.values():
+        for path in member_paths(selector):
             needed.update(tuple(path[:length]) for length in range(len(path) + 1))
     for container in contract.get("containers", ()):
         if all(selected[key] is value for key, value in container["conditions"].items()):
             path = container["path"]
             needed.update(tuple(path[:length]) for length in range(len(path) + 1))
-    source = json.loads(contract["schema"])
     paths, children, retained, new_paths, new_children, nodes = {}, {}, {}, {}, {}, []
     for index, node in enumerate(source["nodes"]):
         parent = node["parent"]
@@ -58,7 +65,14 @@ def _select_members(contract, selected):
             if key not in ("schema", "members", "dimensions", "conditions", "containers")
         },
         schema=json.dumps({**source, "nodes": nodes}, separators=(",", ":")),
-        members={name: [list(new_paths[tuple(path)]) for path in paths] for name, paths in active.items()},
+        members={
+            name: (
+                ["schema_nodes", [retained[index] for index in selector[1]]]
+                if selector[0] == "schema_nodes"
+                else [list(new_paths[tuple(path)]) for path in selector]
+            )
+            for name, selector in active.items()
+        },
         dimensions=dimensions,
     )
 

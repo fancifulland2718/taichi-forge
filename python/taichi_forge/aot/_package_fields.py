@@ -150,7 +150,15 @@ def field_declarations(module, constructor, kind, fail):
 def construct_fields(owner, schema, namespace, module, *, imported_modules=None):
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
-    from ._component import DenseField, Dimension, Record, _ConditionalDenseField, _ConditionalRecord, _ModelTensorField
+    from ._component import (
+        DenseField,
+        Dimension,
+        Record,
+        _ConditionalDenseField,
+        _ConditionalModelTensorField,
+        _ConditionalRecord,
+        _ModelTensorField,
+    )
     from taichi_forge_runtime._dimensions import evaluate_extent
     from ._package_records import read_member, write_member
 
@@ -246,10 +254,6 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
                 item["element"].get("members", {}),
                 item.pop("member_initialization_source"),
             )
-        if model_tensors and item.get("conditions"):
-            raise ValueError(
-                "Conditional model tensor Fields require projected layout selection"
-            )
         if item.get("struct_field"):
             if (
                 item["element"]["kind"] != "struct"
@@ -320,6 +324,14 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
 
         def field_declaration(element, spec):
             if spec.get("model_tensor"):
+                if item.get("conditions"):
+                    return _ConditionalModelTensorField(
+                        element.dtype,
+                        tuple(item["shape"]),
+                        group,
+                        tuple(spec["element_shape"]),
+                        tuple(sorted(item["conditions"].items())),
+                    )
                 return _ModelTensorField(element.dtype, tuple(item["shape"]), group, tuple(spec["element_shape"]))
             if item.get("conditions"):
                 return _ConditionalDenseField(
@@ -342,11 +354,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
                 }
             )
             if item.get("struct_field")
-            else (
-                _ConditionalDenseField(dtype, tuple(item["shape"]), group, tuple(sorted(item["conditions"].items())))
-                if item.get("conditions")
-                else field_declaration(dtype, item["element"])
-            )
+            else field_declaration(dtype, item["element"])
         )
     owner._forge_package_field_trees = [builder._finalize_for_aot() for builder in builders.values()]
     return declarations

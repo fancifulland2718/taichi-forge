@@ -1276,20 +1276,28 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         if member_schemas[attribute].get("conditions")
                     }
                     if conditions:
-                        if any(paths[0] == "schema_nodes" for paths in members.values()):
-                            raise PackageExportError(
-                                "Conditional model tensor groups require projected layout selection"
+                        from taichi_forge_runtime.aot._package_layout import _tree
+
+                        layout_paths, _ = _tree(json.loads(layout)["nodes"])
+
+                        def placement_path(selector):
+                            return (
+                                layout_paths[selector[1][0]][:-1]
+                                if selector[0] == "schema_nodes"
+                                else tuple(selector[0][:-1])
                             )
+
                         manifest["field_groups"][key]["conditions"] = conditions
                         containers = {
-                            tuple(members[attribute][0][:-1]): member_schemas[attribute]["placement"]["conditions"]
+                            placement_path(members[attribute]): member_schemas[attribute]["placement"]["conditions"]
                             for attribute in members
                             if "placement" in member_schemas[attribute]
                         }
                         manifest["field_groups"][key]["containers"] = [
                             dict(path=list(path), conditions=guard) for path, guard in sorted(containers.items())
                         ]
-                        manifest["version"] = max(12, manifest["version"])
+                        version = 46 if any(paths[0] == "schema_nodes" for paths in members.values()) else 12
+                        manifest["version"] = max(version, manifest["version"])
                     orders = {
                         attribute: member_schemas[attribute]["order_policy"]
                         for attribute in members

@@ -1375,6 +1375,15 @@ checks cover absent/present storage, new sizes, changed predicates/aliases and
 prepared snapshots. This does not add conditional model-tensor allocation or
 qualify GeoPhys's complete CCD/EFC resource closure.
 
+Format 46 connects model-tensor Field allocation to declared boolean presence.
+Native recipe selectors retain dynamic element axes. Removing absent members
+and empty ancestors still delegates all byte layout to the same SNode compiler;
+model sizes and combinations of unrelated options do not duplicate code.
+Local CPU/CUDA checks cover standalone vectors, AOS/SOA Struct members,
+explicit shared placement, new sizes, original JIT layout equality, independent
+instances and source-free consumption. Dynamic Sparse and conditional owner
+type selection remain outside this qualification.
+
 
 Declared resource records and non-owning owner references can pass through
 unannotated `ti.func` arguments and local aliases. The frontend retains their
