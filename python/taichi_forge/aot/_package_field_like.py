@@ -11,7 +11,7 @@ def resolve_field_likes(sources):
         for name, schema in schemas.items()
     }
 
-    def allocation(owner, path, visiting=()):
+    def allocation(owner, path, visiting=(), *, present=False):
         if not path:
             raise ValueError("field_like requires a declared complete Field allocation")
         token = (owner, tuple(path))
@@ -20,17 +20,17 @@ def resolve_field_likes(sources):
         schema = owners[owner][1]
         name, *rest = path
         item = schema.get(name, {})
-        if item.get("conditions"):
+        if item.get("conditions") and not present:
             raise ValueError(
                 "field_like currently requires an unconditional original allocation"
             )
         if item.get("kind") in ("owner", "owner_input"):
-            identity, field, prefix = allocation(
-                item["owner_type"], rest, (*visiting, token)
-            )
+            identity, field, prefix = allocation(item["owner_type"], rest, (*visiting, token), present=present)
             return identity, field, [name, *prefix]
         if item.get("kind") == "borrowed_field" and not rest:
-            return allocation(owner, item["source_path"], (*visiting, token))
+            return allocation(
+                owner, item["source_path"], (*visiting, token), present=present or "input_parameter" in item
+            )
         if item.get("kind") == "field_like":
             resolve(owner, name, (*visiting, token))
             item = schema[name]
@@ -84,6 +84,7 @@ def resolve_field_likes(sources):
             "order",
             "order_policy",
             "order_source",
+            "conditions",
         ):
             field.pop(key, None)
         for node in ast.walk(field["type_node"]):

@@ -1366,6 +1366,15 @@ unknown effects, recursion, mutable returns and rebinding reject. This has prove
 possible sources in GeoPhys's original CCD inventory, but complete resource types,
 optional presence and consumption still require their own validation.
 
+Format 45 also permits an already allocated conditional Field as a proved
+constructor input. Its source existence predicate remains a binding/admission
+check, not a numerical type choice; `field_like` creates independent backup
+storage whenever that consumer is constructed. Whole Struct inputs retain source
+identity checks even when only their members are used. CPU/CUDA source-free
+checks cover absent/present storage, new sizes, changed predicates/aliases and
+prepared snapshots. This does not add conditional model-tensor allocation or
+qualify GeoPhys's complete CCD/EFC resource closure.
+
 
 Declared resource records and non-owning owner references can pass through
 unannotated `ti.func` arguments and local aliases. The frontend retains their

@@ -1495,6 +1495,96 @@ def test_package_owner_inventory_rejects_unproven_sources(tmp_path, monkeypatch,
     assert not (tmp_path / "sdk").exists()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_present_field_inputs_do_not_specialize_on_source_presence(tmp_path, monkeypatch):
+    source = (
+        INVENTORY_FIELD_INPUT_SOURCE.replace(
+            "self.n, self.width = n, width",
+            "self.n, self.width = n, width\n        self.has_record = width > 0\n        self.record = None",
+        )
+        .replace("columns = scope.dim('width')", "scope.static('has_record', choices=(False, True))")
+        .replace(
+            "scope.record = scope.struct_field({'x': ti.f32, 'v': ti.types.vector(self.width, ti.f32), 'id': ti.i32}, shape=scope.dim('n'), initialization='zero')",
+            "if self.has_record:\n            scope.record = scope.struct_field({'x': ti.f32, 'v': ti.types.vector(3, ti.f32), 'id': ti.i32}, shape=scope.dim('n'), initialization='zero')",
+        )
+    )
+    source += """
+    def restore_graph(self):
+        builder = ti.graph.GraphBuilder()
+        for group in self.groups:
+            builder.dispatch(group.restore)
+        return builder.compile()
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 45
+    assert not any("domain" in item for item in manifest["entry_families"].values())
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(5, 0, 0), code.host.Model(13, 3, 1)
+        assert a.storage.record is None
+        expected = np.arange(13, dtype=np.float32)
+        b.storage.record.x.from_numpy(expected)
+        b.save()
+        graph = b.restore_graph()
+        prepared = graph.bind({})
+        b.storage.record.x.from_numpy(expected * 0)
+        b.storage.has_record = False
+        assert b.groups[1].common() == 7
+        with pytest.raises(ValueError, match="presence"):
+            b.groups[1].restore()
+        with pytest.raises(ValueError, match="presence"):
+            type(b.groups[1])(b.storage.record)
+        prepared.run()
+        prepared.close()
+        b.storage.has_record = True
+        np.testing.assert_array_equal(b.storage.record.x.to_numpy(), expected)
+        b.groups[1].source = b.groups[1].backup
+        with pytest.raises(ValueError, match="declared allocation"):
+            b.groups[1].restore()
+        b.groups[1].source = b.storage.record
+        assert len(a.groups) == 1
+    probe = tmp_path / "consume_present.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(7, 0, 0), code.host.Model(17, 3, 1)
+    assert a.storage.record is None and len(a.groups) == 1
+    expected = np.arange(17, dtype=np.float32)
+    b.storage.record.x.from_numpy(expected)
+    b.save()
+    b.storage.record.x.from_numpy(expected * 0)
+    b.restore_graph().run({})
+    np.testing.assert_array_equal(b.storage.record.x.to_numpy(), expected)
+print('PRESENT_INPUT_SOURCE_FREE_OK')
+""",
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PRESENT_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
 FIELD_LIKE_SOURCE = """
 import taichi_forge as ti
 constructors = 0

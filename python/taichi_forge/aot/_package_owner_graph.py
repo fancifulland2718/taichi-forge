@@ -196,6 +196,10 @@ def _compose(environment, schema, children):
                 transformed["reference_path"] = [attribute, *item["reference_path"]]
             if "like_source_path" in item:
                 transformed["like_source_path"] = [attribute, *item["like_source_path"]]
+            if "source_presence" in item:
+                transformed["source_presence"] = [
+                    {**predicate, "path": [attribute, *predicate["path"]]} for predicate in item["source_presence"]
+                ]
             if "conditions" in item:
                 transformed["conditions"] = {names[n]: expected for n, expected in item["conditions"].items()}
             if owner_conditions:

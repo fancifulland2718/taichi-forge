@@ -85,6 +85,7 @@ def project(owner, environment, schema):
     """Use the same source declaration and Component alias paths, without allocation."""
     from ._component import (
         Dimension,
+        DenseField,
         Record,
         _ConditionalDenseField,
         _ConditionalModelTensorField,
@@ -120,7 +121,13 @@ def project(owner, environment, schema):
         )
         if source is None:
             raise ValueError("Borrowed Field requires a declared original allocation")
-        if any(
+        if "input_parameter" in item and source.get("conditions"):
+            # An actual Field argument proves existence, not a numerical option.
+            # Retain the source predicate as admission on its allocation owner.
+            item["source_presence"] = [
+                dict(path=list(paths[key]), expected=expected) for key, expected in sorted(source["conditions"].items())
+            ]
+        elif any(
             item.get("conditions", {}).get(key) is not expected
             for key, expected in source.get("conditions", {}).items()
         ):
@@ -162,6 +169,13 @@ def project(owner, environment, schema):
             alias_path = target_path if member is None else (*target_path, member)
             original_name = source_name if member is None else _capture_id((*path, member))
             _source_scope_alias(declarations, paths, source_paths, alias_name, alias_path, original_name)
+            if item.get("source_presence"):
+                original = declarations[alias_name]
+                declarations[alias_name] = (
+                    _ModelTensorField(original.dtype, original.shape, original.group, original.element_shape)
+                    if isinstance(original, _ModelTensorField)
+                    else DenseField(original.dtype, original.shape, original.group)
+                )
             if item.get("conditions"):
                 original = declarations[alias_name]
                 conditions = tuple(sorted(item["conditions"].items()))

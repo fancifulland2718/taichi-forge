@@ -530,6 +530,9 @@ class _ModuleBinding:
             )
         if contract.get("kind") != "borrowed_field" or path_value(scope._root, contract["source_path"]) is not field:
             raise ValueError("Borrowed Field differs from its declared allocation")
+        for predicate in contract.get("source_presence", ()):
+            if path_value(scope._root, predicate["path"]) is not predicate["expected"]:
+                raise ValueError("Borrowed input source allocation presence changed")
         from .._dimensions import freeze_extent, check_constraints
 
         dimensions = {} if dimensions is None else dimensions
@@ -1200,6 +1203,7 @@ class LoadedPackage:
                 42,
                 43,
                 44,
+                45,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

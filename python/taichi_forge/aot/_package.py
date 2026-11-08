@@ -1187,6 +1187,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(42, manifest["version"])
             if any(item["kind"] == "host_owner_sequence" for item in schema.values()):
                 manifest["version"] = max(44, manifest["version"])
+            if any(item.get("source_presence") for item in schema.values()):
+                manifest["version"] = max(45, manifest["version"])
             if any(item["kind"] == "borrowed_field" and "input_parameter" in item for item in schema.values()):
                 manifest["version"] = max(23, manifest["version"])
             if any(item.get("optional_input") for item in schema.values()):
@@ -1463,10 +1465,19 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     for key, item in compilation_schemas.get(owner_name, {}).items()
                     if key in code.used and item.get("optional_input")
                 }
+                used_paths = [environment._paths[key] for key in bound_used if key in environment._paths]
                 source_bindings = {
-                    key: dict(path=list(environment._paths[key]), source_path=item["source_path"])
+                    key: dict(
+                        path=list(environment._paths[key]),
+                        source_path=item["source_path"],
+                        **({"presence": item["source_presence"]} if item.get("source_presence") else {}),
+                    )
                     for key, item in compilation_schemas.get(owner_name, {}).items()
-                    if key in bound_used and item["kind"] == "borrowed_field"
+                    if item["kind"] == "borrowed_field"
+                    and any(
+                        tuple(path[: len(environment._paths[key])]) == tuple(environment._paths[key])
+                        for path in used_paths
+                    )
                 }
                 child_bindings = owner_bindings(environment, compilation_schemas.get(owner_name, {}), bound_used)
                 constants = {
