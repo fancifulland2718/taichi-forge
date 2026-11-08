@@ -13,6 +13,28 @@ _MISSING = object()
 _PATH_KEYS = frozenset(("path", "source_path", "reference_path", "flag_path", "nullable_record", "layout_owner_path"))
 
 
+def specialization_entries(path, target, entries):
+    """Read native execution policy once, outside ordinary call dispatch.
+
+    The native loader validates the same metadata. Unsupported formats/tasks
+    keep ordinary AOT; compilation or binding errors are never swallowed.
+    """
+    from ._component_info import _read_document
+
+    if target not in ("x64", "arm64", "cuda", "vulkan"):
+        return frozenset()
+    llvm = target != "vulkan"
+    metadata = _read_document(path, "aot_metadata.json" if llvm else "metadata.json")
+    if llvm and metadata.get("kernel_format") != "bc":
+        return frozenset()
+    # Old metadata without an explicit task policy cannot prove eligibility.
+    if "device_range_dispatch" not in metadata:
+        return frozenset()
+    excluded = {item["name"] for item in metadata["device_range_dispatch"] if item["tasks"]}
+    aliases = {item["key"]: item["value"] for item in metadata.get("kernel_aliases", ())}
+    return frozenset(name for name in entries if name not in excluded and aliases.get(name, name) not in excluded)
+
+
 def _token(value):
     # Exact types distinguish bool/int and +0/-0. Keep the observed objects
     # alive in the guard/call so an identity cannot be recycled underneath it.
@@ -110,11 +132,12 @@ class OwnerGuard:
 
 
 class CachedCall:
-    def __init__(self, guard, values, call, workspaces):
+    def __init__(self, guard, values, call, workspaces, *, specialize=False, constant_args=()):
         self.guard, self.values, self.call = guard, values, call
         self.tokens = tuple(_token(x) for x in values)
         self.workspaces = tuple(workspaces)
         self.prepared = None
+        self.specialize, self.constant_args = specialize, constant_args
 
     def matches(self, owner, values):
         return tuple(_token(x) for x in values) == self.tokens and self.guard.matches(owner)
@@ -124,7 +147,7 @@ class CachedCall:
         # One-off calls and continually changing scalar inputs keep the ordinary
         # AOT launch path instead of building/retiring a native graph each time.
         if reuse and self.prepared is None:
-            self.prepared = self.call.prepare()
+            self.prepared = self.call.prepare(specialize=self.specialize, constant_args=self.constant_args)
         if self.prepared is None:
             return self.call.run()
         # Existing backend preparation consumes authoritative JIT/AOT views,

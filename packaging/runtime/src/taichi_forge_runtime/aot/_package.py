@@ -1439,7 +1439,16 @@ class entry:
                     item["kind"] == "value" and item.get("element_shape") for item in contract["captures"]
                 )
                 if reusable:
-                    ready = CachedCall(guard, values, call, workspaces)
+                    specialize = selected.symbol in package._specialization_entries
+                    # Only declared model dimensions are scalar code facts.
+                    # Explicit ordinary integers (indices/counts/etc.) stay live.
+                    constant_args = tuple(
+                        len(contract["arguments"]) + index
+                        for index, item in enumerate(contract["captures"])
+                        if item["kind"] == "dimension"
+                    ) if specialize else ()
+                    ready = CachedCall(guard, values, call, workspaces,
+                                       specialize=specialize, constant_args=constant_args)
                     if previous is not None:
                         previous.close()
                     cache[self] = ready
@@ -1636,6 +1645,11 @@ class LoadedPackage:
         actual = {p.relative_to(self.directory).as_posix() for p in (self.directory / "host").rglob("*.py")}
         if actual != {p for p in files if p.startswith("host/") and p.endswith(".py")}:
             raise ValueError("Host source inventory differs from package manifest")
+        from ._package_calls import specialization_entries
+
+        self._specialization_entries = specialization_entries(
+            self.directory / "code.tcm", runtime.arch, self.manifest["entries"]
+        )
         self._module = runtime.load_module(self.directory / "code.tcm")
         self._arrays, self._kernels = [], {}
         self._call_lock = threading.RLock()

@@ -2376,8 +2376,12 @@ tasks and CUDA PTX/cubin. Complete CPU range-callback specialization requires a
 new export carrying argument-origin attributes; older bitcode folds only proven
 locations. Vulkan integer capabilities must still be declared at export, for
 example `caps=["spirv_has_int64"]`. Existing resource admission limits remain,
-including sliced interleaved Field borrowing on Vulkan. The default remains
-`specialize=False`; hybrid package calls do not globally enable specialization.
+including sliced interleaved Field borrowing on Vulkan. Explicit
+`BoundCall.prepare()` still defaults to `specialize=False`. Ordinary package
+calls, including hybrid mode, now select eligible specialization on the first
+reuse of a stable binding, using declared model dimensions as scalar facts.
+Ordinary changing scalars stay out of code identity. Unsupported tasks/formats
+retain generic AOT; the initial call keeps the existing ordinary launch path.
 Qualification covers local array, model-size, alias, instance and preparation
 reuse fixtures, not the full engine. Eliminating duplicate generic/specialized
 compilation and adding a cross-process specialization cache are deferred. New

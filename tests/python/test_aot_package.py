@@ -5147,7 +5147,7 @@ class Model:
             'input', values, external=True, dtype=ti.f32, shape=s.dim('n'), optional=True)
     @ti.kernel
     def step(self, gain: ti.f32):
-        for i in self.output:
+        for i in range(self.n):
             self.output[i] += gain
             if ti.static(self.input is not None):
                 self.output[i] += self.input[i]
@@ -5170,7 +5170,9 @@ class Model:
 
     def prepared(*args, **kwargs):
         counts["prepare"] += 1
-        kwargs["specialize"] = specialize
+        assert kwargs["specialize"] is True  # Natural calls select it without an adapter.
+        if not specialize:
+            kwargs.update(specialize=False, constant_args=())
         return prepare(*args, **kwargs)
 
     monkeypatch.setattr(_package, "check_admission", checked)
@@ -5187,6 +5189,10 @@ class Model:
         b.step(3)
         initial = counts.copy()
         assert initial["prepare"] == 2
+        if specialize:
+            cached = next(iter(a._forge_package_calls.values()))
+            assert cached.constant_args  # The declared n, never ordinary gain.
+            assert 0 not in cached.constant_args
         for _ in range(2):
             a.step(gain=2)
             b.step(3)
@@ -5294,6 +5300,25 @@ def _source_package(
     ):
         monkeypatch.delitem(sys.modules, key, raising=False)
     return importlib.import_module("definition_fixture")
+
+
+def test_package_specialization_policy_uses_native_task_and_format_contract(tmp_path):
+    from taichi_forge_runtime.aot._package_calls import specialization_entries
+
+    metadata = dict(kernel_format="bc", device_range_dispatch=[dict(name="device", version=1, tasks=[0])],
+                    kernel_aliases=[dict(key="alias", value="device")])
+    path = tmp_path / "aot_metadata.json"
+    path.write_text(json.dumps(metadata))
+    entries = ("ordinary", "device", "alias")
+    assert specialization_entries(tmp_path, "cuda", entries) == {"ordinary"}
+    metadata["kernel_format"] = "ptx"
+    path.write_text(json.dumps(metadata))
+    assert not specialization_entries(tmp_path, "cuda", entries)
+    (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+    assert specialization_entries(tmp_path, "vulkan", entries) == {"ordinary"}
+    del metadata["device_range_dispatch"]
+    path.write_text(json.dumps(metadata))
+    assert not specialization_entries(tmp_path, "x64", entries)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
