@@ -1454,6 +1454,43 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
             from collections import ChainMap
             from ._package_borrows import declaration
 
+            keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+            if "dtype" in keywords or "shape" in keywords:
+                if (
+                    len(call.args) != 2
+                    or not isinstance(call.args[0], ast.Constant)
+                    or type(call.args[0].value) is not str
+                    or not call.args[0].value.isidentifier()
+                    or len(keywords) != len(call.keywords)
+                    or set(keywords) != {"external", "dtype", "shape"}
+                    or not isinstance(keywords["external"], ast.Constant)
+                    or keywords["external"].value is not True
+                    or conditions
+                ):
+                    fail(module, call, "Typed external borrow requires a name, dtype, shape and external=True")
+                shape = dimension(keywords["shape"])
+                namespace_check(scope, shape, call)
+                shape = (shape,) if isinstance(shape, Extent) else shape
+                if not isinstance(shape, tuple) or any(not isinstance(axis, Extent) for axis in shape):
+                    fail(module, call, "Typed external shape requires declared dimensions or integer constants")
+                add(
+                    member(scope, call.args[0].value),
+                    member_spec(
+                        scope,
+                        call.args[0].value,
+                        kind="ndarray",
+                        external=True,
+                        type_node=keywords["dtype"],
+                        ndim=len(shape),
+                        shape_expressions=[axis.expression for axis in shape],
+                        borrow_declaration=[call.lineno, call.col_offset],
+                        scope_allocation=origin(scope),
+                    ),
+                    call,
+                )
+                allowed.add(id(call.func.value))
+                continue
+
             name, spec = declaration(
                 call,
                 scope_paths[scope],

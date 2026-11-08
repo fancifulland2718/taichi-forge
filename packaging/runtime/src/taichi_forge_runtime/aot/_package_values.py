@@ -29,6 +29,8 @@ def owner_type(owner):
 def check_admission(owner, contract):
     admission = contract.get("admission")
     if admission:
+        for resource in admission.get("external_resources", {}).values():
+            check_external_resource(owner, resource, path_value(owner, resource["path"]))
         for binding in admission.get("constants", {}).values():
             check_constant(owner, binding["path"], binding["value"])
         for binding in admission.get("input_presence", {}).values():
@@ -50,6 +52,29 @@ def check_admission(owner, contract):
             constraints,
             lambda name: capture_value(owner, dict(name=name, dimension_relations=dimensions)),
         )
+
+
+def check_external_resource(owner, contract, value):
+    """Check the caller's storage contract, without requiring allocation provenance."""
+    from ._runtime import NdArray
+
+    if not isinstance(value, NdArray):
+        raise ValueError("External resource requires an explicitly imported device array or Field view")
+    value._descriptor(owner._forge_package_owner.runtime)
+    element = contract["element"]
+
+    def dimension(key):
+        if "dimensions" in contract:
+            return capture_value(owner, dict(name=key, dimension_relations=contract["dimensions"]))
+        return dimension_value(owner, key)
+
+    expected = tuple(evaluate_extent(axis, dimension) for axis in contract["shape_expressions"])
+    if (
+        value.dtype != element["dtype"]
+        or value.element_shape != tuple(element.get("element_shape", ()))
+        or value.shape != expected
+    ):
+        raise ValueError("External resource dtype, element shape or logical shape differs from its declaration")
 
 
 def check_constant(owner, path, value):

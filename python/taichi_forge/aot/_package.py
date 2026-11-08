@@ -116,6 +116,8 @@ def _owner_schema(module, node, kind, namespace, *, include_preparation=False):
         if getattr(function, "_package_preparation_method", False) and not include_preparation:
             continue
         for name, declaration in _construction_schema(module, node, function, kind, namespace, schema).items():
+            if getattr(function, "_package_preparation_method", False) and declaration.get("external"):
+                declaration["binding_phase"] = "preparation"
             if getattr(function, "_package_preparation_method", False) and declaration["kind"] == "borrowed_field":
                 if "input_parameter" in declaration:
                     _fail(module, function, "Prepared Field inputs require a definition-proven allocation path")
@@ -967,7 +969,7 @@ def _host_projection(
                     )
             for item in owners.get(self.owner, {}).values():
                 if item.get("borrow_declaration") == [getattr(node, "lineno", None), getattr(node, "col_offset", None)]:
-                    self.minimum_version = max(self.minimum_version, 20)
+                    self.minimum_version = max(self.minimum_version, 59 if item.get("external") else 20)
                     return ast.copy_location(
                         ast.Call(
                             ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "borrow", ast.Load()),
@@ -1758,6 +1760,21 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     )
                 }
                 child_bindings = owner_bindings(environment, compilation_schemas.get(owner_name, {}), bound_used)
+                from taichi_forge_runtime._dimensions import extent_dependencies
+
+                external_resources = {
+                    key: dict(
+                        path=list(environment._paths[key]),
+                        element=item["element"],
+                        shape_expressions=item["shape_expressions"],
+                        dimensions=dimension_relations(
+                            environment,
+                            {dim for axis in item["shape_expressions"] for dim in extent_dependencies(axis)},
+                        ),
+                    )
+                    for key, item in compilation_schemas.get(owner_name, {}).items()
+                    if key in bound_used and item.get("external")
+                }
                 constants = {
                     key: dict(path=list(environment._paths[key]), value=value)
                     for key, value in code.static.items()
@@ -1770,9 +1787,15 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         **({"source_bindings": source_bindings} if source_bindings else {}),
                         **({"owner_bindings": child_bindings} if child_bindings else {}),
                         **({"input_presence": input_presence} if input_presence else {}),
+                        **({"external_resources": external_resources} if external_resources else {}),
                         **({"constants": constants} if constants else {}),
                     )
-                    if constraints or source_bindings or child_bindings or input_presence or constants
+                    if constraints
+                    or source_bindings
+                    or child_bindings
+                    or input_presence
+                    or constants
+                    or external_resources
                     else None
                 )
                 identity = (code.kernel, code.key)

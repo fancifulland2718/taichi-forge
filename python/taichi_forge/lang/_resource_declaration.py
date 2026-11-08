@@ -456,7 +456,7 @@ class ResourceScope:
         del caller
         return Extent(("dim", alias))
 
-    def borrow(self, name, field, *, dimensions=None, source_scope=False, external=False):
+    def borrow(self, name, field, *, dimensions=None, source_scope=False, external=False, dtype=None, shape=None):
         """Bind an existing Field and explicitly relate its whole source group.
 
         The target retains the original Field and storage ownership. This is a
@@ -468,9 +468,55 @@ class ResourceScope:
         external=True instead declares a read-only component input. Only this
         member's dimensions are mapped; its original group stays owned by the
         supplying component. The native member-view ABI still qualifies access.
+        With explicit dtype and shape, external=True instead binds a typed
+        package input/output port without requiring the caller's allocation
+        declaration. Shape uses this scope's dimensions; it does not describe
+        the caller's complete storage group.
         """
         from taichi_forge.lang.field import Field
         from taichi_forge.lang.struct import StructField
+
+        if dtype is not None or shape is not None:
+            from taichi_forge.lang._ndarray import Ndarray
+            from taichi_forge.types._argument_descriptor import describe_element_type
+
+            if (
+                external is not True
+                or source_scope is not False
+                or dimensions is not None
+                or dtype is None
+                or shape is None
+                or not isinstance(name, str)
+                or not name.isidentifier()
+            ):
+                raise TypeError("Typed external borrow requires a name, dtype, shape and external=True")
+            element = describe_element_type(dtype)
+            shape = shape if isinstance(shape, tuple) else (shape,)
+            expressions = tuple(
+                axis.expression if isinstance(axis, Extent) else ("const", operator.index(axis)) for axis in shape
+            )
+            for expression in expressions:
+                validate_extent(expression)
+                if not set(extent_dependencies(expression)) <= self._registry["dimensions"].keys():
+                    raise ValueError("External shape requires dimensions in its declaration scope")
+            expected = tuple(evaluate_extent(expression, self._normal_dimension) for expression in expressions)
+            if not isinstance(field, (Field, Ndarray)) or isinstance(field, StructField):
+                raise TypeError("Typed external borrow requires scalar/vector/matrix Field or ndarray storage")
+            if isinstance(field, Ndarray):
+                matches = element.matches(field.get_type().element_type)
+            else:
+                lanes = ((field.n,) if field.ndim == 1 else (field.n, field.m)) if hasattr(field, "n") else ()
+                matches = field.dtype == element.scalar_type and lanes == tuple(element.shape)
+            if element.category not in ("scalar", "tensor") or not matches or tuple(field.shape) != expected:
+                raise ValueError("Typed external resource dtype or shape differs from its declaration")
+            if self._read_only:
+                if getattr(self._owner, name) is not field:
+                    raise ValueError("A borrowed record must retain its existing member")
+            else:
+                setattr(self._owner, name, field)
+            # No allocation identity or ownership is inferred for caller storage.
+            self._registry.setdefault("typed_inputs", {})[name] = dict(dtype=dtype, shape=expressions)
+            return field
 
         if not isinstance(name, str) or not name.isidentifier() or not isinstance(field, Field):
             raise TypeError("Resource borrow requires an attribute name and a Field")

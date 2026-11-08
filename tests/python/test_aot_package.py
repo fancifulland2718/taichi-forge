@@ -4693,6 +4693,158 @@ def graph():
     np.testing.assert_array_equal(frames[0][2].to_numpy(), 2 * (np.arange(7) + 1.5) + 13)
 
 
+@pytest.mark.parametrize("tensor", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_typed_external_borrow_uses_caller_storage_contract(tmp_path, monkeypatch, tensor):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        self.values = None
+    def prepare(self, values):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('values', values, external=True, dtype=ti.f32, shape=scope.dim('n'))
+    @ti.kernel
+    def update(self, gain: ti.f32):
+        for i in self.values:
+            self.values[i] += gain * (i + 1)
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.update, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        return b.compile()
+"""
+    if tensor:
+        source = source.replace("dtype=ti.f32", "dtype=ti.types.vector(2, ti.f32)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    caller = ti.Vector.field(2, ti.f32, shape=7) if tensor else ti.field(ti.f32, shape=7)
+    caller.fill(2)
+    original = package.Model(7)
+    original.prepare(caller)
+    original.update(3)
+    expected = caller.to_numpy()
+    assert manifest["version"] == 59
+    assert manifest["field_groups"] == {}
+    assert len([entry for entry in manifest["entries"].values() if entry["definition"].endswith(".update")]) == 1
+    del original, package
+    for name in tuple(sys.modules):
+        if name == "definition_fixture" or name.startswith("definition_fixture."):
+            monkeypatch.delitem(sys.modules, name)
+    (tmp_path / "definition_fixture").rename(tmp_path / "producer_sources")
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        owner = code.host.Model(7)
+        with pytest.raises(ValueError, match="imported"):
+            owner.prepare(caller)
+        first = runtime.import_dense_view(ti.experimental.ndarray_view(caller))
+        owner.prepare(first)
+        old_call = owner.graph().bind({"gain": 2})
+        builder = ti.FieldsBuilder()
+        values = ti.Vector.field(2, ti.f32) if tensor else ti.field(ti.f32)
+        unused = ti.field(ti.i32)
+        builder.dense(ti.i, 7).place(unused, values)
+        tree = builder.finalize()
+        values.fill(10)
+        second = runtime.import_dense_view(ti.experimental.ndarray_view(values))
+        owner.prepare(second)
+        new_call = owner.graph().bind({"gain": -1})
+        wrong_dtype = runtime.ndarray("i32", (7,), element_shape=(2,) if tensor else ())
+        with pytest.raises(ValueError, match="dtype"):
+            owner.prepare(wrong_dtype)
+        assert owner.values is second
+        wrong_dtype.close()
+        old_call.run()
+        new_call.run()
+        runtime.wait()
+        offsets = np.arange(7)[:, None].repeat(2, axis=1) + 1 if tensor else np.arange(7) + 1
+        np.testing.assert_array_equal(caller.to_numpy(), expected + 2 * offsets)
+        np.testing.assert_array_equal(values.to_numpy(), 10 - offsets)
+        other = runtime.ndarray("f32", (19,), element_shape=(2,) if tensor else ())
+        with pytest.raises(ValueError, match="shape"):
+            owner.prepare(other)
+        assert owner.values is second
+        owner.n = 19
+        with pytest.raises(ValueError, match="shape"):
+            owner.update(1)
+        other.from_numpy(np.zeros((19, 2) if tensor else (19,), dtype=np.float32))
+        owner.prepare(other)
+        owner.update(4)
+        offsets19 = np.arange(19)[:, None].repeat(2, axis=1) + 1 if tensor else np.arange(19) + 1
+        np.testing.assert_array_equal(other.to_numpy(), 4 * offsets19)
+        owner.n = 7
+        tree.destroy()
+        with pytest.raises((ValueError, RuntimeError), match="retir|destroy|invalid|closed|released"):
+            new_call.run()
+        old_call.close()
+        new_call.close()
+        first.close()
+        second.close()
+        other.close()
+
+
+@pytest.mark.parametrize(
+    "change, diagnostic",
+    [
+        (("external=True", "external=False"), "external=True"),
+        (("scope.dim('n')", "unknown_shape()"), "dimension|shape|expression"),
+        (("dtype=ti.f32", "dtype=ti.types.struct(x=ti.f32)"), "scalar/vector/matrix"),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_typed_external_borrow_rejects_ambiguous_contracts(tmp_path, monkeypatch, change, diagnostic):
+    source = """
+import taichi_forge as ti
+class Model:
+    def __init__(self, n: int, values):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('values', values, external=True, dtype=ti.f32, shape=scope.dim('n'))
+    @ti.kernel
+    def update(self):
+        for i in self.values:
+            self.values[i] += 1
+"""
+    package = _source_package(tmp_path, monkeypatch, source.replace(*change))
+    with pytest.raises((ValueError, TypeError), match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_nested_external_borrow_checks_child_dimensions(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+class Inputs:
+    def __init__(self, n: int, values):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.borrow('values', values, external=True, dtype=ti.f32, shape=s.dim('n'))
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, values):
+        s = ti.experimental.ResourceScope(self)
+        s.inputs = Inputs(n, values)
+    @ti.kernel
+    def update(self):
+        for i in self.inputs.values:
+            self.inputs.values[i] += i
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert not manifest["field_groups"]
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        values = runtime.ndarray("f32", (13,))
+        values.from_numpy(np.zeros(13, dtype=np.float32))
+        owner = code.host.Model(13, values)
+        owner.update()
+        np.testing.assert_array_equal(values.to_numpy(), np.arange(13))
+        owner.inputs.n = 12
+        with pytest.raises(ValueError, match="shape"):
+            owner.update()
+        values.close()
+
+
 CACHED_FACTORY_SOURCE = """
 import taichi_forge as ti
 from functools import lru_cache, cache

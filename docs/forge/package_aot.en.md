@@ -125,9 +125,28 @@ and call retirement after source-tree destruction. This path needs no caller
 allocation function in the package source closure and does not copy borrowed
 data. Device, element type, rank, layout, lifetime and JIT/AOT ordering contracts
 still apply. Private solver source remains unavailable, with no solver JIT
-fallback. This qualification covers explicit array arguments; the borrowed-Field
-source analysis described below is a separate path and does not yet qualify
-arbitrary captured Fields without allocation provenance.
+fallback.
+
+Persistent inputs can also use the existing `ResourceScope.borrow` interface,
+declaring the type and shape required by the solver:
+
+```python
+scope.borrow("values", values, external=True, dtype=ti.f32, shape=scope.dim("n"))
+```
+
+Format 59 projects this declaration as a package array input/output port.
+Ordinary JIT retains the original Field; consumers bind explicitly imported
+device arrays or Field views during construction or an ordinary preparation
+method. The caller's allocation class and source are not required. Scalar and
+fixed vector/matrix elements use the existing dimension algebra. Local CPU/CUDA
+checks cover scalar/vector reads and writes, new sizes, interleaved layouts,
+old Graph snapshots after rebinding, type/shape rejection and source-tree
+retirement. Failed preparation preserves the previous binding, calls also check
+the resource contract, and package closure does not own caller storage.
+Optional/conditional ports, struct elements and model-dependent element shapes
+are not yet supported by this port form. The `source_scope=True` borrow described
+below retains its separate original-group contract; existing Component read-only
+external Fields do not thereby become arbitrary writable inputs.
 
 ## Initial scope and validation
 

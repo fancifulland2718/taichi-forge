@@ -523,9 +523,58 @@ class _ModuleBinding:
         if type(actual) is not MappingProxyType or tuple(actual.items()) != expected:
             raise ValueError("Alias mapping differs from its declared definition")
 
-    def borrow(self, owner_key, scope, name, field, *, dimensions=None, source_scope=False, external=False):
+    def borrow(
+        self,
+        owner_key,
+        scope,
+        name,
+        field,
+        *,
+        dimensions=None,
+        source_scope=False,
+        external=False,
+        dtype=None,
+        shape=None,
+    ):
         self.package._check()
         construction = _construction.get()
+        if dtype is not None or shape is not None:
+            from ._package_values import check_external_resource
+            from .._dimensions import freeze_extent
+
+            if (
+                not isinstance(scope, _ResourceScope)
+                or getattr(scope._root, "_forge_package_owner", None) is not self.package
+                or external is not True
+                or source_scope is not False
+                or dimensions is not None
+            ):
+                raise ValueError("Typed external resource requires its managed package scope")
+            owner_key = self.owner_contract(scope._root, owner_key)
+            contract = self.package.manifest["owners"][owner_key].get(scope._identity(name), {})
+            if not (construction is not None and construction[0] is self.package and construction[2] is scope._root):
+                if contract.get("binding_phase") != "preparation":
+                    raise ValueError("External resource binding requires its declared preparation phase")
+            actual_type = (
+                dtype.spec if isinstance(dtype, _ElementType) else dict(kind="scalar", dtype=dtype, element_shape=[])
+            )
+            shape = shape if isinstance(shape, tuple) else (shape,)
+            expressions = tuple(
+                axis.expression if isinstance(axis, Extent) else ("const", operator.index(axis)) for axis in shape
+            )
+            if (
+                not contract.get("external")
+                or actual_type != contract.get("element")
+                or expressions != tuple(freeze_extent(axis) for axis in contract.get("shape_expressions", ()))
+            ):
+                raise ValueError("External resource type or shape expression differs from its declaration")
+            check_external_resource(scope._root, contract, field)
+            if scope._parent is not None:
+                if getattr(scope._owner, name) is not field:
+                    raise ValueError("A borrowed record must retain its existing member")
+            else:
+                setattr(scope._owner, name, field)
+            return field
         if (
             not isinstance(scope, _ResourceScope)
             or getattr(scope._root, "_forge_package_owner", None) is not self.package
@@ -1432,6 +1481,7 @@ class LoadedPackage:
                 56,
                 57,
                 58,
+                59,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

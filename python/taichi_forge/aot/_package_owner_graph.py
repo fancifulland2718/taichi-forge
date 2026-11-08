@@ -108,6 +108,8 @@ class OwnerGraph:
             elif item["kind"] == "ndarray":
                 dtype = resolve_type(item.pop("type_node"), vars(self.imported[item.get("declaration_module", name)]))
                 item["element"] = type_spec(dtype, self.module)
+                if item.get("external") and item["element"]["kind"] not in ("scalar", "tensor"):
+                    raise ValueError("Typed external borrow requires scalar/vector/matrix elements")
                 declarations[attribute] = Array(dtype, item["ndim"])
                 value = ti.ndarray(dtype, (1,) * item["ndim"])
             else:
@@ -192,6 +194,8 @@ def _compose(environment, schema, children):
             transformed = {**item, "path": [attribute, *item.get("path", (key,))]}
             if "source_path" in item:
                 transformed["source_path"] = [attribute, *item["source_path"]]
+            if item.get("external"):
+                transformed["shape_expressions"] = [expression(axis) for axis in item["shape_expressions"]]
             if "reference_path" in item:
                 transformed["reference_path"] = [attribute, *item["reference_path"]]
             if "like_source_path" in item:
