@@ -14,9 +14,11 @@ import importlib.util
 import inspect
 import itertools
 import json
+import math
 import operator
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 
 from ._runtime import NdArray, Scalar
@@ -1349,21 +1351,40 @@ class entry:
         return self._call(self.package, None, *args, **kwargs)
 
     def _call(self, package, owner, *args, **kwargs):
+        # Ordinary calls retain their immutable binding on the instance. The
+        # Host lock serializes descriptor/workspace reuse without entering a
+        # native borrowed submission scope: first-time JIT imports occur before
+        # submission and must remain outside that scope.
+        with package._call_lock:
+            return self._call_locked(package, owner, args, kwargs)
+
+    def _call_locked(self, package, owner, args, kwargs):
         package._check()
+        values = tuple(self.signature.bind(*args, **kwargs).arguments.values()) if args or kwargs else ()
+        if not values and self.contract["arguments"]:
+            self.signature.bind(*args, **kwargs)  # Preserve missing-argument errors.
+        cache_owner = owner if owner is not None else self
+        cache = getattr(cache_owner, "_forge_package_calls", None)
+        if cache is None:
+            cache = cache_owner._forge_package_calls = {}
+            package._call_caches.append(cache)
+        previous = cache.get(self)
+        if previous is not None and previous.matches(owner, values):
+            return previous.run()
         selected = self._select(owner)
-        if selected is not self:
-            return selected._call(package, owner, *args, **kwargs)
-        contract = self.contract
+        contract = selected.contract
+        from ._package_calls import CachedCall, OwnerGuard
+
         check_admission(owner, contract)
-        self._check_layout(owner)
-        bound = self.signature.bind(*args, **kwargs)
+        selected._check_layout(owner)
+        guard = OwnerGuard(self, selected, owner)
         arguments = [
             (
-                Scalar(item["dtype"], bound.arguments[item["name"]])
+                Scalar(item["dtype"], value)
                 if item["kind"] == "value"
-                else bound.arguments[item["name"]]
+                else value
             )
-            for item in contract["arguments"]
+            for item, value in zip(contract["arguments"], values)
         ]
         captured = {
             item["name"]: capture_value(owner, item)
@@ -1371,13 +1392,28 @@ class entry:
         }
         check_model_static_ranges(contract.get("model_static_ranges", ()), captured.__getitem__)
         workspaces = []
+        allocated_workspaces = []
+        previous_workspaces = iter(previous.workspaces if previous is not None else ())
+        retained = False
         try:
             for item in contract["captures"]:
                 if item["kind"] == "local_tensor_workspace":
                     # Size the workspace from the exact scalar argument
                     # snapshot, never a second read of mutable Host attributes.
                     shape = local_workspace_shape(item["shape"], captured.__getitem__)
-                    value = package.runtime.ndarray(item["dtype"], shape)
+                    value = next(previous_workspaces, None)
+                    if (
+                        value is not None
+                        and value.dtype == item["dtype"]
+                        and math.prod(shape) * (int(value.dtype[1:]) // 8) <= value.nbytes
+                    ):
+                        # Scratch is private to this serialized invocation path.
+                        # A smaller/empty range may reuse its existing capacity;
+                        # the descriptor keeps the actual current logical shape.
+                        value = NdArray(value._memory, value.dtype, value._code, tuple(shape), value.element_shape)
+                    else:
+                        value = package.runtime.ndarray(item["dtype"], shape)
+                        allocated_workspaces.append(value)
                     workspaces.append(value)
                 else:
                     value = captured[item["name"]]
@@ -1386,19 +1422,34 @@ class entry:
                     if item["kind"] in ("value", "dimension") and not item.get("element_shape")
                     else value
                 )
-            kernel = package._kernels.get(self.symbol)
+            kernel = package._kernels.get(selected.symbol)
             if kernel is None:
-                kernel = package._kernels[self.symbol] = package._module.kernel(self.symbol)
+                kernel = package._kernels[selected.symbol] = package._module.kernel(selected.symbol)
             from ._package_buffers import HostBuffers
 
-            with HostBuffers(package.runtime, contract["arguments"], arguments) as prepared:
-                return kernel.run(*prepared)
+            buffers = HostBuffers(package.runtime, contract["arguments"], arguments)
+            with buffers as prepared:
+                call = kernel.bind(*prepared)
+                # Host arrays must upload/download on every call. Mutable
+                # tensor/scalar wrappers also require a fresh value snapshot.
+                reusable = not buffers.pending and all(
+                    item["kind"] != "value" or type(value) in (bool, int, float)
+                    for item, value in zip(contract["arguments"], values)
+                ) and not any(
+                    item["kind"] == "value" and item.get("element_shape") for item in contract["captures"]
+                )
+                if reusable:
+                    cache[self] = CachedCall(guard, values, call, workspaces)
+                    retained = True
+                else:
+                    cache.pop(self, None)
+                return call.run()
         finally:
             # BoundCall retains memory even on a partially submitted failure.
             # Closing an in-flight allocation would add a host wait here.
             # Unsubmitted storage can be released immediately; submitted
             # storage retires through the Runtime's normal pending owners.
-            for workspace in reversed(workspaces):
+            for workspace in reversed(() if retained else allocated_workspaces):
                 if workspace._memory not in package.runtime._pending:
                     workspace.close()
 
@@ -1581,6 +1632,8 @@ class LoadedPackage:
             raise ValueError("Host source inventory differs from package manifest")
         self._module = runtime.load_module(self.directory / "code.tcm")
         self._arrays, self._kernels = [], {}
+        self._call_lock = threading.RLock()
+        self._call_caches = []
         self._empty_inputs = {}
         self._graph_ids = itertools.count()
         self._closed, self._entered = False, False
@@ -1642,6 +1695,12 @@ class LoadedPackage:
         if self._closed:
             return
         self._module.close()
+        for cache in self._call_caches:
+            for call in cache.values():
+                for workspace in call.workspaces:
+                    workspace.close()
+            cache.clear()
+        self._call_caches.clear()
         for array in reversed(self._arrays):
             array.close()
         self._arrays.clear()

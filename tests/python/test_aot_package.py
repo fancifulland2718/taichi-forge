@@ -5127,6 +5127,81 @@ def test_package_hybrid_failed_startup_releases_program(monkeypatch):
     np.testing.assert_array_equal(values.to_numpy(), [4, 4, 4])
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_natural_calls_reuse_bindings_and_observe_changes(tmp_path, monkeypatch):
+    from taichi_forge_runtime.aot import _package, _runtime
+
+    package = _source_package(tmp_path, monkeypatch, """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.output = s.field(ti.f32, shape=s.dim('n'))
+        self.input = None
+    def prepare(self, values):
+        s = ti.experimental.ResourceScope(self)
+        s.borrow(
+            'input', values, external=True, dtype=ti.f32, shape=s.dim('n'), optional=True)
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in self.output:
+            self.output[i] += gain
+            if ti.static(self.input is not None):
+                self.output[i] += self.input[i]
+""")
+    ti.aot.export_package(package, tmp_path / "sdk")
+    counts = dict(admission=0, bind=0)
+    admission, bind = _package.check_admission, _runtime.Kernel.bind
+
+    def checked(*args):
+        counts["admission"] += 1
+        return admission(*args)
+
+    def bound(*args, **kwargs):
+        counts["bind"] += 1
+        return bind(*args, **kwargs)
+
+    monkeypatch.setattr(_package, "check_admission", checked)
+    monkeypatch.setattr(_runtime.Kernel, "bind", bound)
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7), code.host.Model(13)
+        a.prepare(None)
+        b.prepare(None)
+        a.step(2)
+        b.step(3)
+        initial = counts.copy()
+        for _ in range(3):
+            a.step(gain=2)
+            b.step(3)
+        assert counts == initial  # Natural syntax reuses binding on each instance.
+        np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 8))
+        np.testing.assert_array_equal(b.output.to_numpy(), np.full(13, 12))
+        a.step(5)
+        assert counts["bind"] == initial["bind"] + 1
+        data = runtime.ndarray("f32", 7)
+        data.write(np.full(7, 10, dtype=np.float32))
+        a.prepare(data)
+        a.step(1)
+        count = counts.copy()
+        data.write(np.full(7, 20, dtype=np.float32))
+        a.step(1)
+        assert counts == count  # Device contents are never cached.
+        np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 45))
+        a.n = 8
+        with pytest.raises(ValueError, match="shape|dimension|Dimension|layout"):
+            a.step(1)
+        a.n = 7
+        a.input = None  # Bypassing Host preparation must still be rejected.
+        with pytest.raises(ValueError, match="presence"):
+            a.step(1)
+        a.input = data
+        data.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            a.step(1)
+
+
 def _source_package(
     tmp_path, monkeypatch, source=SOURCE, *, initializer="from .model import Model\n", extra_modules=None
 ):
@@ -8843,10 +8918,27 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
                 np.testing.assert_array_equal(np.frombuffer(model.result.read(), np.float32), expected)
             runtime.wait()
             resources = set(runtime._resources)
-            for model in models:
-                model.step(3.0)
+            original_array = runtime.ndarray
+            def no_hot_allocation(*args, **kwargs):
+                raise AssertionError('ordinary replay allocated unchanged workspace')
+            runtime.ndarray = no_hot_allocation
+            try:
+                for model in models:
+                    model.step(3.0)  # Scalar rebinding reuses the same scratch.
+            finally:
+                runtime.ndarray = original_array
             runtime.wait()
             assert runtime._resources == resources, 'workspace resources leaked'
+            import struct
+            try:
+                models[0].step('invalid scalar')
+            except (TypeError, ValueError, struct.error):
+                pass
+            else:
+                raise AssertionError('invalid scalar accepted')
+            models[0].step(3.0)  # Failed rebind must not retire the cached scratch.
+            runtime.wait()
+            assert runtime._resources == resources
             from taichi_forge_runtime.aot import _package
             original_capture = _package.capture_value
             def changed_after_snapshot(owner, spec):
@@ -8882,6 +8974,13 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
             runtime.wait()
             assert runtime._resources == resources
             model.n = 7
+            runtime.ndarray = no_hot_allocation
+            try:
+                model.step(1.0)  # Regrowth within retained capacity is also free.
+            finally:
+                runtime.ndarray = original_array
+            runtime.wait()
+            assert runtime._resources == resources
             graphs = [model.graph(mixed=True) for model in models]
             prepared = [graph.bind({'gain': gain}) for graph, gain in zip(graphs, gains)]
             for call, model in zip(prepared, models):

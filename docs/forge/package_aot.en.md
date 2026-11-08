@@ -722,8 +722,18 @@ Focused CPU/CUDA checks cover one script using two independent libraries, JIT in
 preparation and postprocessing, direct/Graph calls, new sizes, interleaved Fields,
 ndarrays, invalid bindings and tree retirement. EFC CUDA checks pass JIT Fields
 directly and match the original JIT oracle in 12 cases. Measure cold startup and
-cached-process first calls separately. Warm calls still have existing AOT Host
-admission/preparation costs; faster first loading does not establish faster execution.
+cached-process first calls separately; faster first loading does not establish faster execution.
+
+Ordinary `owner.method(...)` calls automatically reuse unchanged bindings,
+argument descriptors and local workspace on the instance; no explicit `prepare()`
+is required. The first call and changes to relevant configuration, resources or
+arguments use the existing admission/binding path. Stable hot calls compare the
+relevant Host inputs and submit with the original leases, without reinterpreting
+admission schemas or rebuilding array descriptors. Device contents remain live,
+and instances do not share mutable state. Explicit Host buffers still upload and
+read back on every call, and mutable tensor arguments take fresh value snapshots.
+CPU/CUDA device assertion polling requires explicit development debug mode;
+release waits and transfers do not insert error queries.
 
 ## Ordinary imports with a standalone AOT Runtime
 
@@ -1145,8 +1155,8 @@ to prepare workspace enter the invocation snapshot. Sizes and instances do not
 create code variants. Focused CPU/CUDA/Vulkan checks cover new sizes 3/65,
 nonuniform values, copy isolation, swaps, frontend-blocked consumption and separate
 prepared calls; CPU/CUDA also cover `real_func`. These checks do not qualify general
-dynamic tensor algebra or whole-class EFC export. Ordinary calls still allocate and
-copy; stable state should reuse prepared calls. A whole-element snapshot can use
+dynamic tensor algebra or whole-class EFC export. Ordinary calls reuse workspace
+for unchanged bindings; device value copies still execute. A whole-element snapshot can use
 more temporary memory than a direct scalar copy. Graph-internal time alone does not
 represent preparation or normal Host-call costs.
 
