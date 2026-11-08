@@ -22,6 +22,52 @@ def resolve_owners(sources, imported, owner_schema, fail):
                 cls = vars(imported[name]).get(entry["owner"])
                 definitions[cls, entry["node"].name] = entry
 
+    def needs_following_constructor(cls):
+        # object.__init__ cannot receive the forwarded constructor arguments.
+        # Such a source class is a cooperative template, not a standalone owner.
+        for base in cls.__mro__:
+            if base is object or base not in classes:
+                return False
+            node = classes[base][1]
+            constructor = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
+            if constructor is None:
+                continue
+            calls = [
+                n
+                for n in ast.walk(constructor)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "__init__"
+            ]
+            if len(calls) != 1:
+                return False
+            call = calls[0]
+            receiver = call.func.value
+            if not (
+                isinstance(receiver, ast.Call)
+                and isinstance(receiver.func, ast.Name)
+                and receiver.func.id == "super"
+                and not receiver.args
+                and not receiver.keywords
+                and any(isinstance(n, ast.Expr) and n.value is call for n in constructor.body)
+            ):
+                return False
+            next_base = next(b for b in cls.__mro__[cls.__mro__.index(base) + 1 :] if "__init__" in vars(b))
+            if next_base is object:
+                return bool(call.args or call.keywords)
+        return False
+
+    templates = {
+        cls
+        for cls, (_, node, _, schemas) in classes.items()
+        if (getattr(cls, "_data_oriented", False) or node.name in schemas) and needs_following_constructor(cls)
+    }
+    for cls in templates:
+        name, node, _, schemas = classes[cls]
+        schemas.pop(node.name, None)
+        node._package_constructor_template = True
+        for (owner, _), entry in definitions.items():
+            if owner is cls:
+                entry["requires_owner"] = True
+
     def constructor_schema(cls, start=0):
         mro = cls.__mro__
         index = next(i for i in range(start, len(mro)) if "__init__" in vars(mro[i]))
@@ -139,7 +185,31 @@ def resolve_owners(sources, imported, owner_schema, fail):
             fail(name, constructor, "Fields allocated by multiple constructors require separate native group contracts")
         # Projection needs the original allocation sites even for a plain
         # resource mixin. This is metadata, not an additional application decorator.
-        if base is not cls and own:
+        if base in templates:
+            tree = trees[name]
+            if not hasattr(tree, "_package_construction_schemas"):
+                tree._package_construction_schemas = {}
+                tree._package_construction_owners = {}
+            local = tree._package_construction_schemas.setdefault(node.name, {})
+
+            def description(value):
+                if isinstance(value, ast.AST):
+                    return ast.dump(value, include_attributes=False)
+                if isinstance(value, dict):
+                    return {key: description(item) for key, item in value.items()}
+                if isinstance(value, (tuple, list)):
+                    return [description(item) for item in value]
+                return value
+
+            for key, item in own.items():
+                if key in local and description(local[key]) != description(item):
+                    fail(name, node, "Cooperative construction has incompatible resource projections: " + key)
+                local[key] = copy.deepcopy(item)
+            concrete_module, concrete_node, *_ = classes[cls]
+            tree._package_construction_owners.setdefault(node.name, set()).add(
+                concrete_module + "." + concrete_node.name
+            )
+        elif base is not cls and own:
             schemas.setdefault(node.name, own)
         return result
 
@@ -150,6 +220,7 @@ def resolve_owners(sources, imported, owner_schema, fail):
             if (
                 not isinstance(node, ast.ClassDef)
                 or not inspect.isclass(cls)
+                or cls in templates
                 or not (getattr(cls, "_data_oriented", False) or node.name in schemas)
             ):
                 continue
@@ -233,6 +304,10 @@ def resolve_owners(sources, imported, owner_schema, fail):
     for schemas, name, schema, entries, effective in pending:
         schemas[name] = copy.deepcopy(schema)
         entries.extend(effective)
+    for cls in templates:
+        name, node, *_ = classes[cls]
+        if node.name not in getattr(trees[name], "_package_construction_owners", {}):
+            fail(name, node, "cooperative constructor has no exported concrete receiver")
     bound_nodes = {
         id(entry["node"])
         for _, _, _, _, _, _, _, entries in sources

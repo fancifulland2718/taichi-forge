@@ -104,8 +104,15 @@ can use the base constructor's `owner_reference`. Field allocations in multiple
 constructors require distinct explicit resource groups. Ungrouped allocations,
 ambiguous group identities and resource replacement still reject. Focused
 CPU/CUDA checks compare ordinary JIT, new sizes, source-free consumption,
-group/instance isolation and constructor-failure cleanup. Cooperative mixins
-whose resource contract is incomplete without a later MRO class still need work.
+group/instance isolation and constructor-failure cleanup. Version 68 additionally
+recognizes cooperative constructors that forward arguments to a later base.
+The mixin has no standalone owner or numerical entry; concrete receivers supply
+the complete MRO and resource contract. Host construction is retained once, and
+existing binding/allocation calls select the concrete receiver's contract.
+CPU/CUDA checks cover source-free consumption and reuse of the same numerical
+entry. Missing receivers or incompatible resource projections reject. Resource
+branches based on instance `hasattr` still need separate analysis; resolving the
+MRO does not turn them into arbitrary static configuration axes.
 This implementation uses one code module per export; it does not automatically
 provide multiple physical code partitions or qualify their loading costs.
 

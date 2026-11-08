@@ -92,7 +92,11 @@ ti.aot.export_package(roots, "dist/engine_cuda", arch="cuda", source_root="path/
 允许派生组的 `owner_dim` 引用父构造的 `owner_reference`。多个构造器分配 Field 时，
 每个构造器须有独立的显式资源组；未分组的跨构造器分配、组身份冲突及资源替换仍拒绝。
 CPU/CUDA 局部检查覆盖与普通 JIT 对照、新尺寸、无源码消费、组/实例隔离和构造失败释放。
-这不代表需要后续 MRO 类才具备完整资源合同的 cooperative mixin 已全部支持。
+版本 68 进一步识别把参数转发到后续基类的 cooperative 构造：该 mixin 不单独生成
+owner/数值入口；实际派生类提供完整 MRO 和资源合同，Host 构造仍只保存一次。
+已有字段分配/绑定接口按实际接收对象选择合同，实例资源保持隔离。CPU/CUDA 局部检查
+覆盖无源码消费及相同数值入口的复用；缺少实际接收类或资源投影不相容会明确拒绝。
+依赖实例 `hasattr` 的资源分支仍需独立分析，不能因 MRO 已解析就将其当作任意静态选项展开。
 
 `source_root` 模式使用第 2 版包清单，消费者仍兼容第 1 版；旧消费者拒绝新版本。
 `library.host` 仍是最初选择的模块/包。包内绝对、相对和 importlib 导入解析到

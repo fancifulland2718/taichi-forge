@@ -365,7 +365,11 @@ def _host_projection(
     owners = dict(owners)
     for base, variants in input_families.items():
         owners[base] = context_schemas[variants[0]["owner"].rpartition(".")[2]]
-    binding_schemas = {**getattr(tree, "_package_preparation_schemas", {}), **owners}
+    binding_schemas = {
+        **getattr(tree, "_package_construction_schemas", {}),
+        **getattr(tree, "_package_preparation_schemas", {}),
+        **owners,
+    }
     binding_schemas = {
         owner: {
             key: item
@@ -707,7 +711,7 @@ def _host_projection(
                 )
             previous, self.owner = self.owner, node.name
             managed = (node.lineno, node.col_offset) in owners_at
-            if managed:
+            if managed or getattr(node, "_package_constructor_template", False):
                 node.decorator_list = []
             node = self.generic_visit(node)
             self.owner = previous
@@ -1473,6 +1477,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             for name, _, _, _, tree, *_ in sources
             for base, receivers in getattr(tree, "_package_preparation_owners", {}).items()
         },
+        construction_owners={
+            name + "." + base: sorted(receivers)
+            for name, _, _, _, tree, *_ in sources
+            for base, receivers in getattr(tree, "_package_construction_owners", {}).items()
+        },
         error_interfaces=[
             name + "." + definition["name"]
             for name, _, _, _, _, _, _, definitions in sources
@@ -1485,6 +1494,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
         manifest["version"] = 43
     if manifest["preparation_owners"]:
         manifest["version"] = max(62, manifest["version"])
+    if manifest["construction_owners"]:
+        manifest["version"] = max(68, manifest["version"])
     if manifest["target_selections"] or any(
         backend_query(node, kind) or backend_constant(node, kind) is not None
         for _, _, _, _, tree, kind, _, _ in sources
