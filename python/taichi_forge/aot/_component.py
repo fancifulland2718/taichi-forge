@@ -2007,9 +2007,15 @@ class _Capture:
             self.resource_conditions[name] = declaration.conditions
             present = True
             for condition, expected in declaration.conditions:
-                if not isinstance(self.declarations.get(condition), StaticValue):
-                    raise TaichiCompilationError("Conditional Field presence requires a declared static value")
-                actual = self.attribute(ctx, condition)
+                predicate = self.declarations.get(condition)
+                if isinstance(predicate, Record) and predicate.optional and not getattr(predicate, "conditions", ()):
+                    actual = self.attribute(ctx, condition) is not None
+                elif isinstance(predicate, StaticValue):
+                    actual = self.attribute(ctx, condition)
+                else:
+                    raise TaichiCompilationError(
+                        "Conditional Field presence requires a declared boolean or optional record"
+                    )
                 if type(actual) is not bool or type(expected) is not bool:
                     raise TaichiCompilationError("Conditional Field presence requires boolean values")
                 present = present and actual is expected

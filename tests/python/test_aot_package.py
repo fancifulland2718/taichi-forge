@@ -3175,6 +3175,183 @@ def declare_layout(scope, layout, capacity, dtype, *, bounded=True):
     assert "PACKAGE_RECORDS_OK" in result.stdout
 
 
+def _record_workspace_source():
+    source = (
+        _optional_record_source()
+        .replace(
+            "import taichi_forge as ti",
+            "import taichi_forge as ti\nfrom resource_contexts import resource_group",
+        )
+        .replace(
+            "    def __init__(self, capacity: int, layout):",
+            "    def __init__(self):\n        pass\n"
+            "    def prepare(self, capacity: int, layout, fail=False, skip=False):\n"
+            "        if skip:\n            return",
+        )
+    )
+    source = source.replace(
+        "        unused = scope.record('unused', layout, optional=True)",
+        "            with resource_group(self, 'workspace', initialization='zero') as fields:\n"
+        "                fields.workspace = fields.field(ti.f32, shape=fields.dim('capacity'))\n"
+        "        unused = scope.record('unused', layout, optional=True)",
+    )
+    source = source.replace(
+        "        scope.values = scope.field(ti.f32, shape=parent)",
+        "        with resource_group(self, 'state', initialization='zero') as fields:\n"
+        "            fields.values = fields.field(ti.f32, shape=fields.dim('capacity'))\n"
+        "            if fail:\n"
+        "                raise ValueError('preparation failure')",
+    )
+    source = source.replace(
+        "self.values[i] = i + gain", "self.workspace[i] = i + gain\n                self.values[i] = self.workspace[i]"
+    )
+    source += """
+@ti.data_oriented
+class Reader:
+    def __init__(self, values):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('alias', values, source_scope=True)
+    @ti.kernel
+    def step(self):
+        for i in self.alias:
+            self.alias[i] += 1
+
+class Root:
+    def __init__(self, capacity):
+        scope = ti.experimental.ResourceScope(self)
+        scope.source = Model()
+        self.source.prepare(capacity, Layout(capacity, 0.))
+        scope.reader = Reader(self.source.workspace)
+"""
+    return source
+
+
+@pytest.mark.parametrize("alias", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_record_prepares_only_its_workspace(tmp_path, monkeypatch, alias):
+    source = _record_workspace_source()
+    if alias:
+        source += "\n@dataclass(frozen=True)\nclass Input:\n    layout: object\n"
+        source = source.replace(
+            "        record = scope.record('layout', layout, optional=True)",
+            "        incoming = Input(layout)\n        self.layout = incoming.layout\n"
+            "        record = scope.record('layout', incoming.layout, optional=True)",
+        )
+        source = source.replace("        if layout is not None:", "        if self.layout is not None:")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    module = sys.modules["definition_fixture.model"]
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 58
+    assert module.constructors == 0
+    assert len(manifest["entry_families"]) == 1
+    family = next(iter(manifest["entry_families"].values()))
+    assert family["record_presence"] == ["layout"]
+    assert len(family["variants"]) == 3
+    reference = module.Model()
+    reference.prepare(7, module.Layout(5, 2.5, True))
+    reference.step()
+    expected = reference.values.to_numpy()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        Model, Layout = code.host.model.Model, code.host.model.Layout
+        a, b = Model(), Model()
+        a.prepare(7, Layout(5, 2.5, True))
+        b.prepare(31, None)
+        assert not hasattr(b, "workspace")
+        assert len(b._forge_package_field_groups) == 1
+        assert len(a._forge_package_field_groups) == 2
+        a.step()
+        b.step()
+        np.testing.assert_array_equal(a.values.to_numpy(), expected)
+        np.testing.assert_array_equal(b.values.to_numpy(), -5)
+        root = code.host.model.Root(11)
+        root.reader.step()
+        np.testing.assert_array_equal(root.source.workspace.to_numpy(), 1)
+        root.source.layout = None
+        with pytest.raises(ValueError, match="presence changed"):
+            root.reader.step()
+        with pytest.raises(ValueError, match="presence changed"):
+            type(root.reader)(root.source.workspace)
+        previous = a.values
+        workspace = a.workspace
+        saved = a.graph().bind({})
+        registered = set(runtime._resources)
+        groups = dict(a._forge_package_field_groups)
+        a.prepare(19, None, skip=True)
+        assert a.values is previous and a.workspace is workspace
+        assert a._forge_package_field_groups == groups
+        assert set(runtime._resources) == registered
+        with pytest.raises(ValueError, match="preparation failure"):
+            a.prepare(7, Layout(5, 2.5, True), fail=True)
+        assert a.values is previous and a.workspace is workspace
+        assert a._forge_package_field_groups == groups
+        assert set(runtime._resources) == registered
+        a.step()
+        np.testing.assert_array_equal(a.values.to_numpy(), expected)
+        a.prepare(19, None)
+        a.step()
+        np.testing.assert_array_equal(a.values.to_numpy(), -5)
+        assert not hasattr(a, "workspace")
+        saved.run()
+        np.testing.assert_array_equal(previous.to_numpy(), expected)
+        saved.close()
+        a.prepare(67, Layout(67, 3.0, False))
+        assert a.workspace is not workspace
+        a.step()
+        np.testing.assert_array_equal(a.values.to_numpy(), np.arange(67) + 3)
+        # Changing only presence must not retroactively allocate missing state.
+        b.layout = Layout(31, 1.0)
+        with pytest.raises((ValueError, AttributeError), match="workspace|layout|resource"):
+            b.step()
+    probe = tmp_path / "consume_record_workspace.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            Model, Layout = code.host.model.Model, code.host.model.Layout
+            a, b = Model(), Model()
+            a.prepare(13, Layout(13, 2.))
+            b.prepare(31, None)
+            old = a.values
+            call = a.graph().bind({})
+            a.prepare(67, None)
+            assert not hasattr(a, 'workspace') and not hasattr(b, 'workspace')
+            call.run(); a.step(); b.step()
+            np.testing.assert_array_equal(old.to_numpy(), np.arange(13) + 2)
+            np.testing.assert_array_equal(a.values.to_numpy(), -5)
+            np.testing.assert_array_equal(b.values.to_numpy(), -5)
+            call.close()
+            a.prepare(129, Layout(129, 3., True))
+            a.step()
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(129) + 6)
+        print('RECORD_WORKSPACE_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RECORD_WORKSPACE_SOURCE_FREE_OK" in result.stdout
+
+
 def _optional_record_source():
     source = RECORD_RESOURCES_SOURCE.replace(
         "record = scope.record('layout', layout)",

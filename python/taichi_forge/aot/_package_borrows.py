@@ -148,7 +148,11 @@ def project(owner, environment, schema):
             # An actual Field argument proves existence, not a numerical option.
             # Retain the source predicate as admission on its allocation owner.
             item["source_presence"] = [
-                dict(path=list(paths[key]), expected=expected)
+                dict(
+                    path=list(paths[key]),
+                    expected=expected,
+                    **({"record": True} if isinstance(declarations[key], Record) else {}),
+                )
                 for key, expected in sorted(source["conditions"].items())
                 if item.get("conditions", {}).get(key) is not expected
             ]

@@ -4,7 +4,7 @@ No frontend import, source compilation, numeric AST or kernel interpreter.
 Bindings use the ordinary Runtime Kernel API and its per-call resource leases.
 """
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 import functools
@@ -25,6 +25,7 @@ from .._dimensions import Extent, evaluate_extent, local_workspace_shape, check_
 from .._static_values import read_static_key, static_key
 
 _construction = ContextVar("forge_definition_owner", default=None)
+_preparation_batches = ContextVar("forge_definition_preparation", default=())
 _ids = itertools.count()
 _DTYPES = ("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
 
@@ -570,7 +571,10 @@ class _ModuleBinding:
         if contract.get("kind") != "borrowed_field" or binding_value(contract["source_path"]) is not field:
             raise ValueError("Borrowed Field differs from its declared allocation")
         for predicate in contract.get("source_presence", ()):
-            if binding_value(predicate["path"]) is not predicate["expected"]:
+            actual = binding_value(predicate["path"])
+            if predicate.get("record"):
+                actual = actual is not None
+            if actual is not predicate["expected"]:
                 raise ValueError("Borrowed input source allocation presence changed")
         from .._dimensions import freeze_extent, check_constraints
 
@@ -683,34 +687,86 @@ class _ModuleBinding:
             raise ValueError("Preparation requires its declared owner and resource group")
         if key in getattr(owner, "_forge_package_preparing", ()):
             raise ValueError("A resource group is already being prepared on this instance")
+        for batch in reversed(_preparation_batches.get()):
+            if batch["owner"] is owner and key in batch["keys"]:
+                if not batch["started"]:
+                    batch["started"] = True
+                    batch["stack"].enter_context(self._preparation_storage(owner, batch["keys"], retire_missing=True))
+                break
+        active = getattr(owner, "_forge_package_preparing", None)
+        if active is None:
+            owner._forge_package_preparing = active = set()
+        active.add(key)
+        try:
+            with self._preparation_storage(owner, (key,)):
+                with self.context_function(module, name)(*args, **kwargs) as scope:
+                    yield scope
+        finally:
+            active.remove(key)
+
+    @contextmanager
+    def preparation_groups(self, owner, keys):
+        """Replace one method's declared groups together; old calls retain leases."""
+        self.package._check()
+        resolved = []
+        for key in keys:
+            identity, separator, group = key.partition(":")
+            resolved.append(self.owner_contract(owner, identity) + separator + group)
+        keys = tuple(resolved)
+        if (
+            getattr(owner, "_forge_package_owner", None) is not self.package
+            or not keys
+            or len(set(keys)) != len(keys)
+            or any(key not in self.package.manifest["field_groups"] for key in keys)
+        ):
+            raise ValueError("Preparation requires its declared resource groups")
+        active = getattr(owner, "_forge_package_preparation_methods", None)
+        if active is None:
+            owner._forge_package_preparation_methods = active = set()
+        if any(set(keys) & set(previous) for previous in active):
+            raise ValueError("A resource group is already being prepared on this instance")
+        active.add(keys)
+        try:
+            # An ordinary Host cache/early-return before allocation must not
+            # detach any existing state. Start the group transaction only when
+            # the first original allocation context is actually entered.
+            with ExitStack() as stack:
+                batch = dict(owner=owner, keys=keys, stack=stack, started=False)
+                token = _preparation_batches.set((*_preparation_batches.get(), batch))
+                try:
+                    yield
+                finally:
+                    _preparation_batches.reset(token)
+        finally:
+            active.remove(keys)
+
+    @contextmanager
+    def _preparation_storage(self, owner, keys, *, retire_missing=False):
         members = {
             attribute
+            for key in keys
             for attribute, item in self.package.manifest["owners"][key.partition(":")[0]].items()
             if item.get("field_group") == key
         }
         missing = object()
         values = {attribute: getattr(owner, attribute, missing) for attribute in members}
-        active = getattr(owner, "_forge_package_preparing", None)
-        if active is None:
-            owner._forge_package_preparing = active = set()
-        active.add(key)
         previous = _construction.get()
         allocated = []
         token = _construction.set((self.package, allocated, owner))
         maps = (owner._forge_package_field_groups, owner._forge_package_layouts)
-        saved = [mapping.pop(key, missing) for mapping in maps]
+        saved = [{key: mapping.pop(key, missing) for key in keys} for mapping in maps]
         selections = {attribute: owner._forge_package_member_layouts.pop(attribute, missing) for attribute in members}
         try:
-            with self.context_function(module, name)(*args, **kwargs) as scope:
-                yield scope
+            yield
         except BaseException:
             for value in reversed(allocated):
                 value.close()
                 self.package._arrays.remove(value)
-            for mapping, value in zip(maps, saved):
-                mapping.pop(key, None)
-                if value is not missing:
-                    mapping[key] = value
+            for mapping, saved_values in zip(maps, saved):
+                for key, value in saved_values.items():
+                    mapping.pop(key, None)
+                    if value is not missing:
+                        mapping[key] = value
             for attribute, value in values.items():
                 if value is missing:
                     owner.__dict__.pop(attribute, None)
@@ -721,11 +777,17 @@ class _ModuleBinding:
                     owner._forge_package_member_layouts[attribute] = selections[attribute]
             raise
         else:
+            if retire_missing:
+                for attribute, value in values.items():
+                    if (
+                        attribute not in owner._forge_package_member_layouts
+                        and getattr(owner, attribute, missing) is value
+                    ):
+                        owner.__dict__.pop(attribute, None)
             if previous is not None and previous[0] is self.package:
                 previous[1].extend(allocated)
         finally:
             _construction.reset(token)
-            active.remove(key)
 
     def type(self, spec):
         if spec["kind"] == "ndarray_annotation":
@@ -1236,12 +1298,19 @@ class entry:
     def _check_layout(self, owner):
         if owner is None:
             return
+        from ._package_values import owner_type
+
         for item in self.contract["captures"]:
             allocated_owner = path_value(owner, item.get("layout_owner_path", ()))
+            schema = self.package.manifest["owners"].get(owner_type(allocated_owner), {})
             for name, value in allocated_owner._forge_package_member_layouts.get(
                 item.get("layout_member", item["name"]), {}
             ).items():
-                if getattr(allocated_owner, name) is not value:
+                declaration = schema.get(name, {})
+                actual = path_value(allocated_owner, declaration.get("path", (name,)))
+                if declaration.get("kind") == "record" and declaration.get("optional"):
+                    actual = actual is not None
+                if actual is not value:
                     raise ValueError("Conditional layout configuration changed; construct a new instance")
 
     def _select(self, owner):
@@ -1362,6 +1431,7 @@ class LoadedPackage:
                 55,
                 56,
                 57,
+                58,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

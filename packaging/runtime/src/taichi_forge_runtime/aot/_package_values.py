@@ -37,7 +37,10 @@ def check_admission(owner, contract):
         check_owner_bindings(owner, admission.get("owner_bindings", {}).values())
         for binding in admission.get("source_bindings", {}).values():
             for predicate in binding.get("presence", ()):
-                if path_value(owner, predicate["path"]) is not predicate["expected"]:
+                actual = path_value(owner, predicate["path"])
+                if predicate.get("record"):
+                    actual = actual is not None
+                if actual is not predicate["expected"]:
                     raise ValueError("Borrowed input source allocation presence changed")
             if path_value(owner, binding["path"]) is not path_value(owner, binding["source_path"]):
                 raise ValueError("Borrowed Field no longer refers to its declared allocation")

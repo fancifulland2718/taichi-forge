@@ -437,14 +437,20 @@ def field_allocation(owner_key, name, schema):
             return value
         tests = []
         for condition in conditions:
-            terms = [
-                ast.Compare(
-                    ast.Attribute(ast.Name("self", ast.Load()), attribute, ast.Load()),
-                    [ast.Is()],
-                    [ast.Constant(expected)],
+            terms = []
+            for attribute, expected in condition.items():
+                declaration = schema[attribute]
+                source = ast.Name("self", ast.Load())
+                for part in declaration.get("path", (attribute,)):
+                    source = ast.Attribute(source, part, ast.Load())
+                optional = declaration["kind"] == "record" and declaration.get("optional")
+                terms.append(
+                    ast.Compare(
+                        source,
+                        [ast.IsNot() if optional and expected else ast.Is()],
+                        [ast.Constant(None if optional else expected)],
+                    )
                 )
-                for attribute, expected in condition.items()
-            ]
             tests.append(terms[0] if len(terms) == 1 else ast.BoolOp(ast.And(), terms))
         test = tests[0] if len(tests) == 1 else ast.BoolOp(ast.Or(), tests)
         return ast.IfExp(test, value, ast.Constant(None))

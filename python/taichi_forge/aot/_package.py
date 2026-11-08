@@ -734,8 +734,39 @@ def _host_projection(
                         node.returns = self.visit(node.returns)
                     self.host_functions.append(".".join(n for n in (self.owner, node.name) if n))
                     try:
+                        groups = (
+                            [
+                                module + "." + self.owner + f":context_{part.lineno}_{part.col_offset}"
+                                for part in ast.walk(node)
+                                if getattr(part, "_package_resource_context", None) is not None
+                                and getattr(part, "_package_deferred_context", False)
+                            ]
+                            if self.owner is not None and getattr(node, "_package_preparation_method", False)
+                            else []
+                        )
                         body = self.visit(ast.Module(body=node.body, type_ignores=[]))
                         node.body = body.body
+                        if len(groups) > 1:
+                            self.minimum_version = max(self.minimum_version, 58)
+                            offset = int(
+                                bool(node.body)
+                                and isinstance(node.body[0], ast.Expr)
+                                and isinstance(node.body[0].value, ast.Constant)
+                                and isinstance(node.body[0].value.value, str)
+                            )
+                            transaction = ast.Call(
+                                ast.Attribute(
+                                    ast.Name(_PREFIX + "runtime", ast.Load()), "preparation_groups", ast.Load()
+                                ),
+                                [
+                                    ast.Name("self", ast.Load()),
+                                    ast.Tuple([ast.Constant(group) for group in groups], ast.Load()),
+                                ],
+                                [],
+                            )
+                            node.body[offset:] = [
+                                ast.copy_location(ast.With([ast.withitem(transaction)], node.body[offset:]), node)
+                            ]
                     finally:
                         self.host_functions.pop()
                     return node
@@ -1457,6 +1488,16 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                             )
 
                         manifest["field_groups"][key]["conditions"] = conditions
+                        presence = {
+                            flag: list(environments[class_name]._paths[flag])
+                            for guards in conditions.values()
+                            for flag in guards
+                            if compilation_schemas[class_name][flag]["kind"] == "record"
+                            and compilation_schemas[class_name][flag].get("optional")
+                        }
+                        if presence:
+                            manifest["field_groups"][key]["record_presence"] = presence
+                            manifest["version"] = max(58, manifest["version"])
                         containers = {
                             placement_path(members[attribute]): member_schemas[attribute]["placement"]["conditions"]
                             for attribute in members
@@ -1669,9 +1710,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 raise PackageExportError(f"{definition_name}: {error}") from error
             variants = []
             for code in codes:
+                condition_values = {**code.static, **{key: static_key(value) for key, value in code.objects.items()}}
                 for attribute in {key for key, _ in code.contract["captures"]} | code.static.keys():
                     required = compilation_schemas.get(owner_name, {}).get(attribute, {}).get("conditions", {})
-                    if any(code.static.get(key) != static_key(value) for key, value in required.items()):
+                    if any(condition_values.get(key) != static_key(value) for key, value in required.items()):
                         _fail(
                             name,
                             node,
@@ -1683,7 +1725,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     key: value
                     for key, value in code.used.items()
                     if all(
-                        code.static.get(flag) == static_key(expected)
+                        condition_values.get(flag) == static_key(expected)
                         for flag, expected in compilation_schemas.get(owner_name, {})
                         .get(key, {})
                         .get("conditions", {})

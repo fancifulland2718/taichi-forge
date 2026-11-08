@@ -1220,6 +1220,19 @@ allocations and retained Graph snapshots. Unknown sources and numerical reads
 without the presence guard reject. Arbitrary optional expressions, child-owner
 construction and more complex binding factories remain separate gaps.
 
+Version 58 lets the present arm of a declared optional record own explicit workspace
+groups, using the existing record-presence contract without another configuration
+boolean. Entries that do not use the record gain no code variants. Absent records
+neither evaluate member dimensions nor allocate their workspace. Borrowers still
+check source-record presence before a new call. Multiple explicit groups in one
+ordinary preparation method change generation together, so old group dimensions
+cannot prevent preparation of a new model. A Host early return before entering an
+allocation context leaves resources unchanged. Failure releases new allocations
+and restores old Field bindings; arbitrary Host writes outside those contexts are
+not rolled back. Prepared Graph calls retain their old resource leases, and new
+instances and call bindings stay independent. Focused CPU/CUDA source-free checks
+cover these behaviors, not complete engine export.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

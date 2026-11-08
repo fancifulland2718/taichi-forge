@@ -4,9 +4,15 @@ import json
 
 
 def layout_selection(contract, owner):
+    from ._package_values import path_value
+
     names = {name for condition in contract.get("conditions", {}).values() for name in condition}
     names.update(policy["condition"] for policy in contract.get("orders", {}).values())
-    selected = {name: getattr(owner, name) for name in names}
+    presence = contract.get("record_presence", {})
+    selected = {
+        name: path_value(owner, presence[name]) is not None if name in presence else getattr(owner, name)
+        for name in names
+    }
     if any(type(value) is not bool for value in selected.values()):
         raise ValueError("Conditional layout requires its declared boolean configuration")
     return selected

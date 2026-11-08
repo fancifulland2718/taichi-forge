@@ -606,11 +606,13 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                 and target.attr in record_members
                 and member_stores[target.attr] == 1
                 and target.attr not in deleted_members
-                and isinstance(value, ast.Name)
-                and stores.get(value.id) == 1
-                and value.id not in deleted
+                and isinstance(value, (ast.Name, ast.Attribute))
             ):
-                source_aliases[target.attr] = statement
+                root = value
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if isinstance(root, ast.Name) and stores.get(root.id) == 1 and root.id not in deleted:
+                    source_aliases[target.attr] = statement
 
     def dimension(node, bindings=None):
         """Only the already-declared dimension algebra; no model-value evaluation."""
@@ -884,6 +886,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
     }
     optional_records = set()
     optional_members = set()
+    record_group_conditions = {}
 
     def absent_record(call):
         if not (
@@ -1053,9 +1056,11 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
         conditions = conditions or {}
         for statement in body:
             if id(statement) in contexts:
-                group = scope_groups[contexts[id(statement)]]
-                builders[group]["conditions"] = dict(conditions)
-                yield from statements(statement.body, conditions)
+                context_scope = contexts[id(statement)]
+                group = scope_groups[context_scope]
+                group_conditions = {**conditions, **record_group_conditions.get(context_scope, {})}
+                builders[group]["conditions"] = group_conditions
+                yield from statements(statement.body, group_conditions)
             elif isinstance(statement, ast.If) and any(
                 operation(n)[0]
                 or isinstance(n, ast.Attribute)
@@ -1096,15 +1101,28 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                             else (statement.orelse, statement.body)
                         )
                         path = scope_paths[record_scope]
+                        guarded_groups = {
+                            contexts[id(part)] for item in present for part in ast.walk(item) if id(part) in contexts
+                        }
                         for branch, is_present in ((present, True), (absent, False)):
                             for part in (n for item in branch for n in ast.walk(item)):
                                 nested_scope, method = operation(part)
                                 if nested_scope is not None and (
                                     not is_present
-                                    or scope_paths[nested_scope][: len(path)] != path
-                                    or method not in ("dim", "parent_dim", "value", "static", "require_le", "borrow")
+                                    or not (
+                                        scope_paths[nested_scope][: len(path)] == path
+                                        and method in ("dim", "parent_dim", "value", "static", "require_le", "borrow")
+                                        or nested_scope in guarded_groups
+                                        and method in ("dim", "field", "vector_field", "matrix_field", "struct_field")
+                                    )
                                 ):
-                                    fail(module, part, "Optional record guard may only declare its present members")
+                                    fail(
+                                        module,
+                                        part,
+                                        "Optional record guard may only declare its present members or explicit workspace groups",
+                                    )
+                        for group in guarded_groups:
+                            record_group_conditions.setdefault(group, {})[_capture_id(path)] = True
                         yield from statements(present, conditions)
                         continue
                     if getattr(constructor, "_package_preparation_method", False):
