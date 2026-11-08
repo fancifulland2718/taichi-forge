@@ -1662,7 +1662,12 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     _fail(name, node, f"argument {argument.name!r}: {error}")
                 dtype = str(descriptor.element.scalar_type)
                 if isinstance(annotation, NdarrayType):
-                    values.append(ti.ndarray(annotation.dtype, (1,) * annotation.ndim))
+                    value = ti.ndarray(annotation.dtype, (1,) * annotation.ndim)
+                    # A definition export has no caller allocation to specialize
+                    # against. Reuse the Graph/runtime affine ABI so compact
+                    # arrays and qualified borrowed Field views share this code.
+                    value._runtime_affine_exemplar = True
+                    values.append(value)
                     argument_schema.append(
                         dict(
                             name=argument.name,

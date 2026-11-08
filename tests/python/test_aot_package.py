@@ -4603,6 +4603,96 @@ def _source_package(tmp_path, monkeypatch, source=SOURCE, *, initializer="from .
     return importlib.import_module("definition_fixture")
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_core_consumes_caller_jit_storage_without_allocation_sources(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.kernel
+def solve(values: ti.types.ndarray(ti.f32, 1), output: ti.types.ndarray(ti.f32, 1), gain: ti.f32):
+    for i in output:
+        output[i] = values[i] * gain + 3
+def graph():
+    builder = ti.graph.GraphBuilder()
+    values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, 'values', ti.f32, ndim=1)
+    output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, 'output', ti.f32, ndim=1)
+    gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+    builder.dispatch(solve, values, output, gain)
+    return builder.compile()
+"""
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import solve, graph\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["owners"] == {}  # All application storage belongs to the caller.
+    assert len([entry for entry in manifest["entries"].values() if entry["definition"].endswith(".solve")]) == 1
+    assert "output[i]" not in (tmp_path / "sdk/host/model.py").read_text()
+    # The private numerical package is unavailable; the caller's JIT frontend
+    # and its own preparation kernels remain deliberately available.
+    del package
+    for name in tuple(sys.modules):
+        if name == "definition_fixture" or name.startswith("definition_fixture."):
+            monkeypatch.delitem(sys.modules, name)
+    (tmp_path / "definition_fixture").rename(tmp_path / "producer_sources")
+
+    @ti.kernel
+    def prepare(values: ti.types.ndarray(ti.f32, 1), output: ti.types.ndarray(ti.f32, 1), offset: ti.f32):
+        for i in range(values.shape[0]):
+            values[i] = i + offset
+            output[i] = -7
+
+    @ti.kernel
+    def finish(output: ti.types.ndarray(ti.f32, 1)):
+        for i in range(output.shape[0]):
+            output[i] += 5
+
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        graph = code.host.graph()
+        frames = []
+        for n, field_storage in ((7, False), (33, True), (129, False)):
+            tree = None
+            if field_storage:
+                builder = ti.FieldsBuilder()
+                values, output = ti.field(ti.f32), ti.field(ti.f32)
+                builder.dense(ti.i, n).place(values, output)
+                tree = builder.finalize()
+                inputs = runtime.import_dense_view(ti.experimental.ndarray_view(values))
+                outputs = runtime.import_dense_view(ti.experimental.ndarray_view(output))
+            else:
+                values, output = ti.ndarray(ti.f32, n), ti.ndarray(ti.f32, n)
+                inputs, outputs = runtime.import_ndarray(values), runtime.import_ndarray(output)
+            call = graph.bind(dict(values=inputs, output=outputs, gain=2))
+            frames.append((n, values, output, inputs, outputs, call, tree))
+
+        for step in range(2):
+            for n, values, output, inputs, outputs, call, tree in reversed(frames):
+                jit_values = ti.experimental.ndarray_view(values) if tree is not None else values
+                jit_output = ti.experimental.ndarray_view(output) if tree is not None else output
+                prepare(jit_values, jit_output, step + 0.5)
+                # Same Program/backend, explicit ordering at the caller boundary.
+                ti.sync()
+                call.run()
+                runtime.wait()
+                finish(jit_output)
+                np.testing.assert_array_equal(output.to_numpy(), 2 * (np.arange(n) + step + 0.5) + 8)
+
+        bad = ti.ndarray(ti.i32, 7)
+        wrong_dtype = runtime.import_ndarray(bad)
+        try:
+            with pytest.raises((ValueError, RuntimeError), match="type|dtype|32"):
+                graph.bind(dict(values=wrong_dtype, output=frames[0][4], gain=2))
+        finally:
+            wrong_dtype.close()
+        n, values, output, inputs, outputs, call, tree = frames[1]
+        tree.destroy()
+        with pytest.raises((ValueError, RuntimeError), match="retir|destroy|invalid|closed|released"):
+            call.run()
+        for _, _, _, inputs, outputs, call, _ in frames:
+            call.close()
+            inputs.close()
+            outputs.close()
+    # AOT borrower retirement must leave the calling JIT Program usable.
+    finish(frames[0][2])
+    np.testing.assert_array_equal(frames[0][2].to_numpy(), 2 * (np.arange(7) + 1.5) + 13)
+
+
 CACHED_FACTORY_SOURCE = """
 import taichi_forge as ti
 from functools import lru_cache, cache

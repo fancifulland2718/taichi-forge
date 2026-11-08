@@ -59,7 +59,7 @@ Forge/Taichi 兼容层和 Runtime 始终作为外部依赖，不重复编成应�
 不会把整个源文件编译成应用 `.pyd`，也不在 Host 中保存可重建数值函数的 AST。
 已有 Forge Runtime 仍是外部依赖，不复制进这些产物。
 
-消费端只需要匹配的 Runtime Python 实现与原生运行库：
+独立消费方式只需要匹配的 Runtime Python 实现与原生运行库：
 
 ```python
 from taichi_forge_runtime.aot import Runtime, load_package
@@ -74,6 +74,18 @@ with Runtime("cuda") as runtime:
 包命名空间，延迟导入的子模块绑定自己的代码 owner；每个实例持有自己的资源。
 调用复用已有 Runtime 的参数快照/租约，不通过切换模块共享资源指针选实例。
 当前资源寿命到 `LoadedPackage.close()`，尚未提供独立对象退休政策。
+
+调用方也可以保留 Forge 前端，用自己的 JIT Kernel 创建、填充和处理输入输出；
+AOT 边界是包内的数值解算代码，并不要求所有应用 Field 或脚本都导出。
+已有 JIT Program 时使用 `ti.aot.borrow_runtime()`，通过 `runtime.import_ndarray()`
+或 `runtime.import_dense_view(ti.experimental.ndarray_view(field))` 显式借入设备资源。
+显式类型/rank 的数组入口使用既有运行时步长 ABI；CPU/CUDA 局部检查覆盖同一代码
+消费新尺寸的连续 ndarray 和交错 Dense Field、调用方 JIT 前后处理、类型拒绝与
+源树销毁后的调用退休。此路径不要求调用方分配函数进入包的源码闭包，不额外复制
+借用数据；仍须满足设备、元素类型、秩、布局和生命周期合同，并安排 JIT/AOT 间的
+执行顺序。私有解算源码保持不可用，不能回退 JIT 解算。
+这项资格针对显式数组参数；下文借用 Field 的分配来源推导是另一路径，尚不能据此
+宣称所有捕获 Field 都已支持无来源输入。
 
 ## 首批支持范围与验证
 

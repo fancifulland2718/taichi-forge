@@ -93,8 +93,8 @@ methods and extracted numerical methods. It does not compile whole source files
 into application `.pyd` extensions or embed reconstructible numerical ASTs in
 the Host. Forge Runtime remains a separate dependency.
 
-The consumer requires the matching Runtime Python implementation and native
-runtime, without the numerical frontend:
+Standalone consumption requires the matching Runtime Python implementation and
+native runtime, without the numerical frontend:
 
 ```python
 from taichi_forge_runtime.aot import Runtime, load_package
@@ -111,6 +111,23 @@ owner, and instances retain separate resources. Calls reuse the existing Runtime
 argument snapshots and leases; no shared module resource pointer is switched
 between instances. Allocation lifetime currently ends at `LoadedPackage.close()`;
 independent object retirement is not implemented.
+
+Callers may retain the Forge frontend and use their own JIT kernels to prepare
+and process inputs and outputs. The AOT boundary is the package's numerical
+solver code; application Fields and scripts do not all need exporting. With an
+existing JIT Program, use `ti.aot.borrow_runtime()` and explicitly import storage
+through `runtime.import_ndarray()` or
+`runtime.import_dense_view(ti.experimental.ndarray_view(field))`. Explicitly
+typed/ranked array entries use the existing runtime-stride ABI. Local CPU/CUDA
+checks cover the same code consuming new sizes of contiguous ndarrays and
+interleaved Dense Fields, caller JIT preparation/postprocessing, type rejection,
+and call retirement after source-tree destruction. This path needs no caller
+allocation function in the package source closure and does not copy borrowed
+data. Device, element type, rank, layout, lifetime and JIT/AOT ordering contracts
+still apply. Private solver source remains unavailable, with no solver JIT
+fallback. This qualification covers explicit array arguments; the borrowed-Field
+source analysis described below is a separate path and does not yet qualify
+arbitrary captured Fields without allocation provenance.
 
 ## Initial scope and validation
 
