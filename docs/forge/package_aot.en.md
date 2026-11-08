@@ -768,7 +768,8 @@ Fixed field-name tuples/lists used in `setattr(scope, name, scope.field(...))`
 The member expression may add fixed string prefixes/suffixes or use an f-string
 without conversions or format specifications. Immutable definition tuples reuse
 the same source proof as declaration-name loops; mutable global lists and string
-function calls are not evaluated. CPU/CUDA checks cover shared layout, independent
+function calls are not evaluated. Literal member sequences may splice those fixed
+tuples (`(*MEMBERS, 'extra')`); model sequences remain unsupported. CPU/CUDA checks cover shared layout, independent
 instances and isolated source-free consumption of these forms.
 The original allocation order and final loop-variable value are retained; native
 layout construction distinguishes multiple members from the same source call.

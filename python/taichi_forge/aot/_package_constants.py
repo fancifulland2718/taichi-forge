@@ -9,6 +9,19 @@ from ._package_factories import _literal, _source_value
 
 def definition_names(expression, namespace, constructor):
     """Read a fixed declaration-name tuple from its unshadowed module source."""
+    if isinstance(expression, (ast.Tuple, ast.List)):
+        names = []
+        for item in expression.elts:
+            if isinstance(item, ast.Starred):
+                values = definition_names(item.value, namespace, constructor)
+                if type(values) is not tuple:
+                    return None
+                names.extend(values)
+            elif isinstance(item, ast.Constant) and type(item.value) is str:
+                names.append(item.value)
+            else:
+                return None
+        return tuple(names)
     root = expression
     while isinstance(root, ast.Attribute):
         root = root.value
