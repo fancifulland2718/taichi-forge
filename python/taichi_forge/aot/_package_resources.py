@@ -815,7 +815,7 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
             ):
                 fail(module, node, "owner_dim requires a declared owner reference and a literal dimension name")
             reference, name = (arg.value for arg in node.args)
-            source = declarations.get(reference, {})
+            source = declarations.get(reference, (earlier or {}).get(reference, {}))
             if source.get("kind") != "owner_input" or source.get("conditions"):
                 fail(module, node, "owner_dim requires an unconditional declared owner reference")
             identity = _capture_id((reference, name))

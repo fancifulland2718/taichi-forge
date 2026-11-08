@@ -5687,6 +5687,106 @@ def test_package_child_registration_rejects_unproven_parent_and_name(tmp_path, m
     assert not (tmp_path / "sdk").exists()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_derived_groups_use_inherited_owner_dimensions(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+constructors = 0
+@ti.data_oriented
+class Storage:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+@ti.data_oriented
+class Base:
+    def __init__(self, storage: Storage):
+        global constructors
+        constructors += 1
+        with resource_group(self, 'base', initialization='zero') as scope:
+            scope.owner_reference('storage', storage)
+            scope.base = scope.field(ti.i32, shape=scope.owner_dim('storage', 'n'))
+class Derived(Base):
+    def __init__(self, storage: Storage, fail=False):
+        super().__init__(storage)
+        with resource_group(self, 'derived', initialization='zero') as scope:
+            scope.extra = scope.field(ti.i32, shape=scope.owner_dim('storage', 'n'))
+        if fail:
+            raise ValueError('after both groups')
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.extra:
+            self.base[i] = i + bias
+            self.extra[i] = self.base[i] * 2
+class Model(Derived):
+    pass
+"""
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 67
+    original = sys.modules["definition_fixture.model"]
+    assert original.constructors == 0
+    reference = original.Model(original.Storage(7))
+    reference.step(3)
+    expected = reference.extra.to_numpy()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        module = code.host.model
+        a = module.Model(module.Storage(7))
+        b = module.Model(module.Storage(19))
+        assert a.base._group_owner is not a.extra._group_owner
+        assert a.extra._group_owner is not b.extra._group_owner
+        a.step(3)
+        b.step(-2)
+        np.testing.assert_array_equal(a.extra.to_numpy(), expected)
+        np.testing.assert_array_equal(b.extra.to_numpy(), (np.arange(19) - 2) * 2)
+        storage = module.Storage(3)
+        registered = set(runtime._resources)
+        with pytest.raises(ValueError, match="after both groups"):
+            module.Model(storage, True)
+        assert runtime._resources == registered
+    probe = tmp_path / "consume_inherited_groups.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoPrivateSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoPrivateSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            m = code.host.model
+            a, b = m.Model(m.Storage(7)), m.Model(m.Storage(19))
+            a.step(3)
+            b.step(-2)
+            np.testing.assert_array_equal(a.extra.to_numpy(), (np.arange(7) + 3) * 2)
+            np.testing.assert_array_equal(b.extra.to_numpy(), (np.arange(19) - 2) * 2)
+        print('INHERITED_GROUPS_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "INHERITED_GROUPS_SOURCE_FREE_OK" in result.stdout
+
+
 def test_package_specialization_policy_uses_native_task_and_format_contract(tmp_path):
     from taichi_forge_runtime.aot._package_calls import specialization_entries
 

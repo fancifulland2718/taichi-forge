@@ -97,6 +97,15 @@ Consumption preserves registration and rejects replacing an existing child.
 Focused CPU/CUDA checks cover new sizes, independent instances and source-free
 consumption. This slice does not infer undeclared parent attribute assignments
 or extend `child.parent_dim`, conditional registration or multi-constructor groups.
+
+Version 67 resolves an unconditional `super().__init__` along the actual MRO
+before analyzing derived resource dependencies. A derived group's `owner_dim`
+can use the base constructor's `owner_reference`. Field allocations in multiple
+constructors require distinct explicit resource groups. Ungrouped allocations,
+ambiguous group identities and resource replacement still reject. Focused
+CPU/CUDA checks compare ordinary JIT, new sizes, source-free consumption,
+group/instance isolation and constructor-failure cleanup. Cooperative mixins
+whose resource contract is incomplete without a later MRO class still need work.
 This implementation uses one code module per export; it does not automatically
 provide multiple physical code partitions or qualify their loading costs.
 

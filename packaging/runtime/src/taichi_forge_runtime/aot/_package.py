@@ -1200,6 +1200,15 @@ def managed_class(package, cls):
         self._forge_package_field_groups = {}
         self._forge_package_layouts = {}
         self._forge_package_member_layouts = {}
+        # Allocation expressions may use an owner_dim inline, before a local
+        # scope handle has materialized its Extent. The declared paths are
+        # already authoritative and remain per-instance, including inherited
+        # groups. Do not evaluate the referenced values until they are used.
+        self._forge_package_dimension_paths = {
+            name: tuple(item["path"])
+            for name, item in package.manifest["owners"].get(selected_key, {}).items()
+            if item["kind"] == "dimension" and item.get("path")
+        }
         # Optional ports start unbound. A normal constructor may leave their
         # source attributes at None without invoking a later preparation method.
         # Only ResourceScope binding publishes presence; assigning a non-null
@@ -1630,6 +1639,7 @@ class LoadedPackage:
                 64,
                 65,
                 66,
+                67,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

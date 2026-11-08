@@ -107,7 +107,9 @@ def _signature_failures(sources, imported_modules):
     return failures
 
 
-def _owner_schema(module, node, kind, namespace, *, include_preparation=False, functions=None, earlier=None):
+def _owner_schema(
+    module, node, kind, namespace, *, include_preparation=False, functions=None, earlier=None, inherited=None
+):
     """Infer types from syntax, never run __init__ or select a model branch."""
     if node.keywords:
         _fail(module, node, "custom owner metaclasses require further support")
@@ -115,7 +117,8 @@ def _owner_schema(module, node, kind, namespace, *, include_preparation=False, f
     for function in construction_functions(node) if functions is None else functions:
         if getattr(function, "_package_preparation_method", False) and not include_preparation:
             continue
-        for name, declaration in _construction_schema(module, node, function, kind, namespace, schema).items():
+        dependencies = {**(inherited or {}), **schema}
+        for name, declaration in _construction_schema(module, node, function, kind, namespace, dependencies).items():
             if functions is not None:
                 declaration["declaration_module"] = module
                 declaration["declaration_owner"] = node.name
@@ -278,7 +281,17 @@ def _analyze(module, source, namespace, target):
                 or inherited_owner
                 or (declared_owner and any(isinstance(n, ast.FunctionDef) and n.name == "__init__" for n in node.body))
             ):
-                owners[node.name] = _owner_schema(module, node, kind, namespace)
+                constructor = next(
+                    (n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None
+                )
+                inherits_construction = constructor is not None and any(
+                    isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "__init__"
+                    for n in ast.walk(constructor)
+                )
+                # The complete MRO pass must establish base declarations before
+                # analyzing derived owner_dim/type/shape references. An empty
+                # marker here retains the owner without guessing base resources.
+                owners[node.name] = {} if inherits_construction else _owner_schema(module, node, kind, namespace)
             dataclass_owner = decorators == ["dataclass"]
             members = [(node.name, n) for n in node.body]
         else:
@@ -1511,6 +1524,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     shared_entries, pyfunc_kernels, closure_kernels = {}, {}, {}
     for name, path, relative, text, tree, kind, schemas, definitions in sources:
         imported = imported_modules[name]
+        if any(getattr(node, "_package_inherited_resource_dependencies", False) for node in tree.body):
+            manifest["version"] = max(67, manifest["version"])
         owners = {}
         environments = {}
         compilation_schemas = {}
@@ -1519,6 +1534,17 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             schemas[class_name] = schema
             owners[class_name], environments[class_name] = owner, environment
             compilation_schemas[class_name] = expanded
+            if (
+                len(
+                    {
+                        (item.get("declaration_module"), item.get("declaration_owner"))
+                        for item in schema.values()
+                        if item["kind"] == "dense_field"
+                    }
+                )
+                > 1
+            ):
+                manifest["version"] = max(67, manifest["version"])
             if any(item["kind"] == "owner" for item in schema.values()):
                 manifest["version"] = max(21, manifest["version"])
             if any(item["kind"] == "owner_input" for item in schema.values()):

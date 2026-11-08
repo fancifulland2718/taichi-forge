@@ -88,6 +88,12 @@ ti.aot.export_package(roots, "dist/engine_cuda", arch="cuda", source_root="path/
 动态尺寸、两实例及无源码消费。此切片不支持隐式推断普通父属性赋值，也不扩展
 `child.parent_dim`、条件注册或跨构造器组分配。
 
+版本 67 按实际 MRO 先解析无条件 `super().__init__`，再分析派生构造的资源依赖，
+允许派生组的 `owner_dim` 引用父构造的 `owner_reference`。多个构造器分配 Field 时，
+每个构造器须有独立的显式资源组；未分组的跨构造器分配、组身份冲突及资源替换仍拒绝。
+CPU/CUDA 局部检查覆盖与普通 JIT 对照、新尺寸、无源码消费、组/实例隔离和构造失败释放。
+这不代表需要后续 MRO 类才具备完整资源合同的 cooperative mixin 已全部支持。
+
 `source_root` 模式使用第 2 版包清单，消费者仍兼容第 1 版；旧消费者拒绝新版本。
 `library.host` 仍是最初选择的模块/包。包内绝对、相对和 importlib 导入解析到
 各自加载包的命名空间；任意表达式计算的动态依赖不被猜测为完整闭包。

@@ -48,20 +48,6 @@ def resolve_owners(sources, imported, owner_schema, fail):
         constructor = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
         if constructor is None:
             fail(name, node, "constructor replacement requires an explicit resource contract")
-        own = owner_schema(
-            name,
-            node,
-            kind,
-            vars(imported[name]),
-            functions=[
-                method
-                for method in construction_functions(node)
-                if not getattr(method, "_package_preparation_method", False)
-            ],
-        )
-        for item in own.values():
-            item["declaration_module"] = name
-            item["declaration_owner"] = node.name
         calls = [
             n
             for n in ast.walk(constructor)
@@ -82,6 +68,21 @@ def resolve_owners(sources, imported, owner_schema, fail):
             ):
                 fail(name, constructor, "owner construction requires one unconditional super().__init__ call")
             inherited = constructor_schema(cls, index + 1)
+        own = owner_schema(
+            name,
+            node,
+            kind,
+            vars(imported[name]),
+            functions=[
+                method
+                for method in construction_functions(node)
+                if not getattr(method, "_package_preparation_method", False)
+            ],
+            inherited=inherited,
+        )
+        if any(item.get("owner_dimension", [None])[0] in inherited for item in own.values()):
+            node._package_inherited_resource_dependencies = True
+        if calls:
             for n in ast.walk(constructor):
                 if (
                     isinstance(n, ast.Attribute)
@@ -94,6 +95,12 @@ def resolve_owners(sources, imported, owner_schema, fail):
                     fail(name, n, "declared owner assignments must follow super().__init__")
         for key in inherited.keys() & own.keys():
             left, right = inherited[key], own[key]
+            origins = {"scope_allocation", "scope_allocations", "declaration_module", "declaration_owner"}
+            if left["kind"] == right["kind"] == "dimension" and (
+                {k: v for k, v in left.items() if k not in origins}
+                == {k: v for k, v in right.items() if k not in origins}
+            ):
+                continue
             if (
                 left["kind"] != "value"
                 or right["kind"] != "value"
@@ -126,7 +133,9 @@ def resolve_owners(sources, imported, owner_schema, fail):
             for item in result.values()
             if item["kind"] == "dense_field"
         }
-        if len(field_owners) > 1:
+        if len(field_owners) > 1 and any(
+            item["kind"] == "dense_field" and not item.get("group_builder") for item in result.values()
+        ):
             fail(name, constructor, "Fields allocated by multiple constructors require separate native group contracts")
         # Projection needs the original allocation sites even for a plain
         # resource mixin. This is metadata, not an additional application decorator.
