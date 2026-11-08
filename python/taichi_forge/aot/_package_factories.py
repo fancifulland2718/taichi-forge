@@ -393,6 +393,7 @@ def normalize_factories(tree, namespace, module, fail, kind):
             ):
                 continue
             scopes = set()
+            checked_calls = set()
 
             def statements(body):
                 for statement in body:
@@ -411,6 +412,7 @@ def normalize_factories(tree, namespace, module, fail, kind):
                 ):
                     continue
                 call = statement.value
+                checked_calls.add(id(call))
                 target = _source_value(call.func, namespace)
                 expanded = None
                 try:
@@ -455,6 +457,21 @@ def normalize_factories(tree, namespace, module, fail, kind):
                     and isinstance(statement.targets[0], ast.Name)
                 ):
                     scopes.add(statement.targets[0].id)
+
+            # A scope factory can also occur inside an assignment target, a
+            # conditional expression or another call. Leaving it as ordinary
+            # Host syntax would hide its resources from the declaration pass.
+            # Use the same proof, but reject locations we cannot project.
+            for call in (n for n in ast.walk(function) if isinstance(n, ast.Call)):
+                if id(call) in checked_calls or hasattr(call, "_package_factory"):
+                    continue
+                target = _source_value(call.func, namespace)
+                try:
+                    normalized = prove_factory(target, call)
+                except (TypeError, _Unproven) as error:
+                    fail(module, call, f"Resource factory forwarding is unproven: {error}")
+                if normalized is not None and qualified_kind(normalized, kind) == "experimental.ResourceScope":
+                    fail(module, call, "ResourceScope factory construction requires one supported local assignment")
 
     class Replace(ast.NodeTransformer):
         def visit(self, node):
