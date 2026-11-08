@@ -1698,6 +1698,10 @@ already proven resource-group preparation function. This adds no receiver type o
 code variant: the existing preparation transaction checks the loaded owner contract
 before the function body executes. Unproven factories, rebound wrapper parameters
 and value-only preparations without that allocation boundary remain unsupported.
+Source discovery also follows function-local imports of preparation functions
+and module aliases from the existing source closure. It reads those definitions
+without running the Host function; an import that overwrites the owner parameter
+cannot reuse the original owner fact.
 This does not yet support changing one resource attribute between unrelated
 element types during preparation.
 Preparation may use a boolean domain already declared by its owner, including

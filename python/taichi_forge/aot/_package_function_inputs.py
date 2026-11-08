@@ -9,6 +9,7 @@ import builtins
 from collections import deque
 from dataclasses import dataclass, fields, is_dataclass, MISSING
 import inspect
+import importlib.util
 
 from taichi_forge_runtime._static_values import static_key
 from ._package_factories import _source_value
@@ -175,6 +176,55 @@ def discover(sources, imported, *, preparation_receivers=None):
                 result = inspect.getattr_static(cls, expression.attr, None)
         return result
 
+    namespaces = {}
+
+    def function_namespace(function):
+        if function in namespaces:
+            return namespaces[function]
+        _, node = functions[function]
+        bindings, shadowed = {}, set(inspect.signature(function).parameters)
+
+        def walk(part):
+            if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                shadowed.add(part.name)
+                return
+            if isinstance(part, ast.Lambda):
+                return
+            if isinstance(part, ast.Name) and not isinstance(part.ctx, ast.Load):
+                shadowed.add(part.id)
+            if isinstance(part, (ast.Import, ast.ImportFrom)):
+                origin = None
+                if isinstance(part, ast.ImportFrom):
+                    name = "." * part.level + (part.module or "")
+                    if part.level:
+                        name = importlib.util.resolve_name(name, function.__globals__["__package__"])
+                    origin = imported.get(name)
+                for alias in part.names:
+                    if origin is not None:
+                        value = vars(origin).get(alias.name, imported.get(name + "." + alias.name))
+                    elif isinstance(part, ast.Import):
+                        value = imported.get(alias.name if alias.asname else alias.name.split(".")[0])
+                    else:
+                        value = None
+                    key = alias.asname or (alias.name if isinstance(part, ast.ImportFrom) else alias.name.split(".")[0])
+                    if key in bindings and bindings[key] is not value:
+                        shadowed.add(key)
+                    bindings[key] = value
+            for child in ast.iter_child_nodes(part):
+                walk(child)
+
+        for statement in node.body:
+            walk(statement)
+        namespace = dict(function.__globals__)
+        for name, value in bindings.items():
+            # Read only modules already admitted to the source closure. Imports
+            # remain ordinary Host statements; discovery does not execute them.
+            namespace.pop(name, None)
+            if name not in shadowed and value is not None:
+                namespace[name] = value
+        namespaces[function] = namespace
+        return namespace
+
     def member(owner, name):
         if isinstance(owner, _Record):
             return dict(owner.items).get(name)
@@ -191,7 +241,7 @@ def discover(sources, imported, *, preparation_receivers=None):
 
     def build_context(function, arguments, return_chain):
         module, node = functions[function]
-        namespace = function.__globals__
+        namespace = function_namespace(function)
         # A rebinding invalidates an earlier owner fact. Nested definitions have
         # their own lexical scope and cannot lend assignments to this call.
         nodes = []
@@ -235,6 +285,11 @@ def discover(sources, imported, *, preparation_receivers=None):
         for part in nodes:
             if isinstance(part, ast.Name) and not isinstance(part.ctx, ast.Load):
                 stores[part.id] = stores.get(part.id, 0) + 1
+            if isinstance(part, (ast.Import, ast.ImportFrom)):
+                for item in part.names:
+                    name = item.asname or (item.name if isinstance(part, ast.ImportFrom) else item.name.split(".")[0])
+                    if name in arguments:
+                        stores[name] = stores.get(name, 0) + 1
             if isinstance(part, ast.Assign) and len(part.targets) == 1:
                 alias(part.targets[0], part.value)
         local_names = set(stores) | set(inspect.signature(function).parameters)
@@ -783,6 +838,10 @@ def discover(sources, imported, *, preparation_receivers=None):
                 and not isinstance(part.ctx, ast.Load)
                 or isinstance(part, (ast.Global, ast.Nonlocal))
                 and actual.id in part.names
+                or isinstance(part, ast.alias)
+                and (part.asname or part.name.split(".")[0]) == actual.id
+                or isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler))
+                and part.name == actual.id
                 for part in ast.walk(node)
             )
 
@@ -792,7 +851,7 @@ def discover(sources, imported, *, preparation_receivers=None):
             for call in ast.walk(node):
                 if not isinstance(call, ast.Call) or id(call) in covered:
                     continue
-                callee = source_callable(call.func, function.__globals__)
+                callee = source_callable(call.func, function_namespace(function))
                 if inspect.isfunction(callee) and callee in preparation_receivers:
                     if guarded_forward(function, node, callee, call):
                         continue
@@ -804,7 +863,7 @@ def discover(sources, imported, *, preparation_receivers=None):
     for function, (module, node) in functions.items():
         for call in ast.walk(node):
             if isinstance(call, ast.Call) and id(call) not in covered:
-                callee = source_callable(call.func, function.__globals__)
+                callee = source_callable(call.func, function_namespace(function))
                 for owner, name, _ in requested.get(callee, ()):
                     binding_calls.add((callee, id(call), owner, name))
                 if isinstance(call.func, ast.Attribute) and call.func.attr == "dispatch" and call.args:

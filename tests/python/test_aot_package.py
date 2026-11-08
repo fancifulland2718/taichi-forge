@@ -12574,12 +12574,12 @@ def prepare(owner, n: int, wide: bool):
         call.close()
 
 
-@pytest.mark.parametrize("inherited", [False, True, "free", "free_external", "free_forwarding"])
+@pytest.mark.parametrize("inherited", [False, True, "free", "free_external", "free_forwarding", "free_local"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_late_resource_context_preserves_generations(tmp_path, monkeypatch, inherited):
     model = PREPARATION_FIELDS_SOURCE
     extra_modules = {}
-    if inherited in ("free", "free_external", "free_forwarding"):
+    if inherited in ("free", "free_external", "free_forwarding", "free_local"):
         model = _free_preparation_source()
         if inherited == "free_forwarding":
             model += "\ndef forward(owner, n, fail=False):\n    prepare(owner, n, fail=fail)\n"
@@ -12587,13 +12587,23 @@ def test_package_late_resource_context_preserves_generations(tmp_path, monkeypat
                 "    def prepare_again(self, n):",
                 "    def prepare_external(self, other):\n        forward(other, 3)\n    def prepare_again(self, n):",
             )
-        if inherited == "free_external":
+        if inherited in ("free_external", "free_local"):
             start, end = model.index("def prepare(owner,"), model.index("class Alternate")
             extra_modules["preparation"] = (
                 "import taichi_forge as ti\nfrom resource_contexts import resource_group\npreparations = 0\n"
                 + model[start:end]
             )
-            model = model[:start] + "from .preparation import prepare\n" + model[end:]
+            if inherited == "free_local":
+                model = model[:start] + model[end:]
+                model = model.replace(
+                    "        prepare(self, n, fail=fail)",
+                    "        from .preparation import prepare as allocate\n        allocate(self, n, fail=fail)",
+                ).replace(
+                    "        prepare(self, n)",
+                    "        from . import preparation as allocations\n        allocations.prepare(self, n)",
+                )
+            else:
+                model = model[:start] + "from .preparation import prepare\n" + model[end:]
     elif inherited:
         start, end = model.index("    def prepare("), model.index("    @ti.kernel")
         prepare = model[start:end]
@@ -12614,7 +12624,7 @@ def test_package_late_resource_context_preserves_generations(tmp_path, monkeypat
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         registered = set(runtime._resources)
         a, b = code.host.Model(), code.host.Model()
-        if inherited in ("free", "free_external", "free_forwarding"):
+        if inherited in ("free", "free_external", "free_forwarding", "free_local"):
             b = sys.modules[code.host.Model.__module__].Alternate()
         assert set(runtime._resources) == registered
         if inherited == "free_forwarding":
@@ -12720,6 +12730,7 @@ def test_package_late_resource_context_preserves_generations(tmp_path, monkeypat
     [
         ("unknown", "no proven owner receiver"),
         ("forward_rebind", "no proven owner receiver"),
+        ("import_receiver", "no proven owner receiver"),
         ("rebind", "unchanged synchronous owner"),
         ("yield", "unchanged synchronous owner"),
     ],
@@ -12731,6 +12742,11 @@ def test_package_free_preparation_rejects_unproven_receiver(tmp_path, monkeypatc
         model += "\ndef unknown(value):\n    prepare(value(), 3)\n"
     elif change == "forward_rebind":
         model += "\ndef unknown(value):\n    value = None\n    prepare(value, 3)\n"
+    elif change == "import_receiver":
+        model = model.replace(
+            "        prepare(self, n, fail=fail)",
+            "        from .model import Alternate as self\n        prepare(self, n, fail=fail)",
+        )
     elif change == "rebind":
         model = model.replace(
             "def prepare(owner, n: int, fail=False):", "def prepare(owner, n: int, fail=False):\n    owner = None"
