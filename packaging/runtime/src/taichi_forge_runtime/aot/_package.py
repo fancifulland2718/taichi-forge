@@ -1370,7 +1370,7 @@ class entry:
             package._call_caches.append(cache)
         previous = cache.get(self)
         if previous is not None and previous.matches(owner, values):
-            return previous.run()
+            return previous.run(reuse=True)
         selected = self._select(owner)
         contract = selected.contract
         from ._package_calls import CachedCall, OwnerGuard
@@ -1439,9 +1439,15 @@ class entry:
                     item["kind"] == "value" and item.get("element_shape") for item in contract["captures"]
                 )
                 if reusable:
-                    cache[self] = CachedCall(guard, values, call, workspaces)
+                    ready = CachedCall(guard, values, call, workspaces)
+                    if previous is not None:
+                        previous.close()
+                    cache[self] = ready
                     retained = True
+                    return ready.run()
                 else:
+                    if previous is not None:
+                        previous.close()
                     cache.pop(self, None)
                 return call.run()
         finally:
@@ -1697,6 +1703,7 @@ class LoadedPackage:
         self._module.close()
         for cache in self._call_caches:
             for call in cache.values():
+                call.close()
                 for workspace in call.workspaces:
                     workspace.close()
             cache.clear()

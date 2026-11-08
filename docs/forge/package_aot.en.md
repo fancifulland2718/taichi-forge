@@ -724,12 +724,19 @@ ndarrays, invalid bindings and tree retirement. EFC CUDA checks pass JIT Fields
 directly and match the original JIT oracle in 12 cases. Measure cold startup and
 cached-process first calls separately; faster first loading does not establish faster execution.
 
-Ordinary `owner.method(...)` calls automatically reuse unchanged bindings,
-argument descriptors and local workspace on the instance; no explicit `prepare()`
+Ordinary `owner.method(...)` calls automatically reuse an unchanged native PreparedCall,
+argument frame and local workspace on the instance; no explicit `prepare()`
 is required. The first call and changes to relevant configuration, resources or
-arguments use the existing admission/binding path. Stable hot calls compare the
-relevant Host inputs and submit with the original leases, without reinterpreting
-admission schemas or rebuilding array descriptors. Device contents remain live,
+arguments use the existing admission/binding path. Native preparation occurs on the
+first reuse of an unchanged binding: one-off calls and continuously changing scalars
+do not repeatedly prepare native graphs. Preparation consumes authoritative
+JIT/AOT array views and fixes argument frames, resource references, block sizes and
+shared-memory sizes through the existing native execution mechanism. Stable hot
+calls compare the relevant Host inputs and submit with the original leases, without
+reinterpreting admission schemas, rebuilding array descriptors or native launch
+contexts. Changed bindings retire the old call and wait for in-flight work; historical
+argument combinations are not cached. Preparation neither recompiles numerical
+definitions nor adds model-specific distribution code. Device contents remain live,
 and instances do not share mutable state. Explicit Host buffers still upload and
 read back on every call, and mutable tensor arguments take fresh value snapshots.
 CPU/CUDA device assertion polling requires explicit development debug mode;

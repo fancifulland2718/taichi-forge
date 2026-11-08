@@ -1,7 +1,7 @@
 """Reuse ordinary definition-call binding while its observed inputs stay fixed.
 
-This caches descriptors, not device results. Changes re-enter the existing
-admission/binding path; each replay still checks the retained resource leases.
+This caches native prepared execution, not device results. Changes re-enter
+the existing admission/binding path; replay retains the native resource leases.
 No module-global resource pointer is changed to select an instance.
 """
 
@@ -114,9 +114,28 @@ class CachedCall:
         self.guard, self.values, self.call = guard, values, call
         self.tokens = tuple(_token(x) for x in values)
         self.workspaces = tuple(workspaces)
+        self.prepared = None
 
     def matches(self, owner, values):
         return tuple(_token(x) for x in values) == self.tokens and self.guard.matches(owner)
 
-    def run(self):
-        return self.call.run()
+    def run(self, *, reuse=False):
+        # Do native preparation when an unchanged binding is actually reused.
+        # One-off calls and continually changing scalar inputs keep the ordinary
+        # AOT launch path instead of building/retiring a native graph each time.
+        if reuse and self.prepared is None:
+            self.prepared = self.call.prepare()
+        if self.prepared is None:
+            return self.call.run()
+        # Existing backend preparation consumes authoritative JIT/AOT views,
+        # freezes launch geometry and retains its own argument frame. Shared
+        # code never implies shared mutable instance state.
+        self.prepared.run()
+        if self.prepared._return_layout is not None:
+            return self.prepared.result()
+
+    def close(self):
+        # Changed bindings are a cold boundary. Retire the previous immutable
+        # invocation before dropping its owners or reusing its workspace.
+        if self.prepared is not None:
+            self.prepared.close()

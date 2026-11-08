@@ -5150,10 +5150,14 @@ class Model:
             self.output[i] += gain
             if ti.static(self.input is not None):
                 self.output[i] += self.input[i]
+    @ti.kernel
+    def read(self, i: ti.i32) -> ti.f32:
+        return self.output[i]
 """)
     ti.aot.export_package(package, tmp_path / "sdk")
-    counts = dict(admission=0, bind=0)
+    counts = dict(admission=0, bind=0, prepare=0)
     admission, bind = _package.check_admission, _runtime.Kernel.bind
+    prepare = _runtime.BoundCall.prepare
 
     def checked(*args):
         counts["admission"] += 1
@@ -5163,16 +5167,25 @@ class Model:
         counts["bind"] += 1
         return bind(*args, **kwargs)
 
+    def prepared(*args, **kwargs):
+        counts["prepare"] += 1
+        return prepare(*args, **kwargs)
+
     monkeypatch.setattr(_package, "check_admission", checked)
     monkeypatch.setattr(_runtime.Kernel, "bind", bound)
+    monkeypatch.setattr(_runtime.BoundCall, "prepare", prepared)
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7), code.host.Model(13)
         a.prepare(None)
         b.prepare(None)
         a.step(2)
         b.step(3)
+        assert counts["prepare"] == 0  # Do not prepare one-off calls speculatively.
+        a.step(2)
+        b.step(3)
         initial = counts.copy()
-        for _ in range(3):
+        assert initial["prepare"] == 2
+        for _ in range(2):
             a.step(gain=2)
             b.step(3)
         assert counts == initial  # Natural syntax reuses binding on each instance.
@@ -5180,6 +5193,7 @@ class Model:
         np.testing.assert_array_equal(b.output.to_numpy(), np.full(13, 12))
         a.step(5)
         assert counts["bind"] == initial["bind"] + 1
+        assert counts["prepare"] == initial["prepare"]
         data = runtime.ndarray("f32", 7)
         data.write(np.full(7, 10, dtype=np.float32))
         a.prepare(data)
@@ -5187,7 +5201,8 @@ class Model:
         count = counts.copy()
         data.write(np.full(7, 20, dtype=np.float32))
         a.step(1)
-        assert counts == count  # Device contents are never cached.
+        assert counts == {**count, "prepare": count["prepare"] + 1}
+        # First reuse promotes the binding, but device contents remain live.
         np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 45))
         a.n = 8
         with pytest.raises(ValueError, match="shape|dimension|Dimension|layout"):
@@ -5198,8 +5213,16 @@ class Model:
             a.step(1)
         a.input = data
         data.close()
-        with pytest.raises(RuntimeError, match="closed"):
+        with pytest.raises(RuntimeError, match="closed|retired dependency"):
             a.step(1)
+        prepared_count = counts["prepare"]
+        for gain in (4, 5, 6):
+            b.step(gain)
+        assert counts["prepare"] == prepared_count  # Changing inputs stay ordinary AOT.
+        assert b.read(0) == 27
+        assert b.read(0) == 27  # Promoted calls preserve ordinary return semantics.
+        b.step(7)
+        assert b.read(0) == 34  # Prepared result storage is refreshed, not memoized.
 
 
 def _source_package(
@@ -8917,7 +8940,12 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
                 expected = np.where(indices % 2 == 1, (indices + 1) * (2 * gain + 1) * (model.dof + 1), 0)
                 np.testing.assert_array_equal(np.frombuffer(model.result.read(), np.float32), expected)
             runtime.wait()
-            resources = set(runtime._resources)
+            def resource_snapshot():
+                # Each model may promote its one ordinary entry on reuse.
+                # Scalar changes must not retain historical prepared calls.
+                assert sum(kind == 'prepared' for kind, _ in runtime._resources) <= len(models)
+                return {item for item in runtime._resources if item[0] != 'prepared'}
+            resources = resource_snapshot()
             original_array = runtime.ndarray
             def no_hot_allocation(*args, **kwargs):
                 raise AssertionError('ordinary replay allocated unchanged workspace')
@@ -8928,7 +8956,7 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
             finally:
                 runtime.ndarray = original_array
             runtime.wait()
-            assert runtime._resources == resources, 'workspace resources leaked'
+            assert resource_snapshot() == resources, 'workspace resources leaked'
             import struct
             try:
                 models[0].step('invalid scalar')
@@ -8938,7 +8966,7 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
                 raise AssertionError('invalid scalar accepted')
             models[0].step(3.0)  # Failed rebind must not retire the cached scratch.
             runtime.wait()
-            assert runtime._resources == resources
+            assert resource_snapshot() == resources
             from taichi_forge_runtime.aot import _package
             original_capture = _package.capture_value
             def changed_after_snapshot(owner, spec):
@@ -8956,7 +8984,7 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
             np.testing.assert_array_equal(models[0].result.to_numpy(),
                 np.where(indices % 2 == 1, (indices + 1) * 5 * 4, 0))
             runtime.wait()
-            assert runtime._resources == resources
+            assert resource_snapshot() == resources
             model = models[0]
             original_dof = model.dof
             for invalid in (0, 2**30):
@@ -8967,12 +8995,12 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
                     assert 'tensor axes' in str(error) or 'indexing range' in str(error)
                 else:
                     raise AssertionError('invalid workspace extent accepted')
-                assert runtime._resources == resources
+                assert resource_snapshot() == resources
             model.dof = original_dof
             model.n = 1
             model.step(1.0)  # empty range, no model-sized scratch allocation
             runtime.wait()
-            assert runtime._resources == resources
+            assert resource_snapshot() == resources
             model.n = 7
             runtime.ndarray = no_hot_allocation
             try:
@@ -8980,7 +9008,7 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
             finally:
                 runtime.ndarray = original_array
             runtime.wait()
-            assert runtime._resources == resources
+            assert resource_snapshot() == resources
             graphs = [model.graph(mixed=True) for model in models]
             prepared = [graph.bind({'gain': gain}) for graph, gain in zip(graphs, gains)]
             for call, model in zip(prepared, models):
@@ -9024,7 +9052,7 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
             for call in prepared[1:]:
                 call.close()
             runtime.wait()
-            assert runtime._resources == resources, 'prepared workspaces leaked'
+            assert resource_snapshot() == resources, 'prepared workspaces leaked'
             for invalid in (0, 2**30):
                 models[0].dof = invalid
                 try:
@@ -9033,7 +9061,7 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
                     assert 'tensor axes' in str(error) or 'indexing range' in str(error)
                 else:
                     raise AssertionError('invalid Graph workspace extent accepted')
-                assert runtime._resources == resources
+                assert resource_snapshot() == resources
             models[0].dof = 3
         print('MODEL_LOCAL_TENSOR_SOURCE_FREE_OK')
     """), encoding="utf8")
