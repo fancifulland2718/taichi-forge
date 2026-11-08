@@ -646,6 +646,16 @@ class _OwnerReference:
         return component.read(owner, name) is target
 
 
+class _InputRecord(Record):
+    def __init__(self, presence):
+        super().__init__(optional=True)
+        object.__setattr__(self, "presence", presence)
+
+    @property
+    def schema(self):
+        return ("input_record", self.presence)
+
+
 class _ConditionalRecord(Record):
     """A declared optional StructField namespace with a complete type witness."""
 
@@ -680,6 +690,10 @@ class _RecordReference:
 
     def __bool__(self):
         raise TaichiCompilationError("A declared record is a namespace; test its presence with 'is not None'")
+
+
+class _InputRecordReference(_RecordReference):
+    pass
 
 
 @dataclass(frozen=True)
@@ -2095,6 +2109,13 @@ class _Capture:
                 "declare it as a runtime value, resource or static configuration"
             )
         self.used[name] = declaration.schema
+        if isinstance(declaration, _InputRecord):
+            return _InputRecordReference(path)
+        if not _argument_binding:
+            for depth in range(1, len(path)):
+                record = _capture_id(path[:depth])
+                if isinstance(self.declarations.get(record), _InputRecord):
+                    self.input_requirements.setdefault(record, set()).add(tuple(self.input_guards))
         if isinstance(declaration, _OptionalArray):
             if ctx is not None and ctx.is_in_static_scope():
                 return _OptionalArrayReference(path)
@@ -2222,12 +2243,13 @@ class _Capture:
     def optional_comparison(self, ctx, left, right, operation):
         from taichi_forge.lang import ops
 
-        reference = left if isinstance(left, _OptionalArrayReference) else right
-        if not isinstance(reference, _OptionalArrayReference):
+        references = (_OptionalArrayReference, _InputRecordReference)
+        reference = left if isinstance(left, references) else right
+        if not isinstance(reference, references):
             return None
         other = right if reference is left else left
         if other is not None or operation not in ("Is", "IsNot", "Eq", "NotEq"):
-            raise TaichiCompilationError("Optional array references only support comparison with None")
+            raise TaichiCompilationError("Optional input references only support comparison with None")
         name = self.declarations[_capture_id(reference.path)].presence
         path = self.component._paths[name]
         value = self.attribute(ctx, path[-1], prefix=path[:-1])

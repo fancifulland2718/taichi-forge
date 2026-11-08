@@ -165,9 +165,17 @@ byte for a zero-sized ranked array, or one element for a rank-zero scalar. No
 model-sized placeholder is allocated. Local CPU/CUDA checks cover four two-port
 combinations, dependent-input rejection, presence-only queries, new sizes, nested
 owners, vector/rank-zero inputs and old Graph snapshots.
-Optional record presence still uses the existing static mechanism. Dynamic
-records, arbitrary conditional ports, struct elements and model-dependent element
-shapes remain outside this typed-port slice.
+Format 64 applies the same dynamic presence mechanism to optional input records
+containing typed external arrays, scalar values and dimensions. Actual bindings
+check branch requirements and member dimension constraints; an absent record's
+unreachable members are not read. Local CPU/CUDA checks cover dynamic member
+loops, scalar values, `ti.real_func`, dependent-record rejection, preparation
+changes and independent consumers that forbid frontend/private-definition imports.
+Records controlling owned workspace allocation, containing static options, or
+feeding dimensions into declarations outside the record retain their existing
+layout/selection contract until their binding lifetime is handled. Arbitrary
+conditional ports, struct elements and model-dependent element shapes remain
+outside this typed-port slice.
 
 Format 61 projects retained `ti.algorithms.sort`, `SortWorkspace`, and
 `primitive_sequence().sort(...)` / `GraphBuilder.append_native` onto the existing

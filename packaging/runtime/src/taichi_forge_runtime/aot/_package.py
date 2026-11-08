@@ -1044,6 +1044,16 @@ class _ResourceScope:
                 raise ValueError("A record declaration must refer to its existing member")
         else:
             setattr(self._owner, name, value)
+        from ._package_values import owner_type
+
+        package = getattr(self._root, "_forge_package_owner", None)
+        contract = (
+            package.manifest["owners"].get(owner_type(self._root), {}).get(self._identity(name), {})
+            if package is not None
+            else {}
+        )
+        if contract.get("dynamic_input_record"):
+            setattr(self._root, contract["input_presence_attribute"], value is not None)
         return _ResourceScope(value, parent=self, path=(*self._path, name))
 
     def require_le(self, name, left, right, *, when):
@@ -1501,6 +1511,7 @@ class LoadedPackage:
                 61,
                 62,
                 63,
+                64,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

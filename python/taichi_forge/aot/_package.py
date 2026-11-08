@@ -1809,6 +1809,20 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 }
                 if dynamic_presence:
                     manifest["version"] = max(63, manifest["version"])
+                input_records = {
+                    key: dict(
+                        path=list(environment._paths[key]),
+                        required_when=code.contract.get("input_requirements", {}).get(key, []),
+                    )
+                    for key, item in compilation_schemas.get(owner_name, {}).items()
+                    if item.get("dynamic_input_record") and key in code.used
+                }
+                for key in input_records:
+                    flag = compilation_schemas[owner_name][key]["input_presence_attribute"]
+                    dynamic_presence[flag] = dict(
+                        path=list(environment._paths[key]), flag_path=list(environment._paths[flag])
+                    )
+                    manifest["version"] = max(64, manifest["version"])
                 used_paths = [environment._paths[key] for key in bound_used if key in environment._paths]
                 source_bindings = {
                     key: dict(
@@ -1840,6 +1854,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                             if item.get("optional_input")
                             else {}
                         ),
+                        **({"input_record": item["input_record"]} if item.get("input_record") else {}),
                     )
                     for key, item in compilation_schemas.get(owner_name, {}).items()
                     if key in code.dynamic and item.get("external")
@@ -1857,6 +1872,20 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         **({"owner_bindings": child_bindings} if child_bindings else {}),
                         **({"input_presence": input_presence} if input_presence else {}),
                         **({"dynamic_input_presence": dynamic_presence} if dynamic_presence else {}),
+                        **(
+                            {
+                                "input_records": input_records,
+                                "constraint_records": {
+                                    key: compilation_schemas[owner_name][constraint["when"]]["input_record"]
+                                    for key, constraint in constraints.items()
+                                    if compilation_schemas.get(owner_name, {})
+                                    .get(constraint["when"], {})
+                                    .get("input_record")
+                                },
+                            }
+                            if input_records
+                            else {}
+                        ),
                         **({"external_resources": external_resources} if external_resources else {}),
                         **({"constants": constants} if constants else {}),
                     )
@@ -1910,7 +1939,11 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     ]
                     for item in capture:
                         resource = compilation_schemas.get(owner_name, {}).get(item["name"], {})
-                        if resource.get("external") and resource.get("optional_input"):
+                        if resource.get("input_record"):
+                            item["nullable_record"] = list(environment._paths[resource["input_record"]])
+                        if resource.get("external") and (
+                            resource.get("optional_input") or resource.get("input_record")
+                        ):
                             item["optional_array"] = dict(element=resource["element"], ndim=resource["ndim"])
                         if item["kind"] == "local_tensor_workspace":
                             item.update(code.workspaces[item["name"]])

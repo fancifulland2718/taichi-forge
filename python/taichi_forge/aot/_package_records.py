@@ -20,7 +20,7 @@ def write_member(owner, name, value, schema):
 
 def record_environment(declarations, schema):
     """Use Component's record paths while preserving already qualified dimensions."""
-    from ._component import Component, Dimension, Record, _OptionalArray
+    from ._component import Component, Dimension, Record, _OptionalArray, _InputRecord
 
     tree = {}
     for name, declaration in declarations.items():
@@ -54,7 +54,7 @@ def record_environment(declarations, schema):
     environment._symbolic_dimensions = True
     flattened = dict(environment.declarations)
     for name, declaration in declarations.items():
-        if isinstance(declaration, (Dimension, _OptionalArray)):
+        if isinstance(declaration, (Dimension, _OptionalArray, _InputRecord)):
             flattened[name] = declaration
     environment._set_declarations(flattened)
     environment._constraints = MappingProxyType(

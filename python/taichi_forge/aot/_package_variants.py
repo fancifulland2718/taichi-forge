@@ -28,7 +28,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     records = {
         name: read_member(owner, name, schema)
         for name, item in schema.items()
-        if item["kind"] == "record" and item.get("optional")
+        if item["kind"] == "record" and item.get("optional") and not item.get("dynamic_input_record")
     }
     if not domains and not records:
         return [environment.compile(entry, *arguments, owner=owner, template_args=template_args)]

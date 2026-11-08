@@ -40,14 +40,24 @@ def check_admission(owner, contract):
             if path_value(owner, binding["flag_path"]) is not actual:
                 raise ValueError("Optional input presence changed outside its preparation binding")
             presence[name] = int(actual)
+
+        def required(paths):
+            return any(
+                all(bool(evaluate_extent(expression, presence.__getitem__)) is truth for expression, truth in path)
+                for path in paths
+            )
+
+        records = {}
+        for name, record in admission.get("input_records", {}).items():
+            records[name] = path_value(owner, record["path"]) is not None
+            if not records[name] and required(record["required_when"]):
+                raise ValueError("Optional record presence is required by the selected execution branch")
         for resource in admission.get("external_resources", {}).values():
+            if resource.get("input_record") and not records[resource["input_record"]]:
+                continue
             value = path_value(owner, resource["path"])
             if value is None and "required_when" in resource:
-                required = any(
-                    all(bool(evaluate_extent(expression, presence.__getitem__)) is truth for expression, truth in path)
-                    for path in resource["required_when"]
-                )
-                if required:
+                if required(resource["required_when"]):
                     raise ValueError("Optional input presence is required by the selected execution branch")
                 continue
             check_external_resource(owner, resource, value)
@@ -64,7 +74,11 @@ def check_admission(owner, contract):
         constraints, dimensions = admission["constraints"], admission["dimensions"]
         validate_constraints(constraints, dimensions.keys(), {spec["when"] for spec in constraints.values()})
         check_constraints(
-            constraints,
+            {
+                key: spec
+                for key, spec in constraints.items()
+                if key not in admission.get("constraint_records", {}) or records[admission["constraint_records"][key]]
+            },
             lambda name: capture_value(owner, dict(name=name, dimension_relations=dimensions)),
         )
 
@@ -111,6 +125,12 @@ def check_owner_bindings(owner, bindings):
 
 def capture_value(owner, spec):
     root = owner
+    if spec.get("nullable_record") and path_value(owner, spec["nullable_record"]) is None:
+        if "optional_array" in spec:
+            return root._forge_package_owner._empty_input(spec["optional_array"])
+        # The record access is unreachable according to admission. This scalar
+        # only completes the immutable ABI snapshot; it is not a model value.
+        return 0
     relations = spec.get("dimension_relations")
     if relations:
 

@@ -5198,6 +5198,7 @@ class Packet:
     count: int
     offsets: object
     values: object
+    gain: float = 2.0
 @ti.data_oriented
 class Model:
     def __init__(self, n: int):
@@ -5209,16 +5210,20 @@ class Model:
         s = ti.experimental.ResourceScope(self)
         record = s.record('packet', packet, optional=True)
         if packet is not None:
+            record.value('gain', ti.f32)
             record.borrow('offsets', packet.offsets, external=True, dtype=ti.i32, shape=record.dim('count') + 1)
             record.borrow('values', packet.values, external=True, dtype=ti.types.vector(3, ti.f32),
                           shape=record.parent_dim('n'))
             record.require_le('enough_offsets', record.parent_dim('n'), record.dim('count'), when='offsets')
+    @ti.real_func
+    def offset(self, i: ti.i32) -> ti.f32:
+        return self.packet.offsets[i + 1] + self.packet.gain
     @ti.kernel
     def update(self):
         self.counter[None] += 1
         if ti.static(self.packet is not None):
-            for i in range(self.n):
-                self.packet.values[i] += self.packet.offsets[i + 1]
+            for i in range(self.packet.count):
+                self.packet.values[i] += self.offset(i)
     def graph(self):
         b = ti.graph.GraphBuilder()
         b.dispatch(self.update)
@@ -5228,9 +5233,10 @@ class Model:
         source = source.replace(
             "record.parent_dim('n'), record.dim('count'), when", "record.parent_dim('n') + 2, record.dim('count'), when"
         )
+        source = source.replace("range(self.packet.count)", "range(self.packet.count - 2)")
     if helper:
         start = source.index("            record.borrow")
-        end = source.index("    @ti.kernel", start)
+        end = source.index("    @ti.real_func", start)
         body = textwrap.dedent(source[start:end]).replace("ti.", "dsl.")
         (tmp_path / "port_declarations.py").write_text(
             "import taichi_forge as dsl\ndef declare_packet(record, packet):\n" + textwrap.indent(body, "    "),
@@ -5241,6 +5247,7 @@ class Model:
         source = "from port_declarations import declare_packet\n" + source
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 64 and not manifest["entry_families"]
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
         for n in (5, 17):
             offsets = ti.field(ti.i32, shape=n + padding + 1)
@@ -5272,6 +5279,54 @@ class Model:
             previous.close()
             for array in imported:
                 array.close()
+    if not helper:
+        probe = tmp_path / "consume_optional_record.py"
+        probe.write_text(
+            textwrap.dedent("""
+            import importlib.abc, sys, numpy as np
+            class NoSource(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                        raise AssertionError(fullname)
+            sys.meta_path.insert(0, NoSource())
+            from taichi_forge_runtime.aot import Runtime, load_package
+            with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+                model = code.host.Model(7)
+                model.prepare(None)
+                model.update()
+                offsets = runtime.ndarray('i32', 8)
+                values = runtime.ndarray('f32', 7, element_shape=(3,))
+                offsets.from_numpy(np.arange(8, dtype=np.int32))
+                values.from_numpy(np.zeros((7,3), dtype=np.float32))
+                packet = code.module('definition_fixture.model').Packet(7, offsets, values, 3.)
+                model.prepare(packet)
+                with model.graph().bind({}) as call:
+                    model.prepare(None)
+                    model.update()
+                    call.run()
+                    np.testing.assert_array_equal(values.to_numpy(), np.repeat((np.arange(7)+4)[:,None],3,axis=1))
+                offsets.close(); values.close()
+            print('OPTIONAL_RECORD_SOURCE_FREE_OK')
+        """),
+            encoding="utf8",
+        )
+        env = dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        )
+        result = subprocess.run(
+            [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "OPTIONAL_RECORD_SOURCE_FREE_OK" in result.stdout
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
@@ -5319,7 +5374,10 @@ class Model:
 """
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert sorted(len(entry["variants"]) for entry in manifest["entry_families"].values()) == [1, 3]
+    # Only the explicit algorithm option remains static; two record-presence
+    # axes share each implementation and required reads are checked at bind.
+    assert manifest["version"] == 64
+    assert sorted(len(entry["variants"]) for entry in manifest["entry_families"].values()) == [2]
     for name in tuple(sys.modules):
         if name == "definition_fixture" or name.startswith("definition_fixture."):
             monkeypatch.delitem(sys.modules, name)

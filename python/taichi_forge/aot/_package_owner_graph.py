@@ -143,6 +143,9 @@ class OwnerGraph:
                 declarations[attribute] = value_type(dtype, affects_plan=item.get("affects_plan", False))
                 value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
             write_member(owner, attribute, value, schema)
+        from ._package_optional import project_input_records
+
+        project_input_records(owner, schema, declarations)
         environment, expanded = _compose(field_environment(declarations, schema), schema, children)
         from ._package_field_like import project_field_likes
 
@@ -154,7 +157,16 @@ class OwnerGraph:
 def _compose(environment, schema, children):
     """Qualify existing Component declarations; native layouts remain authoritative."""
     from dataclasses import replace
-    from ._component import Array, DenseField, Dimension, Record, _ConditionalRecord, _ModelTensorField, _capture_id
+    from ._component import (
+        Array,
+        DenseField,
+        Dimension,
+        Record,
+        _ConditionalRecord,
+        _InputRecord,
+        _ModelTensorField,
+        _capture_id,
+    )
 
     declarations, paths = dict(environment.declarations), dict(environment._paths)
     constraints, source_paths = dict(environment._constraints), dict(environment._source_scope_paths)
@@ -202,6 +214,8 @@ def _compose(environment, schema, children):
                 value = replace(value, **changes)
             elif isinstance(value, _ConditionalRecord):
                 value = _ConditionalRecord(tuple((names[n], expected) for n, expected in value.conditions))
+            elif isinstance(value, _InputRecord):
+                value = _InputRecord(names[value.presence])
             elif isinstance(value, Record):
                 value = Record(optional=value.optional)
             declarations[names[key]], paths[names[key]] = value, (attribute, *child._paths[key])
@@ -220,6 +234,8 @@ def _compose(environment, schema, children):
                 transformed["source_path"] = [attribute, *item["source_path"]]
             if "input_presence_attribute" in item:
                 transformed["input_presence_attribute"] = names[item["input_presence_attribute"]]
+            if "input_record" in item:
+                transformed["input_record"] = names[item["input_record"]]
             if item.get("external"):
                 transformed["shape_expressions"] = [expression(axis) for axis in item["shape_expressions"]]
             if "reference_path" in item:
