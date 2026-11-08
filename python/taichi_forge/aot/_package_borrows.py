@@ -4,6 +4,17 @@ import ast
 from types import MappingProxyType
 
 
+def needs_source_proof(expression, schema):
+    path, node = [], expression
+    while isinstance(node, ast.Attribute):
+        path.insert(0, node.attr)
+        node = node.value
+    return isinstance(node, ast.Name) and (
+        node.id != "self"
+        or bool(path) and schema.get(path[0], {}).get("kind") not in ("owner", "owner_input", "dense_field")
+    )
+
+
 def declaration(call, scope_path, schema, dimension, fail, *, preparation=False):
     """Admit known allocation paths, never infer a borrowed ABI from a sample."""
     if len(call.args) != 2 or not isinstance(call.args[0], ast.Constant):
@@ -26,15 +37,7 @@ def declaration(call, scope_path, schema, dimension, fail, *, preparation=False)
         path.insert(0, node.attr)
         node = node.value
     parameter = node.id if isinstance(node, ast.Name) and node.id != "self" and not path else None
-    deferred = (
-        preparation
-        and isinstance(node, ast.Name)
-        and (
-            node.id != "self" or schema.get(path[0], {}).get("kind") not in ("owner", "owner_input", "dense_field")
-            if path
-            else node.id != "self"
-        )
-    )
+    deferred = preparation and needs_source_proof(call.args[1], schema)
     if scope_path and parameter is not None and not deferred:
         fail(call, "Record borrowing requires a declared allocation path, not an untyped record input")
     if not deferred and parameter is None and (not isinstance(node, ast.Name) or node.id != "self" or not path):
@@ -145,7 +148,9 @@ def project(owner, environment, schema):
             # An actual Field argument proves existence, not a numerical option.
             # Retain the source predicate as admission on its allocation owner.
             item["source_presence"] = [
-                dict(path=list(paths[key]), expected=expected) for key, expected in sorted(source["conditions"].items())
+                dict(path=list(paths[key]), expected=expected)
+                for key, expected in sorted(source["conditions"].items())
+                if item.get("conditions", {}).get(key) is not expected
             ]
         elif any(
             item.get("conditions", {}).get(key) is not expected

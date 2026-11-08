@@ -543,7 +543,10 @@ class _ModuleBinding:
             raise ValueError("Borrowed record member differs from its declared allocation")
         if contract.get("optional_input") and field is None:
             setattr(scope._root, contract["source_path"][0], None)
-            setattr(scope._owner, name, None)
+            if scope._parent is None:
+                setattr(scope._owner, name, None)
+            if contract.get("input_presence_attribute"):
+                setattr(scope._root, contract["input_presence_attribute"], False)
             return None
         source_binding = None
         if "input_parameter" in contract or "input_method" in contract:
@@ -587,6 +590,8 @@ class _ModuleBinding:
         )
         if source_binding is not None:
             setattr(scope._root, source_binding[0], source_binding[1])
+        if contract.get("input_presence_attribute"):
+            setattr(scope._root, contract["input_presence_attribute"], True)
         if scope._parent is None:
             setattr(scope._owner, name, field)
         return field
@@ -1356,6 +1361,7 @@ class LoadedPackage:
                 54,
                 55,
                 56,
+                57,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

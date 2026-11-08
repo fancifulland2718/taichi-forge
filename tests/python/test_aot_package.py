@@ -3402,6 +3402,158 @@ class Model:
 """
 
 
+def _optional_prepared_input_source():
+    source = _prepared_input_source().replace("    values: object", "    values: object\n    unused: object = None")
+    source = source.replace(
+        "record = scope.record('binding', binding, optional=True)", "record = scope.record('binding', binding)"
+    )
+    source = source.replace(
+        "        if binding is not None:\n            size = record.dim('n')",
+        "        size = record.dim('n')\n        if binding.values is not None:",
+    )
+    source = source.replace(
+        "        with resource_group(self, 'output'",
+        "        if binding.unused is not None:\n            record.borrow('unused', binding.unused, source_scope=True)\n"
+        "        with resource_group(self, 'output'",
+    )
+    source = source.replace("ti.static(self.binding is not None)", "ti.static(self.binding.values is not None)")
+    source = source.replace(
+        "def make_binding(source):\n    return Binding(source.n, source.storage)",
+        "def make_binding(source, enabled, unused):\n    return Binding(source.n, source.storage if enabled else None, source.other if unused else None)",
+    )
+    return source.replace(
+        "    def prepare(self):\n        binding = make_binding(self.source)",
+        "    def prepare(self, enabled=True, unused=False):\n        binding = make_binding(self.source, enabled, unused)",
+    )
+
+
+@pytest.mark.parametrize("form", ["guard", "helper", "conditional_source"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_prepared_field_inputs_reuse_presence_contract(tmp_path, monkeypatch, form):
+    source = _optional_prepared_input_source()
+    if form == "helper":
+        source = (
+            source.replace(
+                "        if binding.values is not None:\n            record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})",
+                "        declare_source(record, 'values', binding.values, dimensions={'n': size})",
+            ).replace(
+                "        if binding.unused is not None:\n            record.borrow('unused', binding.unused, source_scope=True)",
+                "        declare_source(record, 'unused', binding.unused)",
+            )
+            + FIELD_HELPER_SOURCE
+        )
+    elif form == "conditional_source":
+        source = source.replace(
+            "class Source:\n    def __init__(self, n: int):",
+            "class Source:\n    def __init__(self, n: int, enabled: bool = True):",
+        )
+        source = source.replace(
+            "        scope.storage = scope.field(ti.i32, shape=scope.dim('n'))",
+            "        size = scope.dim('n')\n        if enabled:\n            scope.storage = scope.field(ti.i32, shape=size)\n"
+            "        else:\n            scope.record('storage', None, optional=True)",
+        )
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    module = sys.modules["definition_fixture.model"]
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 57
+    assert module.constructors == module.preparations == 0
+    reference = module.Harness(7)
+    reference.source.storage.from_numpy(np.arange(7, dtype=np.int32))
+    reference.prepare(True, False)
+    reference.consumer.step(3)
+    expected = reference.consumer.output.to_numpy()
+    # The unused optional binding does not multiply the actual numerical code.
+    family = next(value for value in manifest["entry_families"].values() if len(value["variants"]) > 1)
+    assert len(family["variants"]) == 2
+    assert len(family["domain"]) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.model.Harness(7), code.host.model.Harness(31)
+        a.source.storage.from_numpy(np.arange(7, dtype=np.int32))
+        b.source.storage.from_numpy(np.arange(31, dtype=np.int32) * 2)
+        a.prepare(True, False)
+        a.consumer.step(3)
+        np.testing.assert_array_equal(a.consumer.output.to_numpy(), expected)
+        b.prepare(False, True)
+        b.consumer.step(9)
+        np.testing.assert_array_equal(b.consumer.output.to_numpy(), np.full(31, -1))
+        previous = a.consumer.output
+        saved = a.consumer.graph().bind({"delta": 5})
+        a.prepare(False, True)
+        a.consumer.step(3)
+        np.testing.assert_array_equal(a.consumer.output.to_numpy(), np.full(7, -1))
+        saved.run()
+        np.testing.assert_array_equal(previous.to_numpy(), np.arange(7) + 5)
+        saved.close()
+        a.prepare(True, True)
+        a.consumer.step(11)
+        np.testing.assert_array_equal(a.consumer.output.to_numpy(), np.arange(7) + 11)
+        a.consumer.binding = code.host.model.Binding(7, None)
+        with pytest.raises(ValueError, match="presence|source|alias|allocation"):
+            a.consumer.step(0)
+        if form == "conditional_source":
+            missing = code.host.model.Source(19, False)
+            a.consumer.prepare(code.host.model.make_binding(missing, True, False))
+            a.consumer.step(3)
+            np.testing.assert_array_equal(a.consumer.output.to_numpy(), np.full(19, -1))
+    probe = tmp_path / "consume_optional_prepared.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.model.Harness(19), code.host.model.Harness(67)
+            a.source.storage.from_numpy(np.arange(19, dtype=np.int32))
+            a.prepare(True, True); b.prepare(False, False)
+            a.consumer.step(4); b.consumer.step(9)
+            np.testing.assert_array_equal(a.consumer.output.to_numpy(), np.arange(19) + 4)
+            np.testing.assert_array_equal(b.consumer.output.to_numpy(), np.full(67, -1))
+        print('OPTIONAL_PREPARED_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OPTIONAL_PREPARED_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["wrong_guard", "unknown_factory", "no_source", "unguarded_numerics"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_optional_prepared_inputs_reject_unproven_sources(tmp_path, monkeypatch, change):
+    source = _optional_prepared_input_source()
+    if change == "wrong_guard":
+        source = source.replace("if binding.values is not None:", "if binding.unused is not None:")
+    elif change == "unknown_factory":
+        source = source.replace("source.storage if enabled else None", "unknown(source) if enabled else None")
+        source += '\ndef unknown(source):\n    raise AssertionError("must not run")\n'
+    elif change == "no_source":
+        source = source.replace("source.storage if enabled else None", "None")
+    else:
+        source = source.replace("if ti.static(self.binding.values is not None):", "if ti.static(True):")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ti.aot.PackageExportError):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
 def _prepared_input_source():
     source = RECORD_BORROW_SOURCE.replace(
         "record.borrow('values', self.storage,", "record.borrow('values', binding.values,"

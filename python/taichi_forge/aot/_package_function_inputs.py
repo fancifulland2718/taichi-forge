@@ -26,6 +26,7 @@ class _Owner:
 class _Resource:
     owner: _Owner
     path: tuple
+    optional: bool = False
 
 
 @dataclass(frozen=True)
@@ -468,6 +469,9 @@ def discover(sources, imported):
                 if isinstance(condition, _Literal) and type(condition.value) is bool:
                     return child(expression.body if condition.value else expression.orelse)
                 left, right = child(expression.body), child(expression.orelse)
+                for resource, absent in ((left, right), (right, left)):
+                    if isinstance(resource, _Resource) and isinstance(absent, _Literal) and absent.value is None:
+                        return _Resource(resource.owner, resource.path, optional=True)
                 return left if left == right else None
             if isinstance(expression, ast.Call):
                 cls = source(expression.func)
@@ -601,7 +605,10 @@ def discover(sources, imported):
             if not isinstance(receiver, _Owner) or receiver.identity != owner:
                 continue
             fact = value(item["input_expression"])
-            if isinstance(fact, _Resource):
+            if isinstance(fact, _Literal) and fact.value is None and item.get("optional_input"):
+                if call_site is not None:
+                    binding_covered.add((function, call_site, owner, name))
+            if isinstance(fact, _Resource) and (not fact.optional or item.get("optional_input")):
                 source = owners[fact.owner.identity].get(fact.path[0], {})
                 if source.get("kind") == "dense_field" and (
                     len(fact.path) == 1 or source.get("struct_field") and len(fact.path) == 2
@@ -632,6 +639,8 @@ def discover(sources, imported):
                         continue
                     item = inputs.get(key)
                     if isinstance(item, _Resource):
+                        if item.optional:
+                            raise ValueError("Optional Field forwarding requires its declared presence binding")
                         path = (*item.owner.path, *item.path)
                         if (item.owner.root or item.owner.identity) != (owner.root or owner.identity) or path[
                             : len(owner.path)
@@ -750,8 +759,22 @@ def discover(sources, imported):
                 source_type=source_type, source_member=list(source_member), source_path=[private_source, *source_member]
             )
             del item["input_expression"]
+            if item.get("optional_input"):
+                presence = "_forge_package_input_present_" + name
+                owners[owner][presence] = dict(
+                    kind="static",
+                    choices=[("bool", False), ("bool", True)],
+                    kernel_only=False,
+                    presence_field=name,
+                )
+                item["input_presence_attribute"] = presence
+                item["conditions"] = {**item.get("conditions", {}), presence: True}
             owners[owner][private_source] = dict(
-                kind="owner_input", owner_type=source_type, field_input=name, binding_phase="preparation"
+                kind="owner_input",
+                owner_type=source_type,
+                field_input=name,
+                binding_phase="preparation",
+                **({"conditions": item["conditions"]} if item.get("conditions") else {}),
             )
 
     result = {}

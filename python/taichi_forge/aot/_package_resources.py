@@ -1107,6 +1107,37 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                                     fail(module, part, "Optional record guard may only declare its present members")
                         yield from statements(present, conditions)
                         continue
+                    if getattr(constructor, "_package_preparation_method", False):
+                        from collections import ChainMap
+                        from ._package_borrows import needs_source_proof
+
+                        present, absent = (
+                            (statement.body, statement.orelse)
+                            if isinstance(test.ops[0], ast.IsNot)
+                            else (statement.orelse, statement.body)
+                        )
+                        calls = [part.value for part in present if isinstance(part, ast.Expr)]
+                        if (
+                            calls
+                            and needs_source_proof(test.left, ChainMap(declarations, earlier or {}))
+                            and len(calls) == len(present)
+                            and all(isinstance(part, ast.Pass) for part in absent)
+                            and all(
+                                operation(call)[1] == "borrow"
+                                and len(call.args) == 2
+                                and source_expression(call.args[1]) == source_expression(test.left)
+                                for call in calls
+                            )
+                        ):
+                            # This is the existing optional Field contract, not
+                            # a model configuration axis. Project absence through
+                            # the same borrow binding; keep dimension expressions
+                            # in the present arm so they are not evaluated on None.
+                            statement._package_optional_input_borrows = calls
+                            for call in calls:
+                                call._package_optional_borrow = True
+                            yield from statements(present, conditions)
+                            continue
                 test, expected = statement.test, True
                 if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
                     test, expected = test.operand, False
@@ -1355,6 +1386,8 @@ def scope_declarations(module, constructor, kind, fail, namespace, earlier=None,
                         fail(module, call, "Prepared input alias requires one preceding source assignment")
                     spec["input_expression"] = assignments[0].value
                 spec["input_method"] = constructor.name
+                if getattr(call, "_package_optional_borrow", False):
+                    spec["optional_input"] = True
             parameter = spec.get("input_parameter")
             if parameter is not None and (parameter not in parameter_names or stores[parameter] != 1):
                 fail(module, call, "Borrowed input requires an unmodified constructor parameter")

@@ -1209,7 +1209,16 @@ checks its package, type, path, alias and dimension relations before publishing
 the private source link. A failed binding does not replace that link; arbitrary
 earlier Host writes are still outside the rollback boundary. CPU/CUDA source-free
 checks cover new sizes, independent/rebound inputs and retained Graph snapshots.
-Optional Field inputs and more complex binding factories remain separate gaps.
+Version 57 also admits optional Field members supplied by these factories. A
+metadata-only non-None guard or a proven optional declaration helper uses the
+existing conditional Field contract; presence is updated at preparation, and
+absence clears the old private source link. Dimension expressions remain in the
+present arm. Only entries that read the member specialize on its presence:
+another unused optional input does not multiply their code. Local CPU/CUDA and
+source-free checks cover present/absent/rebound inputs, conditional source
+allocations and retained Graph snapshots. Unknown sources and numerical reads
+without the presence guard reject. Arbitrary optional expressions, child-owner
+construction and more complex binding factories remain separate gaps.
 
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute

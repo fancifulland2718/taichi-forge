@@ -453,7 +453,13 @@ def normalize_factories(tree, namespace, module, fail, kind):
                         statement.value = normalized
                         declarations.append({**normalized._package_factory, "module": module, "line": call.lineno})
                 if (
-                    qualified_kind(statement.value, kind) == "experimental.ResourceScope"
+                    (
+                        qualified_kind(statement.value, kind) == "experimental.ResourceScope"
+                        or isinstance(statement.value.func, ast.Attribute)
+                        and isinstance(statement.value.func.value, ast.Name)
+                        and statement.value.func.value.id in scopes
+                        and statement.value.func.attr == "record"
+                    )
                     and isinstance(statement, ast.Assign)
                     and len(statement.targets) == 1
                     and isinstance(statement.targets[0], ast.Name)
