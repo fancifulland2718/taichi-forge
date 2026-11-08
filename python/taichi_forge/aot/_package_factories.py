@@ -497,6 +497,13 @@ def normalize_factories(tree, namespace, module, fail, kind):
                         else prove_factory(target, call, scopes, allow_void=isinstance(statement, ast.Expr))
                     )
                 except (TypeError, _Unproven) as error:
+                    from ._package_preparations import is_preparation
+
+                    if is_preparation(target):
+                        # The ordinary Host body owns a resource-group lifetime.
+                        # Its receiver and every declaration are validated by the
+                        # complete preparation pass, never folded as a factory.
+                        continue
                     try:
                         shadowed = {
                             n.id

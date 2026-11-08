@@ -1699,6 +1699,12 @@ Preparation may use a boolean domain already declared by its owner, including
 a single backend-qualified choice. A flag controlling resource layout must not
 be declared `kernel_only`; distinct typed resources retain their original
 conditional group layout and old prepared-call leases.
+The same contract supports the reverse dependency: an unconditional static domain
+declared by a free preparation function can guard resources in its caller's
+constructor. Export collects domains from proven receivers before fully validating
+construction and preparation. This discovery executes no Host code, preserves call
+order and does not bypass resource-use validation. Local CPU/CUDA checks cover new
+sizes, independent instances and source-free consumption in a separate process.
 
 Dynamic local vectors/matrices also support
 `range(begin, ti.min(device_count, model_bound))`, with `begin` and `model_bound`

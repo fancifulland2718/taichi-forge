@@ -118,6 +118,7 @@ def _owner_schema(
     earlier=None,
     inherited=None,
     owner_class=None,
+    external_dependencies=None,
 ):
     """Infer types from syntax, never run __init__ or select a model branch."""
     if node.keywords:
@@ -126,7 +127,7 @@ def _owner_schema(
     for function in construction_functions(node) if functions is None else functions:
         if getattr(function, "_package_preparation_method", False) and not include_preparation:
             continue
-        dependencies = {**(inherited or {}), **schema}
+        dependencies = {**(external_dependencies or {}), **(inherited or {}), **schema}
         for name, declaration in _construction_schema(
             module, node, function, kind, namespace, dependencies, owner_class=owner_class
         ).items():
@@ -248,7 +249,7 @@ def _construction_schema(module, node, constructor, kind, namespace, earlier=Non
     return schema
 
 
-def _analyze(module, source, namespace, target):
+def _analyze(module, source, namespace, target, *, defer_owners=False):
     tree = ast.parse(source.removeprefix("\ufeff"))
     if any(
         (isinstance(n, ast.Name) and n.id.startswith(_PREFIX))
@@ -323,7 +324,9 @@ def _analyze(module, source, namespace, target):
                 # The complete MRO pass must establish base declarations before
                 # analyzing derived owner_dim/type/shape references. An empty
                 # marker here retains the owner without guessing base resources.
-                owners[node.name] = {} if inherits_construction else _owner_schema(module, node, kind, namespace)
+                owners[node.name] = (
+                    {} if inherits_construction or defer_owners else _owner_schema(module, node, kind, namespace)
+                )
             dataclass_owner = decorators == ["dataclass"]
             members = [(node.name, n) for n in node.body]
         else:
@@ -1322,7 +1325,7 @@ def _preflight_package(package, *, arch=None, source_root=None):
             raise PackageExportError(f"Module origin differs from scanned source: {name}")
         imported_modules[name] = imported
         try:
-            tree, kind, owners, definitions = _analyze(name, text, vars(imported), target_arch.name)
+            tree, kind, owners, definitions = _analyze(name, text, vars(imported), target_arch.name, defer_owners=True)
         except PackageExportError as error:
             failures.append(str(error))
             continue
@@ -1345,10 +1348,30 @@ def _preflight_package(package, *, arch=None, source_root=None):
     # Resolve preparation declarations with the complete owner hierarchy. The
     # local declaration pass describes construction only; neither pass executes
     # Host preparation or infers its contract from a sample model.
+    from ._package_preparations import declaration_dependencies
+
+    try:
+        preparation_dependencies = declaration_dependencies(sources, imported_modules, _fail)
+    except ValueError as error:
+        raise PackageExportError(str(error)) from error
+
+    def complete_owner_schema(module, node, kind, namespace, **kwargs):
+        cls = kwargs.get("owner_class") or namespace.get(node.name)
+        dependencies = preparation_dependencies.get(cls, {})
+        return _owner_schema(
+            module,
+            node,
+            kind,
+            namespace,
+            include_preparation=True,
+            external_dependencies=dependencies,
+            **kwargs,
+        )
+
     resolve_owners(
         sources,
         imported_modules,
-        lambda *args, **kwargs: _owner_schema(*args, include_preparation=True, **kwargs),
+        complete_owner_schema,
         _fail,
     )
     from ._package_owner_sequences import resolve_sequences

@@ -395,6 +395,7 @@ def scope_declarations(
     owner_node=None,
     owner_class=None,
     initial_conditions=None,
+    declaration_domains_only=False,
 ):
     if constructor is None:
         return {}
@@ -1403,6 +1404,11 @@ def scope_declarations(
         resolve_constants(
             module, owner_node, declarations, namespace, fail, constructor=constructor, owner_class=owner_class
         )
+
+    if declaration_domains_only:
+        # A discovery input, not an admitted schema. The complete owner and
+        # preparation passes must still validate every allocation and use.
+        return {name: item for name, item in declarations.items() if item["kind"] == "static"}
 
     conditional_fields = set()
     for statement, conditions in statements(constructor.body, initial_conditions):

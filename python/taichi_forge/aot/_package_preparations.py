@@ -5,6 +5,7 @@ import copy
 import hashlib
 import inspect
 import json
+import textwrap
 
 from ._package_construction import ordinary_owner_lookup
 from ._package_contexts import discover_contexts, _generator_context
@@ -13,9 +14,41 @@ from ._package_function_inputs import discover
 from ._package_input_families import source_class
 
 
-def resolve(sources, imported, owner_schema, fail, host_contexts):
+def _declares_group(node, namespace):
     import taichi_forge as ti
 
+    for part in ast.walk(node):
+        if not isinstance(part, ast.With) or len(part.items) != 1:
+            continue
+        call = part.items[0].context_expr
+        if not isinstance(call, ast.Call):
+            continue
+        candidate = _generator_context(_source_value(call.func, namespace))
+        if candidate is not None and any(
+            isinstance(item, ast.Call) and _source_value(item.func, candidate[0].__globals__) is ti.FieldsBuilder
+            for item in ast.walk(candidate[2])
+        ):
+            return True
+    return False
+
+
+def is_preparation(function):
+    """A group-owning Host call needs full preparation analysis, not factory folding."""
+    if not inspect.isfunction(function):
+        return False
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    except (OSError, TypeError):
+        return False
+    return (
+        len(tree.body) == 1
+        and isinstance(tree.body[0], ast.FunctionDef)
+        and not tree.body[0].decorator_list
+        and _declares_group(tree.body[0], function.__globals__)
+    )
+
+
+def _candidates(sources, imported):
     candidates = {}
     for module, _, _, _, tree, kind, _, _ in sources:
         namespace = vars(imported[module])
@@ -24,23 +57,110 @@ def resolve(sources, imported, owner_schema, fail, host_contexts):
                 continue
             # Explicit independent groups have the existing preparation
             # lifetime. Arbitrary Host functions/allocations are not lifted.
-            contexts = []
-            for part in ast.walk(node):
-                if not isinstance(part, ast.With) or len(part.items) != 1:
-                    continue
-                call = part.items[0].context_expr
-                if not isinstance(call, ast.Call):
-                    continue
-                candidate = _generator_context(_source_value(call.func, namespace))
-                if candidate is not None and any(
-                    isinstance(item, ast.Call)
-                    and _source_value(item.func, candidate[0].__globals__) is ti.FieldsBuilder
-                    for item in ast.walk(candidate[2])
-                ):
-                    contexts.append(part)
             function = namespace.get(node.name)
-            if contexts and inspect.isfunction(function):
+            if inspect.isfunction(function) and _declares_group(node, namespace):
                 candidates[function] = (module, tree, kind, node)
+    return candidates
+
+
+def _normalize(function, original, module, kind, receiver, fail):
+    arguments = (*original.args.posonlyargs, *original.args.args, *original.args.kwonlyargs)
+    parameter_nodes = {id(part) for part in arguments if part.arg == receiver}
+    if any(
+        isinstance(part, (ast.Yield, ast.YieldFrom, ast.AsyncFunctionDef))
+        or isinstance(part, ast.Name)
+        and part.id == receiver
+        and not isinstance(part.ctx, ast.Load)
+        or isinstance(part, ast.arg)
+        and part.arg == receiver
+        and id(part) not in parameter_nodes
+        or isinstance(part, ast.alias)
+        and (part.asname or part.name.split(".")[0]) == receiver
+        or isinstance(part, (ast.Global, ast.Nonlocal))
+        and receiver in part.names
+        or isinstance(part, ast.ExceptHandler)
+        and part.name == receiver
+        or receiver != "self"
+        and (isinstance(part, ast.Name) and part.id == "self" or isinstance(part, ast.arg) and part.arg == "self")
+        for part in ast.walk(original)
+    ):
+        fail(module, original, "Preparation requires an unchanged synchronous owner parameter")
+    normalized = copy.deepcopy(original)
+
+    class Receiver(ast.NodeTransformer):
+        def visit_Name(self, node):
+            if node.id == receiver:
+                node.id = "self"
+            return node
+
+        def visit_arg(self, node):
+            if node.arg == receiver:
+                node.arg = "self"
+            return node
+
+    normalized = Receiver().visit(normalized)
+    normalized._package_preparation_method = True
+    identity = "_forge_package_prepare_" + original.name
+    owner = ast.copy_location(ast.ClassDef(identity, [], [], [normalized], []), original)
+    wrapper = ast.Module(body=[owner], type_ignores=[])
+    namespace = function.__globals__
+    facts = discover_contexts(wrapper, namespace, module, fail)
+    facts += normalize_factories(wrapper, namespace, module, fail, kind)
+    from ._package_allocations import normalize_allocation_helpers
+    from ._package_type_factories import normalize_type_member_factories
+
+    facts += normalize_allocation_helpers(wrapper, namespace, kind, module, fail)
+    facts += normalize_type_member_factories(wrapper, namespace, kind, module, fail)
+    return owner, normalized, facts
+
+
+def declaration_dependencies(sources, imported, fail):
+    """Read declared domains before interpreting a caller's resource guards.
+
+    Only source-proven owner receivers supply these facts. They are temporary
+    inputs to schema resolution, never a replacement for the complete function
+    projection performed by resolve(). No Host preparation is executed here.
+    """
+    from ._package_resources import scope_declarations
+
+    candidates = _candidates(sources, imported)
+    if not candidates:
+        return {}
+    receivers = {function: set() for function in candidates}
+    discover(sources, imported, preparation_receivers=receivers)
+    owners = {
+        module + "." + name: vars(imported[module])[source_class(tree, name)]
+        for module, _, _, _, tree, _, schemas, _ in sources
+        for name in schemas
+    }
+    result = {}
+    for function, (module, _, kind, original) in candidates.items():
+        domains = receivers[function]
+        parameters = {parameter for parameter, _ in domains}
+        if not domains:
+            continue
+        if len(parameters) != 1:
+            fail(module, original, "Preparation owner parameter changes between source calls")
+        _, normalized, _ = _normalize(function, original, module, kind, next(iter(parameters)), fail)
+        declarations = scope_declarations(
+            module, normalized, kind, fail, function.__globals__, declaration_domains_only=True
+        )
+        for _, target in domains:
+            cls = owners[target]
+            if not ordinary_owner_lookup(cls):
+                fail(module, original, "Preparation requires ordinary owner lookup")
+            dependencies = result.setdefault(cls, {})
+            for name, item in declarations.items():
+                previous = dependencies.get(name)
+                domain = {key: item[key] for key in ("kind", "choices", "kernel_only")}
+                if previous is not None and previous != domain:
+                    fail(module, original, "Preparation static domains conflict for " + name)
+                dependencies[name] = domain
+    return result
+
+
+def resolve(sources, imported, owner_schema, fail, host_contexts):
+    candidates = _candidates(sources, imported)
     if not candidates:
         return
     receivers = {function: set() for function in candidates}
@@ -58,53 +178,9 @@ def resolve(sources, imported, owner_schema, fail, host_contexts):
         if len(parameters) != 1:
             fail(module, original, "Preparation owner parameter changes between source calls")
         receiver = next(iter(parameters))
-        arguments = (*original.args.posonlyargs, *original.args.args, *original.args.kwonlyargs)
-        parameter_nodes = {id(part) for part in arguments if part.arg == receiver}
-        if any(
-            isinstance(part, (ast.Yield, ast.YieldFrom, ast.AsyncFunctionDef))
-            or isinstance(part, ast.Name)
-            and part.id == receiver
-            and not isinstance(part.ctx, ast.Load)
-            or isinstance(part, ast.arg)
-            and part.arg == receiver
-            and id(part) not in parameter_nodes
-            or isinstance(part, ast.alias)
-            and (part.asname or part.name.split(".")[0]) == receiver
-            or isinstance(part, (ast.Global, ast.Nonlocal))
-            and receiver in part.names
-            or isinstance(part, ast.ExceptHandler)
-            and part.name == receiver
-            or receiver != "self"
-            and (isinstance(part, ast.Name) and part.id == "self" or isinstance(part, ast.arg) and part.arg == "self")
-            for part in ast.walk(original)
-        ):
-            fail(module, original, "Preparation requires an unchanged synchronous owner parameter")
-        normalized = copy.deepcopy(original)
-
-        class Receiver(ast.NodeTransformer):
-            def visit_Name(self, node):
-                if node.id == receiver:
-                    node.id = "self"
-                return node
-
-            def visit_arg(self, node):
-                if node.arg == receiver:
-                    node.arg = "self"
-                return node
-
-        normalized = Receiver().visit(normalized)
-        normalized._package_preparation_method = True
-        identity = "_forge_package_prepare_" + original.name
-        owner = ast.copy_location(ast.ClassDef(identity, [], [], [normalized], []), original)
-        wrapper = ast.Module(body=[owner], type_ignores=[])
+        owner, normalized, facts = _normalize(function, original, module, kind, receiver, fail)
+        identity = owner.name
         namespace = vars(imported[module])
-        facts = discover_contexts(wrapper, namespace, module, fail)
-        facts += normalize_factories(wrapper, namespace, module, fail, kind)
-        from ._package_allocations import normalize_allocation_helpers
-        from ._package_type_factories import normalize_type_member_factories
-
-        facts += normalize_allocation_helpers(wrapper, namespace, kind, module, fail)
-        facts += normalize_type_member_factories(wrapper, namespace, kind, module, fail)
         local = None
         for _, target in sorted(domains):
             schemas, name, cls = owners[target]

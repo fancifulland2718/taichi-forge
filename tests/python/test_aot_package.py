@@ -12311,6 +12311,118 @@ class Model:
 """
 
 
+PREPARATION_DOMAIN_SOURCE = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+preparations = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, active: bool):
+        self.n = n
+        prepare(self, active)
+        with resource_group(self, 'result', initialization='zero') as fields:
+            fields.base = fields.field(ti.i32, shape=fields.dim('n'))
+            if self.active:
+                fields.extra = fields.field(ti.i32, shape=fields.dim('n'))
+    @ti.kernel
+    def step(self, delta: ti.i32):
+        for i in self.base:
+            self.base[i] += self.work[i] + delta
+            if ti.static(self.active):
+                self.extra[i] += delta * 2
+def prepare(owner, active):
+    global preparations
+    preparations += 1
+    owner.active = active
+    declarations = ti.experimental.ResourceScope(owner)
+    declarations.static('active', choices=(False, True))
+    with resource_group(owner, 'work', initialization='zero') as fields:
+        fields.work = fields.field(ti.i32, shape=fields.dim('n'))
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_free_preparation_domains_precede_constructor_guards(tmp_path, monkeypatch):
+    model = PREPARATION_DOMAIN_SOURCE
+    start = model.index("def prepare(owner,")
+    extra = {
+        "preparation": "import taichi_forge as ti\nfrom resource_contexts import resource_group\npreparations = 0\n"
+        + model[start:]
+    }
+    model = "from .preparation import prepare\n" + model[:start]
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=model, extra_modules=extra)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.preparation"].preparations == 0
+    assert len(manifest["entries"]) == 3  # Two dependent implementations and the fixture's free Kernel.
+    reference = package.Model(3, True)
+    reference.step(4)
+    np.testing.assert_array_equal(reference.base.to_numpy(), 4)
+    np.testing.assert_array_equal(reference.extra.to_numpy(), 8)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, True), code.host.Model(19, False)
+        a.step(4)
+        b.step(9)
+        np.testing.assert_array_equal(a.base.to_numpy(), 4)
+        np.testing.assert_array_equal(a.extra.to_numpy(), 8)
+        np.testing.assert_array_equal(b.base.to_numpy(), 9)
+        assert not hasattr(b, "extra")
+    probe = tmp_path / "consume_domains.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(11, False), code.host.Model(23, True)
+            a.step(3)
+            b.step(5)
+            np.testing.assert_array_equal(a.base.to_numpy(), 3)
+            np.testing.assert_array_equal(b.base.to_numpy(), 5)
+            np.testing.assert_array_equal(b.extra.to_numpy(), 10)
+            assert not hasattr(a, 'extra')
+        print('PREPARATION_DOMAINS_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PREPARATION_DOMAINS_SOURCE_FREE_OK" in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize("case", ["kernel_only", "escape"])
+def test_package_preparation_domains_do_not_bypass_full_admission(tmp_path, monkeypatch, case):
+    source = PREPARATION_DOMAIN_SOURCE
+    if case == "kernel_only":
+        source = source.replace("choices=(False, True)", "choices=(False, True), kernel_only=True")
+        message = "declared boolean owner static"
+    else:
+        source += "\n    owner.escaped = fields\n"
+        message = "ResourceScope use requires"
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ti.aot.PackageExportError, match=message):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 def _free_preparation_source():
     model = PREPARATION_FIELDS_SOURCE
     start, end = model.index("    def prepare("), model.index("    @ti.kernel")
