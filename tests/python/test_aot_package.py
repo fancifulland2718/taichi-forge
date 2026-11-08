@@ -5373,6 +5373,154 @@ def untyped(x):
     assert not (tmp_path / "sdk").exists()
 
 
+def _engine_source_roots(tmp_path, monkeypatch):
+    source_root = tmp_path / "engine_src"
+    files = {
+        "engine_left/__init__.py": "from engine_shared import Model\n",
+        "engine_right/__init__.py": "from engine_shared import Model\n",
+        "engine_right/unimported.py": """import taichi_forge as ti
+@ti.kernel
+def value(x: ti.i32) -> ti.i32:
+    return x * 7
+""",
+        "engine_shared/__init__.py": """import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.values = ti.ndarray(ti.f32, n)
+    @ti.kernel
+    def step(self, bias: ti.f32):
+        for i in range(self.n):
+            self.values[i] = i + bias
+""",
+        "engine_unselected/__init__.py": "raise AssertionError('outside selected source roots')\n",
+    }
+    for relative, text in files.items():
+        path = source_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf8")
+        name = relative.removesuffix(".py").replace("/", ".").removesuffix(".__init__")
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.syspath_prepend(str(source_root))
+    return source_root, tuple(importlib.import_module(name) for name in ("engine_left", "engine_right"))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_multiple_roots_share_code_and_normal_hybrid_imports(tmp_path, monkeypatch):
+    source_root, roots = _engine_source_roots(tmp_path, monkeypatch)
+    selected = (*roots, roots[0])  # Repeated roots are one source, not a second code owner.
+    report = ti.aot.check_package(selected, source_root=source_root)
+    assert report["module_roots"] == ["engine_left", "engine_right"]
+    assert set(report["modules"]) == {"engine_left", "engine_right", "engine_right.unimported", "engine_shared"}
+    assert sys.modules["engine_shared"].constructors == 0
+    output = tmp_path / "forge_aot" / "engine"
+    manifest = ti.aot.export_package(selected, output, source_root=source_root)
+    assert manifest["module_roots"] == report["module_roots"]
+    assert set(manifest["sources"]) == set(report["modules"])
+    assert len(manifest["entries"]) == 2
+    assert {entry["definition"] for entry in manifest["entries"].values()} == {
+        "engine_shared.Model.step", "engine_right.unimported.value"
+    }
+    with zipfile.ZipFile(output / "code.tcm") as archive:
+        assert len([name for name in archive.namelist() if name.endswith(".bc")]) == 2
+    assert sys.modules["engine_shared"].constructors == 0
+
+    probe = tmp_path / "consume_engine.py"
+    probe.write_text(textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoFrontend(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge'):
+                    raise AssertionError('frontend imported: ' + fullname)
+        sys.meta_path.insert(0, NoFrontend())
+        from taichi_forge_runtime import ExecutionSession
+        with ExecutionSession(mode='aot', arch=sys.argv[1]) as session:
+            import engine_left, engine_right
+            from engine_right.unimported import value
+            assert engine_left.Model is engine_right.Model
+            a, b = engine_left.Model(7), engine_right.Model(19)
+            for bias in (2, 5):
+                a.step(bias)
+                b.step(-bias)
+                np.testing.assert_array_equal(a.values.to_numpy(), np.arange(7) + bias)
+                np.testing.assert_array_equal(b.values.to_numpy(), np.arange(19) - bias)
+            assert value(3) == 21
+            assert len(session.loaded_packages) == 1
+        print('ENGINE_ROOTS_SOURCE_FREE_OK')
+    """), encoding="utf8")
+    env = dict(
+        os.environ,
+        FORGE_AOT_PACKAGE_PATH="",
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=os.pathsep.join((str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"), str(tmp_path))),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run([sys.executable, "-B", str(probe), manifest["target"]], cwd=tmp_path,
+                            env=env, capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ENGINE_ROOTS_SOURCE_FREE_OK" in result.stdout
+
+    # Select hybrid once; both original import roots use the same loaded code.
+    arch = ti.cfg.arch
+    ti.reset()
+    for name in report["modules"]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if p != str(source_root)])
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delenv("FORGE_AOT_PACKAGE_PATH", raising=False)
+    ti.init(arch=arch, execution_mode="hybrid", offline_cache=False)
+    try:
+        left, right = (importlib.import_module(name) for name in ("engine_left", "engine_right"))
+        assert left.Model is right.Model
+        a, b = left.Model(11), right.Model(23)
+        for bias in (1.5, 3.5):
+            a.step(bias)
+            b.step(-bias)
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(11) + bias)
+            np.testing.assert_array_equal(b.values.to_numpy(), np.arange(23) - bias)
+        session = ti.lang.impl.get_runtime()._package_execution_session
+        assert len(session.loaded_packages) == 1
+    finally:
+        ti.reset()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_multiple_roots_require_valid_common_sources(tmp_path, monkeypatch):
+    from types import ModuleType
+
+    source_root, roots = _engine_source_roots(tmp_path, monkeypatch)
+    for invalid in ([], "engine_left", (roots[0], object())):
+        with pytest.raises(TypeError, match="module"):
+            ti.aot.check_package(invalid, source_root=source_root)
+    with pytest.raises(ValueError, match="common application source_root"):
+        ti.aot.check_package(roots)
+    foreign = ModuleType("engine_left")
+    foreign.__file__ = str(tmp_path / "wrong_origin.py")
+    with pytest.raises(ValueError, match="Conflicting package root origins"):
+        ti.aot.check_package((roots[0], foreign), source_root=source_root)
+    with pytest.raises(ValueError, match="origin does not match"):
+        ti.aot.check_package((roots[1], foreign), source_root=source_root)
+    # An unsupported declaration in the second root must fail before building.
+    (source_root / "engine_right/unimported.py").write_text(
+        "import taichi_forge as ti\n@ti.pyfunc\ndef bad(x):\n    return x\n", encoding="utf8"
+    )
+    monkeypatch.delitem(sys.modules, "engine_right.unimported", raising=False)
+    with pytest.raises(ti.aot.PackageExportError) as check:
+        ti.aot.check_package(roots, source_root=source_root)
+    with pytest.raises(ti.aot.PackageExportError) as export:
+        ti.aot.export_package(roots, tmp_path / "rejected", source_root=source_root)
+    assert str(check.value) == str(export.value)
+    assert "engine_right.unimported" in str(check.value)
+    assert not (tmp_path / "rejected").exists()
+
+
 def test_package_specialization_policy_uses_native_task_and_format_contract(tmp_path):
     from taichi_forge_runtime.aot._package_calls import specialization_entries
 

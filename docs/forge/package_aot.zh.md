@@ -51,6 +51,31 @@ ti.aot.export_package(my_engine, "dist/my_engine_cuda", arch="cuda")
 输出必须在该源码目录之外；同名模块的实际导入位置须与扫描路径一致。
 Forge/Taichi 兼容层和 Runtime 始终作为外部依赖，不重复编成应用载荷。
 
+一个引擎有多个独立公开包时，可把它们同时交给原接口：
+
+```python
+import solver_api
+import renderer_api
+
+roots = (solver_api, renderer_api)
+report = ti.aot.check_package(roots, arch="cuda", source_root="path/to/src")
+ti.aot.export_package(roots, "dist/engine_cuda", arch="cuda", source_root="path/to/src")
+```
+
+多根输入要求共同的 `source_root`。每个选定包仍包含未被入口导入的源码子模块；
+依赖闭包在同一次预检和 Module 构建中合并，相同来源只分析、导出一次，共用原代码
+复用规则及资源合同。它不是逐包导出后拼接归档，也不要求建立求解器+渲染器组合根。
+重复根去重，同名不同来源拒绝；任何根中的不支持定义都会使预检/导出失败。
+清单/预检的 `module_roots` 记录显式选择，`sources`/`modules` 记录实际闭包。
+`source_root` 中未被选定根覆盖、也未作为依赖到达的模块不自动纳入；构建方仍需
+核对整个引擎的公开根和声明清单。当前一次导出使用一个代码模块，多物理代码分区
+及其加载成本不由这个接口自动解决。
+
+多根包沿用现有 `application_modules` 消费边界，不需要另一个 Runtime Linker。
+正常混合 import 可从不同原命名空间取得对象并共享同一加载包；独立消费时
+`library.host` 是第一个根，其他根可用 `library.module("renderer_api")` 访问。
+源根选择只决定定义覆盖，不能替代实际编译、数值消费及实例隔离检查。
+
 `source_root` 模式使用第 2 版包清单，消费者仍兼容第 1 版；旧消费者拒绝新版本。
 `library.host` 仍是最初选择的模块/包。包内绝对、相对和 importlib 导入解析到
 各自加载包的命名空间；任意表达式计算的动态依赖不被猜测为完整闭包。

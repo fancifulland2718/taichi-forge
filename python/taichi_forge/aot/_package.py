@@ -16,12 +16,12 @@ from functools import reduce
 from pathlib import Path
 import shutil
 import tempfile
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 from taichi_forge.tools._compiled_host import decorator_resolver
 from ._package_types import qualified_kind, resolve_type, type_expression, type_spec
 from ._package_fields import field_declarations, field_allocation
-from ._package_sources import collect_sources
+from ._package_sources import collect_sources, package_roots
 from ._package_owners import resolve_owners
 from ._package_errors import is_error_interface, project_error_interface
 from ._package_resources import scope_declarations
@@ -1214,6 +1214,7 @@ def _preflight_package(package, *, arch=None, source_root=None):
     """The declaration phase shared by inspection and production export."""
     import taichi_forge as ti
 
+    packages = package_roots(package, source_root)
     if arch is not None:
         from taichi_forge.lang import impl
 
@@ -1228,18 +1229,17 @@ def _preflight_package(package, *, arch=None, source_root=None):
                 "Package arch differs from the live JIT Runtime; initialize the chosen backend in a fresh process"
             )
 
-    if not isinstance(package, ModuleType) or not getattr(package, "__file__", None):
-        raise TypeError("Package preflight requires an imported source module or package")
-    paths, namespaces, dependency_report = collect_sources(package, source_root)
+    paths, namespaces, dependency_report = collect_sources(packages, source_root)
     program = ti.lang.impl.get_runtime().prog
     if program is None:
         raise PackageExportError("Initialize the Runtime or select an export backend")
     target_arch = ti.lang.impl.current_cfg().arch
     application_modules = set(paths) | set(namespaces) if source_root is not None else None
     sources, failures, imported_modules = [], [], {}
+    selected_modules = {item.__name__: item for item in packages}
     for name, (path, relative) in paths.items():
         text = path.read_text(encoding="utf8")
-        imported = package if name == package.__name__ else importlib.import_module(name)
+        imported = selected_modules[name] if name in selected_modules else importlib.import_module(name)
         if ti.lang.impl.get_runtime().prog is not program or ti.lang.impl.current_cfg().arch != target_arch:
             raise PackageExportError(f"Module import changed the selected export Runtime: {name}")
         if Path(imported.__file__).resolve() != path:
@@ -1310,19 +1310,20 @@ def _preflight_package(package, *, arch=None, source_root=None):
     factory_calls = closure_calls(sources, imported_modules, _fail)
     return (
         sources, namespaces, dependency_report, application_modules, imported_modules,
-        host_contexts, function_inputs, factory_calls, target_arch,
+        host_contexts, function_inputs, factory_calls, target_arch, packages,
     )
 
 
 def check_package(package, *, arch=None, source_root=None):
     """Check package declarations without compiling kernels or writing artifacts.
 
+    Accepts one module or multiple roots under a common ``source_root``.
     Uses exactly the exporter's source discovery and declaration resolution.
     Normal imports and backend initialization still occur. Raises
     PackageExportError for unsupported declarations; successful inspection does
     not qualify device compilation, Host projection or numerical execution.
     """
-    sources, namespaces, dependencies, _, _, _, inputs, factories, target = _preflight_package(
+    sources, namespaces, dependencies, _, _, _, inputs, factories, target, packages = _preflight_package(
         package, arch=arch, source_root=source_root
     )
     modules = {}
@@ -1352,7 +1353,8 @@ def check_package(package, *, arch=None, source_root=None):
             target_selections=tree._package_target_selections,
         )
     return dict(
-        kind="forge_package_preflight", version=1, module_root=package.__name__,
+        kind="forge_package_preflight", version=1, module_root=packages[0].__name__,
+        module_roots=[item.__name__ for item in packages],
         target=target.name, declaration_check="passed", compilation="not_run",
         host_projection="not_run", consumption="not_run", modules=modules,
         namespaces=list(namespaces), dependencies=dependencies,
@@ -1365,6 +1367,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     """Export decorated definitions without executing a model to discover coverage.
 
     ``check_package`` runs this same declaration phase without compilation.
+    Multiple roots share one compiler and source closure, not separate exports.
     Selects ``arch`` on a cold Runtime or validates the active backend.
     """
     import taichi_forge as ti
@@ -1384,8 +1387,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
         raise ValueError("Package output must be outside its application source root")
     (
         sources, namespaces, dependency_report, application_modules, imported_modules,
-        host_contexts, function_inputs, factory_calls, target_arch,
+        host_contexts, function_inputs, factory_calls, target_arch, packages,
     ) = _preflight_package(package, arch=arch, source_root=source_root)
+    package = packages[0]
     module = Module(caps=caps)
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
 
@@ -1404,6 +1408,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
         target=module._arch.name,
         target_capabilities=list(caps or ()),
         module_root=package.__name__,
+        module_roots=[item.__name__ for item in packages],
         discovery="all_decorated_definitions",
         entries={},
         entry_families={},

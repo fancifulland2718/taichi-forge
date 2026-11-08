@@ -66,6 +66,36 @@ roots. Output must be outside that source directory, and imported module origins
 must match scanned paths. Forge/Taichi compatibility shims and Runtime remain
 external rather than becoming application compilation units.
 
+An engine with independent public packages can pass them together to the same API:
+
+```python
+import solver_api
+import renderer_api
+
+roots = (solver_api, renderer_api)
+report = ti.aot.check_package(roots, arch="cuda", source_root="path/to/src")
+ti.aot.export_package(roots, "dist/engine_cuda", arch="cuda", source_root="path/to/src")
+```
+
+Multiple roots require a common `source_root`. Each selected package includes its
+unimported source submodules. Their dependency closures enter one preflight and
+one Module build; each source is analyzed and exported once, using the existing
+code sharing and resource contracts. This does not concatenate independent
+exports or require a solver/renderer combination root. Repeated roots are
+deduplicated, conflicting origins reject, and an unsupported definition in any
+root fails the preflight/export. `module_roots` records explicit selections;
+`sources` in the manifest and `modules` in preflight record the actual closure.
+Unselected, unreachable modules under `source_root` are not automatically included:
+the build must still account for the engine's public roots and declarations.
+This implementation uses one code module per export; it does not automatically
+provide multiple physical code partitions or qualify their loading costs.
+
+Consumption reuses the existing `application_modules` boundary, without another
+Runtime linker. Normal hybrid imports from different original namespaces share
+one loaded package. For standalone consumption, `library.host` is the first root;
+use `library.module("renderer_api")` for another. Source coverage does not replace
+device compilation, numerical consumption, or instance isolation checks.
+
 This mode uses package manifest version 2. Consumers retain version 1 support;
 older consumers reject the new version. `library.host` still denotes the selected
 entry module/package. Imports resolve within each loaded package's namespace.
