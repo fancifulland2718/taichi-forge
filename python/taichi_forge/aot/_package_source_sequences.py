@@ -108,7 +108,7 @@ class SourceSequences:
                 # forwarding. Carry a private proof to that existing pass;
                 # never execute the recording function to discover a domain.
                 source = copy.deepcopy(owner)
-                source._package_written_resource_inventory = True
+                source._package_written_resource_inventory = record.attr
                 return Sequence([source])
             if isinstance(node.func, ast.Name) and node.func.id in ("tuple", "zip"):
                 import builtins

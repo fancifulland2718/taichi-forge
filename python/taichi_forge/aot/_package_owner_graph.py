@@ -302,6 +302,11 @@ def _compose(environment, schema, children):
             )
         derived.update(names[key] for key in child._derived_attributes)
         for key, item in child_schema.items():
+            if item["kind"] == "host_owner_sequence":
+                # Independent algorithm instances stay in their child's Host
+                # contract. The collection has no device allocation/path to
+                # compose into its parent; its entries are exported separately.
+                continue
             transformed = {**item, "path": [attribute, *item.get("path", (key,))]}
             if "source_path" in item:
                 transformed["source_path"] = [attribute, *item["source_path"]]

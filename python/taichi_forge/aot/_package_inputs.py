@@ -284,6 +284,8 @@ def resolve_inputs(sources, imported, *, partial=False):
                 return None
         return result
 
+    inventory_cache = {}
+
     def expand_write_inventory(caller, arguments, declaration):
         marked = [value for value in arguments.values() if getattr(value, "_package_written_resource_inventory", False)]
         if not marked:
@@ -296,9 +298,31 @@ def resolve_inputs(sources, imported, *, partial=False):
             return False
         if source[1]:
             raise ValueError("Write inventory requires an owner, not a Field")
-        fields = declared_fields(source[0])
-        if fields is None:
-            return False
+        from ._package_function_inputs import discover
+
+        query = (source[0], value._package_written_resource_inventory)
+        if query not in inventory_cache:
+            inventory_cache[query] = discover(sources, imported, resource_inventory=query)
+        requirements, failures = inventory_cache[query]
+        if failures:
+            raise ValueError("Write inventory dependency proof failed:\n" + "\n".join(failures))
+        fields = set()
+        for owner, path in requirements:
+            if not path:
+                domain = declared_fields(owner)
+                if domain is None:
+                    return False
+                fields.update(domain)
+                continue
+            field = member_type(owner, path)
+            if field is None:
+                return False
+            fields.add(field)
+            source_item = owners[field[0]][0][field[1][0]]
+            if len(field[1]) == 1 and source_item.get("struct_field"):
+                from ._package_field_like import declared_struct_members
+
+                fields.update((field[0], (*field[1], member)) for member in declared_struct_members(source_item))
         if not fields:
             raise ValueError("Write inventory has no declared Field input domain")
         call = declaration["constructor_call"]
@@ -350,6 +374,7 @@ def resolve_inputs(sources, imported, *, partial=False):
 
     while True:
         changed = False
+        inventory_cache.clear()  # Forwarded owner types may have resolved in the previous iteration.
         for (owner, name), item in aliases.items():
             resolved = member_type(owner, item["reference_path"])
             if resolved is None:

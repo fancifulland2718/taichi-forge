@@ -96,7 +96,7 @@ def _returns_on_all_paths(body):
     )
 
 
-def discover(sources, imported, *, preparation_receivers=None):
+def discover(sources, imported, *, preparation_receivers=None, resource_inventory=None):
     from taichi_forge.types.annotations import Template
     from taichi_forge.graph import GraphBuilder
     from taichi_forge.lang.field import ScalarField
@@ -124,22 +124,26 @@ def discover(sources, imported, *, preparation_receivers=None):
                             if inspect.isfunction(function):
                                 functions[function] = (module, method)
         for definition in definitions:
-            if definition["kind"] != "kernel":
+            if definition["kind"] != "kernel" and resource_inventory is None:
                 continue
             if definition["owner"] is None:
                 entry = namespace.get(definition["node"].name)
             else:
                 cls = namespace.get(source_class(tree, definition["owner"]))
                 entry = inspect.getattr_static(cls, definition["node"].name, None) if inspect.isclass(cls) else None
+            if resource_inventory is not None and inspect.isfunction(entry):
+                functions[entry] = (module, definition["node"])
             kernel = getattr(entry, "_primal", None)
             if kernel is None:
                 continue
             templates = [a.name for a in kernel.arguments if isinstance(a.annotation, Template)]
-            if len(templates) > (1 if definition["owner"] is not None else 0):
+            if resource_inventory is not None or len(templates) > (1 if definition["owner"] is not None else 0):
                 kernels.setdefault(entry, (module, definition, tuple(templates)))
                 kernel_definitions.setdefault(entry, []).append(definition)
     requested = {}
     for identity, schema in owners.items():
+        if resource_inventory is not None:
+            break
         for name, item in schema.items():
             if "input_expression" not in item:
                 continue
@@ -152,6 +156,8 @@ def discover(sources, imported, *, preparation_receivers=None):
 
     pending = deque()
     for identity, cls in classes.items():
+        if resource_inventory is not None:
+            break
         seen = set()
         for base in cls.__mro__:
             for name, function in vars(base).items():
@@ -162,6 +168,18 @@ def discover(sources, imported, *, preparation_receivers=None):
                     parameters = list(inspect.signature(function).parameters)
                     if parameters and parameters[0] == "self":
                         pending.append((function, {"self": _Owner(identity)}, (function,), None))
+
+    inventory = set()
+    if resource_inventory is not None:
+        identity, method = resource_inventory
+        function = inspect.getattr_static(classes[identity], method, None)
+        if function not in functions or function in kernels:
+            raise ValueError("Write inventory requires an ordinary recording definition: " + identity + "." + method)
+        try:
+            inputs = inspect.signature(function).bind(_Owner(identity), _Graph()).arguments
+        except TypeError as error:
+            raise ValueError("Write inventory recording requires its owner and a Graph builder") from error
+        pending.append((function, dict(inputs), (function,), None))
 
     visited, domains, covered, failures = set(), {}, set(), []
     invalid = set()
@@ -215,7 +233,7 @@ def discover(sources, imported, *, preparation_receivers=None):
 
         for statement in node.body:
             walk(statement)
-        namespace = dict(function.__globals__)
+        namespace = dict((inspect.unwrap(function) if resource_inventory is not None else function).__globals__)
         for name, value in bindings.items():
             # Read only modules already admitted to the source closure. Imports
             # remain ordinary Host statements; discovery does not execute them.
@@ -231,11 +249,21 @@ def discover(sources, imported, *, preparation_receivers=None):
         if not isinstance(owner, _Owner):
             return None
         item = owners[owner.identity].get(name, {})
+        if resource_inventory is not None and isinstance(inspect.getattr_static(classes[owner.identity], name, None), property):
+            inventory.add((owner.identity, ()))
+        if resource_inventory is not None and (
+            item.get("kind") == "host_owner_sequence"
+            or item.get("kind") in ("owner", "owner_input") and item.get("owner_type") not in owners
+            or len({choice["owner_type"] for choice in item.get("owner_alternatives", ())}) > 1
+        ):
+            inventory.add((owner.identity, ()))
         if item.get("kind") in ("owner", "owner_input") and item.get("owner_type") in owners:
             if len({choice["owner_type"] for choice in item.get("owner_alternatives", ())}) > 1:
                 return None  # A choice is not evidence for its first receiver type.
             return _Owner(item["owner_type"], owner.root or owner.identity, (*owner.path, name))
-        if item.get("kind") in ("dense_field", "model_tensor_field", "borrowed_field", "fixed_snode_field"):
+        if item.get("kind") in ("dense_field", "model_tensor_field", "borrowed_field", "fixed_snode_field") or (
+            resource_inventory is not None and item.get("kind") == "field_like"
+        ):
             return _Resource(owner, tuple(item.get("path", (name,))))
         return None
 
@@ -704,7 +732,40 @@ def discover(sources, imported, *, preparation_receivers=None):
             continue
         visited.add(identity)
 
+        def inventory_input(item):
+            if isinstance(item, _Resource):
+                inventory.add((item.owner.identity, item.path))
+            elif isinstance(item, _Owner):
+                # An opaque escape needs the whole declared domain. It cannot
+                # establish that a cyclic or unresolved child is unused.
+                inventory.add((item.identity, ()))
+            elif isinstance(item, (_Mapping, _Record)):
+                for _, child in item.items:
+                    inventory_input(child)
+            elif isinstance(item, tuple):
+                for child in item:
+                    inventory_input(child)
+            elif isinstance(item, _Graph):
+                inventory.add((resource_inventory[0], ()))
+
+        if resource_inventory is not None:
+            # This is a conservative source/type domain, not a second effects
+            # analysis. The existing compiler still selects actual writes.
+            for part in nodes:
+                if isinstance(part, (ast.Name, ast.Attribute)):
+                    fact = value(part)
+                    if isinstance(fact, _Resource):
+                        inventory_input(fact)
+
         def record(callee, inputs, call):
+            if resource_inventory is not None:
+                if any(inputs.get(name) is None for name in kernels[callee][2]):
+                    missing = ', '.join(name for name in kernels[callee][2] if inputs.get(name) is None)
+                    failures.append(f"{module}:{call.lineno}: write inventory Kernel {callee.__qualname__} "
+                                    f"has unproven template inputs: {missing}")
+                    return
+                pending.append((callee, inputs, (*chain, callee), id(call)))
+                return
             origin, definition, parameters = kernels[callee]
             receivers = [key for key in parameters if isinstance(inputs.get(key), _Owner)]
             if len(receivers) != 1:
@@ -761,9 +822,19 @@ def discover(sources, imported, *, preparation_receivers=None):
                         else:
                             mapping[receiver] = kernel.receiver
                     record(kernel.function, mapping if set(mapping) == set(parameters) else {}, call)
+                elif resource_inventory is not None:
+                    route = ' -> '.join(item.__qualname__ for item in chain)
+                    failures.append(f"{module}:{call.lineno}: write inventory dispatch has no proven Kernel via {route}")
                 continue
             callee, receiver = target(call.func)
             if callee not in kernels and callee not in functions:
+                if resource_inventory is not None:
+                    if isinstance(call.func, ast.Name) and call.func.id == 'super':
+                        inventory_input(arguments.get('self'))
+                    for expression in [*call.args, *(k.value for k in call.keywords)]:
+                        inventory_input(value(expression))
+                    if isinstance(call.func, ast.Attribute):
+                        inventory_input(value(call.func.value))
                 continue
             for owner, name, _ in requested.get(callee, ()):
                 if isinstance(receiver, _Owner) and receiver.identity == owner:
@@ -798,6 +869,9 @@ def discover(sources, imported, *, preparation_receivers=None):
                 if callee in kernels:
                     failures.append(f"{module}:{call.lineno}: free Kernel argument mismatch: {error}")
                     invalid.add(callee)
+                elif resource_inventory is not None:
+                    for item in [*values, *kwargs.values()]:
+                        inventory_input(item)
                 continue
             for owner, name, _ in requested.get(callee, ()):
                 actual = bound.arguments.get("self")
@@ -818,6 +892,9 @@ def discover(sources, imported, *, preparation_receivers=None):
                         )
                 else:
                     pending.append((callee, inputs, (*chain, callee), id(call)))
+
+    if resource_inventory is not None:
+        return inventory, list(dict.fromkeys(failures))
 
     if preparation_receivers is not None:
         from ._package_preparations import _declares_group

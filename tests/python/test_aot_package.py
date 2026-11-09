@@ -2151,6 +2151,174 @@ class Checkpoint:""",
 )
 
 
+CYCLIC_WRITE_INVENTORY_SOURCE = '''
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Copy:
+    def __init__(self, source):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('source', source, source_scope=True)
+        scope.backup = scope.field_like(self.source, initialization='zero')
+    @ti.kernel
+    def save(self):
+        for i in ti.grouped(self.source):
+            self.backup[i] = self.source[i]
+    @ti.kernel
+    def restore(self):
+        for i in ti.grouped(self.source):
+            self.source[i] = self.backup[i]
+@ti.data_oriented
+class Checkpoint:
+    def __init__(self, solver):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('solver', solver)
+        sources = ti.aot.written_resources(solver, solver.record)
+        self.copies = tuple(Copy(source) for source in sources)
+        scope.owner_sequence('copies', self.copies)
+def append_step(solver, builder):
+    builder.dispatch(solver.step)
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        global constructors
+        constructors += 1
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.values = scope.field(ti.f32, shape=self.n)
+        scope.unused = scope.field(ti.i32, shape=self.n)
+        scope.checkpoint = Checkpoint(self)
+    @ti.func
+    def update(self, i):
+        self.values[i] += 1
+    @ti.kernel
+    def step(self):
+        for i in self.values:
+            self.update(i)
+    def record(self, builder):
+        append_step(self, builder)
+    @ti.kernel
+    def unrelated(self):
+        for i in self.unused:
+            self.unused[i] += 3
+    def record_unrelated(self, builder):
+        builder.dispatch(self.unrelated)
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_write_inventory_resolves_before_its_own_checkpoint(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, CYCLIC_WRITE_INVENTORY_SOURCE)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert package.model.constructors == 0
+    assert not manifest.get('input_families')  # Only the used f32 allocation, not unrelated i32 or copies.
+    normal = package.Model(5)
+    normal.step()
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(5), code.host.Model(13)
+        for model, n in ((a, 5), (b, 13)):
+            assert len(model.checkpoint.copies) == 1
+            backup = model.checkpoint.copies[0]
+            assert backup.source is model.values
+            model.step()
+            np.testing.assert_array_equal(model.values.to_numpy(), np.ones(n))
+            backup.save()
+            model.step()
+            backup.restore()
+            np.testing.assert_array_equal(model.values.to_numpy(), np.ones(n))
+        np.testing.assert_array_equal(a.values.to_numpy(), normal.values.to_numpy())
+        a.values._group_owner.close()
+        b.step()
+        np.testing.assert_array_equal(b.values.to_numpy(), np.full(13, 2))
+    probe = tmp_path / 'consume_checkpoint_inventory.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            model = code.host.Model(19)
+            model.step()
+            backup, = model.checkpoint.copies
+            backup.save()
+            model.step()
+            backup.restore()
+            np.testing.assert_array_equal(model.values.to_numpy(), np.ones(19))
+        print('CHECKPOINT_INVENTORY_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target']],
+        cwd=tmp_path, capture_output=True, text=True, timeout=90,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+                 PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'CHECKPOINT_INVENTORY_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_write_inventory_keeps_nested_and_conditional_resources(tmp_path, monkeypatch):
+    state = '''
+@ti.data_oriented
+class State:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.backup = scope.field(ti.i32, shape=self.n)
+    @ti.kernel
+    def update(self):
+        for i in self.backup:
+            self.backup[i] += 3
+'''
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace('@ti.data_oriented\nclass Model:', state + '\n@ti.data_oriented\nclass Model:')
+    source = source.replace('        scope.checkpoint = Checkpoint(self)',
+                            '        scope.state = State(n)\n        scope.checkpoint = Checkpoint(self)')
+    source = source.replace('        append_step(self, builder)',
+                            '        append_step(self, builder)\n        if self.n > 6:\n            builder.dispatch(self.state.update)')
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert len(manifest['input_families']['definition_fixture.model.Copy']) == 2
+    assert package.model.constructors == 0
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(5), code.host.Model(17)
+        assert len(a.checkpoint.copies) == 1
+        assert len(b.checkpoint.copies) == 2
+        for model, n in ((a, 5), (b, 17)):
+            model.step()
+            model.state.update()
+            for backup in model.checkpoint.copies:
+                backup.save()
+            model.step()
+            model.state.update()
+            for backup in model.checkpoint.copies:
+                backup.restore()
+            np.testing.assert_array_equal(model.values.to_numpy(), np.ones(n))
+            # A name such as "backup" does not exempt a used nested allocation.
+            np.testing.assert_array_equal(model.state.backup.to_numpy(), np.full(n, 6 if n == 5 else 3))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('body', ['vars(self)\n        append_step(self, builder)',
+                                  'builder.dispatch(self.checkpoint.copies[0].save)'])
+def test_package_write_inventory_does_not_drop_opaque_or_recursive_sources(tmp_path, monkeypatch, body):
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace('        append_step(self, builder)', '        ' + body)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match='proven source|inventory dispatch'):
+        ti.aot.check_package(package)
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_owner_sequence_uses_compiler_write_inventory(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, WRITE_INVENTORY_SOURCE)
