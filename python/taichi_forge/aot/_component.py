@@ -1833,8 +1833,17 @@ class _Capture:
         self.model_dimensions.update(
             name for name, declaration in self.declarations.items() if isinstance(declaration, Dimension)
         )
+        # Plan-affecting integer values are immutable in a prepared descriptor,
+        # like dimensions and input-presence flags; they are not device loads.
         self.model_dimensions.update(
-            name for name, declaration in self.declarations.items() if isinstance(declaration, _InputPresence)
+            name
+            for name, declaration in self.declarations.items()
+            if isinstance(declaration, _InputPresence)
+            or (
+                isinstance(declaration, RuntimeValue)
+                and declaration.affects_plan
+                and declaration.dtype == primitive_types.i32
+            )
         )
         pending = list(self.model_dimensions)
         while pending:
@@ -2305,7 +2314,13 @@ class _Capture:
         def scope():
             expression = extent(condition)
             known = expression is not None and all(
-                isinstance(self.declarations.get(name), _InputPresence) for name in extent_dependencies(expression)
+                isinstance(self.declarations.get(name), _InputPresence)
+                or (
+                    isinstance(self.declarations.get(name), RuntimeValue)
+                    and self.declarations[name].affects_plan
+                    and self.declarations[name].dtype == primitive_types.i32
+                )
+                for name in extent_dependencies(expression)
             )
             if known:
                 self.input_guards.append((expression, truth))

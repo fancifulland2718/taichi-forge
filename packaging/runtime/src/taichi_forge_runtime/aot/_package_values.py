@@ -48,7 +48,10 @@ def check_admission(owner, contract):
         for binding in admission.get("input_presence", {}).values():
             if (path_value(owner, binding["path"]) is not None) is not binding["present"]:
                 raise ValueError("Optional Field input presence changed after construction")
-        presence = {}
+        presence = {
+            name: operator.index(path_value(owner, binding["path"]))
+            for name, binding in admission.get("input_guard_values", {}).items()
+        }
         for name, binding in admission.get("dynamic_input_presence", {}).items():
             value = path_value(owner, binding["path"])
             if binding.get("boolean") and type(value) is not bool:
@@ -60,7 +63,11 @@ def check_admission(owner, contract):
 
         def required(paths):
             return any(
-                all(bool(evaluate_extent(expression, presence.__getitem__)) is truth for expression, truth in path)
+                all(
+                    bool(evaluate_extent(expression, presence.__getitem__, min_value=-(2**31), max_value=2**31 - 1))
+                    is truth
+                    for expression, truth in path
+                )
                 for path in paths
             )
 

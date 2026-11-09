@@ -2223,6 +2223,18 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         **({"boolean": True} if compilation_schema[key].get("dynamic_storage_condition") else {}),
                     )
                     manifest["version"] = max(64, manifest["version"])
+                from taichi_forge_runtime._dimensions import extent_dependencies
+
+                guard_values = {
+                    key: dict(path=list(environment._paths[key]))
+                    for paths in code.contract.get("input_requirements", {}).values()
+                    for branch in paths
+                    for expression, _ in branch
+                    for key in extent_dependencies(expression)
+                    if key not in dynamic_presence
+                }
+                if guard_values:
+                    manifest["version"] = max(80, manifest["version"])
                 used_paths = [environment._paths[key] for key in bound_used if key in environment._paths]
                 source_bindings = {
                     key: dict(
@@ -2291,6 +2303,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         **({"owner_bindings": child_bindings} if child_bindings else {}),
                         **({"input_presence": input_presence} if input_presence else {}),
                         **({"dynamic_input_presence": dynamic_presence} if dynamic_presence else {}),
+                        **({"input_guard_values": guard_values} if guard_values else {}),
                         **(
                             {
                                 "input_records": input_records,

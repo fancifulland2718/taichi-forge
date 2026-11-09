@@ -1753,6 +1753,7 @@ class LoadedPackage:
                 77,
                 78,
                 79,
+                80,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1807,6 +1808,11 @@ class LoadedPackage:
             raise ValueError("Logical entry binding collides with another package entry")
         for symbol in bindings:
             _entry_contract(self.manifest, symbol)
+        if self.manifest["version"] < 80 and any(
+            (contract.get("admission") or {}).get("input_guard_values")
+            for contract in (*self.manifest["entries"].values(), *bindings.values())
+        ):
+            raise ValueError("Prepared input guards require definition package format 80")
         functions = self.manifest.get("function_entries", {})
         if not isinstance(functions, dict) or functions and self.manifest["version"] < 50:
             raise ValueError("Free Kernel input bindings require definition package format 50")

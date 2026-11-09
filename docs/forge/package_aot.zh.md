@@ -1435,6 +1435,13 @@ CPU/CUDA 局部无源码检查覆盖两组独立重准备、双实例及旧 Grap
 这里复用构造参数的来源证明和既有准备阶段引用检查，不凭类型相同推断别名，也不增加
 逐步运行检查。局部 CPU/CUDA 验证覆盖两种选择、新模型尺寸，以及配置相同的外来父对象拒绝。
 
+通过 `value(..., ti.i32, affects_plan=True)` 声明的整数，可沿模型尺寸的表达式机制
+处理原有 `ti.static` 条件。发行实现接受准备阶段固定的值，不枚举其取值域；正常
+JIT 保持原静态行为，已绑定 Graph 保留准备时快照。可选工作区的输入要求也在准备时
+使用这些值判断，允许负整数模式。这不将普通运行时捕获或设备数据读取当作静态值。
+定义包格式 80 记录可选输入守卫依赖的准备值。局部 CPU/CUDA 检查覆盖 JIT 对照、
+缺席工作区、必需输入拒绝及已绑定 Graph 的快照语义。
+
 实现入口：[`_package.py`](../../python/taichi_forge/aot/_package.py)、
 [独立消费者](../../packaging/runtime/src/taichi_forge_runtime/aot/_package.py)、
 [局部验证](../../tests/python/test_aot_package.py)。

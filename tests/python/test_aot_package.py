@@ -20049,6 +20049,77 @@ class Model:
         np.testing.assert_array_equal(second.out.to_numpy(), np.full(19, 30))
 
 
+@pytest.mark.parametrize("prepared", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_prepared_integer_guard_preserves_optional_workspace(tmp_path, monkeypatch, prepared):
+    source = '''
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool, mode: int):
+        self.n, self.enabled, self.mode = n, enabled, mode
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('enabled', choices=(False, True))
+        scope.value('mode', ti.i32, affects_plan=True)
+        with resource_group(self, 'output', initialization='zero') as fields:
+            fields.out = fields.field(ti.i32, shape=fields.dim('n'))
+        if self.enabled:
+            with resource_group(self, 'optional', initialization='zero') as fields:
+                fields.scratch = fields.field(ti.i32, shape=fields.dim('n'))
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] += 1
+            if ti.static(self.enabled and self.mode == 2):
+                self.scratch[i] = i + 10
+                self.out[i] += self.scratch[i]
+    @ti.kernel
+    def conditional_requirement(self) -> ti.i32:
+        value = 0
+        if ti.static(self.mode == 2):
+            value = self.scratch[0]
+        return value
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.step)
+        return b.compile()
+'''
+    if not prepared:
+        source = source.replace("scope.value('mode', ti.i32, affects_plan=True)", "scope.value('mode', ti.i32)")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    if not prepared:
+        with pytest.raises(ti.aot.PackageExportError, match='runtime capture|dynamic'):
+            ti.aot.export_package(package, tmp_path / 'sdk')
+        return
+    original = sys.modules['definition_fixture.model']
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert manifest['version'] == 80 and not manifest['entry_families']
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for enabled in (False, True):
+            for mode in (-1, 0, 2, 7):
+                normal = original.Model(7, enabled, mode)
+                normal.step()
+                loaded = code.host.model.Model(7, enabled, mode)
+                loaded.step()
+                expected = normal.out.to_numpy()
+                np.testing.assert_array_equal(loaded.out.to_numpy(), expected)
+                assert hasattr(loaded, 'scratch') == enabled
+                if mode == 2 and not enabled:
+                    with pytest.raises(ValueError, match='presence'):
+                        loaded.conditional_requirement()
+                else:
+                    assert loaded.conditional_requirement() == (10 if mode == 2 else 0)
+                with loaded.graph().bind({}) as bound:
+                    loaded.mode = 2 if mode != 2 else 0
+                    bound.run()
+                np.testing.assert_array_equal(loaded.out.to_numpy(), 2 * expected)
+    (tmp_path / 'sdk/package.json').write_text(json.dumps({**manifest, 'version': 79}), encoding='utf8')
+    with Runtime(manifest['target']) as runtime, pytest.raises(ValueError, match='format 80'):
+        load_package(runtime, tmp_path / 'sdk')
+
+
 @pytest.mark.parametrize("mixed", [False, True, "conditional_extent"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_boolean_workspace_reuses_code_without_allocating_absent_groups(

@@ -2145,6 +2145,17 @@ prepare-time reference check. It neither infers aliases from matching types nor
 adds a per-step check. Focused CPU/CUDA checks cover both selections, different
 model sizes and rejection of a foreign parent with matching configuration.
 
+Integer values declared with `value(..., ti.i32, affects_plan=True)` may participate
+in the same model-expression lowering as dimensions, including existing `ti.static`
+conditions. The exported implementation takes a prepared value instead of
+enumerating its domain. JIT keeps its original static behavior; a bound Graph
+keeps its prepared snapshot. Optional workspace requirements use these values
+at preparation as well, including negative integer modes. This does not admit
+ordinary runtime captures or device loads as static values. Definition package
+format 80 records prepared values needed by optional-input guards. Focused
+CPU/CUDA checks cover JIT agreement, absent workspaces, required-input rejection,
+and bound Graph snapshots.
+
 Implementation: [producer](../../python/taichi_forge/aot/_package.py),
 [standalone consumer](../../packaging/runtime/src/taichi_forge_runtime/aot/_package.py),
 [focused tests](../../tests/python/test_aot_package.py).
