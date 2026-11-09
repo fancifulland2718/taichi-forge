@@ -1846,7 +1846,12 @@ conditions; aliases learned in an arm do not escape it. It retains the target gu
 Fixed Field-name loops may compose their `dim` / `parent_dim` attribute names from
 that same literal name. Capacities remain instance data, and only declarations
 expand, without numerical copies. The loop variable cannot select types, vector
-widths or arbitrary computations. Local CPU/CUDA checks cover backend-specific
+widths or arbitrary computations. Direct root-scope aliases of a previously
+declared Field (`scope.alias = scope.field_name`) reuse source-scope borrowing;
+identity, storage and retirement ownership remain shared, without another allocation.
+Local CPU/CUDA checks include JIT agreement, source-free new sizes and instance/retirement
+isolation. Missing sources/presence guards still reject; alias chains and unproven
+record sources are outside this slice. Local CPU/CUDA checks cover backend-specific
 element types/ranks and new instance sizes without mixing the other target's layout.
 Normal Host preparation may read unconditional declared scalar roles through
 scope attributes or an unshadowed `getattr(scope, 'name', default)`. This admits

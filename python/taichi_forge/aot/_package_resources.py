@@ -148,6 +148,7 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
 
     # Record handles are declaration namespaces as well. Follow their lexical
     # source binding without reading the record or running its factory.
+    root_scopes = {name for name, _ in scope_bindings + context_bindings}
     for node in sorted(ast.walk(constructor), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))):
         if (
             isinstance(node, ast.Assign)
@@ -185,8 +186,46 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
     )
 
     class Declarations(ast.NodeTransformer):
+        def __init__(self):
+            self.fields = set()
+
         def visit_Assign(self, node):
             scope_names = scope_names_at(node)
+            target = node.targets[0] if len(node.targets) == 1 else None
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id in scope_names & root_scopes
+            ):
+                value = node.value
+                if (
+                    isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Attribute)
+                    and isinstance(value.func.value, ast.Name)
+                    and value.func.value.id in scope_names & root_scopes
+                    and value.func.attr in ("field", "vector_field", "matrix_field", "struct_field")
+                ):
+                    self.fields.add(target.attr)
+                elif (
+                    isinstance(value, ast.Attribute)
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in scope_names & root_scopes
+                    and value.attr in self.fields
+                    and target.attr != value.attr
+                ):
+                    return ast.copy_location(
+                        ast.Expr(
+                            ast.Call(
+                                ast.Attribute(copy.deepcopy(target.value), "borrow", ast.Load()),
+                                [
+                                    ast.Constant(target.attr),
+                                    ast.Attribute(ast.Name("self", ast.Load()), value.attr, ast.Load()),
+                                ],
+                                [ast.keyword("source_scope", ast.Constant(True))],
+                            )
+                        ),
+                        node,
+                    )
             if not (len(node.targets) == 1 and isinstance(node.value, ast.IfExp)):
                 return self.generic_visit(node)
             target, choice = node.targets[0], node.value

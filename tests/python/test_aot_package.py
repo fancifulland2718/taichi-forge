@@ -13969,6 +13969,104 @@ def test_package_conditional_contexts_reject_unproven_domains(tmp_path, monkeypa
     assert not (tmp_path / "sdk").exists()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_direct_scoped_field_aliases_preserve_original_storage(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        with resource_group(self, 'state', initialization='zero') as scope:
+            scope.values = scope.field(ti.i32, shape=scope.dim('n'))
+            scope.alias = scope.values
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.alias:
+            self.alias[i] = i + bias
+"""
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    normal = package.Model(7)
+    normal.step(4)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7), code.host.Model(19)
+        assert a.values is a.alias
+        a.step(4)
+        np.testing.assert_array_equal(a.values.to_numpy(), normal.values.to_numpy())
+        np.testing.assert_array_equal(b.values.to_numpy(), 0)
+        a.tree.destroy()
+        b.step(-3)
+        np.testing.assert_array_equal(b.values.to_numpy(), np.arange(19) - 3)
+    probe = tmp_path / "consume_scope_alias.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3), code.host.Model(11)
+            assert a.values is a.alias
+            a.step(5); b.step(-1)
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(3) + 5)
+            np.testing.assert_array_equal(b.values.to_numpy(), np.arange(11) - 1)
+        print('SCOPE_ALIAS_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SCOPE_ALIAS_OK" in result.stdout
+
+
+@pytest.mark.parametrize("conditional", [False, True])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_direct_scope_alias_requires_a_present_declared_source(tmp_path, monkeypatch, conditional):
+    source = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, n, enabled):
+        self.n, self.enabled = n, enabled
+        with resource_group(self, 'state', initialization='zero') as scope:
+            scope.static('enabled', choices=(False, True))
+            scope.header = scope.field(ti.i32, shape=())
+            if self.enabled:
+                scope.values = scope.field(ti.i32, shape=scope.dim('n'))
+            scope.alias = scope.values
+    @ti.kernel
+    def step(self):
+        for i in self.alias:
+            self.alias[i] = i
+"""
+    if not conditional:
+        source = source.replace("scope.alias = scope.values", "scope.alias = scope.missing")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ti.aot.PackageExportError, match="presence guards|ResourceScope use"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 FIELD_LOOP_SOURCE = """
 import taichi_forge as ti
 from resource_contexts import resource_group, read_events
