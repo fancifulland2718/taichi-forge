@@ -1,6 +1,7 @@
 """Resolve declared input types from normal constructor calls, without executing them."""
 
 import ast
+import copy
 import inspect
 
 
@@ -97,6 +98,13 @@ def resolve_inputs(sources, imported):
             annotated.add(key)
     targets = {owner for owner, _ in inputs}
     calls = {}
+    sequence_sites = {
+        id(call): item["constructors"]
+        for schema, _ in owners.values()
+        for item in schema.values()
+        if item["kind"] == "host_owner_sequence"
+        for call in item.get("constructors", ())
+    }
     declared_sites = set()
     for caller, (schema, _) in owners.items():
         for item in constructor_items(schema):
@@ -158,6 +166,9 @@ def resolve_inputs(sources, imported):
         return None
 
     def input_type(owner, expression):
+        projected = getattr(expression, "_package_resource_inventory_origin", None)
+        if projected is not None:
+            return projected
         path = []
         while isinstance(expression, ast.Attribute):
             path.insert(0, expression.attr)
@@ -174,9 +185,81 @@ def resolve_inputs(sources, imported):
             path = [*prefix, *path]
         return member_type(owner, path)
 
+    def declared_fields(owner, visited=()):
+        if owner in visited:
+            return set()
+        result = set()
+        for key, item in owners[owner][0].items():
+            kind = item["kind"]
+            if kind == "dense_field":
+                result.add((owner, (key,)))
+                from ._package_field_like import declared_struct_members
+
+                result.update((owner, (key, member)) for member in declared_struct_members(item))
+            elif kind == "borrowed_field":
+                value = member_type(owner, [key])
+                if value is None:
+                    return None
+                result.add(value)
+            elif kind in ("owner", "owner_input", "host_owner_sequence"):
+                children = item.get("owner_alternatives") or (
+                    item.get("constructors", ()) if kind == "host_owner_sequence" else (item,)
+                )
+                for child in children:
+                    if "owner_type" not in child:
+                        return None
+                    fields = declared_fields(child["owner_type"], (*visited, owner))
+                    if fields is None:
+                        return None
+                    result.update(fields)
+            elif kind == "field_like":
+                # These aliases are resolved by the subsequent layout pass.
+                # Do not silently omit a possibly written resource.
+                return None
+        return result
+
+    def expand_write_inventory(caller, arguments, declaration):
+        marked = [value for value in arguments.values() if getattr(value, "_package_written_resource_inventory", False)]
+        if not marked:
+            return False
+        if len(marked) != 1 or id(declaration) not in sequence_sites:
+            raise ValueError("Write inventories require one independent Host owner sequence input")
+        value = marked[0]
+        source = input_type(caller, value)
+        if source is None:
+            return False
+        if source[1]:
+            raise ValueError("Write inventory requires an owner, not a Field")
+        fields = declared_fields(source[0])
+        if fields is None:
+            return False
+        if not fields:
+            raise ValueError("Write inventory has no declared Field input domain")
+        call = declaration["constructor_call"]
+        positions = [("args", index) for index, arg in enumerate(call.args) if arg is value]
+        positions += [("keywords", index) for index, arg in enumerate(call.keywords) if arg.value is value]
+        if len(positions) != 1:
+            raise ValueError("Write inventory input must be forwarded exactly once")
+        replacements = []
+        for field in sorted(fields):
+            candidate = copy.deepcopy(declaration)
+            group, index = positions[0]
+            expression = getattr(candidate["constructor_call"], group)[index]
+            if group == "keywords":
+                expression = expression.value
+            del expression._package_written_resource_inventory
+            expression._package_resource_inventory_origin = field
+            replacements.append(candidate)
+        sequence = sequence_sites[id(declaration)]
+        index = next(index for index, item in enumerate(sequence) if item is declaration)
+        sequence[index : index + 1] = replacements
+        return True
+
     absent = (None, ())
 
     def input_types(owner, expression):
+        if getattr(expression, "_package_written_resource_inventory", False):
+            return None
         if expression is None or isinstance(expression, ast.Constant) and expression.value is None:
             return {absent}
         if isinstance(expression, ast.IfExp):
@@ -211,6 +294,9 @@ def resolve_inputs(sources, imported):
             if item.get("owner_type") != source_type:
                 item["owner_type"] = source_type
                 changed = True
+        for sites in calls.values():
+            if any(expand_write_inventory(*site) for site in sites):
+                return resolve_inputs(sources, imported)
         for (owner, name), item in inputs.items():
             observed_all = {
                 identity

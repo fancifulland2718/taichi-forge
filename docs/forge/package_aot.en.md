@@ -1145,6 +1145,19 @@ and independent instances, including a source-free vector consumer. Conditional
 sources and heterogeneous checkpoint input families remain open.
 This is not qualification of an entire engine checkpoint or EFC export.
 
+Host owner sequences can also take their inputs from the existing
+`ti.aot.written_resources(owner, owner.record)` query. Export projects possible
+Field types from the declared owner closure without running the recording
+method; normal preparation chooses the actual compiler-proven write set.
+The sequence length/order does not become a numerical specialization key.
+One independent inventory input per constructor is supported; unresolved
+allocation closures and non-owner sources reject. Flat StructField member
+inputs retain their member identity and can own a `field_like` backup.
+Type expressions retain their original module, while backup allocation belongs
+to the new owner. Local CPU/CUDA checks cover new sizes, different write sets,
+independent backups and source-free bit-exact copies. This is a shared mechanism
+check, not qualification of the full rigid capacity checkpoint.
+
 Version 41 also admits borrowing an entire declared flat StructField through
 `scope.borrow(..., source_scope=True)`. Member bindings retain the original
 allocation namespace and native layout; the record is not an independent array.

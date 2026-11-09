@@ -1685,6 +1685,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "local_type_source",
                         "dimension_alias_checks",
                         "declaration_module",
+                        "type_declaration_module",
                         "declaration_owner",
                         "value_declaration",
                         "static_declaration",

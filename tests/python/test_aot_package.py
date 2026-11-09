@@ -2006,6 +2006,120 @@ print('INVENTORY_SOURCE_FREE_OK')
     assert "INVENTORY_SOURCE_FREE_OK" in result.stdout
 
 
+WRITE_INVENTORY_SOURCE = INVENTORY_FIELD_INPUT_SOURCE.replace(
+    "@ti.data_oriented\nclass Checkpoint:",
+    """
+    @ti.kernel
+    def write_scalar(self):
+        for i in self.scalar:
+            self.scalar[i] = 123.0
+    @ti.kernel
+    def write_record(self):
+        for i in self.record:
+            self.record[i].x = 456.0
+            for j in range(self.width):
+                self.record[i].v[j] = i + j
+    def build_graph(self, builder):
+        builder.dispatch(self.write_scalar)
+        if self.width > 3:
+            builder.dispatch(self.write_record)
+
+@ti.data_oriented
+class Checkpoint:""",
+).replace(
+    "self.names, sources = zip(*source_fields(self.storage, mode))",
+    "sources = ti.aot.written_resources(self.storage, self.storage.build_graph)",
+)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_owner_sequence_uses_compiler_write_inventory(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, WRITE_INVENTORY_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["input_families"]["definition_fixture.model.Checkpoint"]) == 5
+    assert len([item for item in manifest["entries"].values() if item["definition"].endswith(".common")]) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(5, 3, 0), code.host.Model(17, 7, 1)
+        assert len(a.groups) == 1 and len(b.groups) == 3
+        for model, n in ((a, 5), (b, 17)):
+            # Inspecting effects must never execute the recorded numerical work.
+            np.testing.assert_array_equal(model.storage.scalar.to_numpy(), np.zeros(n))
+            values = np.arange(n, dtype=np.float32)
+            model.storage.scalar.from_numpy(values)
+            model.save()
+            model.storage.scalar.from_numpy(values * 0)
+            model.restore()
+            np.testing.assert_array_equal(model.storage.scalar.to_numpy(), values)
+        b.storage.record.v.from_numpy(np.ones((17, 7), dtype=np.float32))
+        b.restore()
+        np.testing.assert_array_equal(b.storage.record.v.to_numpy(), np.zeros((17, 7)))
+    probe = tmp_path / "consume_write_inventory.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(4, 3, 0), code.host.Model(19, 7, 1)
+    assert len(a.groups) == 1 and len(b.groups) == 3
+    bits = np.array([0x80000000, 0x7fc00123, 0x3f800000, 0xff800000], dtype=np.uint32)
+    a.storage.scalar.from_numpy(bits.view(np.float32))
+    b.storage.scalar.from_numpy(np.arange(19, dtype=np.float32))
+    a.save()
+    b.save()
+    a.storage.scalar.from_numpy(np.zeros(4, dtype=np.float32))
+    a.restore()
+    np.testing.assert_array_equal(a.storage.scalar.to_numpy().view(np.uint32), bits)
+    np.testing.assert_array_equal(b.storage.scalar.to_numpy(), np.arange(19, dtype=np.float32))
+print('WRITE_INVENTORY_SOURCE_FREE_OK')
+""",
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "WRITE_INVENTORY_SOURCE_FREE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "change, diagnostic",
+    [
+        (("self.storage.build_graph)", "self.build_graph)"), "fixed tuple"),
+        (
+            (
+                "ti.aot.written_resources(self.storage, self.storage.build_graph)",
+                "ti.aot.written_resources(self.storage.scalar, self.storage.scalar.build_graph)",
+            ),
+            "not a Field",
+        ),
+    ],
+)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_write_inventory_rejects_unproven_owners(tmp_path, monkeypatch, change, diagnostic):
+    package = _source_package(tmp_path, monkeypatch, WRITE_INVENTORY_SOURCE.replace(*change))
+    with pytest.raises(ValueError, match=diagnostic):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize(
     "before, after",
     [
@@ -2155,6 +2269,27 @@ class Model:
         for i in ti.grouped(self.storage.values):
             self.storage.values[i] = self.backup[i]
 """
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_field_like_keeps_type_module_and_new_allocation_owner(tmp_path, monkeypatch):
+    split = FIELD_LIKE_SOURCE.index("@ti.data_oriented\nclass Model:")
+    storage = FIELD_LIKE_SOURCE[:split].replace("constructors = 0", "constructors = 0\nDTYPE = ti.f32")
+    storage = storage.replace("scope.vector_field(self.n, ti.f32,", "scope.vector_field(self.n, DTYPE,")
+    model = "import taichi_forge as ti\nfrom .storage import Storage\nDTYPE = ti.i32\n" + FIELD_LIKE_SOURCE[split:]
+    package = _source_package(tmp_path, monkeypatch, model, extra_modules={"storage": storage})
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.storage"].constructors == 0
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for n in (3, 11):
+            instance = code.host.Model(n)
+            instance.fill(0.25)
+            expected = instance.storage.values.to_numpy()
+            instance.save()
+            instance.fill(-7.0)
+            instance.restore()
+            assert instance.backup.to_numpy().dtype == np.float32
+            np.testing.assert_array_equal(instance.storage.values.to_numpy(), expected)
 
 
 @pytest.mark.parametrize(

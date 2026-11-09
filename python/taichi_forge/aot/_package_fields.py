@@ -211,7 +211,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             raise ValueError("Field dtype metadata requires an explicit scalar or tensor resource type")
         node = type_nodes[key]
         source_namespace = (
-            vars(imported_modules[spec["declaration_module"]])
+            vars(imported_modules[spec.get("type_declaration_module", spec["declaration_module"])])
             if imported_modules is not None and "declaration_module" in spec
             else namespace
         )
@@ -295,7 +295,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
 
         model_tensors = {}
         declaration_namespace = (
-            vars(imported_modules[item["declaration_module"]])
+            vars(imported_modules[item.get("type_declaration_module", item["declaration_module"])])
             if imported_modules is not None and "declaration_module" in item
             else namespace
         )

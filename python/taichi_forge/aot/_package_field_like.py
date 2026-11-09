@@ -4,6 +4,18 @@ import ast
 import copy
 
 
+def declared_struct_members(item):
+    """Read the already-normalized member types, without constructing a Field."""
+    node = item.get("type_node")
+    if not item.get("struct_field"):
+        return {}
+    if not isinstance(node, ast.Dict) or not all(
+        isinstance(key, ast.Constant) and isinstance(key.value, str) for key in node.keys
+    ):
+        raise ValueError("Struct Field inventory requires resolved member declarations")
+    return {key.value: value for key, value in zip(node.keys, node.values)}
+
+
 def resolve_field_likes(sources):
     owners = {
         module + "." + name: (module, schema)
@@ -36,6 +48,19 @@ def resolve_field_likes(sources):
         if item.get("kind") == "field_like":
             resolve(owner, name, (*visiting, token))
             item = schema[name]
+        if item.get("kind") == "dense_field" and len(rest) == 1:
+            members = declared_struct_members(item)
+            if rest[0] in members:
+                item = copy.deepcopy(item)
+                item["type_node"] = copy.deepcopy(members[rest[0]])
+                item.pop("struct_field", None)
+                used = {axis for axis in item["shape"] if isinstance(axis, str)} | {
+                    getattr(node, "_package_model_extent", None) for node in ast.walk(item["type_node"])
+                }
+                item["dimension_sources"] = {
+                    key: value for key, value in item["dimension_sources"].items() if key in used
+                }
+                rest = []
         if item.get("kind") != "dense_field" or rest:
             raise ValueError("field_like requires a declared complete Field allocation")
         return owner, item, []
@@ -65,16 +90,17 @@ def resolve_field_likes(sources):
             group="field_like_" + name,
             layout=item["layout"],
             shape=[remap.get(axis, axis) for axis in original["shape"]],
-            dimension_sources={
-                remap[key]: source_expression + "." + key
-                for key in original["dimension_sources"]
-            },
+            dimension_sources={remap[key]: source_expression + "." + key for key in original["dimension_sources"]},
             dimension_expressions={},
             like_source_path=item["source_path"],
-            declaration_module=original.get(
-                "declaration_module", owners[source_owner][0]
+            type_declaration_module=original.get(
+                "type_declaration_module", original.get("declaration_module", owners[source_owner][0])
             ),
+            declaration_module=item.get("declaration_module", owners[owner][0]),
         )
+        field.pop("declaration_owner", None)
+        if "declaration_owner" in item:
+            field["declaration_owner"] = item["declaration_owner"]
         for key in (
             "local_type_source",
             "member_initialization_node",

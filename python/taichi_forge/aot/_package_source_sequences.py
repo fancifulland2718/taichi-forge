@@ -88,6 +88,28 @@ class SourceSequences:
                 result.append(self.value(node.elt, local, namespace, active))
             return Sequence(result, mutable=isinstance(node, ast.ListComp))
         if isinstance(node, ast.Call) and not node.keywords:
+            from ._resource_effects import written_resources
+            from taichi_forge import aot
+
+            if _source_value(node.func, namespace) is written_resources or (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "written_resources"
+                and _source_value(node.func.value, namespace) is aot
+                and "written_resources" not in vars(aot)
+            ):
+                self.unshadowed(node.func, environment)
+                if len(node.args) != 2:
+                    raise UnprovenSourceSequence("Write inventory requires an owner and its recording method")
+                owner = self.scalar(self.value(node.args[0], environment, namespace, active))
+                record = self.scalar(self.value(node.args[1], environment, namespace, active))
+                if not isinstance(record, ast.Attribute) or ast.dump(record.value) != ast.dump(owner):
+                    raise UnprovenSourceSequence("Write inventory requires the same owner's recording method")
+                # The owner's type may be resolved only after constructor
+                # forwarding. Carry a private proof to that existing pass;
+                # never execute the recording function to discover a domain.
+                source = copy.deepcopy(owner)
+                source._package_written_resource_inventory = True
+                return Sequence([source])
             if isinstance(node.func, ast.Name) and node.func.id in ("tuple", "zip"):
                 import builtins
 
