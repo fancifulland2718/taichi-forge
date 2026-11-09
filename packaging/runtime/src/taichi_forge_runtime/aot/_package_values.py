@@ -80,7 +80,7 @@ def check_admission(owner, contract):
                 continue
             check_external_resource(owner, resource, value)
         for name, resource in admission.get("conditional_resources", {}).items():
-            if not records[resource["input_record"]]:
+            if not all(records[key] for key in resource.get("input_conditions", (resource["input_record"],))):
                 continue
             value = path_value(owner, resource["path"])
             allocated_owner = path_value(owner, resource.get("layout_owner_path", ()))
@@ -158,6 +158,7 @@ def capture_value(owner, spec):
     if (
         spec.get("nullable_record") and path_value(owner, spec["nullable_record"]) is None
         or spec.get("nullable_boolean") and not path_value(owner, spec["nullable_boolean"])
+        or any(not path_value(owner, predicate["path"]) for predicate in spec.get("nullable_booleans", ()))
     ):
         if "optional_array" in spec:
             return root._forge_package_owner._empty_input(spec["optional_array"])

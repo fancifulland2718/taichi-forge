@@ -19893,6 +19893,109 @@ class Model:
             np.testing.assert_array_equal(model.out.to_numpy(), np.arange(259) % (width if selected else 256))
 
 
+@pytest.mark.parametrize("mixed", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_nested_boolean_workspaces_share_code(tmp_path, monkeypatch, mixed):
+    from itertools import product
+
+    source = '''
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, motion: bool, rigid: bool, response: bool):
+        self.n, self.motion, self.rigid, self.response = n, motion, rigid, response
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        for name in ('motion', 'rigid', 'response'):
+            scope.static(name, choices=(False, True))
+        with resource_group(self, 'output', initialization='zero') as fields:
+            fields.out = fields.field(ti.i32, shape=fields.dim('n'))
+        if self.motion:
+            with resource_group(self, 'motion', initialization='zero') as fields:
+                fields.translation = fields.field(ti.i32, shape=fields.dim('n'))
+            if self.rigid:
+                with resource_group(self, 'rigid', initialization='zero') as fields:
+                    fields.rotation = fields.field(ti.i32, shape=fields.dim('n'))
+                if self.response:
+                    with resource_group(self, 'response', initialization='zero') as fields:
+                        fields.inertia = fields.field(ti.i32, shape=fields.dim('n'))
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] += 1
+            if ti.static(self.motion):
+                self.translation[i] = i + 10
+                self.out[i] += self.translation[i]
+                if ti.static(self.rigid):
+                    self.rotation[i] = i + 20
+                    self.out[i] += self.rotation[i]
+                    if ti.static(self.response):
+                        self.inertia[i] = i + 30
+                        self.out[i] += self.inertia[i]
+    @ti.kernel
+    def required(self) -> ti.i32:
+        value = 0
+        if ti.static(self.motion):
+            value = self.inertia[0]
+        return value
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.step)
+        return b.compile()
+'''
+    if mixed:
+        source = source.replace(
+            "                if self.response:\n                    with resource_group(self, 'response', initialization='zero') as fields:\n",
+            "                with resource_group(self, 'response', initialization='zero') as fields:\n                    fields.common = fields.field(ti.i32, shape=fields.dim('n'))\n                    if self.response:\n",
+            1,
+        )
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    original = sys.modules["definition_fixture.model"]
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    owner = manifest["owners"]["definition_fixture.model.Model"]
+    assert all(bool(owner[name].get("dynamic_storage_condition")) is not mixed
+               for name in ("motion", "rigid", "response"))
+    if not mixed:
+        assert manifest["version"] == 79 and not manifest["entry_families"]
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        instances = []
+        for index, (motion, rigid, response) in enumerate(product((False, True), repeat=3)):
+            n = index + 3
+            normal = original.Model(n, motion, rigid, response)
+            normal.step()
+            loaded = code.host.model.Model(n, motion, rigid, response)
+            instances.append((loaded, normal.out.to_numpy()))
+            loaded.step()
+            np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+            assert hasattr(loaded, "translation") == motion
+            assert hasattr(loaded, "rotation") == (motion and rigid)
+            assert hasattr(loaded, "inertia") == (motion and rigid and response)
+            assert len(loaded._forge_package_field_groups) == (
+                1 + int(motion) + int(motion and rigid) + int(motion and rigid and (mixed or response)))
+            if motion and not (rigid and response):
+                with pytest.raises(ValueError, match="presence|variant|configuration|selection"):
+                    loaded.required()
+            else:
+                assert loaded.required() == (30 if motion else 0)
+            with loaded.graph().bind({}) as call:
+                call.run()
+        for loaded, expected in instances:
+            np.testing.assert_array_equal(loaded.out.to_numpy(), 2 * expected)
+        if not mixed:
+            full = instances[-1][0]
+            previous = full.inertia
+            full.inertia = code.host.model.Model(full.n, True, True, True).inertia
+            with pytest.raises(ValueError, match="owned Field"):
+                full.step()
+            full.inertia = previous
+    if not mixed:
+        path = tmp_path / "sdk/package.json"
+        path.write_text(json.dumps({**manifest, "version": 78}), encoding="utf8")
+        with Runtime(manifest["target"]) as runtime, pytest.raises(ValueError, match="format 79"):
+            load_package(runtime, tmp_path / "sdk")
+
+
 @pytest.mark.parametrize("mixed", [False, True, "conditional_extent"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_boolean_workspace_reuses_code_without_allocating_absent_groups(

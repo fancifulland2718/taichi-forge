@@ -1752,6 +1752,7 @@ class LoadedPackage:
                 76,
                 77,
                 78,
+                79,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1767,6 +1768,12 @@ class LoadedPackage:
             for member in owner.values()
         ):
             raise ValueError("Boolean optional workspaces require definition package format 78")
+        if self.manifest["version"] < 79 and any(
+            member.get("input_conditions")
+            for owner in self.manifest["owners"].values()
+            for member in owner.values()
+        ):
+            raise ValueError("Nested optional workspaces require definition package format 79")
         if self.manifest["version"] < 71 and any(
             "array_extents" in member for owner in self.manifest["owners"].values() for member in owner.values()
         ):

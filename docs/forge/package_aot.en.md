@@ -324,12 +324,19 @@ whole independent present-only Dense groups. Definition export can project it
 to a preparation-bound presence argument so instances share numerical code.
 Original Host allocation and ordinary JIT remain unchanged; an absent instance
 allocates no workspace. Mixed groups, child construction choices, type/layout
-selection, conditional dimension declarations and multi-condition groups retain
+selection and conditional dimension declarations retain
 their specialization. Changing an
 allocation flag after construction cannot change its resource layout; a bound
 Graph retains its original snapshot. Local CPU/CUDA source-free checks cover
 `ti.real_func`, new model sizes, absent workspaces, instance isolation and foreign
-workspace rejection. Partial-group
+workspace rejection. Format 79 also accepts complete groups guarded by positive
+conjunctions of declared booleans, such as nested motion, rigid and response
+workspaces. Each presence argument remains independent; storage binds only when
+all conditions hold. A mixed group, layout/type choice or conditional dimension
+keeps the entire connected predicate set specialized. Local CPU/CUDA checks cover
+eight presence combinations, JIT equivalence, new dimensions, missing-condition
+rejection, Graph snapshots, instance isolation and foreign storage rejection.
+Partial-group
 layout choices, records containing static options, and dimensions escaping the
 record retain their existing contract. Numerical code checks record presence,
 rather than inferring it from workspace object comparisons. Arbitrary

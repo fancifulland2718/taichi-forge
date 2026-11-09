@@ -1782,6 +1782,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(77, manifest["version"])
             if any(item.get("dynamic_storage_condition") for item in schema.values()):
                 manifest["version"] = max(78, manifest["version"])
+            if any(item.get("input_conditions") for item in schema.values()):
+                manifest["version"] = max(79, manifest["version"])
             if any(item.get("input_presence_attribute") for item in schema.values()):
                 manifest["version"] = max(57, manifest["version"])
             if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):
@@ -2261,6 +2263,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         path=list(environment._paths[key]),
                         element=item["element"],
                         input_record=item["input_record"],
+                        **({"input_conditions": item["input_conditions"]} if item.get("input_conditions") else {}),
                         shape_expressions=[
                             ("dim", axis) if isinstance(axis, str) else ("const", axis) for axis in item["shape"]
                         ],
@@ -2361,6 +2364,12 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                                 else "nullable_record"
                             )
                             item[nullable] = list(environment._paths[predicate])
+                        if resource.get("input_conditions"):
+                            item["nullable_booleans"] = [
+                                {"path": list(environment._paths[predicate])}
+                                for predicate in resource["input_conditions"]
+                            ]
+                            manifest["version"] = max(79, manifest["version"])
                         if resource.get("external") and (
                             resource.get("optional_input") or resource.get("input_record")
                         ):

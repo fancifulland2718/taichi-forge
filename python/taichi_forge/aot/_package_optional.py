@@ -92,22 +92,25 @@ def project_boolean_groups(schema, declarations):
     from taichi_forge.types import primitive_types
     from ._component import _InputPresence
 
-    for name, predicate in list(schema.items()):
-        if (
-            predicate["kind"] != "static"
-            or predicate.get("conditions")
-            or predicate.get("kernel_only")
-            or predicate.get("static_dtype")
-            or {tuple(value) for value in predicate.get("choices", ())} != {("bool", False), ("bool", True)}
-        ):
-            continue
+    candidates = {
+        name
+        for name, predicate in schema.items()
+        if predicate["kind"] == "static"
+        and not predicate.get("conditions")
+        and not predicate.get("kernel_only")
+        and not predicate.get("static_dtype")
+        and {tuple(value) for value in predicate.get("choices", ())} == {("bool", False), ("bool", True)}
+    }
+
+    def eligible(name):
         conditioned = {key: item for key, item in schema.items() if name in item.get("conditions", {})}
         storage = {key: item for key, item in conditioned.items() if item["kind"] == "dense_field"}
         groups = {item.get("group", "fields") for item in storage.values()}
-        if (
+        return not (
             not storage
             or any(
-                item.get("conditions") != {name: True}
+                not item.get("conditions", {}).keys() <= candidates
+                or any(value is not True for value in item.get("conditions", {}).values())
                 # A conditionally declared dimension can be read without its
                 # Field. It needs a presence contract of its own before it can
                 # use a nullable argument, unlike an unconditional shape axis.
@@ -126,11 +129,24 @@ def project_boolean_groups(schema, declarations):
                 for item in schema.values()
                 for guards in ("choice_guards", "shape_guards", "dtype_guards", "source_guards")
             )
-        ):
-            continue
+        )
+
+    # A nested group's predicates form one eligibility closure. If one guard
+    # also selects a type/layout or a partial group, retain specialization for
+    # every group relying on that guard. No application policy is inferred.
+    while True:
+        accepted = {name for name in candidates if eligible(name)}
+        if accepted == candidates:
+            break
+        candidates = accepted
+    for name in sorted(candidates):
+        predicate = schema[name]
         predicate.update(dynamic_storage_condition=True, input_presence_attribute=name)
         declarations[name] = _InputPresence(primitive_types.i32)
-        for item in conditioned.values():
-            item["input_record"] = name
-        for item in storage.values():
-            item["dynamic_input_storage"] = True
+    for item in schema.values():
+        conditions = item.get("conditions", {})
+        if item["kind"] == "dense_field" and conditions and conditions.keys() <= candidates:
+            names = sorted(conditions)
+            item.update(input_record=names[0], dynamic_input_storage=True)
+            if len(names) > 1:
+                item["input_conditions"] = names
