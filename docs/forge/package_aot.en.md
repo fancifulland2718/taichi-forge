@@ -1842,8 +1842,11 @@ incompatible choices, `kernel_only`, conditions or paths still reject.
 Free preparation functions reuse constructor backend selection: the selected
 allocation branch is chosen before resource factory/contract discovery, and Host
 projection applies the same selection inside resource contexts and declared model
-conditions; aliases learned in an arm do not escape it. Host
-projection retains the target guard. Local CPU/CUDA checks cover backend-specific
+conditions; aliases learned in an arm do not escape it. It retains the target guard.
+Fixed Field-name loops may compose their `dim` / `parent_dim` attribute names from
+that same literal name. Capacities remain instance data, and only declarations
+expand, without numerical copies. The loop variable cannot select types, vector
+widths or arbitrary computations. Local CPU/CUDA checks cover backend-specific
 element types/ranks and new instance sizes without mixing the other target's layout.
 Normal Host preparation may read unconditional declared scalar roles through
 scope attributes or an unshadowed `getattr(scope, 'name', default)`. This admits

@@ -14048,7 +14048,9 @@ class Model:
         np.testing.assert_array_equal(b.values.to_numpy(), np.arange(1, 20))
 
 
-@pytest.mark.parametrize("names", ["literal", "prefix", "formatted", "global_tuple", "global_star", "alias", "slice"])
+@pytest.mark.parametrize(
+    "names", ["literal", "prefix", "formatted", "global_tuple", "global_star", "alias", "slice", "dimension_name"]
+)
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_path, monkeypatch, names):
     from tests.python.test_aot_dense_snode_group import _compiled_nodes
@@ -14074,8 +14076,17 @@ def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_pat
         )
         source = source.replace("self.state_values[i] += 1", "self.alias_values[i] += 1")
     elif names == "slice":
-        source = source.replace("constructors = 0", "MEMBERS = ('before', 'values', 'weights', 'after')\nconstructors = 0")
+        source = source.replace(
+            "constructors = 0", "MEMBERS = ('before', 'values', 'weights', 'after')\nconstructors = 0"
+        )
         source = source.replace("for name in ('values', 'weights'):", "for name in MEMBERS[-3:-1]:")
+    elif names == "dimension_name":
+        source = source.replace("            cells = scope.dense(ti.i, scope.dim('n'))\n", "")
+        source = source.replace(
+            "        self.n = n",
+            "        self.n = n\n        self.values_capacity = n\n        self.weights_capacity = n\n"
+            "        self.vectors_capacity = n\n        self.unused_vectors_capacity = n",
+        ).replace("shape=scope.dim('n'), placement=cells", "shape=scope.dim(name + '_capacity')")
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
@@ -14109,7 +14120,7 @@ def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_pat
         a.tree.destroy()
         b.step()
         np.testing.assert_array_equal(getattr(b, prefix + "values").to_numpy(), 2)
-    if names in ("global_tuple", "global_star", "alias", "slice"):
+    if names in ("global_tuple", "global_star", "alias", "slice", "dimension_name"):
         probe = tmp_path / "consume_member_names.py"
         probe.write_text(
             textwrap.dedent("""
@@ -14169,6 +14180,7 @@ def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_pat
         "alias_source",
         "slice_bound",
         "slice_stride",
+        "dimension_call",
     ],
 )
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -14180,6 +14192,8 @@ def test_package_field_name_loops_reject_unproven_declarations(tmp_path, monkeyp
         model = model.replace("('values', 'weights')", "('values', 'values')")
     elif change == "name_use":
         model = model.replace("shape=scope.dim('n'), placement=cells", "shape=name, placement=cells")
+    elif change == "dimension_call":
+        model = model.replace("shape=scope.dim('n'), placement=cells", "shape=scope.dim(name.upper()), placement=cells")
     elif change == "mangled":
         model = model.replace("('values', 'weights')", "('__values', 'weights')")
     elif change == "shadow":

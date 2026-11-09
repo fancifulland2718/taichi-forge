@@ -338,6 +338,18 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
             ):
                 return self.generic_visit(node)
             receiver, name, allocation = call.args
+            dimension_names = set()
+            for part in ast.walk(allocation):
+                if (
+                    isinstance(part, ast.Call)
+                    and isinstance(part.func, ast.Attribute)
+                    and isinstance(part.func.value, ast.Name)
+                    and part.func.value.id == receiver.id
+                    and part.func.attr in ("dim", "parent_dim")
+                    and len(part.args) == 1
+                    and not part.keywords
+                ):
+                    dimension_names.update(id(item) for item in ast.walk(part.args[0]))
             alias = (
                 isinstance(allocation, ast.Call)
                 and isinstance(allocation.func, ast.Name)
@@ -376,7 +388,10 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
                     or not isinstance(allocation.func.value, ast.Name)
                     or allocation.func.value.id != receiver.id
                     or allocation.func.attr not in ("field", "vector_field", "matrix_field", "struct_field")
-                    or any(isinstance(n, ast.Name) and n.id == node.target.id for n in ast.walk(allocation))
+                    or any(
+                        isinstance(n, ast.Name) and n.id == node.target.id and id(n) not in dimension_names
+                        for n in ast.walk(allocation)
+                    )
                 )
             ):
                 fail(module, node, "Field-name loop requires an unshadowed literal member declaration")
@@ -446,11 +461,28 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
                             part.end_col_offset = max(part.end_col_offset or 0, part.col_offset + 1)
                     result.append(bound)
                     continue
+
+                class BindDimensions(ast.NodeTransformer):
+                    def visit_Call(self, value):
+                        value = self.generic_visit(value)
+                        if (
+                            isinstance(value.func, ast.Attribute)
+                            and isinstance(value.func.value, ast.Name)
+                            and value.func.value.id == receiver.id
+                            and value.func.attr in ("dim", "parent_dim")
+                            and len(value.args) == 1
+                            and not value.keywords
+                            and any(isinstance(n, ast.Name) and n.id == node.target.id for n in ast.walk(value.args[0]))
+                        ):
+                            value.args[0] = ast.copy_location(
+                                ast.Constant(member_name(value.args[0], member)), value.args[0]
+                            )
+                        return value
+
+                bound_allocation = BindDimensions().visit(copy.deepcopy(allocation))
                 result.append(
                     ast.copy_location(
-                        ast.Assign(
-                            [ast.Attribute(copy.deepcopy(receiver), selected, ast.Store())], copy.deepcopy(allocation)
-                        ),
+                        ast.Assign([ast.Attribute(copy.deepcopy(receiver), selected, ast.Store())], bound_allocation),
                         node.body[0],
                     )
                 )
