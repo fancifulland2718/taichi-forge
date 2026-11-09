@@ -12938,6 +12938,53 @@ def prepare(owner, active):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize("second", ["same", "different", "kernel_only"])
+def test_package_preparation_reuses_identical_static_domains(tmp_path, monkeypatch, second):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        first(self)
+        second(self)
+    @ti.kernel
+    def read(self) -> ti.i32:
+        result = 1
+        if ti.static(self.enabled):
+            result = 7
+        return result
+    def toggle(self):
+        self.enabled = not self.enabled
+        second(self)
+def first(owner):
+    scope = ti.experimental.ResourceScope(owner)
+    scope.static('enabled', choices=(False, True))
+def second(owner):
+    scope = ti.experimental.ResourceScope(owner)
+    scope.static('enabled', choices=(False, True))
+"""
+    if second == "different":
+        source = source.rsplit("choices=(False, True)", 1)
+        source = "choices=(False,)".join(source)
+    elif second == "kernel_only":
+        source = source.rsplit("choices=(False, True)", 1)
+        source = "choices=(False, True), kernel_only=True".join(source)
+    package = _source_package(tmp_path, monkeypatch, source)
+    if second != "same":
+        with pytest.raises(ti.aot.PackageExportError, match="domains conflict|Repeated construction"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        return
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sum(entry["definition"].endswith(".Model.read") for entry in manifest["entries"].values()) == 2
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(False), code.host.Model(True)
+        assert a.read() == 1 and b.read() == 7
+        a.toggle()
+        assert a.read() == 7 and b.read() == 7
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_preparation_domains_apply_across_helpers(tmp_path, monkeypatch):
     source = PREPARATION_DOMAIN_SOURCE
     start = source.index("def prepare(owner, active):")

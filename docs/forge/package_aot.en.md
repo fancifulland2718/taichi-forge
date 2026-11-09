@@ -1815,6 +1815,9 @@ Field dtype expressions may read an existing `static_dtype` through the same
 ResourceScope, including a singleton storage type declared by another preparation
 helper. This preserves the owner type/domain checks without instance inference
 or additional type combinations.
+Separate preparation functions may repeat identical static domains while keeping
+their Host declaration sites and call behavior. The owner retains one contract;
+incompatible choices, `kernel_only`, conditions or paths still reject.
 Normal Host preparation may read unconditional declared scalar roles through
 scope attributes or an unshadowed `getattr(scope, 'name', default)`. This admits
 the declared value only: escaped scopes, unknown members and dynamic names still

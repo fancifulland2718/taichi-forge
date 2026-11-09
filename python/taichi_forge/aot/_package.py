@@ -158,15 +158,29 @@ def _owner_schema(
                 )
             if name in schema and schema[name]["kind"] != "value":
                 previous = schema[name]
-                origins = ("scope_allocation", "scope_allocations", "declaration_module", "declaration_owner")
-                if declaration["kind"] == previous["kind"] == "dimension" and (
-                    {k: v for k, v in declaration.items() if k not in origins}
-                    == {k: v for k, v in previous.items() if k not in origins}
+                origins = (
+                    "scope_allocation",
+                    "scope_allocations",
+                    "declaration_module",
+                    "declaration_owner",
+                    "static_declaration",
+                )
+                if (
+                    declaration["kind"] == previous["kind"]
+                    and declaration["kind"] in ("dimension", "static")
+                    and (
+                        {k: v for k, v in declaration.items() if k not in origins}
+                        == {k: v for k, v in previous.items() if k not in origins}
+                    )
                 ):
                     previous["scope_allocations"] = [
                         *previous.get("scope_allocations", [previous["scope_allocation"]]),
                         declaration["scope_allocation"],
                     ]
+                    if declaration["kind"] == "static":
+                        # Each preparation keeps its own Host declaration site;
+                        # the owner still has one identical configuration domain.
+                        schema[name] = {**declaration, "scope_allocations": previous["scope_allocations"]}
                     continue
                 _fail(module, function, f"Repeated construction resource declaration {name!r}")
             schema[name] = declaration
