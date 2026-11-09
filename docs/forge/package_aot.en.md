@@ -1815,6 +1815,10 @@ Field dtype expressions may read an existing `static_dtype` through the same
 ResourceScope, including a singleton storage type declared by another preparation
 helper. This preserves the owner type/domain checks without instance inference
 or additional type combinations.
+Normal Host preparation may read unconditional declared scalar roles through
+scope attributes or an unshadowed `getattr(scope, 'name', default)`. This admits
+the declared value only: escaped scopes, unknown members and dynamic names still
+reject. Host policy does not become a numerical code identity.
 
 Format 70 supports finite shape selection for independent default-AOS Fields,
 such as `shape = (n,) if self.packed else (n, width)`. The condition must be an

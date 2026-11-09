@@ -2394,6 +2394,41 @@ def scope_declarations(
     for target in scope_writes:
         if declarations.get(target.attr, {}).get("kind") in ("dimension", "value", "static", "constant", "owner"):
             allowed.add(id(target.value))
+    # Normal Host preparation may read a declared scalar through its scope.
+    # Permit that forwarded value, never escape the declaration handle itself.
+    def scalar_read(receiver, name):
+        binding = scope_binding(receiver)
+        if binding in scopes:
+            identity = member(binding, name)
+            spec = declarations.get(identity, (earlier or {}).get(identity, {}))
+            if spec.get("kind") in ("dimension", "value", "static", "constant") and not spec.get("conditions"):
+                allowed.add(id(receiver))
+
+    getattr_shadowed = namespace.get("getattr", getattr) is not getattr or any(
+        isinstance(node, ast.Name)
+        and node.id == "getattr"
+        and not isinstance(node.ctx, ast.Load)
+        or isinstance(node, ast.arg)
+        and node.arg == "getattr"
+        or isinstance(node, ast.alias)
+        and (node.asname or node.name.split(".")[0]) == "getattr"
+        for node in ast.walk(constructor)
+    )
+    for node in ast.walk(constructor):
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name):
+            scalar_read(node.value, node.attr)
+        elif (
+            not getattr_shadowed
+            and isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) in (2, 3)
+            and not node.keywords
+            and isinstance(node.args[0], ast.Name)
+            and isinstance(node.args[1], ast.Constant)
+            and type(node.args[1].value) is str
+        ):
+            scalar_read(node.args[0], node.args[1].value)
     for node in ast.walk(constructor):
         if (
             isinstance(node, ast.Name)
