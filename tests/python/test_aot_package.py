@@ -2443,6 +2443,122 @@ def test_package_write_inventory_rejects_unproven_source_method(tmp_path, monkey
     assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
 
 
+_CACHED_INVENTORY_METHOD = '''    @cached_property
+    def operations(self):
+        if self.n > 16:
+            return (self.step,)
+        if self.n in (5, 6):
+            return (self.unrelated,)
+        sequence = []
+        for sweep in range(self.n * 2):
+            reverse = ((sweep + 1) // 2) % 2
+            sequence.append(self.step if reverse else self.unrelated)
+        return tuple(sequence)
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_write_inventory_projects_cached_kernel_sequence(tmp_path, monkeypatch):
+    source = 'from functools import cached_property\n' + CYCLIC_WRITE_INVENTORY_SOURCE
+    source = source.replace('class Model:', 'class Model:\n' + _CACHED_INVENTORY_METHOD)
+    source = source.replace('def append_step(solver, builder):\n    builder.dispatch(solver.step)', '''
+def append_step(solver, builder):
+    for kernel in solver.operations:
+        builder.dispatch(kernel)
+''')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert package.model.constructors == 0
+    for method in ('step', 'unrelated'):
+        assert sum('definition_fixture.model.Model.' + method in entry['definitions']
+                   for entry in manifest['entries'].values()) == 1
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n, expected in ((5, {'unused'}), (13, {'values', 'unused'}), (19, {'values'})):
+            normal, model = package.Model(n), code.host.Model(n)
+            assert model.operations is model.operations
+            assert {name for name in ('values', 'unused')
+                    if any(copy.source is getattr(model, name) for copy in model.checkpoint.copies)} == expected
+            for owner in (normal, model):
+                for kernel in owner.operations:
+                    kernel()
+                for backup in owner.checkpoint.copies:
+                    backup.save()
+                owner.step()
+                owner.unrelated()
+                for backup in owner.checkpoint.copies:
+                    backup.restore()
+            for name in ('values', 'unused'):
+                np.testing.assert_array_equal(getattr(model, name).to_numpy(), getattr(normal, name).to_numpy())
+
+    probe = tmp_path / 'consume_cached_inventory.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            model = code.host.Model(31)
+            assert model.operations is model.operations
+            for kernel in model.operations:
+                kernel()
+            backup, = model.checkpoint.copies
+            assert backup.source is model.values
+            backup.save()
+            model.step()
+            backup.restore()
+            np.testing.assert_array_equal(model.values.to_numpy(), np.ones(31))
+        print('CACHED_INVENTORY_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target']],
+        cwd=tmp_path, capture_output=True, text=True, timeout=90,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+                 PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'CACHED_INVENTORY_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('change', ['effect', 'mutable', 'rebound', 'recursive', 'index', 'overwrite'])
+def test_package_write_inventory_rejects_unproven_cached_sequence(tmp_path, monkeypatch, change):
+    method = _CACHED_INVENTORY_METHOD
+    if change == 'effect':
+        method = method.replace('def operations(self):', "def operations(self):\n        print('must not execute')")
+    elif change == 'mutable':
+        method = method.replace('return tuple(sequence)', 'return sequence')
+    elif change == 'rebound':
+        method = method.replace('reverse = ((sweep + 1) // 2) % 2', 'self = sweep')
+    elif change == 'recursive':
+        method = method.replace('return tuple(sequence)', 'return tuple(self.operations)')
+    elif change == 'index':
+        method = method.replace('self.step if reverse else self.unrelated', 'sweep')
+    source = 'from functools import cached_property\n' + CYCLIC_WRITE_INVENTORY_SOURCE
+    source = source.replace('class Model:', 'class Model:\n' + method)
+    if change == 'overwrite':
+        source = source.replace('scope.checkpoint = Checkpoint(self)',
+                                'self.operations = (self.unrelated,)\n        scope.checkpoint = Checkpoint(self)')
+    source = source.replace('def append_step(solver, builder):\n    builder.dispatch(solver.step)', '''
+def append_step(solver, builder):
+    for kernel in solver.operations:
+        builder.dispatch(kernel)
+''')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    with pytest.raises(ValueError, match='write inventory dispatch has no proven Kernel'):
+        ti.aot.check_package(package)
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 @pytest.mark.parametrize('change', ['mutable', 'rebound', 'non_field'])
 def test_package_checkpoint_sequence_rejects_unproven_sources(tmp_path, monkeypatch, change):

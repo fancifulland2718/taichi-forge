@@ -1231,6 +1231,17 @@ scalar predicates. `bool` and `getattr` must retain their builtin bindings.
 Discovery does not execute methods to sample configurations; side effects,
 unknown methods and shadowed builtin calls still reject.
 
+Write-inventory discovery can project immutable Kernel sequences from the
+original getter of a standard `functools.cached_property`, including early-return
+strategy branches, local list appends, and finite method choices based on parity
+inside a model-dependent range. It projects possible elements without invoking
+the getter, expanding repetitions, or changing normal Host cache lifetime.
+Explicit cache-member overwrites, mutable returns, recursion, loop rebinding and
+loop indices used as Kernels reject. Local CPU/CUDA checks cover new sizes, actual
+backup sets, one entry per numerical definition, and source-free subprocess
+consumption. This does not yet cover arbitrary sequences stored by preparation
+functions or composite closure operations.
+
 Version 41 also admits borrowing an entire declared flat StructField through
 `scope.borrow(..., source_scope=True)`. Member bindings retain the original
 allocation namespace and native layout; the record is not an independent array.

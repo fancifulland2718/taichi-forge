@@ -7,6 +7,7 @@ constructors, Host branches or numerical definitions to discover input types.
 import ast
 import builtins
 import copy
+import functools
 from collections import deque
 from dataclasses import dataclass, fields, is_dataclass, MISSING
 import inspect
@@ -140,6 +141,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     from taichi_forge.lang.struct import StructField
 
     owners, classes, functions, kernels, kernel_definitions = {}, {}, {}, {}, {}
+    cached_sources = set()
+    member_writes = {}
     for module, _, _, _, tree, _, schemas, definitions in sources:
         namespace = vars(imported[module])
         for name, schema in schemas.items():
@@ -154,11 +157,24 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             elif isinstance(node, ast.ClassDef):
                 cls = namespace.get(node.name)
                 if inspect.isclass(cls):
+                    if resource_inventory is not None:
+                        member_writes[cls] = {
+                            part.attr for part in ast.walk(node)
+                            if isinstance(part, ast.Attribute) and not isinstance(part.ctx, ast.Load)
+                            and isinstance(part.value, ast.Name) and part.value.id == 'self'
+                        }
                     for method in node.body:
                         if isinstance(method, ast.FunctionDef) and not method.decorator_list:
                             function = vars(cls).get(method.name)
                             if inspect.isfunction(function):
                                 functions[function] = (module, method)
+                        elif (resource_inventory is not None and isinstance(method, ast.FunctionDef)
+                              and len(method.decorator_list) == 1
+                              and _source_value(method.decorator_list[0], namespace) is functools.cached_property):
+                            descriptor = vars(cls).get(method.name)
+                            if type(descriptor) is functools.cached_property and inspect.isfunction(descriptor.func):
+                                functions[descriptor.func] = (module, method)
+                                cached_sources.add(descriptor.func)
         for definition in definitions:
             if definition["kind"] != "kernel" and resource_inventory is None:
                 continue
@@ -358,8 +374,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 if sequence_projector is None:
                     sequence_projector = SourceSequences(sources, imported, inventory=True)
                     for callee, (_, definition) in functions.items():
-                        if not definition.decorator_list:
-                            sequence_projector.functions[callee] = (definition, function_namespace(callee))
+                        if not definition.decorator_list or callee in cached_sources:
+                            sequence_projector.functions[callee] = (definition, callee.__globals__)
                 try:
                     environment = {name: ast.Name(name, ast.Load()) for name in arguments}
                     environment.update({name: expression for name, expression in aliases.items()
@@ -369,7 +385,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     # bindings. Choice IDs remain shared by the source analysis.
                     projection = copy.copy(sequence_projector)
                     projection.resolve_method = sequence_method
-                    sequence = projection.value(statement.iter, environment, namespace)
+                    projection.resolve_cached = sequence_cached
+                    projection.resolve_namespace = function_namespace
+                    sequence = projection.sequence(projection.value(statement.iter, environment, namespace))
                     if not sequence_projector.immutable(sequence):
                         raise UnprovenSourceSequence('Iteration requires an immutable source sequence')
                     names = {part.id for part in ast.walk(statement.target) if isinstance(part, ast.Name)}
@@ -378,7 +396,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         raise UnprovenSourceSequence('Iteration source is rebound in the loop body')
                 except (UnprovenSourceSequence, TypeError) as error:
                     if (isinstance(statement.iter, ast.Call)
-                            and source_callable(statement.iter.func, namespace) in sequence_projector.functions):
+                            and source_callable(statement.iter.func, namespace) in sequence_projector.functions
+                            or isinstance(statement.iter, ast.Attribute) and sequence_cached(statement.iter) is not None):
                         iteration_failures.setdefault(function, set()).add(str(error))
                 else:
                     for item in sequence.values:
@@ -848,6 +867,18 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             if (isinstance(receiver, _Owner) and callee in functions
                     and not functions[callee][1].decorator_list):
                 return callee
+            return None
+
+        def sequence_cached(expression):
+            receiver = value(expression.value)
+            if isinstance(receiver, _Owner):
+                cls = classes[receiver.identity]
+                if (expression.attr in owners[receiver.identity]
+                        or any(expression.attr in member_writes.get(base, ()) for base in cls.__mro__)):
+                    return None
+                descriptor = inspect.getattr_static(cls, expression.attr, None)
+                if type(descriptor) is functools.cached_property and descriptor.func in cached_sources:
+                    return descriptor.func
             return None
 
         # Keep the original conservative rebinding/escape facts above.
