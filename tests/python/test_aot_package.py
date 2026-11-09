@@ -2412,9 +2412,15 @@ def append_step(solver, builder):
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-@pytest.mark.parametrize('recipe_kind', ['factory', 'mixed', 'filtered'])
+@pytest.mark.parametrize('recipe_kind', ['factory', 'mixed', 'filtered', 'forwarded'])
 def test_package_write_inventory_resolves_optional_record_recipes(tmp_path, monkeypatch, recipe_kind):
     recipe = RECORD_INVENTORY_RECIPE
+    if recipe_kind == 'forwarded':
+        recipe = recipe.replace('''def append_step(solver, builder):
+    recipe = operations(solver)''', '''def append_step(solver, builder):
+    record_operations(builder, operations(solver))
+
+def record_operations(builder, recipe):''')
     if recipe_kind == 'mixed':
         start, end = recipe.index('def operations(solver):'), recipe.index('def append_step(solver, builder):')
         recipe = recipe[:start] + '''def operations(solver):
@@ -2770,6 +2776,73 @@ def append_step(solver, builder, extra=None):
             backup.restore()
         np.testing.assert_array_equal(model.values.to_numpy(), np.ones(7))
         np.testing.assert_array_equal(model.unused.to_numpy(), np.full(7, 2 if present else 0))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('lookup', ['literal', 'static_names', 'static_indices'])
+def test_package_write_inventory_tracks_named_field_reads(tmp_path, monkeypatch, lookup):
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace('''def append_step(solver, builder):
+    builder.dispatch(solver.step)''', '''def append_step(solver, builder):
+    if getattr(solver, '_host_enabled', True):
+        builder.dispatch(solver.step)''')
+    if lookup != 'literal':
+        loop = "for name in ti.static(NAMES):" if lookup == 'static_names' else "for index in ti.static(range(len(NAMES))):"
+        name = "'val' + name" if lookup == 'static_names' else 'NAMES[index]'
+        source = source.replace('    @ti.kernel\n    def step(self):\n        for i in self.values:\n            self.update(i)', f'''    @ti.kernel
+    def step(self):
+        {loop}
+            for i in getattr(self, {name}):
+                getattr(self, {name})[i] += 1''')
+        source = 'from typing import Final\nNAMES: Final = ' + repr(('ues',) if lookup == 'static_names' else ('values',)) + '\n' + source
+        assert loop in source
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        model = code.host.Model(7)
+        copy, = model.checkpoint.copies
+        assert copy.source is model.values
+        model.step()
+        copy.save()
+        model.step()
+        copy.restore()
+        np.testing.assert_array_equal(model.values.to_numpy(), np.ones(7))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('unknown', [False, True])
+def test_package_write_inventory_tracks_nested_graphs(tmp_path, monkeypatch, unknown):
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace('''    def record(self, builder):
+        append_step(self, builder)''', '''    @staticmethod
+    def record_into(solver, builder):
+        region = builder.create_sequential(private_scope=True)
+        region.private_scalar('cap', ti.i32, 3)
+        region.private_ndarray('scratch', ti.i32, (2,))
+        region.dispatch(solver.step)
+        builder.append(region)
+    def record(self, builder):
+        self.record_into(self, builder)''')
+    if unknown:
+        source = source.replace('builder.append(region)', 'builder.append(solver.unknown_graph)')
+    package = _source_package(tmp_path, monkeypatch, source)
+    if unknown:
+        with pytest.raises(ValueError, match='proven source|inventory dispatch'):
+            ti.aot.check_package(package)
+        return
+    assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        model = code.host.Model(9)
+        copy, = model.checkpoint.copies
+        assert copy.source is model.values
+        model.step()
+        copy.save()
+        model.step()
+        copy.restore()
+        np.testing.assert_array_equal(model.values.to_numpy(), np.ones(9))
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -6955,6 +7028,35 @@ class First(Preparation):''')
             field.from_numpy(np.full_like(reference.to_numpy(), 91))
             copy.restore()
             np.testing.assert_array_equal(field.to_numpy(), reference.to_numpy())
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_write_inventory_tracks_child_func_choices(tmp_path, monkeypatch):
+    source = _child_choice_inventory_source().replace('''        owner = self.child
+        dispatch(builder, owner.prepare, {'self': owner})''', '''        builder.dispatch(self.step)''')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for second, n in ((False, 5), (True, 13)):
+            normal, model = package.Model(n, second), code.host.Model(n, second)
+            normal.step()
+            model.step()
+            field = model.child.b if second else model.child.a
+            reference = normal.child.b if second else normal.child.a
+            assert len(model.checkpoint.copies) == 2
+            assert {id(copy.source) for copy in model.checkpoint.copies} == {id(field), id(model.out)}
+            for copy in model.checkpoint.copies:
+                copy.save()
+            field.from_numpy(np.full_like(reference.to_numpy(), 91))
+            model.out.from_numpy(np.full(n, 91, dtype=np.int32))
+            for copy in model.checkpoint.copies:
+                copy.restore()
+            np.testing.assert_array_equal(field.to_numpy(), reference.to_numpy())
+            np.testing.assert_array_equal(model.out.to_numpy(), normal.out.to_numpy())
 
 
 def _child_choice_inventory_source():
@@ -14320,7 +14422,8 @@ class Model:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_free_preparation_connects_child_constructor_input(tmp_path, monkeypatch):
+@pytest.mark.parametrize("publication", ("direct", "configured", "rebound", "deleted"))
+def test_package_free_preparation_connects_child_constructor_input(tmp_path, monkeypatch, publication):
     source = """
 import taichi_forge as ti
 preparations = 0
@@ -14360,7 +14463,26 @@ def allocate_child(owner, fail=False):
     scope = ti.experimental.ResourceScope(owner)
     scope.child = Child(owner, fail)
 """
+    if publication != "direct":
+        source = source.replace(
+            "    scope.child = Child(owner, fail)",
+            "    from .model import Child as PreparedChild\n"
+            "    child = PreparedChild(owner)\n    child.configure(fail)\n    scope.child = child",
+        ).replace(
+            "    @ti.kernel\n    def step(self, delta: ti.i32):",
+            "    def configure(self, fail):\n"
+            "        if fail:\n            raise ValueError('child preparation failure')\n"
+            "    @ti.kernel\n    def step(self, delta: ti.i32):",
+        )
+    if publication in ("rebound", "deleted"):
+        change = "child = None" if publication == "rebound" else "del child"
+        source = source.replace("    scope.child = child", f"    {change}\n    scope.child = child")
     package = _source_package(tmp_path, monkeypatch, source)
+    if publication in ("rebound", "deleted"):
+        with pytest.raises(ti.aot.PackageExportError, match="ResourceScope use requires"):
+            ti.aot.check_package(package)
+        assert sys.modules["definition_fixture.model"].preparations == 0
+        return
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].preparations == 0
     original = package.Model(3)

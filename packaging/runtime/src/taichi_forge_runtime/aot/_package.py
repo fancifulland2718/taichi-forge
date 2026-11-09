@@ -818,6 +818,32 @@ class _ModuleBinding:
             active.remove(key)
 
     @contextmanager
+    def preparation_children(self, owner, names):
+        """Keep unpublished child allocations inside their Host preparation."""
+        missing = object()
+        saved = {name: getattr(owner, name, missing) for name in names}
+        previous = _construction.get()
+        allocated = []
+        token = _construction.set((self.package, allocated, owner))
+        try:
+            yield
+        except BaseException:
+            for value in reversed(allocated):
+                value.close()
+                self.package._arrays.remove(value)
+            for name, value in saved.items():
+                if value is missing:
+                    owner.__dict__.pop(name, None)
+                else:
+                    setattr(owner, name, value)
+            raise
+        else:
+            if previous is not None and previous[0] is self.package:
+                previous[1].extend(allocated)
+        finally:
+            _construction.reset(token)
+
+    @contextmanager
     def preparation_groups(self, owner, keys):
         """Replace one method's declared groups together; old calls retain leases."""
         self.package._check()
@@ -1704,6 +1730,7 @@ class LoadedPackage:
                 71,
                 72,
                 73,
+                74,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

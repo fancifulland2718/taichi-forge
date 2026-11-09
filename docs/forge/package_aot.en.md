@@ -1252,6 +1252,14 @@ or reassigned inputs cannot discard branches using the default. Normal contact
 tables can cache active recipes during preparation and expose their original
 definitions to preflight without a second AOT-only Kernel registry.
 
+Write-inventory provenance also follows original static field-name tables,
+forwarded immutable operation records, multiple proven `ti.func` implementations,
+and known nested Graph recording. Private Graph scalars/arrays are invocation
+workspace; they do not imply writes to the entire solver. Unknown Graph children
+and calls still cannot discard resources. Local CPU checks cover actual backup
+sets, instance save/restore and unknown-source rejection. This analysis does not
+run in the runtime path.
+
 Write-inventory discovery can project immutable Kernel sequences from the
 original getter of a standard `functools.cached_property`, including early-return
 strategy branches, local list appends, and finite method choices based on parity
@@ -1855,6 +1863,14 @@ Source discovery also follows function-local imports of preparation functions
 and module aliases from the existing source closure. It reads those definitions
 without running the Host function; an import that overwrites the owner parameter
 cannot reuse the original owner fact.
+Version 74 also resolves imported child classes inside preparations and a unique,
+unconditional local construction result. Host code may configure that child before
+assigning it to `scope.child`; reassigned or deleted aliases cannot prove ownership.
+Publication ordering is preserved. Failure reuses construction-allocation rollback
+and restores the previous child members; success keeps instance-owned resources.
+Local CPU source-free checks cover constructor/configuration failures, two instance
+sizes and Graph calls. The transaction surrounds resource preparation only, not
+per-step numerical scheduling.
 Ordinary Host forwarding keeps proven explicit arguments when other options arrive
 through a runtime `**mapping` or an unknown trailing `*sequence`. Such options do
 not supply declaration facts or extra variants. Arguments after an unknown positional

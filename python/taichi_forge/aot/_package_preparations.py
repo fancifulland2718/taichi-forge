@@ -10,7 +10,7 @@ import textwrap
 from ._package_construction import ordinary_owner_lookup
 from ._package_contexts import discover_contexts, _generator_context
 from ._package_factories import _source_value, normalize_factories, prove_factory
-from ._package_function_inputs import discover
+from ._package_function_inputs import discover, source_function_namespace
 from ._package_input_families import source_class
 
 
@@ -137,7 +137,7 @@ def _guard_returns(body, module, fail):
     return body
 
 
-def _normalize(function, original, module, kind, receiver, fail):
+def _normalize(function, original, module, kind, receiver, fail, namespace):
     arguments = (*original.args.posonlyargs, *original.args.args, *original.args.kwonlyargs)
     parameter_nodes = {id(part) for part in arguments if part.arg == receiver}
     if any(
@@ -186,7 +186,6 @@ def _normalize(function, original, module, kind, receiver, fail):
     normalized._package_target_selections = select_target_branches(
         wrapper, kind, ti.lang.impl.current_cfg().arch.name, module, fail
     )
-    namespace = function.__globals__
     facts = discover_contexts(wrapper, namespace, module, fail)
     facts += normalize_factories(wrapper, namespace, module, fail, kind)
     from ._package_allocations import normalize_allocation_helpers
@@ -261,7 +260,8 @@ def declaration_dependencies(sources, imported, fail):
             continue
         if len(parameters) != 1:
             fail(module, original, "Preparation owner parameter changes between source calls")
-        _, normalized, _ = _normalize(function, original, module, kind, next(iter(parameters)), fail)
+        namespace = source_function_namespace(function, original, imported)
+        _, normalized, _ = _normalize(function, original, module, kind, next(iter(parameters)), fail, namespace)
         for _, target in domains:
             cls = owners[target]
             if not ordinary_owner_lookup(cls):
@@ -271,7 +271,7 @@ def declaration_dependencies(sources, imported, fail):
                 copy.deepcopy(normalized),
                 kind,
                 fail,
-                function.__globals__,
+                namespace,
                 constants(cls),
                 declaration_domains_only=True,
             )
@@ -306,9 +306,9 @@ def resolve(sources, imported, owner_schema, fail, host_contexts):
         if len(parameters) != 1:
             fail(module, original, "Preparation owner parameter changes between source calls")
         receiver = next(iter(parameters))
-        owner, normalized, facts = _normalize(function, original, module, kind, receiver, fail)
+        namespace = source_function_namespace(function, original, imported)
+        owner, normalized, facts = _normalize(function, original, module, kind, receiver, fail, namespace)
         identity = owner.name
-        namespace = vars(imported[module])
         local = None
         for _, target in sorted(domains):
             schemas, name, cls = owners[target]

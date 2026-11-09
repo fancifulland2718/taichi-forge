@@ -860,6 +860,7 @@ def scope_declarations(
     constraint_declarations = {}
     scope_writes = []
     child_stores = {}
+    child_constructor_aliases = {}
     current_conditions = {}
     stores = {n.arg: 1 for n in ast.walk(constructor.args) if isinstance(n, ast.arg)}
     parameter_names = frozenset(stores)
@@ -2482,13 +2483,16 @@ def scope_declarations(
                 receiver = scope_binding(target.value)
                 if receiver in scopes and not scope_paths[receiver]:
                     scope_writes.append(target)
-                    if isinstance(statement.value, ast.Call):
+                    construction = statement.value
+                    if isinstance(construction, ast.Name):
+                        construction = child_constructor_aliases.get(construction.id)
+                    if isinstance(construction, ast.Call):
                         from ._package_factories import _source_value
                         import inspect
 
-                        cls = _source_value(statement.value.func, namespace)
+                        cls = _source_value(construction.func, namespace)
                         if inspect.isclass(cls):
-                            root = statement.value.func
+                            root = construction.func
                             while isinstance(root, ast.Attribute):
                                 root = root.value
                             if not isinstance(root, ast.Name) or root.id in stores:
@@ -2499,7 +2503,7 @@ def scope_declarations(
                                 dict(
                                     kind="owner",
                                     owner_type=cls.__module__ + "." + cls.__qualname__,
-                                    constructor_call=copy.deepcopy(statement.value),
+                                    constructor_call=copy.deepcopy(construction),
                                     scope_allocation=origin(receiver),
                                     **({"conditions": dict(conditions)} if conditions else {}),
                                 ),
@@ -2514,6 +2518,13 @@ def scope_declarations(
                     and stores[target.id] == 1
                     and target.id not in deleted
                 ):
+                    # Normal preparation may configure a freshly constructed
+                    # child before publishing it. Preserve that Host ordering;
+                    # only project its unique, unconditional constructor site.
+                    # Reassigned/deleted aliases and conditional constructions
+                    # cannot establish this ownership provenance.
+                    if isinstance(expression, ast.Call) and statement in constructor.body:
+                        child_constructor_aliases[target.id] = expression
                     if qualified_kind(expression, kind) in ("types.vector", "types.matrix", "types.struct") or (
                         isinstance(expression, ast.Name) and expression.id in local_types
                     ):

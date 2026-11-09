@@ -59,7 +59,8 @@ class SourceSequences:
             return (value.mutable, value.domain, tuple(SourceSequences.source_key(item) for item in value.values))
         return (ast.dump(value), tuple((getattr(part, '_package_source_choice', None),
                                        getattr(part, '_package_unknown_iteration', False),
-                                       getattr(part, '_package_source_callable', None)) for part in ast.walk(value)))
+                                       getattr(part, '_package_source_callable', None),
+                                       getattr(part, '_package_input_fact', None)) for part in ast.walk(value)))
 
     def join(self, left, right, choice, memo=None):
         """Merge sources without inventing an ordered concatenation of branches."""
@@ -146,6 +147,16 @@ class SourceSequences:
     def value(self, node, environment, namespace, active=()):
         if isinstance(node, ast.Constant) and type(node.value) in (str, int, float, bool, type(None)):
             return copy.deepcopy(node)
+        if self.inventory and isinstance(node, (ast.Name, ast.Attribute)):
+            root = node
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            target = _source_value(node, namespace)
+            from ._package_factories import _literal
+            if isinstance(root, ast.Name) and root.id not in environment and type(target) is tuple and _literal(target):
+                def declared(value):
+                    return Sequence(declared(item) for item in value) if type(value) is tuple else ast.Constant(value)
+                return declared(target)
         if isinstance(node, ast.Name):
             if node.id in environment:
                 return environment[node.id]
@@ -258,6 +269,17 @@ class SourceSequences:
         if isinstance(node, ast.Call) and not node.keywords:
             from ._resource_effects import written_resources
             from taichi_forge import aot
+
+            if (self.inventory and isinstance(node.func, ast.Name) and node.func.id == 'len'
+                    and len(node.args) == 1 and 'len' not in environment):
+                supplied = namespace.get('__builtins__', vars(builtins))
+                supplied = supplied if isinstance(supplied, dict) else vars(supplied)
+                if namespace.get('len', supplied.get('len')) is not builtins.len:
+                    raise UnprovenSourceSequence('Inventory len must retain its original binding')
+                values = self.sequence(self.value(node.args[0], environment, namespace, active))
+                if values.domain:
+                    raise UnprovenSourceSequence('Source domains do not prove a sequence length')
+                return ast.Constant(len(values.values))
 
             if _source_value(node.func, namespace) is written_resources or (
                 isinstance(node.func, ast.Attribute)
@@ -463,8 +485,9 @@ class SourceSequences:
             supplied = supplied if isinstance(supplied, dict) else vars(supplied)
             if supplied.get('range') is not builtins.range:
                 raise UnprovenSourceSequence('Inventory range must retain its original binding')
-            for argument in expression.args:
-                self.scalar(self.value(argument, environment, namespace, active))
+            bounds = [self.scalar(self.value(argument, environment, namespace, active)) for argument in expression.args]
+            if all(isinstance(bound, ast.Constant) and type(bound.value) is int for bound in bounds):
+                return Sequence(ast.Constant(index) for index in range(*(bound.value for bound in bounds)))
             unknown = ast.Name('_package_dynamic_iteration', ast.Load())
             unknown._package_unknown_iteration = True
             return Sequence([unknown], domain=True)

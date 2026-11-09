@@ -139,6 +139,8 @@ def _owner_schema(
                 declaration["binding_phase"] = "preparation"
             if getattr(function, "_package_preparation_method", False) and declaration["kind"] == "owner":
                 declaration["binding_phase"] = "preparation"
+                children = getattr(function, "_package_preparation_children", ())
+                function._package_preparation_children = tuple(dict.fromkeys((*children, name)))
             if getattr(function, "_package_preparation_method", False) and declaration["kind"] == "borrowed_field":
                 if "input_parameter" in declaration:
                     _fail(module, function, "Prepared Field inputs require a definition-proven allocation path")
@@ -934,6 +936,27 @@ def _host_projection(
                                 [
                                     ast.Name("self", ast.Load()),
                                     ast.Tuple([ast.Constant(group) for group in groups], ast.Load()),
+                                ],
+                                [],
+                            )
+                            node.body[offset:] = [
+                                ast.copy_location(ast.With([ast.withitem(transaction)], node.body[offset:]), node)
+                            ]
+                        children = getattr(node, "_package_preparation_children", ())
+                        if children:
+                            self.minimum_version = max(self.minimum_version, 74)
+                            offset = int(
+                                bool(node.body) and isinstance(node.body[0], ast.Expr)
+                                and isinstance(node.body[0].value, ast.Constant)
+                                and isinstance(node.body[0].value.value, str)
+                            )
+                            transaction = ast.Call(
+                                ast.Attribute(
+                                    ast.Name(_PREFIX + "runtime", ast.Load()), "preparation_children", ast.Load()
+                                ),
+                                [
+                                    ast.Name("self", ast.Load()),
+                                    ast.Tuple([ast.Constant(name) for name in children], ast.Load()),
                                 ],
                                 [],
                             )

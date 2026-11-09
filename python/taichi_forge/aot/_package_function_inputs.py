@@ -19,6 +19,51 @@ from ._package_factories import _source_value
 from ._package_input_families import source_class
 
 
+def source_function_namespace(function, node, imported):
+    """Resolve local imports only from the already admitted source closure."""
+    bindings, shadowed = {}, set(inspect.signature(function).parameters)
+
+    def walk(part):
+        if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            shadowed.add(part.name)
+            return
+        if isinstance(part, ast.Lambda):
+            return
+        if isinstance(part, ast.Name) and not isinstance(part.ctx, ast.Load):
+            shadowed.add(part.id)
+        if isinstance(part, (ast.Import, ast.ImportFrom)):
+            origin = None
+            if isinstance(part, ast.ImportFrom):
+                name = "." * part.level + (part.module or "")
+                if part.level:
+                    name = importlib.util.resolve_name(name, function.__globals__["__package__"])
+                origin = imported.get(name)
+            for alias in part.names:
+                if origin is not None:
+                    value = vars(origin).get(alias.name, imported.get(name + "." + alias.name))
+                elif isinstance(part, ast.Import):
+                    value = imported.get(alias.name if alias.asname else alias.name.split(".")[0])
+                else:
+                    value = None
+                key = alias.asname or (alias.name if isinstance(part, ast.ImportFrom) else alias.name.split(".")[0])
+                if key in bindings and bindings[key] is not value:
+                    shadowed.add(key)
+                bindings[key] = value
+        for child in ast.iter_child_nodes(part):
+            walk(child)
+
+    for statement in node.body:
+        walk(statement)
+    namespace = dict(function.__globals__)
+    for name, value in bindings.items():
+        # Read only modules already admitted to the source closure. Imports
+        # remain ordinary Host statements; discovery does not execute them.
+        namespace.pop(name, None)
+        if name not in shadowed and value is not None:
+            namespace[name] = value
+    return namespace
+
+
 @dataclass(frozen=True)
 class _Owner:
     identity: str
@@ -184,6 +229,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                 functions[function] = (module, method)
                         elif (resource_inventory is not None and isinstance(method, ast.FunctionDef)
                               and len(method.decorator_list) == 1
+                              and isinstance(method.decorator_list[0], ast.Name)
+                              and method.decorator_list[0].id == 'staticmethod'
+                              and namespace.get('staticmethod', builtins.staticmethod) is builtins.staticmethod):
+                            descriptor = vars(cls).get(method.name)
+                            if type(descriptor) is staticmethod and inspect.isfunction(descriptor.__func__):
+                                functions[descriptor.__func__] = (module, method)
+                        elif (resource_inventory is not None and isinstance(method, ast.FunctionDef)
+                              and len(method.decorator_list) == 1
                               and _source_value(method.decorator_list[0], namespace) is functools.cached_property):
                             descriptor = vars(cls).get(method.name)
                             if type(descriptor) is functools.cached_property and inspect.isfunction(descriptor.func):
@@ -270,46 +323,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         if function in namespaces:
             return namespaces[function]
         _, node = functions[function]
-        bindings, shadowed = {}, set(inspect.signature(function).parameters)
-
-        def walk(part):
-            if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                shadowed.add(part.name)
-                return
-            if isinstance(part, ast.Lambda):
-                return
-            if isinstance(part, ast.Name) and not isinstance(part.ctx, ast.Load):
-                shadowed.add(part.id)
-            if isinstance(part, (ast.Import, ast.ImportFrom)):
-                origin = None
-                if isinstance(part, ast.ImportFrom):
-                    name = "." * part.level + (part.module or "")
-                    if part.level:
-                        name = importlib.util.resolve_name(name, function.__globals__["__package__"])
-                    origin = imported.get(name)
-                for alias in part.names:
-                    if origin is not None:
-                        value = vars(origin).get(alias.name, imported.get(name + "." + alias.name))
-                    elif isinstance(part, ast.Import):
-                        value = imported.get(alias.name if alias.asname else alias.name.split(".")[0])
-                    else:
-                        value = None
-                    key = alias.asname or (alias.name if isinstance(part, ast.ImportFrom) else alias.name.split(".")[0])
-                    if key in bindings and bindings[key] is not value:
-                        shadowed.add(key)
-                    bindings[key] = value
-            for child in ast.iter_child_nodes(part):
-                walk(child)
-
-        for statement in node.body:
-            walk(statement)
-        namespace = dict((inspect.unwrap(function) if resource_inventory is not None else function).__globals__)
-        for name, value in bindings.items():
-            # Read only modules already admitted to the source closure. Imports
-            # remain ordinary Host statements; discovery does not execute them.
-            namespace.pop(name, None)
-            if name not in shadowed and value is not None:
-                namespace[name] = value
+        namespace = source_function_namespace(
+            inspect.unwrap(function) if resource_inventory is not None else function, node, imported
+        )
         namespaces[function] = namespace
         return namespace
 
@@ -349,6 +365,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             return item
         if isinstance(receiver, _Owner):
             method = inspect.getattr_static(classes[receiver.identity], name, None)
+            if resource_inventory is not None and type(method) is staticmethod and method.__func__ in functions:
+                return _Host(method.__func__)
             if inspect.isfunction(method) and method in kernels:
                 return _Kernel(method, receiver)
             if resource_inventory is not None and inspect.isfunction(method) and method in functions:
@@ -368,6 +386,33 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         nodes = []
         source_only_calls = set()
         condition_value = None
+
+        def source_projection():
+            nonlocal sequence_projector
+            from ._package_source_sequences import SourceSequences
+            if sequence_projector is None:
+                sequence_projector = SourceSequences(sources, imported, inventory=True)
+                for callee, (_, definition) in functions.items():
+                    if not definition.decorator_list or callee in cached_sources:
+                        sequence_projector.functions[callee] = (definition, callee.__globals__)
+            projection = copy.copy(sequence_projector)
+            projection.resolve_method = sequence_method
+            projection.resolve_cached = sequence_cached
+            projection.resolve_namespace = function_namespace
+            return projection
+
+        def sequence_environment():
+            def syntax(fact):
+                if isinstance(fact, (tuple, _SourceDomain)):
+                    expression = ast.Tuple([syntax(item) for item in (fact.items if isinstance(fact, _SourceDomain) else fact)], ast.Load())
+                    if isinstance(fact, _SourceDomain):
+                        expression._package_source_domain = True
+                    return expression
+                expression = ast.Name('_package_input_fact', ast.Load())
+                expression._package_input_fact = fact
+                return expression
+            return {name: syntax(fact) if isinstance(fact, (tuple, _SourceDomain)) else ast.Name(name, ast.Load())
+                    for name, fact in arguments.items()}
 
         def walk(statement):
             nonlocal sequence_projector
@@ -394,14 +439,10 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     and isinstance(statement, ast.For)):
                 from ._package_source_sequences import SourceSequences, UnprovenSourceSequence
 
-                if sequence_projector is None:
-                    sequence_projector = SourceSequences(sources, imported, inventory=True)
-                    for callee, (_, definition) in functions.items():
-                        if not definition.decorator_list or callee in cached_sources:
-                            sequence_projector.functions[callee] = (definition, callee.__globals__)
+                projection = source_projection()
                 try:
                     iteration = statement.iter
-                    environment = {name: ast.Name(name, ast.Load()) for name in arguments}
+                    environment = sequence_environment()
                     class LocalAliases(ast.NodeTransformer):
                         def __init__(self):
                             self.active = set()
@@ -426,14 +467,16 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
 
                     substitution = LocalAliases()
                     iteration = substitution.visit(copy.deepcopy(statement.iter))
+                    from taichi_forge.lang.impl import static
+                    static_iteration = (isinstance(iteration, ast.Call) and source_callable(iteration.func, namespace) is static
+                                        and len(iteration.args) == 1 and not iteration.keywords)
+                    if static_iteration:
+                        iteration = iteration.args[0]
                     # Keep the proven receiver resolver local to this lexical
                     # context; nested discovery must not replace another call's
                     # bindings. Choice IDs remain shared by the source analysis.
-                    projection = copy.copy(sequence_projector)
-                    projection.resolve_method = sequence_method
-                    projection.resolve_cached = sequence_cached
-                    projection.resolve_namespace = function_namespace
-                    sequence = projection.sequence(projection.value(iteration, environment, namespace))
+                    sequence = (projection.iteration(iteration, environment, namespace, ()) if static_iteration else
+                                projection.sequence(projection.value(iteration, environment, namespace)))
                     if not sequence_projector.immutable(sequence):
                         raise UnprovenSourceSequence('Iteration requires an immutable source sequence')
                     names = {part.id for part in ast.walk(statement.target) if isinstance(part, ast.Name)}
@@ -525,7 +568,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         def source_value(expression):
             if (
                 isinstance(expression, ast.Name)
-                and expression.id in ("getattr", "dict", "isinstance")
+                and expression.id in ("getattr", "dict", "isinstance", "id")
                 and expression.id not in local_names
             ):
                 builtin = getattr(builtins, expression.id)
@@ -660,6 +703,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         def value(expression, visiting=(), bindings=None):
             if getattr(expression, '_package_unknown_iteration', False):
                 return None
+            if resource_inventory is not None and hasattr(expression, '_package_input_fact'):
+                return expression._package_input_fact
             bindings = bindings or {}
 
             def child(item):
@@ -707,6 +752,10 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     resolved = _source_value(expression, namespace)
                     if inspect.isfunction(resolved) and resolved in kernels:
                         return _Kernel(resolved)
+                    if resource_inventory is not None and (name in namespace):
+                        from ._package_factories import _literal
+                        if _literal(resolved):
+                            return _Literal(resolved)
                 return None
             if isinstance(expression, ast.Attribute):
                 receiver = child(expression.value)
@@ -724,6 +773,17 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 expression.value is None or type(expression.value) in (bool, int, float, str)
             ):
                 return _Literal(expression.value)
+            if resource_inventory is not None and isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+                left, right = child(expression.left), child(expression.right)
+                if isinstance(left, _Literal) and isinstance(right, _Literal) and type(left.value) is type(right.value) is str:
+                    return _Literal(left.value + right.value)
+            if resource_inventory is not None and isinstance(expression, ast.Subscript):
+                parent, index = child(expression.value), child(expression.slice)
+                if isinstance(parent, _Literal) and type(parent.value) is tuple and isinstance(index, _Literal) and type(index.value) is int:
+                    try:
+                        return _Literal(parent.value[index.value])
+                    except IndexError:
+                        return None
             if isinstance(expression, ast.Dict):
                 if all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in expression.keys):
                     names = [key.value for key in expression.keys]
@@ -771,12 +831,21 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 return left if left == right else None
             if isinstance(expression, ast.Call):
                 cls = source(expression.func)
+                if resource_inventory is not None and cls is builtins.id and len(expression.args) == 1 and not expression.keywords:
+                    source_only_calls.add(id(expression))
+                    return None  # Identity is Host data, never a code or resource identity.
                 if cls is builtins.dict and not expression.args and all(k.arg is not None for k in expression.keywords):
                     return _Mapping(tuple((k.arg, child(k.value)) for k in expression.keywords))
                 if cls is builtins.getattr and len(expression.args) in (2, 3) and not expression.keywords:
                     name = child(expression.args[1])
                     if isinstance(name, _Literal) and type(name.value) is str:
-                        return child(ast.Attribute(expression.args[0], name.value, ast.Load()))
+                        result = child(ast.Attribute(expression.args[0], name.value, ast.Load()))
+                        if resource_inventory is not None and result is None:
+                            # Same provenance as an ordinary attribute read.
+                            # Properties retain member()'s conservative effects;
+                            # a Host scalar lookup does not escape its owner.
+                            source_only_calls.add(id(expression))
+                        return result
                 if (
                     _plain_record(cls)
                     and not any(isinstance(arg, ast.Starred) for arg in expression.args)
@@ -858,6 +927,18 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     and isinstance(child(expression.func.value), _Graph)
                 ):
                     return _Graph()
+                if resource_inventory is not None and isinstance(expression.func, ast.Attribute) and isinstance(child(expression.func.value), _Graph):
+                    method = expression.func.attr
+                    if method == 'compile':
+                        return _Graph()
+                    if method in ('private_scalar', 'private_ndarray'):
+                        source_only_calls.add(id(expression))
+                        return None
+                    children = expression.args
+                    if ((method == 'append' and len(children) == 1)
+                            or (method == 'while_loop' and len(children) == 2)) and all(isinstance(child(item), _Graph) for item in children):
+                        source_only_calls.add(id(expression))
+                        return None
                 callee, receiver = call_target(expression.func, visiting, bindings)
                 if (
                     callee in functions
@@ -891,7 +972,19 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         return_cache[return_key] = (
                             results[0] if results and all(item == results[0] for item in results) else None
                         )
-                    return return_cache[return_key]
+                    if return_cache[return_key] is not None:
+                        return return_cache[return_key]
+                if resource_inventory is not None and callee in functions and callee not in return_chain:
+                    from ._package_source_sequences import UnprovenSourceSequence
+                    try:
+                        projection = source_projection()
+                        sequence = projection.sequence(projection.value(expression, sequence_environment(), namespace))
+                        if projection.immutable(sequence):
+                            result = child(projection.syntax(sequence, allow_domain=True))
+                            source_only_calls.add(id(expression))
+                            return result
+                    except (UnprovenSourceSequence, TypeError):
+                        pass
             return None
 
         def call_target(expression, visiting=(), bindings=None):
@@ -938,7 +1031,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 if isinstance(right, _Literal) and right.value is None:
                     if isinstance(left, _Literal):
                         absent = left.value is None
-                    elif isinstance(left, _Owner) or isinstance(left, _Resource) and not left.optional:
+                    elif isinstance(left, (_Owner, _Graph, _Host, _Kernel, _Record)) or isinstance(left, _Resource) and not left.optional:
                         absent = False
                     else:
                         return None
@@ -1089,6 +1182,77 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             domains.setdefault(callee, set()).add((owner.identity, receiver, tuple(values), tuple(resources)))
             covered.add(id(call))
 
+        def forward_call(callee, receiver, call, selected_values=None):
+            for owner, name, _ in requested.get(callee, ()):
+                if isinstance(receiver, _Owner) and receiver.identity == owner:
+                    binding_calls.add((callee, id(call), owner, name))
+            values = [receiver] if receiver is not None else []
+            unknown_expansion = any(k.arg is None for k in call.keywords)
+            unknown_position = False
+            for argument in call.args:
+                if isinstance(argument, ast.Starred):
+                    items = value(argument.value)
+                    if isinstance(items, tuple) and not unknown_position:
+                        values.extend(items)
+                    else:
+                        unknown_expansion = True
+                        unknown_position = True
+                elif not unknown_position:
+                    values.append(value(argument))
+            if unknown_expansion and callee in kernels:
+                failures.append(f"{module}:{call.lineno}: free Kernel inputs require explicit argument sources")
+                invalid.add(callee)
+                return
+            kwargs = {item.arg: value(item.value) for item in call.keywords if item.arg is not None}
+            if selected_values is not None:
+                positional, keywords = selected_values
+                values = ([receiver] if receiver is not None else []) + list(positional)
+                kwargs = dict(keywords)
+            signature = inspect.signature(callee)
+            try:
+                # A successful ordinary Host call preserves its explicit
+                # positional prefix and named arguments even when other options
+                # are runtime data. Missing arguments provide no source facts;
+                # duplicate bindings still fail in the normal Python call.
+                bind = signature.bind_partial if unknown_expansion else signature.bind
+                bound = bind(*values, **kwargs)
+            except TypeError as error:
+                if callee in kernels:
+                    failures.append(f"{module}:{call.lineno}: free Kernel argument mismatch: {error}")
+                    invalid.add(callee)
+                elif resource_inventory is not None:
+                    for item in [*values, *kwargs.values()]:
+                        inventory_input(item)
+                return
+            for owner, name, _ in requested.get(callee, ()):
+                actual = bound.arguments.get("self")
+                if isinstance(actual, _Owner) and actual.identity == owner:
+                    binding_calls.add((callee, id(call), owner, name))
+            if callee in kernels:
+                record(callee, bound.arguments, call)
+            elif any(item is not None for item in bound.arguments.values()):
+                for name, parameter in signature.parameters.items():
+                    if name not in bound.arguments and parameter.default is not inspect.Parameter.empty:
+                        try:
+                            static_key(parameter.default)
+                            bound.arguments[name] = _Literal(parameter.default)
+                        except ValueError:
+                            pass
+                inputs = {
+                    key: _Mapping(tuple(item.items())) if isinstance(item, dict) else item
+                    for key, item in bound.arguments.items()
+                    if item is not None
+                }
+                for context in _choice_contexts(inputs):
+                    if callee in chain:
+                        if (callee, tuple(sorted(context.items()))) not in visited:
+                            failures.append(
+                                f"{module}:{call.lineno}: recursive Kernel input forwarding changes its source context"
+                            )
+                    else:
+                        pending.append((callee, context, (*chain, callee), id(call)))
+
+
         for call in (part for part in nodes if isinstance(part, ast.Call)):
             if id(call) in source_only_calls:
                 continue
@@ -1122,8 +1286,23 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             callee, receiver = target(call.func)
             if callee not in kernels and callee not in functions:
                 if resource_inventory is not None:
+                    callback = value(call.func)
+                    if (isinstance(callback, _Choice)
+                            and not any(isinstance(arg, ast.Starred) for arg in call.args)
+                            and all(k.arg is not None for k in call.keywords)):
+                        choices = list(_choice_contexts(dict(
+                            callback=callback, args=tuple(value(arg) for arg in call.args),
+                            kwargs=_Mapping(tuple((k.arg, value(k.value)) for k in call.keywords)))))
+                        if all(isinstance(choice['callback'], (_Host, _Kernel)) for choice in choices):
+                            for choice in choices:
+                                method = choice['callback']
+                                forward_call(method.function, method.receiver, call,
+                                             (choice['args'], choice['kwargs'].items))
+                            continue
                     fact = value(call)
-                    if isinstance(fact, (_Mapping, _Record, _Kernel, _Host, _Resource, _Literal, tuple)):
+                    if id(call) in source_only_calls:
+                        continue
+                    if isinstance(fact, (_Mapping, _Record, _Kernel, _Host, _Resource, _Literal, _Graph, tuple)):
                         # Proven builtin/record projections expose no owner to
                         # an arbitrary callee. A Field lookup still contributes
                         # its conservative resource dependency.
@@ -1137,70 +1316,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     if isinstance(call.func, ast.Attribute):
                         inventory_input(value(call.func.value))
                 continue
-            for owner, name, _ in requested.get(callee, ()):
-                if isinstance(receiver, _Owner) and receiver.identity == owner:
-                    binding_calls.add((callee, id(call), owner, name))
-            values = [receiver] if receiver is not None else []
-            unknown_expansion = any(k.arg is None for k in call.keywords)
-            unknown_position = False
-            for argument in call.args:
-                if isinstance(argument, ast.Starred):
-                    items = value(argument.value)
-                    if isinstance(items, tuple) and not unknown_position:
-                        values.extend(items)
-                    else:
-                        unknown_expansion = True
-                        unknown_position = True
-                elif not unknown_position:
-                    values.append(value(argument))
-            if unknown_expansion and callee in kernels:
-                failures.append(f"{module}:{call.lineno}: free Kernel inputs require explicit argument sources")
-                invalid.add(callee)
-                continue
-            kwargs = {item.arg: value(item.value) for item in call.keywords if item.arg is not None}
-            signature = inspect.signature(callee)
-            try:
-                # A successful ordinary Host call preserves its explicit
-                # positional prefix and named arguments even when other options
-                # are runtime data. Missing arguments provide no source facts;
-                # duplicate bindings still fail in the normal Python call.
-                bind = signature.bind_partial if unknown_expansion else signature.bind
-                bound = bind(*values, **kwargs)
-            except TypeError as error:
-                if callee in kernels:
-                    failures.append(f"{module}:{call.lineno}: free Kernel argument mismatch: {error}")
-                    invalid.add(callee)
-                elif resource_inventory is not None:
-                    for item in [*values, *kwargs.values()]:
-                        inventory_input(item)
-                continue
-            for owner, name, _ in requested.get(callee, ()):
-                actual = bound.arguments.get("self")
-                if isinstance(actual, _Owner) and actual.identity == owner:
-                    binding_calls.add((callee, id(call), owner, name))
-            if callee in kernels:
-                record(callee, bound.arguments, call)
-            elif any(item is not None for item in bound.arguments.values()):
-                for name, parameter in signature.parameters.items():
-                    if name not in bound.arguments and parameter.default is not inspect.Parameter.empty:
-                        try:
-                            static_key(parameter.default)
-                            bound.arguments[name] = _Literal(parameter.default)
-                        except ValueError:
-                            pass
-                inputs = {
-                    key: _Mapping(tuple(item.items())) if isinstance(item, dict) else item
-                    for key, item in bound.arguments.items()
-                    if item is not None
-                }
-                for context in _choice_contexts(inputs):
-                    if callee in chain:
-                        if (callee, tuple(sorted(context.items()))) not in visited:
-                            failures.append(
-                                f"{module}:{call.lineno}: recursive Kernel input forwarding changes its source context"
-                            )
-                    else:
-                        pending.append((callee, context, (*chain, callee), id(call)))
+            forward_call(callee, receiver, call)
 
     if resource_inventory is not None:
         return inventory, list(dict.fromkeys(failures))
