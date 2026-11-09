@@ -357,14 +357,19 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
 
                 if sequence_projector is None:
                     sequence_projector = SourceSequences(sources, imported, inventory=True)
-                    for callee, (definition, _) in list(sequence_projector.functions.items()):
-                        if callee in functions:
+                    for callee, (_, definition) in functions.items():
+                        if not definition.decorator_list:
                             sequence_projector.functions[callee] = (definition, function_namespace(callee))
                 try:
                     environment = {name: ast.Name(name, ast.Load()) for name in arguments}
                     environment.update({name: expression for name, expression in aliases.items()
                                         if stores.get(name) == 1})
-                    sequence = sequence_projector.value(statement.iter, environment, namespace)
+                    # Keep the proven receiver resolver local to this lexical
+                    # context; nested discovery must not replace another call's
+                    # bindings. Choice IDs remain shared by the source analysis.
+                    projection = copy.copy(sequence_projector)
+                    projection.resolve_method = sequence_method
+                    sequence = projection.value(statement.iter, environment, namespace)
                     if not sequence_projector.immutable(sequence):
                         raise UnprovenSourceSequence('Iteration requires an immutable source sequence')
                     names = {part.id for part in ast.walk(statement.target) if isinstance(part, ast.Name)}
@@ -836,6 +841,13 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     else:
                         return None
                     return absent if isinstance(expression.ops[0], ast.Is) else not absent
+            return None
+
+        def sequence_method(expression):
+            callee, receiver = call_target(expression)
+            if (isinstance(receiver, _Owner) and callee in functions
+                    and not functions[callee][1].decorator_list):
+                return callee
             return None
 
         # Keep the original conservative rebinding/escape facts above.

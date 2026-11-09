@@ -1225,6 +1225,11 @@ alias relationships, and positional unpacking/zip of a source domain reject.
 This only extends write-inventory type discovery and leaves the Host recipe
 unchanged. Local CPU/CUDA checks cover actual backup sets; CPU checks cover
 receiver correlation and rejection cases.
+Source helpers may also call ordinary Host methods on proven receivers, including
+inherited methods, using existing argument bindings to project source returns or
+scalar predicates. `bool` and `getattr` must retain their builtin bindings.
+Discovery does not execute methods to sample configurations; side effects,
+unknown methods and shadowed builtin calls still reject.
 
 Version 41 also admits borrowing an entire declared flat StructField through
 `scope.borrow(..., source_scope=True)`. Member bindings retain the original

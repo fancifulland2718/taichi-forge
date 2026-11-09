@@ -2361,9 +2361,16 @@ def append_step(solver, builder):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_write_inventory_joins_conditional_local_sequences(tmp_path, monkeypatch):
+@pytest.mark.parametrize('predicate', ['attribute', 'method'])
+def test_package_write_inventory_joins_conditional_local_sequences(tmp_path, monkeypatch, predicate):
     source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
         'def append_step(solver, builder):\n    builder.dispatch(solver.step)', CONDITIONAL_INVENTORY_RECIPE)
+    if predicate == 'method':
+        source = source.replace('solver.n > 16', 'solver.large()').replace('@ti.data_oriented\nclass Model:', '''class Routing:
+    def large(self):
+        return bool(getattr(self, 'n', 0) > 16)
+@ti.data_oriented
+class Model(Routing):''')
     package = _source_package(tmp_path, monkeypatch, source)
     before = ti.lang.impl.get_runtime().get_num_compiled_functions()
     assert ti.aot.check_package(package)['declaration_check'] == 'passed'
@@ -2406,6 +2413,28 @@ def test_package_write_inventory_rejects_unproven_branch_sources(tmp_path, monke
         recipe = recipe.replace('    alias = names', '    first, second = names\n    alias = names')
     source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
         'def append_step(solver, builder):\n    builder.dispatch(solver.step)', recipe)
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    with pytest.raises(ValueError, match='write inventory dispatch has no proven Kernel'):
+        ti.aot.check_package(package)
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('change', ['effect', 'shadowed_bool', 'unknown_method'])
+def test_package_write_inventory_rejects_unproven_source_method(tmp_path, monkeypatch, change):
+    recipe = CONDITIONAL_INVENTORY_RECIPE.replace('solver.n > 16', 'solver.large()')
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+        'def append_step(solver, builder):\n    builder.dispatch(solver.step)', recipe)
+    statement = "        return bool(getattr(self, 'n', 0) > 16)"
+    if change == 'effect':
+        statement = "        print('must not run')\n" + statement
+    elif change == 'shadowed_bool':
+        statement = "        bool = self.step\n" + statement
+    source = source.replace('class Model:', 'class Model:\n    def large(self):\n' + statement)
+    if change == 'unknown_method':
+        source = source.replace('solver.large()', 'solver.missing()')
     package = _source_package(tmp_path, monkeypatch, source)
     before = ti.lang.impl.get_runtime().get_num_compiled_functions()
     with pytest.raises(ValueError, match='write inventory dispatch has no proven Kernel'):

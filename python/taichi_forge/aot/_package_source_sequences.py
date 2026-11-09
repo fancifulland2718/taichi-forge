@@ -9,6 +9,7 @@ import ast
 import builtins
 import copy
 import inspect
+import itertools
 import operator
 
 from ._package_factories import _source_value
@@ -26,7 +27,8 @@ class Sequence:
 class SourceSequences:
     def __init__(self, sources, imported, *, inventory=False):
         self.inventory = inventory
-        self.choice_count = 0
+        self.choices = itertools.count(1)
+        self.resolve_method = None
         self.functions = {}
         for module, _, _, _, tree, *_ in sources:
             namespace = vars(imported[module])
@@ -43,8 +45,7 @@ class SourceSequences:
                     self.functions[value] = (node, namespace)
 
     def choice(self, predicate):
-        self.choice_count += 1
-        return predicate, self.choice_count
+        return predicate, next(self.choices)
 
     @staticmethod
     def source_key(value):
@@ -207,6 +208,14 @@ class SourceSequences:
                         raise UnprovenSourceSequence('Inventory source domains do not prove zip positions')
                     rows = sequence.values
                     return Sequence(Sequence(items) for items in zip(*(self.sequence(row).values for row in rows)))
+            if self.inventory and isinstance(node.func, ast.Name) and node.func.id == 'bool' and len(node.args) == 1:
+                supplied = namespace.get('__builtins__', vars(builtins))
+                supplied = supplied if isinstance(supplied, dict) else vars(supplied)
+                if ('bool' in environment or namespace.get('bool', builtins.bool) is not builtins.bool
+                        or supplied.get('bool') is not builtins.bool):
+                    raise UnprovenSourceSequence('Inventory bool must retain its original binding')
+                predicate = self.scalar(self.value(node.args[0], environment, namespace, active))
+                return ast.UnaryOp(ast.Not(), ast.UnaryOp(ast.Not(), predicate))
             if isinstance(node.func, ast.Call) and len(node.args) == 1:
                 selector = node.func
                 self.unshadowed(selector.func, environment)
@@ -227,8 +236,19 @@ class SourceSequences:
                         result = ast.Attribute(result, part, ast.Load())
                     return result
         if isinstance(node, ast.Call):
-            self.unshadowed(node.func, environment)
-            target = _source_value(node.func, namespace)
+            receiver = None
+            root = node.func
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if (self.inventory and self.resolve_method is not None and isinstance(node.func, ast.Attribute)
+                    and isinstance(root, ast.Name) and root.id in environment):
+                receiver = self.scalar(self.value(node.func.value, environment, namespace, active))
+                target = self.resolve_method(ast.Attribute(receiver, node.func.attr, ast.Load()))
+                if target is None:
+                    raise UnprovenSourceSequence('Inventory method requires a proven ordinary receiver definition')
+            else:
+                self.unshadowed(node.func, environment)
+                target = _source_value(node.func, namespace)
             if inspect.isfunction(target) and target in self.functions:
                 if target in active:
                     raise UnprovenSourceSequence("Recursive source inventories are not finite declarations")
@@ -237,6 +257,8 @@ class SourceSequences:
                 if any(k.arg is None for k in node.keywords):
                     raise UnprovenSourceSequence("Inventory helpers require explicit keyword arguments")
                 arguments = [self.value(arg, environment, namespace, active) for arg in node.args]
+                if receiver is not None:
+                    arguments.insert(0, receiver)
                 bound = inspect.signature(target).bind(
                     *arguments, **{k.arg: self.value(k.value, environment, namespace, active) for k in node.keywords})
                 # Defaults cannot silently introduce runtime objects into the proof.
@@ -250,7 +272,7 @@ class SourceSequences:
                         result = self.body(definition.body, dict(bound.arguments), child_namespace, (*active, target))
                 except UnprovenSourceSequence as error:
                     raise UnprovenSourceSequence(target.__qualname__ + ": " + str(error)) from error
-                if not self.immutable(result):
+                if not self.immutable(result) and not (self.inventory and isinstance(result, ast.AST)):
                     raise UnprovenSourceSequence("Inventory helpers must return an immutable source tuple")
                 return result
         raise UnprovenSourceSequence("Unproven source inventory expression")
@@ -417,7 +439,7 @@ class SourceSequences:
         # The source domain, not the repeated dispatch plan, is the proof input.
         unique = {}
         for value in result:
-            unique.setdefault(ast.dump(self.syntax(value)), value)
+            unique.setdefault(self.source_key(value), value)
         return Sequence(unique.values())
 
     def constructor_aliases(self, constructor, namespace):
