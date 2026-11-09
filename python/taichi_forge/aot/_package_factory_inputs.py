@@ -211,8 +211,70 @@ def constructor_calls(
                 yield from uses(node.args[0], attribute, selected)
                 return
         if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
-            if len(node.generators) != 1 or node.generators[0].is_async or node.generators[0].ifs:
-                raise ValueError("Cold factory comprehension requires one fixed sequence without filters")
+            # Only independently prepared owner instances may be filtered at
+            # Host time. The input type pool stays conservative; fixed factory
+            # sequences still need their exact original selection semantics.
+            def identity_filter(test, target):
+                if not (
+                    isinstance(target, ast.Name)
+                    and isinstance(test, ast.Compare)
+                    and len(test.ops) == len(test.comparators) == 1
+                ):
+                    return False
+                left, right = test.left, test.comparators[0]
+                if isinstance(test.ops[0], (ast.In, ast.NotIn)):
+
+                    def identity(node):
+                        return (
+                            isinstance(node, ast.Call)
+                            and builtin(node.func, "id")
+                            and len(node.args) == 1
+                            and not node.keywords
+                            and (isinstance(node.args[0], ast.Name) or path(node.args[0]) is not None)
+                        )
+
+                    collection = isinstance(right, ast.Name) or (
+                        isinstance(right, (ast.Set, ast.Tuple, ast.List)) and all(identity(node) for node in right.elts)
+                    )
+                    if isinstance(right, ast.SetComp) and len(right.generators) == 1:
+                        generator = right.generators[0]
+                        names = {node.id for node in ast.walk(generator.target) if isinstance(node, ast.Name)}
+                        collection = (
+                            not generator.is_async
+                            and not generator.ifs
+                            and (isinstance(generator.iter, ast.Name) or path(generator.iter) is not None)
+                            and identity(right.elt)
+                            and isinstance(right.elt.args[0], ast.Name)
+                            and right.elt.args[0].id in names
+                        )
+                    return (
+                        isinstance(left, ast.Call)
+                        and builtin(left.func, "id")
+                        and len(left.args) == 1
+                        and not left.keywords
+                        and isinstance(left.args[0], ast.Name)
+                        and left.args[0].id == target.id
+                        and collection
+                    )
+                if not isinstance(test.ops[0], (ast.Is, ast.IsNot)):
+                    return False
+                if isinstance(right, ast.Name) and right.id == target.id:
+                    left, right = right, left
+                return (
+                    isinstance(left, ast.Name)
+                    and left.id == target.id
+                    and (path(right) is not None or isinstance(right, ast.Constant) and right.value is None)
+                )
+
+            if (
+                len(node.generators) != 1
+                or node.generators[0].is_async
+                or (node.generators[0].ifs and not host_sequence)
+                or any(not identity_filter(test, node.generators[0].target) for test in node.generators[0].ifs)
+            ):
+                raise ValueError(
+                    "Cold factory comprehension requires one fixed sequence with passive identity filters only"
+                )
             generator = node.generators[0]
             for index, item in enumerate(sequence(generator.iter)):
                 yield from uses(

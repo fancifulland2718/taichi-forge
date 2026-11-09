@@ -2120,6 +2120,41 @@ def test_package_write_inventory_rejects_unproven_owners(tmp_path, monkeypatch, 
     assert not (tmp_path / "sdk").exists()
 
 
+@pytest.mark.parametrize("selection", ["identity", "id_set", "id_comprehension"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_write_inventory_filters_only_choose_host_instances(tmp_path, monkeypatch, selection):
+    before = "self.groups = tuple(Checkpoint(value) for value in sources)"
+    if selection == "identity":
+        after = "self.groups = tuple(Checkpoint(value) for value in sources if value is not self.storage.scalar)"
+    elif selection == "id_set":
+        after = "eligible = {id(self.storage.scalar)}\n        self.groups = tuple(Checkpoint(value) for value in sources if id(value) in eligible)"
+    else:
+        after = "self.selection = (('scalar', self.storage.scalar),)\n        eligible = {id(field) for _, field in self.selection}\n        self.groups = tuple(Checkpoint(value) for value in sources if id(value) in eligible)"
+    package = _source_package(tmp_path, monkeypatch, WRITE_INVENTORY_SOURCE.replace(before, after))
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["input_families"]["definition_fixture.model.Checkpoint"]) == 5
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(5, 3, 0), code.host.Model(17, 7, 1)
+        assert (len(a.groups), len(b.groups)) == ((0, 2) if selection == "identity" else (1, 1))
+        for model in (a, b):
+            model.save()
+            model.restore()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_write_inventory_filter_rejects_shadowed_identity(tmp_path, monkeypatch):
+    source = WRITE_INVENTORY_SOURCE.replace(
+        "self.groups = tuple(Checkpoint(value) for value in sources)",
+        "id = lambda value: 1\n        eligible = {1}\n        self.groups = tuple(Checkpoint(value) for value in sources if id(value) in eligible)",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match="fixed sequence"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize(
     "before, after",
     [

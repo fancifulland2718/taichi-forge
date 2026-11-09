@@ -1150,6 +1150,9 @@ Host owner sequences can also take their inputs from the existing
 Field types from the declared owner closure without running the recording
 method; normal preparation chooses the actual compiler-proven write set.
 The sequence length/order does not become a numerical specialization key.
+Passive identity filters (`value is not self.member` or membership of `id(value)`
+in a Host identity set) only select instances from that proven input pool; they
+do not create new numerical variants. Rebound identity functions reject.
 One independent inventory input per constructor is supported; unresolved
 allocation closures and non-owner sources reject. Flat StructField member
 inputs retain their member identity and can own a `field_like` backup.
