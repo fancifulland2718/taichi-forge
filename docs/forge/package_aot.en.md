@@ -2049,6 +2049,10 @@ dual instances. Only scalar elements are supported.
 Allocating another scalar Field from a declared Field's `.dtype` propagates the
 same policy, including to entries that use only the derived Field. Tensor/Struct
 allocations derived from a conditional type currently reject explicitly.
+Export layout witnesses also preserve the source field's derived dimensions.
+Borrowed `owner_dim` dependencies retain their source dimensions without a new
+model size or a copy of the source owner's algorithms.
+
 Format 76 propagates the original type/shape policy through `field_like`, including a source
 borrowed from a proven owner input. The clone owns independent storage while
 sharing the source's boolean layout condition, without another configuration axis.

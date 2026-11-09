@@ -182,15 +182,15 @@ class OwnerGraph:
                 schema = {key: item for key, item in schema.items() if item["kind"] != "owner"}
         imported = self.imported[name]
         owner = object.__new__(getattr(imported, class_name))
-        # Dimension relations may read a non-owning source before this owner's
-        # fields are allocated. Construct only those resource definitions first;
-        # owned algorithms remain in their original phase below.
-        children = {}
+        # Dimensions and field_like may read child allocation metadata before
+        # this owner's fields are allocated. Build each declared child once;
+        # attach owned children after the parent's record namespaces exist.
+        children, child_values = {}, {}
         for attribute, item in schema.items():
-            if item["kind"] == "owner_input":
+            if item["kind"] in ("owner", "owner_input"):
                 value, _, child, expanded = self.construct(
                     item["owner_type"],
-                    resource_only=True,
+                    resource_only=resource_only or item["kind"] == "owner_input",
                     references=references,
                     choices=choices,
                     path=(*path, attribute),
@@ -198,8 +198,23 @@ class OwnerGraph:
                     or ((tuple(schema[item["field_input"]]["source_member"]),) if "field_input" in item else None),
                 )
                 children[attribute] = (child, expanded)
-                write_member(owner, attribute, value, schema)
-        declarations = construct_fields(owner, schema, vars(imported), self.module, imported_modules=self.imported)
+                child_values[attribute] = value
+                if item["kind"] == "owner_input":
+                    write_member(owner, attribute, value, schema)
+
+        def source_dimension(parts):
+            # Owned child fields may supply a clone's dimensions before they are
+            # attached to the parent. Reuse that same construction witness.
+            if parts[0] in child_values:
+                value, parts = child_values[parts[0]], parts[1:]
+            else:
+                value = owner
+            for part in parts:
+                value = getattr(value, part)
+            return value
+
+        declarations = construct_fields(owner, schema, vars(imported), self.module,
+                                        imported_modules=self.imported, source_dimension=source_dimension)
         for attribute, item in schema.items():
             if item["kind"] in ("dense_field", "dimension", "borrowed_field", "host_owner_sequence"):
                 continue
@@ -210,20 +225,12 @@ class OwnerGraph:
                 if item["kind"] == "owner_input":
                     declarations[attribute] = Record(optional=bool(item.get("conditions")))
                     continue
-                value, _, child, expanded = self.construct(
-                    item["owner_type"],
-                    references=references,
-                    choices=choices,
-                    path=(*path, attribute),
-                    resource_only=resource_only,
-                    resource_paths=source_children.get(attribute),
-                )
+                value = child_values[attribute]
                 declarations[attribute] = (
                     _ChoiceRecord(item["choice_guards"].items(), optional=bool(item.get("conditions")))
                     if item.get("owner_alternatives")
                     else Record(optional=bool(item.get("conditions")))
                 )
-                children[attribute] = (child, expanded)
             elif item["kind"] == "static":
                 domain = tuple(producer_static(read_static_key(key)) for key in item["choices"])
                 declarations[attribute] = StaticValue(choices=domain, kernel_only=item["kernel_only"])

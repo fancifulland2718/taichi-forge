@@ -17,6 +17,12 @@ def allocation_schema(schema, source_paths):
             raise ValueError("Borrowed allocation dependency has no declared resource path: " + ".".join(path))
         key, prefix = max(matches, key=lambda match: len(match[1]))
         require(key)
+        # owner_dim has an exact declaration at e.g. parent.n. Keeping that
+        # leaf also requires the non-owning parent and its dimension witness.
+        for parent, owner_path in matches:
+            if schema[parent]["kind"] in ("owner", "owner_input") and len(owner_path) < len(path):
+                require(parent)
+                children.setdefault(parent, set()).add(path[len(owner_path) :])
         item = schema[key]
         if item["kind"] in ("owner", "owner_input"):
             if len(path) == len(prefix):

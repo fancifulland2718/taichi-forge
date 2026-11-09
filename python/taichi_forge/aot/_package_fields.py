@@ -147,7 +147,7 @@ def field_declarations(module, constructor, kind, fail):
     return fields
 
 
-def construct_fields(owner, schema, namespace, module, *, imported_modules=None):
+def construct_fields(owner, schema, namespace, module, *, imported_modules=None, source_dimension=None):
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
     from ._component import (
@@ -298,6 +298,18 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             expression = item.get("dimension_expressions", {}).get(extent, ())
             declarations[extent] = Dimension(expression=expression)
             value = evaluate_extent(expression, lambda key: read_member(owner, key, schema)) if expression else 1
+            if "like_source_path" in item:
+                # field_like sources have already been proved against an
+                # allocation declaration. Preserve derived dimensions in the
+                # witness too; an independent default of 1 is not its layout.
+                node = ast.parse(item["dimension_sources"][extent], mode="eval").body
+                parts = []
+                while isinstance(node, ast.Attribute):
+                    parts.insert(0, node.attr)
+                    node = node.value
+                if not isinstance(node, ast.Name) or node.id != "self" or not parts or source_dimension is None:
+                    raise ValueError("field_like dimension requires its proved source owner")
+                value = source_dimension(parts)
             if not 0 < value <= 2**31 - 1:
                 raise ValueError("Declared extent needs a legal symbolic construction witness")
             setattr(owner, extent, value)

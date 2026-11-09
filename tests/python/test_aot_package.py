@@ -3523,7 +3523,7 @@ def test_package_field_like_rejects_unproved_layouts(tmp_path, monkeypatch, fail
 
 
 @pytest.mark.parametrize(
-    "kind", ["vector", "struct", "struct_helper", "struct_rejected_helper", "invalid_type", "invalid_value"]
+    "kind", ["vector", "derived_vector", "owner_dimension_vector", "struct", "struct_helper", "struct_rejected_helper", "invalid_type", "invalid_value"]
 )
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_field_like_borrowed_input_preserves_source_dimensions(tmp_path, monkeypatch, kind):
@@ -3579,6 +3579,24 @@ class Checkpoint:
                 valid = self.finite(self.source, index)
             invalid += int(not valid)
         return invalid
+"""
+    if kind == "derived_vector":
+        source = source.replace("shape=scope.dim('n')", "shape=2 * scope.dim('n')")
+    if kind == "owner_dimension_vector":
+        source = source.replace("class Storage:\n    def __init__(self, n: int):",
+                                "class Storage:\n    def __init__(self, parent):")
+        source = source.replace("        self.n = n\n", "        self.n = parent.n\n", 1)
+        source = source.replace("        scope.values =", "        scope.owner_reference('parent', parent)\n        scope.dim('n')\n        scope.values =", 1)
+        source = source.replace("shape=scope.dim('n')", "shape=2 * scope.owner_dim('parent', 'n')")
+        source = source.replace("scope.storage = Storage(n)",
+                                "scope.sizes = Sizes(n)\n        scope.storage = Storage(self.sizes)")
+        source += """
+@ti.data_oriented
+class Sizes:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
 """
     if kind.startswith("struct"):
         source = source.replace(
