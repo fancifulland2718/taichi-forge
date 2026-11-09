@@ -1029,6 +1029,15 @@ def _host_projection(
 
         def visit_Attribute(self, node):
             role = qualified_kind(node, kind)
+            if isinstance(node.ctx, ast.Load) and role and role.startswith("ui."):
+                from taichi_forge.ui import constants as ui_constants
+
+                # Keyboard/mouse tokens are public strings, not device or UI
+                # runtime objects. Retained Host code needs no frontend for them.
+                value = vars(ui_constants).get(role.removeprefix("ui."))
+                if type(value) is str:
+                    return ast.copy_location(ast.Constant(value), node)
+            role = qualified_kind(node, kind)
             if isinstance(node.ctx, ast.Load) and role in _PRODUCER_ALLOCATIONS:
                 return self.producer_allocation(node, role)
             if isinstance(node.ctx, ast.Load) and role in _HOST_RESOURCE_TYPES:

@@ -76,6 +76,23 @@ class Model:
 """
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_host_ui_tokens_do_not_require_ui_runtime(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.kernel
+def value() -> ti.i32:
+    return 7
+def tokens():
+    import taichi_forge as ti
+    return ti.ui.RMB, ti.ui.SHIFT, ti.ui.PRESS
+"""
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import tokens\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        assert code.host.tokens() == package.tokens() == ("RMB", "Shift", "Press")
+
+
 FIELD_INPUT_SOURCE = (
     OWNER_INPUT_SOURCE.replace("scope.reader = Reader(self)", "scope.reader = Reader(self.values, n)")
     .replace("def __init__(self, source):", "def __init__(self, values, n):")
