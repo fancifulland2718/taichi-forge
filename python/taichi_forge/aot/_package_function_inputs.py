@@ -356,7 +356,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 from ._package_source_sequences import SourceSequences, UnprovenSourceSequence
 
                 if sequence_projector is None:
-                    sequence_projector = SourceSequences(sources, imported)
+                    sequence_projector = SourceSequences(sources, imported, inventory=True)
                     for callee, (definition, _) in list(sequence_projector.functions.items()):
                         if callee in functions:
                             sequence_projector.functions[callee] = (definition, function_namespace(callee))
@@ -664,6 +664,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     if len(set(key for key, _ in items)) == len(items):
                         return _Mapping(tuple(items))
             if isinstance(expression, ast.IfExp):
+                if resource_inventory is not None and hasattr(expression, '_package_source_choice'):
+                    return _Choice(('source_sequence', expression._package_source_choice),
+                                   (child(expression.body), child(expression.orelse)))
                 condition = child(expression.test)
                 if isinstance(condition, _Literal) and type(condition.value) is bool:
                     return child(expression.body if condition.value else expression.orelse)

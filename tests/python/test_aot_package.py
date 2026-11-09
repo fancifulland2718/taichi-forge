@@ -2343,6 +2343,77 @@ def append_step(solver, builder):
     assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
 
 
+CONDITIONAL_INVENTORY_RECIPE = '''def operations(solver):
+    if solver.n > 8:
+        names = ['step']
+    else:
+        names = ['unrelated']
+    alias = names
+    if solver.n > 16:
+        alias.append('step')
+    names.extend(('step' if solver.n > 16 else 'unrelated',))
+    return tuple((name, getattr(solver, name)) for name in names)
+
+def append_step(solver, builder):
+    for name, operation in operations(solver):
+        builder.dispatch(operation)
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_write_inventory_joins_conditional_local_sequences(tmp_path, monkeypatch):
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+        'def append_step(solver, builder):\n    builder.dispatch(solver.step)', CONDITIONAL_INVENTORY_RECIPE)
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert package.model.constructors == 0
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n, expected in ((5, {'unused'}), (13, {'values', 'unused'}), (19, {'values'})):
+            normal, model = package.Model(n), code.host.Model(n)
+            assert {name for name in ('values', 'unused')
+                    if any(copy.source is getattr(model, name) for copy in model.checkpoint.copies)} == expected
+            for owner in (normal, model):
+                owner.step()
+                owner.unrelated()
+                for copy in owner.checkpoint.copies:
+                    copy.save()
+                owner.step()
+                owner.unrelated()
+                for copy in owner.checkpoint.copies:
+                    copy.restore()
+            for name in ('values', 'unused'):
+                np.testing.assert_array_equal(getattr(model, name).to_numpy(), getattr(normal, name).to_numpy())
+                np.testing.assert_array_equal(getattr(model, name).to_numpy(),
+                    np.full(n, (1 if name == 'values' else 3) * (1 if name in expected else 2)))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('change', ['missing_branch', 'unknown_name', 'positional_domain', 'conditional_alias'])
+def test_package_write_inventory_rejects_unproven_branch_sources(tmp_path, monkeypatch, change):
+    recipe = CONDITIONAL_INVENTORY_RECIPE
+    if change == 'missing_branch':
+        recipe = recipe.replace("        names = ['unrelated']", '        pass')
+    elif change == 'unknown_name':
+        recipe = recipe.replace("'unrelated'", "'missing'")
+    elif change == 'conditional_alias':
+        recipe = recipe.replace('    alias = names', '''    alias = names
+    if solver.n > 8:
+        names = ['step']''')
+    else:
+        recipe = recipe.replace('    alias = names', '    first, second = names\n    alias = names')
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+        'def append_step(solver, builder):\n    builder.dispatch(solver.step)', recipe)
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    with pytest.raises(ValueError, match='write inventory dispatch has no proven Kernel'):
+        ti.aot.check_package(package)
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 @pytest.mark.parametrize('change', ['mutable', 'rebound', 'non_field'])
 def test_package_checkpoint_sequence_rejects_unproven_sources(tmp_path, monkeypatch, change):
@@ -6614,6 +6685,39 @@ def _child_choice_inventory_source():
 def dispatch(builder, kernel, inputs):
     builder.dispatch(kernel, template_args=inputs)
 '''
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('mismatch', [False, True])
+def test_package_write_inventory_keeps_branch_kernel_receiver_pairs(tmp_path, monkeypatch, mismatch):
+    source = _child_choice_inventory_source().replace('''        owner = self.child
+        dispatch(builder, owner.prepare, {'self': owner})''', '''        for kernel, owner in selected(self):
+            dispatch(builder, kernel, {'self': owner})''')
+    source += '''
+def selected(solver):
+    if solver.n > 8:
+        owner = solver.child
+        kernel = owner.prepare
+    else:
+        owner = solver
+        kernel = owner.parent_flag
+    return ((kernel, owner),)
+'''
+    if mismatch:
+        source = source.replace('kernel = owner.parent_flag', 'kernel = solver.child.prepare')
+    package = _source_package(tmp_path, monkeypatch, source)
+    if mismatch:
+        with pytest.raises(ValueError, match='write inventory'):
+            ti.aot.check_package(package)
+    else:
+        assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+        manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+        with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+            for n, second in ((5, False), (13, True)):
+                model = code.host.Model(n, second)
+                backup, = model.checkpoint.copies
+                assert backup.source is (model.out if n <= 8 else model.child.b)
+    assert package.model.constructors == 0
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

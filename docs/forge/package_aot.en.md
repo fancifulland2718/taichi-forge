@@ -1217,6 +1217,15 @@ inputs, unknown methods and unproven cached/closure sequences still reject with
 their source chain. Local CPU/CUDA source-free checks pass; the complete TGS
 time recipe is not yet qualified.
 
+Recording-source helpers may build local lists in branches, append names through
+stable aliases, and return immutable Kernel tuples. Discovery joins possible
+element sources, not execution order; tuple members retain correlated Kernel
+and receiver choices. Missing branches, unknown names, branch-dependent mutable
+alias relationships, and positional unpacking/zip of a source domain reject.
+This only extends write-inventory type discovery and leaves the Host recipe
+unchanged. Local CPU/CUDA checks cover actual backup sets; CPU checks cover
+receiver correlation and rejection cases.
+
 Version 41 also admits borrowing an entire declared flat StructField through
 `scope.borrow(..., source_scope=True)`. Member bindings retain the original
 allocation namespace and native layout; the record is not an independent array.
