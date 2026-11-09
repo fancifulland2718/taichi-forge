@@ -1209,6 +1209,12 @@ def _host_projection(
                         node,
                     )
             role = qualified_kind(node, kind)
+            if role == "experimental.ndarray_view":
+                if len(node.args) != 1 or node.keywords:
+                    _fail(module, node, "Package ndarray_view currently requires one whole-storage input")
+                self.minimum_version = max(self.minimum_version, 75)
+                node.func = ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "ndarray_view", ast.Load())
+                return self.generic_visit(node)
             if role in ("types.vector", "types.matrix"):
                 self.minimum_version = max(self.minimum_version, 9)
                 node.func = ast.Attribute(

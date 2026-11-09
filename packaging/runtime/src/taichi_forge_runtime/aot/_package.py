@@ -313,6 +313,16 @@ class _ModuleBinding:
     def entry(self, symbol):
         return entry(self.package, symbol)
 
+    def ndarray_view(self, value):
+        from ._runtime import NdArray
+
+        value = self.package.runtime._adapt_package_array(value)
+        if not isinstance(value, NdArray):
+            raise TypeError("Package ndarray_view requires scalar or tensor dense storage")
+        # Package Fields already expose their native affine array descriptor.
+        # Reuse it; the ordinary call/Graph binding retains its existing lease.
+        return value
+
     def closure_entry(self, identity, values, *, options=None):
         from ._package_closures import bind_closure
 
@@ -1731,6 +1741,7 @@ class LoadedPackage:
                 72,
                 73,
                 74,
+                75,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

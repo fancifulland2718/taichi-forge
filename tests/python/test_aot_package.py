@@ -18501,6 +18501,90 @@ class Derived(Model):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_whole_storage_view_reuses_typed_input_and_graph(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.control = scope.field(ti.f32, shape=())
+        scope.output = scope.field(ti.f32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self, control: ti.types.ndarray(dtype=ti.f32, ndim=0)):
+        for i in self.output:
+            self.output[i] = control[None] + i
+    def run(self):
+        self.step(ti.experimental.ndarray_view(self.control))
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        control = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, 'control', ti.f32, ndim=0)
+        builder.dispatch(self.step, control, template_args={'self': self})
+        return builder.compile()
+    def graph_inputs(self):
+        return {'control': ti.experimental.ndarray_view(self.control)}
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert manifest['version'] == 75
+    reference = package.Model(7)
+    reference.control[None] = 3
+    reference.run()
+    expected = reference.output.to_numpy()
+    reference.graph().run(reference.graph_inputs())
+    np.testing.assert_array_equal(reference.output.to_numpy(), expected)
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(7), code.host.Model(19)
+        a.control[None], b.control[None] = 3, 11
+        assert a.graph_inputs()['control'] is a.control
+        a.run()
+        b.run()
+        np.testing.assert_array_equal(a.output.to_numpy(), expected)
+        np.testing.assert_array_equal(b.output.to_numpy(), np.arange(19) + 11)
+        with a.graph().bind(a.graph_inputs()) as call:
+            a.control[None] = 17
+            call.run()
+            np.testing.assert_array_equal(a.output.to_numpy(), np.arange(7) + 17)
+        resources = {key for key in runtime._resources if key[0] == 'memory'}
+        a.run()
+        a.run()
+        assert {key for key in runtime._resources if key[0] == 'memory'} == resources
+    probe = tmp_path / 'whole_view_consume.py'
+    probe.write_text('''
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    model = code.host.Model(11)
+    model.control[None] = 7
+    model.run()
+    np.testing.assert_array_equal(model.output.to_numpy(), np.arange(11) + 7)
+    with model.graph().bind(model.graph_inputs()) as call:
+        model.control[None] = 19
+        call.run()
+        np.testing.assert_array_equal(model.output.to_numpy(), np.arange(11) + 19)
+print('WHOLE_VIEW_SOURCE_FREE_OK')
+''', encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target']],
+        cwd=tmp_path,
+        env=dict(os.environ,
+                 PYTHONPATH=str(Path(__file__).parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+        capture_output=True, text=True, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'WHOLE_VIEW_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_free_kernel_receiver_preserves_shared_code_and_instance_binding(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, FREE_RECEIVER_SOURCE)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")

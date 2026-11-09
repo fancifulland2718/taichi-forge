@@ -235,6 +235,14 @@ data. Device, element type, rank, layout, lifetime and JIT/AOT ordering contract
 still apply. Private solver source remains unavailable, with no solver JIT
 fallback.
 
+Format 75 also projects `ti.experimental.ndarray_view(field)` in retained Host
+functions when passing whole dense storage to explicitly typed array entries.
+Package Fields reuse their existing array descriptors without allocation or data
+copies; calls and Graph bindings retain their existing leases. Only the single
+whole-storage argument is supported; slices and additional options are rejected
+at export. Local CPU/CUDA checks cover original JIT results, independent instances,
+scalar updates after preparation, and source-free consumption.
+
 Persistent inputs can also use the existing `ResourceScope.borrow` interface,
 declaring the type and shape required by the solver:
 
