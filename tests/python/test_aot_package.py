@@ -2360,6 +2360,116 @@ def append_step(solver, builder):
 '''
 
 
+RECORD_INVENTORY_RECIPE = '''from dataclasses import dataclass
+@dataclass(frozen=True, slots=True)
+class Operation:
+    execute: object
+    append_graph: object
+    prewarm: object
+
+@dataclass(frozen=True, slots=True)
+class Directed:
+    kernel: object
+
+    def record(self, builder):
+        builder.dispatch(self.kernel)
+
+def named(solver, *names):
+    return tuple((name, getattr(solver, name)) for name in names)
+
+def left(solver, enabled=True):
+    if solver.n < 0:
+        raise ValueError('negative size')
+    steps: list = list(named(solver, 'step'))
+    if enabled:
+        steps.append(('composite', Operation(solver.step, Directed(solver.step).record, solver.unrelated)))
+    return tuple(steps)
+
+def right(solver, enabled=True):
+    return (('composite', Operation(solver.unrelated, solver.record_unrelated, solver.step)),)
+
+def optional(solver):
+    if solver.n < 10:
+        return None
+    return ('step', solver.step)
+
+def operations(solver):
+    factory = left if solver.n > 8 else right
+    steps = list(factory(solver))
+    item = optional(solver)
+    if item is not None:
+        steps.append(item)
+    return tuple(steps)
+
+def append_step(solver, builder):
+    recipe = operations(solver)
+    for name, operation in recipe:
+        if isinstance(operation, Operation):
+            operation.append_graph(builder)
+        else:
+            builder.dispatch(operation)
+'''
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('recipe_kind', ['factory', 'mixed'])
+def test_package_write_inventory_resolves_optional_record_recipes(tmp_path, monkeypatch, recipe_kind):
+    recipe = RECORD_INVENTORY_RECIPE
+    if recipe_kind == 'mixed':
+        start, end = recipe.index('def operations(solver):'), recipe.index('def append_step(solver, builder):')
+        recipe = recipe[:start] + '''def operations(solver):
+    item = (('step', solver.step) if solver.n > 8 else
+            ('composite', Operation(solver.unrelated, solver.record_unrelated, solver.step)))
+    return (item,)
+
+''' + recipe[end:]
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+        'def append_step(solver, builder):\n    builder.dispatch(solver.step)', recipe)
+    source = source.replace('    def record(self, builder):', '''    def record_step(self, builder):
+        builder.dispatch(self.step)
+    def record(self, builder):''')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n, expected in ((5, 'unused'), (19, 'values')):
+            normal, model = package.Model(n), code.host.Model(n)
+            assert len(model.checkpoint.copies) == 1
+            assert model.checkpoint.copies[0].source is getattr(model, expected)
+            for owner in (normal, model):
+                owner.step()
+                owner.unrelated()
+                owner.checkpoint.copies[0].save()
+                owner.step()
+                owner.unrelated()
+                owner.checkpoint.copies[0].restore()
+            for name in ('values', 'unused'):
+                np.testing.assert_array_equal(getattr(model, name).to_numpy(), getattr(normal, name).to_numpy())
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('change', ['unknown_callback', 'exception_effect', 'escaped_recipe'])
+def test_package_write_inventory_rejects_unproven_record_recipes(tmp_path, monkeypatch, change):
+    recipe = RECORD_INVENTORY_RECIPE
+    if change == 'unknown_callback':
+        recipe = recipe.replace('Directed(solver.step).record', 'solver.missing')
+    elif change == 'exception_effect':
+        recipe = recipe.replace("ValueError('negative size')", 'ValueError(solver.step())')
+    else:
+        recipe = recipe.replace('    recipe = operations(solver)', '    recipe = operations(solver)\n    opaque(recipe)')
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+        'def append_step(solver, builder):\n    builder.dispatch(solver.step)', recipe)
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    with pytest.raises(ValueError):
+        ti.aot.check_package(package)
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 @pytest.mark.parametrize('predicate', ['attribute', 'method'])
 def test_package_write_inventory_joins_conditional_local_sequences(tmp_path, monkeypatch, predicate):

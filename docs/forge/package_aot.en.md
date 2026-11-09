@@ -1231,6 +1231,18 @@ scalar predicates. `bool` and `getattr` must retain their builtin bindings.
 Discovery does not execute methods to sample configurations; side effects,
 unknown methods and shadowed builtin calls still reject.
 
+Source recipes can forward Kernels through ordinary function choices, immutable
+defaults and variadic arguments, return optional operations, and store execution
+or recording entries in generated frozen dataclasses, including standard slots.
+Discovery follows the member actually read. An `isinstance` branch distinguishing
+a Kernel from a composite operation retains its source choice; local aliases
+retain returned sequences. Explicit None identity tests filter optional entries.
+Builtin exception branches with constant arguments contribute no return sources;
+effectful exception arguments, unknown callbacks and incompatible sources reject.
+Local CPU checks compare JIT/AOT save/restore at new sizes and rejection cases.
+This runs only during preflight/export, adds no Runtime checks, and does not
+qualify the complete rigid package.
+
 Write-inventory discovery can project immutable Kernel sequences from the
 original getter of a standard `functools.cached_property`, including early-return
 strategy branches, local list appends, and finite method choices based on parity

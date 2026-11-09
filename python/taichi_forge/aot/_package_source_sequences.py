@@ -19,6 +19,10 @@ class UnprovenSourceSequence(ValueError):
     pass
 
 
+class _UnavailableSource(UnprovenSourceSequence):
+    """A source-only branch terminates by rejecting the configuration."""
+
+
 class Sequence:
     def __init__(self, values, *, mutable=False, domain=False):
         self.values, self.mutable, self.domain = list(values), mutable, domain
@@ -54,7 +58,8 @@ class SourceSequences:
         if isinstance(value, Sequence):
             return (value.mutable, value.domain, tuple(SourceSequences.source_key(item) for item in value.values))
         return (ast.dump(value), tuple((getattr(part, '_package_source_choice', None),
-                                       getattr(part, '_package_unknown_iteration', False)) for part in ast.walk(value)))
+                                       getattr(part, '_package_unknown_iteration', False),
+                                       getattr(part, '_package_source_callable', None)) for part in ast.walk(value)))
 
     def join(self, left, right, choice, memo=None):
         """Merge sources without inventing an ordered concatenation of branches."""
@@ -83,7 +88,12 @@ class SourceSequences:
             elif len(left.values) == len(right.values):
                 result = Sequence(self.join(a, b, choice, memo) for a, b in zip(left.values, right.values))
             else:
-                raise UnprovenSourceSequence('Inventory branches require matching immutable tuple structure')
+                values = {self.source_key(item): item for item in (*left.values, *right.values)}
+                result = Sequence(values.values(), domain=True)
+        elif self.immutable(left) and isinstance(right, ast.AST):
+            return self.join(self.syntax(left), right, choice, memo)
+        elif isinstance(left, ast.AST) and self.immutable(right):
+            return self.join(left, self.syntax(right), choice, memo)
         elif isinstance(left, ast.AST) and isinstance(right, ast.AST):
             if self.source_key(left) == self.source_key(right):
                 result = left
@@ -104,12 +114,48 @@ class SourceSequences:
             raise UnprovenSourceSequence('Inventory getattr requires a literal member name')
         return ast.Attribute(parent, name.value, ast.Load())
 
+    @classmethod
+    def known_condition(cls, expression):
+        if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+            answer = cls.known_condition(expression.operand)
+            return None if answer is None else not answer
+        if isinstance(expression, ast.Compare) and len(expression.ops) == 1:
+            operations = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.In: lambda a, b: a in b,
+                          ast.NotIn: lambda a, b: a not in b, ast.Is: operator.is_, ast.IsNot: operator.is_not}
+            operation = operations.get(type(expression.ops[0]))
+            def alternatives(node):
+                if isinstance(node, ast.IfExp):
+                    return alternatives(node.body) + alternatives(node.orelse)
+                return [ast.literal_eval(node)]
+            if operation is not None:
+                try:
+                    left, right = alternatives(expression.left), alternatives(expression.comparators[0])
+                    if isinstance(expression.ops[0], (ast.Is, ast.IsNot)) and not all(
+                            item is None or type(item) is bool for item in (*left, *right)):
+                        return None
+                    answers = {operation(a, b) for a in left for b in right}
+                    if len(answers) == 1:
+                        return answers.pop()
+                except (ValueError, TypeError):
+                    pass
+        try:
+            return bool(ast.literal_eval(expression))
+        except (ValueError, TypeError):
+            return None
+
     def value(self, node, environment, namespace, active=()):
-        if isinstance(node, ast.Constant) and type(node.value) in (str, int, bool, type(None)):
+        if isinstance(node, ast.Constant) and type(node.value) in (str, int, float, bool, type(None)):
             return copy.deepcopy(node)
         if isinstance(node, ast.Name):
             if node.id in environment:
                 return environment[node.id]
+            target = namespace.get(node.id)
+            if self.inventory and type(target) in (str, int, bool) and node.id in namespace:
+                return ast.Constant(target)
+            if self.inventory and inspect.isfunction(target) and target in self.functions:
+                result = copy.deepcopy(node)
+                result._package_source_callable = target
+                return result
             raise UnprovenSourceSequence("Inventory local has no proven value: " + node.id)
         if isinstance(node, ast.Attribute):
             parent = self.value(node.value, environment, namespace, active)
@@ -119,12 +165,36 @@ class SourceSequences:
             if self.inventory:
                 expression._package_source_active = active
             return expression
+        if self.inventory and isinstance(node, ast.Lambda):
+            arguments = node.args
+            if (arguments.posonlyargs or arguments.args or arguments.kwonlyargs
+                    or arguments.vararg or arguments.kwarg):
+                raise UnprovenSourceSequence('Inventory callback requires explicit immutable captures')
+            projection = self
+            class Captures(ast.NodeTransformer):
+                def visit_Name(self, part):
+                    if isinstance(part.ctx, ast.Load) and part.id in environment:
+                        return ast.copy_location(projection.syntax(environment[part.id]), part)
+                    target = namespace.get(part.id)
+                    if inspect.isfunction(target) and target in projection.functions:
+                        part._package_source_callable = target
+                    return part
+            return Captures().visit(copy.deepcopy(node))
+        if self.inventory and isinstance(node, ast.Subscript):
+            parent = self.scalar(self.value(node.value, environment, namespace, active))
+            key = self.value(node.slice, environment, namespace, active)
+            if not isinstance(key, ast.Constant) or type(key.value) not in (str, int):
+                raise UnprovenSourceSequence('Inventory metadata lookup requires a literal key')
+            return ast.Subscript(parent, key, ast.Load())
         if isinstance(node, (ast.Tuple, ast.List)):
             return Sequence(
                 (self.value(n, environment, namespace, active) for n in node.elts), mutable=isinstance(node, ast.List)
             )
         if self.inventory and isinstance(node, ast.IfExp):
             predicate = self.scalar(self.value(node.test, environment, namespace, active))
+            chosen = self.known_condition(predicate)
+            if chosen is not None:
+                return self.value(node.body if chosen else node.orelse, environment, namespace, active)
             return self.join(self.value(node.body, environment, namespace, active),
                              self.value(node.orelse, environment, namespace, active), self.choice(predicate))
         if isinstance(node, ast.BinOp) and (self.inventory or isinstance(node.op, ast.Add)):
@@ -201,7 +271,7 @@ class SourceSequences:
                 if len(node.args) == 3:
                     self.scalar(self.value(node.args[2], environment, namespace, active))
                 return self.member(parent, name)
-            if isinstance(node.func, ast.Name) and node.func.id in ("tuple", "zip"):
+            if isinstance(node.func, ast.Name) and node.func.id in (("tuple", "list", "zip") if self.inventory else ("tuple", "zip")):
                 builtin = getattr(builtins, node.func.id)
                 supplied = namespace.get("__builtins__", vars(builtins))
                 supplied = supplied if isinstance(supplied, dict) else vars(supplied)
@@ -211,9 +281,9 @@ class SourceSequences:
                     or supplied.get(node.func.id) is not builtin
                 ):
                     raise UnprovenSourceSequence("Inventory builtins must retain their original bindings")
-                if node.func.id == "tuple" and len(node.args) == 1:
+                if node.func.id in ("tuple", "list") and len(node.args) == 1:
                     value = self.sequence(self.value(node.args[0], environment, namespace, active))
-                    return Sequence(value.values, domain=value.domain)
+                    return Sequence(value.values, mutable=node.func.id == 'list', domain=value.domain)
                 if node.func.id == "zip" and len(node.args) == 1 and isinstance(node.args[0], ast.Starred):
                     sequence = self.sequence(self.value(node.args[0].value, environment, namespace, active))
                     if sequence.domain or any(self.sequence(row).domain for row in sequence.values):
@@ -228,6 +298,18 @@ class SourceSequences:
                     raise UnprovenSourceSequence('Inventory bool must retain its original binding')
                 predicate = self.scalar(self.value(node.args[0], environment, namespace, active))
                 return ast.UnaryOp(ast.Not(), ast.UnaryOp(ast.Not(), predicate))
+            if self.inventory and isinstance(node.func, ast.Name) and node.func.id == 'str' and len(node.args) == 1:
+                supplied = namespace.get('__builtins__', vars(builtins))
+                supplied = supplied if isinstance(supplied, dict) else vars(supplied)
+                if ('str' in environment or namespace.get('str', builtins.str) is not builtins.str
+                        or supplied.get('str') is not builtins.str):
+                    raise UnprovenSourceSequence('Inventory str must retain its original binding')
+                item = self.scalar(self.value(node.args[0], environment, namespace, active))
+                if isinstance(item, ast.Constant):
+                    return ast.Constant(str(item.value))
+                function = copy.deepcopy(node.func)
+                function._package_source_callable = builtins.str
+                return ast.Call(function, [item], [])
             if isinstance(node.func, ast.Call) and len(node.args) == 1:
                 selector = node.func
                 self.unshadowed(selector.func, environment)
@@ -248,10 +330,28 @@ class SourceSequences:
                         result = ast.Attribute(result, part, ast.Load())
                     return result
         if isinstance(node, ast.Call):
+            if self.inventory:
+                from ._package_function_inputs import _plain_record
+
+                target = _source_value(node.func, namespace)
+                if _plain_record(target) and all(k.arg is not None for k in node.keywords):
+                    function = copy.deepcopy(node.func)
+                    function._package_source_callable = target
+                    args = [self.syntax(item, allow_domain=True) for item in self.arguments(node.args, environment, namespace, active)]
+                    kwargs = [ast.keyword(k.arg, self.syntax(self.value(k.value, environment, namespace, active), allow_domain=True))
+                              for k in node.keywords]
+                    return ast.Call(function, args, kwargs)
             receiver = None
             root = node.func
             while isinstance(root, ast.Attribute):
                 root = root.value
+            if self.inventory and isinstance(node.func, ast.Name) and node.func.id in environment:
+                chosen = environment[node.func.id]
+                arguments = self.arguments(node.args, environment, namespace, active)
+                keywords = {k.arg: self.value(k.value, environment, namespace, active) for k in node.keywords}
+                if None in keywords:
+                    raise UnprovenSourceSequence('Inventory helpers require explicit keyword arguments')
+                return self.invoke_choice(chosen, arguments, keywords, active)
             if (self.inventory and self.resolve_method is not None and isinstance(node.func, ast.Attribute)
                     and isinstance(root, ast.Name) and root.id in environment):
                 receiver = self.scalar(self.value(node.func.value, environment, namespace, active))
@@ -264,12 +364,37 @@ class SourceSequences:
             if inspect.isfunction(target) and target in self.functions:
                 if any(k.arg is None for k in node.keywords):
                     raise UnprovenSourceSequence("Inventory helpers require explicit keyword arguments")
-                arguments = [self.value(arg, environment, namespace, active) for arg in node.args]
+                arguments = self.arguments(node.args, environment, namespace, active)
                 if receiver is not None:
                     arguments.insert(0, receiver)
                 keywords = {k.arg: self.value(k.value, environment, namespace, active) for k in node.keywords}
                 return self.invoke(target, arguments, keywords, active)
-        raise UnprovenSourceSequence("Unproven source inventory expression")
+        raise UnprovenSourceSequence(f"Unproven source inventory expression: {ast.unparse(node)}")
+
+    def arguments(self, nodes, environment, namespace, active):
+        result = []
+        for node in nodes:
+            if isinstance(node, ast.Starred):
+                values = self.sequence(self.value(node.value, environment, namespace, active))
+                if values.domain:
+                    raise UnprovenSourceSequence('Inventory source domain does not prove argument positions')
+                result.extend(values.values)
+            else:
+                result.append(self.value(node, environment, namespace, active))
+        return result
+
+    def invoke_choice(self, expression, arguments, keywords, active):
+        if isinstance(expression, ast.IfExp) and hasattr(expression, '_package_source_choice'):
+            results = [self.invoke_choice(arm, arguments, keywords, active)
+                       for arm in (expression.body, expression.orelse)]
+            if all(self.immutable(result) for result in results):
+                unique = {self.source_key(item): item for result in results for item in result.values}
+                return Sequence(unique.values(), domain=True)
+            return self.join(*results, (expression.test, expression._package_source_choice))
+        target = getattr(expression, '_package_source_callable', None)
+        if target not in self.functions:
+            raise UnprovenSourceSequence('Inventory callable has no admitted source')
+        return self.invoke(target, arguments, keywords, active)
 
     def invoke(self, target, arguments, keywords, active):
         if target in active:
@@ -279,11 +404,18 @@ class SourceSequences:
             namespace = self.resolve_namespace(target)
         signature = inspect.signature(target)
         bound = signature.bind(*arguments, **keywords)
-        if len(bound.arguments) != len(signature.parameters):
-            raise UnprovenSourceSequence("Inventory helpers require explicit arguments")
+        for name, parameter in signature.parameters.items():
+            if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+                bound.arguments[name] = Sequence(bound.arguments.get(name, ()))
+            elif name not in bound.arguments:
+                if type(parameter.default) not in (bool, int, str, type(None)):
+                    raise UnprovenSourceSequence("Inventory helpers require explicit immutable arguments")
+                bound.arguments[name] = ast.Constant(parameter.default)
         try:
             project = self.generator_body if inspect.isgeneratorfunction(target) else self.body
             result = project(definition.body, dict(bound.arguments), namespace, (*active, target))
+        except _UnavailableSource:
+            raise
         except UnprovenSourceSequence as error:
             raise UnprovenSourceSequence(target.__qualname__ + ": " + str(error)) from error
         if not self.immutable(result) and not (self.inventory and isinstance(result, ast.AST)):
@@ -335,6 +467,8 @@ class SourceSequences:
         return value
 
     def sequence(self, value):
+        if self.inventory and isinstance(value, ast.Tuple):
+            return Sequence(value.elts, domain=getattr(value, '_package_source_domain', False))
         if self.inventory and self.resolve_cached is not None and isinstance(value, ast.Attribute):
             target = self.resolve_cached(value)
             if target is not None:
@@ -342,6 +476,36 @@ class SourceSequences:
         if not isinstance(value, Sequence):
             raise UnprovenSourceSequence("Inventory iteration requires a finite source sequence")
         return value
+
+    def refined(self, test, environment, take):
+        """Narrow only explicit optional source tests; never evaluate user data."""
+        result = copy.deepcopy(environment)
+        if (not isinstance(test, ast.Compare) or len(test.ops) != 1
+                or not isinstance(test.left, ast.Name)
+                or not isinstance(test.comparators[0], ast.Constant)
+                or test.comparators[0].value is not None
+                or not isinstance(test.ops[0], (ast.Is, ast.IsNot))):
+            return result
+        name = test.left.id
+        want_none = take == isinstance(test.ops[0], ast.Is)
+        def narrow(value):
+            if isinstance(value, ast.IfExp) and hasattr(value, '_package_source_choice'):
+                left, right = narrow(value.body), narrow(value.orelse)
+                if left is None:
+                    return right
+                if right is None:
+                    return left
+                return self.join(left, right, (value.test, value._package_source_choice))
+            if isinstance(value, ast.Constant) and value.value is None:
+                return value if want_none else None
+            if self.immutable(value) or isinstance(value, ast.Tuple):
+                return None if want_none else value
+            return value
+        if name in result:
+            result[name] = narrow(result[name])
+            if result[name] is None:
+                return None
+        return result
 
     def bind(self, target, value, environment, *, allow_members=False):
         if isinstance(target, ast.Name):
@@ -375,6 +539,8 @@ class SourceSequences:
                 continue
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and (not branch or self.inventory):
                 self.bind(node.targets[0], self.value(node.value, environment, namespace, active), environment)
+            elif self.inventory and isinstance(node, ast.AnnAssign) and node.value is not None:
+                self.bind(node.target, self.value(node.value, environment, namespace, active), environment)
             elif isinstance(node, ast.For) and not node.orelse:
                 values = (self.iteration(node.iter, environment, namespace, active) if self.inventory else
                           self.sequence(self.value(node.iter, environment, namespace, active)))
@@ -392,26 +558,39 @@ class SourceSequences:
                         environment.update(updated)
             elif isinstance(node, ast.If):
                 predicate = self.scalar(self.value(node.test, environment, namespace, active))
-                if self.inventory and any(isinstance(part, ast.Return) for part in ast.walk(node)):
+                chosen = self.known_condition(predicate) if self.inventory else None
+                if chosen is not None:
+                    selected = self.body(node.body if chosen else node.orelse, environment, namespace, active)
+                    if selected is not None:
+                        return selected
+                    continue
+                if self.inventory and any(isinstance(part, (ast.Return, ast.Raise)) for part in ast.walk(node)):
                     # Complete each returning arm through the remaining source
                     # statements. Return values are possible elements, never a
                     # positional concatenation of mutually exclusive tuples.
-                    results = [self.body(arm + statements[index + 1:], copy.deepcopy(environment), namespace, active)
-                               for arm in (node.body, node.orelse)]
-                    if all(self.immutable(result) for result in results):
-                        unique = {self.source_key(item): item for result in results for item in result.values}
-                        return Sequence(unique.values(), domain=True)
-                    if all(isinstance(result, ast.AST) for result in results):
-                        return self.join(*results, self.choice(predicate))
-                    raise UnprovenSourceSequence('Inventory return branches require proven compatible sources')
+                    results = []
+                    for take, arm in ((True, node.body), (False, node.orelse)):
+                        local = self.refined(node.test, environment, take)
+                        if local is not None:
+                            try:
+                                results.append(self.body(arm + statements[index + 1:], local, namespace, active))
+                            except _UnavailableSource:
+                                pass
+                    if not results:
+                        raise _UnavailableSource('All source branches reject the configuration')
+                    if len(results) == 1:
+                        return results[0]
+                    return self.join(*results, self.choice(predicate))
                 branches = []
-                for arm in (node.body, node.orelse):
-                    local = copy.deepcopy(environment) if self.inventory else dict(environment)
+                for take, arm in ((True, node.body), (False, node.orelse)):
+                    local = self.refined(node.test, environment, take) if self.inventory else dict(environment)
+                    if local is None:
+                        continue
                     if self.body(arm, local, namespace, active, branch=True) is not None:
                         raise UnprovenSourceSequence("Inventory branches cannot return early")
                     branches.append(local)
                 if self.inventory:
-                    joined = self.join_environments(*branches, predicate)
+                    joined = branches[0] if len(branches) == 1 else self.join_environments(*branches, predicate)
                     environment.clear()
                     environment.update(joined)
             elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
@@ -435,6 +614,22 @@ class SourceSequences:
                 if not self.inventory and node is not statements[-1]:
                     raise UnprovenSourceSequence("Inventory requires a final return")
                 return self.value(node.value, environment, namespace, active)
+            elif self.inventory and isinstance(node, ast.Raise):
+                call = node.exc
+                if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                        and call.func.id not in environment and not call.keywords and node.cause is None
+                        and all(isinstance(arg, ast.Constant) for arg in call.args)):
+                    supplied = namespace.get('__builtins__', vars(builtins))
+                    supplied = supplied if isinstance(supplied, dict) else vars(supplied)
+                    target = namespace.get(call.func.id, supplied.get(call.func.id))
+                    if target in (ValueError, TypeError, RuntimeError):
+                        raise _UnavailableSource('Source branch rejects the configuration')
+                raise UnprovenSourceSequence('Inventory exception has an unproven constructor or argument')
+            elif self.inventory and isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = (item.asname or (item.name if isinstance(node, ast.ImportFrom) else item.name.split('.')[0])
+                         for item in node.names)
+                if any(name in environment for name in names):
+                    raise UnprovenSourceSequence('Inventory import cannot rebind a source')
             else:
                 raise UnprovenSourceSequence(
                     f"Inventory has an unproven {type(node).__name__} or side effect at line {node.lineno}")
@@ -443,15 +638,28 @@ class SourceSequences:
         """Project yielded sources, never the number of runtime iterations."""
         result = []
         for node in statements:
-            if isinstance(node, ast.Expr) and isinstance(node.value, (ast.Yield, ast.YieldFrom)):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                self.bind(node.targets[0], self.value(node.value, environment, namespace, active), environment)
+            elif isinstance(node, ast.Expr) and isinstance(node.value, (ast.Yield, ast.YieldFrom)):
                 value = self.value(node.value.value, environment, namespace, active)
                 result.extend(self.sequence(value).values if isinstance(node.value, ast.YieldFrom) else [value])
             elif isinstance(node, ast.If):
-                self.scalar(self.value(node.test, environment, namespace, active))
+                predicate = self.scalar(self.value(node.test, environment, namespace, active))
+                chosen = self.known_condition(predicate)
+                if chosen is not None:
+                    result.extend(self.generator_body(node.body if chosen else node.orelse, environment, namespace, active).values)
+                    continue
+                branches = []
                 for branch in (node.body, node.orelse):
-                    result.extend(self.generator_body(branch, dict(environment), namespace, active).values)
+                    local = copy.deepcopy(environment)
+                    result.extend(self.generator_body(branch, local, namespace, active).values)
+                    branches.append(local)
+                joined = self.join_environments(*branches, predicate)
+                environment.clear()
+                environment.update(joined)
             elif isinstance(node, ast.For) and not node.orelse:
-                if any(part.id in environment for part in ast.walk(node.target) if isinstance(part, ast.Name)):
+                inputs = set(inspect.signature(active[-1]).parameters) if active else set(environment)
+                if any(part.id in inputs for part in ast.walk(node.target) if isinstance(part, ast.Name)):
                     raise UnprovenSourceSequence('Generator iteration cannot rebind a forwarded input')
                 values = self.iteration(node.iter, environment, namespace, active).values
                 for value in values:
@@ -459,6 +667,8 @@ class SourceSequences:
                     self.bind(node.target, value, local)
                     result.extend(self.generator_body(node.body, local, namespace, active).values)
             elif isinstance(node, ast.Return) and node.value is None:
+                break
+            elif isinstance(node, ast.Continue):
                 break
             elif isinstance(node, (ast.Import, ast.ImportFrom)):
                 names = (item.asname or (item.name if isinstance(node, ast.ImportFrom) else item.name.split('.')[0])
@@ -509,9 +719,12 @@ class SourceSequences:
                     result[name] = self.syntax(value)
         return result
 
-    def syntax(self, value):
+    def syntax(self, value, *, allow_domain=False):
         if isinstance(value, Sequence):
-            if value.domain:
+            if value.domain and not allow_domain:
                 raise UnprovenSourceSequence('Inventory source domain is not an ordered tuple value')
-            return ast.Tuple([self.syntax(item) for item in value.values], ast.Load())
+            result = ast.Tuple([self.syntax(item, allow_domain=allow_domain) for item in value.values], ast.Load())
+            if value.domain:
+                result._package_source_domain = True
+            return result
         return copy.deepcopy(value)

@@ -12,6 +12,7 @@ from collections import deque
 from dataclasses import dataclass, fields, is_dataclass, MISSING
 import inspect
 import importlib.util
+import types
 
 from taichi_forge_runtime._static_values import static_key
 from ._package_factories import _source_value
@@ -41,6 +42,17 @@ class _Graph:
 class _Kernel:
     function: object
     receiver: object = None
+
+
+@dataclass(frozen=True)
+class _Host:
+    function: object
+    receiver: object = None
+
+
+@dataclass(frozen=True)
+class _SourceDomain:
+    items: tuple
 
 
 @dataclass(frozen=True)
@@ -120,7 +132,9 @@ def _plain_record(cls):
         and not hasattr(cls, "__post_init__")
         and cls.__new__ is object.__new__
         and cls.__getattribute__ is object.__getattribute__
-        and all(not hasattr(vars(base).get(field.name), "__get__") for base in cls.__mro__ for field in fields(cls))
+        and all(not hasattr(vars(base).get(field.name), "__get__")
+                or type(vars(base).get(field.name)) is types.MemberDescriptorType
+                for base in cls.__mro__ for field in fields(cls))
     )
 
 
@@ -239,6 +253,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     binding_domains, binding_calls, binding_covered = {}, set(), set()
 
     def source_callable(expression, namespace):
+        if resource_inventory is not None and hasattr(expression, '_package_source_callable'):
+            return expression._package_source_callable
         result = _source_value(expression, namespace)
         if result is None and isinstance(expression, ast.Attribute):
             cls = _source_value(expression.value, namespace)
@@ -335,6 +351,12 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             method = inspect.getattr_static(classes[receiver.identity], name, None)
             if inspect.isfunction(method) and method in kernels:
                 return _Kernel(method, receiver)
+            if resource_inventory is not None and inspect.isfunction(method) and method in functions:
+                return _Host(method, receiver)
+        if resource_inventory is not None and isinstance(receiver, _Record):
+            method = inspect.getattr_static(receiver.cls, name, None)
+            if inspect.isfunction(method) and method in functions:
+                return _Host(method, receiver)
         return None
 
     def build_context(function, arguments, return_chain):
@@ -344,6 +366,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         # A rebinding invalidates an earlier owner fact. Nested definitions have
         # their own lexical scope and cannot lend assignments to this call.
         nodes = []
+        source_only_calls = set()
         condition_value = None
 
         def walk(statement):
@@ -377,9 +400,32 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         if not definition.decorator_list or callee in cached_sources:
                             sequence_projector.functions[callee] = (definition, callee.__globals__)
                 try:
+                    iteration = statement.iter
                     environment = {name: ast.Name(name, ast.Load()) for name in arguments}
-                    environment.update({name: expression for name, expression in aliases.items()
-                                        if stores.get(name) == 1})
+                    class LocalAliases(ast.NodeTransformer):
+                        def __init__(self):
+                            self.active = set()
+                            self.used = []
+
+                        def visit_Name(self, part):
+                            if (isinstance(part.ctx, ast.Load) and part.id in aliases
+                                    and stores.get(part.id) == 1):
+                                if part.id in tainted:
+                                    raise UnprovenSourceSequence('Inventory local sequence escaped or was mutated')
+                                if part.id in self.active:
+                                    raise UnprovenSourceSequence('Recursive local inventory alias')
+                                self.active.add(part.id)
+                                self.used.append(aliases[part.id])
+                                replacement = self.visit(copy.deepcopy(aliases[part.id]))
+                                self.active.remove(part.id)
+                                return replacement
+                            return part
+
+                        def visit_Lambda(self, part):
+                            return part
+
+                    substitution = LocalAliases()
+                    iteration = substitution.visit(copy.deepcopy(statement.iter))
                     # Keep the proven receiver resolver local to this lexical
                     # context; nested discovery must not replace another call's
                     # bindings. Choice IDs remain shared by the source analysis.
@@ -387,7 +433,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     projection.resolve_method = sequence_method
                     projection.resolve_cached = sequence_cached
                     projection.resolve_namespace = function_namespace
-                    sequence = projection.sequence(projection.value(statement.iter, environment, namespace))
+                    sequence = projection.sequence(projection.value(iteration, environment, namespace))
                     if not sequence_projector.immutable(sequence):
                         raise UnprovenSourceSequence('Iteration requires an immutable source sequence')
                     names = {part.id for part in ast.walk(statement.target) if isinstance(part, ast.Name)}
@@ -395,11 +441,16 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                            for body in statement.body for part in ast.walk(body)):
                         raise UnprovenSourceSequence('Iteration source is rebound in the loop body')
                 except (UnprovenSourceSequence, TypeError) as error:
-                    if (isinstance(statement.iter, ast.Call)
-                            and source_callable(statement.iter.func, namespace) in sequence_projector.functions
+                    if (isinstance(iteration, ast.Call)
+                            and source_callable(iteration.func, namespace) in sequence_projector.functions
                             or isinstance(statement.iter, ast.Attribute) and sequence_cached(statement.iter) is not None):
                         iteration_failures.setdefault(function, set()).add(str(error))
                 else:
+                    # The source-only projector proved these expressions without
+                    # executing application code. Do not rediscover a selected
+                    # local helper as an opaque owner escape in the generic pass.
+                    source_only_calls.update(id(part) for expression in substitution.used
+                                             for part in ast.walk(expression) if isinstance(part, ast.Call))
                     for item in sequence.values:
                         bindings = {}
                         sequence_projector.bind(statement.target, item, bindings)
@@ -419,6 +470,21 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                             walk(BindIteration().visit(copy.deepcopy(body)))
                     for body in statement.orelse:
                         walk(body)
+                    return
+            if (resource_inventory is not None and condition_value is not None
+                    and isinstance(statement, (ast.If, ast.IfExp))):
+                fact = value(statement.test)
+                if isinstance(fact, _Choice) and fact.source[0] == 'source_sequence':
+                    class SelectSource(ast.NodeTransformer):
+                        def __init__(self, index):
+                            self.index = index
+
+                        def visit_IfExp(self, part):
+                            if getattr(part, '_package_source_choice', None) == fact.source[1]:
+                                return self.visit(part.body if self.index == 0 else part.orelse)
+                            return self.generic_visit(part)
+                    for index in range(len(fact.alternatives)):
+                        walk(SelectSource(index).visit(copy.deepcopy(statement)))
                     return
             nodes.append(statement)
             if condition_value is not None and isinstance(statement, (ast.If, ast.IfExp)):
@@ -600,6 +666,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 return value(item, visiting, bindings)
 
             def source(item):
+                if resource_inventory is not None and hasattr(item, '_package_source_callable'):
+                    return item._package_source_callable
                 root = item
                 while isinstance(root, ast.Attribute):
                     root = root.value
@@ -649,7 +717,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 if inspect.isfunction(resolved) and resolved in kernels:
                     return _Kernel(resolved)
             if isinstance(expression, (ast.Tuple, ast.List)):
-                return tuple(child(item) for item in expression.elts)
+                items = tuple(child(item) for item in expression.elts)
+                return (_SourceDomain(items) if resource_inventory is not None
+                        and getattr(expression, '_package_source_domain', False) else items)
             if isinstance(expression, ast.Constant) and (
                 expression.value is None or type(expression.value) in (bool, int, float, str)
             ):
@@ -739,20 +809,29 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     item = child(expression.args[0])
                     cls = source(expression.args[1])
                     if inspect.isclass(cls) and type(cls) is type:
-                        if isinstance(item, _Literal) and type(item.value) in (bool, int, float, str, type(None)):
-                            return _Literal(isinstance(item.value, cls))
-                        if isinstance(item, _Owner):
-                            return _Literal(issubclass(classes[item.identity], cls))
-                        if isinstance(item, _Resource):
-                            # Allocation-proven Fields cannot be arbitrary Host
-                            # adapters. Keep the family broad until its element
-                            # type is resolved; only unanimous answers are safe.
-                            candidates = (ScalarField, MatrixField, StructField)
-                            if item.optional:
-                                candidates += (type(None),)
-                            answers = {issubclass(candidate, cls) for candidate in candidates}
-                            if len(answers) == 1:
-                                return _Literal(answers.pop())
+                        def classify(item):
+                            if isinstance(item, _Choice):
+                                answers = tuple(classify(arm) for arm in item.alternatives)
+                                return answers[0] if all(answer == answers[0] for answer in answers) else _Choice(item.source, answers)
+                            if isinstance(item, _Literal) and type(item.value) in (bool, int, float, str, type(None)):
+                                return _Literal(isinstance(item.value, cls))
+                            if isinstance(item, _Owner):
+                                return _Literal(issubclass(classes[item.identity], cls))
+                            if isinstance(item, _Record):
+                                return _Literal(issubclass(item.cls, cls))
+                            if isinstance(item, (_Kernel, _Host)) and _plain_record(cls):
+                                return _Literal(False)
+                            if isinstance(item, _Resource):
+                                # Allocation-proven Fields cannot be arbitrary Host
+                                # adapters. Optional inputs also admit None.
+                                candidates = (ScalarField, MatrixField, StructField)
+                                if item.optional:
+                                    candidates += (type(None),)
+                                answers = {issubclass(candidate, cls) for candidate in candidates}
+                                if len(answers) == 1:
+                                    return _Literal(answers.pop())
+                            return None
+                        return classify(item)
                 if (
                     isinstance(expression.func, ast.Attribute)
                     and expression.func.attr == "items"
@@ -807,7 +886,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     }
                     return_key = (callee, tuple(sorted(return_inputs.items())))
                     if return_key not in return_cache:
-                        evaluate, _, returned_nodes, _ = build_context(callee, return_inputs, (*return_chain, callee))
+                        evaluate, _, returned_nodes, _, _ = build_context(callee, return_inputs, (*return_chain, callee))
                         results = [evaluate(part.value) for part in returned_nodes if isinstance(part, ast.Return)]
                         return_cache[return_key] = (
                             results[0] if results and all(item == results[0] for item in results) else None
@@ -816,6 +895,10 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             return None
 
         def call_target(expression, visiting=(), bindings=None):
+            if resource_inventory is not None:
+                resolved = value(expression, visiting, bindings)
+                if isinstance(resolved, (_Kernel, _Host)):
+                    return resolved.function, resolved.receiver
             root = expression
             while isinstance(root, ast.Attribute):
                 root = root.value
@@ -888,12 +971,12 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         nodes = []
         for statement in node.body:
             walk(statement)
-        return value, call_target, nodes, module
+        return value, call_target, nodes, module, source_only_calls
 
     while pending:
         function, arguments, chain, call_site = pending.popleft()
         identity = (function, tuple(sorted(arguments.items())))
-        value, target, nodes, module = build_context(function, arguments, (function,))
+        value, target, nodes, module, source_only_calls = build_context(function, arguments, (function,))
         for owner, name, item in requested.get(function, ()):
             receiver = arguments.get("self")
             if not isinstance(receiver, _Owner) or receiver.identity != owner:
@@ -937,6 +1020,11 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             elif isinstance(item, (_Mapping, _Record)):
                 for _, child in item.items:
                     inventory_input(child)
+            elif isinstance(item, _SourceDomain):
+                for child in item.items:
+                    inventory_input(child)
+            elif isinstance(item, (_Kernel, _Host)):
+                inventory_input(item.receiver)
             elif isinstance(item, _Choice):
                 for child in item.alternatives:
                     inventory_input(child)
@@ -1002,6 +1090,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             covered.add(id(call))
 
         for call in (part for part in nodes if isinstance(part, ast.Call)):
+            if id(call) in source_only_calls:
+                continue
             if (
                 isinstance(call.func, ast.Attribute)
                 and call.func.attr == "dispatch"
@@ -1033,7 +1123,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             if callee not in kernels and callee not in functions:
                 if resource_inventory is not None:
                     fact = value(call)
-                    if isinstance(fact, (_Mapping, _Record, _Kernel, _Resource, _Literal, tuple)):
+                    if isinstance(fact, (_Mapping, _Record, _Kernel, _Host, _Resource, _Literal, tuple)):
                         # Proven builtin/record projections expose no owner to
                         # an arbitrary callee. A Field lookup still contributes
                         # its conservative resource dependency.
