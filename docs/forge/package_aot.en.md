@@ -1893,6 +1893,9 @@ alignment and offsets. Model capacities do not create code copies. Focused
 CPU/CUDA checks include nested owners, borrowing, JIT equivalence and source-free
 dual instances. Only scalar elements are supported; `field_like` cloning across
 this selection is not supported yet.
+Allocating another scalar Field from a declared Field's `.dtype` propagates the
+same policy, including to entries that use only the derived Field. Tensor/Struct
+allocations derived from a conditional type currently reject explicitly.
 
 Declared fixed integer constants may also be read through a resource scope for
 layout. Ordinary inherited constructors allocate against the concrete receiver's

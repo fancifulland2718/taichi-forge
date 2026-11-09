@@ -12346,13 +12346,22 @@ FIELD_DTYPE_CHOICE_SOURCE = (
 )
 
 
-@pytest.mark.parametrize("declaration", ["local", "inline"])
+@pytest.mark.parametrize("declaration", ["local", "inline", "derived"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_field_dtype_choices_share_unaffected_code(tmp_path, monkeypatch, declaration):
     source = FIELD_DTYPE_CHOICE_SOURCE
     if declaration == "inline":
         source = source.replace("word_type = ti.u64 if scope.packed else ti.u32\n        ", "")
         source = source.replace("scope.field(word_type,", "scope.field(ti.u64 if scope.packed else ti.u32,")
+    elif declaration == "derived":
+        source = source.replace("self.values", "self.mirror")
+        source = source.replace("self.source.values", "self.source.mirror")
+        source = source.replace("self.child.values", "self.child.mirror")
+        source = source.replace(
+            "scope.result = scope.field",
+            "scope.mirror = scope.field(self.values.dtype, shape=shape, initialization='zero')\n"
+            "        scope.result = scope.field",
+        )
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert manifest["version"] == 72
@@ -12377,6 +12386,8 @@ def test_package_field_dtype_choices_share_unaffected_code(tmp_path, monkeypatch
         for n in (3, 19):
             a, b = code.host.Model(n, 7, True), code.host.Model(n, 7, False)
             assert a.values.dtype == "u64" and b.values.dtype == "u32"
+            if declaration == "derived":
+                assert a.mirror.dtype == "u64" and b.mirror.dtype == "u32"
             a.fill(wide_value)
             b.reader.fill(wide_value)
             a.read()
@@ -12437,7 +12448,7 @@ def test_package_field_dtype_choices_share_unaffected_code(tmp_path, monkeypatch
         load_package(runtime, tmp_path / "sdk")
 
 
-@pytest.mark.parametrize("change", ["kernel_only", "model_condition", "unproven_branch"])
+@pytest.mark.parametrize("change", ["kernel_only", "model_condition", "unproven_branch", "derived_tensor"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_field_dtype_rejects_unproven_selection(tmp_path, monkeypatch, change):
     source = FIELD_DTYPE_CHOICE_SOURCE
@@ -12445,10 +12456,16 @@ def test_package_field_dtype_rejects_unproven_selection(tmp_path, monkeypatch, c
         source = source.replace("choices=(False, True))", "choices=(False, True), kernel_only=True)")
     elif change == "model_condition":
         source = source.replace("if scope.packed else", "if self.n > 4 else")
-    else:
+    elif change == "unproven_branch":
         source = source.replace("else ti.u32", "else ti.types.vector(3, ti.u32)")
+    else:
+        source = source.replace(
+            "scope.result = scope.field",
+            "scope.mirror = scope.vector_field(3, self.values.dtype, shape=shape)\n"
+            "        scope.result = scope.field",
+        )
     package = _source_package(tmp_path, monkeypatch, source)
-    with pytest.raises(ValueError, match="Field dtype selection"):
+    with pytest.raises(ValueError, match="Field dtype (selection|choices)"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk").exists()

@@ -187,6 +187,24 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             raise ValueError("Field layout requires one fixed dtype; numerical dtype choices cannot change its ABI")
         return producer_static(read_static_key(spec["choices"][0]))
 
+    def resolved_dtype_policy(policy, type_namespace):
+        if "native_ids" in policy:
+            return dict(policy)
+        types = {
+            key: resolve_type(policy[key], type_namespace, owner_dtype=owner_dtype) for key in ("if_true", "if_false")
+        }
+        alternatives = {key: type_spec(dtype, module) for key, dtype in types.items()}
+        if any(element["kind"] != "scalar" for element in alternatives.values()):
+            raise ValueError("Field dtype selection requires scalar element alternatives")
+        return {
+            "condition": policy["condition"],
+            **{key: element["dtype"] for key, element in alternatives.items()},
+            # Reuse native primitive serialization, never a second enum table.
+            "native_ids": {key: dtype.__getstate__()[0] for key, dtype in types.items()},
+        }
+
+    dtype_sources = []
+
     def resource_dtype(expression, visiting=()):
         from taichi_forge.types._argument_descriptor import describe_element_type
 
@@ -220,6 +238,9 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             "_forge_package_vector": ti.types.vector,
             "_forge_package_matrix": ti.types.matrix,
         }
+        if "dtype_policy" in spec:
+            policy = resolved_dtype_policy(spec["dtype_policy"], source_namespace)
+            dtype_sources.append((policy, spec.get("dtype_guards", {})))
         # .dtype means the scalar component type, also for model-sized tensors.
         if isinstance(node, ast.Call):
             from ._package_factories import _source_value
@@ -300,21 +321,8 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             else namespace
         )
         if "dtype_policy" in item:
-            policy = item["dtype_policy"]
-            types = {
-                key: resolve_type(policy[key], declaration_namespace, owner_dtype=owner_dtype)
-                for key in ("if_true", "if_false")
-            }
-            alternatives = {key: type_spec(dtype, module) for key, dtype in types.items()}
-            if any(element["kind"] != "scalar" for element in alternatives.values()):
-                raise ValueError("Field dtype selection requires scalar element alternatives")
-            item["dtype_policy"] = {
-                "condition": policy["condition"],
-                **{key: element["dtype"] for key, element in alternatives.items()},
-                # Reuse the native primitive serializer; do not duplicate its
-                # enum numbering or compute any physical offsets in Python.
-                "native_ids": {key: dtype.__getstate__()[0] for key, dtype in types.items()},
-            }
+            item["dtype_policy"] = resolved_dtype_policy(item["dtype_policy"], declaration_namespace)
+        dtype_sources.clear()
         dtype = resolve_type(
             item.pop("type_node"),
             {
@@ -329,6 +337,12 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             owner_dtype=owner_dtype,
         )
         item["element"] = type_spec(dtype, module, model_tensors=model_tensors)
+        if dtype_sources:
+            policy, guards = dtype_sources[0]
+            if item["element"]["kind"] != "scalar" or any(source != (policy, guards) for source in dtype_sources):
+                raise ValueError("Derived Field dtype choices require one scalar source policy")
+            item["dtype_policy"] = dict(policy)
+            item["dtype_guards"] = dict(guards)
         if "local_type_source" in item and item["element"]["kind"] == "struct":
             item["local_type_order"] = list(item["element"]["members"])
         if "member_initialization_node" in item:

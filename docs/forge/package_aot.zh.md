@@ -1274,6 +1274,8 @@ StructField 或跨形状选择的 `field_like` 克隆；这些情况明确拒绝
 实例构造选择原生类型，SNode 编译器重算对齐和偏移，不按模型容量复制代码。
 CPU/CUDA 局部检查包含嵌套 owner、借用、JIT 对照和无源码双实例消费。
 当前仅支持标量元素选择，不含 `field_like` 对该选择的克隆。
+以已声明字段的 `.dtype` 分配另一个标量 Field 时，该类型依赖沿同一策略传递，
+只访问派生字段的入口也覆盖相应类型；派生张量/Struct 的类型选择目前明确拒绝。
 
 复杂 SNode/Field 布局、上述继承限制、模板参数域/其余条件资源域、无类型或 Python 专用 `pyfunc`、梯度、任意 Python
 资源工厂、完整 Host 数组访问接口、完整 Graph/ExecutionPlan 和 provider 引用还没有接入。
