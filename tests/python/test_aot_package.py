@@ -2412,9 +2412,17 @@ def append_step(solver, builder):
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-@pytest.mark.parametrize('recipe_kind', ['factory', 'mixed', 'filtered', 'forwarded', 'forwarded_many'])
+@pytest.mark.parametrize('recipe_kind', ['factory', 'mixed', 'filtered', 'forwarded', 'forwarded_many', 'direct_choice'])
 def test_package_write_inventory_resolves_optional_record_recipes(tmp_path, monkeypatch, recipe_kind):
     recipe = RECORD_INVENTORY_RECIPE
+    if recipe_kind == 'direct_choice':
+        start = recipe.index('def append_step(solver, builder):')
+        recipe = recipe[:start] + '''def append_step(solver, builder):
+    record_selected(builder, solver.step if solver.n > 8 else solver.unrelated)
+
+def record_selected(builder, kernel):
+    builder.dispatch(kernel)
+'''
     if recipe_kind.startswith('forwarded'):
         if recipe_kind == 'forwarded_many':
             start, end = recipe.index('def operations(solver):'), recipe.index('def append_step(solver, builder):')
@@ -2488,13 +2496,17 @@ def operations(solver):
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-@pytest.mark.parametrize('change', ['unknown_callback', 'exception_effect', 'escaped_recipe'])
+@pytest.mark.parametrize('change', ['unknown_callback', 'exception_effect', 'escaped_recipe', 'direct_missing_branch'])
 def test_package_write_inventory_rejects_unproven_record_recipes(tmp_path, monkeypatch, change):
     recipe = RECORD_INVENTORY_RECIPE
     if change == 'unknown_callback':
         recipe = recipe.replace('Directed(solver.step).record', 'solver.missing')
     elif change == 'exception_effect':
         recipe = recipe.replace("ValueError('negative size')", 'ValueError(solver.step())')
+    elif change == 'direct_missing_branch':
+        recipe = recipe[:recipe.index('def append_step(solver, builder):')] + '''def append_step(solver, builder):
+    builder.dispatch(solver.step if solver.n > 8 else solver.missing)
+'''
     else:
         recipe = recipe.replace('    recipe = operations(solver)', '    recipe = operations(solver)\n    opaque(recipe)')
     source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(

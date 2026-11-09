@@ -1248,6 +1248,9 @@ discovery does not enumerate every combination of its operations. Only the choic
 used by a particular branch or dispatch is refined, with correlated record members
 and Kernel receivers kept together. This is source analysis, not a limit on recipe
 length or a change to normal Host execution.
+The same rule covers a conditional Kernel expression passed directly to a recording
+helper. Both possible entries must have proven sources; an unknown alternative
+cannot be discarded because another branch is known.
 
 Immutable operation records may also participate in single-level conditional
 filters, sequence concatenation and model-count repetition. Source domains retain

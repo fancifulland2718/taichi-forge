@@ -415,6 +415,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         # their own lexical scope and cannot lend assignments to this call.
         nodes = []
         source_only_calls = set()
+        source_expression_choices = {}
         condition_value = None
 
         def source_projection():
@@ -571,6 +572,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
 
                         def visit_IfExp(self, part):
                             if getattr(part, '_package_source_choice', None) == fact.source[1]:
+                                return self.visit(part.body if self.index == 0 else part.orelse)
+                            original = value(part)
+                            if isinstance(original, _Choice) and original.source == fact.source:
                                 return self.visit(part.body if self.index == 0 else part.orelse)
                             return self.generic_visit(part)
                     for index in range(len(fact.alternatives)):
@@ -875,6 +879,13 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 for resource, absent in ((left, right), (right, left)):
                     if isinstance(resource, _Resource) and isinstance(absent, _Literal) and absent.value is None:
                         return _Resource(resource.owner, resource.path, optional=True)
+                if resource_inventory is not None and left != right:
+                    projection = source_projection()
+                    key = (getattr(expression, 'lineno', None), getattr(expression, 'col_offset', None),
+                           projection.source_key(expression))
+                    if key not in source_expression_choices:
+                        source_expression_choices[key] = projection.choice(expression.test)[1]
+                    return _Choice(('source_sequence', source_expression_choices[key]), (left, right))
                 return left if left == right else None
             if isinstance(expression, ast.Call):
                 cls = source(expression.func)
