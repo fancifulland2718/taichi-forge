@@ -1758,22 +1758,35 @@ arbitrary record argument or execute a binding factory to obtain a model sample.
 
 Version 56 extends that binding to preparation inputs with a proven original
 allocation. The existing Host-call analysis traces frozen record factories,
-normal method forwarding and a preceding single-assignment owner alias. Every
-discovered call must resolve to one source owner type and Field member; unknown
-or conflicting sources reject before numerical compilation. Preparation binds
+normal method forwarding and a preceding single-assignment owner alias. Proven
+sources must agree on one source owner type and Field member. Later caller inputs
+may be unknown during export: they contribute no source evidence and use that
+existing allocation contract at binding. Missing or conflicting source contracts
+reject before numerical compilation. Preparation binds
 the caller's actual instance without copying or reallocating the source. Runtime
 checks its package, type, path, alias and dimension relations before publishing
 the private source link. A failed binding does not replace that link; arbitrary
 earlier Host writes are still outside the rollback boundary. CPU/CUDA source-free
 checks cover new sizes, independent/rebound inputs and retained Graph snapshots.
 
+Ordinary free preparation functions, including definitions in another module,
+use the same projection and input contract. Forwarding methods may pass caller
+parameters to them. The exporter resolves the original function, owner parameter
+and normalized declaration-helper aliases without running the preparation body.
+It does not mark every upstream call as statically proven just because they share
+one helper call site. No runtime diagnostics, new binding checks or format version
+are added. Local CPU/CUDA source-free checks cover normal/explicit forwarding,
+new instances and sizes, wrong members/dimensions/packages, and retained Graphs.
+This source-scope contract still names a declared allocation role; independent
+caller allocations use the existing typed `external=True` borrow instead.
+
 Preparation declarations may also borrow a `self` Field assigned in another ordinary
 binding method. There must be one direct assignment source, with its original
-allocation type proven at every known call; initial `None` in the constructor is
+allocation contract determined by consistent proven sources; initial `None` in the constructor is
 not another allocation source. The borrow still checks the actual Field, original
 member and owner before publishing the private source link. A Host assignment alone
 does not refresh that binding. This rule does not infer method execution order;
-multiple writers, conditional assignments and unknown argument forwarding reject.
+multiple writers, conditional assignments and missing source contracts reject.
 Focused CPU/CUDA source-free checks include new sizes, wrong sources, rebinding and
 retained Graph snapshots.
 Version 57 also admits optional Field members supplied by these factories. A

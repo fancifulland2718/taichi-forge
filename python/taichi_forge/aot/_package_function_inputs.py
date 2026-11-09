@@ -303,16 +303,54 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             if resource_inventory is not None or len(templates) > (1 if definition["owner"] is not None else 0):
                 kernels.setdefault(entry, (module, definition, tuple(templates)))
                 kernel_definitions.setdefault(entry, []).append(definition)
-    requested = {}
+    # Free preparation already has a source-proven owner projection. Reuse its
+    # normalized declarations (including helper-local aliases), with the actual
+    # Python parameter name restored for ordinary call binding.
+    preparations = {}
+    if resource_inventory is None:
+        for function, (module, node) in list(functions.items()):
+            preparation = getattr(node, "_package_free_preparation", None)
+            if preparation is None:
+                continue
+            owner, receiver, normalized = preparation
+
+            class RestoreReceiver(ast.NodeTransformer):
+                def __init__(self, parameter):
+                    self.parameter = parameter
+
+                def visit_Name(self, part):
+                    if part.id == "self":
+                        part.id = self.parameter
+                    return part
+
+                def visit_arg(self, part):
+                    if part.arg == "self":
+                        part.arg = self.parameter
+                    return part
+
+            restore = RestoreReceiver(receiver)
+            functions[function] = (module, restore.visit(copy.deepcopy(normalized)))
+            preparations[(module, owner, normalized.name)] = (function, receiver, restore)
+    requested, request_sources = {}, {}
     for identity, schema in owners.items():
         if resource_inventory is not None:
             break
         for name, item in schema.items():
             if "input_expression" not in item:
                 continue
-            method = inspect.getattr_static(classes[identity], item["input_method"], None)
+            preparation = preparations.get((
+                item.get("declaration_module"), item.get("declaration_owner"), item["input_method"]
+            ))
+            if preparation is not None:
+                method, receiver, restore = preparation
+                expression = restore.visit(copy.deepcopy(item["input_expression"]))
+            else:
+                method = inspect.getattr_static(classes[identity], item["input_method"], None)
+                receiver, expression = "self", item["input_expression"]
             if method not in functions:
-                raise ValueError("Prepared input method is outside its ordinary source definition: " + identity)
+                raise ValueError("Prepared input method is outside its ordinary source definition: "
+                                 + identity + "." + item["input_method"] + " (" + name + ")")
+            request_sources[id(item)] = receiver, expression
             requested.setdefault(method, []).append((identity, name, item))
     if not kernels and not requested and preparation_receivers is None:
         return {}, []
@@ -347,7 +385,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     visited, domains, covered, failures = set(), {}, set(), []
     invalid = set()
     return_cache = {}
-    binding_domains, binding_calls, binding_covered = {}, set(), set()
+    binding_domains = {}
 
     def source_callable(expression, namespace):
         if resource_inventory is not None and hasattr(expression, '_package_source_callable'):
@@ -1190,21 +1228,17 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         identity = (function, tuple(sorted(arguments.items())))
         value, target, nodes, module, source_only_calls = build_context(function, arguments, (function,))
         for owner, name, item in requested.get(function, ()):
-            receiver = arguments.get("self")
+            parameter, expression = request_sources[id(item)]
+            receiver = arguments.get(parameter)
             if not isinstance(receiver, _Owner) or receiver.identity != owner:
                 continue
-            fact = value(item["input_expression"])
-            if isinstance(fact, _Literal) and fact.value is None and item.get("optional_input"):
-                if call_site is not None:
-                    binding_covered.add((function, call_site, owner, name))
+            fact = value(expression)
             if isinstance(fact, _Resource) and (not fact.optional or item.get("optional_input")):
                 source = owners[fact.owner.identity].get(fact.path[0], {})
                 if source.get("kind") == "dense_field" and (
                     len(fact.path) == 1 or source.get("struct_field") and len(fact.path) == 2
                 ):
                     binding_domains.setdefault((owner, name), set()).add((fact.owner.identity, fact.path))
-                    if call_site is not None:
-                        binding_covered.add((function, call_site, owner, name))
         if preparation_receivers is not None and function in preparation_receivers:
             receivers = [(key, item.identity) for key, item in arguments.items() if isinstance(item, _Owner)]
             if not receivers:
@@ -1309,9 +1343,6 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             if resource_inventory is not None and receiver is None and callee not in kernels:
                 if scope_factory(callee, call) is not None:
                     return  # Reuse the existing proof; construction performs no device work.
-            for owner, name, _ in requested.get(callee, ()):
-                if isinstance(receiver, _Owner) and receiver.identity == owner:
-                    binding_calls.add((callee, id(call), owner, name))
             values = [receiver] if receiver is not None else []
             unknown_expansion = any(k.arg is None for k in call.keywords)
             unknown_position = False
@@ -1350,10 +1381,6 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     for item in [*values, *kwargs.values()]:
                         inventory_input(item)
                 return
-            for owner, name, _ in requested.get(callee, ()):
-                actual = bound.arguments.get("self")
-                if isinstance(actual, _Owner) and actual.identity == owner:
-                    binding_calls.add((callee, id(call), owner, name))
             if callee in kernels:
                 record(callee, bound.arguments, call)
             elif any(item is not None for item in bound.arguments.values()):
@@ -1498,14 +1525,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     raise ValueError(f"{module}:{call.lineno}: preparation call has no proven owner receiver")
         return {}, []
 
-    # An input domain must cover each ordinary direct use in the scanned source,
-    # not just the first convenient model path. Unknown forwarding stays a gap.
+    # Free Kernel template domains must cover all direct uses. Prepared Field
+    # borrows instead infer one allocation contract below and use the existing
+    # binding boundary for caller-provided values; unknown calls are not proof
+    # of that contract, nor do they require a second implementation.
     for function, (module, node) in functions.items():
         for call in ast.walk(node):
             if isinstance(call, ast.Call) and id(call) not in covered:
                 callee = source_callable(call.func, function_namespace(function))
-                for owner, name, _ in requested.get(callee, ()):
-                    binding_calls.add((callee, id(call), owner, name))
                 if isinstance(call.func, ast.Attribute) and call.func.attr == "dispatch" and call.args:
                     callee = _source_value(call.args[0], function.__globals__)
                 if inspect.isfunction(callee) and callee in domains:
@@ -1515,11 +1542,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     for entries in requested.values():
         for owner, name, item in entries:
             identities = binding_domains.get((owner, name), ())
-            if len(identities) != 1 or any(
-                key not in binding_covered for key in binding_calls if key[2:] == (owner, name)
-            ):
+            # Source-scope borrowing retains one known allocation role. All
+            # proven contexts must agree; an unknown external caller adds no
+            # source fact. Its actual Field still goes through the same borrow
+            # binding contract before use. No evidence cannot infer an ABI.
+            if len(identities) != 1:
                 failures.append(
-                    f"{owner}.{name}: prepared Field input requires one proven allocation source at every call"
+                    f"{owner}.{name}: prepared Field input requires one definition-proven allocation contract; "
+                    "use a typed external borrow for independent allocation sources"
                 )
                 continue
             source_type, source_member = next(iter(identities))

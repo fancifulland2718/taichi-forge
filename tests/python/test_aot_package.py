@@ -5394,6 +5394,116 @@ def _prepared_field_alias_source(*, cross_method=False):
     return source
 
 
+def _free_prepared_input_source(source):
+    start = source.index("    def prepare(self, binding):")
+    end = source.index("    @ti.kernel", start)
+    preparation = textwrap.dedent(source[start:end]).replace(
+        "prepare(self, binding)", "prepare_external(owner, binding)"
+    ).replace("self", "owner")
+    return (source[:start] + "    def prepare(self, binding):\n"
+            "        prepare_external(self, binding)\n" + source[end:] + "\n" + preparation)
+
+
+@pytest.mark.parametrize("preparation", ["method", "free", "module", "helper", "cross_method"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_prepared_inputs_accept_late_callers_with_known_contract(tmp_path, monkeypatch, preparation):
+    source = (_prepared_field_alias_source(cross_method=True)
+              if preparation == "cross_method" else _prepared_input_source())
+    source += """
+    def external(self, binding):
+        self.consumer.prepare(binding)
+    def explicit(self, binding):
+        Model.prepare(self.consumer, binding)
+"""
+    extra = {}
+    if preparation in ("free", "module", "helper"):
+        source = _free_prepared_input_source(source)
+    if preparation == "helper":
+        start = source.index("    record = scope.record('binding', binding, optional=True)")
+        end = source.index("    with resource_group(owner, 'output'", start)
+        helper = source[start:end].replace(
+            "        record.borrow('values', binding.values, source_scope=True, dimensions={'n': size})",
+            "        dimensions = {'n': size}\n"
+            "        record.borrow('values', binding.values, source_scope=True, dimensions=dimensions)",
+        )
+        source = (source[:start] + "    declare_binding(scope, binding)\n" + source[end:]
+                  + "\ndef declare_binding(scope, binding):\n" + helper)
+    if preparation == "module":
+        start = source.index("def prepare_external(owner,")
+        extra["preparation"] = (
+            "import taichi_forge as ti\nfrom resource_contexts import resource_group\npreparations = 0\n"
+            + source[start:].replace("owner", "target")
+        )
+        source = "from .preparation import prepare_external\n" + source[:start]
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source, extra_modules=extra)
+    model = sys.modules["definition_fixture.model"]
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert model.constructors == model.preparations == 0
+    reference = model.Harness(7)
+    reference.source.storage.from_numpy(np.arange(7, dtype=np.int32))
+    reference.external(model.make_binding(reference.source))
+    reference.consumer.step(3)
+    expected = reference.consumer.output.to_numpy()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        host = code.host.model
+        a, b = host.Harness(7), host.Harness(19)
+        a.source.storage.from_numpy(np.arange(7, dtype=np.int32))
+        b.source.storage.from_numpy(np.arange(19, dtype=np.int32) * 2)
+        a.external(host.make_binding(a.source))
+        a.consumer.step(3)
+        np.testing.assert_array_equal(a.consumer.output.to_numpy(), expected)
+        b.explicit(host.make_binding(b.source))
+        b.consumer.step(5)
+        np.testing.assert_array_equal(b.consumer.output.to_numpy(), np.arange(19) * 2 + 5)
+        saved = a.consumer.graph().bind({"delta": 11})
+        old = a.consumer.output
+        a.explicit(host.make_binding(b.source))
+        a.consumer.step(9)
+        saved.run()
+        np.testing.assert_array_equal(old.to_numpy(), np.arange(7) + 11)
+        np.testing.assert_array_equal(a.consumer.output.to_numpy(), np.arange(19) * 2 + 9)
+        np.testing.assert_array_equal(b.consumer.output.to_numpy(), np.arange(19) * 2 + 5)
+        saved.close()
+        for binding, message in ((host.Binding(19, b.source.other), "declared allocation member"),
+                                 (host.Binding(18, b.source.storage), "Dimension constraint")):
+            resources = set(runtime._resources)
+            with pytest.raises(ValueError, match=message):
+                a.external(binding)
+            assert set(runtime._resources) == resources
+        with load_package(runtime, tmp_path / "sdk") as foreign:
+            field = foreign.host.model.Source(19).storage
+            with pytest.raises(ValueError, match="child owner"):
+                a.explicit(host.Binding(19, field))
+    probe = tmp_path / "consume_late_input.py"
+    probe.write_text(textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            host = code.host.model
+            a, b = host.Harness(11), host.Harness(23)
+            b.source.storage.from_numpy(np.arange(23, dtype=np.int32))
+            a.external(host.make_binding(b.source))
+            a.consumer.step(4)
+            np.testing.assert_array_equal(a.consumer.output.to_numpy(), np.arange(23) + 4)
+        print('LATE_INPUT_SOURCE_FREE_OK')
+    """), encoding="utf8")
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path, capture_output=True, text=True, timeout=90,
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "LATE_INPUT_SOURCE_FREE_OK" in result.stdout
+
+
 @pytest.mark.parametrize("alias", [False, True, "explicit", "cross_method"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_prepared_inputs_follow_record_factory_sources(tmp_path, monkeypatch, alias):
@@ -5501,7 +5611,7 @@ def test_package_prepared_inputs_follow_record_factory_sources(tmp_path, monkeyp
     assert "PREPARED_INPUT_SOURCE_FREE_OK" in result.stdout
 
 
-@pytest.mark.parametrize("change", ["second_writer", "conditional_writer", "unknown_call", "unknown_source"])
+@pytest.mark.parametrize("change", ["second_writer", "conditional_writer", "unknown_source"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_cross_method_inputs_require_unique_proven_binding(tmp_path, monkeypatch, change):
     source = _prepared_field_alias_source(cross_method=True)
@@ -5514,8 +5624,6 @@ def test_package_cross_method_inputs_require_unique_proven_binding(tmp_path, mon
         source = source.replace(
             "        self.input = field", "        if field is not None:\n            self.input = field"
         )
-    elif change == "unknown_call":
-        source += "\n    def unknown(self, field):\n        self.consumer.bind_input(field)\n"
     else:
         source = source.replace("        self.input = field", "        self.input = unknown(field)")
         source += "\ndef unknown(field):\n    raise AssertionError('must not execute')\n"
@@ -5526,20 +5634,19 @@ def test_package_cross_method_inputs_require_unique_proven_binding(tmp_path, mon
     assert sys.modules["definition_fixture.model"].constructors == 0
 
 
-@pytest.mark.parametrize("change", ["unknown_call", "unknown_explicit", "two_sources", "unreachable", "mutable"])
+@pytest.mark.parametrize("change", ["two_sources", "unreachable", "mutable"])
+@pytest.mark.parametrize("free_preparation", [False, True])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_package_prepared_inputs_require_complete_source_calls(tmp_path, monkeypatch, change):
+def test_package_prepared_inputs_require_one_source_contract(tmp_path, monkeypatch, change, free_preparation):
     source = _prepared_input_source()
-    if change == "unknown_call":
-        source += "\n    def unknown(self, binding):\n        self.consumer.prepare(binding)\n"
-    elif change == "unknown_explicit":
-        source += "\n    def unknown(self, binding):\n        Model.prepare(self.consumer, binding)\n"
-    elif change == "two_sources":
+    if change == "two_sources":
         source += "\n    def other(self):\n        self.consumer.prepare(Binding(self.source.n, self.source.other))\n"
     elif change == "unreachable":
         source = source.replace("        self.consumer.prepare(binding)", "        pass")
     else:
         source = source.replace("@dataclass(frozen=True)", "@dataclass")
+    if free_preparation:
+        source = _free_prepared_input_source(source)
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     with pytest.raises(ti.aot.PackageExportError, match="prepared Field input requires"):
         ti.aot.export_package(package, tmp_path / "sdk")
