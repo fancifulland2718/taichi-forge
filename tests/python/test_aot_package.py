@@ -6503,6 +6503,89 @@ class Model:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize('inherited', [False, True])
+def test_package_write_inventory_tracks_child_kernel_choices(tmp_path, monkeypatch, inherited):
+    source = _child_choice_inventory_source()
+    if inherited:
+        source = source.replace('@ti.data_oriented\nclass First:', '''class Preparation:
+    @ti.kernel
+    def prepare(self):
+        for i in range(self.parent.n):
+            self.evaluate(i)
+@ti.data_oriented
+class First(Preparation):''')
+        source = source.replace('''    @ti.kernel
+    def prepare(self):
+        for i in self.a:
+            self.a[i] = i + 3''', '')
+        source = source.replace('class Second:', 'class Second(Preparation):').replace('''    @ti.kernel
+    def prepare(self):
+        for i, j in self.b:
+            self.b[i, j] = 2 * i - j''', '')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert package.model.constructors == 0
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for second, n in ((False, 5), (True, 13)):
+            normal = package.Model(n, second)
+            normal.child.prepare()
+            model = code.host.Model(n, second)
+            model.child.prepare()
+            field = model.child.b if second else model.child.a
+            reference = normal.child.b if second else normal.child.a
+            np.testing.assert_array_equal(field.to_numpy(), reference.to_numpy())
+            copy, = model.checkpoint.copies
+            assert copy.source is field
+            copy.save()
+            field.from_numpy(np.full_like(reference.to_numpy(), 91))
+            copy.restore()
+            np.testing.assert_array_equal(field.to_numpy(), reference.to_numpy())
+
+
+def _child_choice_inventory_source():
+    source = CHILD_CHOICES_SOURCE.replace('class First:', '''class First:
+    @ti.kernel
+    def prepare(self):
+        for i in self.a:
+            self.a[i] = i + 3''').replace('class Second:', '''class Second:
+    @ti.kernel
+    def prepare(self):
+        for i, j in self.b:
+            self.b[i, j] = 2 * i - j''')
+    source = source.replace('scope.child = First(self)', '''scope.child = First(self)
+        scope.checkpoint = Checkpoint(self)''')
+    source = source.replace('class Model:', '''class Model:
+    def record(self, builder):
+        owner = self.child
+        dispatch(builder, owner.prepare, {'self': owner})''')
+    checkpoint = CYCLIC_WRITE_INVENTORY_SOURCE.split('@ti.data_oriented\nclass Copy:', 1)[1]
+    checkpoint = checkpoint.split('def append_step', 1)[0]
+    return source + '\n@ti.data_oriented\nclass Copy:' + checkpoint + '''
+def dispatch(builder, kernel, inputs):
+    builder.dispatch(kernel, template_args=inputs)
+'''
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('change', ['receiver', 'missing_alternative'])
+def test_package_write_inventory_rejects_unproven_child_kernel(tmp_path, monkeypatch, change):
+    source = _child_choice_inventory_source()
+    if change == 'receiver':
+        source = source.replace("{'self': owner}", "{'self': self}")
+    else:
+        source = source.replace('class Second:\n    @ti.kernel\n    def prepare(self):',
+                                'class Second:\n    @ti.kernel\n    def other(self):')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    with pytest.raises(ValueError, match='write inventory'):
+        ti.aot.check_package(package)
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_child_choices_share_unrelated_parent_code(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, CHILD_CHOICES_SOURCE)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")

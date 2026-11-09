@@ -52,6 +52,41 @@ class _Record:
     items: tuple
 
 
+@dataclass(frozen=True)
+class _Choice:
+    source: tuple
+    alternatives: tuple
+
+
+def _choice_contexts(arguments):
+    """Keep repeated reads of one declared owner choice correlated."""
+    def expand(value, selected):
+        if isinstance(value, _Choice):
+            indices = (selected[value.source],) if value.source in selected else range(len(value.alternatives))
+            for index in indices:
+                yield from expand(value.alternatives[index], {**selected, value.source: index})
+        elif isinstance(value, (_Mapping, _Record)):
+            for items, choices in entries(value.items, selected):
+                yield (_Record(value.cls, items) if isinstance(value, _Record) else _Mapping(items)), choices
+        elif isinstance(value, tuple):
+            for items, choices in entries(tuple(enumerate(value)), selected):
+                yield tuple(item for _, item in items), choices
+        else:
+            yield value, selected
+
+    def entries(items, selected):
+        if not items:
+            yield (), selected
+            return
+        (name, value), *rest = items
+        for item, choices in expand(value, selected):
+            for tail, choices in entries(rest, choices):
+                yield ((name, item), *tail), choices
+
+    for items, _ in entries(tuple(arguments.items()), {}):
+        yield dict(items)
+
+
 @dataclass(frozen=True, eq=False)
 class _Literal:
     value: object
@@ -249,6 +284,10 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         if not isinstance(owner, _Owner):
             return None
         item = owners[owner.identity].get(name, {})
+        alternatives = tuple(dict.fromkeys(choice.get('owner_type') for choice in item.get('owner_alternatives', ())))
+        if resource_inventory is not None and len(alternatives) > 1 and all(kind in owners for kind in alternatives):
+            root, path = owner.root or owner.identity, (*owner.path, name)
+            return _Choice((root, path), tuple(_Owner(kind, root, path) for kind in alternatives))
         if resource_inventory is not None and isinstance(inspect.getattr_static(classes[owner.identity], name, None), property):
             inventory.add((owner.identity, ()))
         if resource_inventory is not None and (
@@ -265,6 +304,18 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             resource_inventory is not None and item.get("kind") == "field_like"
         ):
             return _Resource(owner, tuple(item.get("path", (name,))))
+        return None
+
+    def attribute(receiver, name):
+        if isinstance(receiver, _Choice):
+            return _Choice(receiver.source, tuple(attribute(item, name) for item in receiver.alternatives))
+        item = member(receiver, name)
+        if item is not None:
+            return item
+        if isinstance(receiver, _Owner):
+            method = inspect.getattr_static(classes[receiver.identity], name, None)
+            if inspect.isfunction(method) and method in kernels:
+                return _Kernel(method, receiver)
         return None
 
     def build_context(function, arguments, return_chain):
@@ -515,13 +566,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 return None
             if isinstance(expression, ast.Attribute):
                 receiver = child(expression.value)
-                item = member(receiver, expression.attr)
+                item = attribute(receiver, expression.attr)
                 if item is not None:
                     return item
-                if isinstance(receiver, _Owner):
-                    method = inspect.getattr_static(classes[receiver.identity], expression.attr, None)
-                    if inspect.isfunction(method) and method in kernels:
-                        return _Kernel(method, receiver)
                 resolved = source(expression)
                 if inspect.isfunction(resolved) and resolved in kernels:
                     return _Kernel(resolved)
@@ -792,6 +839,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             elif isinstance(item, (_Mapping, _Record)):
                 for _, child in item.items:
                     inventory_input(child)
+            elif isinstance(item, _Choice):
+                for child in item.alternatives:
+                    inventory_input(child)
             elif isinstance(item, tuple):
                 for child in item:
                     inventory_input(child)
@@ -861,8 +911,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 and call.args
             ):
                 kernel = value(call.args[0])
-                if isinstance(kernel, _Kernel):
-                    inputs = next((value(k.value) for k in call.keywords if k.arg == "template_args"), None)
+                inputs = next((value(k.value) for k in call.keywords if k.arg == "template_args"), None)
+                for context in _choice_contexts(dict(kernel=kernel, inputs=inputs)):
+                    kernel, inputs = context['kernel'], context['inputs']
+                    if not isinstance(kernel, _Kernel):
+                        if resource_inventory is not None:
+                            route = ' -> '.join(item.__qualname__ for item in chain)
+                            failures.append(f"{module}:{call.lineno}: write inventory dispatch has no proven Kernel via {route}")
+                        continue
                     parameters = kernels[kernel.function][2]
                     mapping = dict(inputs.items) if isinstance(inputs, _Mapping) else {}
                     if kernel.receiver is not None:
@@ -872,9 +928,6 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         else:
                             mapping[receiver] = kernel.receiver
                     record(kernel.function, mapping if set(mapping) == set(parameters) else {}, call)
-                elif resource_inventory is not None:
-                    route = ' -> '.join(item.__qualname__ for item in chain)
-                    failures.append(f"{module}:{call.lineno}: write inventory dispatch has no proven Kernel via {route}")
                 continue
             callee, receiver = target(call.func)
             if callee not in kernels and callee not in functions:
@@ -950,13 +1003,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     for key, item in bound.arguments.items()
                     if item is not None
                 }
-                if callee in chain:
-                    if (callee, tuple(sorted(inputs.items()))) not in visited:
-                        failures.append(
-                            f"{module}:{call.lineno}: recursive Kernel input forwarding changes its source context"
-                        )
-                else:
-                    pending.append((callee, inputs, (*chain, callee), id(call)))
+                for context in _choice_contexts(inputs):
+                    if callee in chain:
+                        if (callee, tuple(sorted(context.items()))) not in visited:
+                            failures.append(
+                                f"{module}:{call.lineno}: recursive Kernel input forwarding changes its source context"
+                            )
+                    else:
+                        pending.append((callee, context, (*chain, callee), id(call)))
 
     if resource_inventory is not None:
         return inventory, list(dict.fromkeys(failures))

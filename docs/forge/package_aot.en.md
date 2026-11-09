@@ -1199,6 +1199,14 @@ constructor/preparation forwarding, source-free consumption at new sizes,
 optional Field save/restore and unknown-source rejection. This does not admit
 arbitrary Python sequences.
 
+Write-inventory discovery also preserves declared child implementation choices:
+`child.prepare` and a forwarded `self=child` retain the same receiver choice.
+Inherited Kernels resolve numerical calls against each concrete child. Only
+possible Field sources are combined; normal preparation still selects actual
+writes, without expanding parent configuration combinations. Local CPU/CUDA
+checks cover distinct child layouts and inherited methods. Mismatched receivers
+and alternatives with missing methods still reject.
+
 Version 41 also admits borrowing an entire declared flat StructField through
 `scope.borrow(..., source_scope=True)`. Member bindings retain the original
 allocation namespace and native layout; the record is not an independent array.

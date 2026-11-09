@@ -691,6 +691,11 @@ Host owner 序列也可从已有 `ti.aot.written_resources(owner, owner.record)`
 分支继续验证来源，未知值或被改写参数不能当成缺省值。CPU/CUDA 局部检查覆盖构造/准备
 转发、无源码新尺寸消费、可选字段的保存/恢复及未知来源拒绝；不扩大到任意 Python 序列。
 
+写集合来源分析也保留已声明子对象实现选择：`child.prepare` 与转发的 `self=child`
+始终来自同一个选择，继承的 Kernel 按具体子对象解析数值调用。这里只合并可能的字段
+类型来源，正常准备仍选择实际写集合；不展开父对象配置组合。CPU/CUDA 局部检查覆盖
+两种不同字段布局及继承方法；错误的接收者和缺失方法的分支仍拒绝。
+
 版本 41 允许通过 `scope.borrow(..., source_scope=True)` 借用整个已声明的扁平
 StructField，成员绑定保留原分配命名空间和原生布局，不将记录当作独立数组。
 该输入可以供 `field_like` 使用，包括含模型向量成员的 SOA 备份。Dense 遍历为
