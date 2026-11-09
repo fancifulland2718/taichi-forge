@@ -83,6 +83,30 @@ def resolve_field_likes(sources):
             for key in original["dimension_sources"]
         }
         field = copy.deepcopy(original)
+
+        class SourceTypes(ast.NodeTransformer):
+            def visit_Attribute(self, node):
+                parts, root = [], node
+                while isinstance(root, ast.Attribute):
+                    parts.insert(0, root.attr)
+                    root = root.value
+                declaration = next(
+                    (spec for key, spec in owners[source_owner][1].items() if spec.get("path", [key]) == parts), {}
+                )
+                if isinstance(root, ast.Name) and root.id == "self" and declaration.get("static_dtype"):
+                    from taichi_forge_runtime._static_values import read_static_key
+
+                    if len(declaration["choices"]) != 1:
+                        raise ValueError("field_like requires one fixed source storage dtype")
+                    dtype = read_static_key(declaration["choices"][0])
+                    return ast.copy_location(
+                        ast.Attribute(ast.Name("_forge_package_scalar", ast.Load()), dtype.name, ast.Load()), node
+                    )
+                return self.generic_visit(node)
+
+        # A fixed storage type belongs to the source declaration. The clone
+        # must not try to resolve that attribute on its own, unrelated owner.
+        field["type_node"] = SourceTypes().visit(field["type_node"])
         # The clone owns its placement. Its sizes are read from the proved
         # original namespace in retained Host construction, never from a model
         # witness or another instance's allocation.

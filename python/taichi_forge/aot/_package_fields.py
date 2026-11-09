@@ -224,6 +224,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None,
         )
         source_namespace = {
             **source_namespace,
+            "_forge_package_scalar": ti,
             "_forge_package_vector": ti.types.vector,
             "_forge_package_matrix": ti.types.matrix,
         }
@@ -328,6 +329,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None,
             item.pop("type_node"),
             {
                 **declaration_namespace,
+                "_forge_package_scalar": ti,
                 "_forge_package_vector": ti.types.vector,
                 "_forge_package_matrix": ti.types.matrix,
             },

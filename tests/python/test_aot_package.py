@@ -3540,7 +3540,7 @@ def test_package_field_like_rejects_unproved_layouts(tmp_path, monkeypatch, fail
 
 
 @pytest.mark.parametrize(
-    "kind", ["vector", "derived_vector", "owner_dimension_vector", "struct", "struct_helper", "struct_rejected_helper", "invalid_type", "invalid_value"]
+    "kind", ["vector", "derived_vector", "owner_dimension_vector", "owner_dtype", "struct", "struct_helper", "struct_rejected_helper", "invalid_type", "invalid_value"]
 )
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_field_like_borrowed_input_preserves_source_dimensions(tmp_path, monkeypatch, kind):
@@ -3599,6 +3599,11 @@ class Checkpoint:
 """
     if kind == "derived_vector":
         source = source.replace("shape=scope.dim('n')", "shape=2 * scope.dim('n')")
+    if kind == "owner_dtype":
+        source = source.replace("        scope.values =",
+                                "        self.storage_dtype = ti.f32\n"
+                                "        scope.static_dtype('storage_dtype', choices=(ti.f32,))\n        scope.values =", 1)
+        source = source.replace("scope.vector_field(self.n, ti.f32,", "scope.vector_field(self.n, self.storage_dtype,")
     if kind == "owner_dimension_vector":
         source = source.replace("class Storage:\n    def __init__(self, n: int):",
                                 "class Storage:\n    def __init__(self, parent):")
