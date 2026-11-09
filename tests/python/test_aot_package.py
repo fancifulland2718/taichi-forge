@@ -18793,6 +18793,44 @@ FREE_GRAPH_RECEIVER_SOURCE = (
 )
 
 
+@pytest.mark.parametrize('change', ['ordinary', 'aliased', 'unknown_type', 'rebound'])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_public_typed_graph_receiver(tmp_path, monkeypatch, change):
+    source = FREE_RECEIVER_SOURCE
+    source = source.replace('def forward(receiver, gain):\n    publish(gain, solver=receiver)\n', '')
+    start, end = source.index('    def update('), source.index('    def record(')
+    source = source[:start] + source[end:]
+    start, end = source.index('    def writes('), source.index('\nclass Derived')
+    source = source[:start] + source[end:]
+    source = source.replace('def record(self, builder):', 'def record(self, builder: ti.graph.GraphBuilder):')
+    if change == 'aliased':
+        source = 'import taichi_forge as frontend\n' + source
+        source = source.replace('builder: ti.graph.GraphBuilder', 'builder: frontend.graph.GraphBuilder')
+    elif change == 'unknown_type':
+        source = source.replace('builder: ti.graph.GraphBuilder', 'builder: object')
+    elif change == 'rebound':
+        source = source.replace("        gain = ti.graph.Arg", "        builder = object()\n        gain = ti.graph.Arg")
+    # No package Host method constructs a builder or calls record().
+    package = _source_package(tmp_path, monkeypatch, source)
+    if change in ('unknown_type', 'rebound'):
+        with pytest.raises(ti.aot.PackageExportError, match='receiver|template input'):
+            ti.aot.export_package(package, tmp_path / 'sdk')
+        assert package.model.constructors == 0
+        return
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert package.model.constructors == 0
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n, gain in ((5, 2), (19, 3)):
+            normal, loaded = package.Model(n), code.host.Model(n)
+            jit_builder, aot_builder = ti.graph.GraphBuilder(), code.graph_builder()
+            normal.record(jit_builder)
+            loaded.record(aot_builder)
+            jit_builder.compile().run({'gain': gain})
+            aot_builder.compile().run({'gain': gain})
+            np.testing.assert_array_equal(loaded.values.to_numpy(), normal.values.to_numpy())
+            np.testing.assert_array_equal(loaded.values.to_numpy(), gain * (np.arange(n) + n))
+
+
 @pytest.mark.parametrize("mapping", ["direct", "filtered"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_graph_only_free_receiver_is_discovered_without_recording(tmp_path, monkeypatch, mapping):

@@ -369,7 +369,18 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 if inspect.isfunction(function) and function in functions:
                     parameters = list(inspect.signature(function).parameters)
                     if parameters and parameters[0] == "self":
-                        pending.append((function, {"self": _Owner(identity)}, (function,), None))
+                        inputs = {"self": _Owner(identity)}
+                        # Public recording methods may receive their builder
+                        # from the consumer instead of a call in this package.
+                        # Use the explicit API type, never the parameter name
+                        # or the spelling of a dispatch method. Read the AST
+                        # so postponed annotations need no eval/import hooks.
+                        node = functions[function][1]
+                        for parameter in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+                            if (parameter.arg != "self" and parameter.annotation is not None
+                                    and _source_value(parameter.annotation, function.__globals__) is GraphBuilder):
+                                inputs[parameter.arg] = _Graph()
+                        pending.append((function, inputs, (function,), None))
 
     inventory = set()
     if resource_inventory is not None:

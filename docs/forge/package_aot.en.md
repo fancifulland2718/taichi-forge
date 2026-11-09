@@ -1683,6 +1683,12 @@ source. Source discovery also follows the original `GraphBuilder`,
 dictionaries and dictionaries filtered by proven owner types. It does not record a
 Graph to discover entries. Mutated, escaped or unproven read-only mappings are
 rejected as origins; an unrelated method named `dispatch` is not a Forge Graph.
+Public recording methods whose builder comes from an external caller can declare
+`builder: ti.graph.GraphBuilder` when no in-package construction proves its type.
+Discovery continues from that explicit type; parameter names, lookalike methods
+and unknown types are not evidence, and local rebinding still changes the source.
+This neither records the Graph nor adds a consumer-time type scan. External
+callers can record the retained Host methods with `library.graph_builder()`.
 GeoPhys's three EFC parameter-publication definitions, Newton condition and three
 sort-control definitions pass this input preflight. This is not full EFC export
 or engine qualification. Additional template checks cover five source call tuples
