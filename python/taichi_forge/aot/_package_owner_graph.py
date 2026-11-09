@@ -165,6 +165,10 @@ class OwnerGraph:
                     raise ValueError("Child implementation choices must cover their declared guard domain")
                 selected = applicable[0]
                 item["owner_type"] = selected["owner_type"]
+                # Constructor identity proofs belong to the selected call site,
+                # just like its concrete child type. Do not lose Child(self)
+                # when that child is selected by a normal Host branch.
+                item["input_references"] = selected.get("input_references", {})
                 item["choice_guards"] = {
                     key: value
                     for key, value in selected.get("conditions", {}).items()

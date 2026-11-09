@@ -19996,8 +19996,9 @@ class Model:
             load_package(runtime, tmp_path / "sdk")
 
 
+@pytest.mark.parametrize("alternative", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_child_back_reference_shares_static_selection(tmp_path, monkeypatch):
+def test_package_child_back_reference_shares_static_selection(tmp_path, monkeypatch, alternative):
     source = '''
 import taichi_forge as ti
 @ti.data_oriented
@@ -20030,6 +20031,16 @@ class Model:
             else:
                 self.out[i] += 1
 '''
+    if alternative:
+        source = source.replace('@ti.data_oriented\nclass Model:', '''@ti.data_oriented
+class Alternate(Child):
+    pass
+@ti.data_oriented
+class Model:''')
+        source = source.replace('        scope.child = Child(self)', '''        if self.enabled:
+            scope.child = Alternate(self)
+        else:
+            scope.child = Child(self)''')
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     entries = [entry for entry in manifest['entries'].values()
