@@ -16,6 +16,66 @@ from tests import test_utils
 from tests.python.test_aot_component_configuration import _ConfiguredModel, _configured
 
 
+def test_package_variant_frontier_keeps_one_pending_copy_per_selection(monkeypatch):
+    from collections import deque
+    from types import SimpleNamespace
+    from taichi_forge.aot import _package_variants as variants
+    from taichi_forge_runtime._static_values import static_key
+
+    queued = set()
+
+    class UniqueFrontier(deque):
+        def append(self, selection):
+            identity = tuple(sorted(selection.items()))
+            assert identity not in queued, "Repeated selections retain duplicate frontier work"
+            queued.add(identity)
+            super().append(selection)
+
+        def __init__(self, items):
+            super().__init__()
+            for item in items:
+                self.append(item)
+
+    monkeypatch.setattr(variants, "deque", UniqueFrontier)
+    owner = SimpleNamespace(a=True, b=True, c=True, unused=True)
+    schema = {name: dict(kind="static", choices=[static_key(False), static_key(True)])
+              for name in vars(owner)}
+    calls = []
+
+    class Compiler:
+        def compile(self, entry, *args, owner, template_args):
+            reads = ("a", "b", "c") if owner.a else ("a",)
+            captured = {name: static_key(getattr(owner, name)) for name in reads}
+            calls.append(captured)
+            return SimpleNamespace(static=captured, objects={})
+
+    codes = variants.compile_static_variants(Compiler(), None, (), owner, schema)
+    assert len(codes) == len(calls) == 5
+    assert len(queued) <= 8 and all(not dict(item)["unused"] for item in queued)
+    assert vars(owner) == dict(a=True, b=True, c=True, unused=True)
+    assert {(tuple(code.static["b"]), tuple(code.static["c"])) for code in codes if "b" in code.static} == {
+        (tuple(static_key(b)), tuple(static_key(c))) for b in (False, True) for c in (False, True)
+    }
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_candidate_static_rejection_precedes_storage_validation(monkeypatch):
+    from taichi_forge.aot import _component
+
+    owner, environment = _ConfiguredModel(7), _configured()
+    code = environment.compile(owner.evaluate)
+
+    def storage_validation(*args, **kwargs):
+        raise ValueError("storage validation is still required for matching candidates")
+
+    monkeypatch.setattr(_component, "_dimension_value", storage_validation)
+    owner.scale = False
+    assert code.dependency_mismatch(environment, owner) == "static value 'scale'"
+    owner.scale = True
+    with pytest.raises(ValueError, match="storage validation is still required"):
+        code.dependency_mismatch(environment, owner)
+
+
 @ti.data_oriented
 class _VariantModel(_ConfiguredModel):
     def record_options(self, builder, *, include_capacity=False):

@@ -2723,6 +2723,12 @@ class _Capture:
             value = component.read(owner, name)
             if not isinstance(value, StructField) or tuple(value.field_dict) != keys:
                 return f"StructField members {name!r}"
+        # A different static choice cannot reuse this candidate. Reject it
+        # before inspecting dimensions and storage layouts, after declaration
+        # and record guards have established that its capture paths exist.
+        for name, value in self.static.items():
+            if _static_value(component.read(owner, name)) != value:
+                return f"static value {name!r}"
         arrays = {}
         for name in self.used:
             declaration = component.declarations[name]
@@ -2758,9 +2764,6 @@ class _Capture:
             for name, (member_group, paths) in self.member_paths.items():
                 if member_group == group and members.get(name) != paths:
                     return f"member {name!r} in group {group!r}"
-        for name, value in self.static.items():
-            if _static_value(component.read(owner, name)) != value:
-                return f"static value {name!r}"
         for (function, name), value in self.constants.items():
             if not _final_global(function, name) or name not in function.__globals__:
                 return f"static global declaration {name!r} in {function.__qualname__}"

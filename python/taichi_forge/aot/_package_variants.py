@@ -40,15 +40,12 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     initial = {name: values[0] for name, values in domains.items()}
     initial.update((name, True) for name in records)
     previous = {name: read_member(owner, name, schema) for name in domains}
-    pending, visited, codes = deque([initial]), set(), []
+    initial_identity = tuple(sorted((name, static_key(value)) for name, value in initial.items()))
+    pending, scheduled, codes = deque([initial]), {initial_identity}, []
     try:
         while pending:
             selection = pending.popleft()
             keys = {name: static_key(value) for name, value in selection.items()}
-            identity = tuple(sorted(keys.items()))
-            if identity in visited:
-                continue
-            visited.add(identity)
             if any(
                 all(keys[name] == value for name, value in code.static.items())
                 and all(selection[name] is value for name, value in code.objects.items() if name in records)
@@ -78,7 +75,14 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
             for name in reads:
                 for value in domains.get(name, (True, False)):
                     if static_key(value) != keys[name]:
-                        pending.append({**selected, name: value})
+                        candidate = {**selected, name: value}
+                        identity = tuple(sorted((key, static_key(item)) for key, item in candidate.items()))
+                        # Different read branches can discover the same state.
+                        # Keep one queued visit rather than retaining duplicate
+                        # owner selections until they are eventually popped.
+                        if identity not in scheduled:
+                            scheduled.add(identity)
+                            pending.append(candidate)
             # Restore namespaces before selecting any of their scalar leaves.
             for name, value in records.items():
                 write_member(owner, name, value, schema)
