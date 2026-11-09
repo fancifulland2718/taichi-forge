@@ -11570,7 +11570,8 @@ def test_package_rejects_unprojected_scope_factories(tmp_path, monkeypatch, bind
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_free_preparation_reuses_selected_backend_contract(tmp_path, monkeypatch):
+@pytest.mark.parametrize("nested", [False, True])
+def test_package_free_preparation_reuses_selected_backend_contract(tmp_path, monkeypatch, nested):
     source = """
 import taichi_forge as ti
 from resource_contexts import resource_group
@@ -11591,6 +11592,31 @@ class Model:
         for index in ti.grouped(self.values):
             self.values[index] = index.sum() + offset
 """
+    if nested:
+        source = (
+            source.replace(
+                "    if ti.lang.impl.current_cfg().arch == ti.cuda:\n"
+                "        with resource_group(owner, 'values') as scope:\n"
+                "            scope.values = scope.field(ti.i32, shape=scope.dim('n'))\n"
+                "    else:\n"
+                "        with resource_group(owner, 'values') as scope:\n"
+                "            scope.values = scope.field(ti.f32, shape=(scope.dim('n'), 2))",
+                "    with resource_group(owner, 'values') as scope:\n"
+                "        scope.static('enabled', choices=(False, True))\n"
+                "        scope.header = scope.field(ti.i32, shape=())\n"
+                "        if owner.enabled:\n"
+                "            if ti.lang.impl.current_cfg().arch == ti.cuda:\n"
+                "                scope.values = scope.field(ti.i32, shape=scope.dim('n'))\n"
+                "            else:\n"
+                "                scope.values = scope.field(ti.f32, shape=(scope.dim('n'), 2))",
+            )
+            .replace("        self.n = n", "        self.n = n\n        self.enabled = True")
+            .replace(
+                "        for index in ti.grouped(self.values):\n            self.values[index] = index.sum() + offset",
+                "        if ti.static(self.enabled):\n"
+                "            for index in ti.grouped(self.values):\n                self.values[index] = index.sum() + offset",
+            )
+        )
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     normal = package.Model(7)
     normal.step(3)

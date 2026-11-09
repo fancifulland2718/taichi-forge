@@ -115,6 +115,18 @@ def select_target_branches(tree, kind, target, module, fail):
                                 aliases.add(name)
                     selected = condition(node.test) if isinstance(node, ast.If) else None
                     if selected is None:
+                        # Resource contexts and model conditions do not hide
+                        # backend-only decisions. Arm-local aliases must not
+                        # escape into a sibling or continuation.
+                        if isinstance(node, (ast.With, ast.If)):
+                            outer_aliases = set(aliases)
+                            node.body = statements(node.body)
+                            aliases.clear()
+                            aliases.update(outer_aliases)
+                            if isinstance(node, ast.If):
+                                node.orelse = statements(node.orelse)
+                                aliases.clear()
+                                aliases.update(outer_aliases)
                         output.append(node)
                         continue
                     location = f"{module}:{node.lineno}"
