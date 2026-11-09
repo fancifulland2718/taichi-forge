@@ -2524,7 +2524,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             application_modules,
             frozenset(manifest["error_interfaces"]),
             host_contexts,
-            lambda identity: owner_graph.construct(identity)[1],
+            lambda identity: owner_graph.context(identity)[1],
         )
         payloads["host/" + relative.as_posix()] = host_source.encode("utf8")
         manifest["version"] = max(manifest["version"], minimum_version)
