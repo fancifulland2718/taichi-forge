@@ -190,6 +190,7 @@ def resolve_owners(sources, imported, owner_schema, fail):
             tree = trees[name]
             if not hasattr(tree, "_package_construction_schemas"):
                 tree._package_construction_schemas = {}
+            if not hasattr(tree, "_package_construction_owners"):
                 tree._package_construction_owners = {}
             local = tree._package_construction_schemas.setdefault(node.name, {})
 
@@ -218,6 +219,16 @@ def resolve_owners(sources, imported, owner_schema, fail):
             )
         elif base is not cls and own:
             schemas.setdefault(node.name, own)
+            # An ordinary inherited constructor also runs on the concrete
+            # receiver. Its fixed class definitions may change Field layout;
+            # using the base allocation contract silently keeps the old shape.
+            tree = trees[name]
+            if not hasattr(tree, "_package_construction_owners"):
+                tree._package_construction_owners = {}
+            concrete_module, concrete_node, *_ = classes[cls]
+            tree._package_construction_owners.setdefault(node.name, set()).update(
+                (name + "." + node.name, concrete_module + "." + concrete_node.name)
+            )
         return result
 
     pending = []

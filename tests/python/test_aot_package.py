@@ -14945,10 +14945,20 @@ class Wider(Model):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-@pytest.mark.parametrize("name_source", ["inline", "module", "qualified"])
+@pytest.mark.parametrize("name_source", ["inline", "module", "qualified", "scope_extent"])
 def test_package_definition_constants_preserve_dependencies_and_snapshots(tmp_path, monkeypatch, name_source):
     source, modules = CONSTANT_SOURCE, None
-    if name_source != "inline":
+    if name_source == "scope_extent":
+        source = source.replace(
+            "scope.values = scope.field(ti.f32, shape=scope.dim('n'))",
+            "scope.values = scope.field(ti.f32, shape=scope.dim('n'))\n"
+            "        fields = ti.FieldsBuilder()\n"
+            "        fixed = ti.experimental.ResourceScope(self, builder=fields)\n"
+            "        width = fixed.group_size\n"
+            "        fixed.scratch = fixed.field(ti.i32, shape=(fixed.dim('n'), width))\n"
+            "        self.scratch_tree = fields.finalize()",
+        )
+    elif name_source != "inline":
         declarations = "        declare_constant(scope, 'group_size')\n        scope.constant('scale')\n        scope.constant('unused')"
         if name_source == "module":
             source = "NAMES = ('group_size', 'scale', 'unused')\n" + source
@@ -14964,7 +14974,7 @@ def test_package_definition_constants_preserve_dependencies_and_snapshots(tmp_pa
         tmp_path, monkeypatch, source, initializer="from .model import Model, Wider\n", extra_modules=modules
     )
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 30
+    assert manifest["version"] >= 68
     assert sys.modules["definition_fixture.model"].constructors == 0
     entries = [entry for entry in manifest["entries"].values() if ".model." in entry["definition"]]
     assert len(entries) == 5  # Four used static combinations and one shared clear.
@@ -14992,6 +15002,8 @@ def test_package_definition_constants_preserve_dependencies_and_snapshots(tmp_pa
         from taichi_forge_runtime.aot import Runtime, load_package
         with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
             a, b = code.host.Model(3), code.host.Wider(5, True)
+            if sys.argv[3] == 'scope_extent':
+                assert a.scratch.shape == (3, 4) and b.scratch.shape == (5, 6), (a.scratch.shape, b.scratch.shape)
             graph = a.graph()
             with graph.bind({}) as prepared:
                 a.unused = 101
@@ -15031,7 +15043,7 @@ def test_package_definition_constants_preserve_dependencies_and_snapshots(tmp_pa
         TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
     )
     result = subprocess.run(
-        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"], name_source],
         cwd=tmp_path,
         env=env,
         capture_output=True,

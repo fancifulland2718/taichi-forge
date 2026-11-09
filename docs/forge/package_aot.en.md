@@ -1894,6 +1894,11 @@ CPU/CUDA checks include nested owners, borrowing, JIT equivalence and source-fre
 dual instances. Only scalar elements are supported; `field_like` cloning across
 this selection is not supported yet.
 
+Declared fixed integer constants may also be read through a resource scope for
+layout. Ordinary inherited constructors allocate against the concrete receiver's
+contract, including subclass constant widths. Instance dimensions remain dynamic;
+constant-change admission and prepared-call snapshots retain their semantics.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.
