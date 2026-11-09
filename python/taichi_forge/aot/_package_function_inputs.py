@@ -325,11 +325,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         def source_value(expression):
             if (
                 isinstance(expression, ast.Name)
-                and expression.id == "getattr"
+                and expression.id in ("getattr", "dict", "isinstance")
                 and expression.id not in local_names
-                and namespace.get("getattr", builtins.getattr) is builtins.getattr
             ):
-                return builtins.getattr
+                builtin = getattr(builtins, expression.id)
+                supplied = namespace.get('__builtins__', vars(builtins))
+                supplied = supplied if isinstance(supplied, dict) else vars(supplied)
+                if namespace.get(expression.id, supplied.get(expression.id)) is builtin:
+                    return builtin
             return source_callable(expression, namespace)
 
         def graph_source(expression, visiting=()):
@@ -563,10 +566,12 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 return left if left == right else None
             if isinstance(expression, ast.Call):
                 cls = source(expression.func)
+                if cls is builtins.dict and not expression.args and all(k.arg is not None for k in expression.keywords):
+                    return _Mapping(tuple((k.arg, child(k.value)) for k in expression.keywords))
                 if cls is builtins.getattr and len(expression.args) in (2, 3) and not expression.keywords:
                     name = child(expression.args[1])
                     if isinstance(name, _Literal) and type(name.value) is str:
-                        return member(child(expression.args[0]), name.value)
+                        return child(ast.Attribute(expression.args[0], name.value, ast.Load()))
                 if (
                     _plain_record(cls)
                     and not any(isinstance(arg, ast.Starred) for arg in expression.args)
@@ -592,13 +597,15 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     isinstance(expression.func, ast.Name)
                     and expression.func.id == "isinstance"
                     and "isinstance" not in local_names
-                    and namespace.get("isinstance", builtins.isinstance) is builtins.isinstance
+                    and source(expression.func) is builtins.isinstance
                     and len(expression.args) == 2
                     and not expression.keywords
                 ):
                     item = child(expression.args[0])
                     cls = source(expression.args[1])
                     if inspect.isclass(cls) and type(cls) is type:
+                        if isinstance(item, _Literal) and type(item.value) in (bool, int, float, str, type(None)):
+                            return _Literal(isinstance(item.value, cls))
                         if isinstance(item, _Owner):
                             return _Literal(issubclass(classes[item.identity], cls))
                         if isinstance(item, _Resource):
@@ -829,6 +836,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             callee, receiver = target(call.func)
             if callee not in kernels and callee not in functions:
                 if resource_inventory is not None:
+                    fact = value(call)
+                    if isinstance(fact, (_Mapping, _Record, _Kernel, _Resource, _Literal, tuple)):
+                        # Proven builtin/record projections expose no owner to
+                        # an arbitrary callee. A Field lookup still contributes
+                        # its conservative resource dependency.
+                        if isinstance(fact, _Resource):
+                            inventory_input(fact)
+                        continue
                     if isinstance(call.func, ast.Name) and call.func.id == 'super':
                         inventory_input(arguments.get('self'))
                     for expression in [*call.args, *(k.value for k in call.keywords)]:

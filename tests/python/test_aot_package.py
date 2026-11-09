@@ -2208,8 +2208,23 @@ class Model:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_write_inventory_resolves_before_its_own_checkpoint(tmp_path, monkeypatch):
-    package = _source_package(tmp_path, monkeypatch, CYCLIC_WRITE_INVENTORY_SOURCE)
+@pytest.mark.parametrize('forward_mapping', [False, True])
+def test_package_write_inventory_resolves_before_its_own_checkpoint(tmp_path, monkeypatch, forward_mapping):
+    source = CYCLIC_WRITE_INVENTORY_SOURCE
+    if forward_mapping:
+        source = source.replace('def append_step(solver, builder):\n    builder.dispatch(solver.step)', '''
+from dataclasses import dataclass
+@dataclass(frozen=True)
+class Resource:
+    compile_value: object
+def dispatch(builder, kernel, templates):
+    inputs = {name: value.compile_value if isinstance(value, Resource) else value
+              for name, value in templates.items()}
+    builder.dispatch(kernel, template_args=inputs)
+def append_step(solver, builder):
+    dispatch(builder, getattr(solver, 'step'), dict(self=solver))
+''')
+    package = _source_package(tmp_path, monkeypatch, source)
     before = ti.lang.impl.get_runtime().get_num_compiled_functions()
     assert ti.aot.check_package(package)['declaration_check'] == 'passed'
     assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
