@@ -14199,6 +14199,113 @@ def test_package_field_name_loops_reject_unproven_declarations(tmp_path, monkeyp
     assert not (tmp_path / "sdk").exists()
 
 
+EXTENT_RELATION_SOURCE = """
+import taichi_forge as ti
+effects = []
+constructors = 0
+
+def chunk_capacity(jobs, candidates, width=32):
+    chunks = (jobs + width - 1) // width + candidates - 1
+    if hasattr(jobs, 'minimum'):
+        return jobs.minimum(chunks).maximum(1)
+    return max(1, min(jobs, chunks))
+
+@ti.data_oriented
+class Model:
+    def __init__(self, jobs, candidates):
+        global constructors
+        constructors += 1
+        self.jobs, self.candidates = jobs, candidates
+        self.capacity = chunk_capacity(jobs, candidates)
+        scope = ti.experimental.ResourceScope(self)
+        count = scope.derived_dim('capacity', chunk_capacity(scope.dim('jobs'), scope.dim('candidates')))
+        scope.values = scope.field(ti.i32, shape=count)
+
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.values:
+            self.values[i] = i + bias
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_extent_relation_helper_preserves_symbolic_counts(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, EXTENT_RELATION_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert len(manifest["entries"]) == 2  # One step plus the existing unimported public root.
+    assert "def chunk_capacity" in (tmp_path / "sdk/host/model.py").read_text()
+    normal = package.Model(73, 5)
+    normal.step(7)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(73, 5), code.host.Model(257, 2)
+        a.step(7)
+        b.step(-2)
+        np.testing.assert_array_equal(a.values.to_numpy(), normal.values.to_numpy())
+        np.testing.assert_array_equal(b.values.to_numpy(), np.arange(10) - 2)
+        a.step(-5)
+        np.testing.assert_array_equal(b.values.to_numpy(), np.arange(10) - 2)
+    probe = tmp_path / "consume_extent_relation.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(97, 3), code.host.Model(1, 1)
+            a.step(4)
+            b.step(-3)
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(6) + 4)
+            np.testing.assert_array_equal(b.values.to_numpy(), [-3])
+        print('EXTENT_RELATION_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "EXTENT_RELATION_OK" in result.stdout
+
+
+@pytest.mark.parametrize("change", ["effect", "model", "shadow"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_extent_relation_helper_rejects_unproven_computation(tmp_path, monkeypatch, change):
+    source = EXTENT_RELATION_SOURCE
+    if change == "effect":
+        source = source.replace("    chunks =", "    effects.append(1)\n    chunks =")
+    elif change == "model":
+        source = source.replace("    chunks =", "    if jobs > 5:\n        return jobs\n    chunks =")
+    else:
+        source = source.replace(
+            "    return max(1, min(jobs, chunks))",
+            "    hasattr = lambda *args: False\n    return max(1, min(jobs, chunks))",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="declared dimension algebra"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].effects == []
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 DERIVED_FIELDS_SOURCE = """
 import taichi_forge as ti
 from resource_factories import declare_extent

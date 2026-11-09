@@ -1054,6 +1054,10 @@ def scope_declarations(
                     id(right), set()
                 )
                 return result
+        if isinstance(node, ast.Call):
+            from ._package_extent_helpers import project_extent_helper
+
+            return project_extent_helper(node, namespace, dimension, shadowed=stores)
         return None
 
     def scoped_extent(scope, name):

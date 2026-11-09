@@ -714,6 +714,14 @@ each model size. The producer builds only structural witnesses and never calls
 application constructors. Relations enter the original Component dimension
 contract and native group layout; later `dim` calls retain those relations.
 
+Small ordinary capacity helpers can also express these relations with local
+arithmetic and `minimum`/`maximum`. Export proves their source through the same
+dimension algebra without calling them. A returning `hasattr(extent, 'minimum')`
+or `maximum` protocol arm is supported; the normal integer path remains Host
+Python. Side effects, model-dependent control, shadowed protocol functions and
+unknown operations reject. CPU/CUDA checks cover new sizes, JIT agreement and
+source-free independent instances; this does not qualify arbitrary Python helpers.
+
 Ordinary imported Python helpers may forward these dimension methods. The
 existing resource-factory proof accepts one supported declaration call and fixed
 frontend capability selection, such as `getattr(type(scope), 'derived_dim', None)`.
