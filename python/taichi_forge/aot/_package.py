@@ -166,6 +166,24 @@ def _owner_schema(
                     "static_declaration",
                 )
                 if (
+                    declaration["kind"] == previous["kind"] == "dimension"
+                    and not declaration.get("conditions")
+                    and not previous.get("conditions")
+                    and {k: v for k, v in declaration.items() if k not in (*origins, "expression")}
+                    == {k: v for k, v in previous.items() if k not in (*origins, "expression")}
+                    and (
+                        not declaration.get("expression")
+                        or not previous.get("expression")
+                        or declaration["expression"] == previous["expression"]
+                    )
+                ):
+                    # A later helper may state the relation of a count already
+                    # used elsewhere. Keep that invariant; a plain dim() is a
+                    # reference and must not erase it on subsequent visits.
+                    expression = declaration.get("expression", previous.get("expression"))
+                    if expression is not None:
+                        declaration["expression"] = previous["expression"] = expression
+                if (
                     declaration["kind"] == previous["kind"]
                     and declaration["kind"] in ("dimension", "static")
                     and (
@@ -184,6 +202,23 @@ def _owner_schema(
                     continue
                 _fail(module, function, f"Repeated construction resource declaration {name!r}")
             schema[name] = declaration
+    # Local scope validation cannot see relations introduced in other helpers.
+    from taichi_forge_runtime._dimensions import extent_dependencies
+
+    checked = set()
+
+    def check_relation(name, visiting):
+        if name in visiting:
+            _fail(module, node, f"Cyclic derived dimension {name!r}")
+        if name in checked:
+            return
+        for child in extent_dependencies(schema.get(name, {}).get("expression", ("const", 0))):
+            check_relation(child, (*visiting, name))
+        checked.add(name)
+
+    for name, declaration in schema.items():
+        if declaration["kind"] == "dimension":
+            check_relation(name, ())
     return schema
 
 

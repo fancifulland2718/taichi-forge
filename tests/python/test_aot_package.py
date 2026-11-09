@@ -14337,6 +14337,120 @@ def test_package_field_name_loops_reject_unproven_declarations(tmp_path, monkeyp
     assert not (tmp_path / "sdk").exists()
 
 
+SHARED_DIMENSION_RELATION_SOURCE = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+def allocate_first(owner):
+    with resource_group(owner, 'first', initialization='zero') as scope:
+        count = scope.dim('n')
+        scope.values = scope.field(ti.i32, shape=count)
+def allocate_second(owner):
+    with resource_group(owner, 'second', initialization='zero') as scope:
+        count = scope.derived_dim('n', scope.dim('base') + scope.dim('padding'))
+        scope.other = scope.field(ti.i32, shape=count)
+@ti.data_oriented
+class Model:
+    def __init__(self, base, padding, wrong=False):
+        self.base, self.padding = base, padding
+        self.n = base + padding + int(wrong)
+        allocate_first(self)
+        allocate_second(self)
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.values:
+            self.values[i] = i + bias
+            self.other[i] = 2 * i - bias
+"""
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_preparation_helpers_share_dimension_relations(tmp_path, monkeypatch, reverse):
+    source = SHARED_DIMENSION_RELATION_SOURCE
+    if reverse:
+        plain, derived = (
+            "count = scope.dim('n')",
+            "count = scope.derived_dim('n', scope.dim('base') + scope.dim('padding'))",
+        )
+        source = (
+            source.replace(plain, "COUNT_PLACEHOLDER").replace(derived, plain).replace("COUNT_PLACEHOLDER", derived)
+        )
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    normal = package.Model(5, 2)
+    normal.step(4)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(5, 2), code.host.Model(17, 2)
+        a.step(4)
+        b.step(-3)
+        np.testing.assert_array_equal(a.values.to_numpy(), normal.values.to_numpy())
+        np.testing.assert_array_equal(a.other.to_numpy(), normal.other.to_numpy())
+        np.testing.assert_array_equal(b.values.to_numpy(), np.arange(19) - 3)
+        before = set(runtime._resources)
+        with pytest.raises(ValueError, match="does not match"):
+            code.host.Model(3, 2, wrong=True)
+        assert set(runtime._resources) == before
+
+    probe = tmp_path / "consume_shared_dimension.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(3, 2), code.host.Model(11, 4)
+            a.step(5); b.step(-1)
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(5) + 5)
+            np.testing.assert_array_equal(b.other.to_numpy(), 2 * np.arange(15) + 1)
+        print('SHARED_DIMENSION_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SHARED_DIMENSION_OK" in result.stdout
+
+
+@pytest.mark.parametrize("cycle", [False, True])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_preparation_helpers_reject_conflicting_dimension_relations(tmp_path, monkeypatch, cycle):
+    source = SHARED_DIMENSION_RELATION_SOURCE.replace(
+        "count = scope.dim('n')",
+        "count = scope.derived_dim('n', scope.dim('base') + scope.dim('padding'))",
+    )
+    last = source.index("def allocate_second")
+    source = source[:last] + source[last:].replace(
+        "count = scope.derived_dim('n', scope.dim('base') + scope.dim('padding'))",
+        (
+            "count = scope.derived_dim('base', scope.dim('n') - scope.dim('padding'))"
+            if cycle
+            else "count = scope.derived_dim('n', scope.dim('base') + scope.dim('padding') + 1)"
+        ),
+    )
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ti.aot.PackageExportError, match="Cyclic derived|Repeated construction resource"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert not (tmp_path / "sdk").exists()
+
+
 EXTENT_RELATION_SOURCE = """
 import taichi_forge as ti
 effects = []

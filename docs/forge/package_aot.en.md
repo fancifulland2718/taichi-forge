@@ -713,6 +713,12 @@ relations. Numerical code uses the dynamic dimension ABI, without copies for
 each model size. The producer builds only structural witnesses and never calls
 application constructors. Relations enter the original Component dimension
 contract and native group layout; later `dim` calls retain those relations.
+Unconditional declarations across preparation helpers follow the same rule:
+a plain dimension and its derived relation share one count, in either discovery
+order. Compatible scopes keep the relation; conflicting expressions and cycles
+across helpers reject. CPU/CUDA local checks include source-free new sizes,
+JIT agreement and failed-construction cleanup. Conditional refinements require
+separate qualification.
 
 Small ordinary capacity helpers can also express these relations with local
 arithmetic and `minimum`/`maximum`. Export proves their source through the same
