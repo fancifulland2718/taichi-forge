@@ -778,6 +778,11 @@ the same source proof as declaration-name loops; mutable global lists and string
 function calls are not evaluated. Literal member sequences may splice those fixed
 tuples (`(*MEMBERS, 'extra')`); model sequences remain unsupported. CPU/CUDA checks cover shared layout, independent
 instances and isolated source-free consumption of these forms.
+Fixed aliases such as `setattr(scope, f'alias_{name}', getattr(owner, 'source_' + name))`
+reuse source-scope borrow admission, preserving the original Field, layout and
+instance ownership without another allocation. Sources must resolve to declared
+Field paths; shadowed `getattr`, model-dependent names and factory expressions reject.
+The CPU/CUDA checks include alias identity and isolated source-free consumption.
 The original allocation order and final loop-variable value are retained; native
 layout construction distinguishes multiple members from the same source call.
 The allocation expression must be independent of the loop variable. Duplicate

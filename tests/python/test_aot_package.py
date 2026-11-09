@@ -13167,7 +13167,7 @@ class Model:
         np.testing.assert_array_equal(b.values.to_numpy(), np.arange(1, 20))
 
 
-@pytest.mark.parametrize("names", ["literal", "prefix", "formatted", "global_tuple", "global_star"])
+@pytest.mark.parametrize("names", ["literal", "prefix", "formatted", "global_tuple", "global_star", "alias"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_path, monkeypatch, names):
     from tests.python.test_aot_dense_snode_group import _compiled_nodes
@@ -13184,6 +13184,14 @@ def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_pat
     elif names == "global_star":
         source = source.replace("constructors = 0", "MEMBERS = ('values',)\nconstructors = 0")
         source = source.replace("for name in ('values', 'weights'):", "for name in (*MEMBERS, 'weights'):")
+    elif names == "alias":
+        source = source.replace(
+            "            self.last_member = name",
+            """            self.last_member = name
+            for name in ('values', 'weights'):
+                setattr(scope, f'alias_{name}', getattr(self, 'state_' + name))""",
+        )
+        source = source.replace("self.state_values[i] += 1", "self.alias_values[i] += 1")
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
@@ -13200,6 +13208,10 @@ def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_pat
     np.testing.assert_array_equal(getattr(original, prefix + "vectors").to_numpy(), expected)
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7), code.host.Model(19)
+        if names == "alias":
+            assert original.alias_values is original.state_values
+            assert a.alias_values is a.state_values
+            assert b.alias_values is b.state_values
         values, vectors = getattr(a, prefix + "values"), getattr(a, prefix + "vectors")
         assert values._group_owner.layout["nodes"] == nodes
         assert a.last_member == original.last_member == "weights"
@@ -13213,7 +13225,7 @@ def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_pat
         a.tree.destroy()
         b.step()
         np.testing.assert_array_equal(getattr(b, prefix + "values").to_numpy(), 2)
-    if names in ("global_tuple", "global_star"):
+    if names in ("global_tuple", "global_star", "alias"):
         probe = tmp_path / "consume_member_names.py"
         probe.write_text(
             textwrap.dedent("""
@@ -13268,6 +13280,9 @@ def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_pat
         "mutable_names",
         "mutable_expansion",
         "model_expansion",
+        "alias_shadow",
+        "alias_dynamic",
+        "alias_source",
     ],
 )
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -13295,13 +13310,26 @@ def test_package_field_name_loops_reject_unproven_declarations(tmp_path, monkeyp
         model = model.replace("for name in ('values', 'weights'):", "for name in (*MEMBERS, 'weights'):")
     elif change == "model_expansion":
         model = model.replace("for name in ('values', 'weights'):", "for name in (*self.names, 'weights'):")
+    elif change.startswith("alias_"):
+        model = model.replace(
+            "            self.last_member = name",
+            """            self.last_member = name
+            for name in ('values', 'weights'):
+                setattr(scope, f'alias_{name}', getattr(self, name))""",
+        )
+        if change == "alias_shadow":
+            model = model.replace("self, n: int):", "self, n: int, getattr=None):")
+        elif change == "alias_dynamic":
+            model = model.replace("getattr(self, name)", "getattr(self, self.member)")
+        else:
+            model = model.replace("getattr(self, name)", "getattr(self.make_source(), name)")
     else:
         model = model.replace(
             "                setattr(scope, name, scope.field",
             "                print(name)\n                setattr(scope, name, scope.field",
         )
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=model)
-    with pytest.raises(ti.aot.PackageExportError, match="Field-name loop|ResourceScope"):
+    with pytest.raises(ti.aot.PackageExportError, match="Field-name loop|ResourceScope|Field alias|Borrow"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert not (tmp_path / "sdk").exists()

@@ -338,18 +338,46 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
             ):
                 return self.generic_visit(node)
             receiver, name, allocation = call.args
+            alias = (
+                isinstance(allocation, ast.Call)
+                and isinstance(allocation.func, ast.Name)
+                and allocation.func.id == "getattr"
+                and len(allocation.args) == 2
+                and not allocation.keywords
+                and not any(
+                    isinstance(n, ast.Name) and n.id == getattr(node.target, "id", None)
+                    for n in ast.walk(allocation.args[0])
+                )
+            )
+            if alias and (
+                namespace.get("getattr", getattr) is not getattr
+                or any(
+                    isinstance(n, ast.Name)
+                    and n.id == "getattr"
+                    and not isinstance(n.ctx, ast.Load)
+                    or isinstance(n, ast.arg)
+                    and n.arg == "getattr"
+                    or isinstance(n, ast.alias)
+                    and (n.asname or n.name.split(".")[0]) == "getattr"
+                    for n in ast.walk(constructor)
+                )
+            ):
+                fail(module, allocation, "Field alias access requires the unshadowed getattr builtin")
             if (
                 shadowed
                 or call.keywords
                 or node.orelse
                 or not isinstance(node.target, ast.Name)
                 or node.target.id in scope_names | {"self"}
-                or not isinstance(allocation, ast.Call)
-                or not isinstance(allocation.func, ast.Attribute)
-                or not isinstance(allocation.func.value, ast.Name)
-                or allocation.func.value.id != receiver.id
-                or allocation.func.attr not in ("field", "vector_field", "matrix_field", "struct_field")
-                or any(isinstance(n, ast.Name) and n.id == node.target.id for n in ast.walk(allocation))
+                or not alias
+                and (
+                    not isinstance(allocation, ast.Call)
+                    or not isinstance(allocation.func, ast.Attribute)
+                    or not isinstance(allocation.func.value, ast.Name)
+                    or allocation.func.value.id != receiver.id
+                    or allocation.func.attr not in ("field", "vector_field", "matrix_field", "struct_field")
+                    or any(isinstance(n, ast.Name) and n.id == node.target.id for n in ast.walk(allocation))
+                )
             ):
                 fail(module, node, "Field-name loop requires an unshadowed literal member declaration")
             try:
@@ -391,6 +419,33 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
                 # Retain the ordinary loop variable's last value and original
                 # allocation order. Only fixed declarations expand, not kernels.
                 result.append(ast.copy_location(ast.Assign([copy.deepcopy(node.target)], ast.Constant(member)), node))
+                if alias:
+                    source = member_name(allocation.args[1], member)
+                    if not source.isidentifier() or source.startswith("__"):
+                        fail(module, allocation, "Field alias requires a non-mangled fixed source member")
+                    # The ordinary scope assignment names an existing Field.
+                    # Reuse source-scope borrow admission, layout and lifetime
+                    # checks rather than declaring another allocation/ABI.
+                    bound = ast.copy_location(
+                        ast.Expr(
+                            ast.Call(
+                                ast.Attribute(copy.deepcopy(receiver), "borrow", ast.Load()),
+                                [
+                                    ast.Constant(selected),
+                                    ast.Attribute(copy.deepcopy(allocation.args[0]), source, ast.Load()),
+                                ],
+                                [ast.keyword("source_scope", ast.Constant(True))],
+                            )
+                        ),
+                        node.body[0],
+                    )
+                    ast.fix_missing_locations(bound)
+                    for part in ast.walk(bound):
+                        if isinstance(part, (ast.expr, ast.stmt)):
+                            part.col_offset += len(result)
+                            part.end_col_offset = max(part.end_col_offset or 0, part.col_offset + 1)
+                    result.append(bound)
+                    continue
                 result.append(
                     ast.copy_location(
                         ast.Assign(
