@@ -58,6 +58,46 @@ def test_package_variant_frontier_keeps_one_pending_copy_per_selection(monkeypat
     }
 
 
+@pytest.mark.parametrize("optional_record", [False, True])
+def test_package_variant_frontier_reuses_missing_resource_proof(optional_record):
+    from collections import Counter
+    from types import SimpleNamespace
+    from taichi_forge.aot._component import _DefinitionMissingResource
+    from taichi_forge.aot._package_variants import compile_static_variants
+    from taichi_forge_runtime._static_values import static_key
+
+    workspace = SimpleNamespace() if optional_record else True
+    owner = SimpleNamespace(use=False, a=True, b=True, workspace=workspace)
+    schema = {name: dict(kind="static", choices=[static_key(False), static_key(True)])
+              for name in vars(owner)}
+    if optional_record:
+        schema['workspace'] = dict(kind='record', optional=True)
+    failures = Counter()
+
+    class Compiler:
+        def compile(self, entry, *args, owner, template_args):
+            static, objects = {'use': static_key(owner.use)}, {}
+            if owner.use:
+                present = owner.workspace is not None if optional_record else owner.workspace
+                if optional_record:
+                    objects['workspace'] = present
+                else:
+                    static['workspace'] = static_key(present)
+                if not present:
+                    failures['missing'] += 1
+                    raise _DefinitionMissingResource('workspace', SimpleNamespace(static=static, objects=objects))
+            else:
+                static.update((name, static_key(getattr(owner, name))) for name in ('a', 'b'))
+            return SimpleNamespace(static=static, objects=objects)
+
+    codes = compile_static_variants(Compiler(), None, (), owner, schema)
+    assert len(codes) == 5 and failures['missing'] == 1
+    assert len([code for code in codes if code.static['use'] == static_key(True)]) == 1
+    assert {tuple(code.static[name][1] for name in ('a', 'b'))
+            for code in codes if 'a' in code.static} == {(a, b) for a in (False, True) for b in (False, True)}
+    assert not owner.use and owner.a and owner.b and owner.workspace is workspace
+
+
 def test_package_reference_frontier_keeps_unrelated_owners_independent():
     from types import SimpleNamespace
     from taichi_forge.aot._package_variants import compile_static_variants

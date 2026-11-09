@@ -71,15 +71,15 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     synchronize(initial)
     previous = {name: read_member(owner, name, schema) for name in domains}
     initial_identity = tuple(sorted((name, static_key(value)) for name, value in initial.items()))
-    pending, scheduled, codes = deque([initial]), {initial_identity}, []
+    pending, scheduled, codes, covered = deque([initial]), {initial_identity}, [], []
     try:
         while pending:
             selection = pending.popleft()
             keys = {name: static_key(value) for name, value in selection.items()}
             if any(
-                all(keys[name] == value for name, value in code.static.items())
-                and all(selection[name] is value for name, value in code.objects.items() if name in records)
-                for code in codes
+                all(keys[name] == value for name, value in static.items())
+                and all(selection[name] is value for name, value in objects.items() if name in records)
+                for static, objects in covered
             ):
                 continue
             for name, value in selection.items():
@@ -98,6 +98,12 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                 codes.append(code)
             if not code.static.keys() <= domains.keys():
                 raise ValueError("Kernel static dependencies are outside the declared package domain")
+            # Missing required storage is also a proven branch result. Its
+            # observed guards include the allocation/presence decision, so
+            # unrelated choices cannot make that same prefix admissible.
+            # Explore its read neighbors below once, but never export it.
+            # Keep only guards, not an exception traceback and compiler state.
+            covered.append((code.static, code.objects))
             # Forget unread values. They are unconstrained by this code, not a
             # second identity for it. A changed read value may expose a new path.
             reads = {aliases.get(name, name) for name in code.static}
