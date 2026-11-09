@@ -476,6 +476,7 @@ Host 记录提供成员属性、shape 和字典式 `to_numpy/from_numpy`，委�
 分支，普通整数路径仍保留为 Host Python。副作用、模型条件、被遮蔽的协议函数及未知操作
 拒绝导出。CPU/CUDA 局部检查覆盖新尺寸、普通 JIT 对照和无源码独立实例，不代表任意
 Python 辅助函数均可处理。
+Field 形状也可使用已有证明的固定定义元组的 `len`；可变全局列表和被遮蔽的 `len` 不作为定义常量。
 
 已有普通 Python 辅助函数可转发这三种维度方法：证明过程复用资源工厂检查，仅接受一次
 受支持声明调用及固定前端能力选择，例如 `getattr(type(scope), 'derived_dim', None)`。

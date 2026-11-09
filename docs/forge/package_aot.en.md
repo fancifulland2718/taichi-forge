@@ -721,6 +721,8 @@ or `maximum` protocol arm is supported; the normal integer path remains Host
 Python. Side effects, model-dependent control, shadowed protocol functions and
 unknown operations reject. CPU/CUDA checks cover new sizes, JIT agreement and
 source-free independent instances; this does not qualify arbitrary Python helpers.
+Field extents also accept `len` of the existing proven fixed definition tuples;
+mutable global lists and shadowed `len` calls are not definition constants.
 
 Ordinary imported Python helpers may forward these dimension methods. The
 existing resource-factory proof accepts one supported declaration call and fixed

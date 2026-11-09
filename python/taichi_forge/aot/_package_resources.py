@@ -892,6 +892,20 @@ def scope_declarations(
                     return None
                 result[key.value] = extent
             return result
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "len"
+            and "len" not in stores
+            and namespace.get("len", len) is len
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            from ._package_constants import definition_names
+
+            names = definition_names(node.args[0], namespace, constructor)
+            if names is not None:
+                return Extent(("const", len(names)))
         scope, method = operation(node)
         if method in ("derived_dim", "power_of_two_dim"):
             if (

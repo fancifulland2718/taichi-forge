@@ -14203,6 +14203,7 @@ EXTENT_RELATION_SOURCE = """
 import taichi_forge as ti
 effects = []
 constructors = 0
+LABELS = ('first', 'second', 'third')
 
 def chunk_capacity(jobs, candidates, width=32):
     chunks = (jobs + width - 1) // width + candidates - 1
@@ -14220,6 +14221,7 @@ class Model:
         scope = ti.experimental.ResourceScope(self)
         count = scope.derived_dim('capacity', chunk_capacity(scope.dim('jobs'), scope.dim('candidates')))
         scope.values = scope.field(ti.i32, shape=count)
+        scope.labels = scope.field(ti.i32, shape=len(LABELS))
 
     @ti.kernel
     def step(self, bias: ti.i32):
@@ -14239,6 +14241,7 @@ def test_package_extent_relation_helper_preserves_symbolic_counts(tmp_path, monk
     normal.step(7)
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(73, 5), code.host.Model(257, 2)
+        assert a.labels.shape == b.labels.shape == (3,)
         a.step(7)
         b.step(-2)
         np.testing.assert_array_equal(a.values.to_numpy(), normal.values.to_numpy())
@@ -14285,7 +14288,7 @@ def test_package_extent_relation_helper_preserves_symbolic_counts(tmp_path, monk
     assert "EXTENT_RELATION_OK" in result.stdout
 
 
-@pytest.mark.parametrize("change", ["effect", "model", "shadow"])
+@pytest.mark.parametrize("change", ["effect", "model", "shadow", "mutable_labels", "shadow_len"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_extent_relation_helper_rejects_unproven_computation(tmp_path, monkeypatch, change):
     source = EXTENT_RELATION_SOURCE
@@ -14293,13 +14296,17 @@ def test_package_extent_relation_helper_rejects_unproven_computation(tmp_path, m
         source = source.replace("    chunks =", "    effects.append(1)\n    chunks =")
     elif change == "model":
         source = source.replace("    chunks =", "    if jobs > 5:\n        return jobs\n    chunks =")
-    else:
+    elif change == "shadow":
         source = source.replace(
             "    return max(1, min(jobs, chunks))",
             "    hasattr = lambda *args: False\n    return max(1, min(jobs, chunks))",
         )
+    elif change == "mutable_labels":
+        source = source.replace("LABELS = ('first', 'second', 'third')", "LABELS = ['first', 'second', 'third']")
+    else:
+        source = source.replace("        scope.labels =", "        len = lambda value: 7\n        scope.labels =")
     package = _source_package(tmp_path, monkeypatch, source)
-    with pytest.raises(ti.aot.PackageExportError, match="declared dimension algebra"):
+    with pytest.raises(ti.aot.PackageExportError, match="declared dimension.*algebra"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].effects == []
     assert sys.modules["definition_fixture.model"].constructors == 0
