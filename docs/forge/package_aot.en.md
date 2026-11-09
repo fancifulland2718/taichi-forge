@@ -776,7 +776,8 @@ The member expression may add fixed string prefixes/suffixes or use an f-string
 without conversions or format specifications. Immutable definition tuples reuse
 the same source proof as declaration-name loops; mutable global lists and string
 function calls are not evaluated. Literal member sequences may splice those fixed
-tuples (`(*MEMBERS, 'extra')`); model sequences remain unsupported. CPU/CUDA checks cover shared layout, independent
+tuples (`(*MEMBERS, 'extra')`) or slice them with fixed integer bounds/stride
+(`MEMBERS[-6:-2]`). Model sequences/bounds and zero strides reject. CPU/CUDA checks cover shared layout, independent
 instances and isolated source-free consumption of these forms.
 Fixed aliases such as `setattr(scope, f'alias_{name}', getattr(owner, 'source_' + name))`
 reuse source-scope borrow admission, preserving the original Field, layout and

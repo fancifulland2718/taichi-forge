@@ -13167,7 +13167,7 @@ class Model:
         np.testing.assert_array_equal(b.values.to_numpy(), np.arange(1, 20))
 
 
-@pytest.mark.parametrize("names", ["literal", "prefix", "formatted", "global_tuple", "global_star", "alias"])
+@pytest.mark.parametrize("names", ["literal", "prefix", "formatted", "global_tuple", "global_star", "alias", "slice"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_path, monkeypatch, names):
     from tests.python.test_aot_dense_snode_group import _compiled_nodes
@@ -13192,6 +13192,9 @@ def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_pat
                 setattr(scope, f'alias_{name}', getattr(self, 'state_' + name))""",
         )
         source = source.replace("self.state_values[i] += 1", "self.alias_values[i] += 1")
+    elif names == "slice":
+        source = source.replace("constructors = 0", "MEMBERS = ('before', 'values', 'weights', 'after')\nconstructors = 0")
+        source = source.replace("for name in ('values', 'weights'):", "for name in MEMBERS[-3:-1]:")
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
@@ -13225,7 +13228,7 @@ def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_pat
         a.tree.destroy()
         b.step()
         np.testing.assert_array_equal(getattr(b, prefix + "values").to_numpy(), 2)
-    if names in ("global_tuple", "global_star", "alias"):
+    if names in ("global_tuple", "global_star", "alias", "slice"):
         probe = tmp_path / "consume_member_names.py"
         probe.write_text(
             textwrap.dedent("""
@@ -13283,6 +13286,8 @@ def test_package_literal_field_name_loops_preserve_layout_and_host_order(tmp_pat
         "alias_shadow",
         "alias_dynamic",
         "alias_source",
+        "slice_bound",
+        "slice_stride",
     ],
 )
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -13310,6 +13315,10 @@ def test_package_field_name_loops_reject_unproven_declarations(tmp_path, monkeyp
         model = model.replace("for name in ('values', 'weights'):", "for name in (*MEMBERS, 'weights'):")
     elif change == "model_expansion":
         model = model.replace("for name in ('values', 'weights'):", "for name in (*self.names, 'weights'):")
+    elif change.startswith("slice_"):
+        model = model.replace("constructors = 0", "MEMBERS = ('values', 'weights')\nconstructors = 0")
+        selection = "MEMBERS[:self.n]" if change == "slice_bound" else "MEMBERS[::0]"
+        model = model.replace("for name in ('values', 'weights'):", "for name in " + selection + ":")
     elif change.startswith("alias_"):
         model = model.replace(
             "            self.last_member = name",

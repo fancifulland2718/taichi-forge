@@ -9,6 +9,22 @@ from ._package_factories import _literal, _source_value
 
 def definition_names(expression, namespace, constructor):
     """Read a fixed declaration-name tuple from its unshadowed module source."""
+    if isinstance(expression, ast.Subscript) and isinstance(expression.slice, ast.Slice):
+        names = definition_names(expression.value, namespace, constructor)
+        if type(names) is not tuple:
+            return None
+        bounds = []
+        for bound in (expression.slice.lower, expression.slice.upper, expression.slice.step):
+            try:
+                value = None if bound is None else ast.literal_eval(bound)
+            except (ValueError, TypeError, SyntaxError):
+                return None
+            if value is not None and type(value) is not int:
+                return None
+            bounds.append(value)
+        if bounds[2] == 0:
+            return None
+        return names[slice(*bounds)]
     if isinstance(expression, (ast.Tuple, ast.List)):
         names = []
         for item in expression.elts:
