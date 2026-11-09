@@ -174,7 +174,7 @@ class OwnerGraph:
                     if item.get("external") and item.get("optional_input")
                     else (
                         _ConditionalArray(dtype, item["ndim"], conditions=tuple(item["conditions"].items()))
-                        if item.get("external") and item.get("conditions")
+                        if item.get("conditions")
                         else Array(dtype, item["ndim"])
                     )
                 )

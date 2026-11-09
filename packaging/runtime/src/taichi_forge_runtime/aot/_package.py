@@ -227,6 +227,32 @@ class _ModuleBinding:
     def arch(self, name):
         return _BACKENDS[name]
 
+    def scoped_array(self, owner, name, dtype, shape):
+        from ._package_values import owner_type
+
+        self.package._check()
+        construction = _construction.get()
+        if construction is None or construction[0] is not self.package or construction[2] is not owner:
+            raise ValueError("Scoped array allocation requires its managed construction")
+        member = self.package.manifest["owners"][owner_type(owner)][name]
+        if member.get("kind") != "ndarray" or "array_extents" not in member:
+            raise ValueError("Scoped array requires its declared allocation")
+        if any(dimension_value(owner, flag) is not expected for flag, expected in member.get("conditions", {}).items()):
+            raise ValueError("Scoped array allocation contradicts its declared presence")
+        shape = shape if isinstance(shape, tuple) else (shape,)
+        actual = tuple(
+            self.extent(item.expression, owner) if isinstance(item, Extent) else operator.index(item) for item in shape
+        )
+        expected = tuple(self.extent(expression, owner) for expression in member["array_extents"])
+        if actual != expected or self.element_spec(dtype) != member["element"]:
+            raise ValueError("Scoped array type or shape changed before allocation")
+        value = self.ndarray(dtype, actual)
+        # LLVM's allocation path already zeroes fresh storage. Vulkan's generic
+        # C-API allocation does not promise initialization; perform it once here.
+        if member["initialization"] == "zero" and self.package.runtime.arch == "vulkan":
+            value.write(bytes(value.nbytes))
+        return value
+
     def tensor(self, values, dt=None):
         from ._package_values import HostTensor
 
@@ -1662,6 +1688,7 @@ class LoadedPackage:
                 68,
                 69,
                 70,
+                71,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1671,6 +1698,10 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        if self.manifest["version"] < 71 and any(
+            "array_extents" in member for owner in self.manifest["owners"].values() for member in owner.values()
+        ):
+            raise ValueError("Scoped arrays require definition package format 71")
         if self.manifest["version"] < 70 and any(
             contract.get("shapes") for contract in self.manifest.get("field_groups", {}).values()
         ):

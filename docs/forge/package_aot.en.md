@@ -1811,6 +1811,17 @@ no device count and does not enlarge the launch. This bound proves neither an
 exact dimension nor a static condition; it does not propagate through potentially
 overflowing arithmetic. Unbounded device ranges still reject.
 
+Format 71 projects ordinary `ResourceScope.ndarray(dtype, shape=..., initialization=...)`
+through the existing independent ndarray ABI, without adding arrays to an SNode group.
+Shapes use declared dimensions and their algebra; new instance sizes and empty arrays
+remain runtime data. Conditional allocation retains declared boolean guards. Local
+CPU/CUDA/Vulkan checks cover constructor/preparation helpers, scalar/vector arrays,
+ordinary JIT comparison, source-free instance isolation and failed-construction cleanup.
+Initialization occurs at allocation only: LLVM reuses allocator zeroing; Vulkan's explicit
+`zero` policy currently uploads zero bytes once. Large-array preparation cost is unmeasured.
+This does not qualify SAP/providers or the full rigid closure; model-selected element types
+still require separate admission.
+
 Field dtype expressions may read an existing `static_dtype` through the same
 ResourceScope, including a singleton storage type declared by another preparation
 helper. This preserves the owner type/domain checks without instance inference

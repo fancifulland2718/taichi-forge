@@ -517,6 +517,21 @@ def _host_projection(
         def _allocation(self, node):
             target = node.targets[0] if isinstance(node, ast.Assign) else node.target
             schema = binding_schemas.get(self.owner, {})
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and "array_extents" in schema.get(target.attr, {})
+                and schema[target.attr]["allocation"] == [node.lineno, node.col_offset]
+            ):
+                self.minimum_version = max(self.minimum_version, 71)
+                arguments = dict(zip(("dtype",), node.value.args))
+                arguments.update((keyword.arg, keyword.value) for keyword in node.value.keywords)
+                node.value = ast.Call(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "scoped_array", ast.Load()),
+                    [ast.Name("self", ast.Load()), ast.Constant(target.attr), arguments["dtype"], arguments["shape"]],
+                    [],
+                )
+                return self.generic_visit(node)
             placement = next(
                 (
                     item["placement"]

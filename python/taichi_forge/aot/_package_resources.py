@@ -1999,7 +1999,7 @@ def scope_declarations(
                 ),
                 statement,
             )
-        elif method in ("field", "vector_field", "matrix_field", "struct_field"):
+        elif method in ("field", "vector_field", "matrix_field", "struct_field", "ndarray"):
             alias_checks.clear()
             if scope_paths[scope]:
                 fail(module, call, "A record describes existing members and cannot allocate Fields")
@@ -2066,6 +2066,7 @@ def scope_declarations(
                     fail(module, keyword, "Field initialization requires its existing zero/consumer_explicit policy")
             role = {
                 "field": "field",
+                "ndarray": "field",
                 "vector_field": "Vector.field",
                 "matrix_field": "Matrix.field",
                 "struct_field": "Struct.field",
@@ -2114,6 +2115,7 @@ def scope_declarations(
                 zip(
                     {
                         "field": ("dtype", "shape"),
+                        "ndarray": ("dtype",),
                         "vector_field": ("n", "dtype", "shape"),
                         "matrix_field": ("n", "m", "dtype", "shape"),
                         "struct_field": ("members", "shape"),
@@ -2165,6 +2167,35 @@ def scope_declarations(
                 shape = (shape,)
             if not isinstance(shape, tuple):
                 fail(module, shape_node, "ResourceScope Field shape requires declared dimensions and their algebra")
+            if method == "ndarray":
+                if (
+                    len(call.args) > 1
+                    or not shape
+                    or shape_policy
+                    or any(keyword.arg not in ("dtype", "shape", "initialization") for keyword in call.keywords)
+                ):
+                    fail(module, call, "ResourceScope ndarray requires dtype and a declared fixed-rank shape")
+                policy = original_args.get("initialization")
+                if policy is None:
+                    policy = next(
+                        (keyword.value for keyword in scopes[scope].value.keywords if keyword.arg == "initialization"),
+                        ast.Constant("consumer_explicit"),
+                    )
+                add(
+                    target.attr,
+                    dict(
+                        kind="ndarray",
+                        type_node=dtype,
+                        ndim=len(shape),
+                        array_extents=[extent.expression for extent in shape],
+                        initialization=policy.value,
+                        allocation=[statement.lineno, statement.col_offset],
+                        scope_allocation=origin(scope),
+                        **({"conditions": dict(conditions)} if conditions else {}),
+                    ),
+                    statement,
+                )
+                continue
             order_policy = None
             order_nodes = [keyword.value for keyword in call.keywords if keyword.arg == "order"]
             order_call = call

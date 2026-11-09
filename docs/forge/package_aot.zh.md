@@ -1215,6 +1215,14 @@ JIT 模式复用同后端的既有 Runtime；新建时可用 `jit_options`，自
 
 ## 仍需补齐的共同机制
 
+格式 71 将正常 `ResourceScope.ndarray(dtype, shape=..., initialization=...)`
+接入包导出，复用原独立 ndarray ABI，不将数组放入 SNode 组。尺寸来自声明的
+`dim/derived_dim` 及其代数，实例可使用新尺寸和空数组；条件分配沿用已声明布尔守卫。
+CPU/CUDA/Vulkan 局部检查覆盖构造器和准备 helper、标量/向量数组、普通 JIT 对照、
+无源码双实例消费及构造失败释放。初始化只发生在分配时；LLVM 复用分配器清零，
+Vulkan 的显式 `zero` 策略暂用一次 Host 零字节上传。未测量其大数组准备成本。
+该检查不表示 SAP/provider 或完整刚体闭包已合格；模型选择的元素类型仍需独立准入。
+
 Field 的 dtype 也可通过同一 ResourceScope 读取既有 `static_dtype` 声明，
 包括另一准备 helper 已声明的单一存储类型；沿用原 owner 类型与有限域检查。
 不同准备函数可重复声明完全一致的静态域；每处 Host 声明仍保留位置和调用行为，
