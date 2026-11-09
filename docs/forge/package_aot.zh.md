@@ -1221,6 +1221,9 @@ Field 的 dtype 也可通过同一 ResourceScope 读取既有 `static_dtype` 声
 正常 Host 准备可通过 scope 的属性或未被替换的 `getattr(scope, '名称', 默认值)`
 读取已声明、无条件的标量角色。该放行只针对声明值；Scope 本身逃逸、未知属性和
 动态名称仍拒绝，Host 策略不进入数值代码身份。
+无 `else` 的资源分配条件可使用已声明布尔角色的 `A and not B`，按嵌套资源守卫
+处理，保留 Host 短路语义；只有读取这些资源的入口受影响。任意模型比较、`or`
+或含替代分配的复合条件尚不在此局部支持范围内。
 
 格式 70 支持独立默认 AOS Field 的有限形状选择，例如
 `shape = (n,) if self.packed else (n, width)`。条件须为已有的非 `kernel_only`

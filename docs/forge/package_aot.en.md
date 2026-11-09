@@ -1819,6 +1819,11 @@ Normal Host preparation may read unconditional declared scalar roles through
 scope attributes or an unshadowed `getattr(scope, 'name', default)`. This admits
 the declared value only: escaped scopes, unknown members and dynamic names still
 reject. Host policy does not become a numerical code identity.
+Resource guards without `else` may conjoin declared boolean roles, such as
+`A and not B`. They use existing nested resource guards, retain Host short-circuit
+semantics and affect only entries reading those resources. Arbitrary model
+comparisons, `or` and compound guards with alternative allocations remain outside
+this focused support.
 
 Format 70 supports finite shape selection for independent default-AOS Fields,
 such as `shape = (n,) if self.packed else (n, width)`. The condition must be an

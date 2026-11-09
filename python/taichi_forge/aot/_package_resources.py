@@ -1316,6 +1316,18 @@ def scope_declarations(
                 and scope_binding(n.value) in scopes
                 for n in ast.walk(statement)
             ):
+                if (
+                    isinstance(statement.test, ast.BoolOp)
+                    and isinstance(statement.test.op, ast.And)
+                    and not statement.orelse
+                ):
+                    # Read a positive conjunction as nested guards. The emitted
+                    # Host condition remains untouched, including short-circuiting.
+                    nested = statement.body
+                    for term in reversed(statement.test.values):
+                        nested = [ast.copy_location(ast.If(term, nested, []), statement)]
+                    yield from statements(nested, conditions)
+                    continue
                 # An optional plain record already has an existing Component
                 # presence contract. Its leaf declarations describe the present
                 # branch; they do not create a second boolean configuration axis.
@@ -1444,6 +1456,10 @@ def scope_declarations(
                     if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name) and test.value.id == "self"
                     else None
                 )
+                if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name):
+                    binding = scope_binding(test.value)
+                    if binding in scopes:
+                        name = member(binding, test.attr)
                 if isinstance(test, ast.Name) and test.id in boolean_parameters:
                     name = presence_parameter(statement, test.id)
                 elif (

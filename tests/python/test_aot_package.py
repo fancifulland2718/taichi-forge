@@ -15685,6 +15685,58 @@ def declare_types(scope, floating, integer):
 """
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize("condition", ["declared", "model_value", "alternative"])
+def test_package_scoped_conjunction_keeps_layout_guards_local(tmp_path, monkeypatch, condition):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, left: bool, right: bool):
+        self.n, self.left, self.right = n, left, right
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields)
+        scope.static('left', choices=(False, True))
+        scope.static('right', choices=(False, True))
+        scope.result = scope.field(ti.i32, shape=scope.dim('n'))
+        if scope.left and not scope.right:
+            scope.extra = scope.field(ti.i32, shape=scope.dim('n'))
+        self.tree = fields.finalize()
+    @ti.kernel
+    def step(self):
+        for i in self.result:
+            self.result[i] = i
+            if ti.static(self.left and not self.right):
+                self.extra[i] = i * 3
+                self.result[i] = self.extra[i]
+    @ti.kernel
+    def common(self):
+        for i in self.result:
+            self.result[i] = -i
+"""
+    if condition == "model_value":
+        source = source.replace("scope.left and not scope.right", "scope.n > 3 and not scope.right")
+    elif condition == "alternative":
+        source = source.replace("scope.left and not scope.right", "scope.left or not scope.right")
+    package = _source_package(tmp_path, monkeypatch, source)
+    if condition != "declared":
+        with pytest.raises(ti.aot.PackageExportError, match="declared boolean"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        assert not (tmp_path / "sdk").exists()
+        return
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sum(entry["definition"].endswith(".Model.common") for entry in manifest["entries"].values()) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for left, right, n in [(False, False, 3), (False, True, 7), (True, False, 13), (True, True, 19)]:
+            model = code.host.Model(n, left, right)
+            assert hasattr(model, "extra") == (left and not right)
+            model.step()
+            np.testing.assert_array_equal(model.result.to_numpy(), np.arange(n) * (3 if left and not right else 1))
+            model.common()
+            np.testing.assert_array_equal(model.result.to_numpy(), -np.arange(n))
+            model.tree.destroy()
+
+
 @pytest.mark.parametrize("storage_type", [False, True, "scope"], ids=["numerical", "storage", "scope-storage"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_static_dtype_preparation(tmp_path, monkeypatch, storage_type):
