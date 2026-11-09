@@ -2412,7 +2412,7 @@ def append_step(solver, builder):
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-@pytest.mark.parametrize('recipe_kind', ['factory', 'mixed'])
+@pytest.mark.parametrize('recipe_kind', ['factory', 'mixed', 'filtered'])
 def test_package_write_inventory_resolves_optional_record_recipes(tmp_path, monkeypatch, recipe_kind):
     recipe = RECORD_INVENTORY_RECIPE
     if recipe_kind == 'mixed':
@@ -2421,6 +2421,29 @@ def test_package_write_inventory_resolves_optional_record_recipes(tmp_path, monk
     item = (('step', solver.step) if solver.n > 8 else
             ('composite', Operation(solver.unrelated, solver.record_unrelated, solver.step)))
     return (item,)
+
+''' + recipe[end:]
+    elif recipe_kind == 'filtered':
+        start, end = recipe.index('def operations(solver):'), recipe.index('def append_step(solver, builder):')
+        recipe = recipe[:start] + '''@dataclass(frozen=True, slots=True)
+class Entry:
+    name: str
+    kernel: object
+    enabled: bool
+
+def operations(solver):
+    entries = tuple(entry for entry in (
+        Entry('step', solver.step, solver.n > 8),
+        Entry('unrelated', solver.unrelated, solver.n <= 8)) if entry.enabled)
+    steps: list = []
+    found = False
+    for entry in entries:
+        steps.append((entry.name, entry.kernel))
+        if entry.name == 'step':
+            found = True
+    if found and any(entry.name == 'step' for entry in entries):
+        steps.extend([('step', solver.step)] * solver.n)
+    return tuple(steps)
 
 ''' + recipe[end:]
     source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
@@ -2691,12 +2714,28 @@ def test_package_checkpoint_sequence_rejects_unproven_sources(tmp_path, monkeypa
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 @pytest.mark.parametrize('present', [False, True])
-def test_package_write_inventory_optional_host_input(tmp_path, monkeypatch, present):
+@pytest.mark.parametrize('form', ['branch', 'conditional_kernel'])
+def test_package_write_inventory_optional_host_input(tmp_path, monkeypatch, present, form):
     source = CYCLIC_WRITE_INVENTORY_SOURCE.replace('''def append_step(solver, builder):
     builder.dispatch(solver.step)''', '''def append_step(solver, builder, extra=None):
     if solver.n > 0 and extra is not None:
         builder.dispatch(solver.write_optional, template_args={'extra': extra})
     builder.dispatch(solver.step)''')
+    if form == 'conditional_kernel':
+        source = source.replace('''def append_step(solver, builder, extra=None):
+    if solver.n > 0 and extra is not None:
+        builder.dispatch(solver.write_optional, template_args={'extra': extra})
+    builder.dispatch(solver.step)''', '''def dispatch(builder, kernel, extra=None):
+    if extra is None:
+        builder.dispatch(kernel)
+    else:
+        builder.dispatch(kernel, template_args={'extra': extra})
+
+def append_step(solver, builder, extra=None):
+    args = () if extra is None else (extra,)
+    dispatch(builder, solver.step if extra is None else solver.write_optional, *args)
+    if extra is not None:
+        builder.dispatch(solver.step)''')
     source = source.replace('    def record_unrelated(self, builder):\n        builder.dispatch(self.unrelated)', '''    @ti.kernel
     def write_optional(self, extra: ti.template()):
         for i in extra:

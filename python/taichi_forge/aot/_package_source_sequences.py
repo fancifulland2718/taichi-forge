@@ -163,6 +163,13 @@ class SourceSequences:
                 raise UnprovenSourceSequence("Inventory attributes require a forwarded resource path")
             expression = ast.Attribute(parent, node.attr, ast.Load())
             if self.inventory:
+                from ._package_function_inputs import _plain_record
+                if isinstance(parent, ast.Call):
+                    cls = getattr(parent.func, '_package_source_callable', None)
+                    if _plain_record(cls):
+                        bound = inspect.signature(cls).bind(*parent.args, **{k.arg: k.value for k in parent.keywords})
+                        if node.attr in bound.arguments:
+                            return copy.deepcopy(bound.arguments[node.attr])
                 expression._package_source_active = active
             return expression
         if self.inventory and isinstance(node, ast.Lambda):
@@ -199,6 +206,12 @@ class SourceSequences:
                              self.value(node.orelse, environment, namespace, active), self.choice(predicate))
         if isinstance(node, ast.BinOp) and (self.inventory or isinstance(node.op, ast.Add)):
             left, right = (self.value(n, environment, namespace, active) for n in (node.left, node.right))
+            if self.inventory and isinstance(left, Sequence):
+                if isinstance(node.op, ast.Add) and isinstance(right, Sequence) and left.mutable == right.mutable:
+                    return Sequence((*left.values, *right.values), mutable=left.mutable, domain=left.domain or right.domain)
+                if isinstance(node.op, ast.Mult) and isinstance(right, ast.AST):
+                    empty = isinstance(right, ast.Constant) and type(right.value) is int and right.value <= 0
+                    return Sequence(() if empty else left.values, mutable=left.mutable, domain=True)
             if (
                 isinstance(node.op, ast.Add)
                 and isinstance(left, ast.Constant)
@@ -226,16 +239,22 @@ class SourceSequences:
                 [operand(n) for n in node.comparators],
             )
         if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
-            if len(node.generators) != 1 or node.generators[0].is_async or node.generators[0].ifs:
+            if len(node.generators) != 1 or node.generators[0].is_async or (node.generators[0].ifs and not self.inventory):
                 raise UnprovenSourceSequence("Inventory comprehension needs one finite sequence without filters")
             generator = node.generators[0]
             values = self.sequence(self.value(generator.iter, environment, namespace, active))
             result = []
+            conditional = values.domain
             for value in values.values:
                 local = dict(environment)
                 self.bind(generator.target, value, local)
+                conditions = [self.known_condition(self.scalar(self.value(test, local, namespace, active)))
+                              for test in generator.ifs]
+                if False in conditions:
+                    continue
+                conditional |= None in conditions
                 result.append(self.value(node.elt, local, namespace, active))
-            return Sequence(result, mutable=isinstance(node, ast.ListComp), domain=values.domain)
+            return Sequence(result, mutable=isinstance(node, ast.ListComp), domain=conditional)
         if isinstance(node, ast.Call) and not node.keywords:
             from ._resource_effects import written_resources
             from taichi_forge import aot
@@ -310,6 +329,19 @@ class SourceSequences:
                 function = copy.deepcopy(node.func)
                 function._package_source_callable = builtins.str
                 return ast.Call(function, [item], [])
+            if self.inventory and isinstance(node.func, ast.Name) and node.func.id in ('any', 'all') and len(node.args) == 1:
+                supplied = namespace.get('__builtins__', vars(builtins))
+                supplied = supplied if isinstance(supplied, dict) else vars(supplied)
+                builtin = getattr(builtins, node.func.id)
+                if (node.func.id in environment or namespace.get(node.func.id, builtin) is not builtin
+                        or supplied.get(node.func.id) is not builtin):
+                    raise UnprovenSourceSequence('Inventory predicate must retain its builtin binding')
+                values = self.sequence(self.value(node.args[0], environment, namespace, active))
+                function = copy.deepcopy(node.func)
+                function._package_source_callable = builtin
+                # A source domain may be empty in a particular model. Retain
+                # the predicate instead of assuming every possible entry exists.
+                return ast.Call(function, [self.syntax(values, allow_domain=True)], [])
             if isinstance(node.func, ast.Call) and len(node.args) == 1:
                 selector = node.func
                 self.unshadowed(selector.func, environment)
@@ -544,8 +576,9 @@ class SourceSequences:
             elif isinstance(node, ast.For) and not node.orelse:
                 values = (self.iteration(node.iter, environment, namespace, active) if self.inventory else
                           self.sequence(self.value(node.iter, environment, namespace, active)))
+                inputs = set(inspect.signature(active[-1]).parameters) if active else set(environment)
                 if self.inventory and any(isinstance(part, ast.Name) and not isinstance(part.ctx, ast.Load)
-                                          and part.id in environment for part in ast.walk(node)):
+                                          and part.id in inputs for part in ast.walk(node)):
                     raise UnprovenSourceSequence('Inventory loop cannot rebind an existing source')
                 for value in values.values:
                     local = copy.deepcopy(environment) if self.inventory else dict(environment)

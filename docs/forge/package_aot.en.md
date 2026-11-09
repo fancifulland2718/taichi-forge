@@ -1243,6 +1243,15 @@ Local CPU checks compare JIT/AOT save/restore at new sizes and rejection cases.
 This runs only during preflight/export, adds no Runtime checks, and does not
 qualify the complete rigid package.
 
+Immutable operation records may also participate in single-level conditional
+filters, sequence concatenation and model-count repetition. Source domains retain
+possible operations without unrolling counts; `any`/`all` retain model conditions
+instead of treating possible entries as necessarily present. Proven default
+inputs also select Kernels and argument tuples in conditional expressions; unknown
+or reassigned inputs cannot discard branches using the default. Normal contact
+tables can cache active recipes during preparation and expose their original
+definitions to preflight without a second AOT-only Kernel registry.
+
 Write-inventory discovery can project immutable Kernel sequences from the
 original getter of a standard `functools.cached_property`, including early-return
 strategy branches, local list appends, and finite method choices based on parity

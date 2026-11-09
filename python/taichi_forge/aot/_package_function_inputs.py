@@ -761,9 +761,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 if resource_inventory is not None and hasattr(expression, '_package_source_choice'):
                     return _Choice(('source_sequence', expression._package_source_choice),
                                    (child(expression.body), child(expression.orelse)))
-                condition = child(expression.test)
-                if isinstance(condition, _Literal) and type(condition.value) is bool:
-                    return child(expression.body if condition.value else expression.orelse)
+                condition = proven_condition(expression.test, visiting, bindings)
+                if condition is not None:
+                    return child(expression.body if condition else expression.orelse)
                 left, right = child(expression.body), child(expression.orelse)
                 for resource, absent in ((left, right), (right, left)):
                     if isinstance(resource, _Resource) and isinstance(absent, _Literal) and absent.value is None:
@@ -918,21 +918,21 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             result = source_callable(expression, namespace)
             return (result, None) if inspect.isfunction(result) else (None, None)
 
-        def proven_condition(expression):
-            fact = value(expression)
+        def proven_condition(expression, visiting=(), bindings=None):
+            fact = value(expression, visiting, bindings)
             if isinstance(fact, _Literal) and type(fact.value) in (bool, int, float, str, type(None)):
                 return bool(fact.value)
             if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
-                answer = proven_condition(expression.operand)
+                answer = proven_condition(expression.operand, visiting, bindings)
                 return None if answer is None else not answer
             if isinstance(expression, ast.BoolOp):
-                answers = [proven_condition(item) for item in expression.values]
+                answers = [proven_condition(item, visiting, bindings) for item in expression.values]
                 if isinstance(expression.op, ast.And):
                     return False if False in answers else True if all(answer is True for answer in answers) else None
                 return True if True in answers else False if all(answer is False for answer in answers) else None
             if (isinstance(expression, ast.Compare) and len(expression.ops) == 1
                     and isinstance(expression.ops[0], (ast.Is, ast.IsNot))):
-                left, right = value(expression.left), value(expression.comparators[0])
+                left, right = value(expression.left, visiting, bindings), value(expression.comparators[0], visiting, bindings)
                 if isinstance(left, _Literal) and left.value is None:
                     left, right = right, left
                 if isinstance(right, _Literal) and right.value is None:
