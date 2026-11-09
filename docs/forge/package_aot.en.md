@@ -2027,7 +2027,8 @@ retain its necessary variants. Unaffected entries share code, and instance
 preparation still determines model sizes. Focused CPU/CUDA checks cover nested
 owners, non-owning inputs, ordinary JIT equivalence and source-free dual instances.
 The native SNode compiler remains responsible for byte layout. Explicit placement
-or order, StructFields and `field_like` clones across shape choices still reject.
+or order and StructFields still reject. Format 76 allows `field_like` to inherit
+these supported shape choices.
 
 Format 72 permits a scalar Field to select its native element type using the same
 boolean declaration, for example `dtype = ti.u64 if scope.wide else ti.u32`,
@@ -2040,14 +2041,14 @@ dual instances. Only scalar elements are supported.
 Allocating another scalar Field from a declared Field's `.dtype` propagates the
 same policy, including to entries that use only the derived Field. Tensor/Struct
 allocations derived from a conditional type currently reject explicitly.
-Format 76 propagates that same policy through `field_like`, including a source
+Format 76 propagates the original type/shape policy through `field_like`, including a source
 borrowed from a proven owner input. The clone owns independent storage while
-sharing the source's boolean type condition, without another configuration axis.
+sharing the source's boolean layout condition, without another configuration axis.
 Condition paths use the existing preparation and call reuse machinery; changing
 the source layout option after construction still rejects. Focused CPU/CUDA
-checks cover u32/u64, new sizes, independent instances, save/restore, Graph,
-ordinary JIT comparison and consumers without numerical source. Cloning across
-shape choices remains outside this scope.
+checks cover u32/u64, 1D/2D, new sizes, independent instances, save/restore, Graph,
+ordinary JIT comparison and consumers without numerical source. The source layout
+must itself belong to the supported declaration scope described above.
 
 Format 73 supports `scope.borrow('view', self.b if self.choice else self.a, source_scope=True)`.
 An unconditional boolean static selects between two declared Fields on the same

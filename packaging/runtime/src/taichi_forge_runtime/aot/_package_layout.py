@@ -3,6 +3,18 @@
 import json
 
 
+def layout_condition_paths(contract):
+    """Reuse declared source paths for dependent allocation choices."""
+    paths = {}
+    for kind in ("shapes", "dtypes"):
+        for policy in contract.get(kind, {}).values():
+            name, path = policy["condition"], policy.get("condition_path", [policy["condition"]])
+            if name in paths and paths[name] != path:
+                raise ValueError("Field layout policies disagree on their declared source")
+            paths[name] = path
+    return paths
+
+
 def layout_selection(contract, owner):
     from ._package_values import path_value
 
@@ -11,12 +23,7 @@ def layout_selection(contract, owner):
     names.update(policy["condition"] for policy in contract.get("shapes", {}).values())
     names.update(policy["condition"] for policy in contract.get("dtypes", {}).values())
     presence = contract.get("record_presence", {})
-    paths = {}
-    for policy in contract.get("dtypes", {}).values():
-        name, path = policy["condition"], policy.get("condition_path", [policy["condition"]])
-        if name in paths and paths[name] != path:
-            raise ValueError("Field dtype policies disagree on their declared source")
-        paths[name] = path
+    paths = layout_condition_paths(contract)
     selected = {
         name: path_value(owner, presence[name]) is not None if name in presence else path_value(owner, paths.get(name, [name]))
         for name in names

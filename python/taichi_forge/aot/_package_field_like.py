@@ -73,8 +73,6 @@ def resolve_field_likes(sources):
         source_owner, original, prefix = allocation(
             owner, item["source_path"], visiting
         )
-        if "shape_policy" in original:
-            raise ValueError("field_like shape choices require a resolved source layout policy")
         if source_owner == owner and original["allocation"] >= item["allocation"]:
             raise ValueError(
                 "field_like source must precede the independent allocation"
@@ -102,16 +100,21 @@ def resolve_field_likes(sources):
             ),
             declaration_module=item.get("declaration_module", owners[owner][0]),
         )
-        if "dtype_policy" in field:
-            policy = field["dtype_policy"]
+        for policy_kind in ("dtype_policy", "shape_policy"):
+            if policy_kind not in field:
+                continue
+            policy = field[policy_kind]
             source_condition = policy.get("condition_path")
             if source_condition is None:
                 source_condition = owners[source_owner][1][policy["condition"]].get("path", [policy["condition"]])
             condition_path = [*prefix, *source_condition]
             # One original layout choice controls both allocations. The clone
             # has independent storage but no additional static selection axis.
-            field["dtype_policy"] = {**policy, "condition": _capture_id(tuple(condition_path)),
-                                     "condition_path": condition_path}
+            field[policy_kind] = {**policy, "condition": _capture_id(tuple(condition_path)),
+                                  "condition_path": condition_path}
+            if policy_kind == "shape_policy":
+                field[policy_kind].update({branch: [remap.get(axis, axis) for axis in policy[branch]]
+                                           for branch in ("if_true", "if_false")})
         field.pop("declaration_owner", None)
         if "declaration_owner" in item:
             field["declaration_owner"] = item["declaration_owner"]

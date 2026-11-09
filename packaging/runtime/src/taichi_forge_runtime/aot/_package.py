@@ -427,7 +427,7 @@ class _ModuleBinding:
         if dimensions.keys() != set(contract["dimensions"]):
             raise ValueError("Field group dimensions differ from its native schema")
         declared_members = contract["members"]
-        from ._package_layout import layout_selection, select_layout
+        from ._package_layout import layout_condition_paths, layout_selection, select_layout
 
         selection = layout_selection(contract, owner)
         if "order_policy" in member:
@@ -532,8 +532,7 @@ class _ModuleBinding:
             self.package._arrays.append(value)
             allocated.append(value)
             values[attribute] = value
-        condition_paths = {policy["condition"]: tuple(policy["condition_path"])
-                           for policy in contract.get("dtypes", {}).values() if "condition_path" in policy}
+        condition_paths = {name: tuple(path) for name, path in layout_condition_paths(contract).items()}
         member_selection = {condition_paths.get(name, name): value for name, value in selection.items()}
         for attribute in declared_members:
             owner._forge_package_member_layouts[attribute] = member_selection
@@ -1769,9 +1768,9 @@ class LoadedPackage:
             raise ValueError("Borrow source selection requires definition package format 73")
         if self.manifest["version"] < 76 and any(
             "condition_path" in policy for contract in self.manifest.get("field_groups", {}).values()
-            for policy in contract.get("dtypes", {}).values()
+            for kind in ("shapes", "dtypes") for policy in contract.get(kind, {}).values()
         ):
-            raise ValueError("field_like dtype selection requires definition package format 76")
+            raise ValueError("field_like layout selection requires definition package format 76")
         if self.manifest["version"] < 70 and any(
             contract.get("shapes") for contract in self.manifest.get("field_groups", {}).values()
         ):

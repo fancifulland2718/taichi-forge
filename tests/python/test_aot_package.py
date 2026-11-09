@@ -13824,8 +13824,9 @@ FIELD_DTYPE_CHOICE_SOURCE = (
 )
 
 
+@pytest.mark.parametrize('policy', ['dtype', 'shape'])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_field_like_borrowed_dtype_policy(tmp_path, monkeypatch):
+def test_package_field_like_borrowed_layout_policy(tmp_path, monkeypatch, policy):
     source = '''
 import taichi_forge as ti
 @ti.data_oriented
@@ -13836,11 +13837,11 @@ class Copy:
         scope.backup = scope.field_like(self.source, initialization='zero')
     @ti.kernel
     def save(self):
-        for i in self.source:
+        for i in ti.grouped(self.source):
             self.backup[i] = self.source[i]
     @ti.kernel
     def restore(self):
-        for i in self.source:
+        for i in ti.grouped(self.source):
             self.source[i] = self.backup[i]
 
 @ti.data_oriented
@@ -13854,17 +13855,20 @@ class Model:
         scope.copy = Copy(self.values)
     @ti.kernel
     def fill(self, value: ti.u64):
-        for i in self.values:
-            self.values[i] = value + i
+        for i in ti.grouped(self.values):
+            self.values[i] = value
     @ti.kernel
     def save_local(self):
-        for i in self.values:
+        for i in ti.grouped(self.values):
             self.local_backup[i] = self.values[i]
     def graph(self):
         builder = ti.graph.GraphBuilder()
         builder.dispatch(self.copy.restore, template_args={'self': self.copy})
         return builder.compile()
 '''
+    if policy == 'shape':
+        source = source.replace("ti.u64 if scope.wide else ti.u32", 'ti.u64')
+        source = source.replace("shape=scope.dim('n'),", "shape=(scope.dim('n'),) if scope.wide else (scope.dim('n'), 3),")
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / 'sdk')
     assert manifest['version'] == 76
@@ -13884,10 +13888,11 @@ class Model:
                     obj.graph().run({})
                 np.testing.assert_array_equal(model.values.to_numpy(), normal.values.to_numpy())
                 np.testing.assert_array_equal(model.local_backup.to_numpy(), model.values.to_numpy())
-                assert model.values.dtype == model.copy.backup.dtype == ('u64' if wide else 'u32')
+                assert model.values.dtype == model.copy.backup.dtype == ('u64' if wide or policy == 'shape' else 'u32')
+                assert model.values.shape == model.copy.backup.shape
             models[0].fill(2)
             models[1].copy.restore()
-            np.testing.assert_array_equal(models[1].values.to_numpy(), 2**40 + 9 + np.arange(n))
+            np.testing.assert_array_equal(models[1].values.to_numpy(), 2**40 + 9)
             models[1].wide = False
             with pytest.raises(ValueError, match='layout configuration changed'):
                 models[1].copy.restore()
@@ -13908,11 +13913,11 @@ with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code
         model.copy.save()
         model.fill(0)
         model.graph().run({})
-        np.testing.assert_array_equal(model.values.to_numpy(), (2**40 if wide else 0) + 9 + np.arange(23))
+        np.testing.assert_array_equal(model.values.to_numpy(), (2**40 if wide or sys.argv[3] == 'shape' else 0) + 9)
 print('FIELD_LIKE_DTYPE_SOURCE_FREE_OK')
 ''', encoding='utf8')
     result = subprocess.run(
-        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target']],
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target'], policy],
         cwd=tmp_path, capture_output=True, text=True, timeout=90,
         env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
                  PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'packaging/runtime/src'),

@@ -98,14 +98,14 @@ class OwnerGraph:
                                if tuple(item.get("path", (key,))) == remaining), None)
                 if member is not None:
                     if member["kind"] != "static":
-                        raise ValueError("field_like dtype selection requires a declared static source")
+                        raise ValueError("field_like layout selection requires a declared static source")
                     return (choices or {}).get((*path, *policy["condition_path"]),
                                                read_static_key(member["choices"][0]))
                 child = next(((tuple(item.get("path", (key,))), item) for key, item in source.items()
                               if item["kind"] in ("owner", "owner_input")
                               and remaining[:len(item.get("path", (key,)))] == tuple(item.get("path", (key,)))), None)
                 if child is None:
-                    raise ValueError("field_like dtype selection has no declared source path")
+                    raise ValueError("field_like layout selection has no declared source path")
                 prefix, item = child
                 remaining = remaining[len(prefix):]
                 source = self.definitions[item["owner_type"]][2]
@@ -130,7 +130,7 @@ class OwnerGraph:
                 item["dtype_guards"] = {policy["condition"]: selected}
             if "shape_policy" in item:
                 policy = item["shape_policy"]
-                selected = static_values[policy["condition"]]
+                selected = layout_static(policy)
                 item["shape"] = policy["if_true" if selected else "if_false"]
                 item["shape_guards"] = {policy["condition"]: selected}
             alternatives = item.get("owner_alternatives")
@@ -363,6 +363,8 @@ def _compose(environment, schema, children):
                 transformed["shape_policy"] = {
                     **item["shape_policy"],
                     "condition": names[item["shape_policy"]["condition"]],
+                    **({"condition_path": [attribute, *item["shape_policy"]["condition_path"]]}
+                       if "condition_path" in item["shape_policy"] else {}),
                 }
                 transformed["shape_guards"] = {names[n]: expected for n, expected in item["shape_guards"].items()}
             if "dtype_policy" in item:
