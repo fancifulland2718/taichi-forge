@@ -1780,6 +1780,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(73, manifest["version"])
             if any(item["kind"] == "ndarray" and item.get("dtype_policy") for item in schema.values()):
                 manifest["version"] = max(77, manifest["version"])
+            if any(item.get("dynamic_storage_condition") for item in schema.values()):
+                manifest["version"] = max(78, manifest["version"])
             if any(item.get("input_presence_attribute") for item in schema.values()):
                 manifest["version"] = max(57, manifest["version"])
             if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):
@@ -2205,14 +2207,17 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     key: dict(
                         path=list(environment._paths[key]),
                         required_when=code.contract.get("input_requirements", {}).get(key, []),
+                        **({"boolean": True} if item.get("dynamic_storage_condition") else {}),
                     )
                     for key, item in compilation_schema.items()
-                    if item.get("dynamic_input_record") and key in code.used
+                    if (item.get("dynamic_input_record") or item.get("dynamic_storage_condition")) and key in code.used
                 }
                 for key in input_records:
                     flag = compilation_schema[key]["input_presence_attribute"]
                     dynamic_presence[flag] = dict(
-                        path=list(environment._paths[key]), flag_path=list(environment._paths[flag])
+                        path=list(environment._paths[key]),
+                        flag_path=list(environment._paths[flag]),
+                        **({"boolean": True} if compilation_schema[key].get("dynamic_storage_condition") else {}),
                     )
                     manifest["version"] = max(64, manifest["version"])
                 used_paths = [environment._paths[key] for key in bound_used if key in environment._paths]
@@ -2349,7 +2354,13 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     for item in capture:
                         resource = compilation_schema.get(item["name"], {})
                         if resource.get("input_record"):
-                            item["nullable_record"] = list(environment._paths[resource["input_record"]])
+                            predicate = resource["input_record"]
+                            nullable = (
+                                "nullable_boolean"
+                                if compilation_schema[predicate].get("dynamic_storage_condition")
+                                else "nullable_record"
+                            )
+                            item[nullable] = list(environment._paths[predicate])
                         if resource.get("external") and (
                             resource.get("optional_input") or resource.get("input_record")
                         ):

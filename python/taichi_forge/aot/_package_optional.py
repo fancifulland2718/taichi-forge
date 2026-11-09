@@ -1,4 +1,4 @@
-"""Project typed input records without specializing their presence.
+"""Project optional input records and complete allocation groups.
 
 Whole optional Dense groups retain their native layout and allocation lifetime;
 partial or mixed-layout conditions keep the existing specialization contract.
@@ -79,4 +79,58 @@ def project_input_records(owner, schema, declarations):
             item["input_record"] = name
         for item in storage.values():
             item["input_record"] = name
+            item["dynamic_input_storage"] = True
+
+
+def project_boolean_groups(schema, declarations):
+    """Reuse nullable Dense arguments for a whole present-only allocation group.
+
+    Keep the original Host boolean declaration and allocation. Only its device
+    use becomes an immutable invocation value. Mixed groups, layout selection,
+    child construction and other conditional declarations remain specialized.
+    """
+    from taichi_forge.types import primitive_types
+    from ._component import _InputPresence
+
+    for name, predicate in list(schema.items()):
+        if (
+            predicate["kind"] != "static"
+            or predicate.get("conditions")
+            or predicate.get("kernel_only")
+            or predicate.get("static_dtype")
+            or {tuple(value) for value in predicate.get("choices", ())} != {("bool", False), ("bool", True)}
+        ):
+            continue
+        conditioned = {key: item for key, item in schema.items() if name in item.get("conditions", {})}
+        storage = {key: item for key, item in conditioned.items() if item["kind"] == "dense_field"}
+        groups = {item.get("group", "fields") for item in storage.values()}
+        if (
+            not storage
+            or any(
+                item.get("conditions") != {name: True}
+                # A conditionally declared dimension can be read without its
+                # Field. It needs a presence contract of its own before it can
+                # use a nullable argument, unlike an unconditional shape axis.
+                or item["kind"] != "dense_field"
+                or item.get("struct_field")
+                or item["element"].get("model_tensor")
+                or not item.get("group_builder")
+                for item in conditioned.values()
+            )
+            or any(
+                item["kind"] == "dense_field" and item.get("group", "fields") in groups and key not in storage
+                for key, item in schema.items()
+            )
+            or any(
+                name in item.get(guards, {})
+                for item in schema.values()
+                for guards in ("choice_guards", "shape_guards", "dtype_guards", "source_guards")
+            )
+        ):
+            continue
+        predicate.update(dynamic_storage_condition=True, input_presence_attribute=name)
+        declarations[name] = _InputPresence(primitive_types.i32)
+        for item in conditioned.values():
+            item["input_record"] = name
+        for item in storage.values():
             item["dynamic_input_storage"] = True

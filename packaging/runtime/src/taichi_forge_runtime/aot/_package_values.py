@@ -50,7 +50,10 @@ def check_admission(owner, contract):
                 raise ValueError("Optional Field input presence changed after construction")
         presence = {}
         for name, binding in admission.get("dynamic_input_presence", {}).items():
-            actual = path_value(owner, binding["path"]) is not None
+            value = path_value(owner, binding["path"])
+            if binding.get("boolean") and type(value) is not bool:
+                raise ValueError("Conditional workspace presence requires a boolean")
+            actual = value if binding.get("boolean") else value is not None
             if path_value(owner, binding["flag_path"]) is not actual:
                 raise ValueError("Optional input presence changed outside its preparation binding")
             presence[name] = int(actual)
@@ -63,7 +66,8 @@ def check_admission(owner, contract):
 
         records = {}
         for name, record in admission.get("input_records", {}).items():
-            records[name] = path_value(owner, record["path"]) is not None
+            value = path_value(owner, record["path"])
+            records[name] = value if record.get("boolean") else value is not None
             if not records[name] and required(record["required_when"]):
                 raise ValueError("Optional record presence is required by the selected execution branch")
         for resource in admission.get("external_resources", {}).values():
@@ -151,7 +155,10 @@ def check_owner_bindings(owner, bindings):
 
 def capture_value(owner, spec):
     root = owner
-    if spec.get("nullable_record") and path_value(owner, spec["nullable_record"]) is None:
+    if (
+        spec.get("nullable_record") and path_value(owner, spec["nullable_record"]) is None
+        or spec.get("nullable_boolean") and not path_value(owner, spec["nullable_boolean"])
+    ):
         if "optional_array" in spec:
             return root._forge_package_owner._empty_input(spec["optional_array"])
         # The record access is unreachable according to admission. This scalar

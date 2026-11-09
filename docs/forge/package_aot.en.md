@@ -318,7 +318,18 @@ groups allocate no workspace; only unreachable parameters use empty descriptors.
 A successful explicit None binding removes the group's current bindings; early
 returns preserve state, failed preparation restores fields/groups, and previous
 Graphs retain their snapshots. Local CPU/CUDA source-free checks include these
-behaviors, dimension mismatch and foreign workspace rejection. Partial-group
+behaviors, dimension mismatch and foreign workspace rejection.
+Format 78 reuses this mechanism for an ordinary declared boolean controlling
+whole independent present-only Dense groups. Definition export can project it
+to a preparation-bound presence argument so instances share numerical code.
+Original Host allocation and ordinary JIT remain unchanged; an absent instance
+allocates no workspace. Mixed groups, child construction choices, type/layout
+selection, conditional dimension declarations and multi-condition groups retain
+their specialization. Changing an
+allocation flag after construction cannot change its resource layout; a bound
+Graph retains its original snapshot. Local CPU/CUDA source-free checks cover
+`ti.real_func`, new model sizes, absent workspaces, instance isolation and foreign
+workspace rejection. Partial-group
 layout choices, records containing static options, and dimensions escaping the
 record retain their existing contract. Numerical code checks record presence,
 rather than inferring it from workspace object comparisons. Arbitrary

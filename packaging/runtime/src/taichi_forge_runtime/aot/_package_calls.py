@@ -10,7 +10,9 @@ import struct
 
 
 _MISSING = object()
-_PATH_KEYS = frozenset(("path", "source_path", "reference_path", "flag_path", "nullable_record", "layout_owner_path"))
+_PATH_KEYS = frozenset(
+    ("path", "source_path", "reference_path", "flag_path", "nullable_record", "nullable_boolean", "layout_owner_path")
+)
 
 
 def specialization_entries(path, target, entries):

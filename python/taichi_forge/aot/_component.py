@@ -2150,9 +2150,9 @@ class _Capture:
             present = True
             for condition, expected in declaration.conditions:
                 predicate = self.declarations.get(condition)
-                if isinstance(predicate, _InputRecord):
+                if isinstance(predicate, (_InputRecord, _InputPresence)):
                     if expected is not True or not isinstance(declaration, _ConditionalDenseField):
-                        raise TaichiCompilationError("Dynamic record storage requires a whole present-only Dense group")
+                        raise TaichiCompilationError("Dynamic storage requires a whole present-only Dense group")
                     record_path = self.component._paths[condition]
                     self.attribute(ctx, record_path[-1], prefix=record_path[:-1])
                     if ctx is not None and ctx.is_in_static_scope():

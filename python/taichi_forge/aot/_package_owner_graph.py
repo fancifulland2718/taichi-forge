@@ -278,9 +278,10 @@ class OwnerGraph:
                 declarations[attribute] = value_type(dtype, affects_plan=item.get("affects_plan", False))
                 value = dtype(0) if isinstance(dtype, MatrixType) else (0.0 if item["dtype"].startswith("f") else 0)
             write_member(owner, attribute, value, schema)
-        from ._package_optional import project_input_records
+        from ._package_optional import project_input_records, project_boolean_groups
 
         project_input_records(owner, schema, declarations)
+        project_boolean_groups(schema, declarations)
         environment, expanded = _compose(field_environment(declarations, schema), schema, children)
         from ._package_field_like import project_field_likes
 

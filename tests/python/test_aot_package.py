@@ -19859,3 +19859,171 @@ def test_package_static_input_domains_reject_unknown_and_malformed_sources(tmp_p
         monkeypatch.setattr(runtime, "load_module", must_not_load)
         with pytest.raises(ValueError, match="template input|static value"):
             load_package(runtime, tmp_path / "sdk")
+
+
+@pytest.mark.parametrize("mixed", [False, True, "conditional_extent"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_boolean_workspace_reuses_code_without_allocating_absent_groups(
+    tmp_path, monkeypatch, mixed
+):
+    source = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled = n, enabled
+        s = ti.experimental.ResourceScope(self)
+        s.dim('n')
+        s.static('enabled', choices=(False, True))
+        with resource_group(self, 'output', initialization='zero') as fields:
+            fields.out = fields.field(ti.i32, shape=fields.dim('n'))
+        if self.enabled:
+            with resource_group(self, 'optional', initialization='zero') as fields:
+                fields.workspace = fields.field(ti.i32, shape=fields.dim('n'))
+    @ti.real_func
+    def store(self, i: ti.i32):
+        self.workspace[i] = i + 5
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] += 1
+            if ti.static(self.enabled):
+                self.store(i)
+                self.out[i] += self.workspace[i]
+    @ti.kernel
+    def required(self) -> ti.i32:
+        return self.workspace[0]
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.step)
+        return b.compile()
+"""
+    if mixed is True:
+        source = source.replace(
+            "        if self.enabled:\n            with resource_group(self, 'optional', initialization='zero') as fields:\n",
+            "        with resource_group(self, 'optional', initialization='zero') as fields:\n            fields.common = fields.field(ti.i32, shape=fields.dim('n'))\n            if self.enabled:\n",
+        )
+    elif mixed == "conditional_extent":
+        source = source.replace(
+            "        if self.enabled:\n",
+            "        if self.enabled:\n            self.optional_n = n + 2\n",
+        )
+        source = source.replace(
+            "fields.workspace = fields.field(ti.i32, shape=fields.dim('n'))",
+            "fields.workspace = fields.field(ti.i32, shape=fields.derived_dim('optional_n', fields.dim('n') + 2))",
+        )
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    original = sys.modules["definition_fixture.model"]
+    reference = original.Model(7, True)
+    reference.step()
+    expected = reference.out.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    owner = manifest["owners"]["definition_fixture.model.Model"]
+    assert bool(owner["enabled"].get("dynamic_storage_condition")) is not bool(mixed)
+    if not mixed:
+        assert manifest["version"] == 78 and not manifest["entry_families"]
+        entries = [
+            entry
+            for entry in manifest["entries"].values()
+            if any(
+                name.startswith("definition_fixture.model.Model.")
+                for name in entry["definitions"]
+            )
+        ]
+        assert {tuple(entry["definitions"]) for entry in entries} == {
+            ("definition_fixture.model.Model." + method,)
+            for method in ("step", "required")
+        }
+    with (
+        Runtime(manifest["target"]) as runtime,
+        load_package(runtime, tmp_path / "sdk") as code,
+    ):
+        a, b = code.host.model.Model(7, True), code.host.model.Model(19, False)
+        assert not hasattr(b, "workspace")
+        assert len(b._forge_package_field_groups) == (2 if mixed is True else 1)
+        a.step()
+        b.step()
+        np.testing.assert_array_equal(a.out.to_numpy(), expected)
+        np.testing.assert_array_equal(b.out.to_numpy(), 1)
+        assert a.required() == 5
+        with pytest.raises(
+            ValueError, match="presence|variant|configuration|selection"
+        ):
+            b.required()
+        with a.graph().bind({}) as call:
+            call.run()
+        np.testing.assert_array_equal(a.out.to_numpy(), 2 * expected)
+        np.testing.assert_array_equal(b.out.to_numpy(), 1)
+        if not mixed:
+            old = a.workspace
+            a.workspace = code.host.model.Model(7, True).workspace
+            with pytest.raises(ValueError, match="owned Field"):
+                a.step()
+            a.workspace = old
+    if not mixed:
+        probe = tmp_path / "consume_boolean_workspace.py"
+        probe.write_text(
+            textwrap.dedent("""
+            import importlib.abc, sys, numpy as np
+            class NoSource(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                        raise AssertionError(fullname)
+            sys.meta_path.insert(0, NoSource())
+            from taichi_forge_runtime.aot import Runtime, load_package
+            with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+                a, b = code.host.model.Model(13, True), code.host.model.Model(31, False)
+                a.step(); b.step()
+                assert not hasattr(b, 'workspace') and len(b._forge_package_field_groups) == 1
+                np.testing.assert_array_equal(a.out.to_numpy(), np.arange(13) + 6)
+                np.testing.assert_array_equal(b.out.to_numpy(), 1)
+                with a.graph().bind({}) as call:
+                    a.enabled = False
+                    call.run()
+                try:
+                    a.step()
+                except ValueError as error:
+                    assert 'layout configuration' in str(error)
+                else:
+                    raise AssertionError('Changed allocation flag admitted')
+                a.enabled = True
+                a.step()
+                np.testing.assert_array_equal(a.out.to_numpy(), 3 * (np.arange(13) + 6))
+            print('BOOLEAN_WORKSPACE_SOURCE_FREE_OK')
+        """),
+            encoding="utf8",
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(probe),
+                str(tmp_path / "sdk"),
+                manifest["target"],
+            ],
+            cwd=tmp_path,
+            env=dict(
+                os.environ,
+                PYTHONDONTWRITEBYTECODE="1",
+                PYTHONPATH=str(
+                    Path(__file__).resolve().parents[2] / "packaging/runtime/src"
+                ),
+                TAICHI_NATIVE_RUNTIME_DIR=str(
+                    Path(utils._loaded_native_runtime_path).parent
+                ),
+                TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+            ),
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "BOOLEAN_WORKSPACE_SOURCE_FREE_OK" in result.stdout
+        path = tmp_path / "sdk/package.json"
+        path.write_text(json.dumps({**manifest, "version": 77}), encoding="utf8")
+        with (
+            Runtime(manifest["target"]) as runtime,
+            pytest.raises(ValueError, match="format 78"),
+        ):
+            load_package(runtime, tmp_path / "sdk")

@@ -19,7 +19,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     domains = {
         name: tuple(read_static_key(value) for value in item["choices"])
         for name, item in schema.items()
-        if item["kind"] == "static"
+        if item["kind"] == "static" and not item.get("dynamic_storage_condition")
     }
     # Constants are fixed definition dependencies, not consumer configuration
     # axes. Include their one value in the existing coverage/guard machinery.

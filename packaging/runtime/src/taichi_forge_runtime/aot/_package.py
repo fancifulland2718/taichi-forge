@@ -1751,6 +1751,7 @@ class LoadedPackage:
                 75,
                 76,
                 77,
+                78,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1760,6 +1761,12 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        if self.manifest["version"] < 78 and any(
+            member.get("dynamic_storage_condition")
+            for owner in self.manifest["owners"].values()
+            for member in owner.values()
+        ):
+            raise ValueError("Boolean optional workspaces require definition package format 78")
         if self.manifest["version"] < 71 and any(
             "array_extents" in member for owner in self.manifest["owners"].values() for member in owner.values()
         ):
