@@ -3364,13 +3364,21 @@ class Model:
 """
 
 
+@pytest.mark.parametrize("metadata_dtype", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_field_like_keeps_type_module_and_new_allocation_owner(tmp_path, monkeypatch):
+def test_package_field_like_keeps_type_module_and_new_allocation_owner(tmp_path, monkeypatch, metadata_dtype):
     split = FIELD_LIKE_SOURCE.index("@ti.data_oriented\nclass Model:")
     storage = FIELD_LIKE_SOURCE[:split].replace("constructors = 0", "constructors = 0\nDTYPE = ti.f32")
     storage = storage.replace("scope.vector_field(self.n, ti.f32,", "scope.vector_field(self.n, DTYPE,")
     model = "import taichi_forge as ti\nfrom .storage import Storage\nDTYPE = ti.i32\n" + FIELD_LIKE_SOURCE[split:]
-    package = _source_package(tmp_path, monkeypatch, model, extra_modules={"storage": storage})
+    extra_modules = {"storage": storage}
+    if metadata_dtype:
+        extra_modules["storage"] = storage.replace(
+            "scope.values = scope.vector_field(self.n, DTYPE,",
+            "scope.original = scope.field(DTYPE, shape=scope.dim('n'), initialization='zero')\n"
+            "        scope.values = scope.vector_field(self.n, self.original.dtype,",
+        )
+    package = _source_package(tmp_path, monkeypatch, model, extra_modules=extra_modules)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.storage"].constructors == 0
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
@@ -13989,7 +13997,7 @@ FIELD_DTYPE_CHOICE_SOURCE = (
 )
 
 
-@pytest.mark.parametrize('policy', ['dtype', 'shape'])
+@pytest.mark.parametrize('policy', ['dtype', 'shape', 'derived_dtype'])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_field_like_borrowed_layout_policy(tmp_path, monkeypatch, policy):
     source = '''
@@ -14034,6 +14042,12 @@ class Model:
     if policy == 'shape':
         source = source.replace("ti.u64 if scope.wide else ti.u32", 'ti.u64')
         source = source.replace("shape=scope.dim('n'),", "shape=(scope.dim('n'),) if scope.wide else (scope.dim('n'), 3),")
+    elif policy == 'derived_dtype':
+        source = source.replace("scope.values = scope.field(ti.u64", "scope.original = scope.field(ti.u64")
+        source = source.replace("        scope.local_backup =",
+                                "        scope.values = scope.field(self.original.dtype, shape=scope.dim('n'), initialization='zero')\n"
+                                "        scope.require_le('fits', scope.dim('n'), scope.dim('n'), when='values')\n"
+                                "        scope.local_backup =")
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / 'sdk')
     assert manifest['version'] == 76

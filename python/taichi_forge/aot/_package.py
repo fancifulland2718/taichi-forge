@@ -1510,7 +1510,7 @@ def _preflight_package(package, *, arch=None, source_root=None):
         raise PackageExportError("Package entry signature preflight failed:\n" + "\n".join(signatures))
     from ._package_field_like import resolve_field_likes
 
-    resolve_field_likes(sources)
+    resolve_field_likes(sources, imported_modules)
     from ._package_closures import calls as closure_calls
 
     factory_calls = closure_calls(sources, imported_modules, _fail)

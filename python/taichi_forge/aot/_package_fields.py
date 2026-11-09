@@ -190,7 +190,9 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None,
     def resolved_dtype_policy(policy, type_namespace):
         from ._package_types import resolve_scalar_dtype_policy
 
-        return resolve_scalar_dtype_policy(policy, type_namespace, module, owner_dtype=owner_dtype)
+        return resolve_scalar_dtype_policy(
+            policy, {**type_namespace, "_forge_package_scalar": ti}, module, owner_dtype=owner_dtype
+        )
 
     dtype_sources = []
 

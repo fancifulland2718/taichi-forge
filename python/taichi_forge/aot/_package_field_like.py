@@ -16,8 +16,15 @@ def declared_struct_members(item):
     return {key.value: value for key, value in zip(node.keys, node.values)}
 
 
-def resolve_field_likes(sources):
+def resolve_field_likes(sources, imported_modules):
+    import taichi_forge as ti
+
     from ._component import _capture_id
+    from ._package import _DTYPES
+    from ._package_factories import _source_value
+    from ._package_types import qualified_kind
+
+    kinds = {entry[0]: entry[5] for entry in sources}
 
     owners = {
         module + "." + name: (module, schema)
@@ -84,14 +91,38 @@ def resolve_field_likes(sources):
         }
         field = copy.deepcopy(original)
 
+        metadata_policies = []
+
         class SourceTypes(ast.NodeTransformer):
+            def __init__(self, source=source_owner, path=(), seen=(), module=None):
+                self.source, self.path, self.seen = source, path, seen
+                self.module = module or original.get("type_declaration_module",
+                                                    original.get("declaration_module", owners[source][0]))
+
+            def scalar_name(self, node):
+                role = qualified_kind(node, kinds[self.module])
+                if role not in _DTYPES:
+                    value = _source_value(node, vars(imported_modules[self.module]))
+                    role = next((name for name in _DTYPES if value is getattr(ti, name)), None)
+                if role in _DTYPES:
+                    return ast.copy_location(
+                        ast.Attribute(ast.Name("_forge_package_scalar", ast.Load()), role, ast.Load()), node
+                    )
+                return None
+
+            def visit_Name(self, node):
+                return self.scalar_name(node) or node
+
             def visit_Attribute(self, node):
+                scalar = self.scalar_name(node)
+                if scalar is not None:
+                    return scalar
                 parts, root = [], node
                 while isinstance(root, ast.Attribute):
                     parts.insert(0, root.attr)
                     root = root.value
                 declaration = next(
-                    (spec for key, spec in owners[source_owner][1].items() if spec.get("path", [key]) == parts), {}
+                    (spec for key, spec in owners[self.source][1].items() if spec.get("path", [key]) == parts), {}
                 )
                 if isinstance(root, ast.Name) and root.id == "self" and declaration.get("static_dtype"):
                     from taichi_forge_runtime._static_values import read_static_key
@@ -102,11 +133,45 @@ def resolve_field_likes(sources):
                     return ast.copy_location(
                         ast.Attribute(ast.Name("_forge_package_scalar", ast.Load()), dtype.name, ast.Load()), node
                     )
+                if isinstance(root, ast.Name) and root.id == "self" and node.attr == "dtype":
+                    token = self.source, tuple(parts[:-1])
+                    if token in self.seen:
+                        raise ValueError("Field dtype metadata has an unknown or cyclic resource source")
+                    origin, resource, nested = allocation(self.source, parts[:-1], present=True)
+                    scalar = copy.deepcopy(resource["type_node"])
+                    declaration_module = resource.get("type_declaration_module",
+                                                      resource.get("declaration_module", owners[origin][0]))
+                    resolver = SourceTypes(origin, (*self.path, *nested), (*self.seen, token), declaration_module)
+                    if resource.get("struct_field"):
+                        raise ValueError("Field dtype metadata requires a scalar or tensor resource")
+                    if "dtype_policy" in resource:
+                        policy = copy.deepcopy(resource["dtype_policy"])
+                        for branch in ("if_true", "if_false"):
+                            policy[branch] = resolver.visit(policy[branch])
+                        metadata_policies.append((origin, (*self.path, *nested), policy))
+                        scalar = copy.deepcopy(policy["if_true"])
+                    if isinstance(scalar, ast.Call):
+                        source_kind = kinds[declaration_module]
+                        role = qualified_kind(scalar, source_kind)
+                        if isinstance(scalar.func, ast.Name):
+                            role = {"_forge_package_vector": "types.vector",
+                                    "_forge_package_matrix": "types.matrix"}.get(scalar.func.id, role)
+                        axes = {"types.vector": 1, "types.matrix": 2}.get(role)
+                        if axes is not None:
+                            scalar = next((k.value for k in scalar.keywords if k.arg == "dtype"), None) or scalar.args[axes]
+                    return resolver.visit(scalar)
                 return self.generic_visit(node)
 
-        # A fixed storage type belongs to the source declaration. The clone
+        # A storage type belongs to the source declaration. The clone
         # must not try to resolve that attribute on its own, unrelated owner.
         field["type_node"] = SourceTypes().visit(field["type_node"])
+        dtype_origin, dtype_prefix = source_owner, prefix
+        if metadata_policies:
+            if any(policy != metadata_policies[0] for policy in metadata_policies[1:]) or field.get("struct_field"):
+                raise ValueError("Derived Field dtype choices require one scalar source policy")
+            dtype_origin, nested, policy = metadata_policies[0]
+            dtype_prefix = [*prefix, *nested]
+            field["dtype_policy"] = copy.deepcopy(policy)
         # The clone owns its placement. Its sizes are read from the proved
         # original namespace in retained Host construction, never from a model
         # witness or another instance's allocation.
@@ -128,10 +193,12 @@ def resolve_field_likes(sources):
             if policy_kind not in field:
                 continue
             policy = field[policy_kind]
+            policy_owner = dtype_origin if policy_kind == "dtype_policy" else source_owner
+            policy_prefix = dtype_prefix if policy_kind == "dtype_policy" else prefix
             source_condition = policy.get("condition_path")
             if source_condition is None:
-                source_condition = owners[source_owner][1][policy["condition"]].get("path", [policy["condition"]])
-            condition_path = [*prefix, *source_condition]
+                source_condition = owners[policy_owner][1][policy["condition"]].get("path", [policy["condition"]])
+            condition_path = [*policy_prefix, *source_condition]
             # One original layout choice controls both allocations. The clone
             # has independent storage but no additional static selection axis.
             field[policy_kind] = {**policy, "condition": _capture_id(tuple(condition_path)),
@@ -154,6 +221,7 @@ def resolve_field_likes(sources):
             "order_policy",
             "order_source",
             "conditions",
+            "constraints",
         ):
             field.pop(key, None)
         if "group_builder" in item:
