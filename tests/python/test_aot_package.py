@@ -2360,6 +2360,62 @@ def append_step(solver, builder):
 '''
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize('missing_control', [False, True])
+def test_package_write_inventory_resolves_forwarded_control_before_type_family(tmp_path, monkeypatch, missing_control):
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace('def __init__(self, source):',
+        'def __init__(self, source, demand):').replace("scope.borrow('source', source, source_scope=True)",
+        "scope.borrow('source', source, source_scope=True)\n        scope.borrow('demand', demand, source_scope=True)")
+    source = source.replace('self.source[i] = self.backup[i]',
+        'if self.demand[0] != 0:\n                self.source[i] = self.backup[i]')
+    source = source.replace('''def __init__(self, solver):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('solver', solver)
+        sources = ti.aot.written_resources(solver, solver.record)''', '''def __init__(self, sources, demand):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('demand', demand, source_scope=True)''')
+    source = source.replace('Copy(source) for source', 'Copy(source, self.demand) for source')
+    source = source.replace('scope.checkpoint = Checkpoint(self)', '''scope.demand = scope.field(ti.i32, shape=1)
+        scope.checkpoint = Checkpoint(ti.aot.written_resources(self, self.record), self.demand)''')
+    source = source.replace('    builder.dispatch(solver.step)',
+        '    builder.dispatch(solver.step)\n    builder.dispatch(solver.unrelated)')
+    if missing_control:
+        source = source.replace('self.record), self.demand)', 'self.record), self.missing)')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    if missing_control:
+        with pytest.raises(ValueError, match='proven source'):
+            ti.aot.check_package(package)
+        assert package.model.constructors == 0
+        assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+        return
+    assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert package.model.constructors == 0
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (5, 13):
+            normal, loaded = package.Model(n), code.host.Model(n)
+            assert len(loaded.checkpoint.copies) == 2
+            assert all(copy.demand is loaded.demand for copy in loaded.checkpoint.copies)
+            for model in (normal, loaded):
+                model.step()
+                model.unrelated()
+                for backup in model.checkpoint.copies:
+                    backup.save()
+                model.step()
+                model.unrelated()
+                model.demand.from_numpy(np.array([0], dtype=np.int32))
+                for backup in model.checkpoint.copies:
+                    backup.restore()
+                np.testing.assert_array_equal(model.values.to_numpy(), np.full(n, 2))
+                model.demand.from_numpy(np.array([1], dtype=np.int32))
+                for backup in model.checkpoint.copies:
+                    backup.restore()
+            np.testing.assert_array_equal(loaded.values.to_numpy(), normal.values.to_numpy())
+            np.testing.assert_array_equal(loaded.unused.to_numpy(), normal.unused.to_numpy())
+
+
 RECORD_INVENTORY_RECIPE = '''from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class Operation:
@@ -2421,6 +2477,10 @@ def test_package_write_inventory_resolves_optional_record_recipes(tmp_path, monk
     record_selected(builder, solver.step if solver.n > 8 else solver.unrelated)
 
 def record_selected(builder, kernel):
+    if not callable(kernel):
+        raise ValueError('not callable')
+    metadata = getattr(kernel, '_primal', kernel)
+    has_region = hasattr(builder, 'create_sequential')
     builder.dispatch(kernel)
 '''
     if recipe_kind.startswith('forwarded'):
@@ -2496,7 +2556,7 @@ def operations(solver):
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-@pytest.mark.parametrize('change', ['unknown_callback', 'exception_effect', 'escaped_recipe', 'direct_missing_branch'])
+@pytest.mark.parametrize('change', ['unknown_callback', 'exception_effect', 'escaped_recipe', 'direct_missing_branch', 'escaped_metadata'])
 def test_package_write_inventory_rejects_unproven_record_recipes(tmp_path, monkeypatch, change):
     recipe = RECORD_INVENTORY_RECIPE
     if change == 'unknown_callback':
@@ -2507,6 +2567,9 @@ def test_package_write_inventory_rejects_unproven_record_recipes(tmp_path, monke
         recipe = recipe[:recipe.index('def append_step(solver, builder):')] + '''def append_step(solver, builder):
     builder.dispatch(solver.step if solver.n > 8 else solver.missing)
 '''
+    elif change == 'escaped_metadata':
+        recipe = recipe.replace('    recipe = operations(solver)',
+            "    opaque(getattr(solver.step, '_primal', solver.step))\n    recipe = operations(solver)")
     else:
         recipe = recipe.replace('    recipe = operations(solver)', '    recipe = operations(solver)\n    opaque(recipe)')
     source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
@@ -2515,6 +2578,28 @@ def test_package_write_inventory_rejects_unproven_record_recipes(tmp_path, monke
     before = ti.lang.impl.get_runtime().get_num_compiled_functions()
     with pytest.raises(ValueError):
         ti.aot.check_package(package)
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('use', ['metadata', 'effectful', 'escaped'])
+def test_package_write_inventory_proves_scope_factory_metadata(tmp_path, monkeypatch, use):
+    factory = RESOURCE_FACTORY_SOURCE
+    if use == 'effectful':
+        factory = factory.replace('    factory = getattr', '    opaque(owner)\n    factory = getattr')
+    source = factory + CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+        'def append_step(solver, builder):',
+        'def append_step(solver, builder):\n    scope = resource_scope(solver)')
+    if use == 'escaped':
+        source = source.replace('scope = resource_scope(solver)', 'scope = resource_scope(solver)\n    opaque(scope)')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    if use != 'metadata':
+        with pytest.raises(ValueError, match='proven source|ResourceScope use'):
+            ti.aot.check_package(package)
+    else:
+        assert ti.aot.check_package(package)['declaration_check'] == 'passed'
     assert package.model.constructors == 0
     assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
 

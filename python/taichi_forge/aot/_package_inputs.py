@@ -479,6 +479,16 @@ def resolve_inputs(sources, imported, *, partial=False):
             if len(observed) > 1:
                 if any(site.get('inherited_input_forward') for _, _, site in calls.get(owner, ())):
                     raise ValueError('Inherited constructor inputs require one proven source type: ' + owner)
+                # Another input can still be resolving through a parent or
+                # preparation constructor in this same fixed-point pass.
+                # Build typed contexts only after every argument has a source;
+                # final admission below still rejects an unresolved input.
+                if any(
+                    input_types(caller, args.get(parameter['input_parameter'])) is None
+                    for (identity, _), parameter in inputs.items() if identity == owner
+                    for caller, args, _ in calls.get(owner, ())
+                ):
+                    continue
                 split_constructor_inputs(sources, owner, inputs, calls.get(owner, ()), input_types)
                 return resolve_inputs(sources, imported, partial=partial)
             if observed and origin(item) is None:

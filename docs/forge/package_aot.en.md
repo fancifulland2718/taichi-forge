@@ -1251,6 +1251,15 @@ length or a change to normal Host execution.
 The same rule covers a conditional Kernel expression passed directly to a recording
 helper. Both possible entries must have proven sources; an unknown alternative
 cannot be discarded because another branch is known.
+Builtin callable checks, `_primal` metadata reads on proven functions, and metadata
+queries on known Graph objects do not introduce writes to their bound owners.
+Scope construction reuses the existing resource-factory proof; a factory with an
+unproven side effect still retains its conservative resource dependencies. This
+does not extend runtime projection to arbitrary Host scope creation. Passing the
+metadata or scope to unknown code retains its owner's conservative dependency.
+Typed constructor contexts are formed after the shared input-resolution pass has
+proved all forwarded resource arguments, independently of declaration order;
+unresolved inputs still fail final admission.
 
 Immutable operation records may also participate in single-level conditional
 filters, sequence concatenation and model-count repetition. Source domains retain

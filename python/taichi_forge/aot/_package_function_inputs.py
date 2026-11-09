@@ -96,6 +96,16 @@ class _Host:
 
 
 @dataclass(frozen=True)
+class _CallableMetadata:
+    source: object
+
+
+@dataclass(frozen=True)
+class _ScopeReference:
+    owner: object
+
+
+@dataclass(frozen=True)
 class _SourceDomain:
     items: tuple
 
@@ -192,6 +202,10 @@ def _select_source_fact(value, source, index):
         return _SourceDomain(tuple(_select_source_fact(item, source, index) for item in value.items))
     if isinstance(value, (_Kernel, _Host)):
         return type(value)(value.function, _select_source_fact(value.receiver, source, index))
+    if isinstance(value, _CallableMetadata):
+        return _CallableMetadata(_select_source_fact(value.source, source, index))
+    if isinstance(value, _ScopeReference):
+        return _ScopeReference(_select_source_fact(value.owner, source, index))
     return value
 
 
@@ -346,6 +360,19 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         return result
 
     namespaces = {}
+    scope_factories = {}
+
+    def scope_factory(callee, call):
+        from ._package_factories import prove_factory
+        key = (callee, ast.dump(call))
+        if key not in scope_factories:
+            try:
+                normalized = prove_factory(callee, call)
+            except (TypeError, ValueError, OSError):
+                normalized = None
+            scope_factories[key] = (normalized if getattr(normalized, '_package_role', None)
+                                   == 'experimental.ResourceScope' else None)
+        return scope_factories[key]
     sequence_projector = None
     iteration_failures = {}
 
@@ -388,6 +415,13 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         return None
 
     def attribute(receiver, name):
+        if isinstance(receiver, _CallableMetadata):
+            return receiver
+        if isinstance(receiver, _ScopeReference):
+            item = member(receiver.owner, name)
+            if item is not None:
+                return item
+            return receiver  # Unknown scope use retains its owner at the call boundary.
         if isinstance(receiver, _Choice):
             return _Choice(receiver.source, tuple(attribute(item, name) for item in receiver.alternatives))
         item = member(receiver, name)
@@ -619,7 +653,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         def source_value(expression):
             if (
                 isinstance(expression, ast.Name)
-                and expression.id in ("getattr", "dict", "isinstance", "id")
+                and expression.id in ("getattr", "hasattr", "callable", "dict", "isinstance", "id")
                 and expression.id not in local_names
             ):
                 builtin = getattr(builtins, expression.id)
@@ -889,6 +923,20 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 return left if left == right else None
             if isinstance(expression, ast.Call):
                 cls = source(expression.func)
+                if resource_inventory is not None and cls is builtins.callable and len(expression.args) == 1 and not expression.keywords:
+                    source_only_calls.add(id(expression))
+                    candidate = child(expression.args[0])
+                    def known_callable(item):
+                        return (all(known_callable(arm) for arm in item.alternatives)
+                                if isinstance(item, _Choice) else isinstance(item, (_Host, _Kernel)))
+                    return _Literal(True) if known_callable(candidate) else None
+                if (resource_inventory is not None and cls is builtins.hasattr and len(expression.args) == 2
+                        and not expression.keywords and isinstance(child(expression.args[0]), _Graph)
+                        and isinstance(child(expression.args[1]), _Literal)):
+                    # Known Graph objects expose frontend metadata. Do not
+                    # claim a particular Graph subtype or prune either path.
+                    source_only_calls.add(id(expression))
+                    return None
                 if resource_inventory is not None and cls is builtins.id and len(expression.args) == 1 and not expression.keywords:
                     source_only_calls.add(id(expression))
                     return None  # Identity is Host data, never a code or resource identity.
@@ -897,6 +945,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 if cls is builtins.getattr and len(expression.args) in (2, 3) and not expression.keywords:
                     name = child(expression.args[1])
                     if isinstance(name, _Literal) and type(name.value) is str:
+                        receiver = child(expression.args[0])
+                        def callable_metadata(item):
+                            return (all(callable_metadata(arm) for arm in item.alternatives)
+                                    if isinstance(item, _Choice) else isinstance(item, (_Kernel, _Host)))
+                        if resource_inventory is not None and name.value == '_primal' and callable_metadata(receiver):
+                            # Reading a proven function's metadata does not
+                            # invoke it or expose its bound owner to writes.
+                            return _CallableMetadata(receiver)
                         result = child(ast.Attribute(expression.args[0], name.value, ast.Load()))
                         if resource_inventory is not None and result is None:
                             # Same provenance as an ordinary attribute read.
@@ -998,6 +1054,10 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         source_only_calls.add(id(expression))
                         return None
                 callee, receiver = call_target(expression.func, visiting, bindings)
+                if resource_inventory is not None and receiver is None and callee in functions and callee not in kernels:
+                    factory = scope_factory(callee, expression)
+                    if factory is not None:
+                        return _ScopeReference(child(factory.args[0]))
                 if (
                     callee in functions
                     and callee not in return_chain
@@ -1177,6 +1237,10 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     inventory_input(child)
             elif isinstance(item, (_Kernel, _Host)):
                 inventory_input(item.receiver)
+            elif isinstance(item, _CallableMetadata):
+                inventory_input(item.source)
+            elif isinstance(item, _ScopeReference):
+                inventory_input(item.owner)
             elif isinstance(item, _Choice):
                 for child in item.alternatives:
                     inventory_input(child)
@@ -1242,6 +1306,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             covered.add(id(call))
 
         def forward_call(callee, receiver, call, selected_values=None):
+            if resource_inventory is not None and receiver is None and callee not in kernels:
+                if scope_factory(callee, call) is not None:
+                    return  # Reuse the existing proof; construction performs no device work.
             for owner, name, _ in requested.get(callee, ()):
                 if isinstance(receiver, _Owner) and receiver.identity == owner:
                     binding_calls.add((callee, id(call), owner, name))
@@ -1366,7 +1433,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     fact = value(call)
                     if id(call) in source_only_calls:
                         continue
-                    if isinstance(fact, (_Mapping, _Record, _Kernel, _Host, _Resource, _Literal, _Graph, tuple)):
+                    if isinstance(fact, (_Mapping, _Record, _Kernel, _Host, _Resource, _Literal, _Graph,
+                                         _CallableMetadata, _ScopeReference, tuple)):
                         # Proven builtin/record projections expose no owner to
                         # an arbitrary callee. A Field lookup still contributes
                         # its conservative resource dependency.
