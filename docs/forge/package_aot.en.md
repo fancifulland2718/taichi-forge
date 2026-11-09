@@ -145,6 +145,16 @@ receiver inference remain unsupported; the first child type is not used as a
 substitute contract. Closure factories combined with child choices are also not
 qualified. These checks do not qualify complete rigid or engine export.
 
+For data-only child access, construction choices remain in logical entry bindings
+without automatically becoming numerical code dependencies. Child types can share
+one code asset when field types, layouts, paths and alias contracts are compatible.
+Device method calls still record the actual method and construction guards;
+incompatible field types retain distinct code. Existing owner-type admission,
+prepared calls and instance state remain independent. Focused CPU/CUDA source-free
+checks cover identical layouts with different methods, incompatible i32/f32 fields,
+two instance sizes and rejection of changed construction choices. This uses the
+existing entry-binding format.
+
 This implementation uses one code module per export; it does not automatically
 provide multiple physical code partitions or qualify their loading costs.
 

@@ -7674,6 +7674,85 @@ def test_package_child_choices_share_unrelated_parent_code(tmp_path, monkeypatch
     assert "CHILD_CHOICES_SOURCE_FREE_OK" in result.stdout
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize("compatible", [False, True])
+def test_package_child_data_shares_code_without_erasing_type_or_method_admission(tmp_path, monkeypatch, compatible):
+    source = CHILD_CHOICES_SOURCE
+    start = source.index("@ti.data_oriented\nclass Second:")
+    end = source.index("@ti.data_oriented\nclass Model:", start)
+    if compatible:
+        child = """@ti.data_oriented
+class Second(First):
+    @ti.func
+    def evaluate(self, i):
+        self.a[i] = 2 * i - 5
+        return self.a[i]
+"""
+    else:
+        child = source[start:end].replace("scope.b", "scope.a").replace("self.b[i, 1]", "self.a[i]")
+        child = child.replace("ti.i32, shape=(n, 2)", "ti.f32, shape=n")
+    source = source[:start] + child + source[end:]
+    source += """
+    @ti.kernel
+    def copy_child(self):
+        for i in self.out:
+            self.out[i] = self.child.a[i]
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    copies = [entry for entry in manifest["entries"].values()
+              if "definition_fixture.model.Model.copy_child" in entry["definitions"]]
+    steps = [entry for entry in manifest["entries"].values()
+             if "definition_fixture.model.Model.step" in entry["definitions"]]
+    assert len(copies) == (1 if compatible else 2)
+    assert len(steps) == 2  # Same data layout is not the same method implementation.
+    if compatible:
+        symbol = copies[0]["symbol"]
+        assert any(binding["code"] == symbol for binding in manifest["entry_bindings"].values())
+    probe = tmp_path / "consume_child_data.py"
+    probe.write_text(textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        from taichi_forge_runtime.aot import Runtime, load_package
+        class RejectSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, RejectSource())
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(7, False), code.host.Model(19, True)
+            a.step()
+            b.step()
+            a.out.from_numpy(np.full(7, -100, np.int32))
+            b.out.from_numpy(np.full(19, -100, np.int32))
+            a.copy_child()
+            b.copy_child()
+            np.testing.assert_array_equal(a.out.to_numpy(), np.arange(7) + 3)
+            np.testing.assert_array_equal(b.out.to_numpy(), 2 * np.arange(19) - 5)
+            a.copy_child()
+            np.testing.assert_array_equal(b.out.to_numpy(), 2 * np.arange(19) - 5)
+            b.second = False
+            try:
+                b.copy_child()
+            except ValueError as error:
+                assert 'child owner' in str(error) or 'layout configuration' in str(error)
+            else:
+                raise AssertionError('Changed child construction admitted')
+        print('CHILD_DATA_SOURCE_FREE_OK')
+    """), encoding="utf8")
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+                 PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+        capture_output=True, text=True, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CHILD_DATA_SOURCE_FREE_OK" in result.stdout
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 @pytest.mark.parametrize(
     "replacement,reason",

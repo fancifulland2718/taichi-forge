@@ -2403,6 +2403,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 variants.append(
                     dict(
                         selection={
+                            # Keep normal construction/type selection even when
+                            # compatible child data reuses one numerical code.
+                            # These guards belong to the logical binding only.
+                            **{
+                                flag: static_key(value)
+                                for key in child_bindings
+                                for flag, value in compilation_schema[key].get("choice_guards", {}).items()
+                            },
                             **{key: value for key, value in code.static.items() if key not in constants},
                             **{
                                 key: ("bool", value)

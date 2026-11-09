@@ -309,7 +309,10 @@ def _compose(environment, schema, children):
     derived, expanded = set(environment._derived_attributes), dict(schema)
     for attribute, (child, child_schema) in children.items():
         names = {key: _capture_id((attribute, *path)) for key, path in child._paths.items()}
-        owner_conditions = {**schema[attribute].get("conditions", {}), **schema[attribute].get("choice_guards", {})}
+        # Presence controls whether the namespace exists. Implementation choice
+        # controls the logical owner binding, not every field's numerical ABI.
+        # Each alternative still constructs and validates its original layout.
+        owner_conditions = schema[attribute].get("conditions", {})
 
         def expression(value):
             op, *args = value

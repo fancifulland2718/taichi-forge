@@ -2107,6 +2107,17 @@ class _Capture:
             namespace = self.component.read(self.owner, _capture_id(prefix)) if prefix else self.owner
             value = inspect.getattr_static(namespace, path[-1], None)
             if getattr(value, "_is_taichi_function", False):
+                # Choosing a method depends on its implementation owner. Merely
+                # traversing that owner to read compatible data does not. The
+                # package retains construction/type admission separately from
+                # the compiler's numerical ABI and dependency identity.
+                for depth in range(1, len(path)):
+                    record = self.declarations.get(_capture_id(path[:depth]))
+                    if isinstance(record, _ChoiceRecord):
+                        for guard, expected in record.guards:
+                            guard_path = self.component._paths[guard]
+                            if self.attribute(ctx, guard_path[-1], prefix=guard_path[:-1]) is not expected:
+                                raise TaichiCompilationError("Child implementation differs from its construction guards")
                 self.methods[name] = _definition(value)
                 self.method_paths[name] = path
                 if prefix and not any(child is namespace and source == prefix for child, source in self._method_owners):
@@ -2184,14 +2195,6 @@ class _Capture:
             if not present and self.component._symbolic_dimensions and ctx is not None and not ctx.is_in_static_scope():
                 self.missing_resource = name
                 raise TaichiCompilationError(f"Numerical entry requires record self.{'.'.join(path)}")
-            if present and isinstance(declaration, _ChoiceRecord):
-                # Record implementation identity only where a numerical entry
-                # actually traverses it. Unrelated methods do not acquire the
-                # parent's construction configuration as code dependencies.
-                for guard, expected in declaration.guards:
-                    guard_path = self.component._paths[guard]
-                    if self.attribute(ctx, guard_path[-1], prefix=guard_path[:-1]) is not expected:
-                        raise TaichiCompilationError("Child implementation differs from its construction guards")
             return _RecordReference(path) if present else None
         if isinstance(declaration, Dimension):
             self.dimension_dependency(name)
