@@ -178,6 +178,14 @@ def _normalize(function, original, module, kind, receiver, fail):
     identity = "_forge_package_prepare_" + original.name
     owner = ast.copy_location(ast.ClassDef(identity, [], [], [normalized], []), original)
     wrapper = ast.Module(body=[owner], type_ignores=[])
+    # Free preparation uses the same selected-backend proof as constructors.
+    # Remove the inactive allocation path before discovering resource factories.
+    import taichi_forge as ti
+    from ._package_targets import select_target_branches
+
+    normalized._package_target_selections = select_target_branches(
+        wrapper, kind, ti.lang.impl.current_cfg().arch.name, module, fail
+    )
     namespace = function.__globals__
     facts = discover_contexts(wrapper, namespace, module, fail)
     facts += normalize_factories(wrapper, namespace, module, fail, kind)
@@ -332,6 +340,7 @@ def resolve(sources, imported, owner_schema, fail, host_contexts):
         tree._package_preparation_schemas[identity] = local[1]
         tree._package_preparation_owners[identity] = {target for _, target in domains}
         original._package_free_preparation = (identity, receiver, normalized)
+        tree._package_target_selections.extend(normalized._package_target_selections)
         tree._package_factory_declarations.extend(facts)
         tree._package_factory_declarations.append(
             dict(

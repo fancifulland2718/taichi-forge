@@ -1829,6 +1829,10 @@ or additional type combinations.
 Separate preparation functions may repeat identical static domains while keeping
 their Host declaration sites and call behavior. The owner retains one contract;
 incompatible choices, `kernel_only`, conditions or paths still reject.
+Free preparation functions reuse constructor backend selection: the selected
+allocation branch is chosen before resource factory/contract discovery, and Host
+projection retains the target guard. Local CPU/CUDA checks cover backend-specific
+element types/ranks and new instance sizes without mixing the other target's layout.
 Normal Host preparation may read unconditional declared scalar roles through
 scope attributes or an unshadowed `getattr(scope, 'name', default)`. This admits
 the declared value only: escaped scopes, unknown members and dynamic names still

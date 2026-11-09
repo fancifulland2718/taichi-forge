@@ -11569,6 +11569,46 @@ def test_package_rejects_unprojected_scope_factories(tmp_path, monkeypatch, bind
     assert not (tmp_path / "sdk").exists()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_free_preparation_reuses_selected_backend_contract(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+def allocate(owner):
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        with resource_group(owner, 'values') as scope:
+            scope.values = scope.field(ti.i32, shape=scope.dim('n'))
+    else:
+        with resource_group(owner, 'values') as scope:
+            scope.values = scope.field(ti.f32, shape=(scope.dim('n'), 2))
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        allocate(self)
+    @ti.kernel
+    def step(self, offset: ti.i32):
+        for index in ti.grouped(self.values):
+            self.values[index] = index.sum() + offset
+"""
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    normal = package.Model(7)
+    normal.step(3)
+    expected = normal.values.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    choices = manifest["target_selections"]["definition_fixture.model"]
+    assert len(choices) == 1 and choices[0]["taken"] is (manifest["target"] == "cuda")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7), code.host.Model(13)
+        a.step(3)
+        b.step(-1)
+        np.testing.assert_array_equal(a.values.to_numpy(), expected)
+        expected_b = np.arange(13) - 1
+        if manifest["target"] != "cuda":
+            expected_b = expected_b[:, None] + np.arange(2)
+        np.testing.assert_array_equal(b.values.to_numpy(), expected_b)
+
+
 SCOPED_ARRAY_SOURCE = """
 import taichi_forge as ti
 @ti.data_oriented
