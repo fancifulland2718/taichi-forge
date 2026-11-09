@@ -3088,6 +3088,116 @@ class Model:
 """
 
 
+INHERITED_OWNER_SOURCE = '''
+import taichi_forge as ti
+from resource_contexts import resource_group
+constructors = 0
+@ti.data_oriented
+class Storage:
+    def __init__(self, n):
+        self.n = n
+        ti.experimental.ResourceScope(self).dim('n')
+@ti.data_oriented
+class Base:
+    def __init__(self, storage):
+        global constructors
+        constructors += 1
+        with resource_group(self, 'base') as fields:
+            fields.owner_reference('storage', storage)
+            fields.values = fields.field(ti.i32, shape=fields.owner_dim('storage', 'n'))
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.values:
+            self.values[i] = i + bias
+@ti.data_oriented
+class Layer:
+    def __init__(self, storage):
+        super().__init__(storage)
+        with resource_group(self, 'layer') as fields:
+            fields.extra = fields.field(ti.i32, shape=fields.owner_dim('storage', 'n'))
+@ti.data_oriented
+class Model(Layer, Base):
+    pass
+@ti.data_oriented
+class Root:
+    def __init__(self, n):
+        scope = ti.experimental.ResourceScope(self)
+        scope.storage = Storage(n)
+        scope.model = Model(self.storage)
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize('cooperative', [False, True])
+def test_package_infers_base_owner_input_from_cooperative_constructor(tmp_path, monkeypatch, cooperative):
+    source = INHERITED_OWNER_SOURCE
+    if not cooperative:
+        start = source.index('@ti.data_oriented\nclass Layer:')
+        end = source.index('@ti.data_oriented\nclass Root:')
+        source = source[:start] + '@ti.data_oriented\nclass Model(Base):\n    pass\n' + source[end:]
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    original = sys.modules['definition_fixture.model']
+    assert original.constructors == 0
+    normal = original.Root(5)
+    normal.model.step(7)
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.model.Root(5), code.host.model.Root(13)
+        assert a.model.storage is a.storage and b.model.storage is b.storage
+        a.model.step(7)
+        b.model.step(-3)
+        np.testing.assert_array_equal(a.model.values.to_numpy(), normal.model.values.to_numpy())
+        np.testing.assert_array_equal(b.model.values.to_numpy(), np.arange(13) - 3)
+        a.model.values._group_owner.close()
+        b.model.step(9)
+        np.testing.assert_array_equal(b.model.values.to_numpy(), np.arange(13) + 9)
+    probe = tmp_path / 'consume_inherited_owner.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            owner = code.host.model.Root(17)
+            assert owner.model.storage is owner.storage
+            owner.model.step(2)
+            np.testing.assert_array_equal(owner.model.values.to_numpy(), np.arange(17) + 2)
+        print('INHERITED_OWNER_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target']],
+        cwd=tmp_path, capture_output=True, text=True, timeout=90,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+                 PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'INHERITED_OWNER_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('case', ['unbound', 'mutated', 'same_line_mutated', 'shadowed_super'])
+def test_package_rejects_unproven_inherited_owner_sources(tmp_path, monkeypatch, case):
+    source = INHERITED_OWNER_SOURCE
+    if case == 'unbound':
+        source = source[:source.index('@ti.data_oriented\nclass Root:')]
+    elif case == 'mutated':
+        source = source.replace('super().__init__(storage)', 'storage = None\n        super().__init__(storage)')
+    elif case == 'same_line_mutated':
+        source = source.replace('super().__init__(storage)', 'storage = None; super().__init__(storage)')
+    else:
+        source = source.replace('super().__init__(storage)', 'super = object\n        super().__init__(storage)')
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ValueError, match='source dimension|source type|input'):
+        ti.aot.export_package(package, tmp_path / 'sdk')
+    assert sys.modules['definition_fixture.model'].constructors == 0
+    assert not (tmp_path / 'sdk').exists()
+
+
 def _borrowed_alias_source(source, struct_member, alias_form):
     path = "('values', 'x')" if struct_member else "('values',)"
     source = source.replace(

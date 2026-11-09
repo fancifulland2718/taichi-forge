@@ -3,6 +3,70 @@
 import ast
 import copy
 import inspect
+import textwrap
+
+
+def _inherited_input_calls(owners, inputs):
+    """Prove unchanged input forwarding through the concrete Python MRO.
+
+    Resource inheritance has already been checked by resolve_owners. Retain
+    the constructor call's source evidence for the base declaration as well;
+    no constructor is executed and no type is inferred from a sample owner.
+    """
+    classes = {cls: name for name, (_, cls) in owners.items()}
+    parameters = {}
+    for (owner, _), item in inputs.items():
+        parameters.setdefault(owner, set()).add(item['input_parameter'])
+    for caller, (_, cls) in owners.items():
+        defining = next((base for base in cls.__mro__ if '__init__' in vars(base)), object)
+        function = vars(defining).get('__init__')
+        if not inspect.isfunction(function):
+            continue
+        # An inherited constructor can also run directly, without super().
+        if defining is not cls and defining in classes:
+            target = classes[defining]
+            if target in parameters:
+                arguments = {name: ast.Name(id=name, ctx=ast.Load()) for name in parameters[target]}
+                yield target, (caller, arguments, {'inherited_input_forward': True})
+        try:
+            tree = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
+        except (OSError, TypeError, SyntaxError):
+            continue
+        if not isinstance(tree, ast.FunctionDef) or function.__globals__.get('super', super) is not super:
+            continue
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and node.func.attr == '__init__']
+        if len(calls) != 1:
+            continue
+        call = calls[0]
+        receiver = call.func.value
+        if not (isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name)
+                and receiver.func.id == 'super' and not receiver.args and not receiver.keywords
+                and any(isinstance(node, ast.Expr) and node.value is call for node in tree.body)
+                and not any(isinstance(arg, ast.Starred) for arg in call.args)
+                and not any(keyword.arg is None for keyword in call.keywords)):
+            continue
+        next_base = next((base for base in cls.__mro__[cls.__mro__.index(defining) + 1:]
+                          if '__init__' in vars(base)), object)
+        target = classes.get(next_base)
+        if target not in parameters:
+            continue
+        try:
+            bound = inspect.signature(inspect.getattr_static(next_base, '__init__')).bind(
+                None, *call.args, **{keyword.arg: keyword.value for keyword in call.keywords})
+        except TypeError:
+            continue
+        signature = inspect.signature(function)
+        mutated = {node.id for node in ast.walk(tree)
+                   if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
+                   and (node.lineno, node.col_offset) < (call.lineno, call.col_offset)}
+        if 'super' in signature.parameters or 'super' in mutated:
+            continue
+        arguments = {name: bound.arguments.get(name) for name in parameters[target]}
+        if not all(isinstance(value, ast.Name) and value.id in signature.parameters
+                   and value.id not in mutated for value in arguments.values()):
+            continue
+        yield target, (caller, arguments, {'inherited_input_forward': True})
 
 
 def default_owner_call(constructor, parameter, before):
@@ -130,6 +194,8 @@ def resolve_inputs(sources, imported, *, partial=False):
             except TypeError as error:
                 raise ValueError("Declared constructor argument mismatch: " + target) from error
             calls.setdefault(target, []).append((caller, bound.arguments, item))
+    for target, site in _inherited_input_calls(owners, inputs):
+        calls.setdefault(target, []).append(site)
     untyped_targets = {owner for owner, name in inputs if (owner, name) not in annotated}
     for name, _, _, _, tree, *_ in sources:
         for node in ast.walk(tree):
@@ -310,6 +376,8 @@ def resolve_inputs(sources, imported, *, partial=False):
             if (owner, name) in annotated and observed - {origin(item)}:
                 raise ValueError(f"Owner input {owner}.{name} contradicts its declared source type")
             if len(observed) > 1:
+                if any(site.get('inherited_input_forward') for _, _, site in calls.get(owner, ())):
+                    raise ValueError('Inherited constructor inputs require one proven source type: ' + owner)
                 split_constructor_inputs(sources, owner, inputs, calls.get(owner, ()), input_types)
                 return resolve_inputs(sources, imported, partial=partial)
             if observed and origin(item) is None:
