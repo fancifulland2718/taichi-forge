@@ -1296,6 +1296,20 @@ class ASTTransformer(Builder):
                 raise TaichiSyntaxError(f'Operator "{name}" in Taichi scope is not supported.')
             l = operands[i]
             r = operands[i + 1]
+            if ctx.is_in_static_scope() and is_model_value(l) and isinstance(node_op, (ast.In, ast.NotIn)):
+                # Python membership coerces each overloaded equality to bool,
+                # losing the immutable model expression (and possibly folding
+                # the wrong branch). Reuse scalar comparisons and their prepare
+                # proof for the existing finite integer-enum idiom.
+                if not isinstance(r, (tuple, list)) or not all(isinstance(item, (int, np.integer)) for item in r):
+                    raise TaichiSyntaxError("Model-dependent membership requires a static integer tuple or list")
+                member = False
+                for item in r:
+                    member = ti_ops.logical_or(member, l == int(item))
+                if isinstance(node_op, ast.NotIn):
+                    member = ti_ops.logical_not(member)
+                val = ti_ops.logical_and(val, member)
+                continue
             if ctx.deployment is not None:
                 optional = ctx.deployment.optional_comparison(ctx, l, r, type(node_op).__name__)
                 if optional is not None:

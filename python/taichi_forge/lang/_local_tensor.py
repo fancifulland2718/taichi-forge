@@ -56,8 +56,19 @@ def binary_extent(result, operation, left, right):
     if not hasattr(left, "_uniform_extent") and not hasattr(right, "_uniform_extent"):
         return result
     boolean = operation in ("logical_and", "logical_or")
-    left, right = tuple(("const", int(value)) if boolean and isinstance(value, bool) else extent(value)
-                        for value in (left, right))
+    comparison = operation in ("cmp_lt", "cmp_le", "cmp_gt", "cmp_ge", "cmp_eq", "cmp_ne")
+    # Comparisons produce a nonnegative boolean even when an integer policy
+    # uses a negative sentinel. Keep that guard without admitting negative
+    # standalone allocation extents.
+    def operand(value):
+        if comparison and isinstance(value, Integral) and -(2**31) <= value <= 2**31 - 1:
+            value = int(value)
+            if value < 0:
+                return ("sub", ("sub", ("const", 0), ("const", -(value + 1))), ("const", 1))
+            return ("const", value)
+        return ("const", int(value)) if boolean and isinstance(value, bool) else extent(value)
+
+    left, right = operand(left), operand(right)
     if left is not None and right is not None and operation in (
         "add", "sub", "mul", "max", "min", "floordiv", "cmp_lt", "cmp_le", "cmp_gt", "cmp_ge", "cmp_eq", "cmp_ne",
         "logical_and", "logical_or"

@@ -2156,6 +2156,11 @@ format 80 records prepared values needed by optional-input guards. Focused
 CPU/CUDA checks cover JIT agreement, absent workspaces, required-input rejection,
 and bound Graph snapshots.
 
+Prepared integer policies also support `in` / `not in` with static integer tuples
+or lists inside `ti.static`, including empty sets and signed sentinels. These
+lower through the same comparisons and input guards; ordinary JIT behavior and
+the existing allocation-range checks remain unchanged.
+
 Implementation: [producer](../../python/taichi_forge/aot/_package.py),
 [standalone consumer](../../packaging/runtime/src/taichi_forge_runtime/aot/_package.py),
 [focused tests](../../tests/python/test_aot_package.py).

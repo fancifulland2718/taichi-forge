@@ -20050,8 +20050,9 @@ class Model:
 
 
 @pytest.mark.parametrize("prepared", [False, True])
+@pytest.mark.parametrize("membership", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_prepared_integer_guard_preserves_optional_workspace(tmp_path, monkeypatch, prepared):
+def test_package_prepared_integer_guard_preserves_optional_workspace(tmp_path, monkeypatch, prepared, membership):
     source = '''
 import taichi_forge as ti
 from resource_contexts import resource_group
@@ -20086,6 +20087,13 @@ class Model:
         b.dispatch(self.step)
         return b.compile()
 '''
+    if membership:
+        source = source.replace('self.mode == 2', 'self.mode in (-1, 2)')
+        source = source.replace('if ti.static(self.mode in (-1, 2)):', 'if ti.static(self.mode not in (0, 7)):')
+        source = source.replace('self.out[i] += 1', '''if ti.static(self.mode not in ()):
+                self.out[i] += 1
+            if ti.static(self.mode in ()):
+                self.out[i] += 1000''')
     if not prepared:
         source = source.replace("scope.value('mode', ti.i32, affects_plan=True)", "scope.value('mode', ti.i32)")
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
@@ -20106,11 +20114,12 @@ class Model:
                 expected = normal.out.to_numpy()
                 np.testing.assert_array_equal(loaded.out.to_numpy(), expected)
                 assert hasattr(loaded, 'scratch') == enabled
-                if mode == 2 and not enabled:
+                selected = mode in (-1, 2) if membership else mode == 2
+                if selected and not enabled:
                     with pytest.raises(ValueError, match='presence'):
                         loaded.conditional_requirement()
                 else:
-                    assert loaded.conditional_requirement() == (10 if mode == 2 else 0)
+                    assert loaded.conditional_requirement() == (10 if selected else 0)
                 with loaded.graph().bind({}) as bound:
                     loaded.mode = 2 if mode != 2 else 0
                     bound.run()

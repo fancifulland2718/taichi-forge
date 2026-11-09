@@ -1442,6 +1442,10 @@ JIT 保持原静态行为，已绑定 Graph 保留准备时快照。可选工作
 定义包格式 80 记录可选输入守卫依赖的准备值。局部 CPU/CUDA 检查覆盖 JIT 对照、
 缺席工作区、必需输入拒绝及已绑定 Graph 的快照语义。
 
+准备整数策略也可在 `ti.static` 内与固定整数 tuple/list 做 `in` / `not in` 判断，
+包括空集合和负整数哨兵值。这里复用原比较表达式与输入守卫，正常 JIT 行为和原分配
+尺寸检查保持不变。
+
 实现入口：[`_package.py`](../../python/taichi_forge/aot/_package.py)、
 [独立消费者](../../packaging/runtime/src/taichi_forge_runtime/aot/_package.py)、
 [局部验证](../../tests/python/test_aot_package.py)。
