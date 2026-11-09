@@ -526,7 +526,9 @@ def _host_projection(
                 and schema[target.attr]["allocation"] == [node.lineno, node.col_offset]
             ):
                 variants = input_families.get(self.owner)
-                receivers = getattr(tree, "_package_construction_owners", {}).get(self.owner)
+                receivers = getattr(tree, "_package_construction_owners", {}).get(self.owner) or getattr(
+                    tree, "_package_preparation_owners", {}
+                ).get(self.owner)
                 if receivers:
                     variants = []
                     for identity in sorted(receivers):
@@ -1387,7 +1389,7 @@ def _preflight_package(package, *, arch=None, source_root=None):
         resolve_preparations(
             sources,
             imported_modules,
-            lambda *args, **kwargs: _owner_schema(*args, include_preparation=True, **kwargs),
+            complete_owner_schema,
             _fail,
             host_contexts,
         )

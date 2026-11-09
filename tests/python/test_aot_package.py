@@ -12758,6 +12758,55 @@ def prepare(owner, active):
 """
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_preparation_domains_apply_across_helpers(tmp_path, monkeypatch):
+    source = PREPARATION_DOMAIN_SOURCE
+    start = source.index("def prepare(owner, active):")
+    source = (
+        source[:start]
+        .replace(
+            "from resource_contexts import resource_group",
+            "from resource_contexts import resource_group\nfrom .options import prepare_options\n"
+            "from .allocation import prepare_work",
+        )
+        .replace("prepare(self, active)", "prepare_options(self, active)\n        prepare_work(self)")
+    )
+    source = source.replace("self.work[i] + delta", "delta").replace(
+        "self.extra[i] += delta * 2", "self.extra[i] += self.work[i] + delta * 2"
+    )
+    package, _ = _resource_context_fixture(
+        tmp_path,
+        monkeypatch,
+        model=source,
+        extra_modules={
+            "options": """
+import taichi_forge as ti
+def prepare_options(owner, active):
+    owner.active = active
+    scope = ti.experimental.ResourceScope(owner)
+    scope.static('active', choices=(False, True))
+""",
+            "allocation": """
+from resource_contexts import resource_group
+import taichi_forge as ti
+def prepare_work(owner):
+    if owner.active:
+        with resource_group(owner, 'work', initialization='zero') as scope:
+            scope.work = scope.field(ti.i32, shape=scope.dim('n'))
+""",
+        },
+    )
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(5, False), code.host.Model(17, True)
+        assert not hasattr(a, "work") and b.work.shape == (17,)
+        a.step(3)
+        b.step(7)
+        np.testing.assert_array_equal(a.base.to_numpy(), 3)
+        np.testing.assert_array_equal(b.base.to_numpy(), 7)
+        np.testing.assert_array_equal(b.extra.to_numpy(), 14)
+
+
 @pytest.mark.parametrize(
     "values_only, early_return",
     [(False, False), (True, False), (False, True)],

@@ -1607,6 +1607,11 @@ child across calls. CPU/CUDA checks cover parent references, independent sizes,
 child-construction failure without leaked storage, Graph use, independent release,
 and a new consumer process without the producer sources. This does not make
 arbitrary Host mutations transactional or admit unknown constructor inputs.
+Preparation helpers can use boolean domains declared by another source-proven
+helper on the same owner. Their Field projection reuses the concrete owner's
+complete contract, so source-module traversal order does not determine whether
+conditional allocations are accepted. The conditions still require declared
+domains; neither helper is executed to discover them.
 
 Version 54 retains optional plain records declared by `scope.record(...,
 optional=True)`. Member declarations under a proven `is not None` guard use the
