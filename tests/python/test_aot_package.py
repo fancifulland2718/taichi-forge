@@ -15686,7 +15686,7 @@ def declare_types(scope, floating, integer):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-@pytest.mark.parametrize("condition", ["declared", "model_value", "alternative"])
+@pytest.mark.parametrize("condition", ["declared", "context", "model_value", "alternative"])
 def test_package_scoped_conjunction_keeps_layout_guards_local(tmp_path, monkeypatch, condition):
     source = """
 import taichi_forge as ti
@@ -15718,8 +15718,21 @@ class Model:
         source = source.replace("scope.left and not scope.right", "scope.n > 3 and not scope.right")
     elif condition == "alternative":
         source = source.replace("scope.left and not scope.right", "scope.left or not scope.right")
-    package = _source_package(tmp_path, monkeypatch, source)
-    if condition != "declared":
+    if condition == "context":
+        begin = source.index("        fields = ti.FieldsBuilder()")
+        end = source.index("        self.tree = fields.finalize()", begin)
+        body = source[source.index("        scope.static('left'", begin) : end]
+        source = (
+            "from resource_contexts import resource_group\n"
+            + source[:begin]
+            + "        with resource_group(self, 'state') as scope:\n"
+            + textwrap.indent(body, "    ")
+            + source[end + len("        self.tree = fields.finalize()") :]
+        )
+        package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    else:
+        package = _source_package(tmp_path, monkeypatch, source)
+    if condition not in ("declared", "context"):
         with pytest.raises(ti.aot.PackageExportError, match="declared boolean"):
             ti.aot.export_package(package, tmp_path / "sdk")
         assert not (tmp_path / "sdk").exists()
@@ -15737,7 +15750,9 @@ class Model:
             model.tree.destroy()
 
 
-@pytest.mark.parametrize("storage_type", [False, True, "scope"], ids=["numerical", "storage", "scope-storage"])
+@pytest.mark.parametrize(
+    "storage_type", [False, True, "scope", "context"], ids=["numerical", "storage", "scope-storage", "context-storage"]
+)
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_static_dtype_preparation(tmp_path, monkeypatch, storage_type):
     source = STATIC_DTYPE_SOURCE
@@ -15745,13 +15760,20 @@ def test_package_static_dtype_preparation(tmp_path, monkeypatch, storage_type):
         source = source.replace("ti.field(ti.f32,", "ti.field(self.storage_type,")
         source = source.replace("    owner.compute_type =", "    owner.storage_type = ti.f32\n    owner.compute_type =")
         source += "    scope.static_dtype('storage_type', choices=(floating,))\n"
-        if storage_type == "scope":
+        if storage_type in ("scope", "context"):
             source = source.replace(
                 "        self.values = ti.field(self.storage_type, shape=n)",
                 "        scope = ti.experimental.ResourceScope(self)\n"
                 "        scope.values = scope.field(scope.storage_type, shape=scope.dim('n'))",
             )
-    package = _source_package(tmp_path, monkeypatch, source)
+    if storage_type == "context":
+        source = "from resource_contexts import resource_group\n" + source.replace(
+            "        scope = ti.experimental.ResourceScope(self)\n        scope.values =",
+            "        with resource_group(self, 'state') as scope:\n            scope.values =",
+        )
+        package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    else:
+        package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].preparations == 0
     assert len(manifest["entry_families"]) == 1

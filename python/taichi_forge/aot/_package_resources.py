@@ -680,14 +680,20 @@ def scope_declarations(
         allowed.add(id(call.func.value))
     scope_names = {key[0] if isinstance(key, tuple) else key for key in scopes}
     binding_inputs = {id(node) for statement in scopes.values() for node in ast.walk(statement.value)}
+    for node in ast.walk(constructor):
+        if id(node) in context_bindings:
+            # Declaration AST normalization copies expressions. Retain the
+            # proved lexical scope, not an object id that disappears on copy.
+            node._package_context_binding = context_bindings[id(node)]
 
     def scope_binding(node):
         # Context variables retain Python's original names in emitted Host code.
         # Only declaration lookup distinguishes their lexical allocation sites.
         if not isinstance(node, ast.Name) or id(node) in binding_inputs:
             return None
-        if id(node) in context_bindings:
-            return context_bindings[id(node)]
+        binding = context_bindings.get(id(node), getattr(node, "_package_context_binding", None))
+        if binding in scopes:
+            return binding
         declaration = scopes.get(node.id)
         if declaration is not None and (node.lineno, node.col_offset) >= (
             declaration.lineno,
