@@ -126,6 +126,43 @@ def second() -> ti.i32:
         assert code.host.second() == 11
 
 
+def test_package_host_allocation_family_does_not_nest_source_choices(monkeypatch):
+    from types import SimpleNamespace
+    from taichi_forge.aot._package import _host_projection
+    from taichi_forge_runtime.aot import _package as runtime_package
+
+    module = "many_allocation_sources"
+    tree = ast.parse("class Model:\n    def allocate(self):\n        self.values = None\n")
+    site = tree.body[0].body[0].body[0]
+    families = [{"owner": f"{module}.Source{i}"} for i in range(600)]
+    tree._package_input_families = {"Model": families}
+    tree._package_factory_declarations = []
+    schemas = {f"Source{i}": {"values": dict(kind="dense_field", allocation=[site.lineno, site.col_offset],
+                                             dimension_sources={"n": f"self.n{i}"})} for i in range(600)}
+    source, _, _ = _host_projection(module, tree, lambda node: None, schemas, [], {},
+                                    module, set(), False, {}, None)
+    calls = []
+    runtime = SimpleNamespace(
+        managed_class=lambda cls: cls,
+        owner_contract=lambda owner, key: owner.selected,
+        field=lambda key, name, dimensions: calls.append((key, name, dimensions)) or dimensions["n"],
+    )
+    monkeypatch.setattr(runtime_package, "bind_module", lambda name: runtime)
+    namespace = {"__name__": module}
+    exec(compile(source, "<large allocation family>", "exec"), namespace)
+    for index in (0, 299, 599):
+        owner = namespace["Model"]()
+        owner.selected = families[index]["owner"]
+        setattr(owner, f"n{index}", index + 3)
+        owner.allocate()
+        assert owner.values == index + 3
+        assert calls[-1] == (owner.selected, "values", {"n": index + 3})
+    assert len(calls) == 3
+    owner.selected = "unknown"
+    with pytest.raises(ValueError, match="no allocation"):
+        owner.allocate()
+
+
 FIELD_INPUT_SOURCE = (
     OWNER_INPUT_SOURCE.replace("scope.reader = Reader(self)", "scope.reader = Reader(self.values, n)")
     .replace("def __init__(self, source):", "def __init__(self, values, n):")

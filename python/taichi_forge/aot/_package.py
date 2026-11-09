@@ -605,30 +605,33 @@ def _host_projection(
                     if not variants:
                         _fail(module, node, "Cooperative allocation has no concrete resource contract")
                 if variants:
-                    value = None
-                    for variant in reversed(variants):
+                    cases = []
+                    for variant in variants:
                         identity = variant["owner"]
                         allocation = field_allocation(
                             identity,
                             target.attr,
                             variant["schema"] if "schema" in variant else context_schemas[identity.rpartition(".")[2]],
                         )
-                        value = (
-                            allocation
-                            if value is None
-                            else ast.IfExp(
-                                ast.Call(
-                                    ast.Attribute(
-                                        ast.Name(_PREFIX + "runtime", ast.Load()), "has_contract", ast.Load()
-                                    ),
-                                    [ast.Name("self", ast.Load()), ast.Constant(identity)],
-                                    [],
-                                ),
-                                allocation,
-                                value,
-                            )
-                        )
-                    node.value = value
+                        assignment = copy.copy(node)
+                        assignment.value = allocation
+                        cases.append(ast.match_case(ast.MatchValue(ast.Constant(identity)), None, [assignment]))
+                    cases.append(ast.match_case(ast.MatchAs(), None, [ast.Raise(
+                        ast.Call(ast.Name("ValueError", ast.Load()),
+                                 [ast.Constant("Selected owner contract has no allocation for " + target.attr)], []), None
+                    )]))
+                    # Source families can contain hundreds of distinct Field
+                    # layouts. Keep the original local allocation expressions
+                    # lazy, but do not encode their selection as a recursively
+                    # nested expression or repeatedly resolve the owner type.
+                    return ast.copy_location(
+                        ast.Match(
+                            ast.Call(
+                                ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "owner_contract", ast.Load()),
+                                [ast.Name("self", ast.Load()), ast.Constant(module + "." + self.owner)], [],
+                            ), cases,
+                        ), node,
+                    )
                 else:
                     node.value = field_allocation(module + "." + self.owner, target.attr, schema)
                 return node
