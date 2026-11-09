@@ -2412,10 +2412,18 @@ def append_step(solver, builder):
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-@pytest.mark.parametrize('recipe_kind', ['factory', 'mixed', 'filtered', 'forwarded'])
+@pytest.mark.parametrize('recipe_kind', ['factory', 'mixed', 'filtered', 'forwarded', 'forwarded_many'])
 def test_package_write_inventory_resolves_optional_record_recipes(tmp_path, monkeypatch, recipe_kind):
     recipe = RECORD_INVENTORY_RECIPE
-    if recipe_kind == 'forwarded':
+    if recipe_kind.startswith('forwarded'):
+        if recipe_kind == 'forwarded_many':
+            start, end = recipe.index('def operations(solver):'), recipe.index('def append_step(solver, builder):')
+            choices = '\n'.join(
+                f"        (('step', solver.step) if solver.n > {8 + index % 8} else "
+                "('composite', Operation(solver.unrelated, solver.record_unrelated, solver.step))),"
+                for index in range(20)
+            )
+            recipe = recipe[:start] + 'def operations(solver):\n    return (\n' + choices + '\n    )\n\n' + recipe[end:]
         recipe = recipe.replace('''def append_step(solver, builder):
     recipe = operations(solver)''', '''def append_step(solver, builder):
     record_operations(builder, operations(solver))

@@ -165,6 +165,36 @@ def _literal_key(value):
     raise ValueError("Template value has no immutable definition source")
 
 
+def _complete_fact(value):
+    if isinstance(value, tuple):
+        return all(_complete_fact(item) for item in value)
+    if isinstance(value, (_Record, _Mapping)):
+        return all(_complete_fact(item) for _, item in value.items)
+    if isinstance(value, _SourceDomain):
+        return all(_complete_fact(item) for item in value.items)
+    if isinstance(value, _Choice):
+        return all(_complete_fact(item) for item in value.alternatives)
+    return value is not None
+
+
+def _select_source_fact(value, source, index):
+    """Refine one correlated source choice, leaving independent choices symbolic."""
+    if isinstance(value, _Choice):
+        if value.source == source:
+            return _select_source_fact(value.alternatives[index], source, index)
+        return _Choice(value.source, tuple(_select_source_fact(item, source, index) for item in value.alternatives))
+    if isinstance(value, tuple):
+        return tuple(_select_source_fact(item, source, index) for item in value)
+    if isinstance(value, (_Mapping, _Record)):
+        items = tuple((name, _select_source_fact(item, source, index)) for name, item in value.items)
+        return _Record(value.cls, items) if isinstance(value, _Record) else _Mapping(items)
+    if isinstance(value, _SourceDomain):
+        return _SourceDomain(tuple(_select_source_fact(item, source, index) for item in value.items))
+    if isinstance(value, (_Kernel, _Host)):
+        return type(value)(value.function, _select_source_fact(value.receiver, source, index))
+    return value
+
+
 def _plain_record(cls):
     """Only generated frozen record constructors preserve their input members."""
     return (
@@ -403,6 +433,15 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
 
         def sequence_environment():
             def syntax(fact):
+                if (isinstance(fact, _Choice) and fact.alternatives
+                        and all(isinstance(item, tuple) for item in fact.alternatives)
+                        and len({len(item) for item in fact.alternatives}) == 1):
+                    # Preserve positional unpacking and the common choice ID,
+                    # without selecting every other operation in the recipe.
+                    return ast.Tuple([
+                        syntax(_Choice(fact.source, tuple(item[index] for item in fact.alternatives)))
+                        for index in range(len(fact.alternatives[0]))
+                    ], ast.Load())
                 if isinstance(fact, (tuple, _SourceDomain)):
                     expression = ast.Tuple([syntax(item) for item in (fact.items if isinstance(fact, _SourceDomain) else fact)], ast.Load())
                     if isinstance(fact, _SourceDomain):
@@ -521,6 +560,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     class SelectSource(ast.NodeTransformer):
                         def __init__(self, index):
                             self.index = index
+
+                        def visit_Name(self, part):
+                            if isinstance(part.ctx, ast.Load):
+                                original = value(part)
+                                selected = _select_source_fact(original, fact.source, self.index)
+                                if selected != original:
+                                    part._package_input_fact = selected
+                            return part
 
                         def visit_IfExp(self, part):
                             if getattr(part, '_package_source_choice', None) == fact.source[1]:
@@ -972,7 +1019,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         return_cache[return_key] = (
                             results[0] if results and all(item == results[0] for item in results) else None
                         )
-                    if return_cache[return_key] is not None:
+                    if return_cache[return_key] is not None and (
+                            resource_inventory is None or _complete_fact(return_cache[return_key])):
                         return return_cache[return_key]
                 if resource_inventory is not None and callee in functions and callee not in return_chain:
                     from ._package_source_sequences import UnprovenSourceSequence
@@ -1243,7 +1291,12 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     for key, item in bound.arguments.items()
                     if item is not None
                 }
-                for context in _choice_contexts(inputs):
+                # Host recipes retain choices until the selected operation is
+                # used. Expanding every element of a forwarded sequence here
+                # creates a Cartesian product of unrelated stages. Actual
+                # dispatch still resolves the correlated Kernel/receiver pair.
+                contexts = (inputs,) if resource_inventory is not None else _choice_contexts(inputs)
+                for context in contexts:
                     if callee in chain:
                         if (callee, tuple(sorted(context.items()))) not in visited:
                             failures.append(

@@ -1243,6 +1243,12 @@ Local CPU checks compare JIT/AOT save/restore at new sizes and rejection cases.
 This runs only during preflight/export, adds no Runtime checks, and does not
 qualify the complete rigid package.
 
+Forwarding a complete immutable recipe preserves its independent source choices;
+discovery does not enumerate every combination of its operations. Only the choice
+used by a particular branch or dispatch is refined, with correlated record members
+and Kernel receivers kept together. This is source analysis, not a limit on recipe
+length or a change to normal Host execution.
+
 Immutable operation records may also participate in single-level conditional
 filters, sequence concatenation and model-count repetition. Source domains retain
 possible operations without unrolling counts; `any`/`all` retain model conditions
