@@ -71,6 +71,8 @@ def resolve_field_likes(sources):
         source_owner, original, prefix = allocation(
             owner, item["source_path"], visiting
         )
+        if "shape_policy" in original:
+            raise ValueError("field_like shape choices require a resolved source layout policy")
         if source_owner == owner and original["allocation"] >= item["allocation"]:
             raise ValueError(
                 "field_like source must precede the independent allocation"

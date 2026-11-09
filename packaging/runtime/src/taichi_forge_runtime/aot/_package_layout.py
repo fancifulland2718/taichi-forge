@@ -8,6 +8,7 @@ def layout_selection(contract, owner):
 
     names = {name for condition in contract.get("conditions", {}).values() for name in condition}
     names.update(policy["condition"] for policy in contract.get("orders", {}).values())
+    names.update(policy["condition"] for policy in contract.get("shapes", {}).values())
     presence = contract.get("record_presence", {})
     selected = {
         name: path_value(owner, presence[name]) is not None if name in presence else getattr(owner, name)
@@ -170,5 +171,52 @@ def _select_orders(contract, selected):
     return {**contract, "schema": json.dumps({**source, "nodes": updated}, separators=(",", ":")), "members": members}
 
 
+def _select_shapes(contract, selected):
+    if not contract.get("shapes"):
+        return contract
+    source = json.loads(contract["schema"])
+    nodes = source["nodes"]
+    paths, children = _tree(nodes)
+    by_path = {path: index for index, path in paths.items()}
+    replaced = set()
+    for name, policy in contract["shapes"].items():
+        if name not in contract["members"]:
+            continue
+        selector = contract["members"][name]
+        leaves = list(selector[1]) if selector[0] == "schema_nodes" else [by_path[tuple(path)] for path in selector]
+        parent = nodes[leaves[0]]["parent"]
+        if (
+            parent <= 0
+            or nodes[parent]["parent"] != 0
+            or nodes[parent]["type"] != 1
+            or leaves != children.get(parent)
+            or parent in replaced
+            or any(children.get(leaf) for leaf in leaves)
+        ):
+            raise ValueError("Field shape selection requires an independent default AOS allocation")
+        shape = policy["if_true" if selected[policy["condition"]] else "if_false"]
+        if not isinstance(shape, (tuple, list)) or any(
+            not (type(axis) is str and axis or type(axis) is int and 0 < axis <= 2**31 - 1) for axis in shape
+        ):
+            raise ValueError("Field shape selection requires declared positive extents")
+        replaced.add(parent)
+        nodes[parent] = {
+            **nodes[parent],
+            "extents": [
+                dict(axis=index, constant=0 if type(axis) is str else axis, parameter=axis if type(axis) is str else "")
+                for index, axis in enumerate(shape)
+            ],
+        }
+    dimensions = sorted(
+        {
+            extent["parameter"]
+            for node in nodes
+            for extent in node["extents"] + node.get("tensor_extents", [])
+            if extent["parameter"]
+        }
+    )
+    return {**contract, "schema": json.dumps(source, separators=(",", ":")), "dimensions": dimensions}
+
+
 def select_layout(contract, selected):
-    return _select_orders(_select_members(contract, selected), selected)
+    return _select_orders(_select_shapes(_select_members(contract, selected), selected), selected)

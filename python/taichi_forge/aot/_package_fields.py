@@ -390,20 +390,19 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         setattr(owner, name, value)
 
         def field_declaration(element, spec):
+            guards = {**item.get("conditions", {}), **item.get("shape_guards", {})}
             if spec.get("model_tensor"):
-                if item.get("conditions"):
+                if guards:
                     return _ConditionalModelTensorField(
                         element.dtype,
                         tuple(item["shape"]),
                         group,
                         tuple(spec["element_shape"]),
-                        tuple(sorted(item["conditions"].items())),
+                        tuple(sorted(guards.items())),
                     )
                 return _ModelTensorField(element.dtype, tuple(item["shape"]), group, tuple(spec["element_shape"]))
-            if item.get("conditions"):
-                return _ConditionalDenseField(
-                    element, tuple(item["shape"]), group, tuple(sorted(item["conditions"].items()))
-                )
+            if guards:
+                return _ConditionalDenseField(element, tuple(item["shape"]), group, tuple(sorted(guards.items())))
             return DenseField(element, tuple(item["shape"]), group)
 
         def record_declaration(**members):

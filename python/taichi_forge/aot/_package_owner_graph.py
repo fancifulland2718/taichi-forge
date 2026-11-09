@@ -88,6 +88,11 @@ class OwnerGraph:
             if item["kind"] == "static"
         }
         for attribute, item in schema.items():
+            if "shape_policy" in item:
+                policy = item["shape_policy"]
+                selected = static_values[policy["condition"]]
+                item["shape"] = policy["if_true" if selected else "if_false"]
+                item["shape_guards"] = {policy["condition"]: selected}
             alternatives = item.get("owner_alternatives")
             if alternatives:
                 applicable = [
@@ -124,7 +129,11 @@ class OwnerGraph:
         for attribute, item in schema.items():
             if item["kind"] == "owner_input":
                 value, _, child, expanded = self.construct(
-                    item["owner_type"], resource_only=True, references=references
+                    item["owner_type"],
+                    resource_only=True,
+                    references=references,
+                    choices=choices,
+                    path=(*path, attribute),
                 )
                 children[attribute] = (child, expanded)
                 write_member(owner, attribute, value, schema)
@@ -149,9 +158,9 @@ class OwnerGraph:
                 )
                 children[attribute] = (child, expanded)
             elif item["kind"] == "static":
-                choices = tuple(producer_static(read_static_key(key)) for key in item["choices"])
-                declarations[attribute] = StaticValue(choices=choices, kernel_only=item["kernel_only"])
-                value = choices[0]
+                domain = tuple(producer_static(read_static_key(key)) for key in item["choices"])
+                declarations[attribute] = StaticValue(choices=domain, kernel_only=item["kernel_only"])
+                value = producer_static(static_values[attribute])
             elif item["kind"] == "constant":
                 declarations[attribute] = StaticValue()
                 value = read_static_key(item["value"])
@@ -297,6 +306,12 @@ def _compose(environment, schema, children):
                 transformed["conditions"] = {names[n]: expected for n, expected in item["conditions"].items()}
             if "choice_guards" in item:
                 transformed["choice_guards"] = {names[n]: expected for n, expected in item["choice_guards"].items()}
+            if "shape_policy" in item:
+                transformed["shape_policy"] = {
+                    **item["shape_policy"],
+                    "condition": names[item["shape_policy"]["condition"]],
+                }
+                transformed["shape_guards"] = {names[n]: expected for n, expected in item["shape_guards"].items()}
             if "owner_alternatives" in item:
                 transformed["owner_alternatives"] = [
                     {

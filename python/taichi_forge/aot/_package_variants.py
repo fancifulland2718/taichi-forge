@@ -111,9 +111,10 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
         visited.add(key)
         owner, _, environment, schema = graph.context(identity, selection)
         choices = {name: item for name, item in schema.items() if item.get("owner_alternatives")}
+        shape_choices = {name: item for name, item in schema.items() if item.get("shape_policy")}
         fixed = {}
-        for item in choices.values():
-            for name, value in item.get("choice_guards", {}).items():
+        for item in (*choices.values(), *shape_choices.values()):
+            for name, value in {**item.get("choice_guards", {}), **item.get("shape_guards", {})}.items():
                 if name in fixed and fixed[name] is not value:
                     raise ValueError("Child implementation guards contradict one another")
                 fixed[name] = value
@@ -146,6 +147,11 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
             if signature not in emitted:
                 emitted.add(signature)
                 results.append((code, owner, environment, schema))
+            for name, item in shape_choices.items():
+                guard = item["shape_policy"]["condition"]
+                if name in code.used or guard in code.static:
+                    for value in (False, True):
+                        pending.append({**selection, tuple(environment._paths[guard]): value})
             for name, item in choices.items():
                 # A parent method can also read the same configuration without
                 # touching the child. Its own static branches remain complete.

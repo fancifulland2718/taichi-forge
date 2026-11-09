@@ -1709,6 +1709,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "constructors",
                         "owner_alternatives",
                         "choice_guards",
+                        "shape_guards",
                     )
                 }
                 for attribute, item in schema.items()
@@ -1744,6 +1745,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         ]
                         for attribute in members
                     }
+                    shapes = {
+                        attribute: member_schemas[attribute]["shape_policy"]
+                        for attribute in members
+                        if member_schemas[attribute].get("shape_policy")
+                    }
+                    if shapes:
+                        manifest["field_groups"][key]["shapes"] = shapes
+                        manifest["version"] = max(70, manifest["version"])
                     conditions = {
                         attribute: member_schemas[attribute]["conditions"]
                         for attribute in members
@@ -1978,7 +1987,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
 
             try:
                 if "closure_environment" not in definition and any(
-                    item.get("owner_alternatives") for item in compilation_schema.values()
+                    item.get("owner_alternatives") or item.get("shape_policy") for item in compilation_schema.values()
                 ):
                     contexts = compile_owner_variants(
                         owner_graph, name + "." + owner_name, entry, values, template_args=template_arguments

@@ -1811,6 +1811,16 @@ no device count and does not enlarge the launch. This bound proves neither an
 exact dimension nor a static condition; it does not propagate through potentially
 overflowing arithmetic. Unbounded device ranges still reject.
 
+Format 70 supports finite shape selection for independent default-AOS Fields,
+such as `shape = (n,) if self.packed else (n, width)`. The condition must be an
+existing non-`kernel_only` boolean static declaration; both shapes use declared
+model dimensions and their algebra. Only numerical entries that read the layout
+retain its necessary variants. Unaffected entries share code, and instance
+preparation still determines model sizes. Focused CPU/CUDA checks cover nested
+owners, non-owning inputs, ordinary JIT equivalence and source-free dual instances.
+The native SNode compiler remains responsible for byte layout. Explicit placement
+or order, StructFields and `field_like` clones across shape choices still reject.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

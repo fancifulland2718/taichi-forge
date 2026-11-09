@@ -11951,6 +11951,176 @@ class Model:
         assert "ORDERED_FIELDS_SOURCE_FREE_OK" in result.stdout
 
 
+FIELD_SHAPE_CHOICE_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, width: int, packed: bool):
+        global constructors
+        constructors += 1
+        self.n, self.width, self.packed = n, width, packed
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields)
+        scope.static('packed', choices=(False, True))
+        n, width = scope.dim('n'), scope.dim('width')
+        shape = (n,) if self.packed else (n, width)
+        scope.values = scope.field(ti.f32, shape=shape, initialization='zero')
+        scope.result = scope.field(ti.f32, shape=n, initialization='zero')
+        self.tree = fields.finalize()
+        scope.reader = Reader(self)
+    @ti.kernel
+    def fill(self, value: ti.f32):
+        for index in ti.grouped(self.values):
+            self.values[index] = value
+    @ti.kernel
+    def read(self):
+        for i in self.result:
+            if ti.static(self.packed):
+                self.result[i] = self.values[i]
+            else:
+                self.result[i] = self.values[i, self.width - 1]
+    @ti.kernel
+    def independent(self, value: ti.f32):
+        for i in self.result:
+            self.result[i] = value
+
+@ti.data_oriented
+class Reader:
+    def __init__(self, source):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('source', source)
+        scope.borrow('alias', self.source.values, source_scope=True)
+    @ti.kernel
+    def fill(self, value: ti.f32):
+        for index in ti.grouped(self.alias):
+            self.alias[index] = value
+
+@ti.data_oriented
+class Parent:
+    def __init__(self, n: int, width: int, packed: bool):
+        self.enabled = True
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.child = Model(n, width, packed)
+    @ti.kernel
+    def fill(self, value: ti.f32):
+        for index in ti.grouped(self.child.values):
+            self.child.values[index] = value
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_field_shape_choices_share_unaffected_code(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, FIELD_SHAPE_CHOICE_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 70
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    for method, count in [("fill", 2), ("read", 2), ("independent", 1)]:
+        entries = [
+            entry
+            for entry in manifest["entries"].values()
+            if "definition_fixture.model.Model." + method in entry["definitions"]
+        ]
+        assert len(entries) == count
+    expected = {}
+    for packed in (False, True):
+        original = package.Model(3, 2, packed)
+        original.reader.fill(7.25)
+        original.read()
+        expected[packed] = original.result.to_numpy()
+        original.tree.destroy()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for n, width in [(3, 2), (19, 7)]:
+            a, b = code.host.Model(n, width, True), code.host.Model(n, width, False)
+            assert a.values.shape == (n,) and b.values.shape == (n, width)
+            a.fill(7.25)
+            b.reader.fill(7.25)
+            a.read()
+            b.read()
+            np.testing.assert_array_equal(a.result.to_numpy(), np.resize(expected[True], n))
+            np.testing.assert_array_equal(b.result.to_numpy(), np.resize(expected[False], n))
+            a.independent(-3.5)
+            np.testing.assert_array_equal(a.result.to_numpy(), -3.5)
+            a.tree.destroy()
+            b.independent(11)
+            np.testing.assert_array_equal(b.result.to_numpy(), 11)
+            b.tree.destroy()
+        for packed in (False, True):
+            parent = code.module("definition_fixture.model").Parent(5, 4, packed)
+            parent.fill(8)
+            parent.child.read()
+            np.testing.assert_array_equal(parent.child.result.to_numpy(), 8)
+            parent.child.tree.destroy()
+    probe = tmp_path / "consume_shapes.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            cls = code.module('definition_fixture.model').Parent
+            a, b = cls(13, 7, True), cls(67, 3, False)
+            a.fill(4)
+            b.child.reader.fill(-9)
+            a.child.read()
+            b.child.read()
+            np.testing.assert_array_equal(a.child.result.to_numpy(), 4)
+            np.testing.assert_array_equal(b.child.result.to_numpy(), -9)
+            a.child.tree.destroy()
+            b.child.independent(12)
+            np.testing.assert_array_equal(b.child.result.to_numpy(), 12)
+            b.child.tree.destroy()
+        print('SHAPE_CHOICES_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SHAPE_CHOICES_SOURCE_FREE_OK" in result.stdout
+    old = {**manifest, "version": 69}
+    (tmp_path / "sdk" / "package.json").write_text(json.dumps(old), encoding="utf8")
+    with Runtime(manifest["target"]) as runtime, pytest.raises(ValueError, match="format 70"):
+        load_package(runtime, tmp_path / "sdk")
+
+
+@pytest.mark.parametrize("change", ["kernel_only", "model_condition", "unproven_branch"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_shape_rejects_unproven_selection(tmp_path, monkeypatch, change):
+    source = FIELD_SHAPE_CHOICE_SOURCE
+    if change == "kernel_only":
+        source = source.replace("choices=(False, True))", "choices=(False, True), kernel_only=True)")
+    elif change == "model_condition":
+        source = source.replace("if self.packed else", "if self.n > 4 else")
+    else:
+        source = source.replace("else (n, width)", "else self.unknown")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match="Field shape"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize("change", ["kernel_only", "runtime_value", "model_condition", "unproven_branch"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_field_order_rejects_unproven_layout_selection(tmp_path, monkeypatch, change):

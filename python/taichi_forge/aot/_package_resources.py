@@ -777,6 +777,7 @@ def scope_declarations(
     aliases, alias_conditions, placements = {}, {}, {}
     local_types = {}
     deferred_aliases, resolving_aliases, alias_checks = {}, set(), {}
+    shape_aliases = {}
     allow_member_dimensions = True
     extent_namespaces = {}
     constraint_declarations = {}
@@ -2072,6 +2073,42 @@ def scope_declarations(
             original_args.update((k.arg, k.value) for k in call.keywords)
             shape_node = original_args["shape"]
             shape = dimension(shape_node)
+            shape_policy = None
+            choice = shape_node
+            visited_shapes = set()
+            while isinstance(choice, ast.Name) and choice.id in shape_aliases and choice.id not in visited_shapes:
+                visited_shapes.add(choice.id)
+                choice = shape_aliases[choice.id]
+            if shape is None and isinstance(choice, ast.IfExp):
+                test, invert = choice.test, False
+                if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                    test, invert = test.operand, True
+                identity = None
+                if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name):
+                    binding = scope_binding(test.value)
+                    if binding in scopes:
+                        identity = member(binding, test.attr)
+                        allowed.add(id(test.value))
+                    elif test.value.id == "self":
+                        identity = test.attr
+                declaration = declarations.get(identity, (earlier or {}).get(identity, {}))
+                if not (
+                    declaration.get("kind") == "static"
+                    and {tuple(value) for value in declaration["choices"]} == {("bool", False), ("bool", True)}
+                    and not declaration.get("kernel_only")
+                    and not declaration.get("conditions")
+                ):
+                    fail(module, choice, "Field shape selection requires an unconditional declared boolean static")
+                branches = [dimension(branch) for branch in (choice.body, choice.orelse)]
+                branches = [(branch,) if isinstance(branch, Extent) else branch for branch in branches]
+                if any(not isinstance(branch, tuple) for branch in branches):
+                    fail(module, choice, "Field shape alternatives require declared dimensions and their algebra")
+                if invert:
+                    branches.reverse()
+                shape_policy = dict(condition=identity, if_true=branches[0], if_false=branches[1])
+                shape = branches[1]
+                for branch in branches:
+                    namespace_check(scope, branch, shape_node)
             namespace_check(scope, shape, shape_node)
             if isinstance(shape, Extent):
                 shape = (shape,)
@@ -2152,6 +2189,16 @@ def scope_declarations(
                 return key
 
             extents = [project_extent(extent, shape_node) for extent in shape]
+            if shape_policy:
+                if method == "struct_field" or order_nodes or placement is not None:
+                    fail(module, call, "Field shape selection requires an independent default AOS allocation")
+                shape_policy = {
+                    **shape_policy,
+                    **{
+                        key: [project_extent(extent, shape_node) for extent in shape_policy[key]]
+                        for key in ("if_true", "if_false")
+                    },
+                }
 
             def model_axis(node):
                 extent = dimension(node)
@@ -2176,6 +2223,7 @@ def scope_declarations(
                         else {}
                     ),
                     shape=extents,
+                    **({"shape_policy": shape_policy} if shape_policy else {}),
                     **({"order": order} if order is not None else {}),
                     **(
                         {"order_policy": order_policy, "order_source": copy.deepcopy(order_nodes[0])}
@@ -2255,6 +2303,8 @@ def scope_declarations(
                         isinstance(expression, ast.Name) and expression.id in local_types
                     ):
                         local_types[target.id] = expand_local_type(expression, local_types, kind)
+                    if isinstance(expression, (ast.IfExp, ast.Name)):
+                        shape_aliases[target.id] = expression
                 if isinstance(target, (ast.Tuple, ast.List)) and isinstance(expression, ast.GeneratorExp):
                     # Tuple unpacking consumes the same literal-name generator
                     # once. Reuse the existing proof; do not run the generator.

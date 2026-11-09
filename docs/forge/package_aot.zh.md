@@ -1215,6 +1215,14 @@ JIT 模式复用同后端的既有 Runtime；新建时可用 `jit_options`，自
 
 ## 仍需补齐的共同机制
 
+格式 70 支持独立默认 AOS Field 的有限形状选择，例如
+`shape = (n,) if self.packed else (n, width)`。条件须为已有的非 `kernel_only`
+布尔静态声明；每个分支的尺寸沿用已声明模型维度及其代数。只有实际读取此布局的
+数值入口保留必要变体，无关入口共享一份代码，模型尺寸仍在实例准备时确定。
+CPU/CUDA 局部检查覆盖嵌套 owner、非拥有输入、普通 JIT 对照及无源码双实例消费。
+原生 SNode 编译器仍负责实际字节布局。该支持暂不包含显式 placement/order、
+StructField 或跨形状选择的 `field_like` 克隆；这些情况明确拒绝。
+
 复杂 SNode/Field 布局、上述继承限制、模板参数域/其余条件资源域、无类型或 Python 专用 `pyfunc`、梯度、任意 Python
 资源工厂、完整 Host 数组访问接口、完整 Graph/ExecutionPlan 和 provider 引用还没有接入。
 当前识别到不支持的声明或 Host 前端操作会拒绝导出，不借助样本运行或私有 JIT 回退。

@@ -405,7 +405,11 @@ class _ModuleBinding:
         dimensions = {key: value for key, value in dimensions.items() if key in contract["dimensions"]}
         if dimensions.keys() != set(contract["dimensions"]):
             raise ValueError("Field group dimensions differ from its native schema")
-        expected_shape = tuple(dimensions[n] if isinstance(n, str) else n for n in member["shape"])
+        shape = member["shape"]
+        if "shape_policy" in member:
+            policy = member["shape_policy"]
+            shape = policy["if_true" if selection[policy["condition"]] else "if_false"]
+        expected_shape = tuple(dimensions[n] if isinstance(n, str) else n for n in shape)
         if "like_source_path" in member:
             if path_value(owner, member["like_source_path"]) is not like_source:
                 raise ValueError(
@@ -1657,6 +1661,7 @@ class LoadedPackage:
                 67,
                 68,
                 69,
+                70,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1666,6 +1671,10 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        if self.manifest["version"] < 70 and any(
+            contract.get("shapes") for contract in self.manifest.get("field_groups", {}).values()
+        ):
+            raise ValueError("Field shape selection requires definition package format 70")
         bindings = self.manifest.get("entry_bindings", {})
         if not isinstance(bindings, dict) or bindings and self.manifest["version"] < 47:
             raise ValueError("Logical entry bindings require definition package format 47")
