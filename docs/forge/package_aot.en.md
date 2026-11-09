@@ -858,6 +858,11 @@ prepare time. Native prepared replay retains those results; ordinary calls bind
 them before submission. Changed models need a new preparation, without changing
 another instance's or an in-flight call's launch descriptors.
 
+A finite static boolean can also select between a model extent and a fixed size,
+for example `ti.static(self.width if self.selected else 256)`. The result retains
+its proven model expression and uses the same preparation path. Device-derived
+conditions or sizes remain outside this path.
+
 One numerical definition does not produce a copy for each DOF. Code generation
 retains a launch upper bound; the loaded function and device constrain the actual
 size. This is not a model-size quota. Device values, mutable Graph parameters,

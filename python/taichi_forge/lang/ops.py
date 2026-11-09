@@ -1168,7 +1168,10 @@ def ifte(cond, x1, x2):
         `x1` if `cond` is true and `x2` otherwise.
     """
     # TODO: systematically resolve `-1 = True` problem by introducing u1:
-    cond = logical_not(logical_not(cond))
+    # A Host boolean already has canonical truth semantics. NumPy's logical
+    # not returns np.bool_, which otherwise loses the immutable scalar proof
+    # when selecting between model extents during definition compilation.
+    cond = bool(cond) if isinstance(cond, (bool, np.bool_)) else logical_not(logical_not(cond))
 
     def py_ifte(cond, x1, x2):
         return x1 if cond else x2

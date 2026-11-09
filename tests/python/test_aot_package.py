@@ -19861,6 +19861,38 @@ def test_package_static_input_domains_reject_unknown_and_malformed_sources(tmp_p
             load_package(runtime, tmp_path / "sdk")
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_model_launch_extent_retains_static_selector(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, width: int, selected: bool):
+        self.n, self.width, self.selected = n, width, selected
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.dim('width')
+        scope.static('selected', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self):
+        width = ti.static(self.width if self.selected else 256)
+        ti.loop_config(block_dim=width)
+        for i in range(self.n):
+            self.out[i] = i % width
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for selected, width in ((False, 64), (True, 32), (True, 128)):
+            original = package.Model(259, width, selected)
+            original.step()
+            model = code.host.Model(259, width, selected)
+            model.step()
+            np.testing.assert_array_equal(model.out.to_numpy(), original.out.to_numpy())
+            np.testing.assert_array_equal(model.out.to_numpy(), np.arange(259) % (width if selected else 256))
+
+
 @pytest.mark.parametrize("mixed", [False, True, "conditional_extent"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_boolean_workspace_reuses_code_without_allocating_absent_groups(
