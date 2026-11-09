@@ -1430,6 +1430,11 @@ CPU/CUDA 局部无源码检查覆盖两组独立重准备、双实例及旧 Grap
 枚举器；它验证的是通用发现、编译入口和 Host 投影。全引擎共享代码、合法静态域及
 最终同范围 wheel 体积仍需单独验收，不能由这个微型包的体积推算。
 
+`Child(self)` 等已证明来源的正常构造，在编译父对象时保留 owner 引用身份。
+经子对象引用和直接经父对象读取的静态量共用一个选择轴；同类型的另一实例仍独立。
+这里复用构造参数的来源证明和既有准备阶段引用检查，不凭类型相同推断别名，也不增加
+逐步运行检查。局部 CPU/CUDA 验证覆盖两种选择、新模型尺寸，以及配置相同的外来父对象拒绝。
+
 实现入口：[`_package.py`](../../python/taichi_forge/aot/_package.py)、
 [独立消费者](../../packaging/runtime/src/taichi_forge_runtime/aot/_package.py)、
 [局部验证](../../tests/python/test_aot_package.py)。

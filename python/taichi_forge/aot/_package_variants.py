@@ -26,7 +26,30 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     domains.update(
         (name, (read_static_key(item["value"]),)) for name, item in schema.items() if item["kind"] == "constant"
     )
+    paths = {tuple(item.get("path", (name,))): name for name, item in schema.items()}
+    aliases = {}
+    for reference, item in schema.items():
+        if item["kind"] != "owner_input" or "reference_path" not in item:
+            continue
+        prefix = tuple(item.get("path", (reference,)))
+        target = tuple(item["reference_path"])
+        for path, name in paths.items():
+            if name in domains and path[:len(prefix)] == prefix:
+                canonical = paths.get((*target, *path[len(prefix):]))
+                if canonical in domains and canonical != name:
+                    if tuple(map(static_key, domains[name])) != tuple(map(static_key, domains[canonical])):
+                        raise ValueError("Proven owner reference has inconsistent static domains")
+                    aliases[name] = canonical
+    for name in aliases:
+        visited, canonical = {name}, aliases[name]
+        while canonical in aliases:
+            if canonical in visited:
+                raise ValueError("Cyclic owner reference static paths")
+            visited.add(canonical)
+            canonical = aliases[canonical]
+        aliases[name] = canonical
     for name, value in (fixed or {}).items():
+        name = aliases.get(name, name)
         if name not in domains or static_key(value) not in tuple(static_key(v) for v in domains[name]):
             raise ValueError("Child implementation guard is outside the declared static domain")
         domains[name] = (value,)
@@ -39,6 +62,13 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
         return [environment.compile(entry, *arguments, owner=owner, template_args=template_args)]
     initial = {name: values[0] for name, values in domains.items()}
     initial.update((name, True) for name in records)
+
+    def synchronize(selection):
+        for name, canonical in aliases.items():
+            selection[name] = selection[canonical]
+        return selection
+
+    synchronize(initial)
     previous = {name: read_member(owner, name, schema) for name in domains}
     initial_identity = tuple(sorted((name, static_key(value)) for name, value in initial.items()))
     pending, scheduled, codes = deque([initial]), {initial_identity}, []
@@ -70,12 +100,13 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                 raise ValueError("Kernel static dependencies are outside the declared package domain")
             # Forget unread values. They are unconstrained by this code, not a
             # second identity for it. A changed read value may expose a new path.
-            reads = {*code.static, *(name for name in code.objects if name in records)}
-            selected = {**initial, **{name: selection[name] for name in reads}}
+            reads = {aliases.get(name, name) for name in code.static}
+            reads.update(name for name in code.objects if name in records)
+            selected = synchronize({**initial, **{name: selection[name] for name in reads}})
             for name in reads:
                 for value in domains.get(name, (True, False)):
                     if static_key(value) != keys[name]:
-                        candidate = {**selected, name: value}
+                        candidate = synchronize({**selected, name: value})
                         identity = tuple(sorted((key, static_key(item)) for key, item in candidate.items()))
                         # Different read branches can discover the same state.
                         # Keep one queued visit rather than retaining duplicate

@@ -19996,6 +19996,59 @@ class Model:
             load_package(runtime, tmp_path / "sdk")
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_child_back_reference_shares_static_selection(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Child:
+    def __init__(self, parent):
+        self.parent = parent
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('parent', parent)
+    @ti.func
+    def value(self):
+        result = 2
+        if ti.static(self.parent.enabled):
+            result = 20
+        return result
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        n = scope.dim('n')
+        scope.static('enabled', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=n, initialization='zero')
+        scope.child = Child(self)
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] += self.child.value()
+            if ti.static(self.enabled):
+                self.out[i] += 10
+            else:
+                self.out[i] += 1
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    entries = [entry for entry in manifest['entries'].values()
+               if 'definition_fixture.model.Model.step' in entry['definitions']]
+    assert len(entries) == 2  # Parent and Child(parent) are one selection axis.
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        first = code.host.Model(7, False)
+        second = code.host.Model(19, True)
+        for loaded, n, enabled in ((first, 7, False), (second, 19, True)):
+            normal = package.Model(n, enabled)
+            normal.step()
+            loaded.step()
+            np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+        first.child.parent = code.host.Model(11, False)
+        with pytest.raises(ValueError, match='Owner reference'):
+            first.step()
+        np.testing.assert_array_equal(second.out.to_numpy(), np.full(19, 30))
+
+
 @pytest.mark.parametrize("mixed", [False, True, "conditional_extent"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_boolean_workspace_reuses_code_without_allocating_absent_groups(

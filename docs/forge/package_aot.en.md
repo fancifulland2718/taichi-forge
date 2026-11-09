@@ -2137,6 +2137,14 @@ Host projection. Engine-wide code sharing, supported static domains and final
 same-scope wheel size still require separate acceptance; the small fixture's
 size cannot predict engine size.
 
+Declared construction such as `Child(self)` retains its owner-reference identity
+when compiling the parent. Static reads through the child reference and the
+parent share one selection axis; another instance of the same type stays
+independent. This reuses source-proven constructor arguments and the existing
+prepare-time reference check. It neither infers aliases from matching types nor
+adds a per-step check. Focused CPU/CUDA checks cover both selections, different
+model sizes and rejection of a foreign parent with matching configuration.
+
 Implementation: [producer](../../python/taichi_forge/aot/_package.py),
 [standalone consumer](../../packaging/runtime/src/taichi_forge_runtime/aot/_package.py),
 [focused tests](../../tests/python/test_aot_package.py).

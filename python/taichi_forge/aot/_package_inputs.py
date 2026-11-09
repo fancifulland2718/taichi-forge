@@ -539,6 +539,23 @@ def resolve_inputs(sources, imported, *, partial=False):
         ):
             raise ValueError(f"Owner input {owner}.{name} requires a proven source at every declared constructor call")
     for (owner, name), item in inputs.items():
+        if item["kind"] == "owner_input":
+            # Retain a call-site identity proof as well as the input's type.
+            # A parent's Child(self) borrows that parent, not another instance
+            # whose static choices can vary independently. Other callers still
+            # use the child's standalone input contract.
+            for caller, arguments, declaration in calls.get(owner, ()):
+                expression = arguments.get(item["input_parameter"])
+                path = []
+                while isinstance(expression, ast.Attribute):
+                    path.insert(0, expression.attr)
+                    expression = expression.value
+                if (
+                    isinstance(expression, ast.Name) and expression.id == "self"
+                    and member_type(caller, path) == (item["owner_type"], ())
+                    and declaration.get("kind") == "owner"
+                ):
+                    declaration.setdefault("input_references", {})[name] = path
         if item["kind"] != "borrowed_field":
             continue
         # A private provenance link exposes the original allocation to the

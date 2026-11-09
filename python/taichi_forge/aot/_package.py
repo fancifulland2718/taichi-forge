@@ -1737,7 +1737,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(21, manifest["version"])
             if any(item["kind"] == "owner_input" for item in schema.values()):
                 manifest["version"] = max(22, manifest["version"])
-            if any("reference_path" in item for item in schema.values()):
+            if any("reference_path" in item or item.get("input_references") for item in schema.values()):
                 manifest["version"] = max(38, manifest["version"])
             if any("like_source_path" in item for item in schema.values()):
                 manifest["version"] = max(39, manifest["version"])
@@ -1817,6 +1817,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "borrow_declaration",
                         "reference_declaration",
                         "constructor_call",
+                        "input_references",
                         "default_constructor_call",
                         "order_source",
                         "sequence_declaration",

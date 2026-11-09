@@ -283,6 +283,14 @@ class OwnerGraph:
         project_input_records(owner, schema, declarations)
         project_boolean_groups(schema, declarations)
         environment, expanded = _compose(field_environment(declarations, schema), schema, children)
+        from ._component import _capture_id
+
+        for attribute, item in schema.items():
+            for member, target in item.get("input_references", {}).items():
+                child_schema = children[attribute][1]
+                source = child_schema[member]
+                key = _capture_id((attribute, *source.get("path", (member,))))
+                expanded[key] = {**expanded[key], "reference_path": list(target)}
         from ._package_field_like import project_field_likes
 
         project_borrows(owner, environment, expanded)

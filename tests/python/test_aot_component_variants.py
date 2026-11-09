@@ -58,6 +58,34 @@ def test_package_variant_frontier_keeps_one_pending_copy_per_selection(monkeypat
     }
 
 
+def test_package_reference_frontier_keeps_unrelated_owners_independent():
+    from types import SimpleNamespace
+    from taichi_forge.aot._package_variants import compile_static_variants
+    from taichi_forge_runtime._static_values import static_key
+
+    owner = SimpleNamespace(flag=True, child=SimpleNamespace(parent=SimpleNamespace(flag=True)),
+                            other=SimpleNamespace(flag=True))
+    schema = {
+        name: dict(kind="static", path=path, choices=[static_key(False), static_key(True)])
+        for name, path in (("flag", ["flag"]), ("borrowed", ["child", "parent", "flag"]),
+                           ("independent", ["other", "flag"]))
+    }
+    schema['reference'] = dict(kind='owner_input', path=['child', 'parent'], reference_path=[])
+
+    class Compiler:
+        def compile(self, entry, *args, owner, template_args):
+            assert owner.flag == owner.child.parent.flag
+            return SimpleNamespace(static={name: static_key(value) for name, value in (
+                ('flag', owner.flag), ('borrowed', owner.child.parent.flag), ('independent', owner.other.flag))},
+                objects={})
+
+    codes = compile_static_variants(Compiler(), None, (), owner, schema)
+    assert len(codes) == 4
+    assert {(code.static['flag'][1], code.static['independent'][1]) for code in codes} == {
+        (a, b) for a in (False, True) for b in (False, True)}
+    assert owner.flag and owner.child.parent.flag and owner.other.flag
+
+
 def test_package_owner_frontier_deduplicates_shared_child_choices(monkeypatch):
     from collections import deque
     from types import SimpleNamespace
