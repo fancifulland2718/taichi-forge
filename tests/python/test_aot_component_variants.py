@@ -58,6 +58,62 @@ def test_package_variant_frontier_keeps_one_pending_copy_per_selection(monkeypat
     }
 
 
+def test_package_owner_frontier_deduplicates_shared_child_choices(monkeypatch):
+    from collections import deque
+    from types import SimpleNamespace
+    from taichi_forge.aot import _package_variants as variants
+    from taichi_forge_runtime._static_values import static_key
+
+    queued = set()
+
+    class UniqueFrontier(deque):
+        def append(self, selection):
+            key = tuple(sorted(selection.items()))
+            assert key not in queued, "Numerical variants queued the same child choice repeatedly"
+            queued.add(key)
+            super().append(selection)
+
+        def __init__(self, items):
+            super().__init__()
+            for item in items:
+                self.append(item)
+
+    calls = []
+    kernel = object()
+
+    class Graph:
+        def context(self, identity, selection):
+            calls.append(dict(selection))
+            selected = selection.get(("flag",), False)
+            schema = {
+                "flag": dict(kind="static", choices=[static_key(False), static_key(True)]),
+                "child": dict(
+                    kind="owner", owner_type="B" if selected else "A",
+                    choice_guards={"flag": selected},
+                    owner_alternatives=[dict(conditions={"flag": value}) for value in (False, True)],
+                ),
+            }
+            environment = SimpleNamespace(
+                _paths={"flag": ("flag",), "child_value": ("child", "value")}, _source_scope_paths={}
+            )
+            return SimpleNamespace(flag=selected), None, environment, schema
+
+    def compile_choices(environment, entry, arguments, owner, schema, **kwargs):
+        # Several numerical implementations discover the same owner choices.
+        return [
+            SimpleNamespace(kernel=kernel, key=(owner.flag, i), static={"flag": static_key(owner.flag)},
+                            objects={}, used={"child_value"})
+            for i in range(3)
+        ]
+
+    monkeypatch.setattr(variants, "deque", UniqueFrontier)
+    monkeypatch.setattr(variants, "compile_static_variants", compile_choices)
+    results = variants.compile_owner_variants(Graph(), "Parent", object(), ())
+    assert calls == [{}, {("flag",): False}, {("flag",): True}]
+    assert {code.key for code, *_ in results} == {(value, i) for value in (False, True) for i in range(3)}
+    assert len(results) == 6 and len(queued) == 3
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_candidate_static_rejection_precedes_storage_validation(monkeypatch):
     from taichi_forge.aot import _component

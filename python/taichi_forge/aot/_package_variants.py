@@ -106,13 +106,16 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
     from ._package_owner_graph import owner_bindings
     from types import SimpleNamespace
 
-    pending, visited, emitted, results = deque([{}]), set(), set(), []
+    pending, scheduled, emitted, results = deque([{}]), {()}, set(), []
+
+    def schedule(selection):
+        key = tuple(sorted(selection.items()))
+        if key not in scheduled:
+            scheduled.add(key)
+            pending.append(selection)
+
     while pending:
         selection = pending.popleft()
-        key = tuple(sorted(selection.items()))
-        if key in visited:
-            continue
-        visited.add(key)
         owner, _, environment, schema = graph.context(identity, selection)
         choices = {name: item for name, item in schema.items() if item.get("owner_alternatives")}
         shape_choices = {name: item for name, item in schema.items() if item.get("shape_policy")}
@@ -166,7 +169,7 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
                 guard = policy["condition"]
                 if name in code.used or guard in code.static:
                     for value in (False, True):
-                        pending.append({**selection, tuple(environment._paths[guard]): value})
+                        schedule({**selection, tuple(environment._paths[guard]): value})
             for name, item in choices.items():
                 # A parent method can also read the same configuration without
                 # touching the child. Its own static branches remain complete.
@@ -178,5 +181,5 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
                         for flag, value in alternative.get("conditions", {}).items()
                         if flag not in item.get("conditions", {})
                     }
-                    pending.append({**selection, **guards})
+                    schedule({**selection, **guards})
     return results
