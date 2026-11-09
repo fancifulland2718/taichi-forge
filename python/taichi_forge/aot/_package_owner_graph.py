@@ -81,12 +81,16 @@ class OwnerGraph:
         from ._package_borrows import project as project_borrows
 
         name, class_name, original = self.definitions[identity]
-        schema = copy.deepcopy(original)
+        schema = original
         source_children = {}
         if resource_paths is not None:
             from ._package_resource_slice import allocation_schema
 
             schema, source_children = allocation_schema(schema, resource_paths)
+        # The slice is read-only. Copy its retained declarations before any
+        # per-witness selection, rather than cloning the entire source owner
+        # once for each borrowed allocation.
+        schema = copy.deepcopy(schema)
         static_values = {
             key: (choices or {}).get((*path, key), read_static_key(item["choices"][0]))
             for key, item in schema.items()
