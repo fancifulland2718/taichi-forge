@@ -2208,10 +2208,26 @@ class Model:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-@pytest.mark.parametrize('forward_mapping', [False, True])
-def test_package_write_inventory_resolves_before_its_own_checkpoint(tmp_path, monkeypatch, forward_mapping):
+@pytest.mark.parametrize('source_form', ['direct', 'mapping', 'prepared', 'preparation', 'tuple'])
+def test_package_write_inventory_resolves_before_its_own_checkpoint(tmp_path, monkeypatch, source_form):
     source = CYCLIC_WRITE_INVENTORY_SOURCE
-    if forward_mapping:
+    if source_form in ('prepared', 'preparation', 'tuple'):
+        source = source.replace('''def __init__(self, solver):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('solver', solver)
+        sources = ti.aot.written_resources(solver, solver.record)''', '''def __init__(self, sources):
+        scope = ti.experimental.ResourceScope(self)''')
+        query = '(self.values,)' if source_form == 'tuple' else 'ti.aot.written_resources(self, self.record)'
+        source = source.replace('scope.checkpoint = Checkpoint(self)',
+                                'scope.checkpoint = Checkpoint(' + query + ')')
+        if source_form == 'preparation':
+            source = source.replace('scope.checkpoint = Checkpoint(' + query + ')', 'prepare_checkpoint(self)')
+            source += '''
+def prepare_checkpoint(solver):
+    scope = ti.experimental.ResourceScope(solver)
+    scope.checkpoint = Checkpoint(ti.aot.written_resources(solver, solver.record))
+'''
+    if source_form == 'mapping':
         source = source.replace('def append_step(solver, builder):\n    builder.dispatch(solver.step)', '''
 from dataclasses import dataclass
 @dataclass(frozen=True)
@@ -2278,6 +2294,26 @@ def append_step(solver, builder):
                  TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()))
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'CHECKPOINT_INVENTORY_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('change', ['mutable', 'rebound', 'non_field'])
+def test_package_checkpoint_sequence_rejects_unproven_sources(tmp_path, monkeypatch, change):
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace('''def __init__(self, solver):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('solver', solver)
+        sources = ti.aot.written_resources(solver, solver.record)''', '''def __init__(self, sources):
+        scope = ti.experimental.ResourceScope(self)''')
+    query = '[self.values]' if change == 'mutable' else '(7,)' if change == 'non_field' else '(self.values,)'
+    source = source.replace('scope.checkpoint = Checkpoint(self)', 'scope.checkpoint = Checkpoint(' + query + ')')
+    if change == 'rebound':
+        source = source.replace('def __init__(self, sources):', 'def __init__(self, sources):\n        sources = (7,)')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    with pytest.raises(ValueError):
+        ti.aot.check_package(package)
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)

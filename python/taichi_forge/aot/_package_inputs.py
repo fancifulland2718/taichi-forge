@@ -160,7 +160,13 @@ def resolve_inputs(sources, imported, *, partial=False):
                 raise ValueError("Default owner input contradicts its declared source type: " + key[0])
             item["owner_type"] = classes[default_type]
             annotated.add(key)
-    targets = {owner for owner, _ in inputs}
+    sequence_parameters = {
+        owner for owner, (schema, _) in owners.items()
+        for item in constructor_items(schema)
+        for node in ast.walk(item.get('constructor_call', ast.Constant(None)))
+        if getattr(node, '_package_source_sequence_parameter', None)
+    }
+    targets = {owner for owner, _ in inputs} | sequence_parameters
     calls = {}
     sequence_sites = {
         id(call): item["constructors"]
@@ -196,7 +202,7 @@ def resolve_inputs(sources, imported, *, partial=False):
             calls.setdefault(target, []).append((caller, bound.arguments, item))
     for target, site in _inherited_input_calls(owners, inputs):
         calls.setdefault(target, []).append(site)
-    untyped_targets = {owner for owner, name in inputs if (owner, name) not in annotated}
+    untyped_targets = {owner for owner, name in inputs if (owner, name) not in annotated} | sequence_parameters
     for name, _, _, _, tree, *_ in sources:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or (name, node.lineno, node.col_offset) in declared_sites:
@@ -235,6 +241,9 @@ def resolve_inputs(sources, imported, *, partial=False):
         projected = getattr(expression, "_package_resource_inventory_origin", None)
         if projected is not None:
             return projected
+        forwarded = getattr(expression, '_package_forwarded_resource_source', None)
+        if forwarded is not None:
+            return input_type(*forwarded)
         path = []
         while isinstance(expression, ast.Attribute):
             path.insert(0, expression.attr)
@@ -285,6 +294,71 @@ def resolve_inputs(sources, imported, *, partial=False):
         return result
 
     inventory_cache = {}
+
+    def sequence_sources(owner, parameter, active=()):
+        from ._package_source_sequences import SourceSequences
+
+        key = (owner, parameter)
+        if key in active or not calls.get(owner):
+            raise ValueError('Resource sequence input requires finite declared callers: ' + owner + '.' + parameter)
+        projector = SourceSequences(sources, imported)
+        result = []
+        for caller, arguments, declaration in calls[owner]:
+            expression = arguments.get(parameter)
+            if isinstance(expression, ast.Name) and expression.id in inspect.signature(owners[caller][1].__init__).parameters:
+                constructor = ast.parse(textwrap.dedent(inspect.getsource(owners[caller][1].__init__)))
+                if any(isinstance(node, ast.Name) and node.id == expression.id
+                       and isinstance(node.ctx, (ast.Store, ast.Del)) for node in ast.walk(constructor)):
+                    raise ValueError('Resource sequence forwarding requires an unchanged parameter')
+                result.extend(sequence_sources(caller, expression.id, (*active, key)))
+                continue
+            namespace = vars(imported[declaration.get('declaration_module', caller.rpartition('.')[0])])
+            environment = {name: ast.Name(name, ast.Load())
+                           for name in inspect.signature(owners[caller][1].__init__).parameters}
+            value = projector.value(expression, environment, namespace)
+            if not projector.immutable(value):
+                raise ValueError('Resource sequence inputs require an immutable source tuple')
+            for value in value.values:
+                if not isinstance(value, ast.AST):
+                    raise ValueError('Resource sequence elements must have a proven Field source')
+                result.append((caller, value))
+        return result
+
+    def expand_sequence_parameter(caller, arguments, declaration):
+        marked = [value for value in arguments.values()
+                  if getattr(value, '_package_source_sequence_parameter', None)]
+        if not marked:
+            return False
+        if partial and not calls.get(caller):
+            # Normal preparation functions have not contributed their declared
+            # construction sites yet. The final pass must prove the source.
+            return False
+        if len(marked) != 1 or id(declaration) not in sequence_sites:
+            raise ValueError('Resource sequences require one independent Host owner sequence input')
+        value = marked[0]
+        call = declaration['constructor_call']
+        positions = [('args', index) for index, arg in enumerate(call.args) if arg is value]
+        positions += [('keywords', index) for index, arg in enumerate(call.keywords) if arg.value is value]
+        if len(positions) != 1:
+            raise ValueError('Resource sequence element must be forwarded exactly once')
+        replacements = []
+        for source_owner, source in sequence_sources(caller, value._package_source_sequence_parameter):
+            candidate = copy.deepcopy(declaration)
+            group, index = positions[0]
+            expression = getattr(candidate['constructor_call'], group)[index]
+            if group == 'keywords':
+                expression = expression.value
+            del expression._package_source_sequence_parameter
+            expression._package_forwarded_resource_source = (source_owner, source)
+            if getattr(source, '_package_written_resource_inventory', None):
+                expression._package_written_resource_inventory = source._package_written_resource_inventory
+            replacements.append(candidate)
+        if not replacements:
+            raise ValueError('Resource sequence input has no declared Field input domain')
+        sequence = sequence_sites[id(declaration)]
+        index = next(index for index, item in enumerate(sequence) if item is declaration)
+        sequence[index:index + 1] = replacements
+        return True
 
     def expand_write_inventory(caller, arguments, declaration):
         marked = [value for value in arguments.values() if getattr(value, "_package_written_resource_inventory", False)]
@@ -386,6 +460,8 @@ def resolve_inputs(sources, imported, *, partial=False):
                 item["owner_type"] = source_type
                 changed = True
         for sites in calls.values():
+            if any(expand_sequence_parameter(*site) for site in sites):
+                return resolve_inputs(sources, imported, partial=partial)
             if any(expand_write_inventory(*site) for site in sites):
                 return resolve_inputs(sources, imported, partial=partial)
         for (owner, name), item in inputs.items():

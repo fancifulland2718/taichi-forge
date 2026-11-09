@@ -134,6 +134,14 @@ def constructor_calls(
         )
 
     def sequence(node):
+        if (host_sequence and isinstance(node, ast.Name) and stores.get(node.id) == 1
+                and node.id in {arg.arg for arg in (*constructor.args.posonlyargs,
+                    *constructor.args.args, *constructor.args.kwonlyargs)}):
+            # A sequence parameter carries a source domain, not a fixed instance
+            # count. Resolve its declared callers with the existing input pass.
+            item = copy.deepcopy(node)
+            item._package_source_sequence_parameter = node.id
+            return [item]
         if isinstance(node, (ast.Tuple, ast.List)):
             return node.elts
         if isinstance(node, ast.Call) and builtin(node.func, "tuple") and len(node.args) == 1 and not node.keywords:
