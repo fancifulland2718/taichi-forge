@@ -1811,6 +1811,11 @@ no device count and does not enlarge the launch. This bound proves neither an
 exact dimension nor a static condition; it does not propagate through potentially
 overflowing arithmetic. Unbounded device ranges still reject.
 
+Field dtype expressions may read an existing `static_dtype` through the same
+ResourceScope, including a singleton storage type declared by another preparation
+helper. This preserves the owner type/domain checks without instance inference
+or additional type combinations.
+
 Format 70 supports finite shape selection for independent default-AOS Fields,
 such as `shape = (n,) if self.packed else (n, width)`. The condition must be an
 existing non-`kernel_only` boolean static declaration; both shapes use declared

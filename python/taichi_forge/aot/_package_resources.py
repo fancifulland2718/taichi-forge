@@ -2049,6 +2049,35 @@ def scope_declarations(
                 "struct_field": "Struct.field",
             }[method]
             dtype, shape_node = field_type_shape(normalized, role, module, fail)
+            # A scope forwards its owner's declared dtype, just as it forwards
+            # dimensions. Keep the existing type-domain proof and owner path.
+            def dtype_path(node):
+                if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+                    return None
+                binding = scope_binding(node.value)
+                if binding not in scopes:
+                    return None
+                identity = member(binding, node.attr)
+                spec = declarations.get(identity, (earlier or {}).get(identity, {}))
+                if not spec.get("static_dtype"):
+                    return None
+                return (*scope_paths[binding], node.attr)
+
+            for node in ast.walk(call):
+                if dtype_path(node) is not None:
+                    allowed.add(id(node.value))
+
+            class ScopeDtype(ast.NodeTransformer):
+                def visit_Attribute(self, node):
+                    path = dtype_path(node)
+                    if path is None:
+                        return self.generic_visit(node)
+                    value = ast.Name("self", ast.Load())
+                    for part in path:
+                        value = ast.Attribute(value, part, ast.Load())
+                    return ast.copy_location(value, node)
+
+            dtype = ScopeDtype().visit(dtype)
             source_type = copy.deepcopy(dtype)
             local_type = any(
                 isinstance(n, ast.Name) and (n.id in local_types or hasattr(n, "_package_forwarded_argument"))

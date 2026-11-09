@@ -1215,6 +1215,10 @@ JIT 模式复用同后端的既有 Runtime；新建时可用 `jit_options`，自
 
 ## 仍需补齐的共同机制
 
+Field 的 dtype 也可通过同一 ResourceScope 读取既有 `static_dtype` 声明，
+包括另一准备 helper 已声明的单一存储类型；沿用原 owner 类型与有限域检查。
+这不会从实例推断 dtype，也不增加类型组合。
+
 格式 70 支持独立默认 AOS Field 的有限形状选择，例如
 `shape = (n,) if self.packed else (n, width)`。条件须为已有的非 `kernel_only`
 布尔静态声明；每个分支的尺寸沿用已声明模型维度及其代数。只有实际读取此布局的

@@ -268,6 +268,8 @@ def declaration_dependencies(sources, imported, fail):
             for name, item in declarations.items():
                 previous = dependencies.get(name)
                 domain = {key: item[key] for key in ("kind", "choices", "kernel_only")}
+                if item.get("static_dtype"):
+                    domain["static_dtype"] = True
                 if previous is not None and previous != domain:
                     fail(module, original, "Preparation static domains conflict for " + name)
                 dependencies[name] = domain

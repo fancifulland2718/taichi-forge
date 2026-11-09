@@ -15672,7 +15672,7 @@ def declare_types(scope, floating, integer):
 """
 
 
-@pytest.mark.parametrize("storage_type", [False, True], ids=["numerical", "storage"])
+@pytest.mark.parametrize("storage_type", [False, True, "scope"], ids=["numerical", "storage", "scope-storage"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_static_dtype_preparation(tmp_path, monkeypatch, storage_type):
     source = STATIC_DTYPE_SOURCE
@@ -15680,6 +15680,12 @@ def test_package_static_dtype_preparation(tmp_path, monkeypatch, storage_type):
         source = source.replace("ti.field(ti.f32,", "ti.field(self.storage_type,")
         source = source.replace("    owner.compute_type =", "    owner.storage_type = ti.f32\n    owner.compute_type =")
         source += "    scope.static_dtype('storage_type', choices=(floating,))\n"
+        if storage_type == "scope":
+            source = source.replace(
+                "        self.values = ti.field(self.storage_type, shape=n)",
+                "        scope = ti.experimental.ResourceScope(self)\n"
+                "        scope.values = scope.field(scope.storage_type, shape=scope.dim('n'))",
+            )
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].preparations == 0
