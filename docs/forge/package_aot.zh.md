@@ -7,6 +7,10 @@
 `@ti.func`、`@ti.real_func`、`@ti.pyfunc`、`@ti.dataclass` 和 `@ti.data_oriented`，无需增加导出装饰器、逐 Kernel 注册或组件根。
 这个接口目前是小范围原型，不是完整引擎的一键发行接口，格式和支持范围尚未稳定。
 
+定义包的显式 AOT 编译保留构建所需定义，不受 JIT 驻留 `kernel_specialization_limit` 截断。
+可执行代码所有权和内存计账仍保留；这不代表内存有界或重复代码已消除。
+原配置上限仍作用于之后普通 JIT 的新编译请求。
+
 ## 生产与消费
 
 可先调用 `ti.aot.check_package(module, arch="cuda", source_root="path/to/src")`。

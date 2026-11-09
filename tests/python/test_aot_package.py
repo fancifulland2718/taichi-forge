@@ -93,6 +93,39 @@ def tokens():
         assert code.host.tokens() == package.tokens() == ("RMB", "Shift", "Press")
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, kernel_specialization_limit=1)
+def test_package_export_is_not_limited_by_jit_resident_budget(tmp_path, monkeypatch):
+    @ti.kernel
+    def existing() -> ti.i32:
+        return 3
+
+    @ti.kernel
+    def new_jit() -> ti.i32:
+        return 5
+
+    assert existing() == 3
+    package = _source_package(tmp_path, monkeypatch, """
+import taichi_forge as ti
+@ti.kernel
+def first() -> ti.i32:
+    return 7
+@ti.kernel
+def second() -> ti.i32:
+    return 11
+""", initializer="from .model import first, second\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert {"definition_fixture.model.first", "definition_fixture.model.second"} <= {
+        entry["definition"] for entry in manifest["entries"].values()
+    }
+    assert ti.lang.impl.get_runtime().kernel_specialization_limit == 1
+    assert existing() == 3
+    with pytest.raises(ti.TaichiRuntimeError, match="resident specialization budget"):
+        new_jit()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        assert code.host.first() == 7
+        assert code.host.second() == 11
+
+
 FIELD_INPUT_SOURCE = (
     OWNER_INPUT_SOURCE.replace("scope.reader = Reader(self)", "scope.reader = Reader(self.values, n)")
     .replace("def __init__(self, source):", "def __init__(self, values, n):")

@@ -10,6 +10,11 @@ No export decorator, per-kernel registration or component root is required.
 This is a limited prototype, not a complete engine distribution interface.
 Its format and supported scope are experimental.
 
+Definition-package AOT materialization retains required build definitions independently
+of the JIT `kernel_specialization_limit`. It keeps normal executable ownership and
+memory accounting; this does not promise a memory bound or remove duplicate code.
+The configured limit still applies to subsequent ordinary JIT cache misses.
+
 Before numerical compilation, export collects independent input-signature gaps
 in recognized kernels alongside declaration errors. Diagnostics identify the
 module, source line, entry and parameter. Missing template type domains or array

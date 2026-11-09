@@ -1676,7 +1676,7 @@ class Kernel:
             if key in self.compiled_kernels:
                 return
             self.runtime.collect_unused_kernel_definitions(
-                force=self.runtime._resident_specialization_count
+                force=not for_aot and self.runtime._resident_specialization_count
                 >= self.runtime.kernel_specialization_limit
             )
             if deployment is None and offload_execution_plan is None and self._try_relocatable_template(
@@ -1686,7 +1686,10 @@ class Kernel:
             limit = self.runtime.kernel_specialization_limit
             native_archives = 0
             native_retired_pins = 0
-            if self.runtime.prog is not None:
+            # An explicit AOT build owns a finite set of definitions until
+            # export. Its size is not a JIT cache-miss budget; keep lifecycle
+            # accounting below, without evicting or rejecting build inputs.
+            if not for_aot and self.runtime.prog is not None:
                 native_stats = (
                     self.runtime.prog._debug_kernel_executable_lifecycle_stats()
                 )
@@ -1699,7 +1702,7 @@ class Kernel:
                 + native_archives
                 + native_retired_pins
             )
-            if resident >= limit:
+            if not for_aot and resident >= limit:
                 allowed_archives = max(
                     0,
                     limit
@@ -1721,7 +1724,7 @@ class Kernel:
                     + int(native_stats["relocatable_templates"])
                     + int(native_stats["retired_generation_bound_handles"])
                 )
-            if resident >= limit:
+            if not for_aot and resident >= limit:
                 self.runtime._specialization_budget_rejections += 1
                 raise TaichiRuntimeError(
                     "Runtime resident specialization budget reached "
