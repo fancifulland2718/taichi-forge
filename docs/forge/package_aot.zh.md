@@ -657,6 +657,9 @@ Host Python 计算。CPU/CUDA 局部检查对照新尺寸的原生布局、备�
 另有无源码新进程消费。条件来源和异构检查点输入族仍待支持；不代表整个引擎检查点或
 EFC 导出已完成。
 
+`field_like` 可在已有显式 FieldsBuilder/资源组的 finalize 之前分配；备份沿该组创建和退休，
+不继承原字段的存储所有权。CPU/CUDA 局部检查包含分组复制、独立源/实例和无源码消费。
+
 Host owner 序列也可从已有 `ti.aot.written_resources(owner, owner.record)` 查询接收输入。
 导出从已声明的 owner 闭包投影可能的 Field 类型，不执行记录方法；正常准备阶段再按编译器写效果
 选择实际备份集合。序列长度和顺序不成为数值特化键。`value is not self.member` 或

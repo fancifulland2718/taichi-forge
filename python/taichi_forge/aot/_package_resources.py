@@ -1915,7 +1915,10 @@ def scope_declarations(
             if (
                 scope_paths[scope]
                 or conditions
-                or scope_groups[scope] in builders
+                or (
+                    scope_groups[scope] in builders
+                    and statement.lineno >= builders[scope_groups[scope]]["finalization"][0]
+                )
                 or not isinstance(target, ast.Attribute)
                 or not isinstance(target.value, ast.Name)
                 or scope_binding(target.value) not in scopes
@@ -1931,18 +1934,17 @@ def scope_declarations(
             layout = "AOS"
             for keyword in call.keywords:
                 if keyword.arg == "layout":
-                    layout = {"Layout.AOS": "AOS", "Layout.SOA": "SOA"}.get(
-                        qualified_kind(keyword.value, kind)
-                    )
+                    layout = {"Layout.AOS": "AOS", "Layout.SOA": "SOA"}.get(qualified_kind(keyword.value, kind))
                     if layout is None:
                         fail(
                             module,
                             call,
                             "field_like layout requires the original AOS/SOA enum",
                         )
-                elif not isinstance(
-                    keyword.value, ast.Constant
-                ) or keyword.value.value not in ("zero", "consumer_explicit"):
+                elif not isinstance(keyword.value, ast.Constant) or keyword.value.value not in (
+                    "zero",
+                    "consumer_explicit",
+                ):
                     fail(
                         module,
                         call,
@@ -1968,6 +1970,7 @@ def scope_declarations(
                     allocation=[statement.lineno, statement.col_offset],
                     scope_allocation=origin(scope),
                     group=scope_groups[scope],
+                    **({"group_builder": builders[scope_groups[scope]]} if scope_groups[scope] in builders else {}),
                 ),
                 statement,
             )

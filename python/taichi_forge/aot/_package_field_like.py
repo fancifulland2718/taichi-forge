@@ -87,7 +87,7 @@ def resolve_field_likes(sources):
         field.update(
             allocation=item["allocation"],
             scope_allocation=item["scope_allocation"],
-            group="field_like_" + name,
+            group=item["group"] if "group_builder" in item else "field_like_" + name,
             layout=item["layout"],
             shape=[remap.get(axis, axis) for axis in original["shape"]],
             dimension_sources={remap[key]: source_expression + "." + key for key in original["dimension_sources"]},
@@ -115,6 +115,10 @@ def resolve_field_likes(sources):
             "conditions",
         ):
             field.pop(key, None)
+        if "group_builder" in item:
+            # Clone the element/layout contract, not the source tree owner.
+            # Explicit construction owns all copies in this original group.
+            field["group_builder"] = copy.deepcopy(item["group_builder"])
         for node in ast.walk(field["type_node"]):
             axis = getattr(node, "_package_model_extent", None)
             if axis in remap:

@@ -1155,6 +1155,100 @@ class Model:
 """
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_field_like_keeps_explicit_group_ownership(tmp_path, monkeypatch):
+    source = TYPED_FIELD_INPUT_SOURCE.replace(
+        "import taichi_forge as ti",
+        "import taichi_forge as ti\nfrom resource_contexts import resource_group",
+    ).replace(
+        "        scope = ti.experimental.ResourceScope(self)\n"
+        "        scope.borrow('source', values, source_scope=True)\n"
+        "        scope.backup = scope.field_like(self.source, layout=ti.Layout.SOA, initialization='zero')",
+        "        with resource_group(self, 'copies', initialization='zero') as scope:\n"
+        "            scope.borrow('source', values, source_scope=True)\n"
+        "            scope.backup = scope.field_like(self.source, layout=ti.Layout.SOA, initialization='zero')\n"
+        "            scope.scratch = scope.field_like(self.source, initialization='zero')",
+    )
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        models = (code.host.Model(5, 3), code.host.Model(17, 7))
+        for model in models:
+            expected = np.arange(model.storage.n, dtype=np.float32)
+            model.storage.scalar.from_numpy(expected)
+            model.graph().run({})
+            assert len(model.first._forge_package_field_groups) == 1
+            assert len(model.second._forge_package_field_groups) == 1
+            np.testing.assert_array_equal(model.first.scratch.to_numpy(), expected * 0)
+            model.storage.scalar.from_numpy(expected * 0)
+            model.first.restore()
+            np.testing.assert_array_equal(model.storage.scalar.to_numpy(), expected)
+        models[0].first.tree.destroy()
+        with pytest.raises(RuntimeError):
+            models[0].first.backup.to_numpy()
+        np.testing.assert_array_equal(models[0].storage.scalar.to_numpy(), np.arange(5))
+        np.testing.assert_array_equal(models[1].first.backup.to_numpy(), np.arange(17))
+        models[0].second.save()
+    probe = tmp_path / "consume_group_copies.py"
+    probe.write_text(
+        """
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+            raise ImportError('Numerical source is unavailable: ' + fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    model = code.host.Model(11, 9)
+    values = np.arange(99, dtype=np.float32).reshape(11, 9)
+    model.storage.record.v.from_numpy(values)
+    model.graph().run({})
+    model.storage.record.v.from_numpy(values * 0)
+    model.second.restore()
+    np.testing.assert_array_equal(model.storage.record.v.to_numpy(), values)
+    assert len(model.second._forge_package_field_groups) == 1
+    model.second.tree.destroy()
+    np.testing.assert_array_equal(model.storage.record.v.to_numpy(), values)
+print('GROUP_COPIES_SOURCE_FREE_OK')
+""",
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "GROUP_COPIES_SOURCE_FREE_OK" in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_like_rejects_finalized_builder(tmp_path, monkeypatch):
+    source = TYPED_FIELD_INPUT_SOURCE.replace(
+        "        scope = ti.experimental.ResourceScope(self)\n        scope.borrow('source', values, source_scope=True)",
+        "        fields = ti.FieldsBuilder()\n"
+        "        scope = ti.experimental.ResourceScope(self, builder=fields)\n"
+        "        scope.borrow('source', values, source_scope=True)\n"
+        "        self.tree = fields.finalize()",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match="field_like requires one unconditional"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 TYPED_OWNER_INPUT_SOURCE = """
 import taichi_forge as ti
 constructors = 0

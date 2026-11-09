@@ -1145,6 +1145,11 @@ and independent instances, including a source-free vector consumer. Conditional
 sources and heterogeneous checkpoint input families remain open.
 This is not qualification of an entire engine checkpoint or EFC export.
 
+`field_like` may also allocate inside an existing explicit FieldsBuilder or
+resource-group context before finalization. Copies keep that group's ownership
+and retirement boundary; they never acquire the source group's ownership.
+CPU/CUDA local checks include grouped copies and source-free consumption.
+
 Host owner sequences can also take their inputs from the existing
 `ti.aot.written_resources(owner, owner.record)` query. Export projects possible
 Field types from the declared owner closure without running the recording
