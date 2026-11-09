@@ -299,6 +299,22 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             if imported_modules is not None and "declaration_module" in item
             else namespace
         )
+        if "dtype_policy" in item:
+            policy = item["dtype_policy"]
+            types = {
+                key: resolve_type(policy[key], declaration_namespace, owner_dtype=owner_dtype)
+                for key in ("if_true", "if_false")
+            }
+            alternatives = {key: type_spec(dtype, module) for key, dtype in types.items()}
+            if any(element["kind"] != "scalar" for element in alternatives.values()):
+                raise ValueError("Field dtype selection requires scalar element alternatives")
+            item["dtype_policy"] = {
+                "condition": policy["condition"],
+                **{key: element["dtype"] for key, element in alternatives.items()},
+                # Reuse the native primitive serializer; do not duplicate its
+                # enum numbering or compute any physical offsets in Python.
+                "native_ids": {key: dtype.__getstate__()[0] for key, dtype in types.items()},
+            }
         dtype = resolve_type(
             item.pop("type_node"),
             {

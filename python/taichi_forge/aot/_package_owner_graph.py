@@ -88,6 +88,11 @@ class OwnerGraph:
             if item["kind"] == "static"
         }
         for attribute, item in schema.items():
+            if "dtype_policy" in item:
+                policy = item["dtype_policy"]
+                selected = static_values[policy["condition"]]
+                item["type_node"] = policy["if_true" if selected else "if_false"]
+                item["dtype_guards"] = {policy["condition"]: selected}
             if "shape_policy" in item:
                 policy = item["shape_policy"]
                 selected = static_values[policy["condition"]]
@@ -312,6 +317,12 @@ def _compose(environment, schema, children):
                     "condition": names[item["shape_policy"]["condition"]],
                 }
                 transformed["shape_guards"] = {names[n]: expected for n, expected in item["shape_guards"].items()}
+            if "dtype_policy" in item:
+                transformed["dtype_policy"] = {
+                    **item["dtype_policy"],
+                    "condition": names[item["dtype_policy"]["condition"]],
+                }
+                transformed["dtype_guards"] = {names[n]: expected for n, expected in item["dtype_guards"].items()}
             if "owner_alternatives" in item:
                 transformed["owner_alternatives"] = [
                     {

@@ -1266,6 +1266,13 @@ CPU/CUDA 局部检查覆盖嵌套 owner、非拥有输入、普通 JIT 对照及
 原生 SNode 编译器仍负责实际字节布局。该支持暂不包含显式 placement/order、
 StructField 或跨形状选择的 `field_like` 克隆；这些情况明确拒绝。
 
+格式 72 允许标量 Field 用同类布尔声明选择原生元素类型，例如
+`dtype = ti.u64 if scope.wide else ti.u32`，也支持单次赋值的局部别名。
+这是必要的类型/布局差异；只访问相关字段或静态条件的入口保留变体，无关入口仍共享代码。
+实例构造选择原生类型，SNode 编译器重算对齐和偏移，不按模型容量复制代码。
+CPU/CUDA 局部检查包含嵌套 owner、借用、JIT 对照和无源码双实例消费。
+当前仅支持标量元素选择，不含 `field_like` 对该选择的克隆。
+
 复杂 SNode/Field 布局、上述继承限制、模板参数域/其余条件资源域、无类型或 Python 专用 `pyfunc`、梯度、任意 Python
 资源工厂、完整 Host 数组访问接口、完整 Graph/ExecutionPlan 和 provider 引用还没有接入。
 当前识别到不支持的声明或 Host 前端操作会拒绝导出，不借助样本运行或私有 JIT 回退。

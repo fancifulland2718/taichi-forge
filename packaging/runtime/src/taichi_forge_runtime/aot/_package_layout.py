@@ -9,6 +9,7 @@ def layout_selection(contract, owner):
     names = {name for condition in contract.get("conditions", {}).values() for name in condition}
     names.update(policy["condition"] for policy in contract.get("orders", {}).values())
     names.update(policy["condition"] for policy in contract.get("shapes", {}).values())
+    names.update(policy["condition"] for policy in contract.get("dtypes", {}).values())
     presence = contract.get("record_presence", {})
     selected = {
         name: path_value(owner, presence[name]) is not None if name in presence else getattr(owner, name)
@@ -218,5 +219,34 @@ def _select_shapes(contract, selected):
     return {**contract, "schema": json.dumps(source, separators=(",", ":")), "dimensions": dimensions}
 
 
+def _select_dtypes(contract, selected):
+    if not contract.get("dtypes"):
+        return contract
+    source = json.loads(contract["schema"])
+    nodes = source["nodes"]
+    paths, children = _tree(nodes)
+    by_path = {path: index for index, path in paths.items()}
+    replaced = set()
+    for name, policy in contract["dtypes"].items():
+        if name not in contract["members"]:
+            continue
+        selector = contract["members"][name]
+        leaves = list(selector[1]) if selector[0] == "schema_nodes" else [by_path[tuple(path)] for path in selector]
+        if len(leaves) != 1 or children.get(leaves[0]) or leaves[0] in replaced:
+            raise ValueError("Field dtype selection requires a distinct scalar place node")
+        leaf = leaves[0]
+        dtype = nodes[leaf]["dtype"]["ptr_"]
+        if dtype["type_kind"] != 0 or set(dtype["content"]) != {"type"}:
+            raise ValueError("Field dtype selection requires a native primitive type")
+        branch = "if_true" if selected[policy["condition"]] else "if_false"
+        dtype["content"]["type"] = policy["native_ids"][branch]
+        replaced.add(leaf)
+    # Only the declared primitive changes. The native schema compiler remains
+    # responsible for padding, alignment, strides and the resulting allocation.
+    return {**contract, "schema": json.dumps(source, separators=(",", ":"))}
+
+
 def select_layout(contract, selected):
-    return _select_orders(_select_shapes(_select_members(contract, selected), selected), selected)
+    return _select_orders(
+        _select_shapes(_select_dtypes(_select_members(contract, selected), selected), selected), selected
+    )

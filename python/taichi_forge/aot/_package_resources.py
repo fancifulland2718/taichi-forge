@@ -2199,6 +2199,47 @@ def scope_declarations(
                 dtype = expand_local_type(dtype, local_types, kind)
             except ValueError as error:
                 fail(module, call, str(error))
+            dtype_policy = None
+            dtype_choice = dtype
+            visited_dtypes = set()
+            while (
+                isinstance(dtype_choice, ast.Name)
+                and dtype_choice.id in shape_aliases
+                and dtype_choice.id not in visited_dtypes
+            ):
+                visited_dtypes.add(dtype_choice.id)
+                dtype_choice = shape_aliases[dtype_choice.id]
+            if isinstance(dtype_choice, ast.IfExp):
+                dtype = dtype_choice
+                local_type = True
+            if isinstance(dtype, ast.IfExp):
+                test, invert = dtype.test, False
+                if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                    test, invert = test.operand, True
+                identity = None
+                if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name):
+                    binding = scope_binding(test.value)
+                    if binding in scopes:
+                        identity = member(binding, test.attr)
+                        allowed.add(id(test.value))
+                    elif test.value.id == "self":
+                        identity = test.attr
+                declaration = declarations.get(identity, (earlier or {}).get(identity, {}))
+                if not (
+                    method == "field"
+                    and declaration.get("kind") == "static"
+                    and {tuple(value) for value in declaration["choices"]} == {("bool", False), ("bool", True)}
+                    and not declaration.get("kernel_only")
+                    and not declaration.get("conditions")
+                ):
+                    fail(
+                        module, dtype, "Scalar Field dtype selection requires an unconditional declared boolean static"
+                    )
+                branches = [dtype.body, dtype.orelse]
+                if invert:
+                    branches.reverse()
+                dtype_policy = dict(condition=identity, if_true=branches[0], if_false=branches[1])
+                dtype = branches[1]
             # Use original shape nodes for declaration provenance.
             original_args = dict(
                 zip(
@@ -2394,6 +2435,7 @@ def scope_declarations(
                         else {}
                     ),
                     shape=extents,
+                    **({"dtype_policy": dtype_policy} if dtype_policy else {}),
                     **({"shape_policy": shape_policy} if shape_policy else {}),
                     **({"order": order} if order is not None else {}),
                     **(

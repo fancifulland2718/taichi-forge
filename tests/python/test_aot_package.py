@@ -12335,6 +12335,125 @@ def test_package_field_shape_choices_share_unaffected_code(tmp_path, monkeypatch
         load_package(runtime, tmp_path / "sdk")
 
 
+FIELD_DTYPE_CHOICE_SOURCE = (
+    FIELD_SHAPE_CHOICE_SOURCE.replace("shape = (n,) if self.packed else (n, width)", "shape = (n,)")
+    .replace("self.values[i, self.width - 1]", "self.values[i]")
+    .replace("ti.f32", "ti.u64")
+    .replace(
+        "scope.values = scope.field(ti.u64,",
+        "word_type = ti.u64 if scope.packed else ti.u32\n        scope.values = scope.field(word_type,",
+    )
+)
+
+
+@pytest.mark.parametrize("declaration", ["local", "inline"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_field_dtype_choices_share_unaffected_code(tmp_path, monkeypatch, declaration):
+    source = FIELD_DTYPE_CHOICE_SOURCE
+    if declaration == "inline":
+        source = source.replace("word_type = ti.u64 if scope.packed else ti.u32\n        ", "")
+        source = source.replace("scope.field(word_type,", "scope.field(ti.u64 if scope.packed else ti.u32,")
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 72
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    for method, count in [("fill", 2), ("read", 2), ("independent", 1)]:
+        assert (
+            sum(
+                "definition_fixture.model.Model." + method in entry["definitions"]
+                for entry in manifest["entries"].values()
+            )
+            == count
+        )
+    wide_value = 2**40 + 9
+    expected = {}
+    for wide in (False, True):
+        original = package.Model(3, 2, wide)
+        original.reader.fill(wide_value)
+        original.read()
+        expected[wide] = original.result.to_numpy()
+        original.tree.destroy()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for n in (3, 19):
+            a, b = code.host.Model(n, 7, True), code.host.Model(n, 7, False)
+            assert a.values.dtype == "u64" and b.values.dtype == "u32"
+            a.fill(wide_value)
+            b.reader.fill(wide_value)
+            a.read()
+            b.read()
+            np.testing.assert_array_equal(a.result.to_numpy(), np.resize(expected[True], n))
+            np.testing.assert_array_equal(b.result.to_numpy(), np.resize(expected[False], n))
+            a.tree.destroy()
+            b.independent(31)
+            np.testing.assert_array_equal(b.result.to_numpy(), 31)
+            b.tree.destroy()
+    probe = tmp_path / "consume_dtypes.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            cls = code.module('definition_fixture.model').Parent
+            a, b = cls(13, 7, True), cls(67, 3, False)
+            a.fill(2**40 + 9)
+            b.child.reader.fill(2**40 + 9)
+            a.child.read()
+            b.child.read()
+            np.testing.assert_array_equal(a.child.result.to_numpy(), 2**40 + 9)
+            np.testing.assert_array_equal(b.child.result.to_numpy(), 9)
+            a.child.tree.destroy()
+            b.child.independent(12)
+            np.testing.assert_array_equal(b.child.result.to_numpy(), 12)
+            b.child.tree.destroy()
+        print('DTYPE_CHOICES_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "DTYPE_CHOICES_SOURCE_FREE_OK" in result.stdout
+    (tmp_path / "sdk" / "package.json").write_text(json.dumps({**manifest, "version": 71}), encoding="utf8")
+    with Runtime(manifest["target"]) as runtime, pytest.raises(ValueError, match="format 72"):
+        load_package(runtime, tmp_path / "sdk")
+
+
+@pytest.mark.parametrize("change", ["kernel_only", "model_condition", "unproven_branch"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_field_dtype_rejects_unproven_selection(tmp_path, monkeypatch, change):
+    source = FIELD_DTYPE_CHOICE_SOURCE
+    if change == "kernel_only":
+        source = source.replace("choices=(False, True))", "choices=(False, True), kernel_only=True)")
+    elif change == "model_condition":
+        source = source.replace("if scope.packed else", "if self.n > 4 else")
+    else:
+        source = source.replace("else ti.u32", "else ti.types.vector(3, ti.u32)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match="Field dtype selection"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 @pytest.mark.parametrize("change", ["kernel_only", "model_condition", "unproven_branch"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_field_shape_rejects_unproven_selection(tmp_path, monkeypatch, change):

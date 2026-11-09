@@ -391,6 +391,12 @@ class _ModuleBinding:
             if actual != self.extent(expression, owner):
                 raise ValueError(f"Dimension alias {alias!r} changed before its Field allocation")
         member = self.package.manifest["owners"][owner_key][name]
+        if "dtype_policy" in member:
+            policy = member["dtype_policy"]
+            enabled = getattr(owner, policy["condition"])
+            if type(enabled) is not bool:
+                raise ValueError("Field dtype selection requires its declared boolean configuration")
+            member = {**member, "element": {**member["element"], "dtype": policy["if_true" if enabled else "if_false"]}}
         if declared_type is not None:
 
             def structural(spec, model=False, order=None):
@@ -1689,6 +1695,7 @@ class LoadedPackage:
                 69,
                 70,
                 71,
+                72,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1702,6 +1709,10 @@ class LoadedPackage:
             "array_extents" in member for owner in self.manifest["owners"].values() for member in owner.values()
         ):
             raise ValueError("Scoped arrays require definition package format 71")
+        if self.manifest["version"] < 72 and any(
+            contract.get("dtypes") for contract in self.manifest.get("field_groups", {}).values()
+        ):
+            raise ValueError("Field dtype selection requires definition package format 72")
         if self.manifest["version"] < 70 and any(
             contract.get("shapes") for contract in self.manifest.get("field_groups", {}).values()
         ):

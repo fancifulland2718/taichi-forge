@@ -1884,6 +1884,16 @@ owners, non-owning inputs, ordinary JIT equivalence and source-free dual instanc
 The native SNode compiler remains responsible for byte layout. Explicit placement
 or order, StructFields and `field_like` clones across shape choices still reject.
 
+Format 72 permits a scalar Field to select its native element type using the same
+boolean declaration, for example `dtype = ti.u64 if scope.wide else ti.u32`,
+including a single-assignment local alias. Only entries using the affected Field
+or static condition retain type/layout variants; unrelated entries still share
+code. Construction selects the native type and the SNode compiler recomputes
+alignment and offsets. Model capacities do not create code copies. Focused
+CPU/CUDA checks include nested owners, borrowing, JIT equivalence and source-free
+dual instances. Only scalar elements are supported; `field_like` cloning across
+this selection is not supported yet.
+
 Other recognized unsupported declarations or Host frontend operations reject export;
 there is no sample-execution or private-JIT fallback. This does not constitute
 semantic validation of arbitrary Python Host code.

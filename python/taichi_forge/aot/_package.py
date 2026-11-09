@@ -1817,6 +1817,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     if shapes:
                         manifest["field_groups"][key]["shapes"] = shapes
                         manifest["version"] = max(70, manifest["version"])
+                    dtypes = {
+                        attribute: member_schemas[attribute]["dtype_policy"]
+                        for attribute in members
+                        if member_schemas[attribute].get("dtype_policy")
+                    }
+                    if dtypes:
+                        manifest["field_groups"][key]["dtypes"] = dtypes
+                        manifest["version"] = max(72, manifest["version"])
                     conditions = {
                         attribute: member_schemas[attribute]["conditions"]
                         for attribute in members
@@ -2051,7 +2059,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
 
             try:
                 if "closure_environment" not in definition and any(
-                    item.get("owner_alternatives") or item.get("shape_policy") for item in compilation_schema.values()
+                    item.get("owner_alternatives") or item.get("shape_policy") or item.get("dtype_policy")
+                    for item in compilation_schema.values()
                 ):
                     contexts = compile_owner_variants(
                         owner_graph, name + "." + owner_name, entry, values, template_args=template_arguments

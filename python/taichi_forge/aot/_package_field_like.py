@@ -73,6 +73,8 @@ def resolve_field_likes(sources):
         )
         if "shape_policy" in original:
             raise ValueError("field_like shape choices require a resolved source layout policy")
+        if "dtype_policy" in original:
+            raise ValueError("field_like dtype choices require a resolved source layout policy")
         if source_owner == owner and original["allocation"] >= item["allocation"]:
             raise ValueError(
                 "field_like source must precede the independent allocation"
